@@ -129,6 +129,7 @@ func computeSmartCropStillV2(
 			sampleSource = "source-tracking"
 			markSmartCropSceneCuts(samples)
 			refineSmartCropMotionSamples(samples, row.Width, cw)
+			refineSmartCropHeadSamples(samples, row.Width, cw)
 			trackingStill = true
 		} else if sampleErr != nil {
 			app.Logger().Info("smartcrop v2 exact tracking unavailable",
@@ -153,6 +154,12 @@ func computeSmartCropStillV2(
 				x = corrected
 				method += "+temporal"
 			}
+		}
+	}
+	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil {
+		if corrected, changed := headAwareNarrowSmartCropX(sample.img, x, row.Width, cw); changed {
+			x = corrected
+			method += "+head"
 		}
 	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
@@ -353,6 +360,7 @@ func computeSmartCropReelV2(
 				sampleSource += "+tracking"
 				markSmartCropSceneCuts(samples)
 				refineSmartCropMotionSamples(samples, row.Width, cw)
+				refineSmartCropHeadSamples(samples, row.Width, cw)
 			} else {
 				app.Logger().Info("smartcrop v2 adaptive tracking unavailable",
 					"file_id", sourceFileID, "err", sampleErr.Error())
@@ -363,6 +371,7 @@ func computeSmartCropReelV2(
 		return nil, nil, fmt.Errorf("smartcrop v2: fewer than two usable samples")
 	}
 	temporalCorrections := correctSmartCropReelTemporalOutliers(samples, row.Width, cw)
+	headCorrections := refineSmartCropHeadSamples(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
@@ -380,6 +389,7 @@ func computeSmartCropReelV2(
 			"sample_source", sampleSource,
 			"crop_w", cw, "crop_h", ch, "crop_x", x,
 			"temporal_corrections", temporalCorrections,
+			"head_corrections", headCorrections,
 			"tracking_frames", trackingFrames)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
 	}
@@ -389,6 +399,7 @@ func computeSmartCropReelV2(
 		"sample_source", sampleSource,
 		"path_points", len(path), "crop_w", cw, "crop_h", ch,
 		"temporal_corrections", temporalCorrections,
+		"head_corrections", headCorrections,
 		"tracking_frames", trackingFrames)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
 }
@@ -421,7 +432,23 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 	if subjectX, ok := subjectAwareNarrowSmartCropX(img, rawX, x, srcW, srcH, cw, ch, tcw); ok {
 		x = subjectX
 	}
+	if headX, ok := headAwareNarrowSmartCropX(img, x, srcW, cw); ok {
+		x = headX
+	}
 	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, nil
+}
+
+func nearestSmartCropSample(samples []smartCropV2Sample, focusMs int64) *smartCropV2Sample {
+	if len(samples) == 0 {
+		return nil
+	}
+	nearest := 0
+	for i := 1; i < len(samples); i++ {
+		if absInt64(samples[i].point.AtMs-focusMs) < absInt64(samples[nearest].point.AtMs-focusMs) {
+			nearest = i
+		}
+	}
+	return &samples[nearest]
 }
 
 func smartCropStillNeedsTracking(samples []smartCropV2Sample, focusMs int64, cropW int) bool {
@@ -596,6 +623,17 @@ func refineSmartCropMotionSamples(samples []smartCropV2Sample, srcW, cropW int) 
 		x, ok := motionAwareNarrowSmartCropXFromImages(samples[i].img, neighbors,
 			samples[i].point.X, srcW, cropW, thumbCropW)
 		if ok && x != samples[i].point.X {
+			samples[i].point.X = x
+			refined++
+		}
+	}
+	return refined
+}
+
+func refineSmartCropHeadSamples(samples []smartCropV2Sample, srcW, cropW int) int {
+	refined := 0
+	for i := range samples {
+		if x, ok := headAwareNarrowSmartCropX(samples[i].img, samples[i].point.X, srcW, cropW); ok {
 			samples[i].point.X = x
 			refined++
 		}

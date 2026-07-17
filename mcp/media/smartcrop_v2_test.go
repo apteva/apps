@@ -184,6 +184,40 @@ func TestSmartCropStillTrackingActivatesOnlyForTraversal(t *testing.T) {
 	}
 }
 
+func TestHeadAwareNarrowCropProtectsRecliningFace(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// Static poster-like warm detail in the top band must be ignored.
+	fillSmartCropTestRect(img, image.Rect(147, 8, 188, 48), color.RGBA{R: 205, G: 145, B: 120, A: 255})
+	// A reclining face is low in the frame and partly outside the current
+	// portrait crop's left safety margin.
+	fillSmartCropTestEllipse(img, 138, 104, 24, 14, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+
+	x, changed := headAwareNarrowSmartCropX(img, 816, 1920, 606)
+	if !changed {
+		t.Fatal("reclining face at the crop edge was not protected")
+	}
+	if x < 450 || x > 650 {
+		t.Fatalf("head-safe crop x=%d, want [450,650]", x)
+	}
+}
+
+func TestHeadAwareNarrowCropKeepsSafeOrNonFaceContentStable(t *testing.T) {
+	centered := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(centered, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	fillSmartCropTestEllipse(centered, 160, 108, 18, 18, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(centered, 720, 1920, 606); changed || x != 720 {
+		t.Fatalf("already-safe face moved crop: x=%d changed=%v", x, changed)
+	}
+
+	lowerBody := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(lowerBody, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	fillSmartCropTestEllipse(lowerBody, 142, 158, 22, 20, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(lowerBody, 816, 1920, 606); changed || x != 816 {
+		t.Fatalf("lower-body warm region moved crop: x=%d changed=%v", x, changed)
+	}
+}
+
 func TestStaticSmartCropPathStaysFixed(t *testing.T) {
 	path := []cropPathPoint{
 		{AtMs: 0, X: 300}, {AtMs: 5_000, X: 316}, {AtMs: 10_000, X: 326},
@@ -539,6 +573,18 @@ func fillSmartCropTestRect(img *image.RGBA, rect image.Rectangle, c color.RGBA) 
 	for y := rect.Min.Y; y < rect.Max.Y; y++ {
 		for x := rect.Min.X; x < rect.Max.X; x++ {
 			img.SetRGBA(x, y, c)
+		}
+	}
+}
+
+func fillSmartCropTestEllipse(img *image.RGBA, cx, cy, rx, ry int, c color.RGBA) {
+	for y := maxInt(img.Bounds().Min.Y, cy-ry); y < minInt(img.Bounds().Max.Y, cy+ry+1); y++ {
+		for x := maxInt(img.Bounds().Min.X, cx-rx); x < minInt(img.Bounds().Max.X, cx+rx+1); x++ {
+			dx := float64(x-cx) / float64(rx)
+			dy := float64(y-cy) / float64(ry)
+			if dx*dx+dy*dy <= 1 {
+				img.SetRGBA(x, y, c)
+			}
 		}
 	}
 }

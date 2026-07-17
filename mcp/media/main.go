@@ -172,7 +172,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: "Crop or smart-reframe an image/video. Smart Crop v2 analyzes the cached canonical thumbnail. Returns render_id."
+      description: "Crop or smart-reframe an image/video. Smart Crop v2 analyzes the cached canonical thumbnail, centers subjects, and protects visible faces/heads near portrait edges. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -186,7 +186,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: "Save a frame as PNG; Smart Crop v2 uses cached storyboard frames when dense and bounded temporary source screenshots when sparse. Returns render_id."
+      description: "Save a frame as PNG; Smart Crop v2 uses cached storyboard frames when dense, bounded temporary source screenshots when sparse, and automatic face/head edge protection. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -228,7 +228,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_reel
-      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded cached or temporary source screenshots and uses a stable fixed crop when movement is low. Returns render_id."
+      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded cached or temporary source screenshots, protects visible faces/heads near portrait edges, and uses a stable fixed crop when movement is low. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -619,7 +619,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_crop",
-			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart Crop v2 mode analyzes the canonical cached image/video thumbnail: file_id, target_ratio, crop_mode? ('smart' default|'center'), output_width?. Use this for still images or a whole video; use media_extract_frame for a video timestamp.",
+			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart Crop v2 mode analyzes the canonical cached image/video thumbnail, centers subjects, and protects visible faces/heads near portrait edges: file_id, target_ratio, crop_mode? ('smart' default|'center'), output_width?. Use this for still images or a whole video; use media_extract_frame for a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"x":             map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
@@ -636,7 +636,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_frame",
-			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
+			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering and automatic face/head edge protection. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"at_ms":         map[string]any{"type": "integer"},
@@ -675,7 +675,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, and follows movement with a smoothed path. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
+			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, protects visible faces/heads near portrait edges, and follows movement with a smoothed path. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},

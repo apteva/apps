@@ -364,6 +364,80 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 	return x, true
 }
 
+// headAwareNarrowSmartCropX is a conservative edge guard for reclining or
+// low-positioned people. Generic saliency and whole-body motion naturally
+// favour the torso; on a narrow portrait crop that can leave a clearly visible
+// face cut by the left or right edge even though the current crop otherwise
+// contains most of the person.
+//
+// This is intentionally not a general face detector. It only considers a
+// compact, face-sized warm component in the middle/lower part of the frame,
+// requires that component's centre to already be inside the chosen crop, and
+// only moves the crop far enough to restore a small safety margin. Upright
+// people, products, animals, animation, broad warm furniture, posters near the
+// top of the frame, and already-safe crops stay on the released path.
+func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
+	if img == nil || srcW <= 0 || cropW <= 0 || srcW <= cropW ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return srcX, false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	if thumbCropW >= w {
+		return srcX, false
+	}
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	currentEnd := currentStart + thumbCropW - 1
+
+	pixels := normalizedSmartCropRGB(img, w, h)
+	components := warmSubjectComponents(pixels, w, h, thumbCropW, 0, w-1)
+	minScore := 350.0 * float64(w*h) / (320.0 * 180.0)
+	var best warmSubjectComponent
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		if componentW < maxInt(6, w*3/100) || componentW > w*22/100 ||
+			componentH < maxInt(10, h*10/100) || componentH > h*35/100 ||
+			component.minY < h*30/100 || component.maxY > h*80/100 ||
+			component.centerX < float64(currentStart) || component.centerX > float64(currentEnd) ||
+			component.score < minScore {
+			continue
+		}
+		boxArea := maxInt(1, componentW*componentH)
+		fill := float64(component.area) / float64(boxArea)
+		if fill < 0.15 || fill > 0.78 {
+			continue
+		}
+		if component.score > best.score {
+			best = component
+		}
+	}
+	if best.score == 0 {
+		return srcX, false
+	}
+
+	margin := maxInt(4, thumbCropW/5)
+	newStart := currentStart
+	if best.minX < currentStart+margin {
+		newStart = best.minX - margin
+	} else if best.maxX > currentEnd-margin {
+		newStart = best.maxX + margin - thumbCropW + 1
+	} else {
+		return srcX, false
+	}
+	newStart = clampInt(newStart, 0, w-thumbCropW)
+	x := clampInt(roundEven(int(math.Round(float64(newStart)*float64(srcW)/float64(w)))), 0, srcW-cropW)
+	if x == srcX {
+		return srcX, false
+	}
+	return x, true
+}
+
 func subjectColumnWeights(img image.Image) []float64 {
 	bounds := img.Bounds()
 	w := bounds.Dx()

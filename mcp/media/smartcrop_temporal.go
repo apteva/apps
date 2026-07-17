@@ -275,6 +275,11 @@ func smartCropTemporalResultConfident(result smartCropTemporalResult) bool {
 type warmSubjectComponent struct {
 	centerX float64
 	score   float64
+	minX    int
+	maxX    int
+	minY    int
+	maxY    int
+	area    int
 }
 
 // persistentWarmSubjectCenter finds a person-like warm component that recurs
@@ -437,6 +442,11 @@ func warmSubjectComponents(frame []uint8, w, h, cropW, regionMin, regionMax int)
 		components = append(components, warmSubjectComponent{
 			centerX: centerX,
 			score:   float64(area) * (1.0 + heightFactor),
+			minX:    minX,
+			maxX:    maxX,
+			minY:    minY,
+			maxY:    maxY,
+			area:    area,
 		})
 	}
 	return components
