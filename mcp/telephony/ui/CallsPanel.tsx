@@ -355,6 +355,40 @@ interface NumberSearchResponse {
   pricing_note?: string;
 }
 
+interface ProviderAddress {
+  sid: string;
+  friendly_name?: string;
+  customer_name?: string;
+  street?: string;
+  city?: string;
+  region?: string;
+  postal_code?: string;
+  iso_country?: string;
+  validated?: boolean;
+  verified?: boolean;
+}
+
+interface RegulatoryBundle {
+  sid: string;
+  friendly_name?: string;
+  status?: string;
+  regulation_sid?: string;
+  email?: string;
+  valid_until?: string;
+  date_updated?: string;
+}
+
+async function postJSON<T>(url: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return await res.json() as T;
+}
+
 function money(value?: string, currency?: string, suffix = ""): string {
   if (!value) return "-";
   const amount = Number(value);
@@ -374,6 +408,10 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<NumberOffer | null>(null);
   const [addressSid, setAddressSid] = useState("");
+  const [bundleSid, setBundleSid] = useState("");
+  const [addresses, setAddresses] = useState<ProviderAddress[]>([]);
+  const [bundles, setBundles] = useState<RegulatoryBundle[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
   const [purchasing, setPurchasing] = useState(false);
   const [purchaseResult, setPurchaseResult] = useState("");
 
@@ -394,16 +432,12 @@ function NumbersView({ projectId }: NativePanelProps) {
     setLoading(true);
     setSelected(null);
     setAddressSid("");
+    setBundleSid("");
     setPurchaseResult("");
     try {
-      const res = await fetch(endpoint("/numbers/search"), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ countries: values, number_type: numberType, features: ["voice"], limit: 10 }),
+      const data = await postJSON<NumberSearchResponse>(endpoint("/numbers/search"), {
+        countries: values, number_type: numberType, features: ["voice"], limit: 10,
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as NumberSearchResponse;
       setProvider(data.provider || "");
       setSupportedTypes(data.supported_number_types ?? []);
       setOffers(data.offers ?? []);
@@ -418,21 +452,39 @@ function NumbersView({ projectId }: NativePanelProps) {
     }
   };
 
+  const review = async (offer: NumberOffer) => {
+    setSelected(offer);
+    setAddressSid("");
+    setBundleSid("");
+    setAddresses([]);
+    setBundles([]);
+    if (offer.provider !== "twilio") return;
+    setResourcesLoading(true);
+    try {
+      const [addressData, bundleData] = await Promise.all([
+        postJSON<{ addresses?: ProviderAddress[] }>(endpoint("/numbers/addresses/list"), { limit: 200 }),
+        postJSON<{ bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), {
+          country: offer.country, status: "twilio-approved", limit: 200,
+        }),
+      ]);
+      setAddresses(addressData.addresses ?? []);
+      setBundles(bundleData.bundles ?? []);
+    } catch (e) {
+      setPurchaseResult((e as Error).message || "Could not load Twilio compliance resources");
+    } finally {
+      setResourcesLoading(false);
+    }
+  };
+
   const purchase = async () => {
     if (!selected?.confirmation_token) return;
     setPurchasing(true);
     try {
-      const res = await fetch(endpoint("/numbers/purchase"), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          confirmation_token: selected.confirmation_token,
-          ...(addressSid.trim() ? { address_sid: addressSid.trim() } : {}),
-        }),
+      const data = await postJSON<Record<string, string>>(endpoint("/numbers/purchase"), {
+        confirmation_token: selected.confirmation_token,
+        ...(addressSid.trim() ? { address_sid: addressSid.trim() } : {}),
+        ...(bundleSid.trim() ? { bundle_sid: bundleSid.trim() } : {}),
       });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
       setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
       setSelected(null);
       setStatus("Purchase completed");
@@ -530,10 +582,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelected(offer);
-                    setAddressSid("");
-                  }}
+                  onClick={() => review(offer)}
                   disabled={!offer.purchase_ready}
                   title={offer.purchase_blocker || "Review purchase"}
                   className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-40"
@@ -556,16 +605,37 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.inbound_price ? `; ${money(selected.inbound_price, selected.currency, "/minute inbound")}` : ""}
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
             </div>
-            {selected.provider === "twilio" && selected.address_requirement && selected.address_requirement !== "none" ? (
-              <label className="mt-3 block max-w-md">
-                <span className="mb-1 block text-xs text-text-muted">Twilio Address SID</span>
-                <input
-                  value={addressSid}
-                  onChange={(event) => setAddressSid(event.target.value)}
-                  placeholder="AD..."
-                  className="h-9 w-full rounded border border-border bg-bg px-3 font-mono text-sm outline-none focus:border-text-dim"
-                />
-              </label>
+            {selected.provider === "twilio" ? (
+              <div className="mt-3 grid max-w-3xl gap-3 md:grid-cols-2">
+                <label>
+                  <span className="mb-1 block text-xs text-text-muted">Address</span>
+                  <select
+                    value={addressSid}
+                    onChange={(event) => setAddressSid(event.target.value)}
+                    className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
+                  >
+                    <option value="">{resourcesLoading ? "Loading addresses..." : "No address selected"}</option>
+                    {addresses.map((address) => (
+                      <option key={address.sid} value={address.sid}>
+                        {address.friendly_name || address.customer_name || address.sid} ({address.iso_country || "--"})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span className="mb-1 block text-xs text-text-muted">Approved regulatory bundle</span>
+                  <select
+                    value={bundleSid}
+                    onChange={(event) => setBundleSid(event.target.value)}
+                    className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
+                  >
+                    <option value="">{resourcesLoading ? "Loading bundles..." : "No bundle selected"}</option>
+                    {bundles.map((bundle) => (
+                      <option key={bundle.sid} value={bundle.sid}>{bundle.friendly_name || bundle.sid}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             ) : null}
           </div>
           <button
@@ -581,9 +651,8 @@ function NumbersView({ projectId }: NativePanelProps) {
             onClick={purchase}
             disabled={purchasing || Boolean(
               selected.provider === "twilio" &&
-              selected.address_requirement &&
-              selected.address_requirement !== "none" &&
-              !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())
+              ((selected.address_requirement && selected.address_requirement !== "none" && !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())) ||
+              (bundleSid.trim() && !/^BU[0-9a-fA-F]{32}$/.test(bundleSid.trim())))
             )}
             className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
           >
@@ -595,8 +664,325 @@ function NumbersView({ projectId }: NativePanelProps) {
   );
 }
 
+function AddressesView({ projectId }: NativePanelProps) {
+  const [addresses, setAddresses] = useState<ProviderAddress[]>([]);
+  const [status, setStatus] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    customer_name: "", friendly_name: "", street: "", street_secondary: "",
+    city: "", region: "", postal_code: "", country: "",
+  });
+  const endpoint = useCallback((path: string) => {
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return `${API}${path}${query}`;
+  }, [projectId]);
+  const load = useCallback(async () => {
+    try {
+      const data = await postJSON<{ addresses?: ProviderAddress[] }>(endpoint("/numbers/addresses/list"), { limit: 500 });
+      setAddresses(data.addresses ?? []);
+      setStatus(`${data.addresses?.length ?? 0} addresses`);
+    } catch (e) {
+      setStatus((e as Error).message || "Could not load addresses");
+    }
+  }, [endpoint]);
+  useEffect(() => { void load(); }, [load]);
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await postJSON(endpoint("/numbers/addresses/create"), { ...form, auto_correct: true });
+      setForm({ ...form, customer_name: "", friendly_name: "", street: "", street_secondary: "", city: "", region: "", postal_code: "" });
+      setStatus("Address created");
+      await load();
+    } catch (e) {
+      setStatus((e as Error).message || "Address creation failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="h-full min-h-0 grid lg:grid-cols-[minmax(0,1fr)_22rem] bg-bg text-text">
+      <section className="min-h-0 overflow-auto border-r border-border">
+        <header className="h-12 px-4 border-b border-border flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold">Provider addresses</h2>
+          <span className="truncate text-xs text-text-muted">{status}</span>
+        </header>
+        <div className="min-w-[48rem]">
+          <div className="grid grid-cols-[10rem_1fr_8rem_9rem_12rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase text-text-dim">
+            <div>Name</div><div>Address</div><div>Country</div><div>Validation</div><div>SID</div>
+          </div>
+          {addresses.map((address) => (
+            <div key={address.sid} className="grid grid-cols-[10rem_1fr_8rem_9rem_12rem] gap-3 px-4 py-3 border-b border-border/70 text-sm">
+              <div className="truncate">{address.friendly_name || address.customer_name || "-"}</div>
+              <div className="truncate text-text-muted">{[address.street, address.city, address.region, address.postal_code].filter(Boolean).join(", ")}</div>
+              <div>{address.iso_country || "-"}</div>
+              <div>{address.validated ? "Validated" : address.verified ? "Verified" : "Unverified"}</div>
+              <div className="truncate font-mono text-xs">{address.sid}</div>
+            </div>
+          ))}
+          {addresses.length === 0 ? <div className="p-8 text-center text-sm text-text-muted">No addresses</div> : null}
+        </div>
+      </section>
+      <form onSubmit={create} className="min-h-0 overflow-auto p-4 space-y-3">
+        <h2 className="text-sm font-semibold">New address</h2>
+        <Field label="Customer name" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} required />
+        <Field label="Label" value={form.friendly_name} onChange={(value) => setForm({ ...form, friendly_name: value })} />
+        <Field label="Street" value={form.street} onChange={(value) => setForm({ ...form, street: value })} required />
+        <Field label="Street secondary" value={form.street_secondary} onChange={(value) => setForm({ ...form, street_secondary: value })} />
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="City" value={form.city} onChange={(value) => setForm({ ...form, city: value })} required />
+          <Field label="Region" value={form.region} onChange={(value) => setForm({ ...form, region: value })} required />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Postal code" value={form.postal_code} onChange={(value) => setForm({ ...form, postal_code: value })} required />
+          <Field label="Country" value={form.country} onChange={(value) => setForm({ ...form, country: value.toUpperCase().slice(0, 2) })} required />
+        </div>
+        <button type="submit" disabled={saving} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">
+          {saving ? "Creating..." : "Create address"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+interface BundleDetails {
+  bundle?: RegulatoryBundle;
+  regulation?: Record<string, unknown>;
+  items?: Array<Record<string, unknown>>;
+}
+
+function BundlesView({ projectId }: NativePanelProps) {
+  const [bundles, setBundles] = useState<RegulatoryBundle[]>([]);
+  const [selected, setSelected] = useState<BundleDetails | null>(null);
+  const [requirements, setRequirements] = useState<unknown>(null);
+  const [result, setResult] = useState<unknown>(null);
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [bundleForm, setBundleForm] = useState({
+    country: "EE", number_type: "national", end_user_type: "individual", friendly_name: "Estonia national", email: "",
+  });
+  const [itemForm, setItemForm] = useState({ kind: "end_user", friendly_name: "", type: "individual", attributes: "{}" });
+  const [itemFile, setItemFile] = useState<File | null>(null);
+  const endpoint = useCallback((path: string) => {
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return `${API}${path}${query}`;
+  }, [projectId]);
+  const load = useCallback(async () => {
+    try {
+      const data = await postJSON<{ bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), { limit: 500 });
+      setBundles(data.bundles ?? []);
+      setStatus(`${data.bundles?.length ?? 0} bundles`);
+    } catch (e) {
+      setStatus((e as Error).message || "Could not load bundles");
+    }
+  }, [endpoint]);
+  useEffect(() => { void load(); }, [load]);
+
+  const inspect = async (bundleSid: string, preserveResult = false) => {
+    setBusy(true);
+    try {
+      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { bundle_sid: bundleSid });
+      setSelected(data);
+      if (!preserveResult) setResult(null);
+    } catch (e) {
+      setStatus((e as Error).message || "Could not load bundle");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const discover = async () => {
+    setBusy(true);
+    try {
+      const data = await postJSON(endpoint("/numbers/regulatory/requirements"), bundleForm);
+      setRequirements(data);
+      setStatus("Requirements loaded");
+    } catch (e) {
+      setStatus((e as Error).message || "Requirement lookup failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const createBundle = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
+      setStatus("Draft bundle created");
+      await load();
+      if (data.bundle?.sid) await inspect(data.bundle.sid);
+    } catch (e) {
+      setStatus((e as Error).message || "Bundle creation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const addItem = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const bundleSid = selected?.bundle?.sid;
+    if (!bundleSid) return;
+    let attributes: Record<string, unknown>;
+    try {
+      attributes = JSON.parse(itemForm.attributes) as Record<string, unknown>;
+    } catch {
+      setStatus("Attributes must be valid JSON");
+      return;
+    }
+    setBusy(true);
+    try {
+      const body: Record<string, unknown> = { bundle_sid: bundleSid, ...itemForm, attributes };
+      if (itemFile) {
+        body.file = await readAsDataURL(itemFile);
+        body.file_name = itemFile.name;
+      }
+      const data = await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), body);
+      setResult(data);
+      setStatus("Bundle item assigned");
+      setItemFile(null);
+      await inspect(bundleSid, true);
+    } catch (e) {
+      setStatus((e as Error).message || "Item creation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const bundleAction = async (action: "evaluate" | "submit") => {
+    const bundleSid = selected?.bundle?.sid;
+    if (!bundleSid) return;
+    setBusy(true);
+    try {
+      const data = await postJSON(endpoint(`/numbers/regulatory/bundles/${action}`), { bundle_sid: bundleSid });
+      setResult(data);
+      setStatus(action === "submit" ? "Submission processed" : "Evaluation complete");
+      await inspect(bundleSid, true);
+    } catch (e) {
+      setStatus((e as Error).message || `${action} failed`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="h-full min-h-0 grid xl:grid-cols-[20rem_minmax(0,1fr)_22rem] bg-bg text-text">
+      <section className="min-h-0 overflow-auto border-r border-border">
+        <header className="h-12 px-4 border-b border-border flex items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold">Regulatory bundles</h2>
+          <span className="truncate text-xs text-text-muted">{status}</span>
+        </header>
+        {bundles.map((bundle) => (
+          <button key={bundle.sid} type="button" onClick={() => inspect(bundle.sid)} className={`w-full px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/60 ${selected?.bundle?.sid === bundle.sid ? "bg-bg-muted" : ""}`}>
+            <div className="flex items-center justify-between gap-2">
+              <span className="truncate text-sm font-medium">{bundle.friendly_name || bundle.sid}</span>
+              <span className="shrink-0 text-xs text-text-muted">{bundle.status || "unknown"}</span>
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-text-dim">{bundle.sid}</div>
+          </button>
+        ))}
+      </section>
+
+      <section className="min-h-0 overflow-auto border-r border-border">
+        {selected?.bundle ? (
+          <div>
+            <header className="px-4 py-3 border-b border-border flex flex-wrap items-center gap-3">
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-sm font-semibold">{selected.bundle.friendly_name || selected.bundle.sid}</h2>
+                <div className="mt-1 truncate font-mono text-xs text-text-dim">{selected.bundle.sid}</div>
+              </div>
+              <span className="rounded border border-border px-2 py-1 text-xs">{selected.bundle.status || "unknown"}</span>
+              <button type="button" disabled={busy} onClick={() => bundleAction("evaluate")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Evaluate</button>
+              <button type="button" disabled={busy || selected.bundle.status !== "draft"} onClick={() => bundleAction("submit")} className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-50">Submit</button>
+            </header>
+            <div className="grid lg:grid-cols-2">
+              <section className="p-4 border-b lg:border-r border-border">
+                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Regulation</h3>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(selected.regulation ?? {}, null, 2)}</pre>
+              </section>
+              <section className="p-4 border-b border-border">
+                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Assigned items</h3>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(selected.items ?? [], null, 2)}</pre>
+              </section>
+            </div>
+            {result ? (
+              <section className="p-4 border-b border-border">
+                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Latest result</h3>
+                <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(result, null, 2)}</pre>
+              </section>
+            ) : null}
+            <form onSubmit={addItem} className="p-4 space-y-3">
+              <h3 className="text-sm font-semibold">Add bundle item</h3>
+              <div className="grid md:grid-cols-3 gap-3">
+                <label className="block">
+                  <span className="mb-1 block text-xs text-text-muted">Kind</span>
+                  <select value={itemForm.kind} onChange={(event) => setItemForm({ ...itemForm, kind: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm">
+                    <option value="end_user">End user</option><option value="document">Document</option>
+                  </select>
+                </label>
+                <Field label="Name" value={itemForm.friendly_name} onChange={(value) => setItemForm({ ...itemForm, friendly_name: value })} required />
+                <Field label="Type" value={itemForm.type} onChange={(value) => setItemForm({ ...itemForm, type: value })} required />
+              </div>
+              <label className="block">
+                <span className="mb-1 block text-xs text-text-muted">Attributes JSON</span>
+                <textarea value={itemForm.attributes} onChange={(event) => setItemForm({ ...itemForm, attributes: event.target.value })} rows={5} className="w-full resize-y rounded border border-border bg-bg px-3 py-2 font-mono text-xs outline-none focus:border-text-dim" />
+              </label>
+              {itemForm.kind === "document" ? (
+                <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setItemFile(event.target.files?.[0] ?? null)} className="block w-full text-xs text-text-muted file:mr-3 file:h-8 file:rounded file:border file:border-border file:bg-bg file:px-3 file:text-xs file:text-text" />
+              ) : null}
+              <button type="submit" disabled={busy} className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create and assign</button>
+            </form>
+          </div>
+        ) : <div className="h-full min-h-[18rem] flex items-center justify-center text-sm text-text-muted">Select a bundle</div>}
+      </section>
+
+      <form onSubmit={createBundle} className="min-h-0 overflow-auto p-4 space-y-3">
+        <h2 className="text-sm font-semibold">New bundle</h2>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Country" value={bundleForm.country} onChange={(value) => setBundleForm({ ...bundleForm, country: value.toUpperCase().slice(0, 2) })} required />
+          <label className="block">
+            <span className="mb-1 block text-xs text-text-muted">Number type</span>
+            <select value={bundleForm.number_type} onChange={(event) => setBundleForm({ ...bundleForm, number_type: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm">
+              <option value="local">Local</option><option value="mobile">Mobile</option><option value="national">National</option><option value="toll_free">Toll-free</option>
+            </select>
+          </label>
+        </div>
+        <label className="block">
+          <span className="mb-1 block text-xs text-text-muted">End user</span>
+          <select value={bundleForm.end_user_type} onChange={(event) => setBundleForm({ ...bundleForm, end_user_type: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm">
+            <option value="individual">Individual</option><option value="business">Business</option>
+          </select>
+        </label>
+        <Field label="Name" value={bundleForm.friendly_name} onChange={(value) => setBundleForm({ ...bundleForm, friendly_name: value })} required />
+        <Field label="Status email" value={bundleForm.email} onChange={(value) => setBundleForm({ ...bundleForm, email: value })} type="email" required />
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" onClick={discover} disabled={busy} className="h-9 rounded border border-border text-sm disabled:opacity-50">Requirements</button>
+          <button type="submit" disabled={busy} className="h-9 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create draft</button>
+        </div>
+        {requirements ? <pre className="max-h-[30rem] overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted">{JSON.stringify(requirements, null, 2)}</pre> : null}
+      </form>
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, required, type = "text" }: { label: string; value: string; onChange: (value: string) => void; required?: boolean; type?: string }) {
+  return (
+    <label className="block min-w-0">
+      <span className="mb-1 block text-xs text-text-muted">{label}</span>
+      <input type={type} value={value} required={required} onChange={(event) => onChange(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-3 text-sm outline-none focus:border-text-dim" />
+    </label>
+  );
+}
+
+function readAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function CallsPanel(props: NativePanelProps) {
-  const [view, setView] = useState<"calls" | "numbers">("calls");
+  const [view, setView] = useState<"calls" | "numbers" | "addresses" | "bundles">("calls");
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
@@ -614,9 +1000,26 @@ export default function CallsPanel(props: NativePanelProps) {
         >
           Numbers
         </button>
+        <button
+          type="button"
+          onClick={() => setView("addresses")}
+          className={`h-8 px-3 rounded text-sm ${view === "addresses" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+        >
+          Addresses
+        </button>
+        <button
+          type="button"
+          onClick={() => setView("bundles")}
+          className={`h-8 px-3 rounded text-sm ${view === "bundles" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+        >
+          Bundles
+        </button>
       </nav>
       <div className="min-h-0 flex-1">
-        {view === "calls" ? <CallsView {...props} /> : <NumbersView {...props} />}
+        {view === "calls" ? <CallsView {...props} /> : null}
+        {view === "numbers" ? <NumbersView {...props} /> : null}
+        {view === "addresses" ? <AddressesView {...props} /> : null}
+        {view === "bundles" ? <BundlesView {...props} /> : null}
       </div>
     </div>
   );

@@ -174,11 +174,11 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 	if err := dbNumberPurchaseIntentInsert(db, intent); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := dbNumberPurchaseIntentClaim(db, "project-a", intent.Token)
+	claimed, err := dbNumberPurchaseIntentClaim(db, "project-a", intent.Token, "AD0123456789abcdef0123456789abcdef", "BU0123456789abcdef0123456789abcdef")
 	if err != nil || !claimed {
 		t.Fatalf("first claim = %v, %v", claimed, err)
 	}
-	claimed, err = dbNumberPurchaseIntentClaim(db, "project-a", intent.Token)
+	claimed, err = dbNumberPurchaseIntentClaim(db, "project-a", intent.Token, "", "")
 	if err != nil || claimed {
 		t.Fatalf("second claim = %v, %v", claimed, err)
 	}
@@ -192,6 +192,9 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 	}
 	if stored == nil || stored.Status != "succeeded" || stored.ResponseJSON != string(response) || stored.AddressRequirement != "any" {
 		t.Fatalf("unexpected stored intent: %#v", stored)
+	}
+	if stored.SelectedAddressSID != "AD0123456789abcdef0123456789abcdef" || stored.SelectedBundleSID != "BU0123456789abcdef0123456789abcdef" {
+		t.Fatalf("selected compliance resources were not persisted: %#v", stored)
 	}
 }
 
@@ -208,6 +211,15 @@ func TestTwilioAddressRequirementValidation(t *testing.T) {
 			t.Errorf("validTwilioAddressSID(%q)=%v, want %v", value, got, want)
 		}
 	}
+	for value, want := range map[string]bool{
+		"BU0123456789abcdef0123456789abcdef": true,
+		"AD0123456789abcdef0123456789abcdef": false,
+		"BUnot-a-valid-sid":                  false,
+	} {
+		if got := validTwilioBundleSID(value); got != want {
+			t.Errorf("validTwilioBundleSID(%q)=%v, want %v", value, got, want)
+		}
+	}
 }
 
 func TestManifestAndRuntimeExposeNumberTools(t *testing.T) {
@@ -220,7 +232,13 @@ func TestManifestAndRuntimeExposeNumberTools(t *testing.T) {
 	for _, tool := range (&App{}).MCPTools() {
 		runtimeTools[tool.Name] = true
 	}
-	for _, name := range []string{"telephony_numbers_search", "telephony_numbers_purchase"} {
+	for _, name := range []string{
+		"telephony_numbers_search", "telephony_numbers_purchase", "telephony_addresses_list",
+		"telephony_address_create", "telephony_regulatory_requirements", "telephony_regulatory_bundles_list",
+		"telephony_regulatory_bundle_create", "telephony_regulatory_bundle_get",
+		"telephony_regulatory_bundle_item_create", "telephony_regulatory_bundle_evaluate",
+		"telephony_regulatory_bundle_submit",
+	} {
 		if !manifestTools[name] || !runtimeTools[name] {
 			t.Fatalf("number tool %s missing: manifest=%v runtime=%v", name, manifestTools[name], runtimeTools[name])
 		}

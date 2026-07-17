@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.6
+version: 0.1.7
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -94,7 +94,16 @@ provides:
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
-    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation. Regulated Twilio numbers require address_sid." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
+    - { name: telephony_addresses_list, description: "List provider addresses." }
+    - { name: telephony_address_create, description: "Create and validate a provider address." }
+    - { name: telephony_regulatory_requirements, description: "Discover current provider regulatory requirements." }
+    - { name: telephony_regulatory_bundles_list, description: "List provider regulatory bundles." }
+    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle." }
+    - { name: telephony_regulatory_bundle_get, description: "Get a regulatory bundle, requirements, and items." }
+    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document to a bundle." }
+    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance." }
+    - { name: telephony_regulatory_bundle_submit, description: "Submit a compliant bundle for review." }
   ui_panels:
     - slot: project.page
       label: Calls
@@ -306,12 +315,108 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_numbers_purchase",
 			Description: "Purchase one phone number from an unexpired telephony_numbers_search quote. THIS SPENDS REAL MONEY. " +
 				"Present the provider, number, recurring price, setup price, inbound rate, currency, and regulatory requirement to the user; call only after explicit confirmation. " +
-				"For regulated Twilio numbers, address_sid is required and must identify an existing Twilio Address. Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
+				"For regulated Twilio numbers, provide the required address_sid and an approved bundle_sid. Both resources are validated before spending. Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
 			InputSchema: schemaObject(map[string]any{
 				"confirmation_token": map[string]any{"type": "string", "description": "Short-lived token returned with a purchase-ready search offer."},
 				"address_sid":        map[string]any{"type": "string", "description": "Existing Twilio Address SID (AD...) required when the quote has an address requirement."},
+				"bundle_sid":         map[string]any{"type": "string", "description": "Approved Twilio Regulatory Bundle SID (BU...) required when Twilio regulates the number."},
 			}, []string{"confirmation_token"}),
 			HandlerCtx: a.toolNumbersPurchase,
+		},
+		{
+			Name:        "telephony_addresses_list",
+			Description: "List addresses in the bound Twilio account. Args: country?, customer_name?, limit?. Address data comes directly from Twilio and is not stored by Telephony.",
+			InputSchema: schemaObject(map[string]any{
+				"country":       map[string]any{"type": "string", "description": "Optional ISO alpha-2 address country."},
+				"customer_name": map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+			}, nil),
+			HandlerCtx: a.toolAddressesList,
+		},
+		{
+			Name:        "telephony_address_create",
+			Description: "Create and validate an address in the bound Twilio account. This transmits personal or business address data to Twilio. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?.",
+			InputSchema: schemaObject(map[string]any{
+				"customer_name":    map[string]any{"type": "string"},
+				"street":           map[string]any{"type": "string"},
+				"street_secondary": map[string]any{"type": "string"},
+				"city":             map[string]any{"type": "string"},
+				"region":           map[string]any{"type": "string"},
+				"postal_code":      map[string]any{"type": "string"},
+				"country":          map[string]any{"type": "string", "description": "ISO alpha-2 address country."},
+				"friendly_name":    map[string]any{"type": "string"},
+				"auto_correct":     map[string]any{"type": "boolean", "default": true},
+			}, []string{"customer_name", "street", "city", "region", "postal_code", "country"}),
+			HandlerCtx: a.toolAddressCreate,
+		},
+		{
+			Name:        "telephony_regulatory_requirements",
+			Description: "Read current Twilio requirements before creating a bundle. Args: country, number_type, end_user_type. Use the returned dynamic fields exactly; never infer or hardcode regulatory requirements.",
+			InputSchema: schemaObject(map[string]any{
+				"country":       map[string]any{"type": "string"},
+				"number_type":   map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
+				"end_user_type": map[string]any{"type": "string", "enum": []string{"individual", "business"}},
+			}, []string{"country", "number_type", "end_user_type"}),
+			HandlerCtx: a.toolRegulatoryRequirements,
+		},
+		{
+			Name:        "telephony_regulatory_bundles_list",
+			Description: "List Twilio regulatory bundles and their approval state. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"country":       map[string]any{"type": "string"},
+				"number_type":   map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
+				"end_user_type": map[string]any{"type": "string", "enum": []string{"individual", "business"}},
+				"status":        map[string]any{"type": "string"},
+				"friendly_name": map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+			}, nil),
+			HandlerCtx: a.toolRegulatoryBundlesList,
+		},
+		{
+			Name:        "telephony_regulatory_bundle_create",
+			Description: "Create a draft Twilio regulatory bundle. First call telephony_regulatory_requirements. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type, status_callback?.",
+			InputSchema: schemaObject(map[string]any{
+				"friendly_name":   map[string]any{"type": "string"},
+				"email":           map[string]any{"type": "string"},
+				"regulation_sid":  map[string]any{"type": "string"},
+				"country":         map[string]any{"type": "string"},
+				"number_type":     map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
+				"end_user_type":   map[string]any{"type": "string", "enum": []string{"individual", "business"}},
+				"status_callback": map[string]any{"type": "string"},
+			}, []string{"friendly_name", "email"}),
+			HandlerCtx: a.toolRegulatoryBundleCreate,
+		},
+		{
+			Name:        "telephony_regulatory_bundle_get",
+			Description: "Get a Twilio bundle with its regulation and assigned items. Args: bundle_sid.",
+			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			HandlerCtx:  a.toolRegulatoryBundleGet,
+		},
+		{
+			Name:        "telephony_regulatory_bundle_item_create",
+			Description: "Create and assign an end user or supporting document to a draft Twilio bundle. Use requirement fields returned by telephony_regulatory_requirements. Args: bundle_sid, kind (end_user|document), friendly_name, type, attributes object, file?, file_name?. File may be JPEG, PNG, or PDF and transmits sensitive identity evidence to Twilio.",
+			InputSchema: schemaObject(map[string]any{
+				"bundle_sid":    map[string]any{"type": "string"},
+				"kind":          map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
+				"friendly_name": map[string]any{"type": "string"},
+				"type":          map[string]any{"type": "string"},
+				"attributes":    map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
+				"file":          map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
+				"file_name":     map[string]any{"type": "string"},
+			}, []string{"bundle_sid", "kind", "friendly_name", "type", "attributes"}),
+			HandlerCtx: a.toolRegulatoryBundleItemCreate,
+		},
+		{
+			Name:        "telephony_regulatory_bundle_evaluate",
+			Description: "Evaluate a draft Twilio bundle and return granular missing or invalid requirements. Args: bundle_sid.",
+			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			HandlerCtx:  a.toolRegulatoryBundleEvaluate,
+		},
+		{
+			Name:        "telephony_regulatory_bundle_submit",
+			Description: "Evaluate and submit a compliant Twilio bundle for regulatory review. This transmits the assigned identity data and documents to Twilio. Args: bundle_sid. Noncompliant bundles are not submitted.",
+			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			HandlerCtx:  a.toolRegulatoryBundleSubmit,
 		},
 	}
 }

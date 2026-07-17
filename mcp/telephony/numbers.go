@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -69,6 +68,8 @@ type numberPurchaseIntent struct {
 	InboundPrice        string
 	Currency            string
 	AddressRequirement  string
+	SelectedAddressSID  string
+	SelectedBundleSID   string
 	Status              string
 	ResponseJSON        string
 	ErrorMessage        string
@@ -781,9 +782,10 @@ func searchSignalWireNumbers(ctx *sdk.AppCtx, connID int64, request numberSearch
 	return offers, []string{"SignalWire search results do not include a verifiable price; purchase is disabled"}, nil
 }
 
-func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID string) (map[string]any, error) {
+func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID, bundleSID string) (map[string]any, error) {
 	token = strings.TrimSpace(token)
 	addressSID = strings.TrimSpace(addressSID)
+	bundleSID = strings.TrimSpace(bundleSID)
 	if token == "" {
 		return nil, errors.New("confirmation_token required; call telephony_numbers_search and obtain explicit user confirmation first")
 	}
@@ -825,13 +827,26 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID string) (map[str
 	} else if addressSID != "" && intent.Provider != "twilio" {
 		return nil, fmt.Errorf("address_sid is not supported for provider %s", intent.Provider)
 	}
-	claimed, err := dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token)
+	if bundleSID != "" && intent.Provider != "twilio" {
+		return nil, fmt.Errorf("bundle_sid is not supported for provider %s", intent.Provider)
+	}
+	if intent.Provider == "twilio" {
+		if bundleSID != "" && !validTwilioBundleSID(bundleSID) {
+			return nil, errors.New("bundle_sid must be a Twilio Regulatory Bundle SID beginning with BU")
+		}
+		if err := validateTwilioPurchaseResources(ctx, intent, addressSID, bundleSID); err != nil {
+			return nil, err
+		}
+	}
+	claimed, err := dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token, addressSID, bundleSID)
 	if err != nil {
 		return nil, err
 	}
 	if !claimed {
 		return nil, errors.New("number purchase is already in progress; do not retry automatically")
 	}
+	intent.SelectedAddressSID = addressSID
+	intent.SelectedBundleSID = bundleSID
 
 	var raw json.RawMessage
 	switch intent.Provider {
@@ -842,6 +857,9 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID string) (map[str
 		}
 		if addressSID != "" {
 			input["AddressSid"] = addressSID
+		}
+		if bundleSID != "" {
+			input["BundleSid"] = bundleSID
 		}
 		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "buy_phone_number", input)
 	case "telnyx":
@@ -898,6 +916,7 @@ func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]
 		"country": intent.Country, "number_type": intent.NumberType,
 		"monthly_price": intent.MonthlyPrice, "upfront_price": intent.UpfrontPrice,
 		"inbound_price": intent.InboundPrice, "currency": intent.Currency,
+		"address_sid": intent.SelectedAddressSID, "bundle_sid": intent.SelectedBundleSID,
 		"provider_response": response,
 		"next":              "Create an inbound route for this number, then configure the carrier webhook where that provider is supported.",
 	}
@@ -912,7 +931,7 @@ func (a *App) toolNumbersSearch(_ context.Context, ctx *sdk.AppCtx, args map[str
 }
 
 func (a *App) toolNumbersPurchase(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""), strArg(args, "address_sid", ""))
+	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""), strArg(args, "address_sid", ""), strArg(args, "bundle_sid", ""))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -930,7 +949,7 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 64<<10))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20))
 	if err := decoder.Decode(&body); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
@@ -942,7 +961,25 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":
-		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""), strArg(body, "address_sid", ""))
+		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""), strArg(body, "address_sid", ""), strArg(body, "bundle_sid", ""))
+	case "/numbers/addresses/list":
+		result, err = a.twilioAddressesList(ctx, body)
+	case "/numbers/addresses/create":
+		result, err = a.twilioAddressCreate(ctx, body)
+	case "/numbers/regulatory/requirements":
+		result, err = a.twilioRegulatoryRequirements(ctx, body)
+	case "/numbers/regulatory/bundles/list":
+		result, err = a.twilioBundlesList(ctx, body)
+	case "/numbers/regulatory/bundles/create":
+		result, err = a.twilioBundleCreate(ctx, body)
+	case "/numbers/regulatory/bundles/get":
+		result, err = a.twilioBundleGet(ctx, body)
+	case "/numbers/regulatory/bundles/items/create":
+		result, err = a.twilioBundleItemCreate(ctx, body)
+	case "/numbers/regulatory/bundles/evaluate":
+		result, err = a.twilioBundleEvaluate(ctx, body)
+	case "/numbers/regulatory/bundles/submit":
+		result, err = a.twilioBundleSubmit(ctx, body)
 	default:
 		http.NotFound(w, r)
 		return
@@ -972,11 +1009,12 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	var expires string
 	err := db.QueryRow(`SELECT token, project_id, provider_slug, carrier_connection_id, country,
         phone_number, number_type, monthly_price, upfront_price, inbound_price, currency,
-        address_requirement, status, response_json, error_message, expires_at
+        address_requirement, selected_address_sid, selected_bundle_sid, status, response_json, error_message, expires_at
         FROM number_purchase_intents WHERE project_id = ? AND token = ?`, projectID, token).Scan(
 		&intent.Token, &intent.ProjectID, &intent.Provider, &intent.CarrierConnectionID,
 		&intent.Country, &intent.PhoneNumber, &intent.NumberType, &intent.MonthlyPrice,
-		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement, &intent.Status,
+		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement,
+		&intent.SelectedAddressSID, &intent.SelectedBundleSID, &intent.Status,
 		&intent.ResponseJSON, &intent.ErrorMessage, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -991,10 +1029,10 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	return &intent, nil
 }
 
-func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token string) (bool, error) {
+func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token, addressSID, bundleSID string) (bool, error) {
 	result, err := db.Exec(`UPDATE number_purchase_intents
-        SET status = 'purchasing', updated_at = CURRENT_TIMESTAMP
-        WHERE project_id = ? AND token = ? AND status = 'quoted'`, projectID, token)
+        SET status = 'purchasing', selected_address_sid = ?, selected_bundle_sid = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE project_id = ? AND token = ? AND status = 'quoted'`, addressSID, bundleSID, projectID, token)
 	if err != nil {
 		return false, err
 	}
