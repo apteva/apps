@@ -75,6 +75,11 @@ func TestMonika9215LocalRegression(t *testing.T) {
 		}
 		paths[reel.name] = path
 	}
+	stableName := "sleep-countdown-stable"
+	stableStart, stableEnd := int64(40274), int64(72725)
+	stablePath := monika9215StablePath(t, video, stableStart, stableEnd,
+		[]int64{36_000, 41_000, 46_000, 51_000, 56_000, 61_000, 66_000, 71_000, 76_000})
+	paths[stableName] = stablePath
 
 	if outputDir := os.Getenv("MONIKA_9215_OUTPUT_DIR"); outputDir != "" {
 		if err := os.MkdirAll(outputDir, 0o755); err != nil {
@@ -92,6 +97,11 @@ func TestMonika9215LocalRegression(t *testing.T) {
 				"-t", secondsString(reel.end-reel.start), "-vf", filter, "-an",
 				"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y", out)
 		}
+		out := filepath.Join(outputDir, stableName+"-smart-tracking.mp4")
+		filter := "setpts=PTS-STARTPTS," + cropFilterForPath(606, 1076, 2, stableStart, stablePath) + ",scale=606:1076,setsar=1"
+		runFFmpeg(t, "-ss", secondsString(stableStart), "-i", video,
+			"-t", secondsString(stableEnd-stableStart), "-vf", filter, "-an",
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y", out)
 	}
 }
 
@@ -122,6 +132,30 @@ func monika9215TrackedPath(t *testing.T, video string, start, end int64, storybo
 		path[i] = samples[i].point
 	}
 	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), 606, 1920)
+}
+
+func monika9215StablePath(t *testing.T, video string, start, end int64, storyboardPositions []int64) []cropPathPoint {
+	t.Helper()
+	samples, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
+		storyboardPositions, 1920, 1080, 606, 1076)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markSmartCropSceneCuts(samples)
+	if smartCropReelNeedsTracking(samples, 1920, 606) {
+		t.Fatal("stable fixture unexpectedly activated adaptive source tracking")
+	}
+	correctSmartCropReelTemporalOutliers(samples, 1920, 606)
+	path := make([]cropPathPoint, len(samples))
+	for i := range samples {
+		path[i] = samples[i].point
+	}
+	path = stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), 606, 1920)
+	x, ok := staticSmartCropPathX(path, 606)
+	if !ok {
+		t.Fatalf("stable fixture produced a moving crop: %v", path)
+	}
+	return []cropPathPoint{{AtMs: start, X: x}, {AtMs: end, X: x}}
 }
 
 func assertFileSHA256(t *testing.T, path, want string) {
