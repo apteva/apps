@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.6
+version: 0.1.7
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -64,7 +64,16 @@ provides:
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
-    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_sid? (required for regulated Twilio numbers)." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_sid?, bundle_sid?." }
+    - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
+    - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
+    - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
+    - { name: telephony_regulatory_bundle_get, description: "Get a bundle with its regulation and assigned items. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document. Args: bundle_sid, kind, friendly_name, type, attributes, file?, file_name?." }
+    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_submit, description: "Evaluate and submit a compliant bundle for review. Args: bundle_sid." }
   ui_panels:
     - slot: project.page
       label: Calls
