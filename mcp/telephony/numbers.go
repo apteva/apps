@@ -43,6 +43,7 @@ type numberOffer struct {
 	Currency           string   `json:"currency,omitempty"`
 	AddressRequirement string   `json:"address_requirement,omitempty"`
 	RequirementsMet    *bool    `json:"requirements_met,omitempty"`
+	ComplianceRequired bool     `json:"compliance_required,omitempty"`
 	PurchaseReady      bool     `json:"purchase_ready"`
 	PurchaseBlocker    string   `json:"purchase_blocker,omitempty"`
 }
@@ -68,6 +69,7 @@ type numberPurchaseIntent struct {
 	InboundPrice        string
 	Currency            string
 	AddressRequirement  string
+	ComplianceRequired  bool
 	SelectedAddressSID  string
 	SelectedBundleSID   string
 	Status              string
@@ -250,9 +252,10 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 				offers[i].PurchaseBlocker = "provider did not return a monthly price"
 			} else if offers[i].Currency == "" {
 				offers[i].PurchaseBlocker = "provider did not return the quote currency"
-			} else if offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet {
+			} else if offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet && provider.Slug != "telnyx" {
 				offers[i].PurchaseBlocker = "provider regulatory requirements are not met"
 			} else if provider.Purchase {
+				offers[i].ComplianceRequired = offers[i].RequirementsMet != nil && !*offers[i].RequirementsMet
 				token := newSecret()
 				intent := numberPurchaseIntent{
 					Token: token, ProjectID: projectID, Provider: provider.Slug,
@@ -261,6 +264,7 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 					MonthlyPrice: offers[i].MonthlyPrice, UpfrontPrice: offers[i].UpfrontPrice,
 					InboundPrice: offers[i].InboundPrice, Currency: offers[i].Currency,
 					AddressRequirement: offers[i].AddressRequirement,
+					ComplianceRequired: offers[i].ComplianceRequired,
 					Status:             "quoted", ExpiresAt: expiresAt,
 				}
 				if err := dbNumberPurchaseIntentInsert(ctx.AppDB(), intent); err != nil {
@@ -790,10 +794,10 @@ func searchSignalWireNumbers(ctx *sdk.AppCtx, connID int64, request numberSearch
 	return offers, []string{"SignalWire search results do not include a verifiable price; purchase is disabled"}, nil
 }
 
-func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID, bundleSID string) (map[string]any, error) {
+func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID string) (map[string]any, error) {
 	token = strings.TrimSpace(token)
-	addressSID = strings.TrimSpace(addressSID)
-	bundleSID = strings.TrimSpace(bundleSID)
+	addressID = strings.TrimSpace(addressID)
+	complianceID = strings.TrimSpace(complianceID)
 	if token == "" {
 		return nil, errors.New("confirmation_token required; call telephony_numbers_search and obtain explicit user confirmation first")
 	}
@@ -826,35 +830,38 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID, bundleSID strin
 		return nil, errors.New("the bound carrier changed after this quote; search again")
 	}
 	if intent.Provider == "twilio" && requiresNumberAddress(intent.AddressRequirement) {
-		if addressSID == "" {
-			return nil, fmt.Errorf("address_sid required for this Twilio number (address requirement: %s)", intent.AddressRequirement)
+		if addressID == "" {
+			return nil, fmt.Errorf("address_id required for this Twilio number (address requirement: %s)", intent.AddressRequirement)
 		}
-		if !validTwilioAddressSID(addressSID) {
-			return nil, errors.New("address_sid must be a Twilio Address SID beginning with AD")
+		if !validTwilioAddressSID(addressID) {
+			return nil, errors.New("address_id must be a Twilio Address SID beginning with AD")
 		}
-	} else if addressSID != "" && intent.Provider != "twilio" {
-		return nil, fmt.Errorf("address_sid is not supported for provider %s", intent.Provider)
-	}
-	if bundleSID != "" && intent.Provider != "twilio" {
-		return nil, fmt.Errorf("bundle_sid is not supported for provider %s", intent.Provider)
+	} else if addressID != "" && intent.Provider != "twilio" {
+		return nil, fmt.Errorf("address_id is not attached directly for provider %s; assign it to the compliance profile instead", intent.Provider)
 	}
 	if intent.Provider == "twilio" {
-		if bundleSID != "" && !validTwilioBundleSID(bundleSID) {
-			return nil, errors.New("bundle_sid must be a Twilio Regulatory Bundle SID beginning with BU")
+		if complianceID != "" && !validTwilioBundleSID(complianceID) {
+			return nil, errors.New("compliance_id must be a Twilio Regulatory Bundle SID beginning with BU")
 		}
-		if err := validateTwilioPurchaseResources(ctx, intent, addressSID, bundleSID); err != nil {
+		if err := validateTwilioPurchaseResources(ctx, intent, addressID, complianceID); err != nil {
 			return nil, err
 		}
+	} else if intent.Provider == "telnyx" {
+		if err := validateTelnyxPurchaseProfile(ctx, intent, complianceID); err != nil {
+			return nil, err
+		}
+	} else if complianceID != "" {
+		return nil, fmt.Errorf("compliance_id is not supported for provider %s", intent.Provider)
 	}
-	claimed, err := dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token, addressSID, bundleSID)
+	claimed, err := dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token, addressID, complianceID)
 	if err != nil {
 		return nil, err
 	}
 	if !claimed {
 		return nil, errors.New("number purchase is already in progress; do not retry automatically")
 	}
-	intent.SelectedAddressSID = addressSID
-	intent.SelectedBundleSID = bundleSID
+	intent.SelectedAddressSID = addressID
+	intent.SelectedBundleSID = complianceID
 
 	var raw json.RawMessage
 	switch intent.Provider {
@@ -863,18 +870,15 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID, bundleSID strin
 			"PhoneNumber":  intent.PhoneNumber,
 			"FriendlyName": "Apteva Telephony",
 		}
-		if addressSID != "" {
-			input["AddressSid"] = addressSID
+		if addressID != "" {
+			input["AddressSid"] = addressID
 		}
-		if bundleSID != "" {
-			input["BundleSid"] = bundleSID
+		if complianceID != "" {
+			input["BundleSid"] = complianceID
 		}
 		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "buy_phone_number", input)
 	case "telnyx":
-		input := map[string]any{"phone_numbers": []map[string]any{{"phone_number": intent.PhoneNumber}}}
-		if connectionID := strings.TrimSpace(provider.Fields["connection_id"]); connectionID != "" {
-			input["connection_id"] = connectionID
-		}
+		input := telnyxNumberOrderInput(intent, provider, complianceID)
 		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "create_number_order", input)
 	case "vonage":
 		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "number_buy", map[string]any{
@@ -911,6 +915,18 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID, bundleSID strin
 	return numberPurchaseResult(intent, false), nil
 }
 
+func telnyxNumberOrderInput(intent *numberPurchaseIntent, provider *numberProvider, complianceID string) map[string]any {
+	phoneNumber := map[string]any{"phone_number": intent.PhoneNumber}
+	if complianceID != "" {
+		phoneNumber["requirement_group_id"] = complianceID
+	}
+	input := map[string]any{"phone_numbers": []map[string]any{phoneNumber}}
+	if connectionID := strings.TrimSpace(provider.Fields["connection_id"]); connectionID != "" {
+		input["connection_id"] = connectionID
+	}
+	return input
+}
+
 func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]any {
 	var response any
 	if intent.ResponseJSON != "" {
@@ -925,6 +941,7 @@ func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]
 		"monthly_price": intent.MonthlyPrice, "upfront_price": intent.UpfrontPrice,
 		"inbound_price": intent.InboundPrice, "currency": intent.Currency,
 		"address_sid": intent.SelectedAddressSID, "bundle_sid": intent.SelectedBundleSID,
+		"address_id": intent.SelectedAddressSID, "compliance_id": intent.SelectedBundleSID,
 		"provider_response": response,
 		"next":              "Create an inbound route for this number, then configure the carrier webhook where that provider is supported.",
 	}
@@ -939,7 +956,9 @@ func (a *App) toolNumbersSearch(_ context.Context, ctx *sdk.AppCtx, args map[str
 }
 
 func (a *App) toolNumbersPurchase(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""), strArg(args, "address_sid", ""), strArg(args, "bundle_sid", ""))
+	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""),
+		firstNonEmpty(strArg(args, "address_id", ""), strArg(args, "address_sid", "")),
+		firstNonEmpty(strArg(args, "compliance_id", ""), strArg(args, "bundle_sid", "")))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -969,25 +988,27 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":
-		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""), strArg(body, "address_sid", ""), strArg(body, "bundle_sid", ""))
+		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""),
+			firstNonEmpty(strArg(body, "address_id", ""), strArg(body, "address_sid", "")),
+			firstNonEmpty(strArg(body, "compliance_id", ""), strArg(body, "bundle_sid", "")))
 	case "/numbers/addresses/list":
-		result, err = a.twilioAddressesList(ctx, body)
+		result, err = a.addressesList(ctx, body)
 	case "/numbers/addresses/create":
-		result, err = a.twilioAddressCreate(ctx, body)
+		result, err = a.addressCreate(ctx, body)
 	case "/numbers/regulatory/requirements":
-		result, err = a.twilioRegulatoryRequirements(ctx, body)
+		result, err = a.regulatoryRequirements(ctx, body)
 	case "/numbers/regulatory/bundles/list":
-		result, err = a.twilioBundlesList(ctx, body)
+		result, err = a.complianceProfilesList(ctx, body)
 	case "/numbers/regulatory/bundles/create":
-		result, err = a.twilioBundleCreate(ctx, body)
+		result, err = a.complianceProfileCreate(ctx, body)
 	case "/numbers/regulatory/bundles/get":
-		result, err = a.twilioBundleGet(ctx, body)
+		result, err = a.complianceProfileGet(ctx, body)
 	case "/numbers/regulatory/bundles/items/create":
-		result, err = a.twilioBundleItemCreate(ctx, body)
+		result, err = a.complianceRequirementSet(ctx, body)
 	case "/numbers/regulatory/bundles/evaluate":
-		result, err = a.twilioBundleEvaluate(ctx, body)
+		result, err = a.complianceProfileEvaluate(ctx, body)
 	case "/numbers/regulatory/bundles/submit":
-		result, err = a.twilioBundleSubmit(ctx, body)
+		result, err = a.complianceProfileSubmit(ctx, body)
 	default:
 		http.NotFound(w, r)
 		return
@@ -1003,11 +1024,11 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 func dbNumberPurchaseIntentInsert(db *sql.DB, intent numberPurchaseIntent) error {
 	_, err := db.Exec(`INSERT INTO number_purchase_intents
         (token, project_id, provider_slug, carrier_connection_id, country, phone_number,
-         number_type, monthly_price, upfront_price, inbound_price, currency, address_requirement, status, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
+	         number_type, monthly_price, upfront_price, inbound_price, currency, address_requirement, compliance_required, status, expires_at)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
 		intent.Token, intent.ProjectID, intent.Provider, intent.CarrierConnectionID,
 		intent.Country, intent.PhoneNumber, intent.NumberType, intent.MonthlyPrice,
-		intent.UpfrontPrice, intent.InboundPrice, intent.Currency, intent.AddressRequirement,
+		intent.UpfrontPrice, intent.InboundPrice, intent.Currency, intent.AddressRequirement, intent.ComplianceRequired,
 		intent.ExpiresAt.Format(time.RFC3339))
 	return err
 }
@@ -1017,11 +1038,11 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	var expires string
 	err := db.QueryRow(`SELECT token, project_id, provider_slug, carrier_connection_id, country,
         phone_number, number_type, monthly_price, upfront_price, inbound_price, currency,
-        address_requirement, selected_address_sid, selected_bundle_sid, status, response_json, error_message, expires_at
+	        address_requirement, compliance_required, selected_address_sid, selected_bundle_sid, status, response_json, error_message, expires_at
         FROM number_purchase_intents WHERE project_id = ? AND token = ?`, projectID, token).Scan(
 		&intent.Token, &intent.ProjectID, &intent.Provider, &intent.CarrierConnectionID,
 		&intent.Country, &intent.PhoneNumber, &intent.NumberType, &intent.MonthlyPrice,
-		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement,
+		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement, &intent.ComplianceRequired,
 		&intent.SelectedAddressSID, &intent.SelectedBundleSID, &intent.Status,
 		&intent.ResponseJSON, &intent.ErrorMessage, &expires)
 	if errors.Is(err, sql.ErrNoRows) {

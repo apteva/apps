@@ -92,6 +92,76 @@ func (a *App) deliverOutboxEvent(ctx *sdk.AppCtx, event outboxRow) error {
 	return err
 }
 
+func (a *App) enqueueImmediateAnswer(route *routeRow, callID string) {
+	if route == nil || route.AnswerMode != answerModeRealtimeImmediate || globalCtx == nil {
+		return
+	}
+	routeCopy := *route
+	ctx := globalCtx.WithProject(route.ProjectID)
+	go func() {
+		if err := a.answerImmediateCall(ctx, &routeCopy, callID); err != nil {
+			ctx.Logger().Warn("immediate inbound answer", "call", callID, "route", routeCopy.ID, "err", err)
+		}
+	}()
+}
+
+func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID string) error {
+	if route == nil || !route.Enabled || route.AnswerMode != answerModeRealtimeImmediate {
+		return nil
+	}
+	row, err := a.db().findCall(callID)
+	if err != nil {
+		return fmt.Errorf("load call: %w", err)
+	}
+	if row == nil || row.RouteID != route.ID || row.ProjectID != route.ProjectID || row.AgentID != route.AgentID {
+		return nil
+	}
+	if row.Status != "pending" {
+		return nil
+	}
+	_, err = a.answerCall(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, true)
+	return err
+}
+
+func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
+	project := ctx.CurrentProject()
+	if project == "" {
+		return nil
+	}
+	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
+        FROM calls c JOIN inbound_routes r ON r.id = c.route_id
+        WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
+          AND r.enabled = 1 AND r.answer_mode = ?
+          AND (c.state_expires_at = '' OR c.state_expires_at > ?)
+        ORDER BY c.placed_at LIMIT 20`, project, answerModeRealtimeImmediate, time.Now().UTC().Format(time.RFC3339))
+	if err != nil {
+		return err
+	}
+	type pendingAnswer struct{ callID, routeID string }
+	var pending []pendingAnswer
+	for rows.Next() {
+		var item pendingAnswer
+		if err := rows.Scan(&item.callID, &item.routeID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		route, err := a.db().findRoute(item.routeID)
+		if err != nil {
+			return err
+		}
+		if err := a.answerImmediateCall(ctx, route, item.callID); err != nil {
+			ctx.Logger().Warn("recover immediate inbound answer", "call", item.callID, "route", item.routeID, "err", err)
+		}
+	}
+	return nil
+}
+
 func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 	project := ctx.CurrentProject()
 	if project == "" {

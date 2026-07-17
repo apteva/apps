@@ -195,6 +195,7 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 		CarrierConnectionID: 9, Country: "EE", PhoneNumber: "+3726692354",
 		NumberType: "local", MonthlyPrice: "1.00", InboundPrice: "0.0115",
 		Currency: "USD", AddressRequirement: "any", ExpiresAt: time.Now().UTC().Add(time.Minute),
+		ComplianceRequired: true,
 	}
 	if err := dbNumberPurchaseIntentInsert(db, intent); err != nil {
 		t.Fatal(err)
@@ -217,6 +218,9 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 	}
 	if stored == nil || stored.Status != "succeeded" || stored.ResponseJSON != string(response) || stored.AddressRequirement != "any" {
 		t.Fatalf("unexpected stored intent: %#v", stored)
+	}
+	if !stored.ComplianceRequired {
+		t.Fatal("compliance requirement flag was not persisted")
 	}
 	if stored.SelectedAddressSID != "AD0123456789abcdef0123456789abcdef" || stored.SelectedBundleSID != "BU0123456789abcdef0123456789abcdef" {
 		t.Fatalf("selected compliance resources were not persisted: %#v", stored)
@@ -263,9 +267,58 @@ func TestManifestAndRuntimeExposeNumberTools(t *testing.T) {
 		"telephony_regulatory_bundle_create", "telephony_regulatory_bundle_get",
 		"telephony_regulatory_bundle_item_create", "telephony_regulatory_bundle_evaluate",
 		"telephony_regulatory_bundle_submit",
+		"telephony_compliance_profiles_list", "telephony_compliance_profile_create",
+		"telephony_compliance_profile_get", "telephony_compliance_requirement_set",
+		"telephony_compliance_profile_evaluate", "telephony_compliance_profile_submit",
 	} {
 		if !manifestTools[name] || !runtimeTools[name] {
 			t.Fatalf("number tool %s missing: manifest=%v runtime=%v", name, manifestTools[name], runtimeTools[name])
 		}
+	}
+}
+
+func TestTelnyxComplianceProfileEvaluation(t *testing.T) {
+	profile := map[string]any{
+		"status": "unapproved",
+		"regulatory_requirements": []any{
+			map[string]any{"requirement_id": "address", "field_type": "address_id", "field_value": ""},
+			map[string]any{"requirement_id": "name", "field_type": "textual", "field_value": "Apteva"},
+		},
+	}
+	evaluation := telnyxProfileEvaluation(profile)
+	if evaluation["status"] != "incomplete" || evaluation["usable_for_order"] != false {
+		t.Fatalf("unexpected incomplete evaluation: %#v", evaluation)
+	}
+	profile["regulatory_requirements"].([]any)[0].(map[string]any)["field_value"] = "address-123"
+	evaluation = telnyxProfileEvaluation(profile)
+	if evaluation["status"] != "compliant" || evaluation["usable_for_order"] != true {
+		t.Fatalf("unexpected fulfilled evaluation: %#v", evaluation)
+	}
+	profile["status"] = "no-longer-eligible"
+	if evaluation := telnyxProfileEvaluation(profile); evaluation["status"] != "incomplete" {
+		t.Fatalf("ineligible profile was accepted: %#v", evaluation)
+	}
+}
+
+func TestTelnyxNumberOrderUsesRequirementGroup(t *testing.T) {
+	input := telnyxNumberOrderInput(
+		&numberPurchaseIntent{PhoneNumber: "+3725550100"},
+		&numberProvider{Fields: map[string]string{"connection_id": "connection-123"}},
+		"requirement-group-123",
+	)
+	phoneNumbers := input["phone_numbers"].([]map[string]any)
+	if phoneNumbers[0]["requirement_group_id"] != "requirement-group-123" || input["connection_id"] != "connection-123" {
+		t.Fatalf("unexpected Telnyx order input: %#v", input)
+	}
+}
+
+func TestProviderResourceAliases(t *testing.T) {
+	args := resourceArgs(map[string]any{"address_id": "address-1", "compliance_id": "profile-1"})
+	if args["address_sid"] != "address-1" || args["bundle_sid"] != "profile-1" {
+		t.Fatalf("generic aliases were not mapped: %#v", args)
+	}
+	address := normalizeTelnyxAddress(map[string]any{"id": "address-1", "business_name": "Apteva", "country_code": "ES"})
+	if address["sid"] != "address-1" || address["address_id"] != "address-1" {
+		t.Fatalf("address aliases missing: %#v", address)
 	}
 }

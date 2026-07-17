@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
@@ -11,12 +13,45 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
+
+type answerPlatform struct {
+	tk.BasePlatformClient
+	failCarrier bool
+	spawned     []sdk.RealtimeSpawnRequest
+	killed      []string
+}
+
+func (p *answerPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{InstallID: 42, PublicURL: "https://example.test"}, nil
+}
+
+func (p *answerPlatform) SpawnRealtimeThread(req sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
+	p.spawned = append(p.spawned, req)
+	return &sdk.RealtimeSpawnResult{
+		Status: "created", ThreadID: req.ThreadID, AudioBridgeURL: "wss://bridge.test/audio?token=test",
+	}, nil
+}
+
+func (p *answerPlatform) KillThread(_ int64, threadID string) error {
+	p.killed = append(p.killed, threadID)
+	return nil
+}
+
+func (p *answerPlatform) ExecuteIntegrationTool(_ int64, _ string, _ map[string]any) (*sdk.ExecuteResult, error) {
+	if p.failCarrier {
+		return &sdk.ExecuteResult{Success: false, Status: 409, Data: json.RawMessage(`{"message":"call ended"}`)}, nil
+	}
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}, nil
+}
 
 func testCallsDB(t *testing.T) *callsDB {
 	t.Helper()
@@ -71,7 +106,7 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 	for _, route := range routes {
 		public[route.Pattern] = route.NoAuth
 	}
-	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/inbound/twilio/"} {
+	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/inbound/twilio/", "/inbound/telnyx/"} {
 		if !public[pattern] {
 			t.Fatalf("carrier route %s must be public at the SDK layer", pattern)
 		}
@@ -84,6 +119,28 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 		if route.Prefix == "/" {
 			t.Fatal("root route must not be anonymous")
 		}
+	}
+}
+
+func TestVerifyTelnyxSignature(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	timestamp := strconv.FormatInt(now.Unix(), 10)
+	body := []byte(`{"data":{"event_type":"call.initiated"}}`)
+	signature := ed25519.Sign(privateKey, append([]byte(timestamp+"|"), body...))
+	publicKeyText := base64.StdEncoding.EncodeToString(publicKey)
+	signatureText := base64.StdEncoding.EncodeToString(signature)
+	if err := verifyTelnyxSignature(publicKeyText, timestamp, signatureText, body, now); err != nil {
+		t.Fatalf("valid Telnyx signature rejected: %v", err)
+	}
+	if err := verifyTelnyxSignature(publicKeyText, timestamp, signatureText, []byte(`{"tampered":true}`), now); err == nil {
+		t.Fatal("tampered Telnyx webhook accepted")
+	}
+	if err := verifyTelnyxSignature(publicKeyText, timestamp, signatureText, body, now.Add(6*time.Minute)); err == nil {
+		t.Fatal("stale Telnyx webhook accepted")
 	}
 }
 
@@ -193,6 +250,98 @@ func TestPendingCallCanOnlyBeClaimedOnce(t *testing.T) {
 	claimed, err = db.claimPendingCall(call.ID, call.AgentID, call.ProjectID)
 	if err != nil || claimed {
 		t.Fatalf("second claim succeeded: claimed=%t err=%v", claimed, err)
+	}
+}
+
+func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+
+	route := routeRow{
+		ID: "route-immediate", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
+		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoVoice: "marin",
+		AutoGreeting: "Hello. How can I help?",
+	}
+	call := testCall("immediate", "pending")
+	call.Direction = "inbound"
+	call.RouteID = route.ID
+	call.ThreadID = "pending-" + call.ID
+	call.AudioBridgeURL = "pending"
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.answerImmediateCall(ctx, &route, call.ID); err != nil {
+		t.Fatalf("answer immediate call: %v", err)
+	}
+	if len(platform.spawned) != 1 {
+		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
+	}
+	spawn := platform.spawned[0]
+	if spawn.AgentID != route.AgentID || spawn.Directive != route.AutoDirective || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting {
+		t.Fatalf("unexpected realtime spawn: %+v", spawn)
+	}
+	stored, err := a.db().findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "answered" || stored.ThreadID != "tel-"+call.ID || stored.AudioBridgeURL == "pending" {
+		t.Fatalf("call was not attached and answered: %+v", stored)
+	}
+}
+
+func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
+	platform := &answerPlatform{failCarrier: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+
+	route := routeRow{
+		ID: "route-failure", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
+		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.", AutoGreeting: defaultInboundGreeting,
+	}
+	call := testCall("immediate-failure", "pending")
+	call.Direction = "inbound"
+	call.RouteID = route.ID
+	call.ThreadID = "pending-" + call.ID
+	call.AudioBridgeURL = "pending"
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.answerImmediateCall(ctx, &route, call.ID); err == nil {
+		t.Fatal("carrier answer failure was ignored")
+	}
+	if len(platform.killed) != 1 || platform.killed[0] != "tel-"+call.ID {
+		t.Fatalf("spawned thread was not cleaned up: %v", platform.killed)
+	}
+	stored, err := a.db().findCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "failed" || stored.EndedAt == "" {
+		t.Fatalf("failed automatic answer remained retryable: %+v", stored)
+	}
+}
+
+func TestImmediateAnswerConfigurationRequiresDirective(t *testing.T) {
+	if _, _, _, _, err := normalizeRouteAnswerConfig(answerModeRealtimeImmediate, "", "", ""); err == nil {
+		t.Fatal("immediate answer accepted an empty directive")
+	}
+	mode, directive, voice, greeting, err := normalizeRouteAnswerConfig(
+		answerModeRealtimeImmediate, " Help the caller. ", " marin ", "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != answerModeRealtimeImmediate || directive != "Help the caller." || voice != "marin" || greeting != defaultInboundGreeting {
+		t.Fatalf("unexpected normalized answer config: %q %q %q %q", mode, directive, voice, greeting)
 	}
 }
 

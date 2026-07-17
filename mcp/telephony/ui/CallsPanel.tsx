@@ -340,6 +340,7 @@ interface NumberOffer {
   currency?: string;
   address_requirement?: string;
   requirements_met?: boolean;
+  compliance_required?: boolean;
   purchase_ready: boolean;
   purchase_blocker?: string;
 }
@@ -458,19 +459,19 @@ function NumbersView({ projectId }: NativePanelProps) {
     setBundleSid("");
     setAddresses([]);
     setBundles([]);
-    if (offer.provider !== "twilio") return;
+    if (offer.provider !== "twilio" && offer.provider !== "telnyx") return;
     setResourcesLoading(true);
     try {
-      const [addressData, bundleData] = await Promise.all([
+      const [addressData, profileData] = await Promise.all([
         postJSON<{ addresses?: ProviderAddress[] }>(endpoint("/numbers/addresses/list"), { limit: 200 }),
-        postJSON<{ bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), {
-          country: offer.country, status: "twilio-approved", limit: 200,
+        postJSON<{ profiles?: RegulatoryBundle[]; bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), {
+          country: offer.country, ...(offer.provider === "twilio" ? { status: "twilio-approved" } : {}), limit: 200,
         }),
       ]);
       setAddresses(addressData.addresses ?? []);
-      setBundles(bundleData.bundles ?? []);
+      setBundles(profileData.profiles ?? profileData.bundles ?? []);
     } catch (e) {
-      setPurchaseResult((e as Error).message || "Could not load Twilio compliance resources");
+      setPurchaseResult((e as Error).message || "Could not load provider compliance resources");
     } finally {
       setResourcesLoading(false);
     }
@@ -482,8 +483,8 @@ function NumbersView({ projectId }: NativePanelProps) {
     try {
       const data = await postJSON<Record<string, string>>(endpoint("/numbers/purchase"), {
         confirmation_token: selected.confirmation_token,
-        ...(addressSid.trim() ? { address_sid: addressSid.trim() } : {}),
-        ...(bundleSid.trim() ? { bundle_sid: bundleSid.trim() } : {}),
+        ...(addressSid.trim() ? { address_id: addressSid.trim() } : {}),
+        ...(bundleSid.trim() ? { compliance_id: bundleSid.trim() } : {}),
       });
       setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
       setSelected(null);
@@ -578,7 +579,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                 <div className="tabular-nums">{money(offer.inbound_price, offer.currency, "/min")}</div>
                 <div className="tabular-nums">{money(offer.upfront_price, offer.currency)}</div>
                 <div className="truncate text-xs text-text-muted" title={offer.purchase_blocker || offer.address_requirement}>
-                  {offer.purchase_blocker || offer.address_requirement || "none stated"}
+                  {offer.purchase_blocker || (offer.compliance_required ? "compliance profile" : offer.address_requirement) || "none stated"}
                 </div>
                 <button
                   type="button"
@@ -605,9 +606,9 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.inbound_price ? `; ${money(selected.inbound_price, selected.currency, "/minute inbound")}` : ""}
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
             </div>
-            {selected.provider === "twilio" ? (
+            {selected.provider === "twilio" || selected.provider === "telnyx" ? (
               <div className="mt-3 grid max-w-3xl gap-3 md:grid-cols-2">
-                <label>
+                {selected.provider === "twilio" ? <label>
                   <span className="mb-1 block text-xs text-text-muted">Address</span>
                   <select
                     value={addressSid}
@@ -621,15 +622,15 @@ function NumbersView({ projectId }: NativePanelProps) {
                       </option>
                     ))}
                   </select>
-                </label>
+                </label> : <div />}
                 <label>
-                  <span className="mb-1 block text-xs text-text-muted">Approved regulatory bundle</span>
+                  <span className="mb-1 block text-xs text-text-muted">Compliance profile</span>
                   <select
                     value={bundleSid}
                     onChange={(event) => setBundleSid(event.target.value)}
                     className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
                   >
-                    <option value="">{resourcesLoading ? "Loading bundles..." : "No bundle selected"}</option>
+                    <option value="">{resourcesLoading ? "Loading profiles..." : "No profile selected"}</option>
                     {bundles.map((bundle) => (
                       <option key={bundle.sid} value={bundle.sid}>{bundle.friendly_name || bundle.sid}</option>
                     ))}
@@ -652,7 +653,8 @@ function NumbersView({ projectId }: NativePanelProps) {
             disabled={purchasing || Boolean(
               selected.provider === "twilio" &&
               ((selected.address_requirement && selected.address_requirement !== "none" && !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())) ||
-              (bundleSid.trim() && !/^BU[0-9a-fA-F]{32}$/.test(bundleSid.trim())))
+              (bundleSid.trim() && !/^BU[0-9a-fA-F]{32}$/.test(bundleSid.trim()))) ||
+              (selected.compliance_required && !bundleSid.trim())
             )}
             className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
           >
@@ -727,7 +729,7 @@ function AddressesView({ projectId }: NativePanelProps) {
       </section>
       <form onSubmit={create} className="min-h-0 overflow-auto p-4 space-y-3">
         <h2 className="text-sm font-semibold">New address</h2>
-        <Field label="Customer name" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} required />
+        <Field label="Person or business name" value={form.customer_name} onChange={(value) => setForm({ ...form, customer_name: value })} required />
         <Field label="Label" value={form.friendly_name} onChange={(value) => setForm({ ...form, friendly_name: value })} />
         <Field label="Street" value={form.street} onChange={(value) => setForm({ ...form, street: value })} required />
         <Field label="Street secondary" value={form.street_secondary} onChange={(value) => setForm({ ...form, street_secondary: value })} />
@@ -755,6 +757,7 @@ interface BundleDetails {
 
 function BundlesView({ projectId }: NativePanelProps) {
   const [bundles, setBundles] = useState<RegulatoryBundle[]>([]);
+  const [provider, setProvider] = useState("");
   const [selected, setSelected] = useState<BundleDetails | null>(null);
   const [requirements, setRequirements] = useState<unknown>(null);
   const [result, setResult] = useState<unknown>(null);
@@ -763,7 +766,7 @@ function BundlesView({ projectId }: NativePanelProps) {
   const [bundleForm, setBundleForm] = useState({
     country: "EE", number_type: "national", end_user_type: "individual", friendly_name: "Estonia national", email: "",
   });
-  const [itemForm, setItemForm] = useState({ kind: "end_user", friendly_name: "", type: "individual", attributes: "{}" });
+  const [itemForm, setItemForm] = useState({ kind: "end_user", friendly_name: "", type: "individual", attributes: "{}", requirement_id: "", field_value: "" });
   const [itemFile, setItemFile] = useState<File | null>(null);
   const endpoint = useCallback((path: string) => {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
@@ -771,9 +774,11 @@ function BundlesView({ projectId }: NativePanelProps) {
   }, [projectId]);
   const load = useCallback(async () => {
     try {
-      const data = await postJSON<{ bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), { limit: 500 });
-      setBundles(data.bundles ?? []);
-      setStatus(`${data.bundles?.length ?? 0} bundles`);
+      const data = await postJSON<{ provider?: string; profiles?: RegulatoryBundle[]; bundles?: RegulatoryBundle[] }>(endpoint("/numbers/regulatory/bundles/list"), { limit: 500 });
+      const profiles = data.profiles ?? data.bundles ?? [];
+      setProvider(data.provider ?? "");
+      setBundles(profiles);
+      setStatus(`${profiles.length} profiles`);
     } catch (e) {
       setStatus((e as Error).message || "Could not load bundles");
     }
@@ -783,7 +788,7 @@ function BundlesView({ projectId }: NativePanelProps) {
   const inspect = async (bundleSid: string, preserveResult = false) => {
     setBusy(true);
     try {
-      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { bundle_sid: bundleSid });
+      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { compliance_id: bundleSid });
       setSelected(data);
       if (!preserveResult) setResult(null);
     } catch (e) {
@@ -809,7 +814,7 @@ function BundlesView({ projectId }: NativePanelProps) {
     setBusy(true);
     try {
       const data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
-      setStatus("Draft bundle created");
+      setStatus("Compliance profile created");
       await load();
       if (data.bundle?.sid) await inspect(data.bundle.sid);
     } catch (e) {
@@ -831,14 +836,14 @@ function BundlesView({ projectId }: NativePanelProps) {
     }
     setBusy(true);
     try {
-      const body: Record<string, unknown> = { bundle_sid: bundleSid, ...itemForm, attributes };
+      const body: Record<string, unknown> = { compliance_id: bundleSid, ...itemForm, attributes };
       if (itemFile) {
         body.file = await readAsDataURL(itemFile);
         body.file_name = itemFile.name;
       }
       const data = await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), body);
       setResult(data);
-      setStatus("Bundle item assigned");
+      setStatus("Compliance requirement assigned");
       setItemFile(null);
       await inspect(bundleSid, true);
     } catch (e) {
@@ -852,7 +857,7 @@ function BundlesView({ projectId }: NativePanelProps) {
     if (!bundleSid) return;
     setBusy(true);
     try {
-      const data = await postJSON(endpoint(`/numbers/regulatory/bundles/${action}`), { bundle_sid: bundleSid });
+      const data = await postJSON(endpoint(`/numbers/regulatory/bundles/${action}`), { compliance_id: bundleSid });
       setResult(data);
       setStatus(action === "submit" ? "Submission processed" : "Evaluation complete");
       await inspect(bundleSid, true);
@@ -867,7 +872,7 @@ function BundlesView({ projectId }: NativePanelProps) {
     <div className="h-full min-h-0 grid xl:grid-cols-[20rem_minmax(0,1fr)_22rem] bg-bg text-text">
       <section className="min-h-0 overflow-auto border-r border-border">
         <header className="h-12 px-4 border-b border-border flex items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold">Regulatory bundles</h2>
+          <h2 className="text-sm font-semibold">Compliance profiles</h2>
           <span className="truncate text-xs text-text-muted">{status}</span>
         </header>
         {bundles.map((bundle) => (
@@ -895,11 +900,11 @@ function BundlesView({ projectId }: NativePanelProps) {
             </header>
             <div className="grid lg:grid-cols-2">
               <section className="p-4 border-b lg:border-r border-border">
-                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Regulation</h3>
+                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Requirements</h3>
                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(selected.regulation ?? {}, null, 2)}</pre>
               </section>
               <section className="p-4 border-b border-border">
-                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Assigned items</h3>
+                <h3 className="mb-2 text-xs font-semibold uppercase text-text-dim">Assigned values</h3>
                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(selected.items ?? [], null, 2)}</pre>
               </section>
             </div>
@@ -910,7 +915,14 @@ function BundlesView({ projectId }: NativePanelProps) {
               </section>
             ) : null}
             <form onSubmit={addItem} className="p-4 space-y-3">
-              <h3 className="text-sm font-semibold">Add bundle item</h3>
+              <h3 className="text-sm font-semibold">Set requirement</h3>
+              {provider === "telnyx" ? (
+                <div className="grid md:grid-cols-2 gap-3">
+                  <Field label="Requirement ID" value={itemForm.requirement_id} onChange={(value) => setItemForm({ ...itemForm, requirement_id: value })} required />
+                  <Field label="Field value" value={itemForm.field_value} onChange={(value) => setItemForm({ ...itemForm, field_value: value })} />
+                </div>
+              ) : null}
+              {provider !== "telnyx" ? <>
               <div className="grid md:grid-cols-3 gap-3">
                 <label className="block">
                   <span className="mb-1 block text-xs text-text-muted">Kind</span>
@@ -925,17 +937,18 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <span className="mb-1 block text-xs text-text-muted">Attributes JSON</span>
                 <textarea value={itemForm.attributes} onChange={(event) => setItemForm({ ...itemForm, attributes: event.target.value })} rows={5} className="w-full resize-y rounded border border-border bg-bg px-3 py-2 font-mono text-xs outline-none focus:border-text-dim" />
               </label>
-              {itemForm.kind === "document" ? (
+              </> : null}
+              {provider === "telnyx" || itemForm.kind === "document" ? (
                 <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setItemFile(event.target.files?.[0] ?? null)} className="block w-full text-xs text-text-muted file:mr-3 file:h-8 file:rounded file:border file:border-border file:bg-bg file:px-3 file:text-xs file:text-text" />
               ) : null}
               <button type="submit" disabled={busy} className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create and assign</button>
             </form>
           </div>
-        ) : <div className="h-full min-h-[18rem] flex items-center justify-center text-sm text-text-muted">Select a bundle</div>}
+        ) : <div className="h-full min-h-[18rem] flex items-center justify-center text-sm text-text-muted">Select a compliance profile</div>}
       </section>
 
       <form onSubmit={createBundle} className="min-h-0 overflow-auto p-4 space-y-3">
-        <h2 className="text-sm font-semibold">New bundle</h2>
+        <h2 className="text-sm font-semibold">New compliance profile</h2>
         <div className="grid grid-cols-2 gap-3">
           <Field label="Country" value={bundleForm.country} onChange={(value) => setBundleForm({ ...bundleForm, country: value.toUpperCase().slice(0, 2) })} required />
           <label className="block">
@@ -952,10 +965,10 @@ function BundlesView({ projectId }: NativePanelProps) {
           </select>
         </label>
         <Field label="Name" value={bundleForm.friendly_name} onChange={(value) => setBundleForm({ ...bundleForm, friendly_name: value })} required />
-        <Field label="Status email" value={bundleForm.email} onChange={(value) => setBundleForm({ ...bundleForm, email: value })} type="email" required />
+        {provider !== "telnyx" ? <Field label="Status email" value={bundleForm.email} onChange={(value) => setBundleForm({ ...bundleForm, email: value })} type="email" required /> : null}
         <div className="grid grid-cols-2 gap-2">
           <button type="button" onClick={discover} disabled={busy} className="h-9 rounded border border-border text-sm disabled:opacity-50">Requirements</button>
-          <button type="submit" disabled={busy} className="h-9 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create draft</button>
+          <button type="submit" disabled={busy} className="h-9 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create profile</button>
         </div>
         {requirements ? <pre className="max-h-[30rem] overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted">{JSON.stringify(requirements, null, 2)}</pre> : null}
       </form>
@@ -1012,7 +1025,7 @@ export default function CallsPanel(props: NativePanelProps) {
           onClick={() => setView("bundles")}
           className={`h-8 px-3 rounded text-sm ${view === "bundles" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
         >
-          Bundles
+          Compliance
         </button>
       </nav>
       <div className="min-h-0 flex-1">

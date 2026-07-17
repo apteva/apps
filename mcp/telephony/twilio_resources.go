@@ -19,39 +19,167 @@ func resourceToolResult(result map[string]any, err error) (any, error) {
 }
 
 func (a *App) toolAddressesList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioAddressesList(ctx, args))
+	return resourceToolResult(a.addressesList(ctx, args))
 }
 
 func (a *App) toolAddressCreate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioAddressCreate(ctx, args))
+	return resourceToolResult(a.addressCreate(ctx, args))
 }
 
 func (a *App) toolRegulatoryRequirements(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioRegulatoryRequirements(ctx, args))
+	return resourceToolResult(a.regulatoryRequirements(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundlesList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundlesList(ctx, args))
+	return resourceToolResult(a.complianceProfilesList(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundleCreate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundleCreate(ctx, args))
+	return resourceToolResult(a.complianceProfileCreate(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundleGet(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundleGet(ctx, args))
+	return resourceToolResult(a.complianceProfileGet(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundleItemCreate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundleItemCreate(ctx, args))
+	return resourceToolResult(a.complianceRequirementSet(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundleEvaluate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundleEvaluate(ctx, args))
+	return resourceToolResult(a.complianceProfileEvaluate(ctx, args))
 }
 
 func (a *App) toolRegulatoryBundleSubmit(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return resourceToolResult(a.twilioBundleSubmit(ctx, args))
+	return resourceToolResult(a.complianceProfileSubmit(ctx, args))
+}
+
+func resourceArgs(args map[string]any) map[string]any {
+	out := make(map[string]any, len(args)+2)
+	for key, value := range args {
+		out[key] = value
+	}
+	if strings.TrimSpace(strArg(out, "address_sid", "")) == "" {
+		out["address_sid"] = strArg(out, "address_id", "")
+	}
+	if strings.TrimSpace(strArg(out, "bundle_sid", "")) == "" {
+		out["bundle_sid"] = strArg(out, "compliance_id", "")
+	}
+	return out
+}
+
+func (a *App) resourceProvider(ctx *sdk.AppCtx) (*numberProvider, error) {
+	provider, err := a.numberProviderFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug != "twilio" && provider.Slug != "telnyx" {
+		return nil, fmt.Errorf("address and compliance resources are not supported for provider %s", provider.Slug)
+	}
+	return provider, nil
+}
+
+func (a *App) addressesList(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug == "telnyx" {
+		return a.telnyxAddressesList(ctx, args)
+	}
+	return a.twilioAddressesList(ctx, args)
+}
+
+func (a *App) addressCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug == "telnyx" {
+		return a.telnyxAddressCreate(ctx, args)
+	}
+	return a.twilioAddressCreate(ctx, args)
+}
+
+func (a *App) regulatoryRequirements(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug == "telnyx" {
+		return a.telnyxRegulatoryRequirements(ctx, args)
+	}
+	return a.twilioRegulatoryRequirements(ctx, args)
+}
+
+func (a *App) complianceProfilesList(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug == "telnyx" {
+		return a.telnyxProfilesList(ctx, args)
+	}
+	return a.twilioBundlesList(ctx, args)
+}
+
+func (a *App) complianceProfileCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if provider.Slug == "telnyx" {
+		return a.telnyxProfileCreate(ctx, args)
+	}
+	return a.twilioBundleCreate(ctx, args)
+}
+
+func (a *App) complianceProfileGet(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	args = resourceArgs(args)
+	if provider.Slug == "telnyx" {
+		return a.telnyxProfileGet(ctx, args)
+	}
+	return a.twilioBundleGet(ctx, args)
+}
+
+func (a *App) complianceRequirementSet(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	args = resourceArgs(args)
+	if provider.Slug == "telnyx" {
+		return a.telnyxRequirementSet(ctx, args)
+	}
+	return a.twilioBundleItemCreate(ctx, args)
+}
+
+func (a *App) complianceProfileEvaluate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	args = resourceArgs(args)
+	if provider.Slug == "telnyx" {
+		return a.telnyxProfileEvaluate(ctx, args)
+	}
+	return a.twilioBundleEvaluate(ctx, args)
+}
+
+func (a *App) complianceProfileSubmit(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	provider, err := a.resourceProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	args = resourceArgs(args)
+	if provider.Slug == "telnyx" {
+		return a.telnyxProfileSubmit(ctx, args)
+	}
+	return a.twilioBundleSubmit(ctx, args)
 }
 
 func validTwilioBundleSID(value string) bool { return validTwilioSID(value, "BU") }
@@ -91,6 +219,24 @@ func twilioResponse(raw json.RawMessage) (map[string]any, error) {
 		return nil, fmt.Errorf("decode Twilio response: %w", err)
 	}
 	return response, nil
+}
+
+func normalizeTwilioAddress(raw map[string]any) map[string]any {
+	address := make(map[string]any, len(raw)+1)
+	for key, value := range raw {
+		address[key] = value
+	}
+	address["address_id"] = stringValue(raw["sid"])
+	return address
+}
+
+func normalizeTwilioBundle(raw map[string]any) map[string]any {
+	profile := make(map[string]any, len(raw)+1)
+	for key, value := range raw {
+		profile[key] = value
+	}
+	profile["compliance_id"] = stringValue(raw["sid"])
+	return profile
 }
 
 func twilioAttributes(args map[string]any) (string, error) {
@@ -149,7 +295,14 @@ func (a *App) twilioAddressesList(ctx *sdk.AppCtx, args map[string]any) (map[str
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "addresses": response["addresses"], "meta": response["meta"]}, nil
+	addresses := make([]map[string]any, 0)
+	if values, ok := response["addresses"].([]any); ok {
+		for _, value := range values {
+			entry, _ := value.(map[string]any)
+			addresses = append(addresses, normalizeTwilioAddress(entry))
+		}
+	}
+	return map[string]any{"provider": "twilio", "addresses": addresses, "meta": response["meta"]}, nil
 }
 
 func (a *App) twilioAddressCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -188,7 +341,7 @@ func (a *App) twilioAddressCreate(ctx *sdk.AppCtx, args map[string]any) (map[str
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "address": address}, nil
+	return map[string]any{"provider": "twilio", "address": normalizeTwilioAddress(address)}, nil
 }
 
 func (a *App) twilioRegulatoryRequirements(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -256,7 +409,14 @@ func (a *App) twilioBundlesList(ctx *sdk.AppCtx, args map[string]any) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "bundles": response["results"], "meta": response["meta"]}, nil
+	profiles := make([]map[string]any, 0)
+	if values, ok := response["results"].([]any); ok {
+		for _, value := range values {
+			entry, _ := value.(map[string]any)
+			profiles = append(profiles, normalizeTwilioBundle(entry))
+		}
+	}
+	return map[string]any{"provider": "twilio", "profiles": profiles, "bundles": profiles, "meta": response["meta"]}, nil
 }
 
 func (a *App) twilioBundleCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -306,7 +466,8 @@ func (a *App) twilioBundleCreate(ctx *sdk.AppCtx, args map[string]any) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "bundle": bundle}, nil
+	profile := normalizeTwilioBundle(bundle)
+	return map[string]any{"provider": "twilio", "profile": profile, "bundle": profile}, nil
 }
 
 func (a *App) twilioBundleGet(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -345,7 +506,8 @@ func (a *App) twilioBundleGet(ctx *sdk.AppCtx, args map[string]any) (map[string]
 			return nil, err
 		}
 	}
-	return map[string]any{"provider": "twilio", "bundle": bundle, "regulation": regulation, "items": items["results"]}, nil
+	profile := normalizeTwilioBundle(bundle)
+	return map[string]any{"provider": "twilio", "profile": profile, "bundle": profile, "regulation": regulation, "requirements": regulation, "items": items["results"]}, nil
 }
 
 func (a *App) twilioBundleItemCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -410,7 +572,7 @@ func (a *App) twilioBundleItemCreate(ctx *sdk.AppCtx, args map[string]any) (map[
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "bundle_sid": bundleSID, "item": item, "assignment": assignment}, nil
+	return map[string]any{"provider": "twilio", "compliance_id": bundleSID, "bundle_sid": bundleSID, "item": item, "assignment": assignment}, nil
 }
 
 func (a *App) twilioBundleEvaluate(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -430,7 +592,7 @@ func (a *App) twilioBundleEvaluate(ctx *sdk.AppCtx, args map[string]any) (map[st
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "bundle_sid": bundleSID, "evaluation": evaluation}, nil
+	return map[string]any{"provider": "twilio", "compliance_id": bundleSID, "bundle_sid": bundleSID, "evaluation": evaluation}, nil
 }
 
 func (a *App) twilioBundleSubmit(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -461,7 +623,8 @@ func (a *App) twilioBundleSubmit(ctx *sdk.AppCtx, args map[string]any) (map[stri
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"provider": "twilio", "submitted": true, "bundle": bundle, "evaluation": evaluation}, nil
+	profile := normalizeTwilioBundle(bundle)
+	return map[string]any{"provider": "twilio", "submitted": true, "compliance_id": bundleSID, "profile": profile, "bundle": profile, "evaluation": evaluation}, nil
 }
 
 func validateTwilioPurchaseResources(ctx *sdk.AppCtx, intent *numberPurchaseIntent, addressSID, bundleSID string) error {

@@ -24,8 +24,10 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -43,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.8
+version: 0.1.9
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -87,6 +90,7 @@ provides:
     - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call." }
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
+    - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
@@ -104,6 +108,12 @@ provides:
     - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document to a bundle." }
     - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance." }
     - { name: telephony_regulatory_bundle_submit, description: "Submit a compliant bundle for review." }
+    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles." }
+    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile." }
+    - { name: telephony_compliance_profile_get, description: "Get a provider compliance profile and its requirements." }
+    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document." }
+    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness." }
+    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review." }
   ui_panels:
     - slot: project.page
       label: Calls
@@ -127,6 +137,12 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct{ installID int64 }
+
+const (
+	answerModeAgent             = "agent"
+	answerModeRealtimeImmediate = "realtime_immediate"
+	defaultInboundGreeting      = "Greet the caller naturally, introduce yourself, and ask how you can help."
+)
 
 func main() { sdk.Run(&App{}) }
 
@@ -165,11 +181,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name:     "call-lifecycle",
-		Schedule: "@every 5s",
-		Run:      a.runLifecycleTick,
-	}}
+	return []sdk.Worker{
+		{
+			Name:     "call-auto-answer",
+			Schedule: "@every 1s",
+			Run:      a.runAutoAnswerTick,
+		},
+		{
+			Name:     "call-lifecycle",
+			Schedule: "@every 5s",
+			Run:      a.runLifecycleTick,
+		},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -190,6 +213,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Twilio inbound call control. The route id maps a phone number
 		// to the agent that should receive the incoming-call event.
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
+		{Pattern: "/inbound/telnyx/", Handler: a.handleTelnyxInbound, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
@@ -224,18 +248,35 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_create",
-			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set the provider webhook. Args: phone_number? (defaults to bound connection phone_number), phone_number_sid? (Twilio PN SID if known), hold_prompt?, timeout_sec?.",
+			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
 				"phone_number":     map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
-				"phone_number_sid": map[string]any{"type": "string", "description": "Carrier phone number id. For Twilio this is PNxxxxxxxx; can be auto-discovered if omitted."},
-				"hold_prompt":      map[string]any{"type": "string", "description": "Short prompt callers hear while the agent decides whether to answer."},
-				"timeout_sec":      map[string]any{"type": "integer", "description": "How long to hold before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+				"phone_number_id":  map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
+				"phone_number_sid": map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
+				"hold_prompt":      map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
+				"timeout_sec":      map[string]any{"type": "integer", "description": "How long to wait before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+				"answer_mode":      map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate"}, "default": "agent", "description": "Agent emits an answer decision, or Telephony immediately starts the configured realtime thread."},
+				"directive":        map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
+				"voice":            map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
+				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
 			}, nil),
 			HandlerCtx: a.toolRoutesCreate,
 		},
 		{
+			Name:        "telephony_routes_set_answer_mode",
+			Description: "Configure how an inbound route answers. agent preserves event-driven pickup. realtime_immediate starts the realtime thread as soon as the carrier webhook arrives and requires directive. Args: route_id, answer_mode, directive?, voice?, greeting?; changes apply to new calls.",
+			InputSchema: schemaObject(map[string]any{
+				"route_id":    map[string]any{"type": "string"},
+				"answer_mode": map[string]any{"type": "string", "enum": []string{"agent", "realtime_immediate"}},
+				"directive":   map[string]any{"type": "string"},
+				"voice":       map[string]any{"type": "string"},
+				"greeting":    map[string]any{"type": "string"},
+			}, []string{"route_id", "answer_mode"}),
+			HandlerCtx: a.toolRoutesSetAnswerMode,
+		},
+		{
 			Name:        "telephony_routes_configure_carrier",
-			Description: "Configure the bound carrier phone number webhook for an inbound route. Currently implemented for Twilio update_phone_number. Args: route_id (required).",
+			Description: "Configure the bound carrier for an inbound route. Twilio sets the number webhook; Telnyx creates a dedicated Call Control Application and assigns the number. Args: route_id (required).",
 			InputSchema: schemaObject(map[string]any{
 				"route_id": map[string]any{"type": "string", "description": "Route id returned by telephony_routes_create."},
 			}, []string{"route_id"}),
@@ -315,17 +356,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_numbers_purchase",
 			Description: "Purchase one phone number from an unexpired telephony_numbers_search quote. THIS SPENDS REAL MONEY. " +
 				"Present the provider, number, recurring price, setup price, inbound rate, currency, and regulatory requirement to the user; call only after explicit confirmation. " +
-				"For regulated Twilio numbers, provide the required address_sid and an approved bundle_sid. Both resources are validated before spending. Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
+				"For regulated numbers, provide the required address_id and compliance_id. Provider resources are validated before spending. Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
 			InputSchema: schemaObject(map[string]any{
 				"confirmation_token": map[string]any{"type": "string", "description": "Short-lived token returned with a purchase-ready search offer."},
-				"address_sid":        map[string]any{"type": "string", "description": "Existing Twilio Address SID (AD...) required when the quote has an address requirement."},
-				"bundle_sid":         map[string]any{"type": "string", "description": "Approved Twilio Regulatory Bundle SID (BU...) required when Twilio regulates the number."},
+				"address_id":         map[string]any{"type": "string", "description": "Provider address ID when the quote requires an address."},
+				"compliance_id":      map[string]any{"type": "string", "description": "Provider compliance profile ID when the quote requires regulatory information."},
+				"address_sid":        map[string]any{"type": "string", "description": "Legacy alias for address_id."},
+				"bundle_sid":         map[string]any{"type": "string", "description": "Legacy alias for compliance_id."},
 			}, []string{"confirmation_token"}),
 			HandlerCtx: a.toolNumbersPurchase,
 		},
 		{
 			Name:        "telephony_addresses_list",
-			Description: "List addresses in the bound Twilio account. Args: country?, customer_name?, limit?. Address data comes directly from Twilio and is not stored by Telephony.",
+			Description: "List addresses in the bound carrier account. Args: country?, customer_name?, limit?. Address data comes directly from the provider and is not stored by Telephony.",
 			InputSchema: schemaObject(map[string]any{
 				"country":       map[string]any{"type": "string", "description": "Optional ISO alpha-2 address country."},
 				"customer_name": map[string]any{"type": "string"},
@@ -335,9 +378,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_address_create",
-			Description: "Create and validate an address in the bound Twilio account. This transmits personal or business address data to Twilio. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?.",
+			Description: "Create and validate an address in the bound carrier account. This transmits personal or business address data to the provider.",
 			InputSchema: schemaObject(map[string]any{
 				"customer_name":    map[string]any{"type": "string"},
+				"business_name":    map[string]any{"type": "string"},
+				"first_name":       map[string]any{"type": "string"},
+				"last_name":        map[string]any{"type": "string"},
+				"phone_number":     map[string]any{"type": "string"},
 				"street":           map[string]any{"type": "string"},
 				"street_secondary": map[string]any{"type": "string"},
 				"city":             map[string]any{"type": "string"},
@@ -346,22 +393,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"country":          map[string]any{"type": "string", "description": "ISO alpha-2 address country."},
 				"friendly_name":    map[string]any{"type": "string"},
 				"auto_correct":     map[string]any{"type": "boolean", "default": true},
-			}, []string{"customer_name", "street", "city", "region", "postal_code", "country"}),
+			}, []string{"street", "city", "country"}),
 			HandlerCtx: a.toolAddressCreate,
 		},
 		{
 			Name:        "telephony_regulatory_requirements",
-			Description: "Read current Twilio requirements before creating a bundle. Args: country, number_type, end_user_type. Use the returned dynamic fields exactly; never infer or hardcode regulatory requirements.",
+			Description: "Read current provider requirements before creating a compliance profile. Args: country, number_type, end_user_type?. Use the returned dynamic fields exactly; never infer or hardcode regulatory requirements.",
 			InputSchema: schemaObject(map[string]any{
 				"country":       map[string]any{"type": "string"},
 				"number_type":   map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
 				"end_user_type": map[string]any{"type": "string", "enum": []string{"individual", "business"}},
-			}, []string{"country", "number_type", "end_user_type"}),
+			}, []string{"country", "number_type"}),
 			HandlerCtx: a.toolRegulatoryRequirements,
 		},
 		{
 			Name:        "telephony_regulatory_bundles_list",
-			Description: "List Twilio regulatory bundles and their approval state. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?.",
+			Description: "Legacy alias for listing provider compliance profiles and their approval state.",
 			InputSchema: schemaObject(map[string]any{
 				"country":       map[string]any{"type": "string"},
 				"number_type":   map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
@@ -374,7 +421,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_regulatory_bundle_create",
-			Description: "Create a draft Twilio regulatory bundle. First call telephony_regulatory_requirements. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type, status_callback?.",
+			Description: "Legacy alias for creating a provider compliance profile. First call telephony_regulatory_requirements.",
 			InputSchema: schemaObject(map[string]any{
 				"friendly_name":   map[string]any{"type": "string"},
 				"email":           map[string]any{"type": "string"},
@@ -383,40 +430,67 @@ func (a *App) MCPTools() []sdk.Tool {
 				"number_type":     map[string]any{"type": "string", "enum": []string{"local", "mobile", "national", "toll_free"}},
 				"end_user_type":   map[string]any{"type": "string", "enum": []string{"individual", "business"}},
 				"status_callback": map[string]any{"type": "string"},
-			}, []string{"friendly_name", "email"}),
+			}, nil),
 			HandlerCtx: a.toolRegulatoryBundleCreate,
 		},
 		{
 			Name:        "telephony_regulatory_bundle_get",
-			Description: "Get a Twilio bundle with its regulation and assigned items. Args: bundle_sid.",
-			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			Description: "Legacy alias for getting a provider compliance profile.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "bundle_sid": map[string]any{"type": "string"}}, nil),
 			HandlerCtx:  a.toolRegulatoryBundleGet,
 		},
 		{
 			Name:        "telephony_regulatory_bundle_item_create",
-			Description: "Create and assign an end user or supporting document to a draft Twilio bundle. Use requirement fields returned by telephony_regulatory_requirements. Args: bundle_sid, kind (end_user|document), friendly_name, type, attributes object, file?, file_name?. File may be JPEG, PNG, or PDF and transmits sensitive identity evidence to Twilio.",
+			Description: "Legacy alias for setting a compliance requirement. Twilio accepts end-user/document objects; Telnyx accepts requirement_id plus field_value or file.",
 			InputSchema: schemaObject(map[string]any{
-				"bundle_sid":    map[string]any{"type": "string"},
-				"kind":          map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
-				"friendly_name": map[string]any{"type": "string"},
-				"type":          map[string]any{"type": "string"},
-				"attributes":    map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
-				"file":          map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
-				"file_name":     map[string]any{"type": "string"},
-			}, []string{"bundle_sid", "kind", "friendly_name", "type", "attributes"}),
+				"bundle_sid":     map[string]any{"type": "string"},
+				"compliance_id":  map[string]any{"type": "string"},
+				"requirement_id": map[string]any{"type": "string"},
+				"field_value":    map[string]any{"type": "string"},
+				"kind":           map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
+				"friendly_name":  map[string]any{"type": "string"},
+				"type":           map[string]any{"type": "string"},
+				"attributes":     map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
+				"file":           map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
+				"file_name":      map[string]any{"type": "string"},
+			}, nil),
 			HandlerCtx: a.toolRegulatoryBundleItemCreate,
 		},
 		{
 			Name:        "telephony_regulatory_bundle_evaluate",
-			Description: "Evaluate a draft Twilio bundle and return granular missing or invalid requirements. Args: bundle_sid.",
-			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			Description: "Legacy alias for evaluating provider compliance-profile completeness.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "bundle_sid": map[string]any{"type": "string"}}, nil),
 			HandlerCtx:  a.toolRegulatoryBundleEvaluate,
 		},
 		{
 			Name:        "telephony_regulatory_bundle_submit",
-			Description: "Evaluate and submit a compliant Twilio bundle for regulatory review. This transmits the assigned identity data and documents to Twilio. Args: bundle_sid. Noncompliant bundles are not submitted.",
-			InputSchema: schemaObject(map[string]any{"bundle_sid": map[string]any{"type": "string"}}, []string{"bundle_sid"}),
+			Description: "Legacy alias for submitting a complete provider compliance profile for review.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "bundle_sid": map[string]any{"type": "string"}}, nil),
 			HandlerCtx:  a.toolRegulatoryBundleSubmit,
+		},
+		{
+			Name: "telephony_compliance_profiles_list", Description: "List provider compliance profiles. Twilio profiles are regulatory bundles; Telnyx profiles are requirement groups.",
+			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), HandlerCtx: a.toolRegulatoryBundlesList,
+		},
+		{
+			Name: "telephony_compliance_profile_create", Description: "Create a provider compliance profile after discovering current requirements.",
+			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "end_user_type": map[string]any{"type": "string"}, "email": map[string]any{"type": "string"}, "regulation_sid": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolRegulatoryBundleCreate,
+		},
+		{
+			Name: "telephony_compliance_profile_get", Description: "Get a provider compliance profile and its current requirements.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleGet,
+		},
+		{
+			Name: "telephony_compliance_requirement_set", Description: "Set one compliance requirement value or upload and assign its document.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "requirement_id": map[string]any{"type": "string"}, "field_value": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"}, "attributes": map[string]any{"type": "object"}, "file": map[string]any{"type": "string"}, "file_name": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleItemCreate,
+		},
+		{
+			Name: "telephony_compliance_profile_evaluate", Description: "Evaluate whether a provider compliance profile is complete and usable for ordering.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleEvaluate,
+		},
+		{
+			Name: "telephony_compliance_profile_submit", Description: "Submit a complete provider compliance profile for optional provider review or pre-approval.",
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
 		},
 	}
 }
@@ -712,8 +786,8 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if slug == "" {
 		return mcpError("could not determine carrier slug"), nil
 	}
-	if slug != "twilio" {
-		return mcpError("inbound call routing is currently implemented for Twilio only"), nil
+	if slug != "twilio" && slug != "telnyx" {
+		return mcpError("inbound call routing is not implemented for provider " + slug), nil
 	}
 	if err := a.validatePublicEndpoint(); err != nil {
 		return mcpError(err.Error()), nil
@@ -735,6 +809,15 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if timeout > 300 {
 		timeout = 300
 	}
+	answerMode, directive, voice, greeting, err := normalizeRouteAnswerConfig(
+		strArg(args, "answer_mode", answerModeAgent),
+		strings.TrimSpace(strArg(args, "directive", "")),
+		strings.TrimSpace(strArg(args, "voice", "")),
+		strings.TrimSpace(strArg(args, "greeting", "")),
+	)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	route := routeRow{
 		ID:                  "route-" + newCallID(),
@@ -742,11 +825,15 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		CarrierSlug:         slug,
 		CarrierConnectionID: bound.ConnectionID,
 		PhoneNumber:         phone,
-		PhoneNumberSID:      strArg(args, "phone_number_sid", ""),
+		PhoneNumberSID:      firstNonEmpty(strArg(args, "phone_number_id", ""), strArg(args, "phone_number_sid", "")),
 		AgentID:             agentID,
 		Enabled:             true,
 		HoldPrompt:          holdPrompt,
 		TimeoutSec:          timeout,
+		AnswerMode:          answerMode,
+		AutoDirective:       directive,
+		AutoVoice:           voice,
+		AutoGreeting:        greeting,
 		Secret:              newSecret(),
 		CreatedAt:           now,
 		UpdatedAt:           now,
@@ -759,6 +846,52 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		"inbound_url": a.inboundRouteURL(route),
 		"next":        "Call telephony_routes_configure_carrier with route_id to set the carrier webhook.",
 	}, nil
+}
+
+func (a *App) toolRoutesSetAnswerMode(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	agentID := callerAgentID(callerCtx)
+	if agentID == 0 {
+		return mcpError("could not determine calling agent id"), nil
+	}
+	routeID := strings.TrimSpace(strArg(args, "route_id", ""))
+	if routeID == "" {
+		return mcpError("route_id required"), nil
+	}
+	route, err := a.db().findRoute(routeID)
+	if err != nil {
+		return mcpError("load route: " + err.Error()), nil
+	}
+	if route == nil {
+		return mcpError("unknown route_id"), nil
+	}
+	if route.AgentID != agentID || route.ProjectID != currentProject(ctx) {
+		return mcpError("route belongs to another agent or project"), nil
+	}
+	directive, voice, greeting := route.AutoDirective, route.AutoVoice, route.AutoGreeting
+	if value, ok := optionalStringArg(args, "directive"); ok {
+		directive = value
+	}
+	if value, ok := optionalStringArg(args, "voice"); ok {
+		voice = value
+	}
+	if value, ok := optionalStringArg(args, "greeting"); ok {
+		greeting = value
+	}
+	mode, directive, voice, greeting, err := normalizeRouteAnswerConfig(
+		strArg(args, "answer_mode", ""), directive, voice, greeting,
+	)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if err := a.db().updateRouteAnswerMode(route.ID, mode, directive, voice, greeting); err != nil {
+		return mcpError("persist route answer mode: " + err.Error()), nil
+	}
+	route.AnswerMode = mode
+	route.AutoDirective = directive
+	route.AutoVoice = voice
+	route.AutoGreeting = greeting
+	route.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	return map[string]any{"ok": true, "route": routePublic(a, *route)}, nil
 }
 
 func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -786,31 +919,16 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 	if err := a.validatePublicEndpoint(); err != nil {
 		return mcpError(err.Error()), nil
 	}
-	if route.CarrierSlug != "twilio" {
-		return mcpError("carrier webhook configuration is currently implemented for Twilio routes only"), nil
+	switch route.CarrierSlug {
+	case "twilio":
+		err = a.configureTwilioRoute(ctx, route)
+	case "telnyx":
+		err = a.configureTelnyxRoute(ctx, route)
+	default:
+		err = fmt.Errorf("carrier webhook configuration is not implemented for provider %s", route.CarrierSlug)
 	}
-	sid, previousVoiceURL, err := a.findTwilioPhoneNumber(ctx, route)
 	if err != nil {
-		return mcpError("find Twilio phone number SID: " + err.Error()), nil
-	}
-	if sid == "" {
-		return mcpError("could not find an exact Twilio phone number SID match for " + route.PhoneNumber), nil
-	}
-	if route.PhoneNumberSID != "" && route.PhoneNumberSID != sid {
-		return mcpError("provided phone_number_sid does not belong to " + route.PhoneNumber), nil
-	}
-	_ = a.db().updateRoutePhoneSID(route.ID, sid)
-	route.PhoneNumberSID = sid
-	if route.PreviousVoiceURL == "" && previousVoiceURL != a.inboundRouteURL(*route) {
-		_ = a.db().updateRoutePreviousVoiceURL(route.ID, previousVoiceURL)
-		route.PreviousVoiceURL = previousVoiceURL
-	}
-	_, err = executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
-		"PhoneNumberSid": sid,
-		"VoiceUrl":       a.inboundRouteURL(*route),
-	})
-	if err != nil {
-		return mcpError("configure Twilio webhook: " + err.Error()), nil
+		return mcpError(err.Error()), nil
 	}
 	return map[string]any{
 		"ok":          true,
@@ -841,19 +959,21 @@ func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args
 	if !route.Enabled {
 		return map[string]any{"ok": true, "route_id": route.ID, "already_disabled": true}, nil
 	}
-	if route.CarrierSlug != "twilio" || route.PhoneNumberSID == "" {
-		return mcpError("route cannot be safely disabled because its Twilio phone number SID is unavailable"), nil
+	switch route.CarrierSlug {
+	case "twilio":
+		err = a.disableTwilioRoute(ctx, route)
+	case "telnyx":
+		err = a.disableTelnyxRoute(ctx, route)
+	default:
+		err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
 	}
-	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
-		"PhoneNumberSid": route.PhoneNumberSID,
-		"VoiceUrl":       route.PreviousVoiceURL,
-	}); err != nil {
-		return mcpError("restore Twilio webhook: " + err.Error()), nil
+	if err != nil {
+		return mcpError(err.Error()), nil
 	}
 	if err := a.db().disableRoute(route.ID); err != nil {
 		return mcpError("persist disabled route: " + err.Error()), nil
 	}
-	return map[string]any{"ok": true, "route_id": route.ID, "restored_voice_url": route.PreviousVoiceURL}, nil
+	return map[string]any{"ok": true, "route_id": route.ID, "carrier": route.CarrierSlug}, nil
 }
 
 func (a *App) toolRoutesList(callerCtx context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -915,30 +1035,41 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.AgentID != agentID || row.ProjectID != currentProject(ctx) {
 		return mcpError("this call is routed to another agent"), nil
 	}
-	if row.CarrierSlug != "twilio" {
-		return mcpError("answer redirect is currently implemented for Twilio inbound calls only"), nil
+	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" {
+		return mcpError("answer is not implemented for inbound provider " + row.CarrierSlug), nil
 	}
+	threadID, err := a.answerCall(ctx, row, directive, voice, greeting, false)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	return map[string]any{
+		"ok":        true,
+		"call_id":   callID,
+		"thread_id": threadID,
+	}, nil
+}
 
+func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string, terminalOnCarrierError bool) (string, error) {
 	if row.Status == "answered" || row.Status == "in-progress" {
-		return map[string]any{"ok": true, "call_id": callID, "thread_id": row.ThreadID, "already_answered": true}, nil
+		return row.ThreadID, nil
 	}
 	if row.Status != "pending" && row.Status != "answering" {
-		return mcpError("call is not available to answer (status=" + row.Status + ")"), nil
+		return "", fmt.Errorf("call is not available to answer (status=%s)", row.Status)
 	}
 
 	threadID := row.ThreadID
 	audioBridgeURL := row.AudioBridgeURL
 	if row.Status == "pending" {
-		claimed, err := a.db().claimPendingCall(callID, agentID, currentProject(ctx))
+		claimed, err := a.db().claimPendingCall(row.ID, row.AgentID, row.ProjectID)
 		if err != nil {
-			return mcpError("claim pending call: " + err.Error()), nil
+			return "", fmt.Errorf("claim pending call: %w", err)
 		}
 		if !claimed {
-			return mcpError("call was already claimed"), nil
+			return "", errors.New("call was already claimed")
 		}
-		threadID = "tel-" + callID
+		threadID = "tel-" + row.ID
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
-			AgentID:                    agentID,
+			AgentID:                    row.AgentID,
 			ThreadID:                   threadID,
 			Directive:                  directive,
 			Voice:                      voice,
@@ -947,40 +1078,43 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 			BridgeDisconnectTTLSeconds: 30,
 		})
 		if err != nil {
-			_ = a.db().releaseAnswerClaim(callID)
-			return mcpError("spawn realtime thread: " + err.Error()), nil
+			_ = a.db().releaseAnswerClaim(row.ID)
+			return "", fmt.Errorf("spawn realtime thread: %w", err)
 		}
-		if rt.AudioBridgeURL == "" {
-			_ = ctx.PlatformAPI().KillThread(agentID, threadID)
-			_ = a.db().releaseAnswerClaim(callID)
-			return mcpError("realtime spawn returned no audio bridge URL"), nil
+		if rt == nil || strings.TrimSpace(rt.AudioBridgeURL) == "" {
+			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
+			_ = a.db().releaseAnswerClaim(row.ID)
+			return "", errors.New("realtime spawn returned no audio bridge URL")
 		}
 		audioBridgeURL = rt.AudioBridgeURL
-		if err := a.db().attachCall(callID, threadID, audioBridgeURL, directive, voice); err != nil {
-			_ = ctx.PlatformAPI().KillThread(agentID, threadID)
-			_ = a.db().releaseAnswerClaim(callID)
-			return mcpError("persist call answer: " + err.Error()), nil
+		if err := a.db().attachCall(row.ID, threadID, audioBridgeURL, directive, voice); err != nil {
+			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
+			_ = a.db().releaseAnswerClaim(row.ID)
+			return "", fmt.Errorf("persist call answer: %w", err)
 		}
+		row.ThreadID = threadID
+		row.AudioBridgeURL = audioBridgeURL
+		row.Directive = directive
+		row.Voice = voice
+		row.Status = "answering"
 	}
 	if threadID == "" || strings.HasPrefix(threadID, "pending-") || audioBridgeURL == "" || audioBridgeURL == "pending" {
-		return mcpError("answer claim is incomplete; wait for lifecycle recovery and retry"), nil
+		return "", errors.New("answer claim is incomplete; wait for lifecycle recovery and retry")
 	}
 
-	twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, xmlEscape(a.publicWSStreamURL("twilio", callID, row.CallbackSecret)))
-	if _, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
-		"CallSid": row.CarrierSID,
-		"Twiml":   twiml,
-	}); err != nil {
-		return mcpError("redirect Twilio call to media stream failed; retry telephony_answer_call with the same call_id: " + err.Error()), nil
+	if err := a.answerInboundCarrierCall(ctx, row); err != nil {
+		_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
+		if terminalOnCarrierError {
+			_ = a.db().updateStatus(row.ID, "failed", "carrier answer failed: "+err.Error())
+		} else {
+			_ = a.db().resetAnswerClaim(row.ID)
+		}
+		return "", fmt.Errorf("answer carrier call failed: %w", err)
 	}
-	if err := a.db().updateStatus(callID, "answered", ""); err != nil {
-		return mcpError("persist answered status: " + err.Error()), nil
+	if err := a.db().updateStatus(row.ID, "answered", ""); err != nil {
+		return "", fmt.Errorf("persist answered status: %w", err)
 	}
-	return map[string]any{
-		"ok":        true,
-		"call_id":   callID,
-		"thread_id": threadID,
-	}, nil
+	return threadID, nil
 }
 
 func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1005,11 +1139,8 @@ func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.Direction != "inbound" || (row.Status != "pending" && row.Status != "answering") {
 		return mcpError("call is not a rejectable pending inbound call"), nil
 	}
-	if row.CarrierSID != "" && row.CarrierSlug == "twilio" {
-		if _, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
-			"CallSid": row.CarrierSID,
-			"Status":  "completed",
-		}); err != nil {
+	if row.CarrierSID != "" {
+		if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
 			return mcpError("carrier reject failed: " + err.Error()), nil
 		}
 	}
@@ -1047,6 +1178,215 @@ func (a *App) findTwilioPhoneNumber(ctx *sdk.AppCtx, route *routeRow) (string, s
 		}
 	}
 	return "", "", nil
+}
+
+func (a *App) configureTwilioRoute(ctx *sdk.AppCtx, route *routeRow) error {
+	sid, previousVoiceURL, err := a.findTwilioPhoneNumber(ctx, route)
+	if err != nil {
+		return fmt.Errorf("find Twilio phone number SID: %w", err)
+	}
+	if sid == "" {
+		return fmt.Errorf("could not find an exact Twilio phone number SID match for %s", route.PhoneNumber)
+	}
+	if route.PhoneNumberSID != "" && route.PhoneNumberSID != sid {
+		return errors.New("provided phone_number_id does not belong to " + route.PhoneNumber)
+	}
+	if err := a.db().updateRoutePhoneSID(route.ID, sid); err != nil {
+		return fmt.Errorf("persist Twilio phone number SID: %w", err)
+	}
+	route.PhoneNumberSID = sid
+	if route.PreviousVoiceURL == "" && previousVoiceURL != a.inboundRouteURL(*route) {
+		if err := a.db().updateRoutePreviousVoiceURL(route.ID, previousVoiceURL); err != nil {
+			return fmt.Errorf("persist previous Twilio webhook: %w", err)
+		}
+		route.PreviousVoiceURL = previousVoiceURL
+	}
+	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+		"PhoneNumberSid": sid,
+		"VoiceUrl":       a.inboundRouteURL(*route),
+	}); err != nil {
+		return fmt.Errorf("configure Twilio webhook: %w", err)
+	}
+	return nil
+}
+
+func (a *App) disableTwilioRoute(ctx *sdk.AppCtx, route *routeRow) error {
+	if route.PhoneNumberSID == "" {
+		return errors.New("route cannot be safely disabled because its Twilio phone number SID is unavailable")
+	}
+	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+		"PhoneNumberSid": route.PhoneNumberSID,
+		"VoiceUrl":       route.PreviousVoiceURL,
+	}); err != nil {
+		return fmt.Errorf("restore Twilio webhook: %w", err)
+	}
+	return nil
+}
+
+type telnyxRouteConfig struct {
+	PreviousConnectionID string `json:"previous_connection_id"`
+	ApplicationID        string `json:"application_id"`
+}
+
+func (a *App) findTelnyxPhoneNumber(ctx *sdk.AppCtx, route *routeRow) (string, string, error) {
+	raw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "list_phone_numbers", map[string]any{
+		"filter[phone_number]": route.PhoneNumber,
+		"page[size]":           100,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	response, err := telnyxResponse(raw)
+	if err != nil {
+		return "", "", err
+	}
+	for _, value := range telnyxDataList(response) {
+		number, _ := value.(map[string]any)
+		if stringValue(number["phone_number"]) == route.PhoneNumber {
+			return stringValue(number["id"]), stringValue(number["connection_id"]), nil
+		}
+	}
+	return "", "", nil
+}
+
+func (a *App) configureTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
+	phoneID, previousConnectionID, err := a.findTelnyxPhoneNumber(ctx, route)
+	if err != nil {
+		return fmt.Errorf("find Telnyx phone number: %w", err)
+	}
+	if phoneID == "" {
+		return fmt.Errorf("could not find an exact Telnyx phone number match for %s", route.PhoneNumber)
+	}
+	if route.PhoneNumberSID != "" && route.PhoneNumberSID != phoneID {
+		return errors.New("provided phone_number_id does not belong to " + route.PhoneNumber)
+	}
+	if route.PreviousVoiceURL != "" {
+		var existing telnyxRouteConfig
+		if json.Unmarshal([]byte(route.PreviousVoiceURL), &existing) == nil &&
+			existing.ApplicationID == previousConnectionID && validProviderResourceID(existing.ApplicationID) {
+			return nil
+		}
+		return errors.New("Telnyx route has saved carrier configuration that does not match the number; disable or repair it before reconfiguring")
+	}
+	if previousConnectionID == "" {
+		provider, providerErr := a.numberProviderFor(ctx)
+		if providerErr != nil {
+			return providerErr
+		}
+		previousConnectionID = strings.TrimSpace(provider.Fields["connection_id"])
+	}
+	if !validProviderResourceID(previousConnectionID) {
+		return errors.New("Telnyx number has no previous connection to restore; assign it to the bound connection before configuring the route")
+	}
+	createdRaw, err := executeCarrierTool(ctx, route.CarrierConnectionID, "create_call_control_application", map[string]any{
+		"application_name":    "Apteva inbound " + route.ID,
+		"webhook_event_url":   a.inboundRouteURL(*route),
+		"active":              true,
+		"webhook_api_version": "2",
+	})
+	if err != nil {
+		return fmt.Errorf("create Telnyx Call Control Application: %w", err)
+	}
+	createdResponse, err := telnyxResponse(createdRaw)
+	if err != nil {
+		return err
+	}
+	applicationID := stringValue(telnyxDataMap(createdResponse)["id"])
+	if !validProviderResourceID(applicationID) {
+		return errors.New("Telnyx created the Call Control Application but returned no usable ID")
+	}
+	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+		"id": phoneID, "connection_id": applicationID,
+	}); err != nil {
+		_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "delete_call_control_application", map[string]any{"id": applicationID})
+		return fmt.Errorf("assign Telnyx phone number to inbound application: %w", err)
+	}
+	configJSON, err := json.Marshal(telnyxRouteConfig{PreviousConnectionID: previousConnectionID, ApplicationID: applicationID})
+	if err != nil {
+		return err
+	}
+	rollback := func() {
+		_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+			"id": phoneID, "connection_id": previousConnectionID,
+		})
+		_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "delete_call_control_application", map[string]any{"id": applicationID})
+	}
+	if err := a.db().updateRoutePhoneSID(route.ID, phoneID); err != nil {
+		rollback()
+		return fmt.Errorf("persist Telnyx phone number ID: %w", err)
+	}
+	if err := a.db().updateRoutePreviousVoiceURL(route.ID, string(configJSON)); err != nil {
+		rollback()
+		_ = a.db().updateRoutePhoneSID(route.ID, "")
+		return fmt.Errorf("persist previous Telnyx routing configuration: %w", err)
+	}
+	route.PhoneNumberSID = phoneID
+	route.PreviousVoiceURL = string(configJSON)
+	return nil
+}
+
+func (a *App) disableTelnyxRoute(ctx *sdk.AppCtx, route *routeRow) error {
+	if route.PhoneNumberSID == "" || route.PreviousVoiceURL == "" {
+		return errors.New("route cannot be safely disabled because its Telnyx routing configuration is unavailable")
+	}
+	var config telnyxRouteConfig
+	if err := json.Unmarshal([]byte(route.PreviousVoiceURL), &config); err != nil || !validProviderResourceID(config.ApplicationID) {
+		return errors.New("route contains invalid saved Telnyx routing configuration")
+	}
+	if config.PreviousConnectionID == "" {
+		return errors.New("route cannot restore the Telnyx number because its previous connection is unknown")
+	}
+	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+		"id": route.PhoneNumberSID, "connection_id": config.PreviousConnectionID,
+	}); err != nil {
+		return fmt.Errorf("restore Telnyx phone number connection: %w", err)
+	}
+	if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "delete_call_control_application", map[string]any{"id": config.ApplicationID}); err != nil {
+		ctx.Logger().Warn("delete restored Telnyx inbound application", "application_id", config.ApplicationID, "err", err)
+	}
+	return nil
+}
+
+func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+	switch row.CarrierSlug {
+	case "twilio":
+		twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, xmlEscape(a.publicWSStreamURL("twilio", row.ID, row.CallbackSecret)))
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+			"CallSid": row.CarrierSID, "Twiml": twiml,
+		})
+		return err
+	case "telnyx":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", map[string]any{
+			"call_control_id":            row.CarrierSID,
+			"stream_url":                 a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
+			"stream_track":               "inbound_track",
+			"stream_codec":               "PCMU",
+			"stream_bidirectional_mode":  "rtp",
+			"stream_bidirectional_codec": "PCMU",
+			"webhook_url":                a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID),
+			"webhook_url_method":         "POST",
+		})
+		return err
+	default:
+		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)
+	}
+}
+
+func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+	switch row.CarrierSlug {
+	case "twilio":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+			"CallSid": row.CarrierSID, "Status": "completed",
+		})
+		return err
+	case "telnyx":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "reject_call", map[string]any{
+			"call_control_id": row.CarrierSID,
+		})
+		return err
+	default:
+		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)
+	}
 }
 
 func (a *App) killCallThread(ctx *sdk.AppCtx, row *callRow) error {
@@ -1167,19 +1507,30 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "called number does not match route", http.StatusForbidden)
 		return
 	}
+	stored, created, err := a.recordInboundCall(route, callSID, from, to)
+	if err != nil {
+		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeTwilioHold(w, a.holdText(*route), a.twilioWaitURL(*route, stored.ID))
+	if created {
+		a.enqueueImmediateAnswer(route, stored.ID)
+	}
+}
+
+func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string) (*callRow, bool, error) {
 	callID := newCallID()
 	now := time.Now().UTC()
-	callbackSecret := newSecret()
 	call := callRow{
 		ID:                  callID,
 		ThreadID:            "pending-" + callID,
 		Direction:           "inbound",
 		AgentID:             route.AgentID,
 		RouteID:             route.ID,
-		CarrierSID:          callSID,
+		CarrierSID:          carrierSID,
 		CarrierSlug:         route.CarrierSlug,
 		CarrierConnectionID: route.CarrierConnectionID,
-		CallbackSecret:      callbackSecret,
+		CallbackSecret:      newSecret(),
 		ToNumber:            to,
 		FromNumber:          from,
 		Directive:           "inbound pending",
@@ -1195,21 +1546,154 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		"Incoming phone call. call_id=%s from=%s to=%s. To answer: call telephony_answer_call with call_id=%q and a directive for the realtime call thread. To decline: call telephony_reject_call with call_id=%q.",
 		callID, from, to, callID, callID,
 	)
+	if route.AnswerMode == answerModeRealtimeImmediate {
+		msg = fmt.Sprintf(
+			"Incoming phone call. call_id=%s from=%s to=%s. Telephony is immediately starting the route's configured realtime thread; this event is informational and does not require telephony_answer_call.",
+			callID, from, to,
+		)
+	}
 	stored, created, err := a.db().insertInboundCallWithEvent(call, msg)
+	if err != nil {
+		return nil, false, err
+	}
+	if created && globalCtx != nil {
+		globalCtx.WithProject(route.ProjectID).Emit("call.incoming", callEventPublic(*stored))
+	}
+	// Immediate routes do not need the main agent to make a pickup decision.
+	// Leave their informational event in the durable outbox so answering stays
+	// on the carrier request's fast path; the lifecycle worker delivers it.
+	if globalCtx != nil && route.AnswerMode != answerModeRealtimeImmediate {
+		if err := a.deliverOutboxCall(globalCtx.WithProject(route.ProjectID), stored.ID); err != nil {
+			globalCtx.Logger().Warn("send incoming call event deferred", "route", route.ID, "agent", route.AgentID, "err", err)
+		}
+	}
+	return stored, created, nil
+}
+
+func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	routeID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/inbound/telnyx/"), "/")
+	if routeID == "" || strings.Contains(routeID, "/") {
+		http.Error(w, "missing route_id", http.StatusBadRequest)
+		return
+	}
+	route, err := a.db().findRoute(routeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if route == nil || route.CarrierSlug != "telnyx" || !route.Enabled || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
+		http.Error(w, "route not found", http.StatusNotFound)
+		return
+	}
+	if projectID := r.URL.Query().Get("project_id"); projectID == "" || projectID != route.ProjectID {
+		http.Error(w, "project does not match route", http.StatusForbidden)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		http.Error(w, "read Telnyx webhook", http.StatusBadRequest)
+		return
+	}
+	if err := a.verifyTelnyxInboundRequest(r, route, body); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	var event struct {
+		Data struct {
+			EventType string `json:"event_type"`
+			Payload   struct {
+				CallControlID string `json:"call_control_id"`
+				CallLegID     string `json:"call_leg_id"`
+				ConnectionID  string `json:"connection_id"`
+				Direction     string `json:"direction"`
+				From          string `json:"from"`
+				To            string `json:"to"`
+			} `json:"payload"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		http.Error(w, "invalid Telnyx webhook", http.StatusBadRequest)
+		return
+	}
+	if event.Data.EventType != "call.initiated" || (event.Data.Payload.Direction != "" && event.Data.Payload.Direction != "incoming") {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var config telnyxRouteConfig
+	if json.Unmarshal([]byte(route.PreviousVoiceURL), &config) != nil || event.Data.Payload.ConnectionID != config.ApplicationID {
+		http.Error(w, "webhook connection does not match route", http.StatusForbidden)
+		return
+	}
+	carrierSID := firstNonEmpty(event.Data.Payload.CallControlID, event.Data.Payload.CallLegID)
+	to := firstNonEmpty(event.Data.Payload.To, route.PhoneNumber)
+	if carrierSID == "" {
+		http.Error(w, "missing call control id", http.StatusBadRequest)
+		return
+	}
+	if to != route.PhoneNumber {
+		http.Error(w, "called number does not match route", http.StatusForbidden)
+		return
+	}
+	stored, created, err := a.recordInboundCall(route, carrierSID, event.Data.Payload.From, to)
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	callID = stored.ID
-	if created && globalCtx != nil {
-		globalCtx.WithProject(route.ProjectID).Emit("call.incoming", callEventPublic(*stored))
+	w.WriteHeader(http.StatusNoContent)
+	if created {
+		a.enqueueImmediateAnswer(route, stored.ID)
 	}
-	if globalCtx != nil {
-		if err := a.deliverOutboxCall(globalCtx.WithProject(route.ProjectID), callID); err != nil {
-			globalCtx.Logger().Warn("send incoming call event deferred", "route", route.ID, "agent", route.AgentID, "err", err)
-		}
+}
+
+func decodeTelnyxSignatureValue(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err == nil {
+		return decoded, nil
 	}
-	writeTwilioHold(w, a.holdText(*route), a.twilioWaitURL(*route, callID))
+	return base64.RawStdEncoding.DecodeString(value)
+}
+
+func (a *App) verifyTelnyxInboundRequest(r *http.Request, route *routeRow, body []byte) error {
+	bound := globalCtx.WithProject(route.ProjectID)
+	creds, err := bound.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
+	if err != nil {
+		return fmt.Errorf("read Telnyx credentials: %w", err)
+	}
+	publicKeyText := strings.TrimSpace(creds.Fields["public_key"])
+	if publicKeyText == "" {
+		// The route secret and dedicated application ID are still checked.
+		// Accounts should configure public_key to enable carrier signatures.
+		return nil
+	}
+	return verifyTelnyxSignature(publicKeyText, r.Header.Get("Telnyx-Timestamp"), r.Header.Get("Telnyx-Signature-Ed25519"), body, time.Now())
+}
+
+func verifyTelnyxSignature(publicKeyText, timestamp, signatureText string, body []byte, now time.Time) error {
+	timestamp = strings.TrimSpace(timestamp)
+	signatureText = strings.TrimSpace(signatureText)
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || now.Sub(time.Unix(seconds, 0)) > 5*time.Minute || time.Unix(seconds, 0).Sub(now) > 5*time.Minute {
+		return errors.New("invalid or stale Telnyx timestamp")
+	}
+	publicKey, err := decodeTelnyxSignatureValue(publicKeyText)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		return errors.New("invalid Telnyx public key")
+	}
+	signature, err := decodeTelnyxSignatureValue(signatureText)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return errors.New("invalid Telnyx signature")
+	}
+	message := append([]byte(timestamp+"|"), body...)
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), message, signature) {
+		return errors.New("invalid Telnyx signature")
+	}
+	return nil
 }
 
 func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, routeID string) {
@@ -1435,11 +1919,16 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"carrier":               r.CarrierSlug,
 		"carrier_connection_id": r.CarrierConnectionID,
 		"phone_number":          r.PhoneNumber,
+		"phone_number_id":       r.PhoneNumberSID,
 		"phone_number_sid":      r.PhoneNumberSID,
 		"agent_id":              r.AgentID,
 		"enabled":               r.Enabled,
 		"hold_prompt":           r.HoldPrompt,
 		"timeout_sec":           r.TimeoutSec,
+		"answer_mode":           firstNonEmpty(r.AnswerMode, answerModeAgent),
+		"directive":             r.AutoDirective,
+		"voice":                 r.AutoVoice,
+		"greeting":              r.AutoGreeting,
 		"created_at":            r.CreatedAt,
 		"updated_at":            r.UpdatedAt,
 	}
@@ -1655,6 +2144,39 @@ func strArg(m map[string]any, key, def string) string {
 	return def
 }
 
+func optionalStringArg(m map[string]any, key string) (string, bool) {
+	v, ok := m[key].(string)
+	return strings.TrimSpace(v), ok
+}
+
+func normalizeRouteAnswerConfig(mode, directive, voice, greeting string) (string, string, string, string, error) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	directive = strings.TrimSpace(directive)
+	voice = strings.TrimSpace(voice)
+	greeting = strings.TrimSpace(greeting)
+	if mode != answerModeAgent && mode != answerModeRealtimeImmediate {
+		return "", "", "", "", errors.New("answer_mode must be agent or realtime_immediate")
+	}
+	if len(directive) > 16000 {
+		return "", "", "", "", errors.New("directive must be at most 16000 characters")
+	}
+	if !validVoice(voice) {
+		return "", "", "", "", errors.New("voice must be a provider voice id of at most 64 characters")
+	}
+	if len(greeting) > 500 {
+		return "", "", "", "", errors.New("greeting must be at most 500 characters")
+	}
+	if mode == answerModeRealtimeImmediate {
+		if directive == "" {
+			return "", "", "", "", errors.New("directive is required for realtime_immediate answering")
+		}
+		if greeting == "" {
+			greeting = defaultInboundGreeting
+		}
+	}
+	return mode, directive, voice, greeting, nil
+}
+
 func intArg(m map[string]any, key string, def int) int {
 	switch v := m[key].(type) {
 	case float64:
@@ -1723,6 +2245,10 @@ type routeRow struct {
 	Enabled             bool
 	HoldPrompt          string
 	TimeoutSec          int
+	AnswerMode          string
+	AutoDirective       string
+	AutoVoice           string
+	AutoGreeting        string
 	Secret              string
 	PreviousVoiceURL    string
 	CreatedAt           string
@@ -1895,6 +2421,13 @@ func (c *callsDB) releaseAnswerClaim(id string) error {
 	return err
 }
 
+func (c *callsDB) resetAnswerClaim(id string) error {
+	_, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
+        audio_bridge_url = 'pending', directive = 'inbound pending', voice = ''
+        WHERE id = ? AND status = 'answering' AND media_active = 0`, id)
+	return err
+}
+
 func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice string) error {
 	res, err := c.db.Exec(`UPDATE calls SET thread_id = ?, audio_bridge_url = ?, directive = ?, voice = ?
         WHERE id = ? AND status = 'answering'`, threadID, audioBridgeURL, directive, voice, id)
@@ -1995,23 +2528,28 @@ func (c *callsDB) insertRoute(r routeRow) error {
 	}
 	_, err := c.db.Exec(`INSERT INTO inbound_routes
 	        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
-	         agent_id, enabled, hold_prompt, timeout_sec, secret, previous_voice_url, created_at, updated_at)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         agent_id, enabled, hold_prompt, timeout_sec, answer_mode, auto_directive, auto_voice,
+	         auto_greeting, secret, previous_voice_url, created_at, updated_at)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
-		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, r.Secret, r.PreviousVoiceURL, r.CreatedAt, r.UpdatedAt,
+		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, firstNonEmpty(r.AnswerMode, answerModeAgent),
+		r.AutoDirective, r.AutoVoice, r.AutoGreeting, r.Secret, r.PreviousVoiceURL, r.CreatedAt, r.UpdatedAt,
 	)
 	return err
 }
 
 func (c *callsDB) findRoute(id string) (*routeRow, error) {
 	row := c.db.QueryRow(`SELECT id, project_id, carrier_slug, carrier_connection_id, phone_number,
-	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec, secret,
+	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec,
+	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
+	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), created_at, updated_at
 	        FROM inbound_routes WHERE id = ?`, id)
 	var r routeRow
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
-		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec, &r.Secret,
+		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
+		&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 		&r.PreviousVoiceURL, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -2038,7 +2576,9 @@ func (c *callsDB) findRouteByNumber(connectionID int64, phone string) (*routeRow
 
 func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow, error) {
 	rows, err := c.db.Query(`SELECT id, project_id, carrier_slug, carrier_connection_id, phone_number,
-	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec, secret,
+	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec,
+	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
+	        COALESCE(auto_greeting,''), secret,
 	        COALESCE(previous_voice_url,''), created_at, updated_at
 	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
 	if err != nil {
@@ -2050,7 +2590,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 		var r routeRow
 		var enabled int
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
-			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec, &r.Secret,
+			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
+			&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
 			&r.PreviousVoiceURL, &r.CreatedAt, &r.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -2069,6 +2610,13 @@ func (c *callsDB) updateRoutePhoneSID(id, sid string) error {
 func (c *callsDB) updateRoutePreviousVoiceURL(id, voiceURL string) error {
 	_, err := c.db.Exec(`UPDATE inbound_routes SET previous_voice_url = ?, updated_at = ? WHERE id = ?`,
 		voiceURL, time.Now().UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func (c *callsDB) updateRouteAnswerMode(id, mode, directive, voice, greeting string) error {
+	_, err := c.db.Exec(`UPDATE inbound_routes SET answer_mode = ?, auto_directive = ?,
+        auto_voice = ?, auto_greeting = ?, updated_at = ? WHERE id = ?`,
+		mode, directive, voice, greeting, time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 
