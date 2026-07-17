@@ -143,6 +143,10 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			price["metadata"] = p.priceMetadata
 		}
 		body = map[string]any{"price": price}
+	case "catalog_products_list":
+		body = map[string]any{"products": []map[string]any{
+			{"id": 7001, "name": "CRM", "slug": "crm", "type": "recurring", "category": "business", "color": "#2563eb"},
+		}}
 	case "catalog_discounts_reserve":
 		discountID := firstNonZero(int64FromAny(input["discount_id"]), 9001)
 		code := normalizeDiscountCode(strFromAny(input["code"]))
@@ -276,8 +280,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.6.1" {
-		t.Errorf("manifest.Version=%q, want 0.6.1", m.Version)
+	if m.Version != "0.7.0" {
+		t.Errorf("manifest.Version=%q, want 0.7.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -344,6 +348,104 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		if !publishes[name] {
 			t.Errorf("manifest missing published event %s", name)
 		}
+	}
+}
+
+func TestPlanList_ProjectsCatalogProductIdentity(t *testing.T) {
+	platform := &platformStub{}
+	ctx, db := newTestCtx(t, platform)
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "crm-basic", "name": "Basic", "billing_mode": "paid", "catalog_product_id": 7001,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolPlanList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plans := out.(map[string]any)["plans"].([]*Plan)
+	var crm *Plan
+	for _, plan := range plans {
+		if plan.Key == "crm-basic" {
+			crm = plan
+			break
+		}
+	}
+	if crm == nil || crm.CatalogProduct == nil {
+		t.Fatalf("catalog product was not projected onto plan: %+v", crm)
+	}
+	if crm.CatalogProduct.ID != 7001 || crm.CatalogProduct.Name != "CRM" || crm.CatalogProduct.Slug != "crm" {
+		t.Fatalf("unexpected catalog product projection: %+v", crm.CatalogProduct)
+	}
+	catalogCalls := 0
+	for _, call := range platform.calls {
+		if call.App == "catalog" && call.Tool == "catalog_products_list" {
+			catalogCalls++
+		}
+	}
+	if catalogCalls != 1 {
+		t.Fatalf("plan list should hydrate products with one Catalog call: %+v", platform.calls)
+	}
+}
+
+func TestPlanList_CatalogProjectionFailureIsNonBlocking(t *testing.T) {
+	platform := &platformStub{failures: map[string]int{"catalog:catalog_products_list": 1}}
+	ctx, db := newTestCtx(t, platform)
+	defer db.Close()
+	app := &App{}
+
+	out, err := app.toolPlanList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("plan list should survive Catalog display-data failure: %v", err)
+	}
+	plans := out.(map[string]any)["plans"].([]*Plan)
+	if len(plans) == 0 {
+		t.Fatal("plan list lost its local SaaS plans")
+	}
+}
+
+func TestAccountList_FiltersByCatalogProduct(t *testing.T) {
+	platform := &platformStub{}
+	ctx, db := newTestCtx(t, platform)
+	defer db.Close()
+	app := &App{}
+	for _, plan := range []map[string]any{
+		{"key": "crm-free", "name": "CRM Free", "billing_mode": "free", "catalog_product_id": 7001},
+		{"key": "storage-free", "name": "Storage Free", "billing_mode": "free", "catalog_product_id": 7002},
+	} {
+		if _, err := app.toolPlanUpsert(ctx, plan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, account := range []map[string]any{
+		{"owner_email": "crm@example.com", "slug": "crm-account", "plan_key": "crm-free"},
+		{"owner_email": "storage@example.com", "slug": "storage-account", "plan_key": "storage-free"},
+		{"owner_email": "legacy@example.com", "slug": "legacy-account", "plan_key": "free"},
+	} {
+		if _, err := app.toolAccountCreate(ctx, account); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	crmOut, err := app.toolAccountList(ctx, map[string]any{"catalog_product_id": 7001})
+	if err != nil {
+		t.Fatal(err)
+	}
+	crmAccounts := crmOut.(map[string]any)["accounts"].([]*Account)
+	if len(crmAccounts) != 1 || crmAccounts[0].PlanKey != "crm-free" {
+		t.Fatalf("CRM product filter returned wrong accounts: %+v", crmAccounts)
+	}
+
+	unlinkedOut, err := app.toolAccountList(ctx, map[string]any{"catalog_product_id": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlinkedAccounts := unlinkedOut.(map[string]any)["accounts"].([]*Account)
+	if len(unlinkedAccounts) != 1 || unlinkedAccounts[0].PlanKey != "free" {
+		t.Fatalf("unlinked product filter returned wrong accounts: %+v", unlinkedAccounts)
 	}
 }
 

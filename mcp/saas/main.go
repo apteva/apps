@@ -137,8 +137,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "saas_plan_list", Description: "List SaaS plans.", InputSchema: schemaObject(nil, nil), Handler: a.toolPlanList},
-		{Name: "saas_plan_get", Description: "Fetch one SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanGet},
+		{Name: "saas_plan_list", Description: "List SaaS plans with Catalog product identity.", InputSchema: schemaObject(nil, nil), Handler: a.toolPlanList},
+		{Name: "saas_plan_get", Description: "Fetch one SaaS plan with Catalog product identity.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanGet},
 		{Name: "saas_plan_upsert", Description: "Create or update a SaaS plan.", InputSchema: schemaObject(map[string]any{
 			"key": strSchema(), "name": strSchema(), "billing_mode": strSchema(), "catalog_product_id": intSchema(), "catalog_price_id": intSchema(),
 			"catalog_discount_id": intSchema(), "subscription_required": boolSchema(), "metadata": objSchema(),
@@ -179,7 +179,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"account_id", "target_plan_key", "idempotency_key"}), Handler: a.toolAccountChangePlan},
 		{Name: "saas_plan_change_get", Description: "Fetch a durable SaaS plan-change status and payment URL.", InputSchema: schemaObject(map[string]any{"change_id": strSchema()}, []string{"change_id"}), Handler: a.toolPlanChangeGet},
 		{Name: "saas_account_list", Description: "List SaaS accounts with customer and Billing summaries.", InputSchema: schemaObject(map[string]any{
-			"customer_id": intSchema(), "customer_email": strSchema(), "subscription_id": intSchema(), "status": strSchema(), "plan_key": strSchema(),
+			"customer_id": intSchema(), "customer_email": strSchema(), "subscription_id": intSchema(), "status": strSchema(), "plan_key": strSchema(), "catalog_product_id": intSchema(),
 			"created_before": strSchema(), "created_after": strSchema(), "has_paid": boolSchema(),
 			"paid_since": strSchema(), "paid_until": strSchema(), "last_paid_before": strSchema(), "last_paid_after": strSchema(),
 			"limit": intSchema(), "offset": intSchema(),
@@ -216,6 +216,7 @@ type Plan struct {
 	Name                 string          `json:"name"`
 	BillingMode          string          `json:"billing_mode"`
 	CatalogProductID     *int64          `json:"catalog_product_id,omitempty"`
+	CatalogProduct       *CatalogProduct `json:"catalog_product,omitempty"`
 	CatalogPriceID       *int64          `json:"catalog_price_id,omitempty"`
 	CatalogDiscountID    *int64          `json:"catalog_discount_id,omitempty"`
 	SubscriptionRequired bool            `json:"subscription_required"`
@@ -226,6 +227,15 @@ type Plan struct {
 	Actions              []PlanAction    `json:"actions,omitempty"`
 	CreatedAt            string          `json:"created_at"`
 	UpdatedAt            string          `json:"updated_at"`
+}
+
+type CatalogProduct struct {
+	ID       int64  `json:"id"`
+	Name     string `json:"name"`
+	Slug     string `json:"slug,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Category string `json:"category,omitempty"`
+	Color    string `json:"color,omitempty"`
 }
 
 type PlanFeature struct {
@@ -645,6 +655,7 @@ func (a *App) toolPlanList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.enrichPlansWithCatalog(ctx, pid, plans)
 	return map[string]any{"plans": plans, "count": len(plans)}, nil
 }
 
@@ -660,7 +671,37 @@ func (a *App) toolPlanGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if p == nil {
 		return nil, errors.New("plan not found")
 	}
+	a.enrichPlansWithCatalog(ctx, pid, []*Plan{p})
 	return map[string]any{"plan": p}, nil
+}
+
+// enrichPlansWithCatalog adds display data without copying Catalog ownership
+// into SaaS. Plan reads remain available if Catalog is temporarily unavailable.
+func (a *App) enrichPlansWithCatalog(ctx *sdk.AppCtx, pid string, plans []*Plan) {
+	if len(plans) == 0 {
+		return
+	}
+	var out struct {
+		Products []*CatalogProduct `json:"products"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_products_list", map[string]any{
+		"_project_id": pid,
+		"archived":    true,
+		"limit":       200,
+	}, &out); err != nil {
+		return
+	}
+	products := make(map[int64]*CatalogProduct, len(out.Products))
+	for _, product := range out.Products {
+		if product != nil {
+			products[product.ID] = product
+		}
+	}
+	for _, plan := range plans {
+		if plan != nil && plan.CatalogProductID != nil {
+			plan.CatalogProduct = products[*plan.CatalogProductID]
+		}
+	}
 }
 
 func (a *App) toolPlanUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -4120,6 +4161,14 @@ func dbAccountSearch(db *sql.DB, pid string, args map[string]any) ([]*Account, i
 		where = append(where, "a.plan_key=?")
 		vals = append(vals, plan)
 	}
+	if _, ok := args["catalog_product_id"]; ok {
+		if productID := int64Arg(args, "catalog_product_id"); productID > 0 {
+			where = append(where, "EXISTS (SELECT 1 FROM saas_plans p WHERE p.project_id=a.project_id AND p.key=a.plan_key AND p.catalog_product_id=?)")
+			vals = append(vals, productID)
+		} else {
+			where = append(where, "EXISTS (SELECT 1 FROM saas_plans p WHERE p.project_id=a.project_id AND p.key=a.plan_key AND p.catalog_product_id IS NULL)")
+		}
+	}
 	if email := strings.ToLower(strArg(args, "customer_email")); email != "" {
 		where = append(where, "c.email=?")
 		vals = append(vals, email)
@@ -5287,6 +5336,9 @@ func (a *App) handlePlans(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		plans, err := dbPlanList(ctx.AppDB(), pid)
+		if err == nil {
+			a.enrichPlansWithCatalog(ctx, pid, plans)
+		}
 		handleJSONOrErr(w, map[string]any{"plans": plans, "count": len(plans)}, err)
 		return
 	}
@@ -5324,7 +5376,7 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args := map[string]any{}
-		for _, key := range []string{"status", "plan_key", "customer_id", "customer_email", "subscription_id", "created_before", "created_after", "paid_since", "paid_until", "last_paid_before", "last_paid_after", "limit", "offset"} {
+		for _, key := range []string{"status", "plan_key", "catalog_product_id", "customer_id", "customer_email", "subscription_id", "created_before", "created_after", "paid_since", "paid_until", "last_paid_before", "last_paid_after", "limit", "offset"} {
 			if value := r.URL.Query().Get(key); value != "" {
 				args[key] = value
 			}

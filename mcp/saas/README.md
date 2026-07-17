@@ -1,5 +1,12 @@
 # SaaS
 
+Catalog products define independently sold SaaS products. Multiple SaaS plans
+may point to prices under the same Catalog product and can be changed within
+that product. Moving an account to a different Catalog product requires a
+separate purchase or an explicit migration workflow. The SaaS panel exposes
+this boundary with separate product and plan selectors and product-level
+account filtering.
+
 Shared SaaS access control for Apteva apps.
 
 SaaS generalizes the access, lifecycle, and live-usage parts that worked

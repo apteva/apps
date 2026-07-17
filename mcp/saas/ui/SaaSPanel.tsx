@@ -23,12 +23,22 @@ interface UsageSource {
   feature_prefix?: string;
 }
 
+interface CatalogProduct {
+  id: number;
+  name: string;
+  slug?: string;
+  type?: string;
+  category?: string;
+  color?: string;
+}
+
 interface Plan {
   key: string;
   name: string;
   billing_mode: string;
   subscription_required: boolean;
   catalog_product_id?: number;
+  catalog_product?: CatalogProduct;
   catalog_price_id?: number;
   catalog_discount_id?: number;
   features?: PlanFeature[];
@@ -167,12 +177,25 @@ function featureOptions(plan: Plan | null, usage: UsageTotal[]): string[] {
   return Array.from(out).sort();
 }
 
+const UNLINKED_PRODUCT = "unlinked";
+
+function productKey(plan: Plan | null | undefined): string {
+  return plan?.catalog_product_id ? String(plan.catalog_product_id) : UNLINKED_PRODUCT;
+}
+
+function productName(plan: Plan | null | undefined): string {
+  if (plan?.catalog_product?.name) return plan.catalog_product.name;
+  if (plan?.catalog_product_id) return `Product #${plan.catalog_product_id}`;
+  return "No Catalog product";
+}
+
 export default function SaaSPanel({ projectId }: NativePanelProps) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [usage, setUsage] = useState<UsageTotal[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
   const [busy, setBusy] = useState("");
   const [status, setStatus] = useState("Loading SaaS...");
   const [error, setError] = useState("");
@@ -190,7 +213,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     owner_email: "",
     customer_name: "",
     slug: "",
-    plan_key: "free",
+    plan_key: "",
     discount_code: "",
     create_owner_user: true,
   });
@@ -228,9 +251,31 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     return text ? JSON.parse(text) as T : body.result as T;
   }, [projectId]);
 
+  const productOptions = useMemo(() => {
+    const products = new Map<string, { key: string; name: string }>();
+    for (const plan of plans) {
+      const key = productKey(plan);
+      if (!products.has(key)) products.set(key, { key, name: productName(plan) });
+    }
+    return Array.from(products.values()).sort((a, b) => {
+      if (a.key === UNLINKED_PRODUCT) return 1;
+      if (b.key === UNLINKED_PRODUCT) return -1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [plans]);
+
+  const planByKey = useMemo(() => new Map(plans.map((plan) => [plan.key, plan])), [plans]);
+
+  const visibleAccounts = useMemo(
+    () => productFilter
+      ? accounts.filter((account) => productKey(planByKey.get(account.plan_key)) === productFilter)
+      : accounts,
+    [accounts, planByKey, productFilter],
+  );
+
   const selected = useMemo(
-    () => accounts.find((a) => a.id === selectedId) || accounts[0] || null,
-    [accounts, selectedId],
+    () => visibleAccounts.find((a) => a.id === selectedId) || visibleAccounts[0] || null,
+    [visibleAccounts, selectedId],
   );
 
   const selectedPlan = useMemo(
@@ -243,6 +288,13 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     [plans, form.plan_key],
   );
 
+  const createProductKey = productKey(createPlan);
+
+  const createProductPlans = useMemo(
+    () => plans.filter((plan) => productKey(plan) === createProductKey),
+    [createProductKey, plans],
+  );
+
   const compatiblePlans = useMemo(
     () => plans.filter((p) => p.key !== selectedPlan?.key && Boolean(p.catalog_product_id) && p.catalog_product_id === selectedPlan?.catalog_product_id),
     [plans, selectedPlan],
@@ -251,17 +303,20 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   const features = useMemo(() => featureOptions(selectedPlan, usage), [selectedPlan, usage]);
 
   const summary = useMemo(() => {
-    const active = accounts.filter((a) => a.status === "active").length;
-    const pastDue = accounts.filter((a) => a.status === "past_due").length;
+    const active = visibleAccounts.filter((a) => a.status === "active").length;
+    const pastDue = visibleAccounts.filter((a) => a.status === "past_due").length;
     const over = usage.filter((u) => u.over_limit).length;
     return { active, pastDue, over };
-  }, [accounts, usage]);
+  }, [usage, visibleAccounts]);
 
   const load = useCallback(async () => {
     try {
+      const accountParams: Record<string, string> = {};
+      if (statusFilter) accountParams.status = statusFilter;
+      if (productFilter) accountParams.catalog_product_id = productFilter === UNLINKED_PRODUCT ? "0" : productFilter;
       const [p, a] = await Promise.all([
         getJSON<{ plans: Plan[] }>("/plans"),
-        getJSON<{ accounts: Account[] }>("/accounts", statusFilter ? { status: statusFilter } : {}),
+        getJSON<{ accounts: Account[] }>("/accounts", accountParams),
       ]);
       const planRows = p.plans || [];
       const accountRows = a.accounts || [];
@@ -269,13 +324,14 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
       setAccounts(accountRows);
       if (!form.plan_key && planRows[0]) setForm((f) => ({ ...f, plan_key: planRows[0].key }));
       if (!selectedId && accountRows[0]) setSelectedId(accountRows[0].id);
-      setStatus(`${accountRows.length} account${accountRows.length === 1 ? "" : "s"}`);
+      const productCount = new Set(planRows.filter((plan) => plan.catalog_product_id).map(productKey)).size;
+      setStatus(`${productCount} product${productCount === 1 ? "" : "s"} · ${accountRows.length} account${accountRows.length === 1 ? "" : "s"}`);
       setError("");
     } catch (e) {
       setError((e as Error).message);
       setStatus("Load failed");
     }
-  }, [form.plan_key, getJSON, selectedId, statusFilter]);
+  }, [form.plan_key, getJSON, productFilter, selectedId, statusFilter]);
 
   const loadUsage = useCallback(async (account: Account | null) => {
     if (!account) {
@@ -468,7 +524,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 placeholder="Acme Inc"
               />
             </Field>
-            <Field label="Slug">
+            <Field label="Slug" className="col-span-2">
               <input
                 value={form.slug}
                 onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") }))}
@@ -476,13 +532,28 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 placeholder="acme"
               />
             </Field>
+            <Field label="Product">
+              <select
+                value={createProductKey}
+                onChange={(e) => {
+                  const nextPlan = plans.find((plan) => productKey(plan) === e.target.value);
+                  if (nextPlan) setForm((f) => ({ ...f, plan_key: nextPlan.key, discount_code: "" }));
+                }}
+                className={CONTROL}
+                disabled={productOptions.length === 0}
+              >
+                {productOptions.map((product) => (
+                  <option key={product.key} value={product.key}>{product.name}</option>
+                ))}
+              </select>
+            </Field>
             <Field label="Plan">
               <select
                 value={form.plan_key}
                 onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value, discount_code: "" }))}
                 className={CONTROL}
               >
-                {plans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
+                {createProductPlans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
               </select>
             </Field>
             <Field label="Discount code" className="col-span-2">
@@ -513,7 +584,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           )}
           <button
             type="button"
-            disabled={busy === "create"}
+            disabled={busy === "create" || !createPlan}
             onClick={createAccount}
             className="w-full px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
           >
@@ -541,8 +612,20 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           )}
         </section>
 
-        <section className="p-3 border-b border-border">
+        <section className="p-3 border-b border-border grid grid-cols-2 gap-2">
           <select
+            aria-label="Filter accounts by product"
+            value={productFilter}
+            onChange={(e) => setProductFilter(e.target.value)}
+            className={`${CONTROL} text-xs`}
+          >
+            <option value="">all products</option>
+            {productOptions.map((product) => (
+              <option key={product.key} value={product.key}>{product.name}</option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter accounts by status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             className={`${CONTROL} text-xs`}
@@ -557,9 +640,11 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
         </section>
 
         <div className="flex-1 min-h-0 overflow-auto">
-          {accounts.length === 0 ? (
+          {visibleAccounts.length === 0 ? (
             <div className="p-4 text-sm text-text-dim">No accounts match this view.</div>
-          ) : accounts.map((account) => (
+          ) : visibleAccounts.map((account) => {
+            const accountPlan = planByKey.get(account.plan_key);
+            return (
             <button
               key={account.id}
               type="button"
@@ -571,9 +656,12 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(account.status)}`}>{account.status}</span>
               </div>
               <div className="text-xs text-text-dim truncate mt-0.5">{account.owner_email}</div>
-              <div className="text-[11px] text-text-dim mt-1">{account.plan_key} · {fmtDate(account.created_at)}</div>
+              <div className="text-[11px] text-text-dim mt-1 truncate">
+                {productName(accountPlan)} / {accountPlan?.name || account.plan_key} · {fmtDate(account.created_at)}
+              </div>
             </button>
-          ))}
+            );
+          })}
         </div>
       </aside>
 
@@ -591,7 +679,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 </div>
                 <div className="text-sm text-text-dim truncate">{selected.owner_email}</div>
                 <div className="text-xs text-text-dim mt-1">
-                  customer #{selected.customer_id} · account {selected.id} · plan {selected.plan_key}
+                  {productName(selectedPlan)} / {selectedPlan?.name || selected.plan_key} · customer #{selected.customer_id} · account {selected.id}
                 </div>
               </div>
               <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -610,13 +698,13 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             <section className="grid grid-cols-4 gap-3 p-4 border-b border-border">
               <Metric label="Active" value={String(summary.active)} />
               <Metric label="Past due" value={String(summary.pastDue)} />
-              <Metric label="Plans" value={String(plans.length)} />
+              <Metric label="Products / plans" value={`${productOptions.filter((product) => product.key !== UNLINKED_PRODUCT).length} / ${plans.length}`} />
               <Metric label="Over limit" value={String(summary.over)} tone={summary.over > 0 ? "warn" : "normal"} />
             </section>
 
             {selected.subscription_id && (
               <section className="p-4 border-b border-border grid grid-cols-[minmax(180px,1fr)_150px_150px_150px_auto] gap-2 items-end">
-                <Field label="Change plan">
+                <Field label={`Change ${productName(selectedPlan)} plan`}>
                   <select
                     value={planChangeForm.target_plan_key}
                     onChange={(e) => setPlanChangeForm((f) => ({ ...f, target_plan_key: e.target.value }))}

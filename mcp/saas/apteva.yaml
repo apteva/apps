@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.6.1
+version: 0.7.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
   organizations, grants Entitlements, stores live usage gauges from
   existing app tools, orchestrates Catalog discounts, and applies
   subscription lifecycle state, and orchestrates same-product plan changes
-  with durable proration and payment continuation. It does not install apps,
+  with durable proration and payment continuation. Catalog products remain
+  the explicit boundary between independently sold SaaS products. It does not install apps,
   run containers, or own catalog eligibility, subscriptions, invoices, or
   payments directly.
 
@@ -109,10 +110,10 @@ provides:
         change_kind: string
   mcp_tools:
     - name: saas_plan_list
-      description: List SaaS plans and their features, limits, and usage sources.
+      description: List SaaS plans with their Catalog product identity, features, limits, and usage sources.
       requires: saas.read
     - name: saas_plan_get
-      description: Fetch one SaaS plan.
+      description: Fetch one SaaS plan with its Catalog product identity.
       requires: saas.read
     - name: saas_plan_upsert
       description: Create or update a SaaS plan linked to Catalog pricing and an optional automatic Catalog discount.
@@ -166,7 +167,7 @@ provides:
       description: Fetch durable plan-change state and any payment URL.
       requires: saas.read
     - name: saas_account_list
-      description: List SaaS accounts with customer and Billing summaries; filter by account age and payment dates.
+      description: List SaaS accounts with Catalog product, customer, account age, payment date, and Billing filters and summaries.
       requires: saas.read
     - name: saas_billing_sync
       description: Refresh SaaS Billing projections from linked Billing invoices for backfill or repair.
