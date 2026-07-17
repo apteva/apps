@@ -371,11 +371,12 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 // contains most of the person.
 //
 // This is intentionally not a general face detector. It only considers a
-// compact, face-sized warm component in the middle/lower part of the frame,
-// requires that component's centre to already be inside the chosen crop, and
-// only moves the crop far enough to restore a small safety margin. Upright
-// people, products, animals, animation, broad warm furniture, posters near the
-// top of the frame, and already-safe crops stay on the released path.
+// compact, face-sized warm component in the middle/lower part of the frame.
+// The component may sit just outside the chosen crop, but must overlap a
+// tightly bounded edge halo; the crop then moves only far enough to restore a
+// small safety margin. Upright people, products, animals, animation, broad
+// warm furniture, posters near the top of the frame, lower-body regions, and
+// already-safe crops stay on the released path.
 func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
 	if img == nil || srcW <= 0 || cropW <= 0 || srcW <= cropW ||
 		float64(srcW)/float64(cropW) < 1.8 {
@@ -393,6 +394,11 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 	}
 	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
 	currentEnd := currentStart + thumbCropW - 1
+	// A face immediately outside a torso-centred crop is the failure mode this
+	// guard exists to repair. Keep the halo small enough that an unrelated
+	// person or warm object elsewhere in the scene cannot pull the crop across
+	// the frame. At 1920 -> 9:16 this is about 150 source pixels.
+	edgeHalo := maxInt(6, thumbCropW/4)
 
 	pixels := normalizedSmartCropRGB(img, w, h)
 	components := warmSubjectComponents(pixels, w, h, thumbCropW, 0, w-1)
@@ -403,8 +409,8 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 		componentH := component.maxY - component.minY + 1
 		if componentW < maxInt(6, w*3/100) || componentW > w*22/100 ||
 			componentH < maxInt(10, h*10/100) || componentH > h*35/100 ||
-			component.minY < h*30/100 || component.maxY > h*80/100 ||
-			component.centerX < float64(currentStart) || component.centerX > float64(currentEnd) ||
+			component.minY < h*30/100 || component.maxY > h*88/100 ||
+			component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo ||
 			component.score < minScore {
 			continue
 		}

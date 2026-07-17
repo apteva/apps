@@ -202,6 +202,34 @@ func TestHeadAwareNarrowCropProtectsRecliningFace(t *testing.T) {
 	}
 }
 
+func TestHeadAwareNarrowCropRecoversRecliningFaceJustOutsideCrop(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// With srcX=906, the thumbnail crop begins at x=151. Model the Monika
+	// 490.745s frame: a horizontal face centred just outside that boundary
+	// and low enough that the older 80% vertical cutoff rejected it.
+	fillSmartCropTestEllipse(img, 130, 132, 22, 15, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+
+	x, changed := headAwareNarrowSmartCropX(img, 906, 1920, 606)
+	if !changed {
+		t.Fatal("near-edge reclining face outside crop was not recovered")
+	}
+	if x < 450 || x > 650 {
+		t.Fatalf("outside-face recovery x=%d, want [450,650]", x)
+	}
+}
+
+func TestHeadAwareNarrowCropDoesNotChaseDistantWarmRegion(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// This has face-like size, colour, and height but is well beyond the
+	// bounded edge halo. It may be another person or room decoration.
+	fillSmartCropTestEllipse(img, 88, 132, 22, 15, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(img, 906, 1920, 606); changed || x != 906 {
+		t.Fatalf("distant warm region moved crop: x=%d changed=%v", x, changed)
+	}
+}
+
 func TestHeadAwareNarrowCropKeepsSafeOrNonFaceContentStable(t *testing.T) {
 	centered := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	fillImage(centered, color.RGBA{R: 82, G: 88, B: 96, A: 255})
