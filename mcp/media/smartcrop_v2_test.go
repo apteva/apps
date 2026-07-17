@@ -162,6 +162,28 @@ func TestResolveSmartCropStillBaseUsesFocusBracketInsideContext(t *testing.T) {
 	}
 }
 
+func TestSmartCropStillTrackingActivatesOnlyForTraversal(t *testing.T) {
+	stable := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 156_000, X: 700}},
+		{point: cropPathPoint{AtMs: 161_000, X: 760}},
+	}
+	if smartCropStillNeedsTracking(stable, 160_000, 606) {
+		t.Fatal("stable bracket should remain on cached storyboard")
+	}
+	moving := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 156_000, X: 720}},
+		{point: cropPathPoint{AtMs: 161_000, X: 458}},
+	}
+	if !smartCropStillNeedsTracking(moving, 160_000, 606) {
+		t.Fatal("Monika traversal should request the exact source frame")
+	}
+	got := smartCropStillTrackingPositions(160_000, 298_200)
+	want := []int64{159_500, 160_000, 160_500}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("tracking positions=%v want=%v", got, want)
+	}
+}
+
 func TestStaticSmartCropPathStaysFixed(t *testing.T) {
 	path := []cropPathPoint{
 		{AtMs: 0, X: 300}, {AtMs: 5_000, X: 316}, {AtMs: 10_000, X: 326},
@@ -191,6 +213,58 @@ func TestMovingSmartCropPathRemainsTrackedAndSmooth(t *testing.T) {
 		if i > 0 && p.X < got[i-1].X {
 			t.Fatalf("monotonic movement reversed at %d: %+v", i, got)
 		}
+	}
+}
+
+func TestSmartCropSmoothingCannotDragTraversalAnchorAway(t *testing.T) {
+	path := []cropPathPoint{
+		{AtMs: 191_000, X: 720},
+		{AtMs: 196_000, X: 1314},
+		{AtMs: 201_000, X: 732},
+	}
+	got := stabilizeSmartCropPath(path, 606, 1920)
+	if len(got) != 3 {
+		t.Fatalf("path=%v", got)
+	}
+	if got[1].X < 1254 {
+		t.Fatalf("subject anchor was pulled too far toward neighbours: %v", got)
+	}
+}
+
+func TestAdaptiveTrackingPositionsFocusOnMovingIntervals(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 151_000, X: 720}, img: img},
+		{point: cropPathPoint{AtMs: 156_000, X: 720}, img: img},
+		{point: cropPathPoint{AtMs: 161_000, X: 458}, img: img},
+		{point: cropPathPoint{AtMs: 166_000, X: 802}, img: img},
+		{point: cropPathPoint{AtMs: 171_000, X: 768}, img: img},
+		{point: cropPathPoint{AtMs: 176_000, X: 720}, img: img},
+	}
+	target := smartCropTarget{StartMs: 151_145, EndMs: 175_599}
+	got := smartCropAdaptiveTrackingPositions(samples, target, 298_200, 1920, 606)
+	if len(got) < 8 || len(got) > smartCropTrackingMaxExtraFrames {
+		t.Fatalf("unexpected adaptive sample count=%d positions=%v", len(got), got)
+	}
+	for _, want := range []int64{157_000, 158_000, 159_000, 160_000, 162_000, 163_000, 164_000, 165_000} {
+		found := false
+		for _, position := range got {
+			found = found || position == want
+		}
+		if !found {
+			t.Fatalf("moving interval position %d missing from %v", want, got)
+		}
+	}
+}
+
+func TestAdaptiveTrackingStaysOffForNearlyStableSubject(t *testing.T) {
+	samples := makeTemporalTestSamples([]int{108, 109, 108, 110, 109, 108, 109, 110, 109}, 700)
+	for i := range samples {
+		samples[i].point.X = 700 + (i%3-1)*12
+	}
+	markSmartCropSceneCuts(samples)
+	if smartCropReelNeedsTracking(samples, 1280, 404) {
+		t.Fatal("nearly stable subject should retain the cached fixed-crop fast path")
 	}
 }
 
@@ -575,6 +649,36 @@ func TestReelTemporalConsensusPreservesOpposingSubjectMovement(t *testing.T) {
 		if samples[i].point.X != original[i] {
 			t.Fatalf("tracked point %d changed from %d to %d", i, original[i], samples[i].point.X)
 		}
+	}
+}
+
+func TestReelTemporalConsensusPreservesSustainedOneSidedTraversal(t *testing.T) {
+	samples := makeTemporalTestSamples([]int{92, 98, 104, 110, 116, 122, 128, 134, 140}, 300)
+	tracked := []int{420, 450, 500, 560, 630, 700, 760, 790, 810}
+	for i := range samples {
+		samples[i].point.X = tracked[i]
+	}
+	if !smartCropSceneHasSustainedTraversal(samples, 404) {
+		t.Fatal("dense one-direction movement was not recognized as traversal")
+	}
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1280, 404); corrected != 0 {
+		t.Fatalf("one-direction traversal was flattened; corrected=%d", corrected)
+	}
+	for i := range samples {
+		if samples[i].point.X != tracked[i] {
+			t.Fatalf("tracked point %d changed from %d to %d", i, tracked[i], samples[i].point.X)
+		}
+	}
+}
+
+func TestSustainedTraversalRejectsSingleDriftPoint(t *testing.T) {
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		samples[i].point.X = 700
+	}
+	samples[4].point.X = 1200
+	if smartCropSceneHasSustainedTraversal(samples, 404) {
+		t.Fatal("one isolated drift point must not disable temporal correction")
 	}
 }
 

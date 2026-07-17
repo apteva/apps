@@ -3,6 +3,7 @@ package main
 import (
 	"image"
 	"math"
+	"sort"
 )
 
 const (
@@ -506,6 +507,15 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		for end < len(samples) && !samples[end].point.Cut {
 			end++
 		}
+		// Once adaptive sampling shows the crop occupying substantially
+		// different regions for a meaningful fraction of the scene, this is a
+		// tracked traversal rather than isolated saliency drift. A scene-wide
+		// consensus would average away the timeline and park the crop between
+		// the subject's old and new positions.
+		if smartCropSceneHasSustainedTraversal(samples[start:end], cropW) {
+			start = end
+			continue
+		}
 		result, ok := temporalSubjectConsensus(samples[start:end], srcW, cropW)
 		if !ok {
 			result, ok = staticWarmSubjectConsensus(samples[start:end], srcW, cropW)
@@ -546,6 +556,22 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		start = end
 	}
 	return corrected
+}
+
+func smartCropSceneHasSustainedTraversal(samples []smartCropV2Sample, cropW int) bool {
+	if len(samples) < 5 || cropW <= 0 {
+		return false
+	}
+	xs := make([]int, len(samples))
+	for i, sample := range samples {
+		xs[i] = sample.point.X
+	}
+	sort.Ints(xs)
+	// Robust 20th-to-80th percentile range ignores one isolated drift point,
+	// while accepting movement that persists across several adjacent frames.
+	lo := xs[(len(xs)-1)/5]
+	hi := xs[(len(xs)-1)*4/5]
+	return hi-lo > maxInt(96, cropW/3)
 }
 
 func smartCropTemporalCorrectionDirection(result smartCropTemporalResult, left, right, aligned, samples int) int {
