@@ -68,6 +68,7 @@ type numberPurchaseIntent struct {
 	UpfrontPrice        string
 	InboundPrice        string
 	Currency            string
+	AddressRequirement  string
 	Status              string
 	ResponseJSON        string
 	ErrorMessage        string
@@ -258,7 +259,8 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 					PhoneNumber: offers[i].PhoneNumber, NumberType: offers[i].NumberType,
 					MonthlyPrice: offers[i].MonthlyPrice, UpfrontPrice: offers[i].UpfrontPrice,
 					InboundPrice: offers[i].InboundPrice, Currency: offers[i].Currency,
-					Status: "quoted", ExpiresAt: expiresAt,
+					AddressRequirement: offers[i].AddressRequirement,
+					Status:             "quoted", ExpiresAt: expiresAt,
 				}
 				if err := dbNumberPurchaseIntentInsert(ctx.AppDB(), intent); err != nil {
 					return nil, fmt.Errorf("persist number offer: %w", err)
@@ -779,8 +781,9 @@ func searchSignalWireNumbers(ctx *sdk.AppCtx, connID int64, request numberSearch
 	return offers, []string{"SignalWire search results do not include a verifiable price; purchase is disabled"}, nil
 }
 
-func (a *App) purchaseNumber(ctx *sdk.AppCtx, token string) (map[string]any, error) {
+func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressSID string) (map[string]any, error) {
 	token = strings.TrimSpace(token)
+	addressSID = strings.TrimSpace(addressSID)
 	if token == "" {
 		return nil, errors.New("confirmation_token required; call telephony_numbers_search and obtain explicit user confirmation first")
 	}
@@ -812,6 +815,16 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token string) (map[string]any, err
 	if provider.ConnID != intent.CarrierConnectionID || provider.Slug != intent.Provider {
 		return nil, errors.New("the bound carrier changed after this quote; search again")
 	}
+	if intent.Provider == "twilio" && requiresNumberAddress(intent.AddressRequirement) {
+		if addressSID == "" {
+			return nil, fmt.Errorf("address_sid required for this Twilio number (address requirement: %s)", intent.AddressRequirement)
+		}
+		if !validTwilioAddressSID(addressSID) {
+			return nil, errors.New("address_sid must be a Twilio Address SID beginning with AD")
+		}
+	} else if addressSID != "" && intent.Provider != "twilio" {
+		return nil, fmt.Errorf("address_sid is not supported for provider %s", intent.Provider)
+	}
 	claimed, err := dbNumberPurchaseIntentClaim(ctx.AppDB(), projectID, token)
 	if err != nil {
 		return nil, err
@@ -823,10 +836,14 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token string) (map[string]any, err
 	var raw json.RawMessage
 	switch intent.Provider {
 	case "twilio":
-		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "buy_phone_number", map[string]any{
+		input := map[string]any{
 			"PhoneNumber":  intent.PhoneNumber,
 			"FriendlyName": "Apteva Telephony",
-		})
+		}
+		if addressSID != "" {
+			input["AddressSid"] = addressSID
+		}
+		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "buy_phone_number", input)
 	case "telnyx":
 		input := map[string]any{"phone_numbers": []map[string]any{{"phone_number": intent.PhoneNumber}}}
 		if connectionID := strings.TrimSpace(provider.Fields["connection_id"]); connectionID != "" {
@@ -895,7 +912,7 @@ func (a *App) toolNumbersSearch(_ context.Context, ctx *sdk.AppCtx, args map[str
 }
 
 func (a *App) toolNumbersPurchase(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""))
+	result, err := a.purchaseNumber(ctx, strArg(args, "confirmation_token", ""), strArg(args, "address_sid", ""))
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
@@ -925,7 +942,7 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":
-		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""))
+		result, err = a.purchaseNumber(ctx, strArg(body, "confirmation_token", ""), strArg(body, "address_sid", ""))
 	default:
 		http.NotFound(w, r)
 		return
@@ -941,11 +958,12 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 func dbNumberPurchaseIntentInsert(db *sql.DB, intent numberPurchaseIntent) error {
 	_, err := db.Exec(`INSERT INTO number_purchase_intents
         (token, project_id, provider_slug, carrier_connection_id, country, phone_number,
-         number_type, monthly_price, upfront_price, inbound_price, currency, status, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
+         number_type, monthly_price, upfront_price, inbound_price, currency, address_requirement, status, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
 		intent.Token, intent.ProjectID, intent.Provider, intent.CarrierConnectionID,
 		intent.Country, intent.PhoneNumber, intent.NumberType, intent.MonthlyPrice,
-		intent.UpfrontPrice, intent.InboundPrice, intent.Currency, intent.ExpiresAt.Format(time.RFC3339))
+		intent.UpfrontPrice, intent.InboundPrice, intent.Currency, intent.AddressRequirement,
+		intent.ExpiresAt.Format(time.RFC3339))
 	return err
 }
 
@@ -954,11 +972,11 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	var expires string
 	err := db.QueryRow(`SELECT token, project_id, provider_slug, carrier_connection_id, country,
         phone_number, number_type, monthly_price, upfront_price, inbound_price, currency,
-        status, response_json, error_message, expires_at
+        address_requirement, status, response_json, error_message, expires_at
         FROM number_purchase_intents WHERE project_id = ? AND token = ?`, projectID, token).Scan(
 		&intent.Token, &intent.ProjectID, &intent.Provider, &intent.CarrierConnectionID,
 		&intent.Country, &intent.PhoneNumber, &intent.NumberType, &intent.MonthlyPrice,
-		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.Status,
+		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement, &intent.Status,
 		&intent.ResponseJSON, &intent.ErrorMessage, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1006,6 +1024,23 @@ func normalizeNumberType(value string) string {
 	default:
 		return value
 	}
+}
+
+func requiresNumberAddress(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value != "" && value != "none"
+}
+
+func validTwilioAddressSID(value string) bool {
+	if len(value) != 34 || !strings.HasPrefix(value, "AD") {
+		return false
+	}
+	for _, char := range value[2:] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 func stringListArg(args map[string]any, key string) []string {

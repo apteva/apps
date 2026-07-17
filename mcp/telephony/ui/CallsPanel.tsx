@@ -373,6 +373,7 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState<NumberOffer | null>(null);
+  const [addressSid, setAddressSid] = useState("");
   const [purchasing, setPurchasing] = useState(false);
   const [purchaseResult, setPurchaseResult] = useState("");
 
@@ -392,6 +393,7 @@ function NumbersView({ projectId }: NativePanelProps) {
     }
     setLoading(true);
     setSelected(null);
+    setAddressSid("");
     setPurchaseResult("");
     try {
       const res = await fetch(endpoint("/numbers/search"), {
@@ -424,7 +426,10 @@ function NumbersView({ projectId }: NativePanelProps) {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ confirmation_token: selected.confirmation_token }),
+        body: JSON.stringify({
+          confirmation_token: selected.confirmation_token,
+          ...(addressSid.trim() ? { address_sid: addressSid.trim() } : {}),
+        }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -525,7 +530,10 @@ function NumbersView({ projectId }: NativePanelProps) {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setSelected(offer)}
+                  onClick={() => {
+                    setSelected(offer);
+                    setAddressSid("");
+                  }}
                   disabled={!offer.purchase_ready}
                   title={offer.purchase_blocker || "Review purchase"}
                   className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-40"
@@ -548,6 +556,17 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.inbound_price ? `; ${money(selected.inbound_price, selected.currency, "/minute inbound")}` : ""}
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
             </div>
+            {selected.provider === "twilio" && selected.address_requirement && selected.address_requirement !== "none" ? (
+              <label className="mt-3 block max-w-md">
+                <span className="mb-1 block text-xs text-text-muted">Twilio Address SID</span>
+                <input
+                  value={addressSid}
+                  onChange={(event) => setAddressSid(event.target.value)}
+                  placeholder="AD..."
+                  className="h-9 w-full rounded border border-border bg-bg px-3 font-mono text-sm outline-none focus:border-text-dim"
+                />
+              </label>
+            ) : null}
           </div>
           <button
             type="button"
@@ -560,7 +579,12 @@ function NumbersView({ projectId }: NativePanelProps) {
           <button
             type="button"
             onClick={purchase}
-            disabled={purchasing}
+            disabled={purchasing || Boolean(
+              selected.provider === "twilio" &&
+              selected.address_requirement &&
+              selected.address_requirement !== "none" &&
+              !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())
+            )}
             className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
           >
             {purchasing ? "Purchasing..." : "Confirm purchase"}

@@ -169,7 +169,7 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 		Token: "quote-token", ProjectID: "project-a", Provider: "twilio",
 		CarrierConnectionID: 9, Country: "EE", PhoneNumber: "+3726692354",
 		NumberType: "local", MonthlyPrice: "1.00", InboundPrice: "0.0115",
-		Currency: "USD", ExpiresAt: time.Now().UTC().Add(time.Minute),
+		Currency: "USD", AddressRequirement: "any", ExpiresAt: time.Now().UTC().Add(time.Minute),
 	}
 	if err := dbNumberPurchaseIntentInsert(db, intent); err != nil {
 		t.Fatal(err)
@@ -190,8 +190,23 @@ func TestNumberPurchaseIntentClaimIsSingleUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored == nil || stored.Status != "succeeded" || stored.ResponseJSON != string(response) {
+	if stored == nil || stored.Status != "succeeded" || stored.ResponseJSON != string(response) || stored.AddressRequirement != "any" {
 		t.Fatalf("unexpected stored intent: %#v", stored)
+	}
+}
+
+func TestTwilioAddressRequirementValidation(t *testing.T) {
+	if requiresNumberAddress("none") || requiresNumberAddress("") || !requiresNumberAddress("any") || !requiresNumberAddress("local") {
+		t.Fatal("unexpected address requirement normalization")
+	}
+	for value, want := range map[string]bool{
+		"AD0123456789abcdef0123456789abcdef": true,
+		"PN0123456789abcdef0123456789abcdef": false,
+		"ADnot-a-valid-sid":                  false,
+	} {
+		if got := validTwilioAddressSID(value); got != want {
+			t.Errorf("validTwilioAddressSID(%q)=%v, want %v", value, got, want)
+		}
 	}
 }
 

@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.5
+version: 0.1.6
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -94,7 +94,7 @@ provides:
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
-    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation. Regulated Twilio numbers require address_sid." }
   ui_panels:
     - slot: project.page
       label: Calls
@@ -306,9 +306,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_numbers_purchase",
 			Description: "Purchase one phone number from an unexpired telephony_numbers_search quote. THIS SPENDS REAL MONEY. " +
 				"Present the provider, number, recurring price, setup price, inbound rate, currency, and regulatory requirement to the user; call only after explicit confirmation. " +
-				"Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
+				"For regulated Twilio numbers, address_sid is required and must identify an existing Twilio Address. Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
 			InputSchema: schemaObject(map[string]any{
 				"confirmation_token": map[string]any{"type": "string", "description": "Short-lived token returned with a purchase-ready search offer."},
+				"address_sid":        map[string]any{"type": "string", "description": "Existing Twilio Address SID (AD...) required when the quote has an address requirement."},
 			}, []string{"confirmation_token"}),
 			HandlerCtx: a.toolNumbersPurchase,
 		},
