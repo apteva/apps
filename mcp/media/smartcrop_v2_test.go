@@ -246,6 +246,25 @@ func TestHeadAwareNarrowCropKeepsSafeOrNonFaceContentStable(t *testing.T) {
 	}
 }
 
+func TestHeadAwareNarrowCropDoesNotChaseHandsAtCropEdge(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// Production failures in resist/thinking_hypno contained hand-sized warm
+	// components at the lower-right edge. Pulling the portrait crop toward the
+	// hand removed the subject's face on the opposite side.
+	fillSmartCropTestEllipse(img, 227, 124, 16, 10, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(img, 774, 1920, 606); changed || x != 774 {
+		t.Fatalf("hand-shaped warm region moved crop: x=%d changed=%v", x, changed)
+	}
+
+	forearm := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(forearm, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	fillSmartCropTestEllipse(forearm, 235, 126, 21, 11, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(forearm, 768, 1920, 606); changed || x != 768 {
+		t.Fatalf("forearm-shaped warm region moved crop: x=%d changed=%v", x, changed)
+	}
+}
+
 func TestStaticSmartCropPathStaysFixed(t *testing.T) {
 	path := []cropPathPoint{
 		{AtMs: 0, X: 300}, {AtMs: 5_000, X: 316}, {AtMs: 10_000, X: 326},

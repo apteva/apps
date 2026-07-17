@@ -407,8 +407,15 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 	for _, component := range components {
 		componentW := component.maxX - component.minX + 1
 		componentH := component.maxY - component.minY + 1
-		if componentW < maxInt(6, w*3/100) || componentW > w*22/100 ||
-			componentH < maxInt(10, h*10/100) || componentH > h*35/100 ||
+		// Hands and forearms can be just as warm and connected as a face. The
+		// failure is especially damaging beside a saturated cushion: protecting
+		// the hand at the crop edge can push the actual face out of frame. A
+		// useful reclining-head component is closer to square at this scale;
+		// reject short hand blobs and broad furniture/hair regions here. The
+		// bounds intentionally retain the production reclining-face fixture
+		// (35x38 at 320x180) and both synthetic edge-face regressions.
+		if componentW < maxInt(6, w*11/100) || componentW > w*18/100 ||
+			componentH < maxInt(10, h*15/100) || componentH > h*35/100 ||
 			component.minY < h*30/100 || component.maxY > h*88/100 ||
 			component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo ||
 			component.score < minScore {
