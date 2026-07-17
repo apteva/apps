@@ -96,7 +96,9 @@ type twilioCarrier struct {
 func (c *twilioCarrier) Slug() string { return "twilio" }
 
 func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
-	twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("twilio", req.CallID, req.CallbackSecret)))
+	twiml := c.app.twilioStreamTwiML(&callRow{
+		ID: req.CallID, CallbackSecret: req.CallbackSecret, ProjectID: req.ProjectID,
+	})
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"To":             req.To,
 		"From":           req.From,

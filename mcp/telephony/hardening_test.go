@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -25,9 +26,16 @@ import (
 
 type answerPlatform struct {
 	tk.BasePlatformClient
-	failCarrier bool
-	spawned     []sdk.RealtimeSpawnRequest
-	killed      []string
+	failCarrier         bool
+	spawned             []sdk.RealtimeSpawnRequest
+	killed              []string
+	integrationCalls    []integrationCall
+	integrationResponse map[string]json.RawMessage
+}
+
+type integrationCall struct {
+	Tool  string
+	Input map[string]any
 }
 
 func (p *answerPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -46,11 +54,43 @@ func (p *answerPlatform) KillThread(_ int64, threadID string) error {
 	return nil
 }
 
-func (p *answerPlatform) ExecuteIntegrationTool(_ int64, _ string, _ map[string]any) (*sdk.ExecuteResult, error) {
+func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "twilio", Fields: map[string]string{"auth_token": "test-auth-token"}}, nil
+}
+
+func (p *answerPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.integrationCalls = append(p.integrationCalls, integrationCall{Tool: tool, Input: input})
 	if p.failCarrier {
 		return &sdk.ExecuteResult{Success: false, Status: 409, Data: json.RawMessage(`{"message":"call ended"}`)}, nil
 	}
-	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}, nil
+	data := json.RawMessage(`{}`)
+	if response := p.integrationResponse[tool]; response != nil {
+		data = response
+	}
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+}
+
+func signTwilioTestRequest(t *testing.T, a *App, req *http.Request, form url.Values) {
+	t.Helper()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", twilioTestSignature(a.publicRequestURL(req), form, "test-auth-token"))
+}
+
+func twilioTestSignature(fullURL string, form url.Values, token string) string {
+	keys := make([]string, 0, len(form))
+	for key := range form {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var signed strings.Builder
+	signed.WriteString(fullURL)
+	for _, key := range keys {
+		signed.WriteString(key)
+		signed.WriteString(form.Get(key))
+	}
+	mac := hmac.New(sha1.New, []byte(token))
+	_, _ = mac.Write([]byte(signed.String()))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func testCallsDB(t *testing.T) *callsDB {
@@ -106,7 +146,7 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 	for _, route := range routes {
 		public[route.Pattern] = route.NoAuth
 	}
-	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/inbound/twilio/", "/inbound/telnyx/"} {
+	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/webhook/stream/twilio/", "/inbound/twilio/", "/inbound/telnyx/"} {
 		if !public[pattern] {
 			t.Fatalf("carrier route %s must be public at the SDK layer", pattern)
 		}
@@ -291,6 +331,186 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	}
 	if stored.Status != "answered" || stored.ThreadID != "tel-"+call.ID || stored.AudioBridgeURL == "pending" {
 		t.Fatalf("call was not attached and answered: %+v", stored)
+	}
+}
+
+func TestAnswerCallIsIdempotentAfterAnswer(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	call := testCall("already-answered", "answered")
+	call.Direction = "inbound"
+	call.ThreadID = "tel-" + call.ID
+	threadID, err := a.answerCall(ctx, &call, "Help.", "marin", "Hello.", false)
+	if err != nil || threadID != call.ThreadID {
+		t.Fatalf("thread=%q err=%v", threadID, err)
+	}
+	if len(platform.integrationCalls) != 0 || len(platform.spawned) != 0 {
+		t.Fatalf("idempotent answer performed work: calls=%v spawned=%v", platform.integrationCalls, platform.spawned)
+	}
+}
+
+func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{
+		ID: "route-direct", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", PhoneNumberSID: "PN1", AgentID: 7, Enabled: true,
+		TimeoutSec: 60, AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Help the caller.",
+		AutoVoice: "marin", AutoGreeting: "Hello. How can I help?", Secret: "route-secret",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"CallSid": {"CAdirect"}, "From": {"+34648257793"}, "To": {route.PhoneNumber},
+	}
+	endpoint := strings.TrimPrefix(a.inboundRouteURL(route), a.publicAppURL())
+	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	signTwilioTestRequest(t, a, req, form)
+	rec := httptest.NewRecorder()
+	a.handleTwilioInbound(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `<Connect><Stream`) || !strings.Contains(body, `statusCallback=`) ||
+		strings.Contains(body, `<Pause`) || strings.Contains(body, `<Say`) {
+		t.Fatalf("unexpected immediate TwiML: %s", body)
+	}
+	if len(platform.spawned) != 1 || len(platform.integrationCalls) != 0 {
+		t.Fatalf("spawned=%d carrier API calls=%d", len(platform.spawned), len(platform.integrationCalls))
+	}
+	stored, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "CAdirect")
+	if err != nil || stored == nil || stored.Status != "answered" || stored.ThreadID != "tel-"+stored.ID {
+		t.Fatalf("stored call=%+v err=%v", stored, err)
+	}
+}
+
+func TestTwilioStreamErrorFailsCallAndKillsRealtimeThread(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	call := testCall("stream-error", "answered")
+	call.Direction = "inbound"
+	call.ThreadID = "tel-" + call.ID
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"CallSid": {call.CarrierSID}, "StreamEvent": {"stream-error"}, "StreamError": {"handshake rejected"},
+	}
+	fullURL := a.twilioStreamStatusURL(call.ID, call.CallbackSecret, call.ProjectID)
+	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	signTwilioTestRequest(t, a, req, form)
+	rec := httptest.NewRecorder()
+	a.handleTwilioStreamStatus(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored, err := a.db().findCall(call.ID)
+	if err != nil || stored.Status != "failed" || stored.ErrorMessage != "handshake rejected" {
+		t.Fatalf("stored call=%+v err=%v", stored, err)
+	}
+	if len(platform.killed) != 1 || platform.killed[0] != call.ThreadID {
+		t.Fatalf("killed threads=%v", platform.killed)
+	}
+}
+
+func TestTwilioInboundStatusCallbackCompletesCall(t *testing.T) {
+	platform := &answerPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{
+		ID: "route-status", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", PhoneNumberSID: "PN1", AgentID: 7, Enabled: true,
+		TimeoutSec: 60, Secret: "route-secret", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	call := testCall("route-status", "in-progress")
+	call.Direction = "inbound"
+	call.RouteID = route.ID
+	call.ThreadID = "tel-" + call.ID
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"CallSid": {call.CarrierSID}, "CallStatus": {"completed"}, "To": {route.PhoneNumber}}
+	fullURL := a.twilioRouteStatusURL(route)
+	endpoint := strings.TrimPrefix(fullURL, a.publicAppURL())
+	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
+	signTwilioTestRequest(t, a, req, form)
+	rec := httptest.NewRecorder()
+	a.handleTwilioInbound(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	stored, err := a.db().findCall(call.ID)
+	if err != nil || stored.Status != "completed" || stored.EndedAt == "" {
+		t.Fatalf("stored call=%+v err=%v", stored, err)
+	}
+	if len(platform.killed) != 1 || platform.killed[0] != call.ThreadID {
+		t.Fatalf("killed threads=%v", platform.killed)
+	}
+}
+
+func TestTwilioRouteConfigurationPreservesAndRestoresCallbacks(t *testing.T) {
+	platform := &answerPlatform{integrationResponse: map[string]json.RawMessage{
+		"list_phone_numbers": json.RawMessage(`{"incoming_phone_numbers":[{"sid":"PN1","phone_number":"+14155550101","voice_url":"https://old.test/voice","status_callback":"https://old.test/status"}]}`),
+	}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	a := &App{installID: 42}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{
+		ID: "route-callbacks", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 9,
+		PhoneNumber: "+14155550101", AgentID: 7, Enabled: true, TimeoutSec: 60,
+		Secret: "route-secret", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.configureTwilioRoute(ctx, &route); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := a.db().findRoute(route.ID)
+	if err != nil || stored.PreviousVoiceURL != "https://old.test/voice" || stored.PreviousStatusCallback != "https://old.test/status" {
+		t.Fatalf("stored route=%+v err=%v", stored, err)
+	}
+	configured := platform.integrationCalls[len(platform.integrationCalls)-1]
+	if configured.Tool != "update_phone_number" || configured.Input["VoiceUrl"] != a.inboundRouteURL(route) ||
+		configured.Input["StatusCallback"] != a.twilioRouteStatusURL(route) {
+		t.Fatalf("configured callbacks=%+v", configured)
+	}
+	if err := a.disableTwilioRoute(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	restored := platform.integrationCalls[len(platform.integrationCalls)-1]
+	if restored.Input["VoiceUrl"] != "https://old.test/voice" || restored.Input["StatusCallback"] != "https://old.test/status" {
+		t.Fatalf("restored callbacks=%+v", restored.Input)
 	}
 }
 
