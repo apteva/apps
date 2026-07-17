@@ -1012,6 +1012,12 @@ func TestAccountMetrics_OmitsRawAndHonorsHistoryPeriod(t *testing.T) {
 		t.Fatal(err)
 	}
 	metrics := out.(accountMetricsResult)
+	if metrics.UpdatedAt == "" {
+		t.Fatal("fresh metrics response omitted updated_at")
+	}
+	if _, leaked := metrics.Insights["_refresh"]; leaked {
+		t.Fatalf("refresh heartbeat leaked into insights: %+v", metrics.Insights)
+	}
 	if len(metrics.Raw) != 0 {
 		t.Fatalf("raw provider data returned without include_raw: %d bytes", len(metrics.Raw))
 	}
@@ -1041,6 +1047,61 @@ func TestAccountMetrics_OmitsRawAndHonorsHistoryPeriod(t *testing.T) {
 	debugMetrics := debugOut.(accountMetricsResult)
 	if len(debugMetrics.Raw) == 0 || !strings.Contains(string(debugMetrics.Raw), "provider-only detail") {
 		t.Fatalf("include_raw did not return sanitized provider detail: %s", debugMetrics.Raw)
+	}
+}
+
+func TestAnalyticsCollector_GlobalInstallRefreshesEveryProjectAndEmitsScopedEvents(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_me"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"data":{"username":"test","public_metrics":{"followers_count":10,"following_count":2,"tweet_count":4}}}`),
+	}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID(""),
+		tk.WithPlatform(pf),
+		tk.WithEmitter(rec),
+	)
+	globalCtx = ctx
+	for _, pid := range []string{"project-a", "project-b"} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO social_accounts
+			   (project_id, platform, connection_id, display_name, status)
+			 VALUES (?, 'twitter', 77, ?, 'active')`,
+			pid, pid,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := (&App{}).runAnalyticsCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var refreshedProjects int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(DISTINCT project_id) FROM social_metric_points
+		  WHERE metric='_refresh' AND period='heartbeat'`,
+	).Scan(&refreshedProjects); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedProjects != 2 {
+		t.Fatalf("refreshed projects = %d, want 2", refreshedProjects)
+	}
+	events := rec.EventsByTopic("metrics.updated")
+	if len(events) != 2 || events[0].ProjectID != "project-a" || events[1].ProjectID != "project-b" {
+		t.Fatalf("metrics events were not project scoped: %+v", events)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(pf.executeCalls))
+	}
+
+	if err := (&App{}).runAnalyticsCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("fresh accounts were collected again: calls=%d", len(pf.executeCalls))
 	}
 }
 

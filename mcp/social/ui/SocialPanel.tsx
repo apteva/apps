@@ -24,6 +24,11 @@ import {
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
+import {
+  ACCOUNT_METRICS_STALE_MS,
+  accountMetricsNeedRefresh,
+  metricTrendEntries,
+} from "./metricsPresentation";
 import { platformPresentation } from "./platformPresentation";
 import {
   calendarWindow,
@@ -5110,6 +5115,7 @@ interface AccountMetrics {
   engagement_rate?: number;
   insights?: Record<string, { time?: string; value: number }[]>;
   history_source?: string;
+  updated_at?: string;
   raw?: any;
 }
 
@@ -5127,15 +5133,20 @@ function MetricsView({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
-  const autoLoadedAccounts = useRef<Set<number>>(new Set());
+  const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
+  const [rangeDays, setRangeDays] = useState<30 | 90 | 365>(30);
+  const autoLoadedAccounts = useRef<Set<string>>(new Set());
+  const autoRefreshedAccounts = useRef<Set<string>>(new Set());
   const accountIds = accounts.map((a) => a.id).join(",");
 
   useEffect(() => {
     setAccountFor({});
     setPostFor({});
     setSyncFor({});
+    setRefreshingFor({});
     setExpanded(null);
     autoLoadedAccounts.current.clear();
+    autoRefreshedAccounts.current.clear();
   }, [projectId]);
 
   useEffect(() => {
@@ -5148,17 +5159,34 @@ function MetricsView({
     }
   }, [accounts, activeAccountId]);
 
-  const loadAccount = async (id: number, refresh = false) => {
-    setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
+  const loadAccount = async (id: number, refresh = false, background = false) => {
+    if (!background) setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
+    if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: true }));
     try {
-      const res = await fetch(appURL(`/accounts/${id}/metrics?refresh=${refresh ? "1" : "0"}`, projectId), { credentials: "same-origin" });
+      const params = new URLSearchParams({
+        refresh: refresh ? "1" : "0",
+        period: `${rangeDays}d`,
+      });
+      const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
       setAccountFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
-      setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      if (!background) {
+        setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      }
+    } finally {
+      if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: false }));
     }
   };
+
+  useAppEvents<{ social_account_id?: number }>("social", projectId, (event) => {
+    if (event.topic !== "metrics.updated") return;
+    const accountID = Number(event.data?.social_account_id || 0);
+    if (accountID > 0 && accounts.some((account) => account.id === accountID)) {
+      loadAccount(accountID, false, true);
+    }
+  });
 
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -5186,12 +5214,13 @@ function MetricsView({
 
   useEffect(() => {
     for (const account of accounts) {
-      if (!autoLoadedAccounts.current.has(account.id)) {
-        autoLoadedAccounts.current.add(account.id);
+      const key = `${account.id}:${rangeDays}`;
+      if (!autoLoadedAccounts.current.has(key)) {
+        autoLoadedAccounts.current.add(key);
         loadAccount(account.id);
       }
     }
-  }, [accountIds]);
+  }, [accountIds, rangeDays]);
 
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -5219,6 +5248,29 @@ function MetricsView({
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0] || null;
   const activeMetrics = activeAccount ? accountFor[activeAccount.id] : null;
+
+  useEffect(() => {
+    if (!activeAccount || !activeMetrics || activeMetrics === "loading" || "error" in activeMetrics) return;
+    const refreshIfStale = () => {
+      if (!accountMetricsNeedRefresh(activeMetrics)) return;
+      const key = `${activeAccount.id}:${activeMetrics.updated_at || "missing"}`;
+      if (autoRefreshedAccounts.current.has(key)) return;
+      autoRefreshedAccounts.current.add(key);
+      loadAccount(activeAccount.id, true, true);
+    };
+    if (accountMetricsNeedRefresh(activeMetrics)) {
+      refreshIfStale();
+      return;
+    }
+    const updatedAt = Date.parse(activeMetrics.updated_at || "");
+    if (!Number.isFinite(updatedAt)) return;
+    const timer = window.setTimeout(
+      refreshIfStale,
+      Math.max(1000, updatedAt + ACCOUNT_METRICS_STALE_MS - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeAccount?.id, activeMetrics]);
+
   const published = posts.filter((p) =>
     (p.status === "published" || p.status === "partial") &&
     (!activeAccount || (p.targets || []).some((t) => t.social_account_id === activeAccount.id))
@@ -5227,10 +5279,7 @@ function MetricsView({
   return (
     <div className="p-4 flex flex-col gap-6">
       <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
-          <span className="text-text-dim text-xs">Shows stored history first</span>
-        </div>
+        <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
         {accounts.length === 0 ? (
           <div className="text-text-dim text-sm py-6 text-center">No accounts connected.</div>
         ) : (
@@ -5264,22 +5313,28 @@ function MetricsView({
       </section>
 
       {activeAccount && (
-        <section className="flex flex-col gap-3 border border-border rounded p-3 bg-bg-card/30">
-          <div className="flex items-center gap-3">
+        <section className="flex flex-col gap-4 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex-1 min-w-0">
               <div className="text-text font-medium truncate">{activeAccount.display_name}</div>
               <div className="text-text-dim text-xs">{activeAccount.platform}</div>
+              {activeMetrics && activeMetrics !== "loading" && !("error" in activeMetrics) && activeMetrics.updated_at && (
+                <div className="text-text-dim text-xs mt-0.5">
+                  Updated {new Date(activeMetrics.updated_at).toLocaleString()}
+                </div>
+              )}
             </div>
             <button
-              onClick={() => loadAccount(activeAccount.id, true)}
-              className="text-xs text-accent hover:underline"
+              onClick={() => loadAccount(activeAccount.id, true, true)}
+              disabled={refreshingFor[activeAccount.id]}
+              className="px-2.5 py-1.5 text-xs border border-border rounded text-accent hover:border-accent disabled:opacity-50"
             >
-              Refresh metrics
+              {refreshingFor[activeAccount.id] ? "Refreshing…" : "Refresh metrics"}
             </button>
             <button
               onClick={() => syncAccountPosts(activeAccount.id)}
               disabled={syncFor[activeAccount.id] === "loading"}
-              className="text-xs text-accent hover:underline disabled:opacity-50"
+              className="px-2.5 py-1.5 text-xs border border-border rounded text-accent hover:border-accent disabled:opacity-50"
             >
               {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
             </button>
@@ -5290,8 +5345,28 @@ function MetricsView({
             <div className="text-red text-sm">{activeMetrics.error}</div>
           ) : activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics ? (
             <>
+              <div className="text-xs uppercase tracking-wide text-text-dim">Overview</div>
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
-              <InsightCharts metrics={activeMetrics as AccountMetrics} />
+              {(activeMetrics as AccountMetrics).status === "ok" && (
+                <>
+                  <div className="flex items-center justify-between gap-3 mt-1">
+                    <div className="text-xs uppercase tracking-wide text-text-dim">Trends</div>
+                    <div className="inline-flex border border-border rounded overflow-hidden" aria-label="Metrics history range">
+                      {([30, 90, 365] as const).map((days) => (
+                        <button
+                          key={days}
+                          type="button"
+                          onClick={() => setRangeDays(days)}
+                          className={`px-2.5 py-1 text-xs border-r border-border last:border-r-0 ${rangeDays === days ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+                        >
+                          {days === 365 ? "1y" : `${days}d`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <InsightCharts metrics={activeMetrics as AccountMetrics} />
+                </>
+              )}
             </>
           ) : (
             <div className="text-text-dim text-sm">Waiting for metrics...</div>
@@ -5302,13 +5377,9 @@ function MetricsView({
         </section>
       )}
 
-      {accounts.length > 1 && (
-        <AccountHistoryGrid accounts={accounts} accountFor={accountFor} />
-      )}
-
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm uppercase tracking-wide text-text-dim">Recent posts</h2>
+          <h2 className="text-sm uppercase tracking-wide text-text-dim">Post performance</h2>
           {activeAccount && <span className="text-text-dim text-xs">{published.length} loaded</span>}
         </div>
         {published.length === 0 ? (
@@ -5411,12 +5482,11 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     ["following", metrics.following],
     ["videos", metrics.total_videos],
     ["posts", metrics.posts],
-    ["likes", metrics.total_likes],
+    ["likes", metrics.likes ?? metrics.total_likes],
     ["reach", metrics.reach],
     ["impressions", metrics.impressions],
     ["engagements", metrics.engagements],
     ["views", metrics.views],
-    ["likes", metrics.likes],
     ["comments", metrics.comments],
     ["shares", metrics.shares],
     ["saves", metrics.saves],
@@ -5443,51 +5513,13 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
   );
 }
 
-function AccountHistoryGrid({
-  accounts,
-  accountFor,
-}: {
-  accounts: SocialAccount[];
-  accountFor: Record<number, AccountMetrics | "loading" | { error: string }>;
-}) {
-  const loaded = accounts
-    .map((account) => ({ account, metrics: accountFor[account.id] }))
-    .filter(({ metrics }) => metrics && metrics !== "loading" && typeof metrics === "object" && "status" in metrics) as {
-      account: SocialAccount;
-      metrics: AccountMetrics;
-    }[];
-  if (loaded.length === 0) return null;
-  return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-sm uppercase tracking-wide text-text-dim">Account history</h2>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-        {loaded.map(({ account, metrics }) => (
-          <div key={account.id} className="border border-border rounded p-3 bg-bg-card/30">
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="min-w-0">
-                <div className="text-text text-sm truncate">{account.display_name}</div>
-                <div className="text-text-dim text-xs">{account.platform}</div>
-              </div>
-              <AccountMetricsCell m={metrics} />
-            </div>
-            <InsightCharts metrics={metrics} compact />
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; compact?: boolean }) {
-  const entries = Object.entries(metrics.insights || {})
-    .map(([name, points]) => ({ name, points }))
-    .filter((entry) => entry.points.length > 0);
+function InsightCharts({ metrics }: { metrics: AccountMetrics }) {
+  const entries = metricTrendEntries(metrics.insights);
   if (entries.length === 0) {
-    if (compact) return <div className="text-text-dim text-xs">Totals only</div>;
-    return null;
+    return <div className="py-6 text-center text-text-dim text-sm">No trend data yet.</div>;
   }
   return (
-    <div className={`grid grid-cols-1 ${compact ? "" : "md:grid-cols-2"} gap-2`}>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
       {entries.map(({ name, points }) => {
         const latest = points[points.length - 1];
         return (
@@ -5496,7 +5528,7 @@ function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; 
               <span className="text-text text-sm">{name.replace(/_/g, " ")}</span>
               <span className="text-text font-medium">{formatNumber(latest.value)}</span>
             </div>
-            <Sparkline points={points} />
+            <Sparkline points={points} gradientId={`socialMetricFill-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`} />
             <div className="text-text-dim text-xs mt-1">
               {points.length} point{points.length !== 1 ? "s" : ""}
               {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
@@ -5508,7 +5540,7 @@ function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; 
   );
 }
 
-function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
+function Sparkline({ points, gradientId }: { points: { time?: string; value: number }[]; gradientId: string }) {
   const data = points.map((point, index) => ({
     index,
     label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),
@@ -5520,7 +5552,7 @@ function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
           <defs>
-            <linearGradient id="socialMetricFill" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#f97316" stopOpacity={0.28} />
               <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
             </linearGradient>
@@ -5544,7 +5576,7 @@ function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
             dataKey="value"
             stroke="#f97316"
             strokeWidth={2}
-            fill="url(#socialMetricFill)"
+            fill={`url(#${gradientId})`}
             dot={false}
             activeDot={{ r: 3, stroke: "#f97316", strokeWidth: 1, fill: "#111" }}
             isAnimationActive={false}

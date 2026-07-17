@@ -5087,6 +5087,7 @@ type accountMetricsResult struct {
 	EngagementRate  float64         `json:"engagement_rate,omitempty"`
 	Insights        insightSeries   `json:"insights,omitempty"`
 	HistorySource   string          `json:"history_source,omitempty"`
+	UpdatedAt       string          `json:"updated_at,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -5577,11 +5578,45 @@ const (
 )
 
 func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error {
-	pid := projectScope(app)
-	if pid == "" {
-		app.Logger().Info("analytics_collector: no project scope; skipping")
-		return nil
+	projects, err := analyticsProjectScopes(app)
+	if err != nil {
+		return err
 	}
+	for _, pid := range projects {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := a.collectProjectAccountMetrics(ctx, app, pid); err != nil {
+			app.Logger().Warn("analytics_collector: project failed", "project", pid, "err", err)
+		}
+	}
+	return nil
+}
+
+func analyticsProjectScopes(ctx *sdk.AppCtx) ([]string, error) {
+	if pid := projectScope(ctx); pid != "" {
+		return []string{pid}, nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT DISTINCT project_id FROM social_accounts
+		  WHERE project_id<>'' AND status='active'
+		  ORDER BY project_id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []string
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err == nil && strings.TrimSpace(pid) != "" {
+			projects = append(projects, pid)
+		}
+	}
+	return projects, rows.Err()
+}
+
+func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppCtx, pid string) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id FROM social_accounts
 		  WHERE project_id=? AND status='active'
@@ -5591,7 +5626,6 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	var ids []int64
 	for rows.Next() {
 		var id int64
@@ -5599,9 +5633,16 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 			ids = append(ids, id)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if runCtx.Err() != nil {
+			return runCtx.Err()
 		}
 		due, err := accountAnalyticsDue(app, pid, id, analyticsSnapshotMinInterval)
 		if err != nil {
@@ -5621,13 +5662,7 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 }
 
 func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterval time.Duration) (bool, error) {
-	var latest string
-	err := ctx.AppDB().QueryRow(
-		`SELECT COALESCE(MAX(point_time),'')
-		   FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account' AND period='snapshot'`,
-		pid, accountID,
-	).Scan(&latest)
+	latest, err := latestAccountMetricsRefresh(ctx, pid, accountID)
 	if err != nil {
 		return true, err
 	}
@@ -5646,13 +5681,23 @@ func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, account
 	// controls how much persisted history is returned to the caller.
 	res := a.getAccountMetrics(ctx, pid, accountID, "day")
 	res.Raw = sanitizeRawJSON(res.Raw)
+	persisted := true
 	if err := a.persistAccountMetrics(ctx, pid, res); err != nil {
+		persisted = false
 		ctx.Logger().Warn("account_metrics: persist failed",
 			"project", pid, "account", accountID, "platform", res.Platform, "err", err)
 	}
+	res.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
 	if history := loadAccountMetricHistory(ctx, pid, accountID, historyDays); len(history) > 0 {
 		res.Insights = history
 		res.HistorySource = "social_metric_points"
+	}
+	if res.Status != "failed" && persisted {
+		ctx.EmitWithProject("metrics.updated", pid, map[string]any{
+			"social_account_id": accountID,
+			"status":            res.Status,
+			"updated_at":        res.UpdatedAt,
+		})
 	}
 	return res
 }
@@ -5678,10 +5723,11 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64,
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
+	out.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
 	history := loadAccountMetricHistory(ctx, pid, accountID, historyDays)
 	if len(history) == 0 {
 		out.Status = "unsupported"
-		out.Reason = "No stored analytics yet. Click Refresh metrics to collect fresh metrics."
+		out.Reason = "No stored analytics yet. A refresh will run automatically."
 		return out
 	}
 	out.Status = "ok"
@@ -5745,6 +5791,9 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		).Scan(&profileID)
 	}
 	source := accountMetricSource(res.Platform, "snapshot")
+	if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", "_refresh", "heartbeat", now, 1, source, "ok", ""); err != nil {
+		return err
+	}
 	totals := []struct {
 		name  string
 		value int64
@@ -5852,7 +5901,7 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 		`SELECT metric, period, point_time, value
 		   FROM social_metric_points
 		  WHERE project_id=? AND social_account_id=? AND scope='account'
-		    AND status='ok' AND point_time >= ?
+		    AND status='ok' AND metric<>'_refresh' AND point_time >= ?
 		  ORDER BY point_time ASC, id ASC`,
 		pid, accountID, since,
 	)
@@ -5878,6 +5927,18 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 		return nil
 	}
 	return out
+}
+
+func latestAccountMetricsRefresh(ctx *sdk.AppCtx, pid string, accountID int64) (string, error) {
+	var latest string
+	err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(MAX(point_time),'')
+		   FROM social_metric_points
+		  WHERE project_id=? AND social_account_id=? AND scope='account'
+		    AND (metric='_refresh' OR period='snapshot')`,
+		pid, accountID,
+	).Scan(&latest)
+	return latest, err
 }
 
 func accountMetricSource(platform, kind string) string {
