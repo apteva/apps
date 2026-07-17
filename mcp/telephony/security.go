@@ -28,7 +28,7 @@ func maxCallsPerMinute() int {
 }
 
 func validE164(value string) bool {
-	if len(value) < 9 || len(value) > 16 || value[0] != '+' {
+	if len(value) < 9 || len(value) > 16 || value[0] != '+' || value[1] == '0' {
 		return false
 	}
 	for i := 1; i < len(value); i++ {
