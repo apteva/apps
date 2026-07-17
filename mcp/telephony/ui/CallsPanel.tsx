@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/telephony";
 
@@ -97,6 +97,36 @@ interface Recording {
 
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "no-answer", "busy", "canceled"]);
+const CALL_COLUMNS = "8rem minmax(0,1fr) minmax(0,1fr) 8rem 7rem 6rem 7rem";
+const NUMBER_COLUMNS = "10rem 7rem minmax(0,1fr) 9rem 9rem 9rem 9rem 7rem";
+const ADDRESS_COLUMNS = "10rem minmax(0,1fr) 8rem 9rem 12rem";
+const DETAILS_COLUMNS = "7.5rem minmax(0,1fr)";
+
+function usePanelWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+
+    const update = () => setWidth(element.getBoundingClientRect().width);
+    update();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+
+    const observer = new ResizeObserver((entries) => {
+      setWidth(entries[0]?.contentRect.width ?? element.getBoundingClientRect().width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  return { ref, width };
+}
 
 function normalizeCall(row: RawCall): Call {
   return {
@@ -213,13 +243,14 @@ function RecordingPlayer({ recording }: { recording: Recording }) {
       <div className="flex items-center gap-3">
         <audio key={url} src={url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
         <a href={url} download className="text-xs text-accent hover:underline">Download</a>
-        <span className="text-[11px] text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
+        <span className="text-xs text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
       </div>
     </div>
   );
 }
 
 function CallsView({ projectId }: NativePanelProps) {
+  const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("");
@@ -375,15 +406,15 @@ function CallsView({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
-        <div className="min-w-0 flex-1">
+    <div ref={layout.ref} className="h-full min-h-0 flex flex-col bg-bg text-text">
+      <header className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
+        <div className="flex-1" style={{ minWidth: "9rem" }}>
           <h1 className="text-sm font-semibold leading-5">Calls</h1>
           <p className="text-xs text-text-muted">
             {activeCount} active / {terminalCount} recent
           </p>
         </div>
-        <div className="text-xs text-text-muted truncate max-w-[16rem]">{status}</div>
+        <div className="text-xs text-text-muted truncate" style={{ maxWidth: "16rem" }}>{status}</div>
         {recordingSettings ? (
           <label className={`h-8 flex items-center gap-2 px-2 border border-border rounded text-xs ${recordingSettings.recording_supported ? "cursor-pointer" : "opacity-50"}`} title={recordingSettings.recording_supported ? `Record future ${recordingSettings.carrier} calls` : `Recording is not yet available for ${recordingSettings.carrier}`}>
             <input
@@ -405,15 +436,21 @@ function CallsView({ projectId }: NativePanelProps) {
         </button>
       </header>
 
-      <main className="min-h-0 flex-1 grid grid-cols-1 lg:grid-cols-[minmax(0,1.2fr)_minmax(20rem,0.8fr)]">
-        <section className="min-h-0 border-b lg:border-b-0 lg:border-r border-border overflow-auto">
+      <main
+        className="min-h-0 flex-1 grid"
+        style={{ gridTemplateColumns: layout.width >= 900 ? "minmax(0,1.2fr) minmax(20rem,0.8fr)" : "minmax(0,1fr)" }}
+      >
+        <section
+          className="min-h-0 min-w-0 border-r border-b border-border overflow-auto"
+          style={{ borderRightWidth: layout.width >= 900 ? 1 : 0, borderBottomWidth: layout.width >= 900 ? 0 : 1 }}
+        >
           {calls.length === 0 ? (
-            <div className="h-full min-h-[18rem] flex items-center justify-center text-sm text-text-muted">
+            <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>
               No calls yet.
             </div>
           ) : (
-            <div className="min-w-[54rem]">
-              <div className="grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem_7rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase tracking-normal text-text-dim">
+            <div style={{ minWidth: "54rem" }}>
+              <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: CALL_COLUMNS }}>
                 <div>Status</div>
                 <div>To</div>
                 <div>From</div>
@@ -429,7 +466,8 @@ function CallsView({ projectId }: NativePanelProps) {
                     key={call.id}
                     type="button"
                     onClick={() => setSelectedId(call.id)}
-                    className={`w-full grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem_7rem] gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
+                    className={`w-full grid gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
+                    style={{ gridTemplateColumns: CALL_COLUMNS }}
                   >
                     <div>
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>
@@ -473,7 +511,7 @@ function CallsView({ projectId }: NativePanelProps) {
                 </button>
               </div>
 
-              <dl className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-x-3 gap-y-3 text-sm">
+              <dl className="grid gap-x-3 gap-y-3 text-sm" style={{ gridTemplateColumns: DETAILS_COLUMNS }}>
                 <dt className="text-text-dim">Status</dt>
                 <dd>
                   <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${statusClass(selected.status)}`}>
@@ -520,7 +558,7 @@ function CallsView({ projectId }: NativePanelProps) {
                           <span className="text-sm font-medium">{recordingStatusLabel(recording.storage_status)}</span>
                           <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)}{recording.size_bytes > 0 ? ` / ${formatBytes(recording.size_bytes)}` : ""} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
                         </div>
-                        <div className="mt-1 truncate font-mono text-[11px] text-text-dim">{recording.provider_recording_id}</div>
+                        <div className="mt-1 truncate font-mono text-xs text-text-dim">{recording.provider_recording_id}</div>
                       </div>
                       {recording.storage_status === "failed" || recording.storage_status === "provider_only" ? (
                         <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "retry")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">{recording.storage_status === "provider_only" ? "Copy to Storage" : "Retry"}</button>
@@ -547,7 +585,7 @@ function CallsView({ projectId }: NativePanelProps) {
               ) : null}
             </div>
           ) : (
-            <div className="h-full min-h-[14rem] flex items-center justify-center text-sm text-text-muted">
+            <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "14rem" }}>
               Select a call.
             </div>
           )}
@@ -733,7 +771,7 @@ function NumbersView({ projectId }: NativePanelProps) {
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <header className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-end gap-3">
-        <label className="min-w-[12rem] flex-1 max-w-[28rem]">
+        <label className="flex-1" style={{ minWidth: "12rem", maxWidth: "28rem" }}>
           <span className="block text-xs text-text-muted mb-1">Countries</span>
           <input
             value={countries}
@@ -764,7 +802,7 @@ function NumbersView({ projectId }: NativePanelProps) {
         >
           {loading ? "Searching..." : "Search"}
         </button>
-        <div className="min-w-[10rem] text-right text-xs text-text-muted">
+        <div className="text-right text-xs text-text-muted" style={{ minWidth: "10rem" }}>
           <div>{provider ? `Carrier: ${provider}` : ""}</div>
           <div className="truncate">{status}</div>
         </div>
@@ -780,12 +818,12 @@ function NumbersView({ projectId }: NativePanelProps) {
           <div className="border-b border-border px-4 py-3 text-sm">{purchaseResult}</div>
         ) : null}
         {offers.length === 0 ? (
-          <div className="min-h-[18rem] flex items-center justify-center px-6 text-center text-sm text-text-muted">
+          <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>
             {status || "Search the bound carrier's live number inventory."}
           </div>
         ) : (
-          <div className="min-w-[64rem]">
-            <div className="grid grid-cols-[10rem_7rem_1fr_9rem_9rem_9rem_9rem_7rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase tracking-normal text-text-dim">
+          <div style={{ minWidth: "64rem" }}>
+            <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: NUMBER_COLUMNS }}>
               <div>Number</div>
               <div>Country</div>
               <div>Location</div>
@@ -798,7 +836,8 @@ function NumbersView({ projectId }: NativePanelProps) {
             {offers.map((offer) => (
               <div
                 key={`${offer.provider}-${offer.phone_number}`}
-                className="grid grid-cols-[10rem_7rem_1fr_9rem_9rem_9rem_9rem_7rem] gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
+                className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
+                style={{ gridTemplateColumns: NUMBER_COLUMNS }}
               >
                 <div className="font-medium truncate">{offer.phone_number}</div>
                 <div>
@@ -901,6 +940,7 @@ function NumbersView({ projectId }: NativePanelProps) {
 }
 
 function AddressesView({ projectId }: NativePanelProps) {
+  const layout = usePanelWidth();
   const [addresses, setAddresses] = useState<ProviderAddress[]>([]);
   const [status, setStatus] = useState("");
   const [saving, setSaving] = useState(false);
@@ -939,18 +979,25 @@ function AddressesView({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="h-full min-h-0 grid lg:grid-cols-[minmax(0,1fr)_22rem] bg-bg text-text">
-      <section className="min-h-0 overflow-auto border-r border-border">
+    <div
+      ref={layout.ref}
+      className="h-full min-h-0 grid bg-bg text-text"
+      style={{ gridTemplateColumns: layout.width >= 900 ? "minmax(0,1fr) 22rem" : "minmax(0,1fr)" }}
+    >
+      <section
+        className="min-h-0 min-w-0 overflow-auto border-r border-b border-border"
+        style={{ borderRightWidth: layout.width >= 900 ? 1 : 0, borderBottomWidth: layout.width >= 900 ? 0 : 1 }}
+      >
         <header className="h-12 px-4 border-b border-border flex items-center justify-between gap-3">
           <h2 className="text-sm font-semibold">Provider addresses</h2>
           <span className="truncate text-xs text-text-muted">{status}</span>
         </header>
-        <div className="min-w-[48rem]">
-          <div className="grid grid-cols-[10rem_1fr_8rem_9rem_12rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase text-text-dim">
+        <div style={{ minWidth: "48rem" }}>
+          <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: ADDRESS_COLUMNS }}>
             <div>Name</div><div>Address</div><div>Country</div><div>Validation</div><div>SID</div>
           </div>
           {addresses.map((address) => (
-            <div key={address.sid} className="grid grid-cols-[10rem_1fr_8rem_9rem_12rem] gap-3 px-4 py-3 border-b border-border/70 text-sm">
+            <div key={address.sid} className="grid gap-3 px-4 py-3 border-b border-border/70 text-sm" style={{ gridTemplateColumns: ADDRESS_COLUMNS }}>
               <div className="truncate">{address.friendly_name || address.customer_name || "-"}</div>
               <div className="truncate text-text-muted">{[address.street, address.city, address.region, address.postal_code].filter(Boolean).join(", ")}</div>
               <div>{address.iso_country || "-"}</div>
@@ -990,6 +1037,7 @@ interface BundleDetails {
 }
 
 function BundlesView({ projectId }: NativePanelProps) {
+  const layout = usePanelWidth();
   const [bundles, setBundles] = useState<RegulatoryBundle[]>([]);
   const [provider, setProvider] = useState("");
   const [selected, setSelected] = useState<BundleDetails | null>(null);
@@ -1103,7 +1151,11 @@ function BundlesView({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="h-full min-h-0 grid xl:grid-cols-[20rem_minmax(0,1fr)_22rem] bg-bg text-text">
+    <div
+      ref={layout.ref}
+      className="h-full min-h-0 grid bg-bg text-text"
+      style={{ gridTemplateColumns: layout.width >= 1200 ? "20rem minmax(0,1fr) 22rem" : "minmax(0,1fr)" }}
+    >
       <section className="min-h-0 overflow-auto border-r border-border">
         <header className="h-12 px-4 border-b border-border flex items-center justify-between gap-2">
           <h2 className="text-sm font-semibold">Compliance profiles</h2>
@@ -1178,7 +1230,7 @@ function BundlesView({ projectId }: NativePanelProps) {
               <button type="submit" disabled={busy} className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create and assign</button>
             </form>
           </div>
-        ) : <div className="h-full min-h-[18rem] flex items-center justify-center text-sm text-text-muted">Select a compliance profile</div>}
+        ) : <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>Select a compliance profile</div>}
       </section>
 
       <form onSubmit={createBundle} className="min-h-0 overflow-auto p-4 space-y-3">
@@ -1204,7 +1256,7 @@ function BundlesView({ projectId }: NativePanelProps) {
           <button type="button" onClick={discover} disabled={busy} className="h-9 rounded border border-border text-sm disabled:opacity-50">Requirements</button>
           <button type="submit" disabled={busy} className="h-9 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create profile</button>
         </div>
-        {requirements ? <pre className="max-h-[30rem] overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted">{JSON.stringify(requirements, null, 2)}</pre> : null}
+        {requirements ? <pre className="overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted" style={{ maxHeight: "30rem" }}>{JSON.stringify(requirements, null, 2)}</pre> : null}
       </form>
     </div>
   );
