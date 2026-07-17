@@ -434,6 +434,7 @@ func parseTwilioOffers(data json.RawMessage, country, numberType string, monthly
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("decode Twilio number search: %w", err)
 	}
+	typeKey := twilioPricedNumberType(numberType, monthly)
 	offers := make([]numberOffer, 0, len(out.Available))
 	for _, item := range out.Available {
 		features := []string{}
@@ -443,7 +444,6 @@ func parseTwilioOffers(data json.RawMessage, country, numberType string, monthly
 			}
 		}
 		sort.Strings(features)
-		typeKey := normalizeNumberType(numberType)
 		offers = append(offers, numberOffer{
 			PhoneNumber: item.PhoneNumber, Country: firstNonEmpty(item.ISOCountry, country),
 			NumberType: typeKey, FriendlyName: item.FriendlyName, Locality: item.Locality,
@@ -453,6 +453,14 @@ func parseTwilioOffers(data json.RawMessage, country, numberType string, monthly
 		})
 	}
 	return offers, nil
+}
+
+func twilioPricedNumberType(requested string, monthly map[string]string) string {
+	typeKey := normalizeNumberType(requested)
+	if typeKey == "local" && strings.TrimSpace(monthly[typeKey]) == "" && strings.TrimSpace(monthly["national"]) != "" {
+		return "national"
+	}
+	return typeKey
 }
 
 func searchTelnyxNumbers(ctx *sdk.AppCtx, connID int64, request numberSearchRequest, country string) ([]numberOffer, []string, error) {
