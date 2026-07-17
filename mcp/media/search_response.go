@@ -161,7 +161,7 @@ func projectMediaSearchRows(rows []MediaRow, files map[string]*StorageFile) []Me
 				item.Folder = source.Folder
 			}
 		}
-		if d := searchThumbnail(row); d != nil {
+		if d := searchThumbnail(row); d != nil && validateDerivationStorageFile(*d, files[d.StorageFileID]) == nil {
 			thumb := &MediaSearchThumbnail{
 				StorageFileID: d.StorageFileID,
 				Width:         d.Width,

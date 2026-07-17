@@ -69,6 +69,7 @@ type StorageFile struct {
 	ContentType string   `json:"content_type"`
 	SizeBytes   int64    `json:"size_bytes"`
 	SHA256      string   `json:"sha256"`
+	Source      string   `json:"source"`
 	Tags        []string `json:"tags"`
 	Visibility  string   `json:"visibility"`
 	// URL — absolute canonical URL minted by storage. Same shape

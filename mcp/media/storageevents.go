@@ -391,8 +391,17 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 		return
 	}
 
-	// Lookup our row + its derivations BEFORE deleting; we'll need
-	// the derivations.storage_file_id list to clean their blobs.
+	// A file.deleted event may describe a hidden thumbnail/keyframe rather
+	// than a catalogued source. Invalidate that pointer before looking for a
+	// media row whose source ID matches the event ID. This closes the stale-ID
+	// window for legacy Storage installs and is harmless for source deletions.
+	if removed, err := deleteDerivationReferencesByStorageID(app.AppDB(), projectID, fileID); err != nil {
+		log.Warn("derivation reference cleanup failed", "storage_file_id", fileID, "err", err)
+	} else if removed > 0 {
+		log.Info("removed deleted storage derivative references", "storage_file_id", fileID, "count", removed)
+	}
+
+	// Confirm this is an indexed source before running the targeted cascade.
 	row, err := getMedia(app.AppDB(), projectID, fileID)
 	if err != nil {
 		// notFound is the common case — storage delete fired for a

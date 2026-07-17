@@ -217,16 +217,7 @@ func clearExistingDerivations(ctx context.Context, app *sdk.AppCtx, sc *storageC
 		app.Logger().Warn("list stale derivations failed", "file_id", fileID, "err", err)
 		return
 	}
-	for _, d := range rows {
-		storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64)
-		if err != nil || storageID <= 0 {
-			continue
-		}
-		if err := sc.DeleteFile(ctx, projectID, storageID); err != nil {
-			app.Logger().Warn("delete stale derivation blob failed",
-				"file_id", fileID, "storage_file_id", storageID, "err", err)
-		}
-	}
+	deleteOwnedDerivationFiles(ctx, app, sc, projectID, rows)
 	if err := clearDerivations(app.AppDB(), projectID, fileID); err != nil {
 		app.Logger().Warn("clear stale derivation rows failed", "file_id", fileID, "err", err)
 	}

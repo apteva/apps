@@ -111,6 +111,13 @@ func computeSmartCrop(
 	if strings.EqualFold(mode, "center") {
 		return center, nil
 	}
+	validDerivations, validateErr := resolveValidDerivations(ctx, sc, projectID, row.Derivations)
+	if validateErr != nil {
+		app.Logger().Warn("smartcrop fallback to center: derivative identity lookup failed",
+			"file_id", sourceFileID, "err", validateErr.Error())
+		return center, nil
+	}
+	row.Derivations = validDerivations
 
 	// Smart mode — prefer the nearest cached keyframe for timed
 	// renders. If keyframes are missing, fall back to the canonical

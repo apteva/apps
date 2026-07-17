@@ -21,6 +21,13 @@ func TestToolDelete_RemovesStorageAndMediaRows(t *testing.T) {
 
 	var deletedIDs []int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/apps/storage/proxy/files" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []StorageFile{
+				{ID: 100, Name: "1.jpg", Folder: "/.media/thumbnail/", ContentType: "image/jpeg", Source: "media-derivation"},
+				{ID: 101, Name: "1.png", Folder: "/.media/waveform/", ContentType: "image/png", Source: "media-derivation"},
+			}})
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/api/apps/callback/apps/storage/proxy/mcp" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}

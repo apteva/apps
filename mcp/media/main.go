@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.66
+version: 0.13.67
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -827,6 +827,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if eerr != nil {
 		// Storage roundtrip failed — surface unenriched row with a
 		// flag so agents can tell it apart from a deleted file.
+		rows[0].Derivations = nil
 		return map[string]any{"found": true, "media": &rows[0], "storage_unavailable": true}, nil
 	}
 	row := enriched[0]
@@ -988,6 +989,10 @@ func (a *App) toolGetKeyframes(ctx *sdk.AppCtx, args map[string]any) (any, error
 	sc := newStorageClient()
 	cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	derivs, err = resolveValidDerivations(cctx, sc, pid, derivs)
+	if err != nil {
+		return nil, err
+	}
 	type keyframeOut struct {
 		PositionMs    int64  `json:"position_ms"`
 		StorageFileID string `json:"storage_file_id"`
@@ -1326,6 +1331,9 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// with a flag so the agent doesn't read missing URLs as
 		// "files deleted". media's own probe + description data is
 		// still useful even without storage's metadata.
+		for i := range rows {
+			rows[i].Derivations = nil
+		}
 		return fitMediaSearchPage(rows, pageOffset, moreFromDB, true)
 	}
 	return fitMediaSearchPage(enriched, pageOffset, moreFromDB, false)
@@ -1496,13 +1504,18 @@ func (a *App) toolGetDerivation(kind string) sdk.ToolHandler {
 		if err != nil {
 			return nil, err
 		}
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		files, err := newStorageClient().ResolveFiles(cctx, pid, derivationStorageIDs(ds))
+		if err != nil {
+			return nil, err
+		}
+		ds = filterResolvedDerivations(ds, files)
 		for _, d := range ds {
 			if d.Kind == kind && d.Status == "ok" {
 				// Resolve the derivation's storage URL so an agent
 				// gets a directly-usable link without a follow-up
 				// storage call.
-				files, _ := newStorageClient().ResolveFiles(
-					context.Background(), pid, []string{d.StorageFileID})
 				enriched := enrichDerivation(d, files)
 				return map[string]any{
 					"found":           true,

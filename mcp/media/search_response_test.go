@@ -72,7 +72,7 @@ func TestToolSearch_DefaultCompactAndDetailOptIn(t *testing.T) {
 	}
 	_, cleanup := newFakeStorage(t, []StorageFile{
 		{ID: 42, Name: "current-name.mp4", Folder: "/current/", URL: "https://example.test/source"},
-		{ID: 420, Name: "42.jpg", Folder: "/.media/thumbnail/", URL: "https://example.test/thumb"},
+		{ID: 420, Name: "42.jpg", Folder: "/.media/thumbnail/", ContentType: "image/jpeg", Source: "media-derivation", URL: "https://example.test/thumb"},
 	})
 	defer cleanup()
 

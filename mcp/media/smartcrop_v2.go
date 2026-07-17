@@ -78,6 +78,11 @@ func computeSmartCropStillV2(
 	if cw == row.Width && ch == row.Height {
 		return &cropWindow{W: cw, H: ch}, nil
 	}
+	validDerivations, err := resolveValidDerivations(ctx, sc, projectID, row.Derivations)
+	if err != nil {
+		return nil, err
+	}
+	row.Derivations = validDerivations
 
 	var derivs []DerivationRow
 	sampleSource := "storyboard"
@@ -313,6 +318,11 @@ func computeSmartCropReelV2(
 	if cw == row.Width && ch == row.Height {
 		return &cropWindow{W: cw, H: ch}, nil, nil
 	}
+	validDerivations, err := resolveValidDerivations(ctx, sc, projectID, row.Derivations)
+	if err != nil {
+		return nil, nil, err
+	}
+	row.Derivations = validDerivations
 
 	uncapped := selectSmartCropReelDerivationsUncapped(row.Derivations, target)
 	var samples []smartCropV2Sample

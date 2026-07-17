@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -433,22 +432,7 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 		derivs, _ := listDerivations(db, projectID, fileID)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for _, d := range derivs {
-			storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64)
-			if err != nil || storageID <= 0 {
-				continue
-			}
-			if err := sc.DeleteFile(ctx, projectID, storageID); err != nil {
-				if app != nil {
-					app.Logger().Warn("cascadeDeleteOne: storage delete failed",
-						"file_id", fileID,
-						"derivation_storage_id", storageID,
-						"kind", d.Kind,
-						"err", err)
-				}
-				// Continue — DB cleanup must still happen.
-			}
-		}
+		deleteOwnedDerivationFiles(ctx, app, sc, projectID, derivs)
 	}
 
 	// Step 3: local DB cleanup.
@@ -471,6 +455,24 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 		return fmt.Errorf("delete media: %w", err)
 	}
 	return nil
+}
+
+// deleteDerivationReferencesByStorageID invalidates cached pointers when
+// Storage deletes a hidden derivative directly. A derivative ID is not itself
+// a Media source ID, so the old event handler ignored these events and left a
+// dangling row that could later resolve to a reused legacy Storage ID.
+func deleteDerivationReferencesByStorageID(db *sql.DB, projectID, storageFileID string) (int64, error) {
+	if projectID == "" || storageFileID == "" {
+		return 0, nil
+	}
+	res, err := db.Exec(
+		`DELETE FROM derivations WHERE project_id = ? AND storage_file_id = ?`,
+		projectID, storageFileID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // purgeOrphans removes media rows (and their derivations + transcripts)
@@ -579,6 +581,7 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 	//    derivation bytes accumulate under /.media/* forever.
 	if sc != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		allDerivs := make([]DerivationRow, 0)
 		for start := 0; start < len(orphanIDs); start += 400 {
 			end := start + 400
 			if end > len(orphanIDs) {
@@ -587,23 +590,10 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 			chunk := orphanIDs[start:end]
 			derivByFile, _ := listDerivationsByFiles(db, projectID, chunk)
 			for _, fid := range chunk {
-				for _, d := range derivByFile[fid] {
-					storageID, perr := strconv.ParseInt(d.StorageFileID, 10, 64)
-					if perr != nil || storageID <= 0 {
-						continue
-					}
-					if delErr := sc.DeleteFile(ctx, projectID, storageID); delErr != nil {
-						if app != nil {
-							app.Logger().Warn("purgeOrphans: storage delete failed",
-								"file_id", fid,
-								"derivation_storage_id", storageID,
-								"kind", d.Kind,
-								"err", delErr)
-						}
-					}
-				}
+				allDerivs = append(allDerivs, derivByFile[fid]...)
 			}
 		}
+		deleteOwnedDerivationFiles(ctx, app, sc, projectID, allDerivs)
 		cancel()
 	}
 
