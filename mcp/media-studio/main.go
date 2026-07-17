@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.50
+version: 0.10.51
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.50 makes JPEG the default
+  as a subscription-backed image provider. v0.10.51 adds a responsive chat
+  generation card with image previews, custom media controls, metadata, and
+  live queued-job promotion. v0.10.50 makes JPEG the default
   image output and guarantees final JPEG files stay below 2 MB, preserving
   quality 90 when possible and adapting quality or dimensions only when
   required. v0.10.49 replaces browser-default
@@ -157,7 +159,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image and audio ids may include a provider prefix when multiple providers are bound." }
-    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?. In chat, attach the returned _meta.chat_component through respond(components=[...])." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Voice creation is provider-neutral: source_type=prompt designs an ElevenLabs voice; source_type=audio clones through Fish Audio or ElevenLabs from source_audio/source_audios. Args also include provider?, name, transcripts?, source_image?, source_video?, labels?, options?." }
@@ -174,6 +176,19 @@ provides:
       label: Studio
       icon: image
       entry: /ui/MediaPanel.mjs
+  ui_components:
+    - name: generation-card
+      entry: /ui/GenerationCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          generation_id: { type: integer, minimum: 1 }
+          job_id: { type: integer, minimum: 1 }
+        anyOf:
+          - required: [generation_id]
+          - required: [job_id]
+      preview_props: { preview: true, generation_id: 1 }
 runtime:
   kind: source
   source:
@@ -233,6 +248,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/generations", Handler: a.handleListGenerations},
+		{Pattern: "/generations/", Handler: a.handleGetGeneration},
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/estimate", Handler: a.handleEstimate},
 		{Pattern: "/delete", Handler: a.handleDeleteGeneration},
@@ -246,6 +262,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/avatar-create-jobs", Handler: a.handleListAvatarCreateJobs},
 		{Pattern: "/voices", Handler: a.handleListVoices},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
+		{Pattern: "/video-jobs/", Handler: a.handleGetVideoJob},
 		{Pattern: "/storage-files", Handler: a.handleStorageFiles},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 	}
@@ -276,7 +293,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
 				"source_image? or source_images? (image edit and video references; Venice reference-to-video models support multiple refs), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras; video supports consents.seedance when required). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
-				"when no storage), text (summary), resource (fetchable URL per storage_id).",
+				"when no storage), text (summary), resource (fetchable URL per storage_id). For chat responses, " +
+				"pass the returned _meta.chat_component object unchanged in respond(components=[...]) so the generated " +
+				"media appears as a live attachment.",
 			InputSchema: schemaObject(map[string]any{
 				"kind": map[string]any{
 					"type":        "string",

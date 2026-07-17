@@ -394,6 +394,45 @@ func (a *App) handleListGenerations(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// HTTP /generations/<id> supplies one project-scoped generation to chat
+// components without loading or scanning a gallery page.
+func (a *App) handleGetGeneration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := pathID(r.URL.Path, "/generations/")
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	ctx, pid, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	row, err := queryGenerationByID(ctx, pid, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"generation": row})
+}
+
+func pathID(path, prefix string) (int64, error) {
+	raw := strings.SplitN(strings.TrimPrefix(path, prefix), "/", 2)[0]
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, errors.New("invalid id")
+	}
+	return id, nil
+}
+
 func resolveProjectFromRequest(r *http.Request) (string, error) {
 	if v := r.URL.Query().Get("project_id"); v != "" {
 		return v, nil

@@ -804,6 +804,7 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 			"cache_key":                  strAny(row["cache_key"]),
 			"estimated_duration_seconds": estimatedSeconds,
 			"actual_duration_seconds":    actualSeconds,
+			"chat_component":             generationChatComponent(int64Any(row["id"]), 0),
 		},
 	}
 }
@@ -841,6 +842,7 @@ func queryPendingJobByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 			"cache_hit":                  true,
 			"cache_key":                  cacheKey,
 			"estimated_duration_seconds": estimatedSeconds,
+			"chat_component":             generationChatComponent(0, id),
 		},
 	}, true
 }

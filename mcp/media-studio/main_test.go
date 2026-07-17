@@ -47,6 +47,52 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 	}
 }
 
+func TestGenerationCardBundleAndManifestContract(t *testing.T) {
+	bundle, err := os.ReadFile("ui/GenerationCard.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(bundle)
+	if strings.Contains(text, "jsxDEV") || strings.Contains(text, "jsx-dev-runtime") {
+		t.Fatal("GenerationCard.mjs contains the development JSX transform")
+	}
+	if !strings.Contains(text, "react/jsx-runtime") {
+		t.Fatal("GenerationCard.mjs does not import the production JSX runtime")
+	}
+	manifest, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"name: generation-card",
+		"entry: /ui/GenerationCard.mjs",
+		"chat.message_attachment",
+		"generation_id",
+		"job_id",
+	} {
+		if !strings.Contains(string(manifest), want) {
+			t.Fatalf("manifest missing generation-card contract %q", want)
+		}
+	}
+}
+
+func TestGenerationChatComponentHints(t *testing.T) {
+	if got := generationChatComponent(42, 0); got["app"] != "media-studio" || got["name"] != "generation-card" {
+		t.Fatalf("generation component = %+v", got)
+	} else if got["props"].(map[string]any)["generation_id"] != int64(42) {
+		t.Fatalf("generation props = %+v", got["props"])
+	}
+	if got := generationChatComponent(0, 17); got["props"].(map[string]any)["job_id"] != int64(17) {
+		t.Fatalf("job props = %+v", got["props"])
+	}
+	if got := generationChatComponent(0, 0); got != nil {
+		t.Fatalf("empty component = %+v, want nil", got)
+	}
+	if got := defaultMime(KindImage); got != "image/jpeg" {
+		t.Fatalf("default image mime = %q, want image/jpeg", got)
+	}
+}
+
 func TestPanelProjectScopedWritesIncludeProjectQuery(t *testing.T) {
 	source, err := os.ReadFile("ui/MediaPanel.tsx")
 	if err != nil {
@@ -2813,6 +2859,78 @@ func TestListVideoJobs_DefaultOnlyReturnsActiveJobs(t *testing.T) {
 	}
 	if len(body.Jobs) != 1 || body.Jobs[0]["queue_id"] != "q-failed" {
 		t.Fatalf("failed jobs = %+v, want explicit failed job", body.Jobs)
+	}
+}
+
+func TestGenerationDetailHTTPIsProjectScoped(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	id := app.dbInsertGeneration(generationRecord{
+		ProjectID: "owner-project", Kind: KindImage, Prompt: "chat preview",
+		Provider: "venice-ai", Model: "gpt-image-2", StorageIDs: []int64{4818},
+		Count: 1, Status: "ready",
+	})
+
+	owner := httptest.NewRecorder()
+	app.handleGetGeneration(owner, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/generations/%d?project_id=owner-project", id), nil))
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner response = %d: %s", owner.Code, owner.Body.String())
+	}
+	var body struct {
+		Generation map[string]any `json:"generation"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if int64(body.Generation["id"].(float64)) != id || body.Generation["prompt"] != "chat preview" {
+		t.Fatalf("generation response = %+v", body.Generation)
+	}
+
+	denied := httptest.NewRecorder()
+	app.handleGetGeneration(denied, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/generations/%d?project_id=other-project", id), nil))
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-project response = %d, want 404", denied.Code)
+	}
+	_ = ctx
+}
+
+func TestVideoJobDetailHTTPIsProjectScoped(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	result, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs
+		 (project_id, kind, queue_id, provider, model, prompt, status, cost_usd, estimated_duration_seconds)
+		 VALUES (?, 'video', 'q-chat', 'venice-ai', 'wan-2-7', 'animate', 'polling', 0.55, 8)`,
+		"owner-project",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	app := &App{}
+
+	owner := httptest.NewRecorder()
+	app.handleGetVideoJob(owner, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/video-jobs/%d?project_id=owner-project", id), nil))
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner response = %d: %s", owner.Code, owner.Body.String())
+	}
+	var body struct {
+		Job map[string]any `json:"job"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Job["status"] != "polling" || body.Job["kind"] != "video" {
+		t.Fatalf("job response = %+v", body.Job)
+	}
+
+	denied := httptest.NewRecorder()
+	app.handleGetVideoJob(denied, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/video-jobs/%d?project_id=other-project", id), nil))
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-project response = %d, want 404", denied.Code)
 	}
 }
 
