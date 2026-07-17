@@ -92,6 +92,7 @@ interface Recording {
   stored_at: string;
   playback_url?: string;
   playback_source?: "storage" | "provider";
+  playback_urls?: Partial<Record<"mix" | "caller" | "agent" | "original", string>>;
 }
 
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
@@ -184,6 +185,38 @@ function formatDurationMS(value: number): string {
   const seconds = Math.max(0, Math.round((value || 0) / 1000));
   const minutes = Math.floor(seconds / 60);
   return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function RecordingPlayer({ recording }: { recording: Recording }) {
+  const variants = recording.playback_urls ?? (recording.playback_url ? { mix: recording.playback_url } : {});
+  const available = (["mix", "caller", "agent", "original"] as const).filter((variant) => Boolean(variants[variant]));
+  const [variant, setVariant] = useState<(typeof available)[number]>(available[0] ?? "mix");
+  const url = variants[variant] ?? recording.playback_url;
+  if (!url) return null;
+  const labels = { mix: "Balanced", caller: "Caller", agent: "Agent", original: "Original" };
+  return (
+    <div className="mt-3 space-y-2">
+      {available.length > 1 ? (
+        <div className="inline-flex max-w-full overflow-x-auto rounded border border-border p-0.5" role="group" aria-label="Recording track">
+          {available.map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setVariant(item)}
+              className={`h-7 whitespace-nowrap px-2 text-xs ${variant === item ? "bg-bg-muted font-medium text-text" : "text-text-muted hover:text-text"}`}
+            >
+              {labels[item]}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="flex items-center gap-3">
+        <audio key={url} src={url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
+        <a href={url} download className="text-xs text-accent hover:underline">Download</a>
+        <span className="text-[11px] text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
+      </div>
+    </div>
+  );
 }
 
 function CallsView({ projectId }: NativePanelProps) {
@@ -494,13 +527,7 @@ function CallsView({ projectId }: NativePanelProps) {
                       ) : null}
                       <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "delete")} className="h-8 px-3 rounded border border-error/40 text-error text-xs disabled:opacity-50">Delete</button>
                     </div>
-                    {recording.playback_url ? (
-                      <div className="mt-3 flex items-center gap-3">
-                        <audio src={recording.playback_url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
-                        <a href={recording.playback_url} download className="text-xs text-accent hover:underline">Download</a>
-                        <span className="text-[11px] text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
-                      </div>
-                    ) : null}
+                    <RecordingPlayer recording={recording} />
                     {recording.last_error ? <div className="mt-2 text-xs text-error whitespace-pre-wrap">{recording.last_error}</div> : null}
                   </div>
                 ))}

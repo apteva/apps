@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/binary"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +88,124 @@ func TestProviderRecordingHasPrivatePlaybackURLWithoutStorage(t *testing.T) {
 	want := "/api/apps/telephony/recordings/rec-provider/content?project_id=project-a"
 	if out["playback_url"] != want {
 		t.Fatalf("playback URL=%v, want %q", out["playback_url"], want)
+	}
+	urls, ok := out["playback_urls"].(map[string]string)
+	if !ok || urls[recordingVariantMix] != want || !strings.Contains(urls[recordingVariantOriginal], "variant=original") {
+		t.Fatalf("unexpected playback variants: %#v", out["playback_urls"])
+	}
+}
+
+func writeTestDualRecording(t *testing.T, callerAmplitude, agentAmplitude int16) string {
+	t.Helper()
+	const sampleRate = 8000
+	const frames = sampleRate / 2
+	path := t.TempDir() + "/dual.wav"
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMonoWAVHeader(file, sampleRate, frames*4); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(22, 0); err != nil {
+		t.Fatal(err)
+	}
+	channels := make([]byte, 2)
+	binary.LittleEndian.PutUint16(channels, 2)
+	if _, err := file.Write(channels); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(28, 0); err != nil {
+		t.Fatal(err)
+	}
+	byteRate := make([]byte, 4)
+	binary.LittleEndian.PutUint32(byteRate, sampleRate*4)
+	if _, err := file.Write(byteRate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(32, 0); err != nil {
+		t.Fatal(err)
+	}
+	blockAlign := make([]byte, 2)
+	binary.LittleEndian.PutUint16(blockAlign, 4)
+	if _, err := file.Write(blockAlign); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(44, 0); err != nil {
+		t.Fatal(err)
+	}
+	frame := make([]byte, 4)
+	for i := 0; i < frames; i++ {
+		caller := int16(float64(callerAmplitude) * math.Sin(2*math.Pi*440*float64(i)/sampleRate))
+		agent := int16(float64(agentAmplitude) * math.Sin(2*math.Pi*660*float64(i)/sampleRate))
+		binary.LittleEndian.PutUint16(frame[0:2], uint16(caller))
+		binary.LittleEndian.PutUint16(frame[2:4], uint16(agent))
+		if _, err := file.Write(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestRecordingVariantsPreserveTracksAndBalanceMix(t *testing.T) {
+	source := writeTestDualRecording(t, 800, 8000)
+	callerPath, err := buildRecordingVariant(source, recordingVariantCaller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(callerPath)
+	agentPath, err := buildRecordingVariant(source, recordingVariantAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(agentPath)
+	mixPath, err := buildRecordingVariant(source, recordingVariantMix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(mixPath)
+
+	for name, path := range map[string]string{"caller": callerPath, "agent": agentPath, "mix": mixPath} {
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := inspectPCM16WAV(file)
+		_ = file.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if info.Channels != 1 || info.SampleRate != 8000 || info.DataSize == 0 {
+			t.Fatalf("%s metadata: %+v", name, info)
+		}
+	}
+
+	mix, err := os.Open(mixPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mix.Close()
+	info, err := inspectPCM16WAV(mix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var correlation440, correlation660 float64
+	index := 0
+	if err := forEachWAVFrame(mix, info, func(samples []int16) error {
+		value := float64(samples[0])
+		correlation440 += value * math.Sin(2*math.Pi*440*float64(index)/8000)
+		correlation660 += value * math.Sin(2*math.Pi*660*float64(index)/8000)
+		index++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ratio := math.Abs(correlation440 / correlation660)
+	if ratio < 0.7 || ratio > 1.3 {
+		t.Fatalf("mixed tracks are not balanced: 440/660 correlation ratio %.3f", ratio)
 	}
 }
 

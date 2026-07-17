@@ -149,6 +149,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	}()
 
 	streamSidCh := make(chan string, 1)
+	inputResampler := carrierInputResampler(cfg.InputCodec)
+	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 
 	go func() {
 		defer cancel()
@@ -187,7 +189,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
 				}
-				pcm24, err := decodeCarrierPayload(f.Media.Payload, cfg.InputCodec)
+				pcm24, err := decodeCarrierPayload(f.Media.Payload, cfg.InputCodec, inputResampler)
 				if err != nil {
 					continue
 				}
@@ -231,7 +233,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		payload, err := encodeCarrierPayload(data, cfg.OutputCodec)
+		payload, err := encodeCarrierPayload(data, cfg.OutputCodec, outputResampler)
 		if err != nil {
 			continue
 		}
@@ -313,6 +315,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		defer cancel()
+		inputResampler := newPCMResampler(16000, 24000)
 		for {
 			data, op, err := wsutil.ReadClientData(vonage)
 			if err != nil {
@@ -324,14 +327,14 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			if op != ws.OpBinary || len(data) == 0 {
 				continue
 			}
-			pcm16 := bytesToPCM16(data)
-			pcm24 := upsample16to24(pcm16)
+			pcm24 := inputResampler.Process(bytesToPCM16(data))
 			if err := wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24)); err != nil {
 				return
 			}
 		}
 	}()
 
+	outputResampler := newPCMResampler(24000, 16000)
 	for {
 		select {
 		case <-ctx.Done():
@@ -345,8 +348,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		pcm24 := bytesToPCM16(data)
-		pcm16 := downsample24to16(pcm24)
+		pcm16 := outputResampler.Process(bytesToPCM16(data))
 		if err := writeVonageFrames(vonage, pcm16ToBytes(pcm16)); err != nil {
 			return
 		}
@@ -395,16 +397,46 @@ func frameCallID(f carrierMediaFrame) string {
 	return firstNonEmpty(f.Start.CallSID, f.Start.CallID, f.Start.CallUUID, f.Start.CallControlID)
 }
 
-func decodeCarrierPayload(payload, codec string) ([]byte, error) {
+func carrierInputResampler(codec string) *pcmResampler {
+	switch codec {
+	case carrierCodecPCMU8:
+		return newPCMResampler(8000, 24000)
+	case carrierCodecL16_16:
+		return newPCMResampler(16000, 24000)
+	default:
+		return nil
+	}
+}
+
+func carrierOutputResampler(codec string) *pcmResampler {
+	switch codec {
+	case carrierCodecPCMU8:
+		return newPCMResampler(24000, 8000)
+	case carrierCodecL16_16:
+		return newPCMResampler(24000, 16000)
+	default:
+		return nil
+	}
+}
+
+func decodeCarrierPayload(payload, codec string, streaming ...*pcmResampler) ([]byte, error) {
 	raw, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return nil, err
 	}
 	switch codec {
 	case carrierCodecPCMU8:
-		return pcm16ToBytes(upsample8to24(ulawToPCM16(raw))), nil
+		pcm := ulawToPCM16(raw)
+		if len(streaming) > 0 && streaming[0] != nil {
+			return pcm16ToBytes(streaming[0].Process(pcm)), nil
+		}
+		return pcm16ToBytes(resamplePCM(pcm, 8000, 24000)), nil
 	case carrierCodecL16_16:
-		return pcm16ToBytes(upsample16to24(bytesToPCM16(raw))), nil
+		pcm := bytesToPCM16(raw)
+		if len(streaming) > 0 && streaming[0] != nil {
+			return pcm16ToBytes(streaming[0].Process(pcm)), nil
+		}
+		return pcm16ToBytes(resamplePCM(pcm, 16000, 24000)), nil
 	case carrierCodecL16_24:
 		return raw, nil
 	default:
@@ -412,15 +444,23 @@ func decodeCarrierPayload(payload, codec string) ([]byte, error) {
 	}
 }
 
-func encodeCarrierPayload(pcm24Bytes []byte, codec string) (string, error) {
+func encodeCarrierPayload(pcm24Bytes []byte, codec string, streaming ...*pcmResampler) (string, error) {
 	switch codec {
 	case carrierCodecPCMU8:
 		pcm24 := bytesToPCM16(pcm24Bytes)
-		raw := pcm16ToUlaw(downsample24to8(pcm24))
+		pcm8 := resamplePCM(pcm24, 24000, 8000)
+		if len(streaming) > 0 && streaming[0] != nil {
+			pcm8 = streaming[0].Process(pcm24)
+		}
+		raw := pcm16ToUlaw(pcm8)
 		return base64.StdEncoding.EncodeToString(raw), nil
 	case carrierCodecL16_16:
 		pcm24 := bytesToPCM16(pcm24Bytes)
-		return base64.StdEncoding.EncodeToString(pcm16ToBytes(downsample24to16(pcm24))), nil
+		pcm16 := resamplePCM(pcm24, 24000, 16000)
+		if len(streaming) > 0 && streaming[0] != nil {
+			pcm16 = streaming[0].Process(pcm24)
+		}
+		return base64.StdEncoding.EncodeToString(pcm16ToBytes(pcm16)), nil
 	case carrierCodecL16_24:
 		return base64.StdEncoding.EncodeToString(pcm24Bytes), nil
 	default:
@@ -479,34 +519,11 @@ func (a *App) finishMediaBridge(callID, status string) {
 }
 
 func upsample16to24(pcm16 []int16) []int16 {
-	if len(pcm16) == 0 {
-		return nil
-	}
-	out := make([]int16, 0, len(pcm16)*3/2+2)
-	for i := 0; i < len(pcm16)-1; i += 2 {
-		a := pcm16[i]
-		b := pcm16[i+1]
-		out = append(out, a, int16((int(a)+int(b))/2), b)
-	}
-	if len(pcm16)%2 == 1 {
-		last := pcm16[len(pcm16)-1]
-		out = append(out, last, last)
-	}
-	return out
+	return resamplePCM(pcm16, 16000, 24000)
 }
 
 func downsample24to16(pcm24 []int16) []int16 {
-	if len(pcm24) == 0 {
-		return nil
-	}
-	out := make([]int16, 0, len(pcm24)*2/3+1)
-	for i := 0; i < len(pcm24); i += 3 {
-		out = append(out, pcm24[i])
-		if i+2 < len(pcm24) {
-			out = append(out, pcm24[i+2])
-		}
-	}
-	return out
+	return resamplePCM(pcm24, 24000, 16000)
 }
 
 func writeVonageFrames(conn net.Conn, data []byte) error {

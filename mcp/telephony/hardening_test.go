@@ -783,6 +783,70 @@ func TestRealtimeInterruptControlAndCarrierClearShapes(t *testing.T) {
 	}
 }
 
+func TestRealtimeAudioFrameControl(t *testing.T) {
+	control, ok := parseRealtimeBridgeControl([]byte(`{"type":"audio.frame","response_id":"response-1","item_id":"item-1","audio_end_ms":320}`))
+	if !ok || control.Type != "audio.frame" || control.ResponseID != "response-1" || control.ItemID != "item-1" || control.AudioEndMS != 320 {
+		t.Fatalf("unexpected audio frame control: %#v, ok=%v", control, ok)
+	}
+}
+
+func TestTwilioPlaybackTrackerDoesNotAcknowledgeClearedAudio(t *testing.T) {
+	tracker := newTwilioPlaybackTracker()
+	first := tracker.add("item-1", 120)
+	if first != "apt-1" {
+		t.Fatalf("first mark=%q, want apt-1", first)
+	}
+	progress, ok := tracker.acknowledge(first)
+	if !ok || progress.ItemID != "item-1" || progress.AudioEndMS != 120 {
+		t.Fatalf("unexpected progress: %#v, ok=%v", progress, ok)
+	}
+	second := tracker.add("item-1", 240)
+	tracker.clear()
+	if progress, ok := tracker.acknowledge(second); ok {
+		t.Fatalf("cleared audio acknowledged as played: %#v", progress)
+	}
+}
+
+func TestTwilioAudioPacketsAreAtMostTwentyMillisecondsWithPreciseMarks(t *testing.T) {
+	pcm8 := make([]int16, 401)
+	packets := twilioAudioPackets(pcm8, 1200, realtimeBridgeControl{
+		Type: "audio.frame", ItemID: "item-1", AudioEndMS: 1000,
+	})
+	if len(packets) != 3 {
+		t.Fatalf("packet count=%d, want 3", len(packets))
+	}
+	wantLengths := []int{160, 160, 81}
+	previousEnd := 0
+	for i, packet := range packets {
+		if len(packet.PCM) != wantLengths[i] {
+			t.Fatalf("packet %d samples=%d, want %d", i, len(packet.PCM), wantLengths[i])
+		}
+		if len(packet.PCM) > twilioMediaPacketSamples {
+			t.Fatalf("packet %d exceeds 20ms: %d samples", i, len(packet.PCM))
+		}
+		if packet.AudioEndMS <= previousEnd || packet.AudioEndMS > 1000 {
+			t.Fatalf("packet %d has invalid end timestamp %d after %d", i, packet.AudioEndMS, previousEnd)
+		}
+		previousEnd = packet.AudioEndMS
+	}
+	if packets[len(packets)-1].AudioEndMS != 1000 {
+		t.Fatalf("final packet end=%d, want frame end 1000", packets[len(packets)-1].AudioEndMS)
+	}
+}
+
+func TestTwilioAudioPacketMarksStayWithinTwentyMilliseconds(t *testing.T) {
+	packets := twilioAudioPackets(make([]int16, 480), 1440, realtimeBridgeControl{
+		Type: "audio.frame", ItemID: "item-2", AudioEndMS: 2060,
+	})
+	previous := 2000
+	for i, packet := range packets {
+		if delta := packet.AudioEndMS - previous; delta <= 0 || delta > 20 {
+			t.Fatalf("packet %d timestamp delta=%dms, want 1..20ms", i, delta)
+		}
+		previous = packet.AudioEndMS
+	}
+}
+
 func TestTelnyxCallbackParsing(t *testing.T) {
 	body := `{"data":{"event_type":"call.hangup","payload":{"call_control_id":"v2:test","hangup_cause":"normal_clearing"}}}`
 	req := httptest.NewRequest(http.MethodPost, "/webhook/status/call?token=x", strings.NewReader(body))

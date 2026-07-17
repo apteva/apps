@@ -210,6 +210,10 @@ func (c *recordingStorageClient) do(ctx context.Context, method, path string, js
 }
 
 func downloadTwilioRecording(ctx context.Context, creds map[string]string, recordingSID, format string) (string, int64, error) {
+	return downloadTwilioRecordingChannels(ctx, creds, recordingSID, format, 0)
+}
+
+func downloadTwilioRecordingChannels(ctx context.Context, creds map[string]string, recordingSID, format string, requestedChannels int) (string, int64, error) {
 	accountSID := strings.TrimSpace(creds["account_sid"])
 	authToken := strings.TrimSpace(creds["auth_token"])
 	if accountSID == "" || authToken == "" {
@@ -220,6 +224,9 @@ func downloadTwilioRecording(ctx context.Context, creds map[string]string, recor
 	}
 	ext := recordingExtension(format)
 	downloadURL := fmt.Sprintf("https://api.twilio.com/2010-04-01/Accounts/%s/Recordings/%s.%s", url.PathEscape(accountSID), url.PathEscape(recordingSID), ext)
+	if requestedChannels == 1 || requestedChannels == 2 {
+		downloadURL += "?RequestedChannels=" + strconv.Itoa(requestedChannels)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return "", 0, err
@@ -255,6 +262,57 @@ func downloadTwilioRecording(ctx context.Context, creds map[string]string, recor
 	}
 	if written <= 0 {
 		return "", 0, errors.New("Twilio recording download was empty")
+	}
+	ok = true
+	return path, written, nil
+}
+
+func (c *recordingStorageClient) download(ctx context.Context, projectID string, fileID int64, format string) (string, int64, error) {
+	if c.base == "" || c.token == "" || fileID <= 0 {
+		return "", 0, errors.New("Storage app transport is unavailable")
+	}
+	query := url.Values{"project_id": {projectID}}
+	downloadURL := c.base + storageRecordingProxyPath + "/files/" + strconv.FormatInt(fileID, 10) + "/content?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return "", 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	client := *c.http
+	if client.Timeout < 10*time.Minute {
+		client.Timeout = 10 * time.Minute
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", 0, &storageProxyError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+	}
+	ext := recordingExtension(format)
+	tmp, err := os.CreateTemp("", "apteva-telephony-stored-recording-*."+ext)
+	if err != nil {
+		return "", 0, err
+	}
+	path := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(path)
+		}
+	}()
+	written, err := io.Copy(tmp, resp.Body)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", 0, err
+	}
+	if written <= 0 {
+		return "", 0, errors.New("stored recording download was empty")
 	}
 	ok = true
 	return path, written, nil
@@ -303,4 +361,8 @@ func storagePlaybackURL(projectID string, fileID int64) string {
 
 func providerPlaybackURL(projectID, recordingID string) string {
 	return "/api/apps/telephony/recordings/" + url.PathEscape(recordingID) + "/content?project_id=" + url.QueryEscape(projectID)
+}
+
+func recordingVariantPlaybackURL(projectID, recordingID, variant string) string {
+	return providerPlaybackURL(projectID, recordingID) + "&variant=" + url.QueryEscape(variant)
 }

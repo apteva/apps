@@ -468,7 +468,7 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	if !storageBound {
 		return errRecordingStorageUnbound
 	}
-	path, size, err := downloadTwilioRecording(importCtx, creds.Fields, recording.ProviderRecordingID, recording.Format)
+	path, size, err := downloadTwilioRecordingChannels(importCtx, creds.Fields, recording.ProviderRecordingID, recording.Format, recording.Channels)
 	if err != nil {
 		return err
 	}
@@ -625,11 +625,22 @@ func recordingPublic(recording recordingRow) map[string]any {
 		"created_at": recording.CreatedAt, "completed_at": recording.CompletedAt, "stored_at": recording.StoredAt,
 	}
 	if recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
-		out["playback_url"] = storagePlaybackURL(recording.ProjectID, recording.StorageFileID)
+		out["playback_url"] = providerPlaybackURL(recording.ProjectID, recording.ID)
 		out["playback_source"] = "storage"
 	} else if recording.ProviderStatus == "completed" && recording.ProviderDeletedAt == "" {
 		out["playback_url"] = providerPlaybackURL(recording.ProjectID, recording.ID)
 		out["playback_source"] = "provider"
+	}
+	if out["playback_url"] != nil {
+		urls := map[string]string{
+			recordingVariantMix:      providerPlaybackURL(recording.ProjectID, recording.ID),
+			recordingVariantOriginal: recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantOriginal),
+		}
+		if recording.Channels >= 2 {
+			urls[recordingVariantCaller] = recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantCaller)
+			urls[recordingVariantAgent] = recordingVariantPlaybackURL(recording.ProjectID, recording.ID, recordingVariantAgent)
+		}
+		out["playback_urls"] = urls
 	}
 	return out
 }
@@ -780,7 +791,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		a.serveProviderRecording(w, r, ctx, recording)
+		a.serveRecordingContent(w, r, ctx, recording)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -808,28 +819,56 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (a *App) serveProviderRecording(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, recording *recordingRow) {
-	if recording.ProviderStatus != "completed" || recording.ProviderDeletedAt != "" {
-		http.Error(w, "provider recording is unavailable", http.StatusGone)
-		return
-	}
-	if recording.Provider != "twilio" {
-		http.Error(w, "provider playback is not implemented", http.StatusNotImplemented)
-		return
-	}
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
-	if err != nil || creds == nil {
-		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
-		return
-	}
-	path, _, err := downloadTwilioRecording(r.Context(), creds.Fields, recording.ProviderRecordingID, recording.Format)
+func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, recording *recordingRow) {
+	variant, err := normalizedRecordingVariant(strings.TrimSpace(r.URL.Query().Get("variant")))
 	if err != nil {
-		ctx.Logger().Warn("provider recording playback", "recording", recording.ID, "err", err)
-		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if variant != recordingVariantOriginal && !strings.EqualFold(recording.Format, "wav") {
+		http.Error(w, "playback variants require a WAV recording", http.StatusConflict)
+		return
+	}
+	if variant == recordingVariantOriginal && recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
+		w.Header().Set("Cache-Control", "private, no-store")
+		http.Redirect(w, r, storagePlaybackURL(recording.ProjectID, recording.StorageFileID), http.StatusTemporaryRedirect)
+		return
+	}
+	var path string
+	if recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
+		path, _, err = newRecordingStorageClient().download(r.Context(), recording.ProjectID, recording.StorageFileID, recording.Format)
+	} else {
+		if recording.ProviderStatus != "completed" || recording.ProviderDeletedAt != "" {
+			http.Error(w, "recording is unavailable", http.StatusGone)
+			return
+		}
+		if recording.Provider != "twilio" {
+			http.Error(w, "provider playback is not implemented", http.StatusNotImplemented)
+			return
+		}
+		creds, credentialErr := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
+		if credentialErr != nil || creds == nil {
+			http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+			return
+		}
+		path, _, err = downloadTwilioRecordingChannels(r.Context(), creds.Fields, recording.ProviderRecordingID, recording.Format, recording.Channels)
+	}
+	if err != nil {
+		ctx.Logger().Warn("recording playback", "recording", recording.ID, "source", recording.StorageStatus, "err", err)
+		http.Error(w, "recording is unavailable", http.StatusBadGateway)
 		return
 	}
 	defer os.Remove(path)
-	file, err := os.Open(path)
+	playbackPath, err := buildRecordingVariant(path, variant)
+	if err != nil {
+		ctx.Logger().Warn("build recording playback variant", "recording", recording.ID, "variant", variant, "err", err)
+		http.Error(w, "recording variant is unavailable", http.StatusConflict)
+		return
+	}
+	if playbackPath != path {
+		defer os.Remove(playbackPath)
+	}
+	file, err := os.Open(playbackPath)
 	if err != nil {
 		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
 		return
@@ -840,9 +879,13 @@ func (a *App) serveProviderRecording(w http.ResponseWriter, r *http.Request, ctx
 		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
 		return
 	}
-	filename := "call-" + recording.CallID + "." + recordingExtension(recording.Format)
+	format := recording.Format
+	if variant != recordingVariantOriginal {
+		format = "wav"
+	}
+	filename := "call-" + recording.CallID + "-" + variant + "." + recordingExtension(format)
 	w.Header().Set("Cache-Control", "private, no-store")
-	w.Header().Set("Content-Type", recordingContentType(recording.Format))
+	w.Header().Set("Content-Type", recordingContentType(format))
 	w.Header().Set("Content-Disposition", `inline; filename="`+filename+`"`)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	http.ServeContent(w, r, filename, info.ModTime(), file)
