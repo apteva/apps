@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.68
+version: 0.13.69
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -113,7 +113,7 @@ provides:
     - { name: media_delete,          description: "Delete a media file and its backing storage file. Hard-deletes storage plus media's catalog data and derivations. Args - file_id." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
-    - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
+    - { name: media_reindex,         description: "Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated." }
     - { name: media_index_status,    description: "Counts of pending / ok / failed / unsupported / skipped_size." }
     - name: media_trim
       description: "Cut a clip from a video/audio source. Returns render_id."
@@ -548,7 +548,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "media_reindex",
-			Description: "Force a re-probe + re-derive. Pass file_id to re-index one row, " +
+			Description: "Queue one atomic re-probe + re-derive. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes instead of submitting a second force request while keyframes are still being generated. Pass file_id to re-index one row, " +
 				"or failed_only=true to retry every failed/unsupported row in the project. " +
 				"force=true (with file_id) bypasses the max_probe_size_mb cap for that one file " +
 				"— useful for genuinely huge sources where you accept the temp-disk hit.",
