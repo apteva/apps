@@ -5101,6 +5101,13 @@ interface AccountMetrics {
   impressions?: number;
   engagements?: number;
   views?: number;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+  saves?: number;
+  sends?: number;
+  clicks?: number;
+  engagement_rate?: number;
   insights?: Record<string, { time?: string; value: number }[]>;
   history_source?: string;
   raw?: any;
@@ -5409,7 +5416,16 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     ["impressions", metrics.impressions],
     ["engagements", metrics.engagements],
     ["views", metrics.views],
+    ["likes", metrics.likes],
+    ["comments", metrics.comments],
+    ["shares", metrics.shares],
+    ["saves", metrics.saves],
+    ["sends", metrics.sends],
+    ["clicks", metrics.clicks],
   ].filter(([, value]) => value != null && Number(value) > 0) as [string, number][];
+  if (metrics.engagement_rate != null && metrics.engagement_rate > 0) {
+    stats.push(["engagement rate", metrics.engagement_rate]);
+  }
   if (stats.length === 0) {
     return <div className="text-text-dim text-sm">No totals returned by the platform.</div>;
   }
@@ -5417,7 +5433,9 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
       {stats.map(([label, value]) => (
         <div key={label} className="border border-border rounded px-3 py-2 bg-bg">
-          <div className="text-text font-medium">{formatNumber(value)}</div>
+          <div className="text-text font-medium">
+            {label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
+          </div>
           <div className="text-text-dim text-[10px] uppercase tracking-wide">{label}</div>
         </div>
       ))}

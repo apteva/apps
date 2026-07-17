@@ -51,7 +51,8 @@ type recordingPlatform struct {
 	nextStartOAuth   *sdk.OAuthStartResult
 	nextStartErr     error
 	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
-	callAppResponses map[string]json.RawMessage    // keyed by "app:tool"
+	executeQueues    map[string][]*sdk.ExecuteResult
+	callAppResponses map[string]json.RawMessage // keyed by "app:tool"
 	connections      []sdk.PlatformConnection
 	executeErr       error
 	identity         *sdk.InstallIdentity
@@ -71,6 +72,7 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
+		executeQueues:    map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
 }
@@ -103,9 +105,17 @@ func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) { return p.id
 func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.mu.Lock()
 	p.executeCalls = append(p.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
+	var queued *sdk.ExecuteResult
+	if queue := p.executeQueues[tool]; len(queue) > 0 {
+		queued = queue[0]
+		p.executeQueues[tool] = queue[1:]
+	}
 	p.mu.Unlock()
 	if p.executeErr != nil {
 		return nil, p.executeErr
+	}
+	if queued != nil {
+		return queued, nil
 	}
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
@@ -1050,7 +1060,7 @@ func TestAccountMetrics_RejectsInvalidHistoryPeriod(t *testing.T) {
 	}
 }
 
-func TestAccountMetrics_ZernioUsesProviderAdapterAndCurrentPayloadShape(t *testing.T) {
+func TestAccountMetrics_ZernioGenericProviderUsesCurrentPayloadShape(t *testing.T) {
 	pf := newRecordingPlatform()
 	now := time.Now().UTC()
 	day1 := now.AddDate(0, 0, -2).Format("2006-01-02")
@@ -1079,7 +1089,7 @@ func TestAccountMetrics_ZernioUsesProviderAdapterAndCurrentPayloadShape(t *testi
 	inserted, err := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts
 		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
-		 VALUES ('test-proj', 'linkedin', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
+		 VALUES ('test-proj', 'facebook', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1094,7 +1104,7 @@ func TestAccountMetrics_ZernioUsesProviderAdapterAndCurrentPayloadShape(t *testi
 		t.Fatal(err)
 	}
 	metrics := out.(accountMetricsResult)
-	if metrics.Status != "ok" || metrics.Followers != 1250 || metrics.Posts != 3 || metrics.Impressions != 150 || metrics.Reach != 120 || metrics.Views != 15 || metrics.Engagements != 13 {
+	if metrics.Status != "ok" || metrics.Followers != 1250 || metrics.Posts != 3 || metrics.Impressions != 150 || metrics.Reach != 120 || metrics.Views != 15 || metrics.Likes != 10 || metrics.Comments != 2 || metrics.Shares != 1 || metrics.Engagements != 13 {
 		t.Fatalf("unexpected zernio account metrics: %+v", metrics)
 	}
 	if metrics.HistorySource != "social_metric_points" || len(metrics.Insights["followers"]) < 2 || len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["comments"]) != 2 || metrics.Insights["comments"][1].Value != 0 {
@@ -1111,6 +1121,125 @@ func TestAccountMetrics_ZernioUsesProviderAdapterAndCurrentPayloadShape(t *testi
 	}
 	if pf.executeCalls[1].Input["granularity"] != "daily" {
 		t.Fatalf("follower metrics input = %+v", pf.executeCalls[1].Input)
+	}
+}
+
+func TestAccountMetrics_ZernioLinkedInUsesAggregateAnalytics(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeQueues["get_linkedin_aggregate_analytics"] = []*sdk.ExecuteResult{
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{
+				"accountId":"za_linkedin","accountType":"personal","aggregation":"TOTAL",
+				"analytics":{"impressions":160,"reach":110,"reactions":2,"comments":1,"shares":3,"saves":4,"sends":5,"engagementRate":1.25}
+			}`),
+		},
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{
+				"accountId":"za_linkedin","accountType":"personal","aggregation":"DAILY",
+				"analytics":{
+					"impressions":[{"date":"2026-07-15","count":60},{"date":"2026-07-16","count":100}],
+					"reactions":[{"date":"2026-07-15","count":0},{"date":"2026-07-16","count":2}]
+				}
+			}`),
+		},
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"accounts":[{"_id":"za_linkedin","currentFollowers":659}],"stats":{"za_linkedin":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Marco Schwartz', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{"social_account_id": accountID, "period": "30d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 659 || metrics.Impressions != 160 || metrics.Reach != 110 || metrics.Likes != 2 || metrics.Comments != 1 || metrics.Shares != 3 || metrics.Saves != 4 || metrics.Sends != 5 || metrics.Engagements != 15 || metrics.EngagementRate != 1.25 {
+		t.Fatalf("unexpected LinkedIn aggregate metrics: %+v", metrics)
+	}
+	if len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["likes"]) != 2 {
+		t.Fatalf("LinkedIn daily analytics were not normalized: %+v", metrics.Insights)
+	}
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider response leaked by default: %s", metrics.Raw)
+	}
+	if len(pf.executeCalls) != 3 || pf.executeCalls[0].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[1].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[2].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["aggregation"] != "TOTAL" || pf.executeCalls[1].Input["aggregation"] != "DAILY" {
+		t.Fatalf("unexpected LinkedIn analytics inputs: %+v", pf.executeCalls)
+	}
+}
+
+func TestAccountMetrics_ZernioLinkedInFallsBackToOrganizationAnalytics(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_linkedin_aggregate_analytics"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  http.StatusBadRequest,
+		Data:    json.RawMessage(`{"code":"org_account_not_supported","error":"Use organization analytics"}`),
+	}
+	pf.executeQueues["get_linkedin_org_aggregate_analytics"] = []*sdk.ExecuteResult{
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{"metrics":{
+				"impressions":{"total":900},"unique_impressions":{"total":700},"clicks":{"total":20},
+				"likes":{"total":30},"comments":{"total":4},"shares":{"total":2},
+				"engagement_rate":{"total":0.0622},"page_views_total":{"total":50}
+			}}`),
+		},
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{"metrics":{
+				"impressions":{"total":900,"values":[{"date":"2026-07-15","value":400},{"date":"2026-07-16","value":500}]},
+				"likes":{"total":30,"values":[{"date":"2026-07-15","value":10},{"date":"2026-07-16","value":20}]}
+			}}`),
+		},
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"accounts":[{"_id":"za_org","currentFollowers":5000}],"stats":{"za_org":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Organization', 'active', 'zernio', 'za_org')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{"social_account_id": accountID, "period": "30d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 5000 || metrics.Impressions != 900 || metrics.Reach != 700 || metrics.Views != 50 || metrics.Clicks != 20 || metrics.Likes != 30 || metrics.Comments != 4 || metrics.Shares != 2 || metrics.Engagements != 56 || metrics.EngagementRate != 6.22 {
+		t.Fatalf("unexpected LinkedIn organization metrics: %+v", metrics)
+	}
+	if len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["likes"]) != 2 {
+		t.Fatalf("organization history was not normalized: %+v", metrics.Insights)
+	}
+	if len(pf.executeCalls) != 4 || pf.executeCalls[0].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[1].Tool != "get_linkedin_org_aggregate_analytics" || pf.executeCalls[2].Tool != "get_linkedin_org_aggregate_analytics" || pf.executeCalls[3].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected organization analytics calls: %+v", pf.executeCalls)
 	}
 }
 

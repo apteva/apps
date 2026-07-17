@@ -5078,6 +5078,13 @@ type accountMetricsResult struct {
 	Impressions     int64           `json:"impressions,omitempty"`
 	Engagements     int64           `json:"engagements,omitempty"`
 	Views           int64           `json:"views,omitempty"`
+	Likes           int64           `json:"likes,omitempty"`
+	Comments        int64           `json:"comments,omitempty"`
+	Shares          int64           `json:"shares,omitempty"`
+	Saves           int64           `json:"saves,omitempty"`
+	Sends           int64           `json:"sends,omitempty"`
+	Clicks          int64           `json:"clicks,omitempty"`
+	EngagementRate  float64         `json:"engagement_rate,omitempty"`
 	Insights        insightSeries   `json:"insights,omitempty"`
 	HistorySource   string          `json:"history_source,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
@@ -5717,6 +5724,12 @@ func applyLatestAccountHistory(out *accountMetricsResult, history insightSeries)
 	} else {
 		out.Engagements = latest("page_post_engagements")
 	}
+	out.Likes = latest("likes_total")
+	out.Comments = latest("comments_total")
+	out.Shares = latest("shares_total")
+	out.Saves = latest("saves_total")
+	out.Sends = latest("sends_total")
+	out.Clicks = latest("clicks_total")
 }
 
 func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetricsResult) error {
@@ -5745,6 +5758,12 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		{"impressions", res.Impressions},
 		{"engagements", res.Engagements},
 		{"views", res.Views},
+		{"likes", res.Likes},
+		{"comments", res.Comments},
+		{"shares", res.Shares},
+		{"saves", res.Saves},
+		{"sends", res.Sends},
+		{"clicks", res.Clicks},
 	}
 	for _, item := range totals {
 		if item.value <= 0 {
@@ -5849,7 +5868,8 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 			continue
 		}
 		label := metric
-		if period == "snapshot" && (metric == "views" || metric == "reach" || metric == "impressions" || metric == "engagements") {
+		if period == "snapshot" && (metric == "views" || metric == "reach" || metric == "impressions" || metric == "engagements" ||
+			metric == "likes" || metric == "comments" || metric == "shares" || metric == "saves" || metric == "sends" || metric == "clicks") {
 			label = metric + "_total"
 		}
 		out[label] = append(out[label], insightPoint{Time: pointTime, Value: value})

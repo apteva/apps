@@ -1021,35 +1021,45 @@ func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 	}
 	now := time.Now().UTC()
 	from := now.AddDate(0, 0, -180)
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_daily_metrics", map[string]any{
-		"accountId":   providerAccountID,
-		"platform":    platform,
-		"fromDate":    from.Format(time.RFC3339),
-		"toDate":      now.Format(time.RFC3339),
-		"attribution": "received",
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
+	raw := map[string]json.RawMessage{}
+	loaded := false
+	if normalizeZernioPlatform(platform) == "linkedin" {
+		linkedinFrom := now.AddDate(0, 0, -(defaultAccountMetricsHistoryDays - 1))
+		series, totals, linkedinRaw, err := a.getZernioLinkedInAccountMetrics(ctx, connID, providerAccountID, linkedinFrom, now)
+		if err == nil {
+			out.Status = "ok"
+			out.Insights = series
+			applyZernioAccountTotals(&out, totals)
+			for key, value := range linkedinRaw {
+				raw[key] = value
+			}
+			loaded = true
+		}
 	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	series := parseZernioMetricSeries(res.Data)
-	out.Status = "ok"
-	out.Insights = series
-	out.Posts = sumZernioInsights(series, "posts", "post_count")
-	out.Views = sumZernioInsights(series, "views", "view_count")
-	out.Impressions = sumZernioInsights(series, "impressions")
-	out.Reach = sumZernioInsights(series, "reach")
-	out.Engagements = sumZernioInsights(series, "engagements")
-	if out.Engagements == 0 {
-		out.Engagements = sumZernioInsights(series, "likes") + sumZernioInsights(series, "comments") +
-			sumZernioInsights(series, "shares") + sumZernioInsights(series, "saves") + sumZernioInsights(series, "clicks")
+	if !loaded {
+		series, genericRaw, err := a.getZernioGenericAccountMetrics(ctx, connID, providerAccountID, platform, from, now)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		out.Status = "ok"
+		out.Insights = series
+		out.Posts = sumZernioInsights(series, "posts", "post_count")
+		out.Views = sumZernioInsights(series, "views", "view_count")
+		out.Impressions = sumZernioInsights(series, "impressions")
+		out.Reach = sumZernioInsights(series, "reach")
+		out.Engagements = sumZernioInsights(series, "engagements")
+		out.Likes = sumZernioInsights(series, "likes", "reactions")
+		out.Comments = sumZernioInsights(series, "comments")
+		out.Shares = sumZernioInsights(series, "shares")
+		out.Saves = sumZernioInsights(series, "saves")
+		out.Clicks = sumZernioInsights(series, "clicks")
+		if out.Engagements == 0 {
+			out.Engagements = out.Likes + out.Comments + out.Shares + out.Saves + out.Clicks
+		}
+		raw["daily_metrics"] = genericRaw
 	}
 
-	raw := map[string]json.RawMessage{"daily_metrics": sanitizeRawJSON(res.Data)}
 	followers, followerSeries, followerRaw, followerErr := a.getZernioFollowerMetrics(ctx, connID, providerAccountID, from, now)
 	if followerErr == nil {
 		out.Followers = followers
@@ -1060,6 +1070,122 @@ func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 	}
 	out.Raw, _ = json.Marshal(raw)
 	return out
+}
+
+func (a *App) getZernioGenericAccountMetrics(ctx *sdk.AppCtx, connID int64, providerAccountID, platform string, from, until time.Time) (insightSeries, json.RawMessage, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_daily_metrics", map[string]any{
+		"accountId":   providerAccountID,
+		"platform":    platform,
+		"fromDate":    from.Format(time.RFC3339),
+		"toDate":      until.Format(time.RFC3339),
+		"attribution": "received",
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if res == nil || !res.Success {
+		return nil, nil, upstreamError(res)
+	}
+	return parseZernioMetricSeries(res.Data), sanitizeRawJSON(res.Data), nil
+}
+
+type zernioAccountMetricTotals struct {
+	Impressions    int64
+	Reach          int64
+	Views          int64
+	Likes          int64
+	Comments       int64
+	Shares         int64
+	Saves          int64
+	Sends          int64
+	Clicks         int64
+	EngagementRate float64
+}
+
+func applyZernioAccountTotals(out *accountMetricsResult, totals zernioAccountMetricTotals) {
+	out.Impressions = totals.Impressions
+	out.Reach = totals.Reach
+	out.Views = totals.Views
+	out.Likes = totals.Likes
+	out.Comments = totals.Comments
+	out.Shares = totals.Shares
+	out.Saves = totals.Saves
+	out.Sends = totals.Sends
+	out.Clicks = totals.Clicks
+	out.EngagementRate = totals.EngagementRate
+	out.Engagements = totals.Likes + totals.Comments + totals.Shares + totals.Saves + totals.Sends + totals.Clicks
+}
+
+func (a *App) getZernioLinkedInAccountMetrics(ctx *sdk.AppCtx, connID int64, providerAccountID string, from, until time.Time) (insightSeries, zernioAccountMetricTotals, map[string]json.RawMessage, error) {
+	dateArgs := map[string]any{
+		"accountId":   providerAccountID,
+		"aggregation": "TOTAL",
+		"startDate":   from.Format("2006-01-02"),
+		"endDate":     until.Format("2006-01-02"),
+	}
+	totalRes, personalErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_linkedin_aggregate_analytics", dateArgs)
+	if personalErr == nil && totalRes != nil && totalRes.Success {
+		if totals, ok := parseZernioLinkedInPersonalTotals(totalRes.Data); ok {
+			raw := map[string]json.RawMessage{"linkedin_total": sanitizeRawJSON(totalRes.Data)}
+			dailyArgs := map[string]any{
+				"accountId":   providerAccountID,
+				"aggregation": "DAILY",
+				"startDate":   from.Format("2006-01-02"),
+				"endDate":     until.Format("2006-01-02"),
+				"metrics":     "IMPRESSION,REACTION,COMMENT,RESHARE,POST_SAVE,POST_SEND",
+			}
+			dailyRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_linkedin_aggregate_analytics", dailyArgs)
+			if err == nil && dailyRes != nil && dailyRes.Success {
+				raw["linkedin_daily"] = sanitizeRawJSON(dailyRes.Data)
+				return parseZernioLinkedInPersonalSeries(dailyRes.Data), totals, raw, nil
+			}
+			return insightSeries{}, totals, raw, nil
+		}
+		personalErr = errors.New("zernio personal LinkedIn analytics response contained no analytics")
+	} else if personalErr == nil {
+		personalErr = upstreamError(totalRes)
+	}
+
+	series, totals, raw, orgErr := a.getZernioLinkedInOrgMetrics(ctx, connID, providerAccountID, from, until)
+	if orgErr == nil {
+		return series, totals, raw, nil
+	}
+	return nil, zernioAccountMetricTotals{}, nil, fmt.Errorf("linkedin analytics unavailable: personal: %v; organization: %v", personalErr, orgErr)
+}
+
+func (a *App) getZernioLinkedInOrgMetrics(ctx *sdk.AppCtx, connID int64, providerAccountID string, from, until time.Time) (insightSeries, zernioAccountMetricTotals, map[string]json.RawMessage, error) {
+	const totalMetrics = "impressions,unique_impressions,clicks,likes,comments,shares,engagement_rate,organic_followers_gained,paid_followers_gained,followers_gained,followers_lost,page_views_total"
+	totalRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_linkedin_org_aggregate_analytics", map[string]any{
+		"accountId":  providerAccountID,
+		"metrics":    totalMetrics,
+		"since":      from.Format("2006-01-02"),
+		"until":      until.Format("2006-01-02"),
+		"metricType": "total_value",
+	})
+	if err != nil {
+		return nil, zernioAccountMetricTotals{}, nil, err
+	}
+	if totalRes == nil || !totalRes.Success {
+		return nil, zernioAccountMetricTotals{}, nil, upstreamError(totalRes)
+	}
+	totals, ok := parseZernioLinkedInOrgTotals(totalRes.Data)
+	if !ok {
+		return nil, zernioAccountMetricTotals{}, nil, errors.New("zernio organization LinkedIn analytics response contained no metrics")
+	}
+	raw := map[string]json.RawMessage{"linkedin_org_total": sanitizeRawJSON(totalRes.Data)}
+	timeSeriesMetrics := "impressions,unique_impressions,clicks,likes,comments,shares,organic_followers_gained,paid_followers_gained,followers_gained,followers_lost"
+	dailyRes, dailyErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_linkedin_org_aggregate_analytics", map[string]any{
+		"accountId":  providerAccountID,
+		"metrics":    timeSeriesMetrics,
+		"since":      from.Format("2006-01-02"),
+		"until":      until.Format("2006-01-02"),
+		"metricType": "time_series",
+	})
+	if dailyErr == nil && dailyRes != nil && dailyRes.Success {
+		raw["linkedin_org_daily"] = sanitizeRawJSON(dailyRes.Data)
+		return parseZernioLinkedInOrgSeries(dailyRes.Data), totals, raw, nil
+	}
+	return insightSeries{}, totals, raw, nil
 }
 
 func (a *App) getZernioFollowerMetrics(ctx *sdk.AppCtx, connID int64, providerAccountID string, from, until time.Time) (int64, insightSeries, json.RawMessage, error) {
@@ -1418,6 +1544,146 @@ func parseZernioMetricSeries(raw json.RawMessage) insightSeries {
 		}
 	}
 	return out
+}
+
+func parseZernioLinkedInPersonalTotals(raw json.RawMessage) (zernioAccountMetricTotals, bool) {
+	root := zernioResponseMap(raw)
+	analytics, ok := root["analytics"].(map[string]any)
+	if !ok {
+		return zernioAccountMetricTotals{}, false
+	}
+	return zernioAccountMetricTotals{
+		Impressions:    zernioMetricValue(analytics, "impressions"),
+		Reach:          zernioMetricValue(analytics, "reach"),
+		Likes:          zernioMetricValue(analytics, "reactions", "likes"),
+		Comments:       zernioMetricValue(analytics, "comments"),
+		Shares:         zernioMetricValue(analytics, "shares", "reshares"),
+		Saves:          zernioMetricValue(analytics, "saves"),
+		Sends:          zernioMetricValue(analytics, "sends"),
+		EngagementRate: zernioFloat(analytics["engagementRate"]),
+	}, true
+}
+
+func parseZernioLinkedInPersonalSeries(raw json.RawMessage) insightSeries {
+	root := zernioResponseMap(raw)
+	analytics, _ := root["analytics"].(map[string]any)
+	out := insightSeries{}
+	for metric, value := range analytics {
+		points, ok := value.([]any)
+		if !ok {
+			continue
+		}
+		name := normaliseZernioLinkedInMetricName(metric)
+		for _, value := range points {
+			point, _ := value.(map[string]any)
+			when := firstString(point, "date", "day", "time", "timestamp")
+			count, ok := zernioNumber(point["count"])
+			if !ok {
+				count, ok = zernioNumber(point["value"])
+			}
+			if when != "" && ok {
+				out[name] = append(out[name], insightPoint{Time: when, Value: count})
+			}
+		}
+	}
+	return out
+}
+
+func parseZernioLinkedInOrgTotals(raw json.RawMessage) (zernioAccountMetricTotals, bool) {
+	root := zernioResponseMap(raw)
+	metrics, ok := root["metrics"].(map[string]any)
+	if !ok {
+		return zernioAccountMetricTotals{}, false
+	}
+	total := func(name string) int64 {
+		metric, _ := metrics[name].(map[string]any)
+		value, _ := zernioNumber(metric["total"])
+		return value
+	}
+	engagementRate := 0.0
+	if metric, ok := metrics["engagement_rate"].(map[string]any); ok {
+		engagementRate = zernioFloat(metric["total"])
+		if engagementRate > 0 && engagementRate <= 1 {
+			engagementRate *= 100
+		}
+	}
+	return zernioAccountMetricTotals{
+		Impressions:    total("impressions"),
+		Reach:          total("unique_impressions"),
+		Views:          total("page_views_total"),
+		Likes:          total("likes"),
+		Comments:       total("comments"),
+		Shares:         total("shares"),
+		Clicks:         total("clicks"),
+		EngagementRate: engagementRate,
+	}, true
+}
+
+func parseZernioLinkedInOrgSeries(raw json.RawMessage) insightSeries {
+	root := zernioResponseMap(raw)
+	metrics, _ := root["metrics"].(map[string]any)
+	out := insightSeries{}
+	for metric, value := range metrics {
+		metricData, _ := value.(map[string]any)
+		points, _ := metricData["values"].([]any)
+		name := normaliseZernioLinkedInMetricName(metric)
+		for _, value := range points {
+			point, _ := value.(map[string]any)
+			when := firstString(point, "date", "day", "time", "timestamp")
+			count, ok := zernioNumber(point["value"])
+			if when != "" && ok {
+				out[name] = append(out[name], insightPoint{Time: when, Value: count})
+			}
+		}
+	}
+	return out
+}
+
+func zernioMetricValue(metrics map[string]any, names ...string) int64 {
+	for _, name := range names {
+		if value, ok := zernioNumber(metrics[name]); ok {
+			return value
+		}
+	}
+	return 0
+}
+
+func zernioFloat(value any) float64 {
+	switch x := value.(type) {
+	case float64:
+		return x
+	case float32:
+		return float64(x)
+	case int:
+		return float64(x)
+	case int64:
+		return float64(x)
+	case json.Number:
+		n, _ := strconv.ParseFloat(string(x), 64)
+		return n
+	case string:
+		n, _ := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+func normaliseZernioLinkedInMetricName(name string) string {
+	switch normaliseZernioMetricName(name) {
+	case "reaction", "reactions":
+		return "likes"
+	case "reshare", "reshares":
+		return "shares"
+	case "members_reached", "unique_impressions":
+		return "reach"
+	case "post_save":
+		return "saves"
+	case "post_send":
+		return "sends"
+	default:
+		return normaliseZernioMetricName(name)
+	}
 }
 
 func parseZernioFollowerSeries(raw json.RawMessage, providerAccountID string) (int64, insightSeries) {
