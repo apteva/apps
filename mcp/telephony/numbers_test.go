@@ -57,6 +57,31 @@ func TestParseTwilioOffersNormalizesPricing(t *testing.T) {
 	}
 }
 
+func TestParseTwilioOffersMapsLocalInventoryToNationalPricing(t *testing.T) {
+	raw := json.RawMessage(`{
+      "available_phone_numbers": [{
+        "friendly_name": "+420 910 000 001",
+        "phone_number": "+420910000001",
+        "iso_country": "CZ",
+        "address_requirements": "any",
+        "capabilities": {"voice": true}
+      }]
+    }`)
+	offers, err := parseTwilioOffers(raw, "CZ", "local",
+		map[string]string{"national": "1.50", "mobile": "12.00", "toll_free": "35.00"},
+		map[string]string{"national": "0.01070", "toll_free": "0.3173"}, "USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers) != 1 {
+		t.Fatalf("offers=%d", len(offers))
+	}
+	offer := offers[0]
+	if offer.NumberType != "national" || offer.MonthlyPrice != "1.50" || offer.InboundPrice != "0.01070" {
+		t.Fatalf("unexpected national offer: %#v", offer)
+	}
+}
+
 func TestParseTelnyxOffersPreservesCostAndRequirements(t *testing.T) {
 	raw := json.RawMessage(`{
       "data": [{
