@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.11
+version: 0.1.12
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -64,7 +64,8 @@ requires:
   apps:
     - name: storage
       version: ">=0.8.1"
-      reason: stores private durable copies of provider call recordings
+      optional: true
+      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
   integrations:
     - role: carrier
       kind: integration
@@ -108,7 +109,7 @@ provides:
     - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
     - { name: telephony_recordings_list, description: "List call recordings." }
-    - { name: telephony_recording_get, description: "Get one recording and its private playback URL." }
+    - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
     - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
     - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
@@ -161,6 +162,7 @@ const (
 	recordingModeInherit        = "inherit"
 	recordingStorageCopy        = "copy_to_storage"
 	recordingStorageMove        = "copy_then_delete_provider"
+	recordingStorageProvider    = "provider_only"
 )
 
 func main() { sdk.Run(&App{}) }

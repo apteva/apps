@@ -91,6 +91,7 @@ interface Recording {
   created_at: string;
   stored_at: string;
   playback_url?: string;
+  playback_source?: "storage" | "provider";
 }
 
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
@@ -123,6 +124,18 @@ function statusClass(status: string): string {
   if (status === "failed" || status === "busy" || status === "no-answer") return "bg-error/10 text-error border-error/30";
   if (status === "canceled") return "bg-warn/10 text-warn border-warn/30";
   return "bg-bg-muted text-text-muted border-border";
+}
+
+function recordingStatusLabel(status: string): string {
+  switch (status) {
+    case "stored": return "Ready";
+    case "provider_only": return "Carrier cloud";
+    case "importing": return "Copying to Storage";
+    case "pending": return "Processing";
+    case "failed": return "Storage copy failed";
+    case "absent": return "Unavailable";
+    default: return status || "Processing";
+  }
 }
 
 function parseTime(iso: string): number {
@@ -308,7 +321,10 @@ function CallsView({ projectId }: NativePanelProps) {
   };
 
   const recordingAction = async (recording: Recording, action: "retry" | "delete") => {
-    if (action === "delete" && !window.confirm("Delete this recording from Storage and the carrier?")) return;
+    if (action === "delete") {
+      const location = recording.storage_file_id > 0 ? "Storage and the carrier" : "the carrier";
+      if (!window.confirm(`Delete this recording from ${location}?`)) return;
+    }
     setRecordingBusy(recording.id);
     try {
       const res = await fetch(withProject(`/recordings/${encodeURIComponent(recording.id)}/${action}`), {
@@ -317,7 +333,7 @@ function CallsView({ projectId }: NativePanelProps) {
       });
       if (!res.ok) throw new Error(await res.text());
       await loadRecordings(recording.call_id);
-      setStatus(action === "delete" ? "Recording deleted" : "Recording import queued");
+      setStatus(action === "delete" ? "Recording deleted" : "Storage copy queued");
     } catch (e) {
       setStatus((e as Error).message || `Recording ${action} failed`);
     } finally {
@@ -396,7 +412,7 @@ function CallsView({ projectId }: NativePanelProps) {
                     <div className="text-sm tabular-nums">{duration(call, now) || "-"}</div>
                     <div className="truncate text-sm text-text-muted">{call.voice || "-"}</div>
                     <div className="truncate text-sm text-text-muted">
-                      {call.recordingStatus === "stored" ? "Ready" : call.recordingStatus === "failed" ? "Failed" : call.recordingStatus ? "Processing" : call.recordingMode === "always" ? "Enabled" : "Off"}
+                      {call.recordingStatus ? recordingStatusLabel(call.recordingStatus) : call.recordingMode === "always" ? "Enabled" : "Off"}
                     </div>
                   </button>
                 );
@@ -450,7 +466,7 @@ function CallsView({ projectId }: NativePanelProps) {
                   <div>
                     <h3 className="text-sm font-semibold">Recordings</h3>
                     <p className="text-xs text-text-muted">
-                      {selected.recordingMode === "always" ? "Captured by the carrier and persisted privately." : "Recording was not enabled for this call."}
+                      {selected.recordingMode === "always" ? "Captured by the carrier. Storage persistence is optional." : "Recording was not enabled for this call."}
                     </p>
                   </div>
                   <button type="button" onClick={() => void loadRecordings(selected.id)} className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted">Refresh</button>
@@ -468,13 +484,13 @@ function CallsView({ projectId }: NativePanelProps) {
                     <div className="flex items-start gap-3">
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{recording.storage_status === "stored" ? "Ready" : recording.storage_status}</span>
-                          <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)} / {formatBytes(recording.size_bytes)} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
+                          <span className="text-sm font-medium">{recordingStatusLabel(recording.storage_status)}</span>
+                          <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)}{recording.size_bytes > 0 ? ` / ${formatBytes(recording.size_bytes)}` : ""} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
                         </div>
                         <div className="mt-1 truncate font-mono text-[11px] text-text-dim">{recording.provider_recording_id}</div>
                       </div>
-                      {recording.storage_status === "failed" || recording.storage_status === "pending" ? (
-                        <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "retry")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Retry</button>
+                      {recording.storage_status === "failed" || recording.storage_status === "provider_only" ? (
+                        <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "retry")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">{recording.storage_status === "provider_only" ? "Copy to Storage" : "Retry"}</button>
                       ) : null}
                       <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "delete")} className="h-8 px-3 rounded border border-error/40 text-error text-xs disabled:opacity-50">Delete</button>
                     </div>
@@ -482,6 +498,7 @@ function CallsView({ projectId }: NativePanelProps) {
                       <div className="mt-3 flex items-center gap-3">
                         <audio src={recording.playback_url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
                         <a href={recording.playback_url} download className="text-xs text-accent hover:underline">Download</a>
+                        <span className="text-[11px] text-text-dim">{recording.playback_source === "storage" ? "Storage" : "Carrier"}</span>
                       </div>
                     ) : null}
                     {recording.last_error ? <div className="mt-2 text-xs text-error whitespace-pre-wrap">{recording.last_error}</div> : null}

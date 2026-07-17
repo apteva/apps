@@ -32,6 +32,15 @@ type recordingStorageClient struct {
 	http  *http.Client
 }
 
+type storageProxyError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *storageProxyError) Error() string {
+	return fmt.Sprintf("Storage returned %d: %s", e.StatusCode, e.Body)
+}
+
 func newRecordingStorageClient() *recordingStorageClient {
 	token := strings.TrimSpace(os.Getenv("APTEVA_OUTBOUND_TOKEN"))
 	if token == "" {
@@ -42,6 +51,20 @@ func newRecordingStorageClient() *recordingStorageClient {
 		token: token,
 		http:  &http.Client{Timeout: 2 * time.Minute},
 	}
+}
+
+func (c *recordingStorageClient) bindingAvailable(ctx context.Context, projectID string) (bool, error) {
+	query := url.Values{"project_id": {projectID}}
+	_, err := c.do(ctx, http.MethodGet, "/health?"+query.Encode(), nil, "", nil)
+	if err == nil {
+		return true, nil
+	}
+	var proxyErr *storageProxyError
+	if errors.As(err, &proxyErr) && proxyErr.StatusCode == http.StatusForbidden &&
+		strings.Contains(strings.ToLower(proxyErr.Body), "not bound") {
+		return false, nil
+	}
+	return false, err
 }
 
 func (c *recordingStorageClient) upload(ctx context.Context, projectID string, row *recordingRow, path string) (*storedRecordingFile, error) {
@@ -181,7 +204,7 @@ func (c *recordingStorageClient) do(ctx context.Context, method, path string, js
 		return nil, err
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("Storage returned %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		return nil, &storageProxyError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(responseBody))}
 	}
 	return responseBody, nil
 }
@@ -276,4 +299,8 @@ func recordingContentType(format string) string {
 
 func storagePlaybackURL(projectID string, fileID int64) string {
 	return "/api/apps/storage/files/" + strconv.FormatInt(fileID, 10) + "/content?project_id=" + url.QueryEscape(projectID)
+}
+
+func providerPlaybackURL(projectID, recordingID string) string {
+	return "/api/apps/telephony/recordings/" + url.PathEscape(recordingID) + "/content?project_id=" + url.QueryEscape(projectID)
 }

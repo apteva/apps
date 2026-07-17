@@ -39,6 +39,55 @@ func TestTwilioStreamTwiMLRecordingIsOptIn(t *testing.T) {
 	}
 }
 
+func TestRecordingStorageDependencyIsOptional(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if manifest.Version != "0.1.12" {
+		t.Fatalf("manifest version=%q, want 0.1.12", manifest.Version)
+	}
+	for _, dependency := range manifest.Requires.Apps {
+		if dependency.Name == "storage" {
+			if !dependency.Optional {
+				t.Fatal("Storage dependency must remain optional")
+			}
+			return
+		}
+	}
+	t.Fatal("optional Storage dependency is not declared")
+}
+
+func TestStorageBindingProbeTreatsMissingBindingAsProviderOnly(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != storageRecordingProxyPath+"/health" {
+			t.Fatalf("unexpected probe path %q", r.URL.Path)
+		}
+		http.Error(w, "target app is not bound: storage", http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+	client := &recordingStorageClient{base: server.URL, token: "test", http: server.Client()}
+	available, err := client.bindingAvailable(t.Context(), "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if available {
+		t.Fatal("missing optional Storage binding reported as available")
+	}
+}
+
+func TestProviderRecordingHasPrivatePlaybackURLWithoutStorage(t *testing.T) {
+	out := recordingPublic(recordingRow{
+		ID: "rec-provider", ProjectID: "project-a", Provider: "twilio",
+		ProviderStatus: "completed", ProviderRecordingID: "RE00000000000000000000000000000003",
+		StorageStatus: recordingStorageProvider,
+	})
+	if out["playback_source"] != "provider" {
+		t.Fatalf("playback source=%v, want provider", out["playback_source"])
+	}
+	want := "/api/apps/telephony/recordings/rec-provider/content?project_id=project-a"
+	if out["playback_url"] != want {
+		t.Fatalf("playback URL=%v, want %q", out["playback_url"], want)
+	}
+}
+
 func TestTwilioRecordingCallbackIsVerifiedAndIdempotent(t *testing.T) {
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))

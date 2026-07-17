@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.11
+version: 0.1.12
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -29,7 +29,8 @@ requires:
   apps:
     - name: storage
       version: ">=0.8.1"
-      reason: stores private durable copies of provider call recordings
+      optional: true
+      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
   integrations:
     - role: carrier
       kind: integration
@@ -75,7 +76,7 @@ provides:
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
-    - { name: telephony_recording_get, description: "Get recording metadata and a private Storage playback URL. Args: recording_id." }
+    - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
     - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
     - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }

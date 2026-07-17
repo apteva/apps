@@ -17,6 +17,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+var errRecordingStorageUnbound = errors.New("Storage app is not bound")
+
 type recordingSettings struct {
 	ProjectID     string `json:"project_id"`
 	DefaultMode   string `json:"default_mode"`
@@ -246,8 +248,8 @@ func (c *callsDB) listRecordings(projectID, callID string, limit int) ([]recordi
 
 func (c *callsDB) attachRecordingSummaries(projectID string, calls []callRow) error {
 	rows, err := c.db.Query(`SELECT call_id, COUNT(*),
-        MAX(CASE storage_status WHEN 'stored' THEN 4 WHEN 'importing' THEN 3
-            WHEN 'pending' THEN 2 WHEN 'failed' THEN 1 ELSE 0 END)
+		MAX(CASE storage_status WHEN 'stored' THEN 5 WHEN 'provider_only' THEN 4 WHEN 'importing' THEN 3
+			WHEN 'pending' THEN 2 WHEN 'failed' THEN 1 ELSE 0 END)
         FROM recordings WHERE project_id = ? AND deleted_at = '' GROUP BY call_id`, projectID)
 	if err != nil {
 		return err
@@ -270,8 +272,10 @@ func (c *callsDB) attachRecordingSummaries(projectID string, calls []callRow) er
 		item := summaries[calls[i].ID]
 		calls[i].RecordingCount = item.count
 		switch item.state {
-		case 4:
+		case 5:
 			calls[i].RecordingStatus = "stored"
+		case 4:
+			calls[i].RecordingStatus = recordingStorageProvider
 		case 3:
 			calls[i].RecordingStatus = "importing"
 		case 2:
@@ -313,9 +317,9 @@ func (c *callsDB) upsertTwilioRecording(call *callRow, sid, status string, durat
         ON CONFLICT(provider, carrier_connection_id, provider_recording_id) DO UPDATE SET
           provider_status = excluded.provider_status, channels = excluded.channels,
           duration_ms = excluded.duration_ms, completed_at = excluded.completed_at,
-          storage_status = CASE WHEN recordings.storage_status IN ('stored','deleted')
-                                THEN recordings.storage_status ELSE excluded.storage_status END,
-          next_attempt_at = CASE WHEN recordings.storage_status IN ('stored','deleted')
+		  storage_status = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only')
+								THEN recordings.storage_status ELSE excluded.storage_status END,
+		  next_attempt_at = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only')
                                  THEN recordings.next_attempt_at ELSE excluded.next_attempt_at END`,
 		id, call.ID, call.ProjectID, call.CarrierConnectionID, sid, status, channels,
 		durationMS, storageStatus, now.Format(time.RFC3339), retentionExpiry,
@@ -390,8 +394,12 @@ func (a *App) runRecordingTick(workerCtx context.Context, ctx *sdk.AppCtx) error
 	}
 	if recording != nil {
 		if err := a.importRecording(workerCtx, ctx, recording); err != nil {
-			a.db().failRecordingImport(recording.ID, err)
-			ctx.Logger().Warn("recording import", "recording", recording.ID, "call", recording.CallID, "err", err)
+			if errors.Is(err, errRecordingStorageUnbound) {
+				a.db().markRecordingProviderOnly(recording.ID)
+			} else {
+				a.db().failRecordingImport(recording.ID, err)
+				ctx.Logger().Warn("recording import", "recording", recording.ID, "call", recording.CallID, "err", err)
+			}
 		}
 	}
 	if err := a.reconcileTwilioRecording(ctx); err != nil {
@@ -409,7 +417,7 @@ func (c *callsDB) claimRecordingImport(projectID string) (*recordingRow, error) 
 	now := time.Now().UTC().Format(time.RFC3339)
 	var id string
 	err = tx.QueryRow(`SELECT id FROM recordings WHERE project_id = ? AND deleted_at = ''
-        AND provider_status = 'completed' AND storage_status IN ('pending','failed')
+		AND provider_status = 'completed' AND storage_status IN ('pending','failed','provider_only')
         AND (next_attempt_at = '' OR next_attempt_at <= ?) ORDER BY created_at LIMIT 1`, projectID, now).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -418,7 +426,7 @@ func (c *callsDB) claimRecordingImport(projectID string) (*recordingRow, error) 
 		return nil, err
 	}
 	result, err := tx.Exec(`UPDATE recordings SET storage_status = 'importing', import_started_at = ?,
-        last_error = '' WHERE id = ? AND storage_status IN ('pending','failed')`, now, id)
+		last_error = '' WHERE id = ? AND storage_status IN ('pending','failed','provider_only')`, now, id)
 	if err != nil {
 		return nil, err
 	}
@@ -450,12 +458,22 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	}
 	importCtx, cancel := context.WithTimeout(workerCtx, 12*time.Minute)
 	defer cancel()
+	storageClient := newRecordingStorageClient()
+	probeCtx, probeCancel := context.WithTimeout(importCtx, 10*time.Second)
+	storageBound, err := storageClient.bindingAvailable(probeCtx, recording.ProjectID)
+	probeCancel()
+	if err != nil {
+		return fmt.Errorf("check Storage binding: %w", err)
+	}
+	if !storageBound {
+		return errRecordingStorageUnbound
+	}
 	path, size, err := downloadTwilioRecording(importCtx, creds.Fields, recording.ProviderRecordingID, recording.Format)
 	if err != nil {
 		return err
 	}
 	defer os.Remove(path)
-	file, err := newRecordingStorageClient().upload(importCtx, recording.ProjectID, recording, path)
+	file, err := storageClient.upload(importCtx, recording.ProjectID, recording, path)
 	if err != nil {
 		return err
 	}
@@ -481,6 +499,12 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	}
 	ctx.Emit("recording.stored", recordingPublic(*recording))
 	return nil
+}
+
+func (c *callsDB) markRecordingProviderOnly(id string) {
+	_, _ = c.db.Exec(`UPDATE recordings SET storage_status = ?, import_started_at = '',
+		next_attempt_at = ?, last_error = '' WHERE id = ?`, recordingStorageProvider,
+		time.Now().UTC().Add(5*time.Minute).Format(time.RFC3339), id)
 }
 
 func (c *callsDB) failRecordingImport(id string, importErr error) {
@@ -602,6 +626,10 @@ func recordingPublic(recording recordingRow) map[string]any {
 	}
 	if recording.StorageFileID > 0 && recording.StorageStatus == "stored" {
 		out["playback_url"] = storagePlaybackURL(recording.ProjectID, recording.StorageFileID)
+		out["playback_source"] = "storage"
+	} else if recording.ProviderStatus == "completed" && recording.ProviderDeletedAt == "" {
+		out["playback_url"] = providerPlaybackURL(recording.ProjectID, recording.ID)
+		out["playback_source"] = "provider"
 	}
 	return out
 }
@@ -736,7 +764,7 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || r.Method != http.MethodPost {
+	if len(parts) != 2 {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
@@ -746,6 +774,20 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := globalCtx.WithProject(projectID)
+	if parts[1] == "content" {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		a.serveProviderRecording(w, r, ctx, recording)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	switch parts[1] {
 	case "retry":
 		if recording.ProviderStatus != "completed" || recording.StorageStatus == "stored" {
@@ -764,4 +806,44 @@ func (a *App) handleRecordings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (a *App) serveProviderRecording(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, recording *recordingRow) {
+	if recording.ProviderStatus != "completed" || recording.ProviderDeletedAt != "" {
+		http.Error(w, "provider recording is unavailable", http.StatusGone)
+		return
+	}
+	if recording.Provider != "twilio" {
+		http.Error(w, "provider playback is not implemented", http.StatusNotImplemented)
+		return
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
+	if err != nil || creds == nil {
+		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+		return
+	}
+	path, _, err := downloadTwilioRecording(r.Context(), creds.Fields, recording.ProviderRecordingID, recording.Format)
+	if err != nil {
+		ctx.Logger().Warn("provider recording playback", "recording", recording.ID, "err", err)
+		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+		return
+	}
+	defer os.Remove(path)
+	file, err := os.Open(path)
+	if err != nil {
+		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
+		return
+	}
+	filename := "call-" + recording.CallID + "." + recordingExtension(recording.Format)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Type", recordingContentType(recording.Format))
+	w.Header().Set("Content-Disposition", `inline; filename="`+filename+`"`)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, filename, info.ModTime(), file)
 }
