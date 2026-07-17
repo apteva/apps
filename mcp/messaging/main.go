@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.38
+version: 0.13.39
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -3944,7 +3944,8 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if strings.TrimSpace(pid) != "" {
 		callCtx = ctx.WithProject(pid)
 	}
-	_, callErr := callCtx.PlatformAPI().CallApp(winner.route.TargetApp, targetTool, payload)
+	var targetResult any
+	callErr := callCtx.PlatformAPI().CallAppResult(winner.route.TargetApp, targetTool, payload, &targetResult)
 	status := "ok"
 	errMsg := ""
 	if callErr != nil {
