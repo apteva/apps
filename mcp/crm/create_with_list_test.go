@@ -53,21 +53,26 @@ func TestCreate_AddsToListsByIDAndSlug(t *testing.T) {
 	}
 }
 
-func TestCreate_UnknownListRefIsSkipped(t *testing.T) {
+func TestCreate_UnknownListRefRejectsWithoutCreatingContact(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 	l1 := mkList(t, ctx, "Real", "real")
 
-	out, err := app.toolCreate(ctx, map[string]any{
+	_, err := app.toolCreate(ctx, map[string]any{
 		"display_name": "Sam",
 		"list_ids":     []any{float64(l1), float64(999999), "no-such-slug"},
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("expected invalid list reference error")
 	}
-	added, _ := out.(map[string]any)["lists_added"].([]int64)
-	if len(added) != 1 || added[0] != l1 {
-		t.Errorf("only the real list should be applied, got %v", added)
+	var contacts int
+	if scanErr := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM contacts WHERE project_id = ?`, "test-proj",
+	).Scan(&contacts); scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if contacts != 0 {
+		t.Fatalf("contacts=%d, want 0 after rejected create", contacts)
 	}
 }
 
