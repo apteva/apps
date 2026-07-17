@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.4
+version: 0.1.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -81,6 +81,7 @@ provides:
     - { prefix: /ui/ }
     - { prefix: /calls }
     - { prefix: /calls/ }
+    - { prefix: /numbers/ }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
     - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
@@ -92,6 +93,8 @@ provides:
     - { name: telephony_pending_calls, description: "List pending inbound calls." }
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
+    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation." }
   ui_panels:
     - slot: project.page
       label: Calls
@@ -182,6 +185,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
 		{Pattern: "/calls/", Handler: a.handleCallAction},
+		// Provider-neutral phone-number discovery and confirmed purchase.
+		{Pattern: "/numbers/", Handler: a.handleNumbers},
 	}
 }
 
@@ -280,6 +285,32 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List currently-ongoing calls with their thread IDs, durations, and statuses. Use sparingly — prefer reacting to send()/done() events.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			HandlerCtx:  a.toolActiveCalls,
+		},
+		{
+			Name: "telephony_numbers_search",
+			Description: "Search and compare voice-capable phone numbers through the bound carrier without purchasing anything. " +
+				"Supports one country or up to 30 countries and returns normalized monthly, setup, and inbound prices where the provider exposes them. " +
+				"Purchase-ready offers include a short-lived confirmation_token; show the exact quote to the user and obtain explicit confirmation before calling telephony_numbers_purchase.",
+			InputSchema: schemaObject(map[string]any{
+				"country":     map[string]any{"type": "string", "description": "One ISO alpha-2 country code, e.g. EE."},
+				"countries":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Up to 30 ISO alpha-2 country codes for comparison."},
+				"number_type": map[string]any{"type": "string", "enum": []string{"any", "local", "mobile", "national", "toll_free"}, "default": "local"},
+				"features":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"voice", "sms", "mms"}}, "default": []string{"voice"}},
+				"area_code":   map[string]any{"type": "string", "description": "Optional national destination or area code."},
+				"pattern":     map[string]any{"type": "string", "description": "Optional number pattern supported by the provider."},
+				"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 10, "description": "Maximum offers per country."},
+			}, nil),
+			HandlerCtx: a.toolNumbersSearch,
+		},
+		{
+			Name: "telephony_numbers_purchase",
+			Description: "Purchase one phone number from an unexpired telephony_numbers_search quote. THIS SPENDS REAL MONEY. " +
+				"Present the provider, number, recurring price, setup price, inbound rate, currency, and regulatory requirement to the user; call only after explicit confirmation. " +
+				"Successful retries with the same token are idempotent; never automatically retry an in-progress or failed purchase.",
+			InputSchema: schemaObject(map[string]any{
+				"confirmation_token": map[string]any{"type": "string", "description": "Short-lived token returned with a purchase-ready search offer."},
+			}, []string{"confirmation_token"}),
+			HandlerCtx: a.toolNumbersPurchase,
 		},
 	}
 }

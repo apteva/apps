@@ -119,7 +119,7 @@ function compactId(value: string): string {
   return `${value.slice(0, 9)}...${value.slice(-6)}`;
 }
 
-export default function CallsPanel({ projectId }: NativePanelProps) {
+function CallsView({ projectId }: NativePanelProps) {
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [status, setStatus] = useState("");
@@ -180,7 +180,7 @@ export default function CallsPanel({ projectId }: NativePanelProps) {
     if (!call || !LIVE_STATUSES.has(call.status)) return;
     setEnding(call.id);
     try {
-		const res = await fetch(withProject(`/calls/${encodeURIComponent(call.id)}/hangup`), {
+      const res = await fetch(withProject(`/calls/${encodeURIComponent(call.id)}/hangup`), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -319,6 +319,281 @@ export default function CallsPanel({ projectId }: NativePanelProps) {
           )}
         </aside>
       </main>
+    </div>
+  );
+}
+
+interface NumberOffer {
+  confirmation_token?: string;
+  expires_at?: string;
+  provider: string;
+  phone_number: string;
+  country: string;
+  number_type: string;
+  friendly_name?: string;
+  locality?: string;
+  region?: string;
+  features?: string[];
+  monthly_price?: string;
+  upfront_price?: string;
+  inbound_price?: string;
+  currency?: string;
+  address_requirement?: string;
+  requirements_met?: boolean;
+  purchase_ready: boolean;
+  purchase_blocker?: string;
+}
+
+interface NumberSearchResponse {
+  provider: string;
+  supported: boolean;
+  purchase_supported: boolean;
+  supported_number_types?: string[];
+  reason?: string;
+  offers?: NumberOffer[];
+  offer_count?: number;
+  pricing_note?: string;
+}
+
+function money(value?: string, currency?: string, suffix = ""): string {
+  if (!value) return "-";
+  const amount = Number(value);
+  const rendered = Number.isFinite(amount)
+    ? amount.toLocaleString(undefined, { maximumFractionDigits: 4 })
+    : value;
+  return `${currency ? `${currency} ` : ""}${rendered}${suffix}`;
+}
+
+function NumbersView({ projectId }: NativePanelProps) {
+  const [countries, setCountries] = useState("EE, AT");
+  const [numberType, setNumberType] = useState("local");
+  const [offers, setOffers] = useState<NumberOffer[]>([]);
+  const [provider, setProvider] = useState("");
+  const [supportedTypes, setSupportedTypes] = useState<string[]>([]);
+  const [status, setStatus] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState<NumberOffer | null>(null);
+  const [purchasing, setPurchasing] = useState(false);
+  const [purchaseResult, setPurchaseResult] = useState("");
+
+  const endpoint = useCallback((path: string) => {
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+    return `${API}${path}${query}`;
+  }, [projectId]);
+
+  const search = async () => {
+    const values = countries
+      .split(",")
+      .map((value) => value.trim().toUpperCase())
+      .filter(Boolean);
+    if (values.length === 0) {
+      setStatus("Enter at least one country code");
+      return;
+    }
+    setLoading(true);
+    setSelected(null);
+    setPurchaseResult("");
+    try {
+      const res = await fetch(endpoint("/numbers/search"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ countries: values, number_type: numberType, features: ["voice"], limit: 10 }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as NumberSearchResponse;
+      setProvider(data.provider || "");
+      setSupportedTypes(data.supported_number_types ?? []);
+      setOffers(data.offers ?? []);
+      setStatus(data.supported
+        ? `${data.offer_count ?? data.offers?.length ?? 0} offers`
+        : data.reason || "Number search is not supported by this carrier");
+    } catch (e) {
+      setOffers([]);
+      setStatus((e as Error).message || "Search failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const purchase = async () => {
+    if (!selected?.confirmation_token) return;
+    setPurchasing(true);
+    try {
+      const res = await fetch(endpoint("/numbers/purchase"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation_token: selected.confirmation_token }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
+      setSelected(null);
+      setStatus("Purchase completed");
+    } catch (e) {
+      setPurchaseResult((e as Error).message || "Purchase failed");
+    } finally {
+      setPurchasing(false);
+    }
+  };
+
+  return (
+    <div className="h-full min-h-0 flex flex-col bg-bg text-text">
+      <header className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-end gap-3">
+        <label className="min-w-[12rem] flex-1 max-w-[28rem]">
+          <span className="block text-xs text-text-muted mb-1">Countries</span>
+          <input
+            value={countries}
+            onChange={(event) => setCountries(event.target.value)}
+            placeholder="EE, AT, DE"
+            className="h-9 w-full rounded border border-border bg-bg px-3 text-sm outline-none focus:border-text-dim"
+          />
+        </label>
+        <label className="w-40">
+          <span className="block text-xs text-text-muted mb-1">Number type</span>
+          <select
+            value={numberType}
+            onChange={(event) => setNumberType(event.target.value)}
+            className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
+          >
+            <option value="local">Local</option>
+            <option value="mobile">Mobile</option>
+            <option value="national">National</option>
+            <option value="toll_free">Toll-free</option>
+            <option value="any">Any</option>
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={search}
+          disabled={loading}
+          className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50"
+        >
+          {loading ? "Searching..." : "Search"}
+        </button>
+        <div className="min-w-[10rem] text-right text-xs text-text-muted">
+          <div>{provider ? `Carrier: ${provider}` : ""}</div>
+          <div className="truncate">{status}</div>
+        </div>
+      </header>
+
+      <main className="min-h-0 flex-1 overflow-auto">
+        {supportedTypes.length > 0 && numberType !== "any" && !supportedTypes.includes(numberType) ? (
+          <div className="border-b border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
+            {provider} supports {supportedTypes.join(", ")} number searches.
+          </div>
+        ) : null}
+        {purchaseResult ? (
+          <div className="border-b border-border px-4 py-3 text-sm">{purchaseResult}</div>
+        ) : null}
+        {offers.length === 0 ? (
+          <div className="min-h-[18rem] flex items-center justify-center px-6 text-center text-sm text-text-muted">
+            {status || "Search the bound carrier's live number inventory."}
+          </div>
+        ) : (
+          <div className="min-w-[64rem]">
+            <div className="grid grid-cols-[10rem_7rem_1fr_9rem_9rem_9rem_9rem_7rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase tracking-normal text-text-dim">
+              <div>Number</div>
+              <div>Country</div>
+              <div>Location</div>
+              <div>Monthly</div>
+              <div>Inbound</div>
+              <div>Setup</div>
+              <div>Requirement</div>
+              <div />
+            </div>
+            {offers.map((offer) => (
+              <div
+                key={`${offer.provider}-${offer.phone_number}`}
+                className="grid grid-cols-[10rem_7rem_1fr_9rem_9rem_9rem_9rem_7rem] gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
+              >
+                <div className="font-medium truncate">{offer.phone_number}</div>
+                <div>
+                  <div>{offer.country}</div>
+                  <div className="text-xs text-text-dim">{offer.number_type.replace("_", " ")}</div>
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate">{[offer.locality, offer.region].filter(Boolean).join(", ") || "-"}</div>
+                  <div className="truncate text-xs text-text-dim">{(offer.features ?? []).join(", ")}</div>
+                </div>
+                <div className="tabular-nums">{money(offer.monthly_price, offer.currency, "/mo")}</div>
+                <div className="tabular-nums">{money(offer.inbound_price, offer.currency, "/min")}</div>
+                <div className="tabular-nums">{money(offer.upfront_price, offer.currency)}</div>
+                <div className="truncate text-xs text-text-muted" title={offer.purchase_blocker || offer.address_requirement}>
+                  {offer.purchase_blocker || offer.address_requirement || "none stated"}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelected(offer)}
+                  disabled={!offer.purchase_ready}
+                  title={offer.purchase_blocker || "Review purchase"}
+                  className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-40"
+                >
+                  Review
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </main>
+
+      {selected ? (
+        <section className="shrink-0 border-t border-border bg-bg-muted/40 px-4 py-3 flex flex-wrap items-center gap-4">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-semibold">Confirm purchase of {selected.phone_number}</div>
+            <div className="mt-1 text-xs text-text-muted">
+              {money(selected.monthly_price, selected.currency, "/month")}
+              {selected.upfront_price ? ` + ${money(selected.upfront_price, selected.currency)} setup` : ""}
+              {selected.inbound_price ? `; ${money(selected.inbound_price, selected.currency, "/minute inbound")}` : ""}
+              {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSelected(null)}
+            disabled={purchasing}
+            className="h-9 px-4 rounded border border-border text-sm disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={purchase}
+            disabled={purchasing}
+            className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
+          >
+            {purchasing ? "Purchasing..." : "Confirm purchase"}
+          </button>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+export default function CallsPanel(props: NativePanelProps) {
+  const [view, setView] = useState<"calls" | "numbers">("calls");
+  return (
+    <div className="h-full min-h-0 flex flex-col bg-bg text-text">
+      <nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
+        <button
+          type="button"
+          onClick={() => setView("calls")}
+          className={`h-8 px-3 rounded text-sm ${view === "calls" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+        >
+          Calls
+        </button>
+        <button
+          type="button"
+          onClick={() => setView("numbers")}
+          className={`h-8 px-3 rounded text-sm ${view === "numbers" ? "bg-bg-muted font-medium" : "text-text-muted hover:bg-bg-muted/60"}`}
+        >
+          Numbers
+        </button>
+      </nav>
+      <div className="min-h-0 flex-1">
+        {view === "calls" ? <CallsView {...props} /> : <NumbersView {...props} />}
+      </div>
     </div>
   );
 }

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.4
+version: 0.1.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -51,6 +51,7 @@ provides:
     - { prefix: /ui/ }
     - { prefix: /calls }
     - { prefix: /calls/ }
+    - { prefix: /numbers/ }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
@@ -62,6 +63,8 @@ provides:
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
+    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token." }
   ui_panels:
     - slot: project.page
       label: Calls

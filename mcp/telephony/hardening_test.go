@@ -76,7 +76,7 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 			t.Fatalf("carrier route %s must be public at the SDK layer", pattern)
 		}
 	}
-	if public["/calls"] || public["/calls/"] {
+	if public["/calls"] || public["/calls/"] || public["/numbers/"] {
 		t.Fatal("panel routes must retain app-token authentication")
 	}
 	manifest := (&App{}).Manifest()
