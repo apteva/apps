@@ -148,3 +148,26 @@ func deleteOwnedDerivationFiles(
 		deleted[f.ID] = struct{}{}
 	}
 }
+
+// deleteObsoleteDerivationFiles removes the previous generation after a
+// replacement set has been committed. Remote indexing uploads before Media
+// swaps its DB rows, and Storage can deduplicate identical bytes back to an
+// existing derivative ID. Such an ID belongs to both generations and must be
+// retained; deleting it would leave the freshly committed row dangling.
+func deleteObsoleteDerivationFiles(
+	ctx context.Context,
+	app *sdk.AppCtx,
+	sc *storageClient,
+	projectID string,
+	previous []DerivationRow,
+	keep map[string]struct{},
+) {
+	obsolete := make([]DerivationRow, 0, len(previous))
+	for _, d := range previous {
+		if _, ok := keep[d.StorageFileID]; ok {
+			continue
+		}
+		obsolete = append(obsolete, d)
+	}
+	deleteOwnedDerivationFiles(ctx, app, sc, projectID, obsolete)
+}

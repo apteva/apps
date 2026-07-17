@@ -260,7 +260,11 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 // source timestamp in ms for keyframes. The UNIQUE constraint moved
 // to (file_id, kind, position_ms) in 012_keyframes.sql so multiple
 // keyframe rows can coexist for one file.
-func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID int64, w, h int, positionMs int64) error {
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertDerivation(db sqlExecer, projectID, fileID, kind string, storageFileID int64, w, h int, positionMs int64) error {
 	_, err := db.Exec(`
 		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, width, height, position_ms, status, error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', '')
@@ -280,7 +284,7 @@ func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID 
 // upsertDerivationFailed records a terminal derivation attempt so
 // completion coordination can distinguish "still running" from
 // "attempted and failed".
-func upsertDerivationFailed(db *sql.DB, projectID, fileID, kind string, positionMs int64, cause error) error {
+func upsertDerivationFailed(db sqlExecer, projectID, fileID, kind string, positionMs int64, cause error) error {
 	msg := "derivation failed"
 	if cause != nil {
 		msg = cause.Error()
@@ -301,7 +305,7 @@ func upsertDerivationFailed(db *sql.DB, projectID, fileID, kind string, position
 	return err
 }
 
-func clearDerivations(db *sql.DB, projectID, fileID string) error {
+func clearDerivations(db sqlExecer, projectID, fileID string) error {
 	_, err := db.Exec(`DELETE FROM derivations WHERE project_id=? AND file_id=?`, projectID, fileID)
 	return err
 }

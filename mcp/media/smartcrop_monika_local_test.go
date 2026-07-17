@@ -174,6 +174,81 @@ func TestMonika9215ProductionSelectionsLocalRegression(t *testing.T) {
 	}
 }
 
+// TestMonika9215LatestProductionSelectionsLocalRegression covers the second
+// production extraction performed after Media 0.13.68 was installed. These
+// are the exact agent-selected frames and reel ranges, not hand-picked proxy
+// timestamps.
+func TestMonika9215LatestProductionSelectionsLocalRegression(t *testing.T) {
+	video := os.Getenv("MONIKA_9215_VIDEO")
+	if video == "" {
+		t.Skip("set MONIKA_9215_VIDEO to run the real-media regression")
+	}
+	assertFileSHA256(t, video, monika9215SHA256)
+
+	stillPositions := []int64{67_690, 160_000, 177_575, 194_209, 237_564}
+	stillRanges := map[int64][2]int{
+		67_690: {680, 820}, 160_000: {300, 620}, 177_575: {740, 900},
+		194_209: {1_240, 1_314}, 237_564: {700, 880},
+	}
+	stillXs := make(map[int64]int, len(stillPositions))
+	for _, focus := range stillPositions {
+		x := monika9215ProductionStillX(t, video, focus)
+		stillXs[focus] = x
+		want := stillRanges[focus]
+		if x < want[0] || x > want[1] {
+			t.Fatalf("latest production still focus=%d crop_x=%d outside [%d,%d]", focus, x, want[0], want[1])
+		}
+		t.Logf("latest production still focus=%d crop_x=%d", focus, x)
+	}
+
+	reels := []struct {
+		name       string
+		start, end int64
+	}{
+		{"relaxation-countdown-into-sleep", 40_274, 76_965},
+		{"first-trigger-response-and-confusion", 151_145, 182_055},
+		{"sustained-zombie-trigger-and-release", 184_215, 218_745},
+	}
+	paths := make(map[string][]cropPathPoint, len(reels))
+	for _, reel := range reels {
+		path := monika9215ProductionReelPath(t, video, reel.start, reel.end,
+			monika9215StoryboardPositions(reel.start, reel.end))
+		if len(path) < 2 {
+			t.Fatalf("%s: empty crop path", reel.name)
+		}
+		paths[reel.name] = path
+		t.Logf("latest production reel %s path=%v", reel.name, path)
+	}
+	if x := monika9215PathXAt(paths["first-trigger-response-and-confusion"], 161_145); x > 700 {
+		t.Fatalf("first trigger reel did not follow subject left at 161145ms: x=%d", x)
+	}
+	lastPath := paths["sustained-zombie-trigger-and-release"]
+	for at, want := range map[int64][2]int{189_215: {600, 900}, 204_215: {700, 950}} {
+		x := monika9215PathXAt(lastPath, at)
+		if x < want[0] || x > want[1] {
+			t.Fatalf("sustained trigger reel at %dms crop_x=%d outside [%d,%d]", at, x, want[0], want[1])
+		}
+	}
+
+	if outputDir := os.Getenv("MONIKA_9215_OUTPUT_DIR"); outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, focus := range stillPositions {
+			out := filepath.Join(outputDir, fmt.Sprintf("latest-production-still-%d.png", focus))
+			runFFmpeg(t, "-ss", secondsString(focus), "-i", video, "-frames:v", "1",
+				"-vf", fmt.Sprintf("crop=606:1076:%d:2", stillXs[focus]), "-y", out)
+		}
+		for _, reel := range reels {
+			out := filepath.Join(outputDir, "latest-"+reel.name+".mp4")
+			filter := "setpts=PTS-STARTPTS," + cropFilterForPath(606, 1076, 2, reel.start, paths[reel.name]) + ",scale=606:1076,setsar=1"
+			runFFmpeg(t, "-ss", secondsString(reel.start), "-i", video,
+				"-t", secondsString(reel.end-reel.start), "-vf", filter, "-an",
+				"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y", out)
+		}
+	}
+}
+
 func monika9215ProductionStillX(t *testing.T, video string, focus int64) int {
 	t.Helper()
 	positions := monika9215NearestStoryboardPositions(focus, 9)
@@ -288,6 +363,39 @@ func monika9215TrackedPath(t *testing.T, video string, start, end int64, storybo
 		path[i] = samples[i].point
 	}
 	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), 606, 1920)
+}
+
+func monika9215ProductionReelPath(t *testing.T, video string, start, end int64, storyboardPositions []int64) []cropPathPoint {
+	t.Helper()
+	samples, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
+		storyboardPositions, 1920, 1080, 606, 1076)
+	if err != nil {
+		t.Fatal(err)
+	}
+	markSmartCropSceneCuts(samples)
+	target := smartCropTarget{StartMs: start, EndMs: end}
+	if smartCropReelNeedsTracking(samples, 1920, 606) {
+		positions := smartCropAdaptiveTrackingPositions(samples, target, 298_200, 1920, 606)
+		extra, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
+			positions, 1920, 1080, 606, 1076)
+		if err != nil {
+			t.Fatal(err)
+		}
+		samples = mergeSmartCropSamples(samples, extra)
+		markSmartCropSceneCuts(samples)
+		refineSmartCropMotionSamples(samples, 1920, 606)
+	}
+	correctSmartCropReelTemporalOutliers(samples, 1920, 606)
+	refineSmartCropHeadSamples(samples, 1920, 606)
+	path := make([]cropPathPoint, len(samples))
+	for i := range samples {
+		path[i] = samples[i].point
+	}
+	path = stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), 606, 1920)
+	if x, ok := staticSmartCropPathX(path, 606); ok {
+		return []cropPathPoint{{AtMs: start, X: x}, {AtMs: end, X: x}}
+	}
+	return path
 }
 
 func monika9215StablePath(t *testing.T, video string, start, end int64, storyboardPositions []int64) []cropPathPoint {

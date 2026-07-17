@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -504,7 +505,18 @@ func tryRemoteIndex(
 		logger.Warn("remote index: upsert media", "file_id", fid, "err", err)
 		return false
 	}
-	clearExistingDerivations(ctx, app, sc, projectID, fid)
+	previousDerivations, err := listDerivations(app.AppDB(), projectID, fid)
+	if err != nil {
+		logger.Warn("remote index: list previous derivations", "file_id", fid, "err", err)
+		return false
+	}
+	if err := replaceRemoteDerivations(app.AppDB(), projectID, fid, probe,
+		thumbID, waveID, keyframes, toInt(thumbWidth), toInt(waveW), toInt(waveH)); err != nil {
+		logger.Warn("remote index: replace derivations", "file_id", fid, "err", err)
+		return false
+	}
+	deleteObsoleteDerivationFiles(ctx, app, sc, projectID, previousDerivations,
+		remoteDerivationStorageIDs(thumbID, waveID, keyframes))
 	logger.Info("indexed (remote)",
 		"file_id", fid, "host_id", hostID,
 		"duration_ms", probe.DurationMs,
@@ -520,29 +532,6 @@ func tryRemoteIndex(
 		"duration_ms": probe.DurationMs,
 		"executor":    "remote-instance",
 	})
-	if thumbID > 0 {
-		if err := upsertDerivation(app.AppDB(), projectID, fid, "thumbnail", thumbID, toInt(thumbWidth), 0, 0); err != nil {
-			logger.Warn("remote index: upsert thumbnail derivation", "err", err)
-		}
-	} else if probe.HasVideo || probe.IsImage {
-		_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, errors.New("remote index produced no thumbnail"))
-	}
-	if waveID > 0 {
-		if err := upsertDerivation(app.AppDB(), projectID, fid, "waveform", waveID, toInt(waveW), toInt(waveH), 0); err != nil {
-			logger.Warn("remote index: upsert waveform derivation", "err", err)
-		}
-	} else if probe.HasAudio && !probe.HasVideo {
-		_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, errors.New("remote index produced no waveform"))
-	}
-	// Keyframes (remote): upsert any keyframe rows the remote shell
-	// produced. The shell returns them as a JSON array
-	// [{position_ms, storage_file_id}, …] in the APTEVA_INDEX marker.
-	for _, k := range keyframes {
-		if err := upsertDerivation(app.AppDB(), projectID, fid, "keyframe", k.StorageFileID, toInt(thumbWidth), 0, k.PositionMs); err != nil {
-			logger.Warn("remote index: upsert keyframe derivation", "err", err, "position_ms", k.PositionMs)
-		}
-	}
-
 	// media.derived — same contract as the local path: fires after
 	// the indexer has finished derive work for this file, regardless
 	// of whether the transcriber/describer integrations are bound.
@@ -570,6 +559,66 @@ func tryRemoteIndex(
 	// Same tail-call as the local path — see comment there.
 	maybeEmitMediaCompleted(app, projectID, fid)
 	return true
+}
+
+func remoteDerivationStorageIDs(thumbID, waveID int64, keyframes []remoteKeyframe) map[string]struct{} {
+	ids := make(map[string]struct{}, len(keyframes)+2)
+	for _, id := range []int64{thumbID, waveID} {
+		if id > 0 {
+			ids[strconv.FormatInt(id, 10)] = struct{}{}
+		}
+	}
+	for _, keyframe := range keyframes {
+		if keyframe.StorageFileID > 0 {
+			ids[strconv.FormatInt(keyframe.StorageFileID, 10)] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// replaceRemoteDerivations swaps a complete remotely-produced generation in
+// one SQLite transaction. Readers therefore see either the previous complete
+// storyboard or the replacement, never an intermediate zero-keyframe state.
+func replaceRemoteDerivations(
+	db *sql.DB,
+	projectID, fileID string,
+	probe *Probe,
+	thumbID, waveID int64,
+	keyframes []remoteKeyframe,
+	thumbWidth, waveW, waveH int,
+) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := clearDerivations(tx, projectID, fileID); err != nil {
+		return err
+	}
+	if thumbID > 0 {
+		if err := upsertDerivation(tx, projectID, fileID, "thumbnail", thumbID, thumbWidth, 0, 0); err != nil {
+			return err
+		}
+	} else if probe.HasVideo || probe.IsImage {
+		if err := upsertDerivationFailed(tx, projectID, fileID, "thumbnail", 0, errors.New("remote index produced no thumbnail")); err != nil {
+			return err
+		}
+	}
+	if waveID > 0 {
+		if err := upsertDerivation(tx, projectID, fileID, "waveform", waveID, waveW, waveH, 0); err != nil {
+			return err
+		}
+	} else if probe.HasAudio && !probe.HasVideo {
+		if err := upsertDerivationFailed(tx, projectID, fileID, "waveform", 0, errors.New("remote index produced no waveform")); err != nil {
+			return err
+		}
+	}
+	for _, keyframe := range keyframes {
+		if err := upsertDerivation(tx, projectID, fileID, "keyframe", keyframe.StorageFileID, thumbWidth, 0, keyframe.PositionMs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // uploadAndRecord pushes the derivation file to storage and records
