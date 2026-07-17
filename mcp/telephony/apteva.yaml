@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.10
+version: 0.1.11
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -22,9 +22,14 @@ min_apteva_version: "0.25.12"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
     - platform.connections.execute        # invoke carrier API
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.realtime.spawn             # open realtime threads in core
+  apps:
+    - name: storage
+      version: ">=0.8.1"
+      reason: stores private durable copies of provider call recordings
   integrations:
     - role: carrier
       kind: integration
@@ -51,19 +56,28 @@ provides:
     - { prefix: /ui/ }
     - { prefix: /calls }
     - { prefix: /calls/ }
+    - { prefix: /recordings/ }
+    - { prefix: /recording-settings }
     - { prefix: /numbers/ }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
+    - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route. Args: route_id." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
+    - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
+    - { name: telephony_recording_get, description: "Get recording metadata and a private Storage playback URL. Args: recording_id." }
+    - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
+    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
     - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }

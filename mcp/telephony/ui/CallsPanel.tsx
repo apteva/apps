@@ -36,6 +36,12 @@ interface RawCall {
   project_id?: string;
   ErrorMessage?: string;
   error_message?: string;
+  RecordingMode?: string;
+  recording_mode?: string;
+  RecordingCount?: number;
+  recording_count?: number;
+  RecordingStatus?: string;
+  recording_status?: string;
 }
 
 interface Call {
@@ -52,6 +58,39 @@ interface Call {
   endedAt: string;
   projectId: string;
   errorMessage: string;
+  recordingMode: string;
+  recordingCount: number;
+  recordingStatus: string;
+}
+
+interface RecordingSettings {
+  default_mode: "off" | "always";
+  channels: "mono" | "dual";
+  storage_mode: "copy_to_storage" | "copy_then_delete_provider";
+  retention_days: number;
+  carrier: string;
+  recording_supported: boolean;
+}
+
+interface Recording {
+  id: string;
+  call_id: string;
+  provider: string;
+  provider_recording_id: string;
+  provider_status: string;
+  channels: number;
+  format: string;
+  duration_ms: number;
+  size_bytes: number;
+  storage_file_id: number;
+  storage_status: string;
+  import_attempts: number;
+  last_error: string;
+  provider_deleted: boolean;
+  retention_expires_at: string;
+  created_at: string;
+  stored_at: string;
+  playback_url?: string;
 }
 
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
@@ -72,6 +111,9 @@ function normalizeCall(row: RawCall): Call {
     endedAt: row.ended_at ?? row.EndedAt ?? "",
     projectId: row.project_id ?? row.ProjectID ?? "",
     errorMessage: row.error_message ?? row.ErrorMessage ?? "",
+    recordingMode: row.recording_mode ?? row.RecordingMode ?? "off",
+    recordingCount: row.recording_count ?? row.RecordingCount ?? 0,
+    recordingStatus: row.recording_status ?? row.RecordingStatus ?? "",
   };
 }
 
@@ -119,6 +161,18 @@ function compactId(value: string): string {
   return `${value.slice(0, 9)}...${value.slice(-6)}`;
 }
 
+function formatBytes(value: number): string {
+  if (!value) return "-";
+  if (value < 1024 * 1024) return `${Math.round(value / 1024)} KB`;
+  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDurationMS(value: number): string {
+  const seconds = Math.max(0, Math.round((value || 0) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
 function CallsView({ projectId }: NativePanelProps) {
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -126,6 +180,9 @@ function CallsView({ projectId }: NativePanelProps) {
   const [loading, setLoading] = useState(false);
   const [ending, setEnding] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [recordingSettings, setRecordingSettings] = useState<RecordingSettings | null>(null);
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [recordingBusy, setRecordingBusy] = useState("");
 
   const withProject = useCallback((path: string) => {
     if (!projectId) return `${API}${path}`;
@@ -152,7 +209,34 @@ function CallsView({ projectId }: NativePanelProps) {
     }
   }, [withProject]);
 
-  useEffect(() => { loadCalls(); }, [loadCalls]);
+  const loadRecordingSettings = useCallback(async () => {
+    try {
+      const res = await fetch(withProject("/recording-settings"), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      setRecordingSettings(await res.json() as RecordingSettings);
+    } catch (e) {
+      setStatus((e as Error).message || "Could not load recording settings");
+    }
+  }, [withProject]);
+
+  const loadRecordings = useCallback(async (callId: string) => {
+    if (!callId) {
+      setRecordings([]);
+      return;
+    }
+    try {
+      const path = `/recordings/?call_id=${encodeURIComponent(callId)}`;
+      const res = await fetch(withProject(path), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { recordings?: Recording[] };
+      setRecordings(data.recordings ?? []);
+    } catch (e) {
+      setRecordings([]);
+      setStatus((e as Error).message || "Could not load recordings");
+    }
+  }, [withProject]);
+
+  useEffect(() => { void Promise.all([loadCalls(), loadRecordingSettings()]); }, [loadCalls, loadRecordingSettings]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -168,6 +252,14 @@ function CallsView({ projectId }: NativePanelProps) {
     () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,
     [calls, selectedId],
   );
+
+  useEffect(() => { void loadRecordings(selected?.id ?? ""); }, [selected?.id, loadRecordings]);
+
+  useEffect(() => {
+    if (!selected?.id || selected.recordingMode !== "always") return;
+    const timer = window.setInterval(() => void loadRecordings(selected.id), 5000);
+    return () => window.clearInterval(timer);
+  }, [selected?.id, selected?.recordingMode, loadRecordings]);
 
   const activeCount = useMemo(
     () => calls.filter((call) => LIVE_STATUSES.has(call.status)).length,
@@ -194,6 +286,45 @@ function CallsView({ projectId }: NativePanelProps) {
     }
   };
 
+  const toggleFutureRecording = async () => {
+    if (!recordingSettings || !recordingSettings.recording_supported) return;
+    setRecordingBusy("settings");
+    try {
+      const next = recordingSettings.default_mode === "always" ? "off" : "always";
+      const res = await fetch(withProject("/recording-settings"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ default_mode: next }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setRecordingSettings(await res.json() as RecordingSettings);
+      setStatus(next === "always" ? "Future calls will be recorded" : "Future call recording disabled");
+    } catch (e) {
+      setStatus((e as Error).message || "Could not update recording settings");
+    } finally {
+      setRecordingBusy("");
+    }
+  };
+
+  const recordingAction = async (recording: Recording, action: "retry" | "delete") => {
+    if (action === "delete" && !window.confirm("Delete this recording from Storage and the carrier?")) return;
+    setRecordingBusy(recording.id);
+    try {
+      const res = await fetch(withProject(`/recordings/${encodeURIComponent(recording.id)}/${action}`), {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      await loadRecordings(recording.call_id);
+      setStatus(action === "delete" ? "Recording deleted" : "Recording import queued");
+    } catch (e) {
+      setStatus((e as Error).message || `Recording ${action} failed`);
+    } finally {
+      setRecordingBusy("");
+    }
+  };
+
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
@@ -204,6 +335,17 @@ function CallsView({ projectId }: NativePanelProps) {
           </p>
         </div>
         <div className="text-xs text-text-muted truncate max-w-[16rem]">{status}</div>
+        {recordingSettings ? (
+          <label className={`h-8 flex items-center gap-2 px-2 border border-border rounded text-xs ${recordingSettings.recording_supported ? "cursor-pointer" : "opacity-50"}`} title={recordingSettings.recording_supported ? `Record future ${recordingSettings.carrier} calls` : `Recording is not yet available for ${recordingSettings.carrier}`}>
+            <input
+              type="checkbox"
+              checked={recordingSettings.default_mode === "always"}
+              disabled={!recordingSettings.recording_supported || recordingBusy === "settings"}
+              onChange={() => void toggleFutureRecording()}
+            />
+            Record future calls
+          </label>
+        ) : null}
         <button
           type="button"
           onClick={loadCalls}
@@ -221,14 +363,15 @@ function CallsView({ projectId }: NativePanelProps) {
               No calls yet.
             </div>
           ) : (
-            <div className="min-w-[48rem]">
-              <div className="grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase tracking-normal text-text-dim">
+            <div className="min-w-[54rem]">
+              <div className="grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem_7rem] gap-3 px-4 py-2 border-b border-border text-[11px] uppercase tracking-normal text-text-dim">
                 <div>Status</div>
                 <div>To</div>
                 <div>From</div>
                 <div>Started</div>
                 <div>Duration</div>
                 <div>Voice</div>
+                <div>Recording</div>
               </div>
               {calls.map((call) => {
                 const picked = selected?.id === call.id;
@@ -237,7 +380,7 @@ function CallsView({ projectId }: NativePanelProps) {
                     key={call.id}
                     type="button"
                     onClick={() => setSelectedId(call.id)}
-                    className={`w-full grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem] gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
+                    className={`w-full grid grid-cols-[8rem_1fr_1fr_8rem_7rem_6rem_7rem] gap-3 px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/70 ${picked ? "bg-bg-muted" : ""}`}
                   >
                     <div>
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>
@@ -252,6 +395,9 @@ function CallsView({ projectId }: NativePanelProps) {
                     <div className="text-sm text-text-muted">{relative(call.placedAt, now) || "-"}</div>
                     <div className="text-sm tabular-nums">{duration(call, now) || "-"}</div>
                     <div className="truncate text-sm text-text-muted">{call.voice || "-"}</div>
+                    <div className="truncate text-sm text-text-muted">
+                      {call.recordingStatus === "stored" ? "Ready" : call.recordingStatus === "failed" ? "Failed" : call.recordingStatus ? "Processing" : call.recordingMode === "always" ? "Enabled" : "Off"}
+                    </div>
                   </button>
                 );
               })}
@@ -298,6 +444,50 @@ function CallsView({ projectId }: NativePanelProps) {
                 <dt className="text-text-dim">Call ID</dt>
                 <dd className="truncate font-mono text-xs">{selected.id}</dd>
               </dl>
+
+              <section className="border-t border-border pt-4">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold">Recordings</h3>
+                    <p className="text-xs text-text-muted">
+                      {selected.recordingMode === "always" ? "Captured by the carrier and persisted privately." : "Recording was not enabled for this call."}
+                    </p>
+                  </div>
+                  <button type="button" onClick={() => void loadRecordings(selected.id)} className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted">Refresh</button>
+                </div>
+                {recordings.length === 0 ? (
+                  <div className="py-4 text-sm text-text-muted">
+                    {selected.recordingMode === "always" && !TERMINAL_STATUSES.has(selected.status)
+                      ? "Recording is in progress."
+                      : selected.recordingMode === "always"
+                        ? "The carrier is still processing the recording."
+                        : "No recording."}
+                  </div>
+                ) : recordings.map((recording) => (
+                  <div key={recording.id} className="border-t border-border py-3 first:border-t-0 first:pt-0">
+                    <div className="flex items-start gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium">{recording.storage_status === "stored" ? "Ready" : recording.storage_status}</span>
+                          <span className="text-xs text-text-dim">{formatDurationMS(recording.duration_ms)} / {formatBytes(recording.size_bytes)} / {recording.channels} channel{recording.channels === 1 ? "" : "s"}</span>
+                        </div>
+                        <div className="mt-1 truncate font-mono text-[11px] text-text-dim">{recording.provider_recording_id}</div>
+                      </div>
+                      {recording.storage_status === "failed" || recording.storage_status === "pending" ? (
+                        <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "retry")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Retry</button>
+                      ) : null}
+                      <button type="button" disabled={recordingBusy === recording.id} onClick={() => void recordingAction(recording, "delete")} className="h-8 px-3 rounded border border-error/40 text-error text-xs disabled:opacity-50">Delete</button>
+                    </div>
+                    {recording.playback_url ? (
+                      <div className="mt-3 flex items-center gap-3">
+                        <audio src={recording.playback_url} controls preload="metadata" className="min-w-0 flex-1 h-9" />
+                        <a href={recording.playback_url} download className="text-xs text-accent hover:underline">Download</a>
+                      </div>
+                    ) : null}
+                    {recording.last_error ? <div className="mt-2 text-xs text-error whitespace-pre-wrap">{recording.last_error}</div> : null}
+                  </div>
+                ))}
+              </section>
 
               <div>
                 <div className="mb-2 text-xs font-medium text-text-muted">Directive</div>

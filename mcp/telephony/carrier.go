@@ -11,14 +11,16 @@ import (
 )
 
 type carrierPlaceRequest struct {
-	CallID         string
-	CallbackSecret string
-	ProjectID      string
-	To             string
-	From           string
-	TimeoutSec     int
-	MaxDurationSec int
-	AudioBridgeURL string
+	CallID            string
+	CallbackSecret    string
+	ProjectID         string
+	To                string
+	From              string
+	TimeoutSec        int
+	MaxDurationSec    int
+	AudioBridgeURL    string
+	RecordingMode     string
+	RecordingChannels string
 }
 
 type carrierPlaceResult struct {
@@ -98,6 +100,7 @@ func (c *twilioCarrier) Slug() string { return "twilio" }
 func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
 	twiml := c.app.twilioStreamTwiML(&callRow{
 		ID: req.CallID, CallbackSecret: req.CallbackSecret, ProjectID: req.ProjectID,
+		RecordingMode: req.RecordingMode, RecordingChannels: req.RecordingChannels,
 	})
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"To":             req.To,

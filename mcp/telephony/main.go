@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.10
+version: 0.1.11
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -57,9 +57,14 @@ min_apteva_version: "0.25.12"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
     - platform.connections.execute
     - platform.connections.read_credentials
     - platform.realtime.spawn
+  apps:
+    - name: storage
+      version: ">=0.8.1"
+      reason: stores private durable copies of provider call recordings
   integrations:
     - role: carrier
       kind: integration
@@ -84,6 +89,8 @@ provides:
     - { prefix: /ui/ }
     - { prefix: /calls }
     - { prefix: /calls/ }
+    - { prefix: /recordings/ }
+    - { prefix: /recording-settings }
     - { prefix: /numbers/ }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
@@ -91,12 +98,19 @@ provides:
     - { name: telephony_reject_call,  description: "Reject a pending inbound call." }
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
     - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
+    - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
     - { name: telephony_pending_calls, description: "List pending inbound calls." }
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
+    - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
+    - { name: telephony_recordings_list, description: "List call recordings." }
+    - { name: telephony_recording_get, description: "Get one recording and its private playback URL." }
+    - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
+    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
     - { name: telephony_addresses_list, description: "List provider addresses." }
@@ -142,6 +156,11 @@ const (
 	answerModeAgent             = "agent"
 	answerModeRealtimeImmediate = "realtime_immediate"
 	defaultInboundGreeting      = "Greet the caller naturally, introduce yourself, and ask how you can help."
+	recordingModeOff            = "off"
+	recordingModeAlways         = "always"
+	recordingModeInherit        = "inherit"
+	recordingStorageCopy        = "copy_to_storage"
+	recordingStorageMove        = "copy_then_delete_provider"
 )
 
 func main() { sdk.Run(&App{}) }
@@ -174,6 +193,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		time.Now().UTC().Add(20*time.Second).Format(time.RFC3339)); err != nil {
 		return fmt.Errorf("reset stale media claims: %w", err)
 	}
+	_, _ = ctx.AppDB().Exec(`UPDATE recordings SET storage_status = 'failed',
+        last_error = 'recording import interrupted by app restart', import_started_at = '',
+        next_attempt_at = ? WHERE storage_status = 'importing'`, time.Now().UTC().Format(time.RFC3339))
 	ctx.Logger().Info("telephony mounted")
 	return nil
 }
@@ -191,6 +213,11 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "call-lifecycle",
 			Schedule: "@every 5s",
 			Run:      a.runLifecycleTick,
+		},
+		{
+			Name:     "recording-import",
+			Schedule: "@every 5s",
+			Run:      a.runRecordingTick,
 		},
 	}
 }
@@ -211,6 +238,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Carrier status callbacks (initiated, ringing, in-progress, completed, ...).
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback, NoAuth: true},
 		{Pattern: "/webhook/stream/twilio/", Handler: a.handleTwilioStreamStatus, NoAuth: true},
+		{Pattern: "/webhook/recording/twilio/", Handler: a.handleTwilioRecordingStatus, NoAuth: true},
 		// Twilio inbound call control. The route id maps a phone number
 		// to the agent that should receive the incoming-call event.
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
@@ -219,6 +247,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
 		{Pattern: "/calls/", Handler: a.handleCallAction},
+		{Pattern: "/recordings/", Handler: a.handleRecordings},
+		{Pattern: "/recording-settings", Handler: a.handleRecordingSettings},
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
 	}
@@ -238,6 +268,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"directive":        map[string]any{"type": "string", "description": "System instructions the realtime model runs with. Should describe the persona, the goal of the call, and when to escalate to main via send(). Keep it short — 2-4 sentences."},
 				"voice":            map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
 				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
+				"recording":        map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Twilio only in this version."},
 				"timeout_sec":      map[string]any{"type": "integer", "description": "Ring timeout before giving up.", "default": 30, "minimum": 5, "maximum": 120},
 				"max_duration_sec": map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
 				"idempotency_key":  map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
@@ -260,6 +291,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"directive":        map[string]any{"type": "string", "description": "Required system directive when answer_mode is realtime_immediate."},
 				"voice":            map[string]any{"type": "string", "description": "Optional realtime voice for immediate answering."},
 				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the media bridge connects."},
+				"recording_mode":   map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}, "default": "inherit"},
 			}, nil),
 			HandlerCtx: a.toolRoutesCreate,
 		},
@@ -274,6 +306,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"greeting":    map[string]any{"type": "string"},
 			}, []string{"route_id", "answer_mode"}),
 			HandlerCtx: a.toolRoutesSetAnswerMode,
+		},
+		{
+			Name:        "telephony_routes_set_recording_policy",
+			Description: "Set recording behavior for future calls on an inbound route. Args: route_id, recording_mode (inherit|off|always). Twilio only in this version.",
+			InputSchema: schemaObject(map[string]any{
+				"route_id":       map[string]any{"type": "string"},
+				"recording_mode": map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}},
+			}, []string{"route_id", "recording_mode"}),
+			HandlerCtx: a.toolRouteRecordingPolicy,
 		},
 		{
 			Name:        "telephony_routes_configure_carrier",
@@ -336,6 +377,50 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List currently-ongoing calls with their thread IDs, durations, and statuses. Use sparingly — prefer reacting to send()/done() events.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			HandlerCtx:  a.toolActiveCalls,
+		},
+		{
+			Name:        "telephony_recording_settings_get",
+			Description: "Get recording defaults for future calls in this project.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolRecordingSettingsGet,
+		},
+		{
+			Name:        "telephony_recording_settings_set",
+			Description: "Set recording defaults for future calls. Recording is opt-in. Args: default_mode (off|always), channels (mono|dual), storage_mode (copy_to_storage|copy_then_delete_provider), retention_days (0 keeps indefinitely).",
+			InputSchema: schemaObject(map[string]any{
+				"default_mode":   map[string]any{"type": "string", "enum": []string{"off", "always"}},
+				"channels":       map[string]any{"type": "string", "enum": []string{"mono", "dual"}},
+				"storage_mode":   map[string]any{"type": "string", "enum": []string{"copy_to_storage", "copy_then_delete_provider"}},
+				"retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650},
+			}, nil),
+			HandlerCtx: a.toolRecordingSettingsSet,
+		},
+		{
+			Name:        "telephony_recordings_list",
+			Description: "List recordings in this project. Args: call_id?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"call_id": map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer", "minimum": 1, "maximum": 200},
+			}, nil),
+			HandlerCtx: a.toolRecordingsList,
+		},
+		{
+			Name:        "telephony_recording_get",
+			Description: "Get one recording with its private Storage playback URL. Args: recording_id.",
+			InputSchema: schemaObject(map[string]any{"recording_id": map[string]any{"type": "string"}}, []string{"recording_id"}),
+			HandlerCtx:  a.toolRecordingGet,
+		},
+		{
+			Name:        "telephony_recording_retry_import",
+			Description: "Retry a failed provider-to-Storage recording import. Args: recording_id.",
+			InputSchema: schemaObject(map[string]any{"recording_id": map[string]any{"type": "string"}}, []string{"recording_id"}),
+			HandlerCtx:  a.toolRecordingRetry,
+		},
+		{
+			Name:        "telephony_recording_delete",
+			Description: "Delete a recording from private Storage and its carrier. Args: recording_id.",
+			InputSchema: schemaObject(map[string]any{"recording_id": map[string]any{"type": "string"}}, []string{"recording_id"}),
+			HandlerCtx:  a.toolRecordingDelete,
 		},
 		{
 			Name: "telephony_numbers_search",
@@ -519,6 +604,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	timeout := intArg(args, "timeout_sec", 30)
 	maxDuration := intArg(args, "max_duration_sec", 3600)
 	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key", ""))
+	recordingOverride, hasRecordingOverride := args["recording"].(bool)
 
 	if !validE164(to) {
 		return mcpError("to must be a valid E.164 number (+ followed by 8-15 digits)"), nil
@@ -589,6 +675,21 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	if !validE164(from) {
 		return mcpError("carrier connection has no phone_number configured"), nil
 	}
+	recordingPolicy, err := a.db().recordingSettings(projectID)
+	if err != nil {
+		return mcpError("load recording settings: " + err.Error()), nil
+	}
+	recordingMode := recordingPolicy.DefaultMode
+	if hasRecordingOverride {
+		recordingMode = recordingModeOff
+		if recordingOverride {
+			recordingMode = recordingModeAlways
+		}
+	}
+	carrierSlug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	if recordingMode == recordingModeAlways && carrierSlug != "twilio" {
+		return mcpError("durable call recording is currently implemented for Twilio; disable recording or bind Twilio"), nil
+	}
 
 	callID := newCallID()
 	threadID := "tel-" + callID
@@ -623,38 +724,44 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	// the call, so the bridge route must already be able to resolve
 	// callID -> audio_bridge_url.
 	if err := a.db().insertCall(callRow{
-		ID:                  callID,
-		ThreadID:            threadID,
-		Direction:           "outbound",
-		AgentID:             agentID,
-		CarrierSlug:         carrier.Slug(),
-		CarrierConnectionID: bound.ConnectionID,
-		CallbackSecret:      callbackSecret,
-		ToNumber:            to,
-		FromNumber:          from,
-		Directive:           directive,
-		Voice:               voice,
-		AudioBridgeURL:      rt.AudioBridgeURL,
-		Status:              "initiated",
-		PlacedAt:            now.Format(time.RFC3339),
-		ProjectID:           projectID,
-		IdempotencyKey:      idempotencyKey,
-		StateExpiresAt:      now.Add(time.Duration(timeout+30) * time.Second).Format(time.RFC3339),
-		DeadlineAt:          now.Add(time.Duration(maxDuration) * time.Second).Format(time.RFC3339),
+		ID:                     callID,
+		ThreadID:               threadID,
+		Direction:              "outbound",
+		AgentID:                agentID,
+		CarrierSlug:            carrier.Slug(),
+		CarrierConnectionID:    bound.ConnectionID,
+		CallbackSecret:         callbackSecret,
+		ToNumber:               to,
+		FromNumber:             from,
+		Directive:              directive,
+		Voice:                  voice,
+		AudioBridgeURL:         rt.AudioBridgeURL,
+		Status:                 "initiated",
+		PlacedAt:               now.Format(time.RFC3339),
+		ProjectID:              projectID,
+		IdempotencyKey:         idempotencyKey,
+		StateExpiresAt:         now.Add(time.Duration(timeout+30) * time.Second).Format(time.RFC3339),
+		DeadlineAt:             now.Add(time.Duration(maxDuration) * time.Second).Format(time.RFC3339),
+		RecordingMode:          recordingMode,
+		RecordingChannels:      recordingPolicy.Channels,
+		RecordingStorageMode:   recordingPolicy.StorageMode,
+		RecordingRetentionDays: recordingPolicy.RetentionDays,
 	}); err != nil {
 		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
 		return mcpError("persist call before carrier placement: " + err.Error()), nil
 	}
 
 	placed, err := carrier.Place(ctx, carrierPlaceRequest{
-		CallID:         callID,
-		CallbackSecret: callbackSecret,
-		ProjectID:      projectID,
-		To:             to,
-		From:           from,
-		TimeoutSec:     timeout,
-		MaxDurationSec: maxDuration,
-		AudioBridgeURL: rt.AudioBridgeURL,
+		CallID:            callID,
+		CallbackSecret:    callbackSecret,
+		ProjectID:         projectID,
+		To:                to,
+		From:              from,
+		TimeoutSec:        timeout,
+		MaxDurationSec:    maxDuration,
+		AudioBridgeURL:    rt.AudioBridgeURL,
+		RecordingMode:     recordingMode,
+		RecordingChannels: recordingPolicy.Channels,
 	})
 	if err != nil {
 		_ = a.db().updateStatus(callID, "failed", err.Error())
@@ -819,6 +926,13 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
+	recordingMode, err := normalizeRouteRecordingMode(strArg(args, "recording_mode", recordingModeInherit))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	if recordingMode == recordingModeAlways && slug != "twilio" {
+		return mcpError("durable call recording is currently implemented for Twilio routes"), nil
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	route := routeRow{
 		ID:                  "route-" + newCallID(),
@@ -838,6 +952,7 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		Secret:              newSecret(),
 		CreatedAt:           now,
 		UpdatedAt:           now,
+		RecordingMode:       recordingMode,
 	}
 	if err := a.db().insertRoute(route); err != nil {
 		return mcpError("persist inbound route: " + err.Error()), nil
@@ -1665,26 +1780,41 @@ func (a *App) handleTwilioInboundStatus(w http.ResponseWriter, r *http.Request, 
 func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string) (*callRow, bool, error) {
 	callID := newCallID()
 	now := time.Now().UTC()
+	recordingPolicy, err := a.db().recordingSettings(route.ProjectID)
+	if err != nil {
+		return nil, false, err
+	}
+	recordingMode := recordingPolicy.DefaultMode
+	if route.RecordingMode != "" && route.RecordingMode != recordingModeInherit {
+		recordingMode = route.RecordingMode
+	}
+	if route.CarrierSlug != "twilio" {
+		recordingMode = recordingModeOff
+	}
 	call := callRow{
-		ID:                  callID,
-		ThreadID:            "pending-" + callID,
-		Direction:           "inbound",
-		AgentID:             route.AgentID,
-		RouteID:             route.ID,
-		CarrierSID:          carrierSID,
-		CarrierSlug:         route.CarrierSlug,
-		CarrierConnectionID: route.CarrierConnectionID,
-		CallbackSecret:      newSecret(),
-		ToNumber:            to,
-		FromNumber:          from,
-		Directive:           "inbound pending",
-		Voice:               "",
-		AudioBridgeURL:      "pending",
-		Status:              "pending",
-		PlacedAt:            now.Format(time.RFC3339),
-		ProjectID:           route.ProjectID,
-		StateExpiresAt:      now.Add(time.Duration(route.TimeoutSec) * time.Second).Format(time.RFC3339),
-		DeadlineAt:          now.Add(time.Hour).Format(time.RFC3339),
+		ID:                     callID,
+		ThreadID:               "pending-" + callID,
+		Direction:              "inbound",
+		AgentID:                route.AgentID,
+		RouteID:                route.ID,
+		CarrierSID:             carrierSID,
+		CarrierSlug:            route.CarrierSlug,
+		CarrierConnectionID:    route.CarrierConnectionID,
+		CallbackSecret:         newSecret(),
+		ToNumber:               to,
+		FromNumber:             from,
+		Directive:              "inbound pending",
+		Voice:                  "",
+		AudioBridgeURL:         "pending",
+		Status:                 "pending",
+		PlacedAt:               now.Format(time.RFC3339),
+		ProjectID:              route.ProjectID,
+		StateExpiresAt:         now.Add(time.Duration(route.TimeoutSec) * time.Second).Format(time.RFC3339),
+		DeadlineAt:             now.Add(time.Hour).Format(time.RFC3339),
+		RecordingMode:          recordingMode,
+		RecordingChannels:      recordingPolicy.Channels,
+		RecordingStorageMode:   recordingPolicy.StorageMode,
+		RecordingRetentionDays: recordingPolicy.RetentionDays,
 	}
 	msg := fmt.Sprintf(
 		"Incoming phone call. call_id=%s from=%s to=%s. To answer: call telephony_answer_call with call_id=%q and a directive for the realtime call thread. To decline: call telephony_reject_call with call_id=%q.",
@@ -1902,6 +2032,10 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
+		http.Error(w, "load recording summaries", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{"calls": callsPanelPublic(rows)})
 }
 
@@ -1993,8 +2127,23 @@ func (a *App) twilioStreamStatusURL(callID, secret, projectID string) string {
 	return a.publicAppURL() + "/webhook/stream/twilio/" + url.PathEscape(callID) + "?" + query
 }
 
+func (a *App) twilioRecordingStatusURL(callID, secret, projectID string) string {
+	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
+	return a.publicAppURL() + "/webhook/recording/twilio/" + url.PathEscape(callID) + "?" + query
+}
+
 func (a *App) twilioStreamTwiML(row *callRow) string {
-	return fmt.Sprintf(`<Response><Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect></Response>`,
+	recording := ""
+	if row.RecordingMode == recordingModeAlways {
+		channels := row.RecordingChannels
+		if channels != "mono" && channels != "dual" {
+			channels = "dual"
+		}
+		recording = fmt.Sprintf(`<Start><Recording name="call-%s" channels="%s" track="both" recordingStatusCallback="%s" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed absent"/></Start>`,
+			xmlEscape(row.ID), channels, xmlEscape(a.twilioRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
+	}
+	return fmt.Sprintf(`<Response>%s<Connect><Stream url="%s" statusCallback="%s" statusCallbackMethod="POST"/></Connect></Response>`,
+		recording,
 		xmlEscape(a.publicWSStreamURL("twilio", row.ID, row.CallbackSecret)),
 		xmlEscape(a.twilioStreamStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 }
@@ -2094,6 +2243,7 @@ func routePublic(a *App, r routeRow) map[string]any {
 		"directive":             r.AutoDirective,
 		"voice":                 r.AutoVoice,
 		"greeting":              r.AutoGreeting,
+		"recording_mode":        firstNonEmpty(r.RecordingMode, recordingModeInherit),
 		"created_at":            r.CreatedAt,
 		"updated_at":            r.UpdatedAt,
 	}
@@ -2103,18 +2253,20 @@ func callsPublic(rows []callRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, map[string]any{
-			"call_id":     r.ID,
-			"thread_id":   r.ThreadID,
-			"direction":   r.Direction,
-			"agent_id":    r.AgentID,
-			"route_id":    r.RouteID,
-			"carrier":     r.CarrierSlug,
-			"to":          r.ToNumber,
-			"from":        r.FromNumber,
-			"status":      r.Status,
-			"placed_at":   r.PlacedAt,
-			"answered_at": r.AnsweredAt,
-			"duration":    callDuration(r),
+			"call_id":        r.ID,
+			"thread_id":      r.ThreadID,
+			"direction":      r.Direction,
+			"agent_id":       r.AgentID,
+			"route_id":       r.RouteID,
+			"carrier":        r.CarrierSlug,
+			"to":             r.ToNumber,
+			"from":           r.FromNumber,
+			"status":         r.Status,
+			"placed_at":      r.PlacedAt,
+			"answered_at":    r.AnsweredAt,
+			"duration":       callDuration(r),
+			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
+			"recording_status": r.RecordingStatus,
 		})
 	}
 	return out
@@ -2129,6 +2281,8 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"directive": r.Directive, "voice": r.Voice, "status": r.Status,
 			"placed_at": r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"project_id": r.ProjectID, "error_message": r.ErrorMessage,
+			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
+			"recording_status": r.RecordingStatus,
 		})
 	}
 	return out
@@ -2373,30 +2527,37 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
-	ID                  string
-	ThreadID            string
-	Direction           string
-	AgentID             int64
-	RouteID             string
-	CarrierSID          string
-	CarrierRequestID    string
-	CarrierSlug         string
-	CarrierConnectionID int64
-	CallbackSecret      string
-	ToNumber            string
-	FromNumber          string
-	Directive           string
-	Voice               string
-	AudioBridgeURL      string
-	Status              string
-	PlacedAt            string
-	AnsweredAt          string
-	EndedAt             string
-	ProjectID           string
-	ErrorMessage        string
-	IdempotencyKey      string
-	StateExpiresAt      string
-	DeadlineAt          string
+	ID                     string
+	ThreadID               string
+	Direction              string
+	AgentID                int64
+	RouteID                string
+	CarrierSID             string
+	CarrierRequestID       string
+	CarrierSlug            string
+	CarrierConnectionID    int64
+	CallbackSecret         string
+	ToNumber               string
+	FromNumber             string
+	Directive              string
+	Voice                  string
+	AudioBridgeURL         string
+	Status                 string
+	PlacedAt               string
+	AnsweredAt             string
+	EndedAt                string
+	ProjectID              string
+	ErrorMessage           string
+	IdempotencyKey         string
+	StateExpiresAt         string
+	DeadlineAt             string
+	RecordingMode          string
+	RecordingChannels      string
+	RecordingStorageMode   string
+	RecordingRetentionDays int
+	RecordingCheckedAt     string
+	RecordingCount         int
+	RecordingStatus        string
 }
 
 type routeRow struct {
@@ -2419,6 +2580,7 @@ type routeRow struct {
 	PreviousStatusCallback string
 	CreatedAt              string
 	UpdatedAt              string
+	RecordingMode          string
 }
 
 type callsDB struct{ db *sql.DB }
@@ -2429,8 +2591,11 @@ const callSelectColumns = `id, thread_id,
     COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0), COALESCE(callback_secret,''),
     to_number, from_number, directive, voice, audio_bridge_url, status,
     placed_at, COALESCE(answered_at,''), COALESCE(ended_at,''),
-    project_id, COALESCE(error_message,''), COALESCE(idempotency_key,''),
-    COALESCE(state_expires_at,''), COALESCE(deadline_at,'')`
+	project_id, COALESCE(error_message,''), COALESCE(idempotency_key,''),
+	COALESCE(state_expires_at,''), COALESCE(deadline_at,''),
+	COALESCE(recording_mode,'off'), COALESCE(recording_channels,'dual'),
+	COALESCE(recording_storage_mode,'copy_to_storage'), COALESCE(recording_retention_days,0),
+	COALESCE(recording_checked_at,'')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -2440,7 +2605,9 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.CarrierSID, &r.CarrierRequestID, &r.CarrierSlug, &r.CarrierConnectionID, &r.CallbackSecret,
 		&r.ToNumber, &r.FromNumber, &r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 		&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage,
-		&r.IdempotencyKey, &r.StateExpiresAt, &r.DeadlineAt); err != nil {
+		&r.IdempotencyKey, &r.StateExpiresAt, &r.DeadlineAt, &r.RecordingMode,
+		&r.RecordingChannels, &r.RecordingStorageMode, &r.RecordingRetentionDays,
+		&r.RecordingCheckedAt); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -2451,12 +2618,15 @@ func (c *callsDB) insertCall(r callRow) error {
 	        (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_request_id,
 	         carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
 	         directive, voice, audio_bridge_url, status, placed_at, project_id,
-	         idempotency_key, state_expires_at, deadline_at)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         idempotency_key, state_expires_at, deadline_at, recording_mode,
+	         recording_channels, recording_storage_mode, recording_retention_days)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.Directive, r.Voice, r.AudioBridgeURL,
 		r.Status, r.PlacedAt, r.ProjectID, r.IdempotencyKey, r.StateExpiresAt, r.DeadlineAt,
+		firstNonEmpty(r.RecordingMode, recordingModeOff), firstNonEmpty(r.RecordingChannels, "dual"),
+		firstNonEmpty(r.RecordingStorageMode, recordingStorageCopy), r.RecordingRetentionDays,
 	)
 	return err
 }
@@ -2705,12 +2875,13 @@ func (c *callsDB) insertRoute(r routeRow) error {
 	_, err := c.db.Exec(`INSERT INTO inbound_routes
 	        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
 	         agent_id, enabled, hold_prompt, timeout_sec, answer_mode, auto_directive, auto_voice,
-	         auto_greeting, secret, previous_voice_url, previous_status_callback, created_at, updated_at)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         auto_greeting, secret, previous_voice_url, previous_status_callback, created_at, updated_at,
+	         recording_mode)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
 		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, firstNonEmpty(r.AnswerMode, answerModeAgent),
 		r.AutoDirective, r.AutoVoice, r.AutoGreeting, r.Secret, r.PreviousVoiceURL, r.PreviousStatusCallback,
-		r.CreatedAt, r.UpdatedAt,
+		r.CreatedAt, r.UpdatedAt, firstNonEmpty(r.RecordingMode, recordingModeInherit),
 	)
 	return err
 }
@@ -2720,14 +2891,15 @@ func (c *callsDB) findRoute(id string) (*routeRow, error) {
 	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec,
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
 	        COALESCE(auto_greeting,''), secret,
-	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at
+	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
+	        COALESCE(recording_mode,'inherit')
 	        FROM inbound_routes WHERE id = ?`, id)
 	var r routeRow
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
 		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 		&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
-		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -2756,7 +2928,8 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec,
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
 	        COALESCE(auto_greeting,''), secret,
-	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at
+	        COALESCE(previous_voice_url,''), COALESCE(previous_status_callback,''), created_at, updated_at,
+	        COALESCE(recording_mode,'inherit')
 	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
 	if err != nil {
 		return nil, err
@@ -2769,7 +2942,7 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
 			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec,
 			&r.AnswerMode, &r.AutoDirective, &r.AutoVoice, &r.AutoGreeting, &r.Secret,
-			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			&r.PreviousVoiceURL, &r.PreviousStatusCallback, &r.CreatedAt, &r.UpdatedAt, &r.RecordingMode); err != nil {
 			return nil, err
 		}
 		r.Enabled = enabled != 0

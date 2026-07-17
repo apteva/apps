@@ -146,12 +146,12 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 	for _, route := range routes {
 		public[route.Pattern] = route.NoAuth
 	}
-	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/webhook/stream/twilio/", "/inbound/twilio/", "/inbound/telnyx/"} {
+	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/webhook/stream/twilio/", "/webhook/recording/twilio/", "/inbound/twilio/", "/inbound/telnyx/"} {
 		if !public[pattern] {
 			t.Fatalf("carrier route %s must be public at the SDK layer", pattern)
 		}
 	}
-	if public["/calls"] || public["/calls/"] || public["/numbers/"] {
+	if public["/calls"] || public["/calls/"] || public["/recordings/"] || public["/recording-settings"] || public["/numbers/"] {
 		t.Fatal("panel routes must retain app-token authentication")
 	}
 	manifest := (&App{}).Manifest()

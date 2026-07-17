@@ -41,12 +41,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string) (*cal
         (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_request_id,
          carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
          directive, voice, audio_bridge_url, status, placed_at, project_id,
-         idempotency_key, state_expires_at, deadline_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	         idempotency_key, state_expires_at, deadline_at, recording_mode,
+	         recording_channels, recording_storage_mode, recording_retention_days)
+	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
 		call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
-		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt)
+		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
+		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
+		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays)
 	if err != nil {
 		return nil, false, err
 	}
@@ -217,7 +220,8 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
         SELECT id FROM calls WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
     )`, project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
 	_, _ = ctx.AppDB().Exec(`DELETE FROM calls
-        WHERE project_id = ? AND ended_at <> '' AND ended_at < ?`,
+		WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
+		  AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id AND r.deleted_at = '')`,
 		project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
 	return nil
 }
