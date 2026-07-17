@@ -1,7 +1,7 @@
 -- Storage v0.1.
 
 CREATE TABLE files (
-  id           INTEGER PRIMARY KEY,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   project_id   TEXT    NOT NULL,
 
   -- User-visible filename (e.g. "summary.pdf"). Just the basename;
