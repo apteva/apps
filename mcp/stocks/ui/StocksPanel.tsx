@@ -88,6 +88,10 @@ interface SyncStatus {
   with_fundamentals: number;
   fresh: number;
   last_batch?: number;
+  newest_refresh?: number;
+  batch_running?: boolean;
+  batch_total?: number;
+  batch_completed?: number;
   fundamentals_state: "ok" | "backoff" | "untried";
   fundamentals_retry_at?: number;
   target_freshness_seconds?: number;
@@ -115,7 +119,9 @@ interface ListResponse {
 }
 
 async function checkedJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, init);
+  // App routes are backed by their own TTL cache. The browser must always
+  // revalidate so live refresh progress and newly-landed rows are visible.
+  const response = await fetch(url, { cache: "no-store", ...init });
   const text = await response.text();
   let body: (T & { error?: string }) | null = null;
   try {
@@ -418,6 +424,7 @@ function List({ onOpen, watchlists, api, url, reloadWL }: {
     setFiltersOpen(false);
   };
   const shown = stocks;
+  const refreshVisibleStocks = useCallback(() => setReloadKey((v) => v + 1), []);
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -432,7 +439,7 @@ function List({ onOpen, watchlists, api, url, reloadWL }: {
         {loading && stocks.length > 0 && <span role="status" className="text-xs text-text-dim">Updating…</span>}
       </div>
 
-      <SyncBar url={url} />
+      <SyncBar url={url} onDataChanged={refreshVisibleStocks} />
 
       {watchlists.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -776,20 +783,59 @@ function Detail({ symbol, onBack, watchlists, api, url }: {
   );
 }
 
-// SyncBar — background-warming progress strip. Polls /status once a minute
-// while the tab is visible so
-// the operator can see the universe filling in (and whether the P/E feed
-// is live or throttled) rather than wondering why some rows are blank.
-function SyncBar({ url }: { url: (path: string, extra?: Record<string, string | number | boolean | undefined>) => string }) {
+// SyncBar — live stock-refresh progress. Poll quickly during an active batch
+// and refresh the visible rows whenever new market data lands.
+function SyncBar({ url, onDataChanged }: {
+  url: (path: string, extra?: Record<string, string | number | boolean | undefined>) => string;
+  onDataChanged: () => void;
+}) {
   const [s, setS] = useState<SyncStatus | null>(null);
+  const dataSignature = useRef<string | null>(null);
   useEffect(() => {
     let live = true;
-    const poll = () =>
-      checkedJSON<SyncStatus>(url("/status")).then((j) => { if (live) setS(j); }).catch(() => {});
+    let timer: number | undefined;
+    let polling = false;
+
+    const schedule = (delay: number) => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { void poll(); }, delay);
+    };
+    const poll = async () => {
+      if (!live || polling) return;
+      if (document.hidden) {
+        schedule(30000);
+        return;
+      }
+      polling = true;
+      try {
+        const next = await checkedJSON<SyncStatus>(url("/status"));
+        if (!live) return;
+        setS(next);
+        const signature = `${next.with_price}:${next.with_fundamentals}:${next.newest_refresh ?? 0}`;
+        if (dataSignature.current !== null && dataSignature.current !== signature) onDataChanged();
+        dataSignature.current = signature;
+        schedule(next.batch_running ? 3000 : next.with_price < next.universe ? 10000 : 60000);
+      } catch {
+        if (live) schedule(15000);
+      } finally {
+        polling = false;
+      }
+    };
+    const onVisibility = () => {
+      if (!document.hidden) {
+        if (timer !== undefined) window.clearTimeout(timer);
+        void poll();
+      }
+    };
+
     void poll();
-    const id = window.setInterval(() => { if (!document.hidden) void poll(); }, 60000);
-    return () => { live = false; clearInterval(id); };
-  }, [url]);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      live = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [url, onDataChanged]);
   if (!s || !s.universe) return null;
 
   const pct = Math.round((s.with_price / s.universe) * 100);
@@ -803,13 +849,16 @@ function SyncBar({ url }: { url: (path: string, extra?: Record<string, string | 
     <div className="mb-3 rounded-md border border-border bg-bg-card px-3 py-2">
       <div className="mb-1 flex flex-wrap items-center justify-between gap-x-3 text-xs text-text-muted">
         <span>
-          {synced ? "Universe covered" : "Warming universe…"}{" "}
-          <span className="tabular-nums text-text">{s.with_price.toLocaleString()}</span> / {s.universe.toLocaleString()} priced
-          {" · "}<span className="tabular-nums">{s.with_fundamentals.toLocaleString()}</span> with P/E
-          {" · "}<span className="tabular-nums">{s.fresh.toLocaleString()}</span> within target freshness
+          {synced ? "Stocks ready" : "Refreshing stocks…"}{" "}
+          <span className="tabular-nums text-text">{s.with_price.toLocaleString()}</span> / {s.universe.toLocaleString()} with price data
+          {" · "}<span className="tabular-nums">{s.with_fundamentals.toLocaleString()}</span> with P/E data
+          {" · "}<span className="tabular-nums">{s.fresh.toLocaleString()}</span> recently refreshed
         </span>
         <span className="text-text-dim">
-          {fund}{s.last_batch ? ` · batch started ${ago(s.last_batch)}` : ""}
+          {s.batch_running && s.batch_total
+            ? `Batch ${(s.batch_completed ?? 0).toLocaleString()} / ${s.batch_total.toLocaleString()} · `
+            : ""}
+          {fund}{s.newest_refresh ? ` · data updated ${ago(s.newest_refresh)}` : ""}
         </span>
       </div>
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-bg-hover">

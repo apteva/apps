@@ -289,6 +289,9 @@ func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
 	fState, retryAt := a.y.fundamentalsState()
 	a.warmMu.Lock()
 	last := a.lastWarm
+	running := a.warmRunning
+	total := a.warmTotal
+	completed := a.warmCompleted
 	a.warmMu.Unlock()
 
 	out := map[string]any{
@@ -303,6 +306,9 @@ func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
 		"fundamentals_state":       fState,
 		"fundamentals_retry_at":    retryAt,
 		"batch_size":               warmBatchSize,
+		"batch_running":            running,
+		"batch_total":              total,
+		"batch_completed":          completed,
 		"interval_seconds":         600,
 		"target_freshness_seconds": int64(a.coldTTL().Seconds()),
 	}
@@ -684,12 +690,25 @@ func (a *App) warmBatch(ctx context.Context) {
 		return
 	}
 	a.lastWarm = time.Now()
+	a.warmRunning = false
+	a.warmTotal = 0
+	a.warmCompleted = 0
 	a.warmMu.Unlock()
 
 	syms, err := a.st.warmCandidates(warmBatchSize, a.coldTTL(), hotTTL, hotWindow)
 	if err != nil || len(syms) == 0 {
 		return
 	}
+	a.warmMu.Lock()
+	a.warmRunning = true
+	a.warmTotal = len(syms)
+	a.warmMu.Unlock()
+	defer func() {
+		a.warmMu.Lock()
+		a.warmRunning = false
+		a.warmMu.Unlock()
+	}()
+
 	var wg sync.WaitGroup
 	for _, sym := range syms {
 		select {
@@ -708,6 +727,9 @@ func (a *App) warmBatch(ctx context.Context) {
 			}
 			defer func() { <-a.y.sem }()
 			a.warmOne(ctx, s)
+			a.warmMu.Lock()
+			a.warmCompleted++
+			a.warmMu.Unlock()
 		}(sym)
 	}
 	wg.Wait()
