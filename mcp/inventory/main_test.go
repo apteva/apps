@@ -24,6 +24,19 @@ func TestManifestParses(t *testing.T) {
 	if m.Name != "inventory" {
 		t.Fatalf("external manifest name = %q, want inventory", m.Name)
 	}
+	declared := map[string]bool{}
+	for _, tool := range m.Provides.MCPTools {
+		declared[tool.Name] = true
+	}
+	runtimeTools := (&App{}).MCPTools()
+	if len(runtimeTools) != len(declared) {
+		t.Fatalf("manifest declares %d tools but runtime exposes %d", len(declared), len(runtimeTools))
+	}
+	for _, tool := range runtimeTools {
+		if !declared[tool.Name] {
+			t.Errorf("runtime tool %q is missing from the manifest", tool.Name)
+		}
+	}
 }
 
 func TestReservationCommitLifecycle(t *testing.T) {
@@ -63,6 +76,9 @@ func TestReservationCommitLifecycle(t *testing.T) {
 	if _, err := finishReservation(db, pid, map[string]any{"reservation_id": res.ID}, "committed"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := finishReservation(db, pid, map[string]any{"reservation_id": res.ID}, "committed"); err != nil {
+		t.Fatalf("repeat commit should be idempotent: %v", err)
+	}
 	level, err = getOneLevel(db, pid, item.ID, loc.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +91,7 @@ func TestReservationCommitLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(movements) != 3 {
-		t.Fatalf("movement count = %d, want receive/reserve/commit", len(movements))
+		t.Fatalf("movement count = %d, want one receive/reserve/commit sequence", len(movements))
 	}
 }
 

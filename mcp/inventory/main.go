@@ -5,6 +5,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,66 +18,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: inventory
-display_name: Inventory
-version: 0.1.0
-description: Reusable stock ledger for Apteva apps.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions: [db.write.app]
-  apps:
-    - name: catalog
-      optional: true
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: inventory_locations_create, description: "Create a stock location." }
-    - { name: inventory_locations_list, description: "List stock locations." }
-    - { name: inventory_locations_get, description: "Fetch one location." }
-    - { name: inventory_locations_update, description: "Patch a location." }
-    - { name: inventory_items_create, description: "Create an inventory item/SKU." }
-    - { name: inventory_items_list, description: "List inventory items." }
-    - { name: inventory_items_get, description: "Fetch one item with levels and reservations." }
-    - { name: inventory_items_update, description: "Patch an inventory item." }
-    - { name: inventory_levels_get, description: "List stock levels." }
-    - { name: inventory_availability_check, description: "Check available quantity." }
-    - { name: inventory_adjust, description: "Adjust on-hand stock." }
-    - { name: inventory_receive, description: "Receive incoming stock." }
-    - { name: inventory_transfer, description: "Move stock between locations." }
-    - { name: inventory_reserve, description: "Reserve available stock." }
-    - { name: inventory_release_reservation, description: "Release a reservation." }
-    - { name: inventory_commit_reservation, description: "Commit a reservation." }
-    - { name: inventory_reservations_list, description: "List reservations." }
-    - { name: inventory_movements_list, description: "List movement audit rows." }
-  ui_panels:
-    - slot: project.page
-      label: Inventory
-      icon: warehouse
-      entry: /ui/InventoryPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/inventory
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/inventory.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 var globalCtx *sdk.AppCtx
 
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -813,6 +763,22 @@ func reserveStock(db *sql.DB, pid string, args map[string]any) (map[string]any, 
 }
 
 func finishReservation(db *sql.DB, pid string, args map[string]any, status string) (map[string]any, error) {
+	if reservationID := intArg(args, "reservation_id"); reservationID != 0 {
+		existing, err := getReservation(db, pid, reservationID)
+		if err != nil {
+			return nil, err
+		}
+		if existing == nil {
+			return nil, errors.New("reservation not found")
+		}
+		if existing.Status == status {
+			level, err := getOneLevel(db, pid, existing.ItemID, existing.LocationID)
+			return map[string]any{"reservation": existing, "level": level}, err
+		}
+		if existing.Status != "active" {
+			return nil, fmt.Errorf("reservation is already %s", existing.Status)
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err

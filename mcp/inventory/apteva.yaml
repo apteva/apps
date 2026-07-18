@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: inventory
 display_name: Inventory
-version: 0.1.0
+version: 0.1.1
 description: |
   Reusable stock ledger for Apteva apps. Tracks SKUs, locations,
   on-hand stock, reservations, transfers, adjustments, receipts, and
