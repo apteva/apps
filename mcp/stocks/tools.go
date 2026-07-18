@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"math"
@@ -24,11 +25,23 @@ import (
 // full S&P 1500 in a couple of hours. warmGuard stops a global install's
 // per-project worker dispatches from stacking batches.
 const (
-	warmBatchSize = 80               // ~160 Yahoo calls/batch — drains within the 10m tick at the rate limit
-	warmGuard     = 9 * time.Minute  // keep consecutive batches from overlapping
-	hotTTL        = 15 * time.Minute // recently-viewed symbols are re-warmed this often
-	hotWindow     = 24 * time.Hour   // "recently viewed" = opened within this window
+	warmBatchSize   = 80               // ~160 Yahoo calls/batch — drains within the 10m tick at the rate limit
+	warmGuard       = 9 * time.Minute  // keep consecutive batches from overlapping
+	hotTTL          = 15 * time.Minute // recently-viewed symbols are re-warmed this often
+	hotWindow       = 24 * time.Hour   // "recently viewed" = opened within this window
+	minColdTTL      = 4 * time.Hour    // 1509 symbols need just over 3h at the configured Yahoo budget
+	cacheRetention  = 30 * 24 * time.Hour
+	cacheMaxRows    = 20000
+	defaultListSize = 100
+	maxListSize     = 200
 )
+
+func (a *App) coldTTL() time.Duration {
+	if a.ttl > minColdTTL {
+		return a.ttl
+	}
+	return minColdTTL
+}
 
 // toolSearch matches the local universe first; if nothing matches and the
 // query looks like a single ticker, it tries Yahoo and auto-adds the
@@ -39,6 +52,9 @@ func (a *App) toolSearch(args map[string]any) (any, error) {
 		return nil, errors.New("query required")
 	}
 	limit := intArg(args, "limit", 20)
+	if limit <= 0 || limit > 50 {
+		limit = 50
+	}
 
 	rows, err := a.st.searchUniverse(q, limit)
 	if err != nil {
@@ -60,9 +76,17 @@ func (a *App) toolSearch(args map[string]any) (any, error) {
 // the snapshot fresh (the universe is too large to warm on every call).
 func (a *App) toolList(args map[string]any) (any, error) {
 	f := listFilter{
+		Query:  strArg(args, "query"),
 		Sector: strArg(args, "sector"),
 		Sort:   orStr(strArg(args, "sort"), "name"),
-		Limit:  intArg(args, "limit", 0), // 0 = the whole universe
+		Limit:  intArg(args, "limit", defaultListSize),
+		Offset: intArg(args, "offset", 0),
+	}
+	if f.Limit <= 0 || f.Limit > maxListSize {
+		f.Limit = defaultListSize
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
 	}
 	if v, ok := floatArg(args, "min_yield"); ok {
 		f.MinYield = &v
@@ -94,11 +118,39 @@ func (a *App) toolList(args map[string]any) (any, error) {
 	if v, ok := floatArg(args, "max_mcap"); ok {
 		f.MaxMcap = &v
 	}
+	total, err := a.st.countUniverse(f)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve the old search affordance in the paginated list endpoint: a
+	// ticker-shaped query that is not in the seed gets one Yahoo validation
+	// attempt, then participates in the same filters and pagination.
+	if total == 0 && looksLikeTicker(f.Query) {
+		if _, refreshErr := a.refresh(f.Query, false, false); refreshErr == nil {
+			total, err = a.st.countUniverse(f)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	rows, err := a.st.listUniverse(f)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"stocks": rows, "count": len(rows)}, nil
+	sectors, err := a.st.sectors()
+	if err != nil {
+		return nil, err
+	}
+	hasMore := f.Offset+len(rows) < total
+	var nextOffset any
+	if hasMore {
+		nextOffset = f.Offset + len(rows)
+	}
+	return map[string]any{
+		"stocks": rows, "count": len(rows), "total": total,
+		"offset": f.Offset, "limit": f.Limit, "has_more": hasMore,
+		"next_offset": nextOffset, "sectors": sectors,
+	}, nil
 }
 
 // toolGet returns one stock's full snapshot. TTL-cached as get:<symbol>.
@@ -108,7 +160,8 @@ func (a *App) toolGet(args map[string]any) (any, error) {
 		return nil, errors.New("symbol required")
 	}
 	_ = a.st.touch(sym) // mark hot so the warmer keeps it fresh in the list
-	if cached, ok := a.st.cacheGet("get:"+sym, a.ttl); ok {
+	force := boolArg(args, "refresh")
+	if cached, ok := a.st.cacheGet("get:"+sym, a.ttl); ok && !force {
 		return cached, nil
 	}
 
@@ -166,7 +219,8 @@ func (a *App) toolChart(args map[string]any) (any, error) {
 	rng := normalizeRange(strArg(args, "range"))
 	interval := normalizeInterval(strArg(args, "interval"))
 	key := "chart:" + sym + ":" + rng + ":" + interval
-	if cached, ok := a.st.cacheGet(key, a.ttl); ok {
+	force := boolArg(args, "refresh")
+	if cached, ok := a.st.cacheGet(key, a.ttl); ok && !force {
 		return cached, nil
 	}
 
@@ -194,7 +248,8 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 	}
 	_ = a.st.touch(sym)
 
-	if _, fresh := a.st.cacheGet("div:"+sym, a.ttl); !fresh {
+	force := boolArg(args, "refresh")
+	if _, fresh := a.st.cacheGet("div:"+sym, a.ttl); !fresh || force {
 		// Recent payments + an accurate price snapshot come from the 1y/1d
 		// path; the deep history comes from range=max. Run both so the
 		// summary is correct even when dividends is called in isolation
@@ -227,7 +282,7 @@ func (a *App) toolDividends(args map[string]any) (any, error) {
 // toolSyncStatus reports background-warming progress + the fundamentals
 // feed health, for the panel's sync strip and agent introspection.
 func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
-	st, err := a.st.stats(a.ttl)
+	st, err := a.st.stats(a.coldTTL())
 	if err != nil {
 		return nil, err
 	}
@@ -237,18 +292,19 @@ func (a *App) toolSyncStatus(_ map[string]any) (any, error) {
 	a.warmMu.Unlock()
 
 	out := map[string]any{
-		"universe":              st.Universe,
-		"warmed":                st.Warmed,
-		"with_price":            st.WithPrice,
-		"with_yield":            st.WithYield,
-		"with_fundamentals":     st.WithFundamentals,
-		"fresh":                 st.Fresh,
-		"oldest_refresh":        st.OldestRefresh,
-		"newest_refresh":        st.NewestRefresh,
-		"fundamentals_state":    fState,
-		"fundamentals_retry_at": retryAt,
-		"batch_size":            warmBatchSize,
-		"interval_seconds":      600,
+		"universe":                 st.Universe,
+		"warmed":                   st.Warmed,
+		"with_price":               st.WithPrice,
+		"with_yield":               st.WithYield,
+		"with_fundamentals":        st.WithFundamentals,
+		"fresh":                    st.Fresh,
+		"oldest_refresh":           st.OldestRefresh,
+		"newest_refresh":           st.NewestRefresh,
+		"fundamentals_state":       fState,
+		"fundamentals_retry_at":    retryAt,
+		"batch_size":               warmBatchSize,
+		"interval_seconds":         600,
+		"target_freshness_seconds": int64(a.coldTTL().Seconds()),
 	}
 	if !last.IsZero() {
 		u := last.Unix()
@@ -264,6 +320,7 @@ var errProjectRequired = errors.New("project_id required (pass _project_id on gl
 // watchlistRules is the saved filter blob (JSON) behind a dynamic
 // watchlist. No constraints = a pure-manual list.
 type watchlistRules struct {
+	Query     string   `json:"query,omitempty"`
 	Sector    string   `json:"sector,omitempty"`
 	MinYield  *float64 `json:"min_yield,omitempty"`
 	MaxYield  *float64 `json:"max_yield,omitempty"`
@@ -287,14 +344,15 @@ func parseRules(raw string) watchlistRules {
 }
 
 func (r watchlistRules) hasConstraints() bool {
-	return r.Sector != "" || r.MinYield != nil || r.MaxYield != nil ||
+	return r.Query != "" || r.Sector != "" || r.MinYield != nil || r.MaxYield != nil ||
 		r.MinPayout != nil || r.MaxPayout != nil || r.MinPE != nil || r.MaxPE != nil ||
 		r.MinGrowth != nil || r.MaxGrowth != nil || r.MinMcap != nil || r.MaxMcap != nil
 }
 
 func (r watchlistRules) toFilter() listFilter {
 	return listFilter{
-		Sector: r.Sector,
+		Query:    r.Query,
+		Sector:   r.Sector,
 		MinYield: r.MinYield, MaxYield: r.MaxYield,
 		MinPayout: r.MinPayout, MaxPayout: r.MaxPayout,
 		MinPE: r.MinPE, MaxPE: r.MaxPE,
@@ -399,10 +457,14 @@ func (a *App) toolWatchlistSave(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, errors.New("name required")
 	}
 	rules := "{}"
+	rulesProvided := false
 	if r, ok := args["rules"]; ok && r != nil {
-		if b, err := json.Marshal(r); err == nil {
-			rules = string(b)
+		b, err := json.Marshal(r)
+		if err != nil {
+			return nil, err
 		}
+		rules = string(b)
+		rulesProvided = true
 	}
 	if id := intArg(args, "id", 0); id > 0 {
 		w, err := a.st.watchlistByID(pid, int64(id))
@@ -411,6 +473,9 @@ func (a *App) toolWatchlistSave(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		if w == nil {
 			return nil, errors.New("watchlist not found")
+		}
+		if !rulesProvided {
+			rules = w.Rules
 		}
 		if err := a.st.watchlistUpdate(pid, int64(id), name, rules); err != nil {
 			return nil, err
@@ -434,6 +499,9 @@ func (a *App) toolWatchlistDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, errors.New("id required")
 	}
 	if err := a.st.watchlistDelete(pid, int64(id)); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("watchlist not found")
+		}
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
@@ -459,6 +527,18 @@ func (a *App) toolWatchlistMember(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	if w == nil {
 		return nil, errors.New("watchlist not found")
+	}
+	if state == "include" || state == "exclude" {
+		rows, searchErr := a.st.searchUniverse(sym, 1)
+		exact := searchErr == nil && len(rows) > 0 && rows[0].Symbol == sym
+		if searchErr != nil {
+			return nil, searchErr
+		}
+		if !exact {
+			if _, refreshErr := a.refresh(sym, false, false); refreshErr != nil {
+				return nil, refreshErr
+			}
+		}
 	}
 	switch state {
 	case "include", "exclude":
@@ -494,10 +574,31 @@ func (a *App) toolWatchlistGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	total := len(rows)
+	limit := intArg(args, "limit", defaultListSize)
+	if limit <= 0 || limit > maxListSize {
+		limit = defaultListSize
+	}
+	offset := intArg(args, "offset", 0)
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	page := rows[offset:end]
 	return map[string]any{
 		"watchlist": map[string]any{"id": w.ID, "name": w.Name, "rules": json.RawMessage(orStr(w.Rules, "{}"))},
-		"stocks":    rows,
-		"count":     len(rows),
+		"stocks":    page,
+		"count":     len(page),
+		"total":     total,
+		"offset":    offset,
+		"limit":     limit,
+		"has_more":  end < total,
 	}, nil
 }
 
@@ -514,33 +615,60 @@ func (a *App) toolWatchlistGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 // never touches the snapshot. saveDividends is an idempotent upsert, so
 // the DB ends up holding the union.
 func (a *App) refresh(symbol string, full, bg bool) (*chartResult, error) {
+	return a.refreshContext(context.Background(), symbol, full, bg)
+}
+
+func (a *App) refreshContext(ctx context.Context, symbol string, full, bg bool) (*chartResult, error) {
 	sym := strings.ToUpper(symbol)
+	key := sym + ":snapshot"
+	if full {
+		key = sym + ":history"
+	}
+	if bg {
+		key += ":background"
+	}
+	v, err, _ := a.refreshGroup.Do(key, func() (any, error) {
+		return a.refreshDirect(ctx, sym, full, bg)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*chartResult), nil
+}
+
+func (a *App) refreshDirect(ctx context.Context, sym string, full, bg bool) (*chartResult, error) {
 	rng, interval := "10y", "1d"
 	if full {
 		rng, interval = "max", "1mo"
 	}
-	res, err := a.y.fetchChart(sym, rng, interval, true, bg)
+	res, err := a.y.fetchChartContext(ctx, sym, rng, interval, true, bg)
 	if err != nil {
 		return nil, err
 	}
-	_ = a.st.ensureInstrument(sym, res.Meta.Name, res.Meta.Exchange, res.Meta.Currency)
-	_ = a.st.saveDividends(sym, res.Dividends)
+	if err := a.st.ensureInstrument(sym, res.Meta.Name, res.Meta.Exchange, res.Meta.Currency); err != nil {
+		return nil, err
+	}
+	if err := a.st.saveDividends(sym, res.Dividends); err != nil {
+		return nil, err
+	}
 
 	if !full && plausiblePrice(res) {
 		_, changePct := dayChange(res)
-		_ = a.st.updateSnapshot(sym, res.Meta.Price, changePct,
-			trailingYield(res.Dividends, res.Meta.Price), dividendCAGR5(res.Dividends))
+		if err := a.st.updateSnapshot(sym, res.Meta.Price, changePct,
+			trailingYield(res.Dividends, res.Meta.Price), dividendCAGR5(res.Dividends)); err != nil {
+			return nil, err
+		}
 	}
 	return res, nil
 }
 
 // warmOne refreshes a single symbol's price/yield/growth snapshot and its
 // P/E + payout fundamentals. Best-effort — partial failures are fine.
-func (a *App) warmOne(sym string) {
-	if _, err := a.refresh(sym, false, true); err != nil {
+func (a *App) warmOne(ctx context.Context, sym string) {
+	if _, err := a.refreshContext(ctx, sym, false, true); err != nil {
 		return
 	}
-	if pe, payout, mcap, err := a.y.fundamentals(sym, true); err == nil {
+	if pe, payout, mcap, err := a.y.fundamentalsContext(ctx, sym, true); err == nil {
 		_ = a.st.updateFundamentals(sym, pe, payout, mcap)
 	}
 }
@@ -558,7 +686,7 @@ func (a *App) warmBatch(ctx context.Context) {
 	a.lastWarm = time.Now()
 	a.warmMu.Unlock()
 
-	syms, err := a.st.warmCandidates(warmBatchSize, a.ttl, hotTTL, hotWindow)
+	syms, err := a.st.warmCandidates(warmBatchSize, a.coldTTL(), hotTTL, hotWindow)
 	if err != nil || len(syms) == 0 {
 		return
 	}
@@ -573,12 +701,17 @@ func (a *App) warmBatch(ctx context.Context) {
 		wg.Add(1)
 		go func(s string) {
 			defer wg.Done()
-			a.y.sem <- struct{}{}
+			select {
+			case a.y.sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			defer func() { <-a.y.sem }()
-			a.warmOne(s)
+			a.warmOne(ctx, s)
 		}(sym)
 	}
 	wg.Wait()
+	_ = a.st.cachePrune(cacheRetention, cacheMaxRows)
 }
 
 // snapshotPrice returns the last-warmed price for a symbol (0..1 element)
@@ -616,7 +749,8 @@ func trailingYield(divs []Dividend, price float64) *float64 {
 		}
 	}
 	if ttm == 0 {
-		return nil
+		zero := 0.0
+		return &zero
 	}
 	y := ttm / price * 100
 	// No real equity/ETF yield approaches this; a value above the guard

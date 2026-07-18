@@ -4,8 +4,11 @@ package main
 // network — the Yahoo client is exercised in integration runs, not here.
 
 import (
+	"context"
 	"database/sql"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +18,85 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+func TestYahooChartParsing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v8/finance/chart/AAPL" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("events") != "div" {
+			t.Error("events=div missing")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"chart":{"result":[{
+				"meta":{"symbol":"AAPL","currency":"USD","exchangeName":"NMS","instrumentType":"EQUITY","longName":"Apple Inc.","regularMarketPrice":210,"previousClose":208,"regularMarketDayHigh":212,"regularMarketDayLow":207,"regularMarketVolume":1234,"fiftyTwoWeekHigh":220,"fiftyTwoWeekLow":150},
+				"timestamp":[100,200,300],
+				"indicators":{"quote":[{"open":[198,null,208],"high":[202,null,212],"low":[197,null,207],"close":[200,null,210],"volume":[10,null,12]}]},
+				"events":{"dividends":{"one":{"amount":0.25,"date":150}}}
+			}],"error":null}
+		}`))
+	}))
+	defer server.Close()
+
+	y := newYahoo()
+	defer y.close()
+	y.base = server.URL
+	y.client = server.Client()
+	result, err := y.fetchChartContext(context.Background(), "aapl", "1y", "1d", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Meta.Name != "Apple Inc." || result.Meta.Price != 210 {
+		t.Fatalf("unexpected meta: %+v", result.Meta)
+	}
+	if len(result.Bars) != 2 || result.Bars[1].C != 210 {
+		t.Fatalf("null close row was not removed: %+v", result.Bars)
+	}
+	if len(result.Dividends) != 1 || result.Dividends[0].Amount != 0.25 {
+		t.Fatalf("unexpected dividends: %+v", result.Dividends)
+	}
+}
+
+func TestYahooFundamentalsScaling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"quoteSummary":{"result":[{"summaryDetail":{"trailingPE":{"raw":24.5},"payoutRatio":{"raw":0.42},"marketCap":{"raw":250000000000}}}]}}`))
+	}))
+	defer server.Close()
+	y := newYahoo()
+	defer y.close()
+	y.base = server.URL
+	y.client = server.Client()
+	pe, payout, mcap, status, err := y.fetchSummaryContext(context.Background(), "AAPL", "crumb", false)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("status=%d err=%v", status, err)
+	}
+	if pe == nil || *pe != 24.5 || payout == nil || *payout != 42 || mcap == nil || *mcap != 250 {
+		t.Fatalf("unexpected fundamentals pe=%v payout=%v mcap=%v", pe, payout, mcap)
+	}
+}
+
+func TestYahooChart429Backoff(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	y := newYahoo()
+	defer y.close()
+	y.base = server.URL
+	y.client = server.Client()
+	if _, err := y.fetchChart("AAPL", "1y", "1d", false, false); err == nil {
+		t.Fatal("first 429 should fail")
+	}
+	if _, err := y.fetchChart("AAPL", "1y", "1d", false, false); err == nil || !strings.Contains(err.Error(), "backing off") {
+		t.Fatalf("second call should use local backoff, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("backoff made %d upstream calls, want 1", calls)
+	}
+}
 
 func newTestStore(t *testing.T) *store {
 	t.Helper()
@@ -61,6 +143,9 @@ func TestEmbeddedManifest(t *testing.T) {
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("db block missing or wrong: %+v", m.DB)
+	}
+	if m.Version != "0.7.0" {
+		t.Fatalf("version = %q, want 0.7.0", m.Version)
 	}
 }
 
@@ -241,8 +326,84 @@ func TestTrailingYield(t *testing.T) {
 	if trailingYield(divs, 0) != nil {
 		t.Fatal("zero price → unknown yield")
 	}
-	if trailingYield(nil, 50) != nil {
-		t.Fatal("no dividends → unknown yield")
+	if y := trailingYield(nil, 50); y == nil || *y != 0 {
+		t.Fatalf("no dividends with a valid quote is a known 0%% yield, got %v", y)
+	}
+}
+
+func TestListPaginationAndStableSectors(t *testing.T) {
+	st := newTestStore(t)
+	a := &App{st: st}
+	firstAny, err := a.toolList(map[string]any{"limit": 25, "offset": 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstAny.(map[string]any)
+	if got := len(first["stocks"].([]instrumentRow)); got != 25 {
+		t.Fatalf("first page rows = %d, want 25", got)
+	}
+	total := first["total"].(int)
+	if total < 1000 || !first["has_more"].(bool) {
+		t.Fatalf("unexpected page metadata: total=%d has_more=%v", total, first["has_more"])
+	}
+	sectors := first["sectors"].([]string)
+	if len(sectors) < 5 {
+		t.Fatalf("stable sector metadata too short: %v", sectors)
+	}
+
+	secondAny, err := a.toolList(map[string]any{"query": "Apple", "limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondAny.(map[string]any)
+	if second["total"].(int) == 0 || !containsSym(second["stocks"].([]instrumentRow), "AAPL") {
+		t.Fatalf("query-aware list did not return AAPL: %+v", second)
+	}
+}
+
+func TestWatchlistRenamePreservesRules(t *testing.T) {
+	st := newTestStore(t)
+	a := &App{st: st}
+	id, err := st.watchlistCreate("proj1", "Income", `{"min_yield":3,"query":"KO"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.toolWatchlistSave(nil, map[string]any{
+		"project_id": "proj1", "id": int(id), "name": "Income renamed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.watchlistByID("proj1", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w == nil || w.Rules != `{"min_yield":3,"query":"KO"}` {
+		t.Fatalf("rename changed rules: %+v", w)
+	}
+}
+
+func TestCachePruneBoundsRows(t *testing.T) {
+	st := newTestStore(t)
+	now := time.Now().Unix()
+	for i := 0; i < 8; i++ {
+		fetched := now - int64(i)
+		if i == 7 {
+			fetched = now - int64((31 * 24 * time.Hour).Seconds())
+		}
+		if _, err := st.db.Exec(`INSERT INTO cache(key,json,fetched_at) VALUES(?,?,?)`,
+			"key-"+string(rune('a'+i)), `{}`, fetched); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.cachePrune(30*24*time.Hour, 3); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("cache rows = %d, want 3", count)
 	}
 }
 
@@ -343,6 +504,7 @@ func TestLiveFundamentals(t *testing.T) {
 		return *p
 	}
 	y := newYahoo()
+	defer y.close()
 	pe, payout, mcap, err := y.fundamentals("JNJ", false)
 	t.Logf("JNJ pe=%v payout=%v mcap(B)=%v err=%v", deref(pe), deref(payout), deref(mcap), err)
 	if err != nil {
