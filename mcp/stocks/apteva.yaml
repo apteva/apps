@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.7.0
+version: 0.7.1
 description: |
   Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
   universe (every Dividend Aristocrat and King included) by dividend
@@ -12,8 +12,8 @@ description: |
 
   All data is Yahoo's free public endpoints (no API key): /chart for
   prices + dividends, and the cookie+crumb quoteSummary handshake for P/E
-  and payout ratio. A rate-limited background worker keeps the universe
-  snapshot warm. Designed to be registered as the equity source behind
+  and payout ratio. A rate-limited background worker keeps stock data
+  refreshed. Designed to be registered as the equity source behind
   market-intel's gateway.
 
 author: Apteva

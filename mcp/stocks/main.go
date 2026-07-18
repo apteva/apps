@@ -32,7 +32,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.7.0
+version: 0.7.1
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -58,7 +58,7 @@ provides:
     - name: dividends
       description: "Dividend history + summary. Args: symbol, refresh?."
     - name: sync_status
-      description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health."
+      description: "Background stock-refresh progress, current batch progress, and fundamentals feed health."
     - name: watchlists_list
       description: "List saved watchlists (dynamic = rule-driven, manual = pinned)."
     - name: watchlist_save
@@ -105,10 +105,14 @@ type App struct {
 	ttl time.Duration
 
 	// warmMu/lastWarm gate the background warming worker so overlapping
-	// dispatches don't stack Yahoo traffic. See warmBatch.
-	warmMu     sync.Mutex
-	lastWarm   time.Time
-	warmCancel context.CancelFunc
+	// dispatches don't stack Yahoo traffic. The remaining fields expose
+	// live per-batch progress to the panel. See warmBatch.
+	warmMu        sync.Mutex
+	lastWarm      time.Time
+	warmRunning   bool
+	warmTotal     int
+	warmCompleted int
+	warmCancel    context.CancelFunc
 
 	refreshGroup singleflight.Group
 }
@@ -244,7 +248,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "sync_status",
-			Description: "Background-warming progress (how much of the universe has prices / yield / P-E) and the fundamentals feed health.",
+			Description: "Background stock-refresh progress, current batch progress, and fundamentals feed health.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolSyncStatus(args) },
 		},
@@ -445,6 +449,7 @@ func respond(w http.ResponseWriter, body any, err error) {
 
 func httpJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
