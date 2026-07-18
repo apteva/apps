@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.17
+version: 0.1.18
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
