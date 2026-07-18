@@ -144,8 +144,8 @@ func TestEmbeddedManifest(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("db block missing or wrong: %+v", m.DB)
 	}
-	if m.Version != "0.7.0" {
-		t.Fatalf("version = %q, want 0.7.0", m.Version)
+	if m.Version != "0.7.1" {
+		t.Fatalf("version = %q, want 0.7.1", m.Version)
 	}
 }
 
@@ -240,6 +240,32 @@ func TestStats(t *testing.T) {
 	}
 	if s1.NewestRefresh == nil {
 		t.Fatal("expected a newest_refresh timestamp")
+	}
+}
+
+func TestSyncStatusReportsLiveBatchProgress(t *testing.T) {
+	a := &App{st: newTestStore(t), y: newYahoo()}
+	t.Cleanup(a.y.close)
+	a.warmMu.Lock()
+	a.lastWarm = time.Now()
+	a.warmRunning = true
+	a.warmTotal = 80
+	a.warmCompleted = 17
+	a.warmMu.Unlock()
+
+	body, err := a.toolSyncStatus(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := body.(map[string]any)
+	if status["batch_running"] != true || status["batch_total"] != 80 || status["batch_completed"] != 17 {
+		t.Fatalf("unexpected batch progress: %+v", status)
+	}
+
+	recorder := httptest.NewRecorder()
+	a.handleStatus(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if got := recorder.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", got)
 	}
 }
 

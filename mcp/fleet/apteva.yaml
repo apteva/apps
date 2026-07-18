@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.21
+version: 0.8.22
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -147,9 +147,9 @@ provides:
     - name: fleet_tenant_backup_plan
       description: "Report backup coverage and Backup-app scope arguments for one tenant. Args: tenant_id."
     - name: fleet_tenant_snapshot
-      description: "Provider hook used by Backup. Stops a local tenant if needed, archives its full data dir plus metadata, restarts it, and returns archive_b64. Args: tenant_id or scope_id."
+      description: "Provider hook used by Backup. Streams a snapshot of one local tenant."
     - name: fleet_tenant_restore
-      description: "Provider hook used by Backup. Replaces a local tenant's data dir from archive_b64 and restarts it if it was running. Args: tenant_id or scope_id, archive_b64."
+      description: "Provider hook used by Backup. Streams and restores one local tenant snapshot."
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -165,7 +165,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.21
+    ref: fleet/v0.8.22
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

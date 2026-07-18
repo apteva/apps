@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -110,6 +112,63 @@ func TestGenerationCacheKeyChangesWithStorageFolder(t *testing.T) {
 	b := generationCacheKey(1, "image", "prompt", map[string]any{"storage_folder": "/b/"}, []int64{1}, nil)
 	if a == b {
 		t.Fatal("cache key must include storage_folder")
+	}
+}
+
+func TestWriteGenerationResultReturnsBadGatewayForRecordedFailure(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeGenerationResult(rec, map[string]any{
+		"asset": map[string]any{"id": 9, "status": "failed"},
+		"error": "provider rejected request",
+	}, nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	if !strings.Contains(rec.Body.String(), "provider rejected request") {
+		t.Fatalf("response did not preserve provider error: %s", rec.Body.String())
+	}
+}
+
+func TestMediaEventsCompleteAndFailQueuedAssets(t *testing.T) {
+	ctx := newPersonaCtx(t)
+	app := &App{}
+	p := mustPersona(t, app, ctx)
+	ready, err := app.insertAsset(ctx, "test-proj", p.ID, 0, "video", "queued", "ready prompt", "resolved", "venice-ai", "video-model", nil, nil, nil, "ready-cache", "", 0, 0, 71)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := app.insertAsset(ctx, "test-proj", p.ID, 0, "avatar", "queued", "failed prompt", "resolved", "heygen", "avatar-model", nil, nil, nil, "failed-cache", "", 0, 0, 72)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.handleMediaGenerated(ctx, sdk.Event{
+		ProjectID: "test-proj",
+		Data:      map[string]any{"job_id": 71, "generation_id": 801, "storage_id": 901},
+	}); err != nil {
+		t.Fatalf("complete event: %v", err)
+	}
+	if err := app.handleMediaFailed(ctx, sdk.Event{
+		ProjectID: "test-proj",
+		Data:      map[string]any{"job_id": 72, "error": "provider timeout"},
+	}); err != nil {
+		t.Fatalf("failed event: %v", err)
+	}
+	ready, err = getAsset(ctx.AppDB(), "test-proj", ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Status != "ready" || ready.StorageFileID != 901 || ready.MediaGenerationID != 801 || ready.MediaJobID != 71 {
+		t.Fatalf("completed asset not reconciled: %#v", ready)
+	}
+	failed, err = getAsset(ctx.AppDB(), "test-proj", failed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "failed" || failed.Error != "provider timeout" {
+		t.Fatalf("failed asset not reconciled: %#v", failed)
+	}
+	if _, ok := cachedAsset(ctx.AppDB(), "test-proj", "ready-cache"); !ok {
+		t.Fatal("completed async asset was not cached")
 	}
 }
 

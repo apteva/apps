@@ -1098,9 +1098,8 @@ func TestUnit_ScanFlightPrices_CapsMatrixAndRecords(t *testing.T) {
 	if len(obs) != 3 {
 		t.Fatalf("want 3 observations, got %d", len(obs))
 	}
-	priceEvents := rec.EventsByTopic("price_observations.created")
-	if len(priceEvents) != 1 {
-		t.Fatalf("want one aggregate price observation event, got %d", len(priceEvents))
+	if events := rec.EventsByTopic("price_observations.created"); len(events) != 1 {
+		t.Fatalf("want one aggregate price observation event, got %d", len(events))
 	}
 }
 
@@ -1124,28 +1123,118 @@ func TestUnit_AvailableConnections_FiltersByProvider(t *testing.T) {
 	}
 }
 
-func TestManifest_Valid(t *testing.T) {
+func TestUnit_UpdateClearsOptionalFieldsAndValidatesRelationships(t *testing.T) {
+	ctx, _ := newCtx(t)
 	app := &App{}
-	m := app.Manifest()
-	if m.Name != "trips" {
-		t.Errorf("manifest name=%q", m.Name)
+	tripAAny, err := app.toolTripsCreate(ctx, map[string]any{"name": "A", "notes": "remove me", "sync_calendar": false})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(m.Provides.Publishes) < 25 {
-		t.Errorf("expected published app-bus topics declared, got %d", len(m.Provides.Publishes))
+	tripBAny, err := app.toolTripsCreate(ctx, map[string]any{"name": "B", "sync_calendar": false})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(app.MCPTools()) < 20 {
-		t.Errorf("expected ≥20 tools, got %d", len(app.MCPTools()))
+	tripA := tripAAny.(Trip)
+	tripB := tripBAny.(Trip)
+	updatedAny, err := app.toolTripsUpdate(ctx, map[string]any{"id": float64(tripA.ID), "notes": "", "total_budget": nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := updatedAny.(Trip)
+	if updated.Notes != "" || updated.TotalBudget != nil {
+		t.Fatalf("optional values were not cleared: %+v", updated)
+	}
+
+	destAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(tripB.ID), "place_name": "Elsewhere"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := destAny.(Destination)
+	if _, err := app.toolTransportLegsAdd(ctx, map[string]any{
+		"trip_id": float64(tripA.ID), "kind": "flight", "to_destination_id": float64(dest.ID),
+	}); err == nil {
+		t.Fatal("expected cross-trip destination link to be rejected")
+	}
+	if _, err := app.toolTransportLegsAdd(ctx, map[string]any{
+		"trip_id": float64(tripA.ID), "kind": "flight",
+		"depart_at": "2026-07-20T12:00:00Z", "arrive_at": "2026-07-20T11:00:00Z",
+	}); err == nil {
+		t.Fatal("expected reversed transport dates to be rejected")
 	}
 }
 
-func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
+func TestUnit_BudgetSummaryKeepsForeignCurrenciesSeparate(t *testing.T) {
+	ctx, _ := newCtx(t)
+	app := &App{}
+	tripAny, err := app.toolTripsCreate(ctx, map[string]any{"name": "Currencies", "home_currency": "EUR", "sync_calendar": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip := tripAny.(Trip)
+	if _, err := app.toolTransportLegsAdd(ctx, map[string]any{
+		"trip_id": float64(trip.ID), "kind": "train", "currency": "EUR", "cost_estimated": float64(1000),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolActivitiesAdd(ctx, map[string]any{
+		"trip_id": float64(trip.ID), "name": "Tour", "currency": "JPY", "cost_estimated": float64(2500),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := computeBudgetSummary(ctx, trip.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalPlanned != 1000 {
+		t.Fatalf("home total should exclude foreign currency: %+v", summary)
+	}
+	if len(summary.OtherCurrencies) != 1 || summary.OtherCurrencies[0].Currency != "JPY" || summary.OtherCurrencies[0].Planned != 2500 {
+		t.Fatalf("foreign totals missing: %+v", summary.OtherCurrencies)
+	}
+}
+
+func TestUnit_PlacesBudgetStopsCallsAfterCap(t *testing.T) {
+	ctx, fake := newCtx(t)
+	app := &App{}
+	if _, err := app.toolSettingsSet(ctx, map[string]any{
+		"places_connection_id": float64(9), "daily_search_budget_cents": float64(1),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake.integResponses["autocomplete"] = map[string]any{"suggestions": []any{}}
+	if _, err := app.toolSearchPlaces(ctx, map[string]any{"query": "first", "kind": "destination"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSearchPlaces(ctx, map[string]any{"query": "second", "kind": "destination"}); err == nil {
+		t.Fatal("expected the second cache miss to exceed the daily Places budget")
+	}
+	fake.mu.Lock()
+	calls := len(fake.integCalls)
+	fake.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("budget guard should prevent provider call, got %d calls", calls)
+	}
+}
+
+func TestUnit_CacheKeyScopesConnectionAndRejectsBadExpiry(t *testing.T) {
+	ctx, _ := newCtx(t)
+	input := map[string]any{"query": "Paris"}
+	if cacheKey("google_places", 1, "autocomplete", input) == cacheKey("google_places", 2, "autocomplete", input) {
+		t.Fatal("cache key must include the integration connection")
+	}
+	key := "malformed-expiry"
+	if _, err := ctx.AppDB().Exec(`INSERT INTO search_cache(key,response,cached_at,expires_at) VALUES(?,?,CURRENT_TIMESTAMP,?)`, key, `{}`, "not-a-time"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cacheGet(ctx, key); ok {
+		t.Fatal("malformed cache expiry must be treated as a miss")
+	}
+}
+
+func TestUnit_AppBusEventsCoverCoreMutations(t *testing.T) {
 	ctx, _, rec := newCtxWithEmitter(t)
 	app := &App{}
-
-	tripAny, err := app.toolTripsCreate(ctx, map[string]any{
-		"name":          "Event trip",
-		"sync_calendar": false,
-	})
+	tripAny, err := app.toolTripsCreate(ctx, map[string]any{"name": "Events", "sync_calendar": false})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1153,57 +1242,53 @@ func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
 	if _, err := app.toolTripsUpdate(ctx, map[string]any{"id": float64(trip.ID), "notes": "updated"}); err != nil {
 		t.Fatal(err)
 	}
-
-	destAAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "place_name": "Paris"})
+	destAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "place_name": "Paris"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	destA := destAAny.(Destination)
+	dest := destAny.(Destination)
+	if _, err := app.toolDestinationsUpdate(ctx, map[string]any{"id": float64(dest.ID), "notes": "longer"}); err != nil {
+		t.Fatal(err)
+	}
 	destBAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "place_name": "Lyon"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	destB := destBAny.(Destination)
-	if _, err := app.toolDestinationsUpdate(ctx, map[string]any{"id": float64(destA.ID), "notes": "stay longer"}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.toolDestinationsReorder(ctx, map[string]any{"trip_id": float64(trip.ID), "order": []any{float64(destB.ID), float64(destA.ID)}}); err != nil {
+	if _, err := app.toolDestinationsReorder(ctx, map[string]any{"trip_id": float64(trip.ID), "order": []any{float64(destB.ID), float64(dest.ID)}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolDestinationsDelete(ctx, map[string]any{"id": float64(destB.ID)}); err != nil {
 		t.Fatal(err)
 	}
-
-	legAny, err := app.toolTransportLegsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "kind": "car"})
+	legAny, err := app.toolTransportLegsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "kind": "train"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	leg := legAny.(TransportLeg)
-	if _, err := app.toolTransportLegsUpdate(ctx, map[string]any{"id": float64(leg.ID), "provider": "Rental"}); err != nil {
+	if _, err := app.toolTransportLegsUpdate(ctx, map[string]any{"id": float64(leg.ID), "provider": "Rail"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.toolTransportLegsMarkBooked(ctx, map[string]any{"id": float64(leg.ID), "cost_actual": float64(1234)}); err != nil {
+	if _, err := app.toolTransportLegsMarkBooked(ctx, map[string]any{"id": float64(leg.ID)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolTransportLegsDelete(ctx, map[string]any{"id": float64(leg.ID)}); err != nil {
 		t.Fatal(err)
 	}
-
 	accAny, err := app.toolAccommodationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "name": "Hotel"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	acc := accAny.(Accommodation)
-	if _, err := app.toolAccommodationsUpdate(ctx, map[string]any{"id": float64(acc.ID), "notes": "quiet room"}); err != nil {
+	if _, err := app.toolAccommodationsUpdate(ctx, map[string]any{"id": float64(acc.ID), "notes": "quiet"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.toolAccommodationsMarkBooked(ctx, map[string]any{"id": float64(acc.ID), "cost_actual": float64(5000)}); err != nil {
+	if _, err := app.toolAccommodationsMarkBooked(ctx, map[string]any{"id": float64(acc.ID)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolAccommodationsDelete(ctx, map[string]any{"id": float64(acc.ID)}); err != nil {
 		t.Fatal(err)
 	}
-
 	actAny, err := app.toolActivitiesAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "name": "Museum"})
 	if err != nil {
 		t.Fatal(err)
@@ -1212,13 +1297,12 @@ func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
 	if _, err := app.toolActivitiesUpdate(ctx, map[string]any{"id": float64(act.ID), "notes": "morning"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.toolActivitiesMarkBooked(ctx, map[string]any{"id": float64(act.ID), "cost_actual": float64(1500)}); err != nil {
+	if _, err := app.toolActivitiesMarkBooked(ctx, map[string]any{"id": float64(act.ID)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolActivitiesDelete(ctx, map[string]any{"id": float64(act.ID)}); err != nil {
 		t.Fatal(err)
 	}
-
 	todoAny, err := app.toolTodosAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "label": "Pack"})
 	if err != nil {
 		t.Fatal(err)
@@ -1230,11 +1314,7 @@ func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
 	if _, err := app.toolTodosDelete(ctx, map[string]any{"id": float64(todo.ID)}); err != nil {
 		t.Fatal(err)
 	}
-
-	if _, err := app.toolBudgetSet(ctx, map[string]any{"trip_id": float64(trip.ID), "category": "transport", "amount": float64(10000)}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := app.toolBudgetSet(ctx, map[string]any{"trip_id": float64(trip.ID), "category": "transport", "amount": float64(0)}); err != nil {
+	if _, err := app.toolBudgetSet(ctx, map[string]any{"trip_id": float64(trip.ID), "category": "transport", "amount": float64(1000)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolSettingsSet(ctx, map[string]any{"home_airport": "BCN"}); err != nil {
@@ -1244,23 +1324,31 @@ func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := []string{
+	for _, topic := range []string{
 		"trip.created", "trip.updated", "trip.deleted",
 		"destination.created", "destination.added", "destination.updated", "destination.deleted", "destination.reordered",
 		"transport.created", "transport.added", "transport.updated", "transport.deleted", "transport.booked",
 		"accommodation.created", "accommodation.added", "accommodation.updated", "accommodation.deleted", "accommodation.booked",
 		"activity.created", "activity.added", "activity.updated", "activity.deleted", "activity.booked",
-		"todo.created", "todo.updated", "todo.deleted",
-		"budget.updated", "settings.updated",
-	}
-	got := map[string]bool{}
-	for _, ev := range rec.Events() {
-		got[ev.Topic] = true
-	}
-	for _, topic := range want {
-		if !got[topic] {
+		"todo.created", "todo.updated", "todo.deleted", "budget.updated", "settings.updated",
+	} {
+		if len(rec.EventsByTopic(topic)) == 0 {
 			t.Errorf("missing emitted topic %s", topic)
 		}
+	}
+}
+
+func TestManifest_Valid(t *testing.T) {
+	app := &App{}
+	m := app.Manifest()
+	if m.Name != "trips" {
+		t.Errorf("manifest name=%q", m.Name)
+	}
+	if len(m.Provides.Publishes) < 25 {
+		t.Errorf("expected published app-bus topics declared, got %d", len(m.Provides.Publishes))
+	}
+	if len(app.MCPTools()) < 20 {
+		t.Errorf("expected ≥20 tools, got %d", len(app.MCPTools()))
 	}
 }
 

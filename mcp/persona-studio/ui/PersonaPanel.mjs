@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/persona-studio";
 const MEDIA_API = "/api/apps/media-studio";
@@ -15,6 +15,38 @@ const IMAGE_FORMAT_PRESETS = [
 const VIDEO_ASPECTS = ["9:16", "16:9", "1:1", "4:3"];
 const IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
 const OUTPUT_FORMATS = ["png", "jpeg", "webp"];
+const PERSONA_PANEL_CSS = `
+  .persona-shell {
+    display: grid;
+    grid-template-columns: 18rem minmax(0, 1fr);
+  }
+  .persona-sidebar { width: auto; }
+  .persona-columns {
+    display: grid;
+    grid-template-columns: minmax(280px, 420px) minmax(0, 1fr);
+  }
+  @media (max-width: 1120px) {
+    .persona-columns { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 760px) {
+    .persona-shell {
+      display: block;
+      overflow: auto;
+    }
+    .persona-sidebar {
+      width: 100%;
+      max-height: 22rem;
+      border-right: 0;
+      border-bottom: 1px solid var(--border, var(--apteva-border, #333));
+    }
+    .persona-main {
+      min-height: 42rem;
+      overflow: visible;
+    }
+    .persona-columns { padding: 0.75rem; }
+    .persona-form-row { grid-template-columns: minmax(0, 1fr) !important; }
+  }
+`;
 const DEFAULT_COMPOSITION_JSON = `{
   "output": { "format": "mp3" },
   "tracks": [
@@ -43,6 +75,7 @@ export default function PersonaPanel({ projectId }) {
   const [bundle, setBundle] = useState(null);
   const [status, setStatus] = useState("");
   const [creating, setCreating] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [form, setForm] = useState({
     name: "",
     handle: "",
@@ -83,6 +116,10 @@ export default function PersonaPanel({ projectId }) {
     json: DEFAULT_COMPOSITION_JSON,
     render: false,
   });
+  const projectRef = useRef(projectId);
+  const selectedRef = useRef(selectedId);
+  projectRef.current = projectId;
+  selectedRef.current = selectedId;
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
   const persona = bundle?.persona;
@@ -92,6 +129,7 @@ export default function PersonaPanel({ projectId }) {
   const avatarRefs = refs.filter((r) => r.kind === "avatar");
   const assets = bundle?.assets || [];
   const compositions = bundle?.compositions || [];
+  const hasPendingAssets = assets.some((asset) => asset.status === "queued" || asset.status === "polling");
   const selectedItems = useMemo(
     () => items.filter((it) => generation.item_ids.includes(it.id)),
     [items, generation.item_ids]
@@ -113,7 +151,9 @@ export default function PersonaPanel({ projectId }) {
 
   const loadPersonas = useCallback(async () => {
     if (!projectId) return;
+    const requestedProject = projectId;
     const res = await fetch(`${API}/personas?${qs}`, { credentials: "same-origin" });
+    if (projectRef.current !== requestedProject) return;
     if (!res.ok) {
       setStatus(`Load personas: ${res.status}`);
       return;
@@ -121,16 +161,21 @@ export default function PersonaPanel({ projectId }) {
     const data = await res.json();
     const rows = data.personas || [];
     setPersonas(rows);
-    if (!selectedId && rows[0]) setSelectedId(rows[0].id);
-  }, [projectId, qs, selectedId]);
+    setSelectedId((current) => rows.some((row) => row.id === current) ? current : (rows[0]?.id || 0));
+    if (rows.length === 0) setBundle(null);
+  }, [projectId, qs]);
 
   const loadBundle = useCallback(async () => {
     if (!projectId || !selectedId) {
       setBundle(null);
       return;
     }
+    const requestedProject = projectId;
+    const requestedID = selectedId;
     const res = await fetch(`${API}/personas/${selectedId}?${qs}`, { credentials: "same-origin" });
+    if (projectRef.current !== requestedProject || selectedRef.current !== requestedID) return;
     if (!res.ok) {
+      setBundle(null);
       setStatus(`Load persona: ${res.status}`);
       return;
     }
@@ -138,11 +183,25 @@ export default function PersonaPanel({ projectId }) {
   }, [projectId, selectedId, qs]);
 
   useEffect(() => {
+    setPersonas([]);
+    setSelectedId(0);
+    setBundle(null);
+    setStatus("");
+    setGeneration((current) => ({ ...current, item_ids: [] }));
+  }, [projectId]);
+  useEffect(() => {
     loadPersonas().catch((e) => setStatus(e.message));
   }, [loadPersonas]);
   useEffect(() => {
     loadBundle().catch((e) => setStatus(e.message));
   }, [loadBundle]);
+  useEffect(() => {
+    if (!hasPendingAssets) return;
+    const timer = window.setInterval(() => {
+      loadBundle().catch((e) => setStatus(e.message));
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [hasPendingAssets, loadBundle]);
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
@@ -343,7 +402,7 @@ export default function PersonaPanel({ projectId }) {
 
   async function generateAsset(e) {
     e.preventDefault();
-    if (!selectedId || !generation.prompt.trim()) return;
+    if (!selectedId || !generation.prompt.trim() || generating) return;
     const settings = {};
     const selectedModelSupportsEdit = selectedModel
       ? modelSupportsImageEdit(selectedModel, mediaProvider)
@@ -378,6 +437,7 @@ export default function PersonaPanel({ projectId }) {
         settings.duration = Number(generation.duration);
       }
     }
+    setGenerating(true);
     try {
       setStatus("Generating...");
       const res = await post(`${API}/generate?${qs}`, {
@@ -388,11 +448,22 @@ export default function PersonaPanel({ projectId }) {
         settings,
         use_cache: true,
       });
-      setStatus(res.cached ? "Returned cached asset" : "Generated asset");
+      if (res.error || res.asset?.status === "failed") {
+        throw new Error(res.error || res.asset?.error || "Media generation failed");
+      }
+      const assetStatus = res.asset?.status;
+      setStatus(res.cached
+        ? "Returned cached asset"
+        : assetStatus === "queued" || assetStatus === "polling"
+          ? "Generation queued"
+          : "Generated asset");
       setGeneration((g) => ({ ...g, prompt: "" }));
-      loadBundle();
+      await loadBundle();
     } catch (e) {
-      setStatus(e.message);
+      setStatus(`Generation failed: ${e.message}`);
+      await loadBundle().catch(() => {});
+    } finally {
+      setGenerating(false);
     }
   }
 
@@ -489,8 +560,9 @@ export default function PersonaPanel({ projectId }) {
   const modelAspects = selectedModel?.aspect_ratios || [];
   const modelDurations = selectedModel?.durations || [];
 
-  return h("div", { className: "h-full w-full flex overflow-hidden bg-bg text-text" },
-    h("aside", { className: "w-72 border-r border-border flex flex-col min-w-0" },
+  return h("div", { className: "persona-shell h-full w-full overflow-hidden bg-bg text-text" },
+    h("style", null, PERSONA_PANEL_CSS),
+    h("aside", { className: "persona-sidebar border-r border-border flex flex-col min-w-0" },
       h("div", { className: "px-4 py-3 border-b border-border flex items-center gap-2" },
         h("div", { className: "font-semibold" }, "Personas"),
         h("span", { className: "ml-auto text-xs text-text-dim" }, `${personas.length}`)
@@ -526,16 +598,16 @@ export default function PersonaPanel({ projectId }) {
         }, creating ? "Creating..." : "Create")
       )
     ),
-    h("main", { className: "flex-1 min-w-0 flex flex-col overflow-hidden" },
+    h("main", { className: "persona-main min-w-0 flex flex-col overflow-hidden" },
       h("header", { className: "border-b border-border px-4 py-3 flex items-center gap-3" },
         h("div", { className: "min-w-0" },
           h("div", { className: "font-semibold truncate" }, persona?.name || "Persona Studio"),
           h("div", { className: "text-xs text-text-dim truncate" }, persona ? [persona.handle, persona.audience, persona.tone].filter(Boolean).join(" · ") || "Identity workspace" : "Reusable identity, items, media, and clips")
         ),
-        h("span", { className: "ml-auto text-xs text-text-dim" }, status)
+        h("span", { className: "ml-auto text-xs text-text-dim text-right", role: "status", "aria-live": "polite" }, status)
       ),
       persona
-        ? h("div", { className: "flex-1 overflow-auto p-4 grid gap-4", style: { gridTemplateColumns: "minmax(320px, 420px) minmax(420px, 1fr)" } },
+        ? h("div", { className: "persona-columns flex-1 overflow-auto p-4 gap-4" },
             h("section", { className: "flex flex-col gap-4 min-w-0" },
               panel("Identity", h("div", { className: "text-sm text-text-muted whitespace-pre-wrap" },
                 persona.bio || persona.visual_style || "Add bio, audience, tone, and style through the tools or API."
@@ -543,7 +615,7 @@ export default function PersonaPanel({ projectId }) {
               panel("Media Identity", h("div", { className: "grid gap-4" },
                 h("div", { className: "grid gap-2" },
                   h("label", { className: "text-xs uppercase text-text-dim" }, "Voice"),
-                  h("div", { className: "grid grid-cols-[1fr_76px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[1fr_76px] gap-2" },
                     h(MediaIdentityChooser, {
                       value: mediaIdentity.voice,
                       options: voiceOptions,
@@ -567,7 +639,7 @@ export default function PersonaPanel({ projectId }) {
                 ),
                 h("div", { className: "grid gap-2" },
                   h("label", { className: "text-xs uppercase text-text-dim" }, "Avatar"),
-                  h("div", { className: "grid grid-cols-[1fr_76px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[1fr_76px] gap-2" },
                     h(MediaIdentityChooser, {
                       value: mediaIdentity.avatar,
                       options: avatarOptions,
@@ -582,7 +654,7 @@ export default function PersonaPanel({ projectId }) {
                     }, "Save")
                   ),
                   avatarRefs.length > 0 && h("div", { className: "grid gap-2" },
-                    avatarRefs.map((r) => h("div", { key: r.id, className: "grid grid-cols-[1fr_auto] gap-2 items-center" },
+                    avatarRefs.map((r) => h("div", { key: r.id, className: "persona-form-row grid grid-cols-[1fr_auto] gap-2 items-center" },
                       h(StoragePreviewCard, {
                         id: r.storage_file_id,
                         title: r.label || "Avatar reference",
@@ -600,11 +672,11 @@ export default function PersonaPanel({ projectId }) {
               )),
               panel("References", h("div", null,
                 h("form", { onSubmit: addReference, className: "grid gap-2 mb-3" },
-                  h("div", { className: "grid grid-cols-[1fr_96px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[1fr_96px] gap-2" },
                     h("input", { value: reference.storage_file_id, onChange: (e) => setReference({ ...reference, storage_file_id: e.target.value }), placeholder: "Storage file id", className: fieldClass() }),
                     h("button", { type: "button", onClick: () => openStoragePicker("reference"), className: secondaryButtonClass() }, "Browse")
                   ),
-                  h("div", { className: "grid grid-cols-[120px_1fr_76px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[120px_1fr_76px] gap-2" },
                     h("select", { value: reference.kind, onChange: (e) => setReference({ ...reference, kind: e.target.value }), className: fieldClass() },
                       ["face", "style", "outfit", "pose", "voice", "avatar", "product", "location", "brand"].map((k) => h("option", { key: k, value: k }, k))
                     ),
@@ -620,7 +692,7 @@ export default function PersonaPanel({ projectId }) {
                   )
                 ),
                 refs.length === 0 ? empty("No references yet.") : h("div", { className: "grid gap-2" },
-                  refs.map((r) => h("div", { key: r.id, className: "grid grid-cols-[1fr_auto] gap-2 items-center" },
+                  refs.map((r) => h("div", { key: r.id, className: "persona-form-row grid grid-cols-[1fr_auto] gap-2 items-center" },
                     h(StoragePreviewCard, {
                       id: r.storage_file_id,
                       title: r.label || `${r.kind} reference`,
@@ -637,13 +709,13 @@ export default function PersonaPanel({ projectId }) {
               )),
               panel("Items", h("div", null,
                 h("form", { onSubmit: addItem, className: "grid gap-2 mb-3" },
-                  h("div", { className: "grid grid-cols-[1fr_120px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[1fr_120px] gap-2" },
                     h("input", { value: item.name, onChange: (e) => setItem({ ...item, name: e.target.value }), placeholder: "Item name", className: fieldClass() }),
                     h("select", { value: item.kind, onChange: (e) => setItem({ ...item, kind: e.target.value }), className: fieldClass() },
                       ["product", "wardrobe", "prop", "location", "brand_asset", "screen_asset", "set", "offer"].map((k) => h("option", { key: k, value: k }, k))
                     )
                   ),
-                  h("div", { className: "grid grid-cols-[1fr_96px] gap-2" },
+                  h("div", { className: "persona-form-row grid grid-cols-[1fr_96px] gap-2" },
                     h("input", { value: item.storage_file_ids, onChange: (e) => setItem({ ...item, storage_file_ids: e.target.value }), placeholder: "Storage ids, comma-separated", className: fieldClass() }),
                     h("button", { type: "button", onClick: () => openStoragePicker("item"), className: secondaryButtonClass() }, "Browse")
                   ),
@@ -682,7 +754,7 @@ export default function PersonaPanel({ projectId }) {
             h("section", { className: "flex flex-col gap-4 min-w-0" },
               panel("Generate With Persona", h("form", { onSubmit: generateAsset, className: "grid gap-3" },
                 h("div", { className: "text-xs text-text-muted" }, "Creates a new Media Studio asset using this persona's identity, references, selected items, style profile, and cache key."),
-                h("div", { className: "grid grid-cols-[150px_1fr] gap-2" },
+                h("div", { className: "persona-form-row grid grid-cols-[150px_1fr] gap-2" },
                   h("select", { value: generation.asset_type, onChange: (e) => setGeneration({ ...generation, asset_type: e.target.value }), className: fieldClass() },
                     ["image", "video", "audio_tts", "audio_sfx", "music", "avatar"].map((k) => h("option", { key: k, value: k }, k))
                   ),
@@ -764,7 +836,10 @@ export default function PersonaPanel({ projectId }) {
                   )
                 ),
                 h("textarea", { value: generation.prompt, onChange: (e) => setGeneration({ ...generation, prompt: e.target.value }), placeholder: "Prompt for this persona...", className: `${fieldClass()} min-h-[86px]` }),
-                h("button", { className: buttonClass(), disabled: !generation.prompt.trim() }, "Generate")
+                h("button", {
+                  className: buttonClass(),
+                  disabled: generating || !generation.prompt.trim(),
+                }, generating ? "Generating..." : "Generate")
               )),
               panel("Compositions", h("div", { className: "grid gap-3" },
                 h("form", { onSubmit: createComposition, className: "grid gap-2" },
@@ -837,12 +912,16 @@ export default function PersonaPanel({ projectId }) {
               )),
               panel("Recent Assets", h("div", { className: "grid gap-2" },
                 assets.length === 0 ? empty("No generated assets yet.") : assets.map((a) =>
-                  h("div", { key: a.id, className: "border border-border rounded p-3" },
+                  h("div", { key: a.id, className: `border rounded p-3 ${a.status === "failed" ? "border-red-500/60" : "border-border"}` },
                     h("div", { className: "flex gap-2 text-sm" },
                       h("span", { className: "font-medium" }, a.asset_type),
-                      h("span", { className: "text-text-dim" }, a.status),
+                      h("span", { className: a.status === "failed" ? "text-red-400" : "text-text-dim" }, a.status),
                       a.storage_file_id ? h("a", { href: `/api/apps/storage/files/${a.storage_file_id}/content`, target: "_blank", rel: "noopener", className: "ml-auto text-accent hover:underline" }, `storage:${a.storage_file_id}`) : null
                     ),
+                    a.error ? h("div", { className: "text-xs text-red-400 mt-2 whitespace-pre-wrap" }, a.error) : null,
+                    (a.status === "queued" || a.status === "polling")
+                      ? h("div", { className: "text-xs text-text-dim mt-2" }, "Processing in Media Studio...")
+                      : null,
                     h(AssetStoragePreview, { asset: a }),
                     h("div", { className: "text-xs text-text-muted mt-1 line-clamp-2" }, a.prompt),
                     h("div", { className: "text-[11px] text-text-dim mt-1" }, [a.provider_slug, a.provider_model, new Date(a.created_at).toLocaleString()].filter(Boolean).join(" · "))
@@ -1262,7 +1341,7 @@ function StoragePicker({ files, loading, error, query, target, onQuery, onSearch
           e.preventDefault();
           onSearch();
         },
-        className: "px-4 py-3 border-b border-border grid grid-cols-[1fr_88px] gap-2"
+        className: "persona-form-row px-4 py-3 border-b border-border grid grid-cols-[1fr_88px] gap-2"
       },
         h("input", { value: query, onChange: (e) => onQuery(e.target.value), placeholder: "Search storage...", className: fieldClass() }),
         h("button", { className: secondaryButtonClass() }, "Search")

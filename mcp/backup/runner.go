@@ -20,16 +20,19 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -57,10 +60,27 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		return nil, err
 	}
 	run.ID = id
-
-	finish := func(status, errMsg string, bytes int64, sha, key, manifestJSON string) (*Run, error) {
-		_ = dbFinishRun(ctx.AppDB(), id, status, bytes, sha, key, manifestJSON, errMsg)
+	lockKey := fmt.Sprintf("%d:%s", dest.ID, storagePrefix(scope, run.PolicyID))
+	if !acquireBackupRun(lockKey) {
+		msg := "another backup is already running for this destination and scope"
+		_ = dbFinishRun(ctx.AppDB(), id, "failed", 0, "", "", "", msg, false)
 		out, _ := dbGetRun(ctx.AppDB(), id)
+		return out, errors.New(msg)
+	}
+	defer releaseBackupRun(lockKey)
+
+	finish := func(status, errMsg string, bytes int64, sha, key, manifestJSON string, encrypted bool) (*Run, error) {
+		if err := dbFinishRun(ctx.AppDB(), id, status, bytes, sha, key, manifestJSON, errMsg, encrypted); err != nil {
+			return nil, fmt.Errorf("record backup result: %w", err)
+		}
+		out, err := dbGetRun(ctx.AppDB(), id)
+		if err != nil {
+			return nil, err
+		}
+		ctx.Emit("run."+status, map[string]any{"run_id": id, "destination_id": dest.ID, "scope": scope})
+		if status == "failed" {
+			return out, errors.New(errMsg)
+		}
 		return out, nil
 	}
 
@@ -68,13 +88,13 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	// don't waste a snapshot.
 	writer, err := openDestination(dest, ctx, defaultLocalBackupDir(ctx))
 	if err != nil {
-		return finish("failed", "open destination: "+err.Error(), 0, "", "", "")
+		return finish("failed", "open destination: "+err.Error(), 0, "", "", "", false)
 	}
 
 	// 2) Stream snapshot to a temp file, hashing as we go.
 	tmp, err := os.CreateTemp("", "apteva-snapshot-*.tar.gz")
 	if err != nil {
-		return finish("failed", "tempfile: "+err.Error(), 0, "", "", "")
+		return finish("failed", "tempfile: "+err.Error(), 0, "", "", "", false)
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
@@ -85,7 +105,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		err = errClose
 	}
 	if err != nil {
-		return finish("failed", "stream snapshot: "+err.Error(), 0, "", "", "")
+		return finish("failed", "stream snapshot: "+err.Error(), 0, "", "", "", false)
 	}
 	sha := hex.EncodeToString(hash.Sum(nil))
 
@@ -96,36 +116,51 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		manifestJSON = providerManifest
 	}
 
-	// 4) Upload.
-	key := buildRemoteKey(dest, run.StartedAt)
-	if key == "" {
-		key = "apteva-snapshot-" + time.Now().UTC().Format("20060102-150405") + ".tar.gz"
-	}
-	src, err := os.Open(tmpPath)
+	// 4) Encrypt when configured, then upload exactly those stored bytes.
+	uploadPath, uploadSize, sha, encrypted, cleanupEncrypted, err := prepareStoredSnapshot(ctx, tmpPath, written, sha)
+	defer cleanupEncrypted()
 	if err != nil {
-		return finish("failed", "reopen tempfile: "+err.Error(), 0, "", "", "")
+		return finish("failed", "encrypt snapshot: "+err.Error(), 0, "", "", manifestJSON, false)
 	}
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	key := buildRemoteKey(run, encrypted)
+	src, err := os.Open(uploadPath)
+	if err != nil {
+		return finish("failed", "reopen tempfile: "+err.Error(), 0, "", "", manifestJSON, encrypted)
+	}
+	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 	defer cancel()
-	if err := writer.Put(uploadCtx, key, src, written); err != nil {
+	if err := writer.Put(uploadCtx, key, src, uploadSize); err != nil {
 		_ = src.Close()
-		return finish("failed", "upload: "+err.Error(), written, sha, "", manifestJSON)
+		return finish("failed", "upload: "+err.Error(), uploadSize, sha, "", manifestJSON, encrypted)
 	}
 	_ = src.Close()
 
 	// 5) Success — record the row.
-	_, _ = finish("success", "", written, sha, key, manifestJSON)
+	successful, err := finish("success", "", uploadSize, sha, key, manifestJSON, encrypted)
+	if err != nil {
+		_ = writer.Delete(uploadCtx, key)
+		return nil, err
+	}
 
 	// 6) Retention prune. Best-effort; failures here don't taint the
 	// successful run.
 	if policy != nil && policy.RetentionKeep > 0 {
-		if err := pruneRetention(uploadCtx, ctx, writer, dest, policy.RetentionKeep); err != nil {
+		if err := pruneRetention(uploadCtx, ctx, writer, dest, policy); err != nil {
 			ctx.Logger().Warn("retention prune failed",
 				"destination", dest.Name, "err", err.Error())
 		}
 	}
-	return dbGetRun(ctx.AppDB(), id)
+	return successful, nil
 }
+
+var activeBackupRuns sync.Map
+
+func acquireBackupRun(key string) bool {
+	_, loaded := activeBackupRuns.LoadOrStore(key, struct{}{})
+	return !loaded
+}
+
+func releaseBackupRun(key string) { activeBackupRuns.Delete(key) }
 
 // streamSnapshot copies /api/platform/snapshot into dst. Returns the
 // number of bytes written. Auth uses the install's APTEVA_APP_TOKEN —
@@ -167,7 +202,7 @@ func writeSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, 
 }
 
 type providerSnapshotResponse struct {
-	ArchiveB64 string          `json:"archive_b64"`
+	ArchiveURL string          `json:"archive_url"`
 	Manifest   json.RawMessage `json:"manifest"`
 }
 
@@ -180,8 +215,9 @@ func streamProviderSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64,
 		return 0, "", err
 	}
 	args := map[string]any{
-		"scope_kind": scope.Kind,
-		"scope_id":   scope.ID,
+		"scope_kind":         scope.Kind,
+		"scope_id":           scope.ID,
+		"supports_streaming": true,
 	}
 	if scope.Kind == "fleet_tenant" {
 		args["tenant_id"] = scope.ID
@@ -190,22 +226,57 @@ func streamProviderSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64,
 	if err := ctx.PlatformAPI().CallAppResult(scope.SourceApp, tool, args, &resp); err != nil {
 		return 0, "", fmt.Errorf("%s.%s: %w", scope.SourceApp, tool, err)
 	}
-	if resp.ArchiveB64 == "" {
-		return 0, "", fmt.Errorf("%s.%s returned no archive_b64", scope.SourceApp, tool)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(resp.ArchiveB64)
-	if err != nil {
-		return 0, "", fmt.Errorf("decode archive_b64: %w", err)
-	}
-	n, err := dst.Write(decoded)
-	if err != nil {
-		return int64(n), "", err
-	}
 	manifest := ""
 	if len(resp.Manifest) > 0 && string(resp.Manifest) != "null" {
 		manifest = string(resp.Manifest)
 	}
-	return int64(n), manifest, nil
+	if resp.ArchiveURL != "" {
+		if err := validateProviderStreamURL(resp.ArchiveURL); err != nil {
+			return 0, "", err
+		}
+		downloadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+		defer cancel()
+		req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, resp.ArchiveURL, nil)
+		if err != nil {
+			return 0, "", err
+		}
+		response, err := providerHTTPClient().Do(req)
+		if err != nil {
+			return 0, "", fmt.Errorf("download provider snapshot: %w", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			return 0, "", fmt.Errorf("download provider snapshot: %d: %s", response.StatusCode, strings.TrimSpace(string(body)))
+		}
+		n, err := io.Copy(dst, response.Body)
+		return n, manifest, err
+	}
+	return 0, "", fmt.Errorf("%s.%s does not support streaming snapshots; upgrade the provider app", scope.SourceApp, tool)
+}
+
+func validateProviderStreamURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.User != nil {
+		return fmt.Errorf("invalid provider stream URL")
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	host := u.Hostname()
+	if u.Scheme == "http" && (host == "localhost" || net.ParseIP(host).IsLoopback()) {
+		return nil
+	}
+	return fmt.Errorf("provider stream URL must use HTTPS")
+}
+
+func providerHTTPClient() *http.Client {
+	return &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many provider stream redirects")
+		}
+		return validateProviderStreamURL(req.URL.String())
+	}}
 }
 
 func providerSnapshotTool(scope Scope) (string, error) {
@@ -270,12 +341,44 @@ func extractManifestJSON(path string) (string, error) {
 // Format: apteva-<YYYYMMDD>-<HHMMSS>.tar.gz under destination's
 // optional KeyPrefix. The runner falls back to a default if startedAt
 // isn't parseable.
-func buildRemoteKey(_ *Destination, startedAt string) string {
-	t, err := time.Parse(time.RFC3339, startedAt)
+func buildRemoteKey(run *Run, encrypted bool) string {
+	t, err := time.Parse(time.RFC3339Nano, run.StartedAt)
 	if err != nil {
 		t = time.Now().UTC()
 	}
-	return fmt.Sprintf("apteva-%s.tar.gz", t.UTC().Format("20060102-150405"))
+	ext := ".tar.gz"
+	if encrypted {
+		ext += ".age"
+	}
+	return fmt.Sprintf("%sapteva-%s-run-%d%s", storagePrefix(run.Scope, run.PolicyID), t.UTC().Format("20060102-150405.000000000"), run.ID, ext)
+}
+
+func storagePrefix(scope Scope, policyID int64) string {
+	kind := safeKeySegment(scope.Kind)
+	if kind == "" {
+		kind = "platform"
+	}
+	prefix := kind + "/"
+	if scope.ID != "" {
+		prefix += safeKeySegment(scope.ID) + "/"
+	}
+	if policyID > 0 {
+		return prefix + fmt.Sprintf("policy-%d/", policyID)
+	}
+	return prefix + "adhoc/"
+}
+
+func safeKeySegment(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return strings.Trim(b.String(), ".")
 }
 
 // pruneRetention deletes the oldest runs on the destination beyond
@@ -284,7 +387,7 @@ func buildRemoteKey(_ *Destination, startedAt string) string {
 // We compare against the destination's actual List() — not the runs
 // table — so that pruning still works after a database reset (the
 // objects are the source of truth for "what's on the destination").
-func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, d *Destination, keep int) error {
+func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, d *Destination, policy *Policy) error {
 	objects, err := w.List(ctx)
 	if err != nil {
 		return err
@@ -292,16 +395,18 @@ func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, 
 	// Filter to apteva-*.tar.gz so we don't accidentally delete files
 	// the operator put in the same bucket.
 	filtered := objects[:0]
+	prefix := storagePrefix(policy.Scope, policy.ID)
 	for _, o := range objects {
-		if strings.HasPrefix(filepathBase(o.Key), "apteva-") && strings.HasSuffix(o.Key, ".tar.gz") {
+		if strings.HasPrefix(o.Key, prefix) && strings.HasPrefix(filepathBase(o.Key), "apteva-") &&
+			(strings.HasSuffix(o.Key, ".tar.gz") || strings.HasSuffix(o.Key, ".tar.gz.age")) {
 			filtered = append(filtered, o)
 		}
 	}
-	if len(filtered) <= keep {
+	if len(filtered) <= policy.RetentionKeep {
 		return nil
 	}
 	// List() returns newest-first, so anything past `keep` is old.
-	for _, o := range filtered[keep:] {
+	for _, o := range filtered[policy.RetentionKeep:] {
 		if err := w.Delete(ctx, o.Key); err != nil {
 			app.Logger().Warn("retention delete failed", "key", o.Key, "err", err.Error())
 			continue
@@ -352,10 +457,6 @@ func filepathBase(p string) string {
 // lands in that project's Jobs panel. Backup is scope:global so
 // its own ctx has no project, but the operator's view does.
 func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
-	gateway := os.Getenv("APTEVA_GATEWAY_URL")
-	if gateway == "" {
-		return fmt.Errorf("APTEVA_GATEWAY_URL not set")
-	}
 	body := map[string]any{
 		"name": "backup-policy-" + fmt.Sprint(p.ID),
 		// jobs_schedule expects {schedule: {kind, cron}}; the older
@@ -364,16 +465,11 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
 			"kind": "cron",
 			"cron": p.Schedule,
 		},
-		// target.kind=http with {app, path} — jobs builds the
-		// gateway URL itself (APTEVA_GATEWAY_URL + /api/apps/backup/run).
-		// Passing url:"/api/apps/backup/run" would be treated as an
-		// absolute URL and fail to resolve.
 		"target": map[string]any{
-			"kind":   "http",
-			"app":    "backup",
-			"path":   "/run",
-			"method": "POST",
-			"body":   map[string]any{"policy_id": p.ID},
+			"kind":  "app_tool",
+			"app":   "backup",
+			"tool":  "backup_now",
+			"input": map[string]any{"policy_id": p.ID},
 		},
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
@@ -402,10 +498,14 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
 		return fmt.Errorf("jobs returned no id")
 	}
 	jobsID := strconv.FormatInt(resp.Job.ID, 10)
-	if _, err := ctx.AppDB().Exec(`UPDATE policies SET jobs_id = ? WHERE id = ?`, jobsID, p.ID); err != nil {
-		return err
+	if _, err := ctx.AppDB().Exec(`UPDATE policies SET jobs_id = ?, jobs_project_id = ? WHERE id = ?`, jobsID, callerProjectID, p.ID); err != nil {
+		if cancelErr := cancelViaJobs(ctx, jobsID, callerProjectID); cancelErr != nil {
+			return fmt.Errorf("store jobs id: %v; cancel orphan job: %w", err, cancelErr)
+		}
+		return fmt.Errorf("store jobs id: %w", err)
 	}
 	p.JobsID = jobsID
+	p.JobsProjectID = callerProjectID
 	return nil
 }
 

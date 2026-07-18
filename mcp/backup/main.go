@@ -1,4 +1,5 @@
-// Backup app v0.1 — periodic snapshots of the whole Apteva instance.
+// Backup captures database snapshots from Apteva and full managed data
+// directories from providers such as Fleet.
 //
 // Architecture sketch:
 //
@@ -22,9 +23,8 @@
 //	                                      │  local | s3 | r2     │
 //	                                      └──────────────────────┘
 //
-// The platform owns the privileged primitive (read every install's
-// data dir + the server DB). This app owns scheduling, destinations,
-// retention, encryption, and the UI.
+// The platform owns the privileged database snapshot primitive. This app
+// owns scheduling, destinations, retention, encryption, and the UI.
 package main
 
 import (
@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strconv"
@@ -49,44 +50,50 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.0
+version: 0.3.1
 description: |
-  Periodic backups of your Apteva instance — server DB plus every
-  installed app's data — driven by the platform snapshot endpoint
-  with destinations on local disk or S3-compatible buckets.
+  Periodic database backups of the platform DB and app.db from running
+  sidecars. Supports local disk, AWS S3, Cloudflare R2, and local Fleet tenants.
 author: Apteva
 scopes: [global]
+min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
     - net.egress
     - platform.apps.call
-    - platform.connections.execute
+    - platform.connections.read_credentials
   apps:
     - name: jobs
       version: ">=0.1.8"
-      reason: Cron scheduling for periodic backup runs. v0.1.8 accepts explicit empty _project_id from global-scope callers.
+      reason: Cron scheduling for periodic backup runs.
   integrations:
+    - role: fleet_provider
+      kind: app
+      required: false
+      compatible_app_names: [fleet]
+      label: Fleet app
+      hint: Bind Fleet to create, schedule, and restore per-tenant backups.
     - role: cloud_storage
       kind: integration
       compatible_slugs: [aws-s3, cloudflare-r2]
       capabilities: [object.put, object.get, object.list, object.delete]
       tools:
-        object.put:    put_object
-        object.get:    get_object
-        object.list:   list_objects
+        object.put: put_object
+        object.get: get_object
+        object.list: list_objects
         object.delete: delete_object
       required: false
-      label: "Cloud storage (optional)"
-      hint: "Bind an S3-compatible connection (R2, S3, …) to enable cloud destinations. Local destinations work without this."
+      label: Cloud storage (optional)
+      hint: Bind AWS S3 or Cloudflare R2 to enable cloud destinations.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: backup_now,     description: "Run a backup immediately. Defaults to platform scope; can target app-provided scopes such as fleet_tenant." }
-    - { name: backup_schedule, description: "Create a scheduled backup policy for platform or app-provided scopes." }
-    - { name: backup_list,    description: "List past backup runs." }
-    - { name: backup_restore, description: "Restore a past backup. Platform runs restore through /api/platform/restore; app-scoped runs call the source app's restore provider." }
+    - { name: backup_now, description: "Run a platform or Fleet tenant backup immediately." }
+    - { name: backup_schedule, description: "Create a scheduled platform or Fleet tenant backup policy." }
+    - { name: backup_list, description: "List past backup runs." }
+    - { name: backup_restore, description: "Verify and restore a past backup." }
   ui_panels:
     - slot: project.page
       label: Backup
@@ -96,7 +103,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: backup/v0.3.1
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -104,6 +111,17 @@ db:
   driver: sqlite
   path: /data/backup.db
   migrations: migrations/
+config_schema:
+  - name: keep_last_n
+    type: text
+    default: "14"
+    label: Default retention (last N runs)
+    description: Default used by new policies. 0 disables pruning.
+  - name: encryption_passphrase
+    type: password
+    default: ""
+    label: Encryption passphrase (optional)
+    description: Age-encrypt backups before upload and verify them before restore.
 upgrade_policy: auto-patch
 `
 
@@ -142,6 +160,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/policies/", Handler: a.handlePolicyItem},
 		{Pattern: "/runs", Handler: a.handleRunsCollection},
 		{Pattern: "/runs/", Handler: a.handleRunItem},
+		{Pattern: "/scopes", Handler: a.handleScopes},
 		{Pattern: "/run", Handler: a.handleRunNow},      // cron + UI entry
 		{Pattern: "/restore", Handler: a.handleRestore}, // POST {run_id}
 	}
@@ -155,6 +174,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "backup_now",
 			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination), scope_kind? (default platform), scope_id?, source_app?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
 			InputSchema: schemaObject(map[string]any{
+				"policy_id":      map[string]any{"type": "integer"},
 				"destination_id": map[string]any{"type": "integer"},
 				"scope_kind":     map[string]any{"type": "string"},
 				"scope_id":       map[string]any{"type": "string"},
@@ -202,6 +222,21 @@ func main() { sdk.Run(&App{}) }
 // ─── Tool handlers ─────────────────────────────────────────────────
 
 func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if policyID := int64Arg(args, "policy_id"); policyID != 0 {
+		policy, err := dbGetPolicy(ctx.AppDB(), policyID)
+		if err != nil {
+			return nil, err
+		}
+		dest, err := dbGetDestination(ctx.AppDB(), policy.DestinationID)
+		if err != nil {
+			return nil, err
+		}
+		run, err := runBackup(ctx, dest, policy, policy.Scope)
+		if err != nil {
+			return map[string]any{"run": run, "status": "failed", "error": err.Error()}, err
+		}
+		return map[string]any{"run": run, "status": "success"}, nil
+	}
 	destID := int64Arg(args, "destination_id")
 	dest, err := pickDestination(ctx.AppDB(), destID)
 	if err != nil {
@@ -213,9 +248,9 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	run, err := runBackup(ctx, dest, nil, scope)
 	if err != nil {
-		return nil, err
+		return map[string]any{"run": run, "status": "failed", "error": err.Error()}, err
 	}
-	return map[string]any{"run": run}, nil
+	return map[string]any{"run": run, "status": "success"}, nil
 }
 
 func (a *App) toolBackupList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -245,7 +280,7 @@ func (a *App) toolBackupSchedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := validateScope(scope); err != nil {
 		return nil, err
 	}
-	keep := intArg(args, "retention_keep", 14)
+	keep := intArg(args, "retention_keep", defaultRetention(ctx))
 	if keep < 0 {
 		keep = 14
 	}
@@ -259,13 +294,73 @@ func (a *App) toolBackupSchedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"policy": p}
 	if err := scheduleViaJobs(ctx, p, getStringArg(args, "project_id")); err != nil {
-		out["jobs_warning"] = err.Error()
-	} else {
-		out["policy"] = p
+		if _, deleteErr := ctx.AppDB().Exec(`DELETE FROM policies WHERE id = ?`, p.ID); deleteErr != nil {
+			return nil, fmt.Errorf("schedule policy: %v; remove incomplete policy: %w", err, deleteErr)
+		}
+		return nil, fmt.Errorf("schedule policy: %w", err)
 	}
-	return out, nil
+	return map[string]any{"policy": p}, nil
+}
+
+func defaultRetention(ctx *sdk.AppCtx) int {
+	if ctx == nil {
+		return 14
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(ctx.Config().Get("keep_last_n")))
+	if err != nil || n < 0 {
+		return 14
+	}
+	return n
+}
+
+func (a *App) handleScopes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ctx := getAppCtx(r)
+	out := map[string]any{
+		"default_retention":  defaultRetention(ctx),
+		"encryption_enabled": backupPassphrase(ctx) != "",
+		"platform": map[string]any{
+			"kind": "platform", "label": "Platform databases",
+			"coverage": "Platform DB and app.db from running sidecars",
+			"gaps":     []string{"non-database app files", "stopped sidecars", "external storage", "repositories", "host configuration"},
+		},
+		"fleet_bound":   false,
+		"fleet_tenants": []any{},
+	}
+	if ctx.IntegrationFor("fleet_provider") == nil {
+		httpJSON(w, out)
+		return
+	}
+	var result struct {
+		Tenants []struct {
+			ID         string `json:"id"`
+			Slug       string `json:"slug"`
+			Kind       string `json:"kind"`
+			Status     string `json:"status"`
+			InstanceID int64  `json:"instance_id"`
+			ConfigDir  string `json:"config_dir"`
+		} `json:"tenants"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("fleet", "tenant_list", map[string]any{}, &result); err != nil {
+		out["fleet_error"] = err.Error()
+		httpJSON(w, out)
+		return
+	}
+	tenantScopes := make([]map[string]any, 0, len(result.Tenants))
+	for _, tenant := range result.Tenants {
+		restorable := tenant.Kind == "local" && tenant.InstanceID == 0 && tenant.ConfigDir != ""
+		tenantScopes = append(tenantScopes, map[string]any{
+			"id": tenant.ID, "slug": tenant.Slug, "status": tenant.Status,
+			"restorable": restorable,
+		})
+	}
+	out["fleet_bound"] = true
+	out["fleet_tenants"] = tenantScopes
+	httpJSON(w, out)
 }
 
 func (a *App) toolBackupRestore(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -302,6 +397,16 @@ func (a *App) handleDestinationsCollection(w http.ResponseWriter, r *http.Reques
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if body.Kind == kindS3 {
+			if body.ConnectionID == 0 {
+				bound := ctx.IntegrationFor("cloud_storage")
+				if bound == nil {
+					httpErr(w, http.StatusBadRequest, "bind a cloud_storage connection before creating an S3 destination")
+					return
+				}
+				body.ConnectionID = bound.ConnectionID
+			}
+		}
 		d, err := dbCreateDestination(ctx.AppDB(), &body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
@@ -329,8 +434,14 @@ func (a *App) handleDestinationItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, map[string]any{"destination": d})
 	case http.MethodDelete:
-		if _, err := ctx.AppDB().Exec(`DELETE FROM destinations WHERE id = ?`, id); err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
+		if err := dbSoftDeleteDestination(ctx.AppDB(), id); err != nil {
+			if errors.Is(err, errDestinationInUse) {
+				httpErr(w, http.StatusConflict, err.Error())
+			} else if errors.Is(err, sql.ErrNoRows) {
+				httpErr(w, http.StatusNotFound, fmt.Sprintf("destination %d not found", id))
+			} else {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
 		httpJSON(w, map[string]any{"deleted": true})
@@ -361,8 +472,9 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "schedule and destination_id required")
 			return
 		}
-		if body.RetentionKeep == 0 {
-			body.RetentionKeep = 14
+		if body.RetentionKeep < 0 {
+			httpErr(w, http.StatusBadRequest, "retention_keep must be 0 or greater")
+			return
 		}
 		if body.Scope.Kind == "" {
 			body.Scope = defaultScope()
@@ -371,27 +483,31 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		destination, err := dbGetDestination(ctx.AppDB(), body.DestinationID)
+		if err != nil || !destination.Enabled {
+			httpErr(w, http.StatusBadRequest, "destination_id must reference an enabled destination")
+			return
+		}
 		p, err := dbCreatePolicy(ctx.AppDB(), &body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		// Schedule via the jobs app. Failure here doesn't roll back the
-		// row — the operator can fix the dependency and re-trigger via
-		// PATCH later. We surface the error in the response.
-		//
 		// Pass the operator's currently-selected project_id (from the
 		// dashboard URL) so the cron job lands in that project's Jobs
 		// panel. Backup itself is scope:global, so its sidecar has no
 		// natural project context — the panel sends ?project_id=<pid>
 		// on every call and we forward it. Empty falls through to a
 		// project-less ("global") tag.
-		jobsErr := scheduleViaJobs(ctx, p, r.URL.Query().Get("project_id"))
-		out := map[string]any{"policy": p}
-		if jobsErr != nil {
-			out["jobs_warning"] = jobsErr.Error()
+		if jobsErr := scheduleViaJobs(ctx, p, r.URL.Query().Get("project_id")); jobsErr != nil {
+			if _, deleteErr := ctx.AppDB().Exec(`DELETE FROM policies WHERE id = ?`, p.ID); deleteErr != nil {
+				httpErr(w, http.StatusInternalServerError, fmt.Sprintf("schedule policy: %v; remove incomplete policy: %v", jobsErr, deleteErr))
+				return
+			}
+			httpErr(w, http.StatusBadGateway, "schedule policy: "+jobsErr.Error())
+			return
 		}
-		httpJSON(w, out)
+		httpJSON(w, map[string]any{"policy": p})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -413,18 +529,17 @@ func (a *App) handlePolicyItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, map[string]any{"policy": p})
 	case http.MethodDelete:
-		// Best-effort cancel the jobs row. Failure doesn't block delete:
-		// an orphan job is harmless (it'll POST /run with a stale
-		// policy_id and that path is idempotent — we treat unknown ids
-		// as a no-op).
-		//
-		// Pass the current request's project_id to jobs_cancel so it
-		// finds the job (jobs filters by project_id). Best case:
-		// operator deletes from the same project where they created
-		// the policy; worst case: project mismatch leaves a stale
-		// jobs row but the policy is still deleted on backup's side.
+		// Cancel the Jobs row before deleting the policy so a failed
+		// cancellation cannot leave a recurring call to a missing policy.
 		if p, err := dbGetPolicy(ctx.AppDB(), id); err == nil && p.JobsID != "" {
-			_ = cancelViaJobs(ctx, p.JobsID, r.URL.Query().Get("project_id"))
+			projectID := p.JobsProjectID
+			if projectID == "" {
+				projectID = r.URL.Query().Get("project_id")
+			}
+			if err := cancelViaJobs(ctx, p.JobsID, projectID); err != nil {
+				httpErr(w, http.StatusBadGateway, "cancel scheduled job: "+err.Error())
+				return
+			}
 		}
 		if _, err := ctx.AppDB().Exec(`DELETE FROM policies WHERE id = ?`, id); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
@@ -488,7 +603,10 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 		ScopeID       string `json:"scope_id"`
 		SourceApp     string `json:"source_app"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
 
 	var dest *Destination
 	var policy *Policy
@@ -527,7 +645,9 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := runBackup(ctx, dest, policy, scope)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "run": run})
 		return
 	}
 	httpJSON(w, map[string]any{"run": run})
@@ -575,6 +695,7 @@ type Policy struct {
 	RetentionKeep int    `json:"retention_keep"`
 	Enabled       bool   `json:"enabled"`
 	JobsID        string `json:"jobs_id,omitempty"`
+	JobsProjectID string `json:"jobs_project_id,omitempty"`
 	Scope         Scope  `json:"scope"`
 	CreatedAt     string `json:"created_at,omitempty"`
 	UpdatedAt     string `json:"updated_at,omitempty"`
@@ -592,6 +713,7 @@ type Run struct {
 	SHA256          string `json:"sha256,omitempty"`
 	RemoteKey       string `json:"remote_key,omitempty"`
 	Error           string `json:"error,omitempty"`
+	Encrypted       bool   `json:"encrypted"`
 	Scope           Scope  `json:"scope"`
 }
 
@@ -607,7 +729,7 @@ func dbCreateDestination(db *sql.DB, d *Destination) (*Destination, error) {
 	res, err := db.Exec(
 		`INSERT INTO destinations (name, kind, config_json, connection_id, enabled)
 		 VALUES (?, ?, ?, ?, ?)`,
-		d.Name, d.Kind, string(d.Config), nullInt(d.ConnectionID), boolToInt(d.Enabled || true))
+		d.Name, d.Kind, string(d.Config), nullInt(d.ConnectionID), 1)
 	if err != nil {
 		return nil, err
 	}
@@ -619,7 +741,7 @@ func dbCreateDestination(db *sql.DB, d *Destination) (*Destination, error) {
 func dbListDestinations(db *sql.DB) ([]*Destination, error) {
 	rows, err := db.Query(
 		`SELECT id, name, kind, config_json, COALESCE(connection_id,0), enabled, created_at
-		 FROM destinations ORDER BY id`)
+		 FROM destinations WHERE deleted_at = '' ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -630,13 +752,13 @@ func dbListDestinations(db *sql.DB) ([]*Destination, error) {
 		var cfg string
 		var enabled int
 		if err := rows.Scan(&d.ID, &d.Name, &d.Kind, &cfg, &d.ConnectionID, &enabled, &d.CreatedAt); err != nil {
-			continue
+			return nil, err
 		}
 		d.Config = json.RawMessage(cfg)
 		d.Enabled = enabled != 0
 		out = append(out, d)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbGetDestination(db *sql.DB, id int64) (*Destination, error) {
@@ -658,14 +780,40 @@ func dbGetDestination(db *sql.DB, id int64) (*Destination, error) {
 	return d, nil
 }
 
+var errDestinationInUse = errors.New("destination is referenced by a policy; delete the policy first")
+
+func dbSoftDeleteDestination(db *sql.DB, id int64) error {
+	var policies int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM policies WHERE destination_id = ?`, id).Scan(&policies); err != nil {
+		return err
+	}
+	if policies > 0 {
+		return errDestinationInUse
+	}
+	result, err := db.Exec(
+		`UPDATE destinations SET enabled = 0, deleted_at = CURRENT_TIMESTAMP,
+		 name = name || '-deleted-' || id WHERE id = ? AND deleted_at = ''`, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if p.Scope.Kind == "" {
 		p.Scope = defaultScope()
 	}
 	res, err := db.Exec(
-		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, scope_kind, scope_id, source_app, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, scope_kind, scope_id, source_app, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?)`,
 		p.Name, p.Schedule, p.DestinationID, p.RetentionKeep, boolToInt(true),
 		p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, now, now)
 	if err != nil {
@@ -680,7 +828,7 @@ func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 
 func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	rows, err := db.Query(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id,
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id,
 		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies ORDER BY id`)
 	if err != nil {
@@ -691,24 +839,24 @@ func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	for rows.Next() {
 		p := &Policy{}
 		var enabled int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID,
+		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID,
 			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			continue
+			return nil, err
 		}
 		p.Enabled = enabled != 0
 		out = append(out, p)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 	p := &Policy{}
 	var enabled int
 	err := db.QueryRow(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id,
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id,
 		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID,
+		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID,
 			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("policy %d not found", id)
@@ -724,11 +872,14 @@ func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
 	if r.Scope.Kind == "" {
 		r.Scope = defaultScope()
 	}
+	if r.StartedAt == "" {
+		r.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	}
 	res, err := db.Exec(
-		`INSERT INTO runs (policy_id, destination_id, destination_name, status, scope_kind, scope_id, source_app)
-		 VALUES (?, ?, ?, 'running', ?, ?, ?)`,
+		`INSERT INTO runs (policy_id, destination_id, destination_name, started_at, status, scope_kind, scope_id, source_app)
+		 VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`,
 		nullInt(r.PolicyID), r.DestinationID, r.DestinationName,
-		r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
+		r.StartedAt, r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
 	if err != nil {
 		return 0, err
 	}
@@ -736,19 +887,19 @@ func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
 	return id, nil
 }
 
-func dbFinishRun(db *sql.DB, id int64, status string, bytes int64, sha, remoteKey, manifestJSON, errMsg string) error {
+func dbFinishRun(db *sql.DB, id int64, status string, bytes int64, sha, remoteKey, manifestJSON, errMsg string, encrypted bool) error {
 	_, err := db.Exec(
 		`UPDATE runs SET status = ?, finished_at = CURRENT_TIMESTAMP,
-		   bytes_compressed = ?, sha256 = ?, remote_key = ?, manifest_json = ?, error = ?
+		   bytes_compressed = ?, sha256 = ?, remote_key = ?, manifest_json = ?, error = ?, encrypted = ?
 		 WHERE id = ?`,
-		status, bytes, sha, remoteKey, manifestJSON, errMsg, id)
+		status, bytes, sha, remoteKey, manifestJSON, errMsg, boolToInt(encrypted), id)
 	return err
 }
 
 func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 	q := `SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 	             started_at, COALESCE(finished_at,''), status, bytes_compressed,
-	             sha256, remote_key, error, scope_kind, scope_id, source_app
+		             sha256, remote_key, error, encrypted, scope_kind, scope_id, source_app
 	      FROM runs`
 	args := []any{}
 	if destID > 0 {
@@ -767,12 +918,12 @@ func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 		r := &Run{}
 		if err := rows.Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
-			continue
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
+			return nil, err
 		}
 		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbGetRun(db *sql.DB, id int64) (*Run, error) {
@@ -780,11 +931,11 @@ func dbGetRun(db *sql.DB, id int64) (*Run, error) {
 	err := db.QueryRow(
 		`SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 		        started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		        sha256, remote_key, error, scope_kind, scope_id, source_app
+		        sha256, remote_key, error, encrypted, scope_kind, scope_id, source_app
 		 FROM runs WHERE id = ?`, id).
 		Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("run %d not found", id)
 	}
@@ -799,7 +950,14 @@ func dbGetRun(db *sql.DB, id int64) (*Run, error) {
 // laptop self-hosters with one local destination.
 func pickDestination(db *sql.DB, id int64) (*Destination, error) {
 	if id != 0 {
-		return dbGetDestination(db, id)
+		destination, err := dbGetDestination(db, id)
+		if err != nil {
+			return nil, err
+		}
+		if !destination.Enabled {
+			return nil, fmt.Errorf("destination %d is disabled", id)
+		}
+		return destination, nil
 	}
 	dests, err := dbListDestinations(db)
 	if err != nil {
@@ -855,10 +1013,7 @@ func validateScope(s Scope) error {
 		}
 		return nil
 	default:
-		if s.ID == "" || s.SourceApp == "" {
-			return fmt.Errorf("%s backups require scope_id and source_app", s.Kind)
-		}
-		return nil
+		return fmt.Errorf("unsupported backup scope %q", s.Kind)
 	}
 }
 

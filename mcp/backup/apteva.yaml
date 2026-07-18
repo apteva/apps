@@ -2,19 +2,16 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.3.0
+version: 0.3.1
 description: |
-  Periodic backups of your Apteva instance — server DB plus every
-  installed app's data. Captured via the platform snapshot endpoint
-  (online, consistent, non-blocking) and shipped to a destination of
-  your choice: local disk for self-hosters, or any S3-compatible
-  bucket (AWS, Cloudflare R2, Backblaze B2, Wasabi, MinIO).
+  Periodic database backups of your Apteva instance: the platform DB
+  plus app.db from running sidecars. Snapshots are captured online and
+  shipped to local disk, AWS S3, or Cloudflare R2. Fleet can be bound
+  to back up and restore individual local Fleet tenants.
 
-  Schedules are driven by the jobs app so cron behaviour, retries,
-  and run history all live in one familiar place. Restores stream
-  back through /api/platform/restore — app DBs are swapped live;
-  the platform DB is staged and applied on the next server boot.
-
+  This is not a host image: app data outside app.db, stopped sidecars,
+  external object storage, repositories, and host configuration are not
+  included by the platform snapshot endpoint.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/backup
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/backup/icon.png
@@ -28,28 +25,30 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
-    - platform.connections.execute
+    - platform.connections.read_credentials
   apps:
     - name: jobs
       version: ">=0.1.8"
-      reason: Cron scheduling for periodic backup runs. v0.1.8 accepts explicit empty _project_id from global-scope callers.
+      reason: Cron scheduling for periodic backup runs.
   integrations:
-    # Cloud destination — bind a connection to any S3-compatible
-    # backend (AWS S3, Cloudflare R2, Backblaze B2, MinIO …) and
-    # backup will use it as a destination via ExecuteIntegrationTool.
-    # Optional: local-disk destinations work without it.
+    - role: fleet_provider
+      kind: app
+      required: false
+      compatible_app_names: [fleet]
+      label: Fleet app
+      hint: Bind Fleet to create, schedule, and restore per-tenant backups from this panel.
     - role: cloud_storage
       kind: integration
       compatible_slugs: [aws-s3, cloudflare-r2]
       capabilities: [object.put, object.get, object.list, object.delete]
       tools:
-        object.put:    put_object
-        object.get:    get_object
-        object.list:   list_objects
+        object.put: put_object
+        object.get: get_object
+        object.list: list_objects
         object.delete: delete_object
       required: false
-      label: "Cloud storage (optional)"
-      hint: "Bind an S3-compatible connection (R2, S3, …) to enable cloud destinations. Local destinations work without this."
+      label: Cloud storage (optional)
+      hint: Bind AWS S3 or Cloudflare R2 to enable cloud destinations. Local destinations work without this.
 
 provides:
   http_routes:
@@ -58,11 +57,11 @@ provides:
     - name: backup_now
       description: Run a backup immediately against a chosen destination.
     - name: backup_schedule
-      description: Create a scheduled backup policy for platform or app-provided scopes.
+      description: Create a scheduled backup policy for platform or Fleet tenant scope.
     - name: backup_list
-      description: List past backup runs with size, destination, status.
+      description: List past backup runs with size, destination, scope, and status.
     - name: backup_restore
-      description: Restore a past backup. App DBs swap live; the platform DB is staged for the next server boot.
+      description: Verify and restore a past backup.
   ui_panels:
     - slot: project.page
       label: Backup
@@ -74,7 +73,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: backup/v0.3.1
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -89,11 +88,11 @@ config_schema:
     type: text
     default: "14"
     label: Default retention (last N runs)
-    description: How many runs to keep per destination. Older runs are pruned after each successful backup. 0 disables pruning.
+    description: Default used by new policies. Retention is isolated per policy and scope. 0 disables pruning.
   - name: encryption_passphrase
-    type: text
+    type: password
     default: ""
     label: Encryption passphrase (optional)
-    description: When set, backups are age-encrypted before upload. Restore needs the same passphrase. Empty means plain tar.gz.
+    description: When set, backups are age-encrypted before upload and verified before restore. Restore needs the same passphrase.
 
 upgrade_policy: auto-patch

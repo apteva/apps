@@ -129,6 +129,29 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 	}
 }
 
+func TestFleetBackupToolSchemasAllowStreamingHandshake(t *testing.T) {
+	tools := map[string]sdk.Tool{}
+	for _, tool := range (&App{}).MCPTools() {
+		tools[tool.Name] = tool
+	}
+	snapshotProps, _ := tools["fleet_tenant_snapshot"].InputSchema["properties"].(map[string]any)
+	if _, ok := snapshotProps["supports_streaming"]; !ok {
+		t.Fatal("fleet_tenant_snapshot schema is missing supports_streaming")
+	}
+	restore := tools["fleet_tenant_restore"].InputSchema
+	restoreProps, _ := restore["properties"].(map[string]any)
+	if _, ok := restoreProps["prepare_stream"]; !ok {
+		t.Fatal("fleet_tenant_restore schema is missing prepare_stream")
+	}
+	if required, ok := restore["required"].([]string); ok {
+		for _, field := range required {
+			if field == "archive_b64" {
+				t.Fatal("fleet_tenant_restore requires archive_b64 and rejects streaming handshakes")
+			}
+		}
+	}
+}
+
 func TestPanel_DeclaredInBothManifests(t *testing.T) {
 	// v0.2.0 shipped with apteva.yaml declaring the FleetPanel slot
 	// but main.go's embedded manifest omitting it — net effect: the
