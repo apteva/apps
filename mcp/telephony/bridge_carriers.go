@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gobwas/ws"
@@ -27,6 +29,7 @@ type jsonMediaBridgeConfig struct {
 	OutputCodec      string
 	RequireStreamSID bool
 	OutboundShape    string
+	PlaybackMarks    bool
 }
 
 type carrierMediaFrame struct {
@@ -45,6 +48,9 @@ type carrierMediaFrame struct {
 	Media *struct {
 		Payload string `json:"payload"`
 	} `json:"media,omitempty"`
+	Mark *struct {
+		Name string `json:"name"`
+	} `json:"mark,omitempty"`
 }
 
 func (a *App) handleSignalWireMediaStream(w http.ResponseWriter, r *http.Request) {
@@ -60,21 +66,15 @@ func (a *App) handleSignalWireMediaStream(w http.ResponseWriter, r *http.Request
 
 func (a *App) handleTelnyxMediaStream(w http.ResponseWriter, r *http.Request) {
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
-		Provider:      "telnyx",
-		PathPrefix:    "/media/telnyx/",
-		InputCodec:    carrierCodecPCMU8,
-		OutputCodec:   carrierCodecPCMU8,
-		OutboundShape: "telnyx",
+		Provider: "telnyx", PathPrefix: "/media/telnyx/", InputCodec: carrierCodecPCMU8, OutputCodec: carrierCodecPCMU8,
+		RequireStreamSID: true, OutboundShape: "telnyx", PlaybackMarks: true,
 	})
 }
 
 func (a *App) handlePlivoMediaStream(w http.ResponseWriter, r *http.Request) {
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
-		Provider:      "plivo",
-		PathPrefix:    "/media/plivo/",
-		InputCodec:    carrierCodecL16_16,
-		OutputCodec:   carrierCodecL16_16,
-		OutboundShape: "plivo16",
+		Provider: "plivo", PathPrefix: "/media/plivo/", InputCodec: carrierCodecPCMU8, OutputCodec: carrierCodecPCMU8,
+		RequireStreamSID: true, OutboundShape: "plivo",
 	})
 }
 
@@ -151,6 +151,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	streamSidCh := make(chan string, 1)
 	inputResampler := carrierInputResampler(cfg.InputCodec)
 	outputResampler := carrierOutputResampler(cfg.OutputCodec)
+	playback := newTwilioPlaybackTracker()
+	speechDetector := newPCMSpeechStartDetector()
+	var coreWriteMu sync.Mutex
 
 	go func() {
 		defer cancel()
@@ -193,7 +196,30 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if err != nil {
 					continue
 				}
-				if err := wsutil.WriteClientBinary(core, pcm24); err != nil {
+				localSpeechStarted := speechDetector.observe(bytesToPCM16(pcm24)) && playback.hasPending()
+				coreWriteMu.Lock()
+				err = wsutil.WriteClientBinary(core, pcm24)
+				if err == nil && localSpeechStarted {
+					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
+					err = wsutil.WriteClientText(core, control)
+				}
+				coreWriteMu.Unlock()
+				if err != nil {
+					return
+				}
+			case "mark":
+				if f.Mark == nil {
+					continue
+				}
+				progress, ok := playback.acknowledge(f.Mark.Name)
+				if !ok {
+					continue
+				}
+				control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
+				coreWriteMu.Lock()
+				err := wsutil.WriteClientText(core, control)
+				coreWriteMu.Unlock()
+				if err != nil {
 					return
 				}
 			case "stop":
@@ -210,7 +236,33 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			return
 		}
 	}
+	sampleRate := carrierCodecSampleRate(cfg.OutputCodec)
+	packetizer := newCarrierAudioPacketizer(sampleRate)
+	maxQueuedMS := 0
+	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
+		playback,
+		func(payload []byte) error {
+			if err := carrier.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return err
+			}
+			return wsutil.WriteServerText(carrier, payload)
+		},
+		func(progress twilioPlaybackProgress) error {
+			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
+			coreWriteMu.Lock()
+			defer coreWriteMu.Unlock()
+			return wsutil.WriteClientText(core, control)
+		},
+		func(err error) {
+			globalCtx.Logger().Warn("carrier media writer failed", "provider", cfg.Provider, "call", callID, "err", err)
+			cancel()
+		},
+	)
+	defer func() {
+		globalCtx.Logger().Info("carrier media bridge metrics", "provider", cfg.Provider, "call", callID, "max_queued_ms", maxQueuedMS)
+	}()
 
+	var nextFrame realtimeBridgeControl
 	for {
 		select {
 		case <-ctx.Done():
@@ -221,10 +273,18 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if err != nil {
 			return
 		}
-		if op == ws.OpText && realtimeInterruptControl(data) {
-			if clearFrame := buildCarrierClear(cfg.OutboundShape, streamSID); clearFrame != nil {
-				buf, _ := json.Marshal(clearFrame)
-				if err := wsutil.WriteServerText(carrier, buf); err != nil {
+		if op == ws.OpText {
+			control, ok := parseRealtimeBridgeControl(data)
+			if !ok {
+				continue
+			}
+			switch control.Type {
+			case "audio.frame":
+				nextFrame = control
+			case "interrupt":
+				nextFrame = realtimeBridgeControl{}
+				packetizer.clear()
+				if _, err := pacer.clear(ctx); err != nil {
 					return
 				}
 			}
@@ -233,15 +293,47 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		payload, err := encodeCarrierPayload(data, cfg.OutputCodec, outputResampler)
-		if err != nil {
+		pcm24 := bytesToPCM16(data)
+		pcmCarrier := pcm24
+		if outputResampler != nil {
+			pcmCarrier = outputResampler.Process(pcm24)
+		}
+		if len(pcmCarrier) == 0 {
 			continue
 		}
-		out := buildCarrierOutbound(cfg.OutboundShape, streamSID, payload)
-		buf, _ := json.Marshal(out)
-		if err := wsutil.WriteServerText(carrier, buf); err != nil {
+		packets := packetizer.add(pcmCarrier, len(pcm24), nextFrame)
+		frame := nextFrame
+		nextFrame = realtimeBridgeControl{}
+		queuedMS, err := pacer.enqueue(ctx, packets)
+		if errors.Is(err, errCarrierPacerOverflow) {
+			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.overflow", ItemID: frame.ItemID})
+			coreWriteMu.Lock()
+			err = wsutil.WriteClientText(core, control)
+			coreWriteMu.Unlock()
+			if err != nil {
+				return
+			}
+			continue
+		}
+		if err != nil {
 			return
 		}
+		if queuedMS > maxQueuedMS {
+			maxQueuedMS = queuedMS
+		}
+	}
+}
+
+func carrierCodecSampleRate(codec string) int {
+	switch codec {
+	case carrierCodecPCMU8:
+		return 8000
+	case carrierCodecL16_16:
+		return 16000
+	case carrierCodecL16_24:
+		return 24000
+	default:
+		return 8000
 	}
 }
 
@@ -470,12 +562,12 @@ func encodeCarrierPayload(pcm24Bytes []byte, codec string, streaming ...*pcmResa
 
 func buildCarrierOutbound(shape, streamSID, payload string) any {
 	switch shape {
-	case "plivo16":
+	case "plivo":
 		return map[string]any{
 			"event": "playAudio",
 			"media": map[string]string{
-				"contentType": "audio/x-l16",
-				"sampleRate":  "16000",
+				"contentType": "audio/x-mulaw",
+				"sampleRate":  "8000",
 				"payload":     payload,
 			},
 		}
@@ -501,7 +593,7 @@ func buildCarrierClear(shape, streamSID string) any {
 	switch shape {
 	case "signalwire":
 		return map[string]string{"event": "clear", "streamSid": streamSID}
-	case "plivo16":
+	case "plivo":
 		return map[string]string{"event": "clearAudio"}
 	case "telnyx":
 		return map[string]string{"event": "clear"}

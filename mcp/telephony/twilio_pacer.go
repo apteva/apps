@@ -12,6 +12,10 @@ import (
 
 const (
 	twilioMediaSampleRate = 8000
+	// Keep a small amount of audio in Twilio's documented playback buffer. A
+	// zero-lead sender underruns whenever JSON encoding, a mark write, or network
+	// scheduling takes part of the next 20 ms packet interval.
+	twilioTargetBufferedAudioSamples = twilioMediaSampleRate / 5 // 200 ms
 	// Realtime models may generate faster than playback. Fifteen seconds keeps
 	// normal multi-sentence turns intact while placing a hard bound on memory
 	// and remote conversational drift.
@@ -43,10 +47,12 @@ type twilioPacerCommand struct {
 
 // twilioAudioPacer is the single writer for outbound carrier media. It keeps
 // generated audio in a local queue so interruption can discard it before the
-// carrier sees it, then writes one packet per packet duration.
+// carrier sees it. A short carrier lead absorbs network jitter; later packets
+// replenish that lead at absolute media deadlines.
 type twilioAudioPacer struct {
 	ctx              context.Context
 	commands         chan twilioPacerCommand
+	clearCommands    chan twilioPacerCommand
 	done             chan struct{}
 	streamSID        string
 	playback         *twilioPlaybackTracker
@@ -66,7 +72,7 @@ func newTwilioAudioPacer(
 	onError func(error),
 ) *twilioAudioPacer {
 	p := &twilioAudioPacer{
-		ctx: ctx, commands: make(chan twilioPacerCommand), done: make(chan struct{}),
+		ctx: ctx, commands: make(chan twilioPacerCommand), clearCommands: make(chan twilioPacerCommand), done: make(chan struct{}),
 		streamSID: streamSID, playback: playback, write: write, onError: onError,
 		maxQueuedSamples: twilioMaxQueuedAudioSamples,
 	}
@@ -93,8 +99,12 @@ func (p *twilioAudioPacer) clear(ctx context.Context) (int, error) {
 
 func (p *twilioAudioPacer) command(ctx context.Context, command twilioPacerCommand) twilioPacerResult {
 	command.response = make(chan twilioPacerResult, 1)
+	destination := p.commands
+	if command.clear {
+		destination = p.clearCommands
+	}
 	select {
-	case p.commands <- command:
+	case destination <- command:
 	case <-ctx.Done():
 		return twilioPacerResult{err: ctx.Err()}
 	case <-p.done:
@@ -133,11 +143,13 @@ func (p *twilioAudioPacer) finish(err error) {
 
 func (p *twilioAudioPacer) run() {
 	var (
-		queue         []twilioPacedPacket
-		queuedSamples int
-		timer         *time.Timer
-		timerC        <-chan time.Time
+		queue           []twilioPacedPacket
+		queuedSamples   int
+		timer           *time.Timer
+		timerC          <-chan time.Time
+		bufferedThrough time.Time
 	)
+	bufferWindow := time.Duration(twilioTargetBufferedAudioSamples) * time.Second / twilioMediaSampleRate
 	stopTimer := func() {
 		if timer == nil {
 			return
@@ -153,15 +165,25 @@ func (p *twilioAudioPacer) run() {
 	clear := func() (int, error) {
 		clearedSamples := queuedSamples
 		stopTimer()
+		bufferedThrough = time.Time{}
 		queue = nil
 		queuedSamples = 0
 		p.playback.clear()
 		payload, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": p.streamSID})
 		return samplesToMS(clearedSamples), p.write(payload)
 	}
-	sendNext := func() error {
+	scheduleAt := func(deadline time.Time) {
+		stopTimer()
+		delay := time.Until(deadline)
+		if delay < 0 {
+			delay = 0
+		}
+		timer = time.NewTimer(delay)
+		timerC = timer.C
+	}
+	sendNext := func() (time.Duration, error) {
 		if len(queue) == 0 {
-			return nil
+			return 0, nil
 		}
 		packet := queue[0]
 		queue = queue[1:]
@@ -171,22 +193,43 @@ func (p *twilioAudioPacer) run() {
 		out.Media.Payload = base64.StdEncoding.EncodeToString(pcm16ToUlaw(packet.PCM))
 		payload, _ := json.Marshal(out)
 		if err := p.write(payload); err != nil {
-			return err
+			return 0, err
 		}
 		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
 			mark, _ := json.Marshal(map[string]any{
 				"event": "mark", "streamSid": p.streamSID, "mark": map[string]string{"name": markName},
 			})
 			if err := p.write(mark); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		duration := time.Duration(len(packet.PCM)) * time.Second / twilioMediaSampleRate
 		if duration <= 0 {
 			duration = time.Millisecond
 		}
-		timer = time.NewTimer(duration)
-		timerC = timer.C
+		now := time.Now()
+		if bufferedThrough.IsZero() || bufferedThrough.Before(now) {
+			bufferedThrough = now
+		}
+		bufferedThrough = bufferedThrough.Add(duration)
+		return duration, nil
+	}
+	fillCarrierLead := func() error {
+		stopTimer()
+		target := time.Now().Add(bufferWindow)
+		for len(queue) > 0 && (bufferedThrough.IsZero() || bufferedThrough.Before(target)) {
+			_, err := sendNext()
+			if err != nil {
+				return err
+			}
+		}
+		if len(queue) > 0 {
+			nextDuration := time.Duration(len(queue[0].PCM)) * time.Second / twilioMediaSampleRate
+			if nextDuration <= 0 {
+				nextDuration = time.Millisecond
+			}
+			scheduleAt(bufferedThrough.Add(-bufferWindow).Add(nextDuration))
+		}
 		return nil
 	}
 	handleCommand := func(command twilioPacerCommand) error {
@@ -209,16 +252,22 @@ func (p *twilioAudioPacer) run() {
 		}
 		queue = append(queue, command.packets...)
 		queuedSamples += incomingSamples
-		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedSamples)}
+		queuedAtEnqueue := queuedSamples
+		err := fillCarrierLead()
+		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedAtEnqueue), err: err}
+		if err != nil {
+			return err
+		}
 		return nil
 	}
 
 	defer stopTimer()
 	for {
-		// Controls take priority over an expired pacing timer so clear cannot sit
-		// behind another packet once Core has observed an interruption.
+		// Clear is the only command that outranks playback. Normal enqueue work
+		// must never starve an already-due carrier packet while the model is
+		// generating audio faster than real time.
 		select {
-		case command := <-p.commands:
+		case command := <-p.clearCommands:
 			if err := handleCommand(command); err != nil {
 				p.finish(err)
 				return
@@ -226,19 +275,28 @@ func (p *twilioAudioPacer) run() {
 			continue
 		default:
 		}
-
-		if timerC == nil && len(queue) > 0 {
-			if err := sendNext(); err != nil {
-				p.finish(err)
-				return
+		if timerC != nil {
+			select {
+			case <-timerC:
+				timer, timerC = nil, nil
+				if err := fillCarrierLead(); err != nil {
+					p.finish(err)
+					return
+				}
+				continue
+			default:
 			}
-			continue
 		}
 
 		select {
 		case <-p.ctx.Done():
 			p.finish(nil)
 			return
+		case command := <-p.clearCommands:
+			if err := handleCommand(command); err != nil {
+				p.finish(err)
+				return
+			}
 		case command := <-p.commands:
 			if err := handleCommand(command); err != nil {
 				p.finish(err)
@@ -246,6 +304,10 @@ func (p *twilioAudioPacer) run() {
 			}
 		case <-timerC:
 			timer, timerC = nil, nil
+			if err := fillCarrierLead(); err != nil {
+				p.finish(err)
+				return
+			}
 		}
 	}
 }

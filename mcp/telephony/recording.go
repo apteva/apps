@@ -96,8 +96,8 @@ func (a *App) toolRouteRecordingPolicy(callerCtx context.Context, ctx *sdk.AppCt
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	if mode == recordingModeAlways && route.CarrierSlug != "twilio" {
-		return mcpError("durable call recording is currently implemented for Twilio routes"), nil
+	if mode == recordingModeAlways && !providerSupportsRecording(route.CarrierSlug) {
+		return mcpError("call recording is not implemented for provider " + route.CarrierSlug), nil
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE inbound_routes SET recording_mode = ?, updated_at = ? WHERE id = ?`,
 		mode, time.Now().UTC().Format(time.RFC3339), route.ID); err != nil {
@@ -158,7 +158,16 @@ func recordingCarrierSupport(ctx *sdk.AppCtx) (string, bool) {
 	if creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID); err == nil && creds != nil {
 		slug = strings.ToLower(firstNonEmpty(creds.Slug, slug))
 	}
-	return slug, slug == "twilio"
+	return slug, providerSupportsRecording(slug)
+}
+
+func providerSupportsRecording(slug string) bool {
+	switch strings.ToLower(strings.TrimSpace(slug)) {
+	case "twilio", "telnyx", "plivo":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *App) recordingSettingsPublic(ctx *sdk.AppCtx, settings recordingSettings) map[string]any {
@@ -288,14 +297,25 @@ func (c *callsDB) attachRecordingSummaries(projectID string, calls []callRow) er
 }
 
 func (c *callsDB) upsertTwilioRecording(call *callRow, sid, status string, durationMS int64, channels int) (*recordingRow, error) {
-	if call == nil || sid == "" {
-		return nil, errors.New("call and recording SID are required")
+	return c.upsertProviderRecording(call, "twilio", sid, status, "wav", durationMS, channels, "both")
+}
+
+func (c *callsDB) upsertProviderRecording(call *callRow, provider, recordingID, status, format string, durationMS int64, channels int, track string) (*recordingRow, error) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if call == nil || recordingID == "" || !providerSupportsRecording(provider) {
+		return nil, errors.New("call, supported provider, and recording id are required")
 	}
 	if channels <= 0 {
 		channels = 1
 		if call.RecordingChannels == "dual" {
 			channels = 2
 		}
+	}
+	if format != "mp3" {
+		format = "wav"
+	}
+	if track == "" {
+		track = "both"
 	}
 	now := time.Now().UTC()
 	storageStatus := "pending"
@@ -308,12 +328,12 @@ func (c *callsDB) upsertTwilioRecording(call *callRow, sid, status string, durat
 	if call.RecordingRetentionDays > 0 {
 		retentionExpiry = now.Add(time.Duration(call.RecordingRetentionDays) * 24 * time.Hour).Format(time.RFC3339)
 	}
-	id := "rec-" + newCallID()
+	rowID := "rec-" + newCallID()
 	_, err := c.db.Exec(`INSERT INTO recordings
         (id, call_id, project_id, provider, carrier_connection_id, provider_recording_id,
          provider_status, channels, track, format, duration_ms, storage_status,
          next_attempt_at, retention_expires_at, created_at, completed_at)
-        VALUES (?, ?, ?, 'twilio', ?, ?, ?, ?, 'both', 'wav', ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(provider, carrier_connection_id, provider_recording_id) DO UPDATE SET
           provider_status = excluded.provider_status, channels = excluded.channels,
           duration_ms = excluded.duration_ms, completed_at = excluded.completed_at,
@@ -321,14 +341,14 @@ func (c *callsDB) upsertTwilioRecording(call *callRow, sid, status string, durat
 								THEN recordings.storage_status ELSE excluded.storage_status END,
 		  next_attempt_at = CASE WHEN recordings.storage_status IN ('stored','deleted','provider_only')
                                  THEN recordings.next_attempt_at ELSE excluded.next_attempt_at END`,
-		id, call.ID, call.ProjectID, call.CarrierConnectionID, sid, status, channels,
+		rowID, call.ID, call.ProjectID, provider, call.CarrierConnectionID, recordingID, status, channels, track, format,
 		durationMS, storageStatus, now.Format(time.RFC3339), retentionExpiry,
 		now.Format(time.RFC3339), completedAt)
 	if err != nil {
 		return nil, err
 	}
 	return scanRecording(c.db.QueryRow(`SELECT `+recordingSelectColumns+` FROM recordings
-        WHERE provider = 'twilio' AND carrier_connection_id = ? AND provider_recording_id = ?`, call.CarrierConnectionID, sid))
+		WHERE provider = ? AND carrier_connection_id = ? AND provider_recording_id = ?`, provider, call.CarrierConnectionID, recordingID))
 }
 
 func (a *App) handleTwilioRecordingStatus(w http.ResponseWriter, r *http.Request) {
@@ -402,7 +422,7 @@ func (a *App) runRecordingTick(workerCtx context.Context, ctx *sdk.AppCtx) error
 			}
 		}
 	}
-	if err := a.reconcileTwilioRecording(ctx); err != nil {
+	if err := a.reconcileProviderRecording(ctx); err != nil {
 		ctx.Logger().Warn("recording reconciliation", "err", err)
 	}
 	return a.expireRecordings(ctx)
@@ -453,9 +473,6 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	if err != nil {
 		return fmt.Errorf("load carrier credentials: %w", err)
 	}
-	if recording.Provider != "twilio" {
-		return fmt.Errorf("recording import is not implemented for %s", recording.Provider)
-	}
 	importCtx, cancel := context.WithTimeout(workerCtx, 12*time.Minute)
 	defer cancel()
 	storageClient := newRecordingStorageClient()
@@ -468,7 +485,7 @@ func (a *App) importRecording(workerCtx context.Context, ctx *sdk.AppCtx, record
 	if !storageBound {
 		return errRecordingStorageUnbound
 	}
-	path, size, err := downloadTwilioRecordingChannels(importCtx, creds.Fields, recording.ProviderRecordingID, recording.Format, recording.Channels)
+	path, size, err := a.downloadProviderRecording(importCtx, ctx, recording, creds.Fields)
 	if err != nil {
 		return err
 	}
@@ -516,9 +533,9 @@ func (c *callsDB) failRecordingImport(id string, importErr error) {
 		time.Now().UTC().Add(delay).Format(time.RFC3339), importErr.Error(), id)
 }
 
-func (a *App) reconcileTwilioRecording(ctx *sdk.AppCtx) error {
+func (a *App) reconcileProviderRecording(ctx *sdk.AppCtx) error {
 	now := time.Now().UTC()
-	row, err := a.db().listWhere(`project_id = ? AND carrier_slug = 'twilio' AND recording_mode = 'always'
+	row, err := a.db().listWhere(`project_id = ? AND carrier_slug IN ('twilio','telnyx','plivo') AND recording_mode = 'always'
         AND status IN ('completed','failed') AND carrier_sid <> '' AND ended_at <> '' AND ended_at <= ?
         AND ended_at >= ? AND (recording_checked_at = '' OR recording_checked_at <= ?)
         AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id)
@@ -529,32 +546,7 @@ func (a *App) reconcileTwilioRecording(ctx *sdk.AppCtx) error {
 	}
 	call := &row[0]
 	_, _ = ctx.AppDB().Exec(`UPDATE calls SET recording_checked_at = ? WHERE id = ?`, now.Format(time.RFC3339), call.ID)
-	raw, err := executeCarrierTool(ctx, call.CarrierConnectionID, "list_recordings", map[string]any{"CallSid": call.CarrierSID, "PageSize": 20})
-	if err != nil {
-		return err
-	}
-	var response struct {
-		Recordings []struct {
-			SID      string `json:"sid"`
-			Status   string `json:"status"`
-			Duration string `json:"duration"`
-			Channels int    `json:"channels"`
-		} `json:"recordings"`
-	}
-	if err := json.Unmarshal(raw, &response); err != nil {
-		return err
-	}
-	for _, item := range response.Recordings {
-		duration, _ := strconv.ParseInt(item.Duration, 10, 64)
-		status := strings.ToLower(item.Status)
-		if status == "" {
-			status = "completed"
-		}
-		if _, err := a.db().upsertTwilioRecording(call, item.SID, status, duration*1000, item.Channels); err != nil {
-			return err
-		}
-	}
-	return nil
+	return a.reconcileCallRecordings(ctx, call)
 }
 
 func (a *App) expireRecordings(ctx *sdk.AppCtx) error {
@@ -574,10 +566,11 @@ func (a *App) deleteProviderRecording(ctx *sdk.AppCtx, recording *recordingRow) 
 	if recording.ProviderDeletedAt != "" || recording.ProviderRecordingID == "" {
 		return nil
 	}
-	if recording.Provider != "twilio" {
-		return fmt.Errorf("provider deletion is not implemented for %s", recording.Provider)
+	input := map[string]any{"recording_id": recording.ProviderRecordingID}
+	if recording.Provider == "twilio" {
+		input = map[string]any{"RecordingSid": recording.ProviderRecordingID}
 	}
-	if _, err := executeCarrierTool(ctx, recording.CarrierConnectionID, "delete_recording", map[string]any{"RecordingSid": recording.ProviderRecordingID}); err != nil {
+	if _, err := executeCarrierTool(ctx, recording.CarrierConnectionID, "delete_recording", input); err != nil {
 		if !strings.Contains(err.Error(), "status=404") {
 			return err
 		}
@@ -842,16 +835,12 @@ func (a *App) serveRecordingContent(w http.ResponseWriter, r *http.Request, ctx 
 			http.Error(w, "recording is unavailable", http.StatusGone)
 			return
 		}
-		if recording.Provider != "twilio" {
-			http.Error(w, "provider playback is not implemented", http.StatusNotImplemented)
-			return
-		}
 		creds, credentialErr := ctx.PlatformAPI().GetConnectionCredentials(recording.CarrierConnectionID)
 		if credentialErr != nil || creds == nil {
 			http.Error(w, "provider recording is unavailable", http.StatusBadGateway)
 			return
 		}
-		path, _, err = downloadTwilioRecordingChannels(r.Context(), creds.Fields, recording.ProviderRecordingID, recording.Format, recording.Channels)
+		path, _, err = a.downloadProviderRecording(r.Context(), ctx, recording, creds.Fields)
 	}
 	if err != nil {
 		ctx.Logger().Warn("recording playback", "recording", recording.ID, "source", recording.StorageStatus, "err", err)

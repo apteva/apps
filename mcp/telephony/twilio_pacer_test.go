@@ -45,10 +45,9 @@ func waitTwilioWrite(t *testing.T, writes <-chan twilioWriteObservation) twilioW
 func TestTwilioAudioPacerWritesAtCarrierCadence(t *testing.T) {
 	pacer, cancel, writes := testTwilioPacer(t)
 	defer cancel()
-	packets := []twilioAudioPacket{
-		{PCM: make([]int16, 160), AudioEndMS: 20},
-		{PCM: make([]int16, 160), AudioEndMS: 40},
-		{PCM: make([]int16, 160), AudioEndMS: 60},
+	packets := make([]twilioAudioPacket, 12)
+	for i := range packets {
+		packets[i] = twilioAudioPacket{PCM: make([]int16, 160), AudioEndMS: (i + 1) * 20}
 	}
 	if _, err := pacer.enqueue(context.Background(), packets, realtimeBridgeControl{ItemID: "item-1"}); err != nil {
 		t.Fatal(err)
@@ -60,10 +59,104 @@ func TestTwilioAudioPacerWritesAtCarrierCadence(t *testing.T) {
 			mediaTimes = append(mediaTimes, observation.at)
 		}
 	}
-	for i := 1; i < len(mediaTimes); i++ {
-		if spacing := mediaTimes[i].Sub(mediaTimes[i-1]); spacing < 15*time.Millisecond {
-			t.Fatalf("media packets were burst: spacing=%v", spacing)
+	// The initial 200 ms is deliberately sent ahead to prevent carrier
+	// underruns. Replenishment after that lead follows the media cadence.
+	if leadSpan := mediaTimes[9].Sub(mediaTimes[0]); leadSpan > 15*time.Millisecond {
+		t.Fatalf("initial carrier buffer took too long to fill: %v", leadSpan)
+	}
+	if firstRefill := mediaTimes[10].Sub(mediaTimes[0]); firstRefill < 15*time.Millisecond || firstRefill > 45*time.Millisecond {
+		t.Fatalf("carrier buffer was not replenished on time: %v", firstRefill)
+	}
+}
+
+func TestTwilioAudioPacerWriteOverheadDoesNotCausePlaybackUnderrun(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writes := make(chan twilioWriteObservation, 128)
+	pacer := newTwilioAudioPacer(ctx, "stream-test", newTwilioPlaybackTracker(), func(payload []byte) error {
+		time.Sleep(time.Millisecond)
+		var envelope struct {
+			Event string `json:"event"`
 		}
+		if err := json.Unmarshal(payload, &envelope); err != nil {
+			return err
+		}
+		writes <- twilioWriteObservation{event: envelope.Event, at: time.Now()}
+		return nil
+	}, nil)
+	packets := make([]twilioAudioPacket, 30)
+	for i := range packets {
+		packets[i] = twilioAudioPacket{PCM: make([]int16, 160), AudioEndMS: (i + 1) * 20}
+	}
+	if _, err := pacer.enqueue(context.Background(), packets, realtimeBridgeControl{ItemID: "item-delayed"}); err != nil {
+		t.Fatal(err)
+	}
+	var mediaTimes []time.Time
+	for len(mediaTimes) < len(packets) {
+		observation := waitTwilioWrite(t, writes)
+		if observation.event == "media" {
+			mediaTimes = append(mediaTimes, observation.at)
+		}
+	}
+	// Thirty 20 ms packets contain 600 ms of audio. With a 200 ms carrier
+	// lead, the final packet must arrive well before the first 500 ms plays.
+	if elapsed := mediaTimes[len(mediaTimes)-1].Sub(mediaTimes[0]); elapsed >= 500*time.Millisecond {
+		t.Fatalf("write overhead accumulated into carrier underrun: elapsed=%v", elapsed)
+	}
+}
+
+func TestTwilioAudioPacerEnqueueTrafficDoesNotStarvePlayback(t *testing.T) {
+	pacer, cancel, writes := testTwilioPacer(t)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 80; i++ {
+			_, _ = pacer.enqueue(context.Background(), []twilioAudioPacket{{
+				PCM: make([]int16, 160), AudioEndMS: (i + 1) * 20,
+			}}, realtimeBridgeControl{ItemID: "item-streaming"})
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	var mediaTimes []time.Time
+	deadline := time.After(time.Second)
+	for len(mediaTimes) < 8 {
+		select {
+		case observation := <-writes:
+			if observation.event == "media" {
+				mediaTimes = append(mediaTimes, observation.at)
+			}
+		case <-deadline:
+			t.Fatal("streaming enqueue traffic starved Twilio playback")
+		}
+	}
+	for i := 1; i < len(mediaTimes); i++ {
+		if gap := mediaTimes[i].Sub(mediaTimes[i-1]); gap > 35*time.Millisecond {
+			t.Fatalf("streaming enqueue traffic opened a carrier gap: %v", gap)
+		}
+	}
+	<-done
+}
+
+func TestTwilioAudioPacerDoesNotRequirePlaybackMetadataForCadence(t *testing.T) {
+	pacer, cancel, writes := testTwilioPacer(t)
+	defer cancel()
+	packets := make([]twilioAudioPacket, 12)
+	for i := range packets {
+		packets[i] = twilioAudioPacket{PCM: make([]int16, 160)}
+	}
+	if _, err := pacer.enqueue(context.Background(), packets, realtimeBridgeControl{}); err != nil {
+		t.Fatal(err)
+	}
+	var mediaTimes []time.Time
+	for len(mediaTimes) < len(packets) {
+		observation := waitTwilioWrite(t, writes)
+		if observation.event == "media" {
+			mediaTimes = append(mediaTimes, observation.at)
+		}
+	}
+	if firstRefill := mediaTimes[10].Sub(mediaTimes[0]); firstRefill < 15*time.Millisecond || firstRefill > 45*time.Millisecond {
+		t.Fatalf("metadata-free packets lost carrier cadence: refill=%v", firstRefill)
 	}
 }
 
@@ -79,12 +172,9 @@ func TestTwilioAudioPacerClearPreemptsQueuedMedia(t *testing.T) {
 	}
 	for waitTwilioWrite(t, writes).event != "media" {
 	}
-	clearedMS, err := pacer.clear(context.Background())
+	_, err := pacer.clear(context.Background())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if clearedMS < 80 {
-		t.Fatalf("cleared queue=%dms, want at least 80ms", clearedMS)
 	}
 	foundClear := false
 	deadline := time.After(150 * time.Millisecond)

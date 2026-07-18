@@ -31,6 +31,7 @@ type answerPlatform struct {
 	killed              []string
 	integrationCalls    []integrationCall
 	integrationResponse map[string]json.RawMessage
+	credentials         *sdk.ConnectionCredentials
 }
 
 type integrationCall struct {
@@ -55,6 +56,11 @@ func (p *answerPlatform) KillThread(_ int64, threadID string) error {
 }
 
 func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	if p.credentials != nil {
+		copy := *p.credentials
+		copy.ConnectionID = id
+		return &copy, nil
+	}
 	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "twilio", Fields: map[string]string{"auth_token": "test-auth-token"}}, nil
 }
 
@@ -146,7 +152,7 @@ func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 	for _, route := range routes {
 		public[route.Pattern] = route.NoAuth
 	}
-	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/xml/plivo/", "/webhook/status/", "/webhook/stream/twilio/", "/webhook/recording/twilio/", "/inbound/twilio/", "/inbound/telnyx/"} {
+	for _, pattern := range []string{"/media/twilio/", "/media/telnyx/", "/media/plivo/", "/xml/plivo/", "/webhook/status/", "/webhook/stream/twilio/", "/webhook/recording/twilio/", "/webhook/recording/plivo/", "/inbound/twilio/", "/inbound/telnyx/", "/inbound/plivo/"} {
 		if !public[pattern] {
 			t.Fatalf("carrier route %s must be public at the SDK layer", pattern)
 		}
@@ -625,6 +631,10 @@ func TestMediaClaimIsExclusive(t *testing.T) {
 }
 
 func TestCallCallbackTokenAndURLRedaction(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&answerPlatform{}))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
 	call := testCall("token", "in-progress")
 	call.CarrierSlug = "telnyx"
 	req := httptest.NewRequest(http.MethodPost, "/webhook/status/token?token=callback-secret", nil)
@@ -750,15 +760,15 @@ func TestActiveRouteIsUniqueAndCanBeDisabled(t *testing.T) {
 	}
 }
 
-func TestPlivoSixteenKilohertzCodecRoundTripShape(t *testing.T) {
+func TestPlivoNativeTelephonyCodecRoundTripShape(t *testing.T) {
 	pcm24 := make([]byte, 960)
-	payload, err := encodeCarrierPayload(pcm24, carrierCodecL16_16)
+	payload, err := encodeCarrierPayload(pcm24, carrierCodecPCMU8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := buildCarrierOutbound("plivo16", "", payload).(map[string]any)
+	out := buildCarrierOutbound("plivo", "", payload).(map[string]any)
 	media := out["media"].(map[string]string)
-	if media["sampleRate"] != "16000" || media["contentType"] != "audio/x-l16" {
+	if media["sampleRate"] != "8000" || media["contentType"] != "audio/x-mulaw" {
 		t.Fatalf("unexpected Plivo media shape: %#v", media)
 	}
 }
@@ -774,7 +784,7 @@ func TestRealtimeInterruptControlAndCarrierClearShapes(t *testing.T) {
 	if signalwire["event"] != "clear" || signalwire["streamSid"] != "stream-1" {
 		t.Fatalf("signalwire clear = %#v", signalwire)
 	}
-	plivo := buildCarrierClear("plivo16", "").(map[string]string)
+	plivo := buildCarrierClear("plivo", "").(map[string]string)
 	if plivo["event"] != "clearAudio" {
 		t.Fatalf("plivo clear = %#v", plivo)
 	}

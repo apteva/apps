@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.12
+version: 0.1.15
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -241,10 +241,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback, NoAuth: true},
 		{Pattern: "/webhook/stream/twilio/", Handler: a.handleTwilioStreamStatus, NoAuth: true},
 		{Pattern: "/webhook/recording/twilio/", Handler: a.handleTwilioRecordingStatus, NoAuth: true},
+		{Pattern: "/webhook/recording/plivo/", Handler: a.handlePlivoRecordingStatus, NoAuth: true},
 		// Twilio inbound call control. The route id maps a phone number
 		// to the agent that should receive the incoming-call event.
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
 		{Pattern: "/inbound/telnyx/", Handler: a.handleTelnyxInbound, NoAuth: true},
+		{Pattern: "/inbound/plivo/", Handler: a.handlePlivoInbound, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
@@ -270,7 +272,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"directive":        map[string]any{"type": "string", "description": "System instructions the realtime model runs with. Should describe the persona, the goal of the call, and when to escalate to main via send(). Keep it short — 2-4 sentences."},
 				"voice":            map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
 				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
-				"recording":        map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Twilio only in this version."},
+				"recording":        map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Supported by Twilio, Telnyx, and Plivo."},
 				"timeout_sec":      map[string]any{"type": "integer", "description": "Ring timeout before giving up.", "default": 30, "minimum": 5, "maximum": 120},
 				"max_duration_sec": map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
 				"idempotency_key":  map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
@@ -311,7 +313,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_set_recording_policy",
-			Description: "Set recording behavior for future calls on an inbound route. Args: route_id, recording_mode (inherit|off|always). Twilio only in this version.",
+			Description: "Set recording behavior for future calls on an inbound route. Args: route_id, recording_mode (inherit|off|always). Supported by Twilio, Telnyx, and Plivo.",
 			InputSchema: schemaObject(map[string]any{
 				"route_id":       map[string]any{"type": "string"},
 				"recording_mode": map[string]any{"type": "string", "enum": []string{"inherit", "off", "always"}},
@@ -320,7 +322,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_configure_carrier",
-			Description: "Configure the bound carrier for an inbound route. Twilio sets the number webhook; Telnyx creates a dedicated Call Control Application and assigns the number. Args: route_id (required).",
+			Description: "Configure the bound carrier for an inbound route. Twilio updates the number webhook; Telnyx and Plivo create a dedicated voice application and assign the number. Args: route_id (required).",
 			InputSchema: schemaObject(map[string]any{
 				"route_id": map[string]any{"type": "string", "description": "Route id returned by telephony_routes_create."},
 			}, []string{"route_id"}),
@@ -689,8 +691,8 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		}
 	}
 	carrierSlug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
-	if recordingMode == recordingModeAlways && carrierSlug != "twilio" {
-		return mcpError("durable call recording is currently implemented for Twilio; disable recording or bind Twilio"), nil
+	if recordingMode == recordingModeAlways && !providerSupportsRecording(carrierSlug) {
+		return mcpError("call recording is not implemented for the bound carrier " + carrierSlug), nil
 	}
 
 	callID := newCallID()
@@ -896,7 +898,7 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if slug == "" {
 		return mcpError("could not determine carrier slug"), nil
 	}
-	if slug != "twilio" && slug != "telnyx" {
+	if slug != "twilio" && slug != "telnyx" && slug != "plivo" {
 		return mcpError("inbound call routing is not implemented for provider " + slug), nil
 	}
 	if err := a.validatePublicEndpoint(); err != nil {
@@ -932,8 +934,8 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	if recordingMode == recordingModeAlways && slug != "twilio" {
-		return mcpError("durable call recording is currently implemented for Twilio routes"), nil
+	if recordingMode == recordingModeAlways && !providerSupportsRecording(slug) {
+		return mcpError("call recording is not implemented for provider " + slug), nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	route := routeRow{
@@ -1042,6 +1044,8 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 		err = a.configureTwilioRoute(ctx, route)
 	case "telnyx":
 		err = a.configureTelnyxRoute(ctx, route)
+	case "plivo":
+		err = a.configurePlivoRoute(ctx, route)
 	default:
 		err = fmt.Errorf("carrier webhook configuration is not implemented for provider %s", route.CarrierSlug)
 	}
@@ -1082,6 +1086,8 @@ func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args
 		err = a.disableTwilioRoute(ctx, route)
 	case "telnyx":
 		err = a.disableTelnyxRoute(ctx, route)
+	case "plivo":
+		err = a.disablePlivoRoute(ctx, route)
 	default:
 		err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
 	}
@@ -1153,7 +1159,7 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.AgentID != agentID || row.ProjectID != currentProject(ctx) {
 		return mcpError("this call is routed to another agent"), nil
 	}
-	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" {
+	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
 		return mcpError("answer is not implemented for inbound provider " + row.CarrierSlug), nil
 	}
 	threadID, err := a.answerCall(ctx, row, directive, voice, greeting, false)
@@ -1495,7 +1501,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		})
 		return err
 	case "telnyx":
-		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", map[string]any{
+		input := map[string]any{
 			"call_control_id":            row.CarrierSID,
 			"stream_url":                 a.publicWSStreamURL("telnyx", row.ID, row.CallbackSecret),
 			"stream_track":               "inbound_track",
@@ -1504,6 +1510,18 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 			"stream_bidirectional_codec": "PCMU",
 			"webhook_url":                a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID),
 			"webhook_url_method":         "POST",
+		}
+		if row.RecordingMode == recordingModeAlways {
+			input["record"] = "record-from-answer"
+			input["record_channels"] = telnyxRecordingChannels(row.RecordingChannels)
+			input["record_format"] = "wav"
+			input["record_track"] = "both"
+		}
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "answer_call", input)
+		return err
+	case "plivo":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+			"call_uuid": row.CarrierSID, "aleg_url": a.plivoXMLURL(row.ID, row.CallbackSecret, row.ProjectID), "aleg_method": "POST",
 		})
 		return err
 	default:
@@ -1522,6 +1540,9 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "reject_call", map[string]any{
 			"call_control_id": row.CarrierSID,
 		})
+		return err
+	case "plivo":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{"call_uuid": row.CarrierSID})
 		return err
 	default:
 		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)
@@ -1576,6 +1597,23 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 	if err := a.authorizeCallRequest(r, row); err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
+	}
+	if row.CarrierSlug == "telnyx" {
+		body, readErr := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+		if readErr != nil || len(body) > 1<<20 {
+			http.Error(w, "invalid Telnyx callback", http.StatusBadRequest)
+			return
+		}
+		handled, recordingErr := a.handleTelnyxRecordingEvent(row, body)
+		if recordingErr != nil {
+			http.Error(w, recordingErr.Error(), http.StatusBadRequest)
+			return
+		}
+		if handled {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
 	}
 	status, errMsg, carrierSID := callbackStatusFor(row.CarrierSlug, r)
 	if status == "" && errMsg == "invalid Telnyx callback" {
@@ -1790,7 +1828,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string) (*
 	if route.RecordingMode != "" && route.RecordingMode != recordingModeInherit {
 		recordingMode = route.RecordingMode
 	}
-	if route.CarrierSlug != "twilio" {
+	if !providerSupportsRecording(route.CarrierSlug) {
 		recordingMode = recordingModeOff
 	}
 	call := callRow{
@@ -2134,6 +2172,11 @@ func (a *App) twilioRecordingStatusURL(callID, secret, projectID string) string 
 	return a.publicAppURL() + "/webhook/recording/twilio/" + url.PathEscape(callID) + "?" + query
 }
 
+func (a *App) plivoRecordingStatusURL(callID, secret, projectID string) string {
+	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
+	return a.publicAppURL() + "/webhook/recording/plivo/" + url.PathEscape(callID) + "?" + query
+}
+
 func (a *App) twilioStreamTwiML(row *callRow) string {
 	recording := ""
 	if row.RecordingMode == recordingModeAlways {
@@ -2381,6 +2424,7 @@ func callbackStatusFor(carrier string, r *http.Request) (string, string, string)
 		return "", "invalid Telnyx callback", ""
 	}
 	status := ""
+	reason := firstNonEmpty(body.Data.Payload.HangupCause, body.Data.Payload.HangupSource)
 	switch body.Data.EventType {
 	case "call.initiated":
 		status = "initiated"
@@ -2392,11 +2436,28 @@ func callbackStatusFor(carrier string, r *http.Request) (string, string, string)
 		status = "in-progress"
 	case "streaming.stopped", "call.streaming.stopped":
 		status = "media-disconnected"
+	case "streaming.failed", "call.streaming.failed":
+		status = "failed"
 	case "call.hangup":
-		status = "completed"
+		status = telnyxHangupStatus(body.Data.Payload.HangupCause)
 	}
-	errMsg := firstNonEmpty(body.Data.Payload.HangupCause, body.Data.Payload.HangupSource)
-	return status, errMsg, body.Data.Payload.CallControlID
+	return status, reason, body.Data.Payload.CallControlID
+}
+
+func telnyxHangupStatus(cause string) string {
+	normalized := strings.ToLower(strings.NewReplacer("-", "_", " ", "_").Replace(strings.TrimSpace(cause)))
+	switch {
+	case strings.Contains(normalized, "busy"):
+		return "busy"
+	case strings.Contains(normalized, "no_answer"), strings.Contains(normalized, "timeout"):
+		return "no-answer"
+	case strings.Contains(normalized, "cancel"):
+		return "canceled"
+	case strings.Contains(normalized, "normal_clearing"), normalized == "":
+		return "completed"
+	default:
+		return "failed"
+	}
 }
 
 func normalizeCallStatus(status string) string {

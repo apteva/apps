@@ -38,6 +38,43 @@ func TestPCMResamplerSuppressesDownsampleAliasing(t *testing.T) {
 	}
 }
 
+func TestTwilioAudioTransformKeepsContinuousToneAcrossPackets(t *testing.T) {
+	down := newPCMResampler(24000, 8000)
+	input := sinePCM(24000, 1000, 24000)
+	var output []int16
+	for start := 0; start < len(input); start += 960 {
+		end := min(len(input), start+960)
+		pcm8 := down.Process(input[start:end])
+		for packetStart := 0; packetStart < len(pcm8); packetStart += twilioMediaPacketSamples {
+			packetEnd := min(len(pcm8), packetStart+twilioMediaPacketSamples)
+			output = append(output, ulawToPCM16(pcm16ToUlaw(pcm8[packetStart:packetEnd]))...)
+		}
+	}
+	if len(output) < 7900 {
+		t.Fatalf("audio transform lost duration: samples=%d", len(output))
+	}
+	longestQuietRun := 0
+	quietRun := 0
+	for _, sample := range output {
+		if absInt16(sample) <= 8 {
+			quietRun++
+			longestQuietRun = max(longestQuietRun, quietRun)
+		} else {
+			quietRun = 0
+		}
+	}
+	if longestQuietRun >= 8 {
+		t.Fatalf("audio transform inserted a %.2fms gap", float64(longestQuietRun)*1000/8000)
+	}
+}
+
+func absInt16(value int16) int {
+	if value < 0 {
+		return -int(value)
+	}
+	return int(value)
+}
+
 func sinePCM(rate, frequency, samples int) []int16 {
 	out := make([]int16, samples)
 	for i := range out {
