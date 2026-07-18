@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.1.3
-description: Isolated test environments built from project apps, fake or selected connections, deterministic seed plans, agents, edge policies, and snapshots.
+version: 0.2.0
+description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, web fixtures, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 tags: [environments, testing, agents, evals, mocks]
@@ -25,7 +25,7 @@ min_apteva_version: "0.18.0"
 requires:
   permissions: [db.write.app, platform.runtimes.read, platform.runtimes.call, platform.runtimes.manage, platform.runtime_catalog.read, platform.connections.read]
 provides:
-  http_routes: [{ prefix: / }]
+  http_routes: [{ prefix: /fixtures/, no_auth: true }, { prefix: / }]
   mcp_tools:
     - { name: environment_list, description: "List environment definitions and active runs." }
     - { name: environment_get, description: "Get one environment definition and live runtime state." }
@@ -37,11 +37,11 @@ provides:
     - { name: environment_run_create, description: "Create an inline ephemeral run for an eval or one-off test." }
     - { name: environment_run_get, description: "Get a run and its live runtime state." }
     - { name: environment_run_stop, description: "Stop an inline or definition-backed run." }
-    - { name: environment_catalog, description: "List project apps, connections, fake integration catalog, agents, and snapshots." }
+    - { name: environment_catalog, description: "List project apps, connections, fake integrations, web fixtures, agents, and snapshots." }
     - { name: environment_seed, description: "Call a runtime app tool to seed or mutate test state." }
     - { name: environment_call, description: "Call any tool on an app cloned into a run." }
     - { name: environment_inspect, description: "Inspect runtime apps, agents, edge calls, and telemetry." }
-    - { name: environment_assert, description: "Evaluate an app-state, edge-call, or telemetry assertion." }
+    - { name: environment_assert, description: "Evaluate app, edge, telemetry, web-state, or web-event assertions." }
     - { name: environment_snapshot, description: "Capture a reusable snapshot of a running environment." }
     - { name: environment_snapshot_list, description: "List snapshots owned by this Environments install." }
     - { name: environment_snapshot_delete, description: "Delete a snapshot." }
@@ -60,7 +60,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.1.3, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.2.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
@@ -94,7 +94,7 @@ func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{Name: "reconcile", Schedule: "@every 15s", Run: func(ctx context.Context, app *sdk.AppCtx) error { a.svc.ctx = app; return a.svc.reconcile(ctx) }}}
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environments/", Handler: a.handleEnvironment}, {Pattern: "/api/runs", Handler: a.handleRuns}, {Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/catalog", Handler: a.handleCatalog}, {Pattern: "/api/catalog/", Handler: a.handleCatalogItem}, {Pattern: "/api/snapshots", Handler: a.handleSnapshots}, {Pattern: "/api/snapshots/", Handler: a.handleSnapshot}, {Pattern: "/api/import/legacy", Handler: a.handleLegacyImport}}
+	return []sdk.Route{{Pattern: "/fixtures/", Handler: a.handleFixture, NoAuth: true}, {Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environments/", Handler: a.handleEnvironment}, {Pattern: "/api/runs", Handler: a.handleRuns}, {Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/catalog", Handler: a.handleCatalog}, {Pattern: "/api/catalog/", Handler: a.handleCatalogItem}, {Pattern: "/api/snapshots", Handler: a.handleSnapshots}, {Pattern: "/api/snapshots/", Handler: a.handleSnapshot}, {Pattern: "/api/import/legacy", Handler: a.handleLegacyImport}}
 }
 func main() { sdk.Run(&App{}) }
 

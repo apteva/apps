@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 type service struct {
-	ctx *sdk.AppCtx
-	db  store
+	ctx       *sdk.AppCtx
+	db        store
+	fixtureMu sync.Mutex
 }
 
 func (s *service) listDefinitions() ([]Definition, error) {
@@ -26,6 +28,7 @@ func (s *service) listDefinitions() ([]Definition, error) {
 	live, _ := s.liveMap()
 	for i := range defs {
 		if defs[i].ActiveRun != nil {
+			s.decorateRun(defs[i].ActiveRun)
 			if rt := live[defs[i].ActiveRun.RuntimeID]; rt != nil {
 				defs[i].Runtime = rt
 			}
@@ -40,6 +43,7 @@ func (s *service) getDefinition(id string) (*Definition, error) {
 		return d, err
 	}
 	if d.ActiveRun != nil {
+		s.decorateRun(d.ActiveRun)
 		rt, err := s.runtime().GetRuntime(d.ActiveRun.RuntimeID)
 		if err == nil {
 			d.Runtime = rt
@@ -98,6 +102,9 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.db.createRun(run); err != nil {
 		return nil, err
 	}
+	if err = s.createWebFixtures(run, spec); err != nil {
+		return run, fmt.Errorf("create web fixtures: %w", err)
+	}
 	created := false
 	defer func() {
 		if err != nil {
@@ -107,6 +114,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 			run.Status = "failed"
 			run.Error = err.Error()
 			_ = s.db.updateRun(run.ID, "failed", err.Error())
+			_ = s.db.setWebFixturesStatus(run.ID, "failed")
 			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
 		}
 	}()
@@ -134,6 +142,8 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.db.updateRun(run.ID, "running", ""); err != nil {
 		return run, err
 	}
+	_ = s.db.setWebFixturesStatus(run.ID, "running")
+	s.decorateRun(run)
 	s.ctx.Emit("environment.started", map[string]any{"environment_id": environmentID, "run_id": run.ID, "runtime_id": runtimeID})
 	return run, nil
 }
@@ -148,12 +158,14 @@ func (s *service) stopDefinition(id string) error {
 }
 func (s *service) stopRun(run *Run) error {
 	_ = s.db.updateRun(run.ID, "stopping", "")
+	_ = s.db.setWebFixturesStatus(run.ID, "stopping")
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		_ = s.db.updateRun(run.ID, "failed", err.Error())
 		return err
 	}
 	_ = s.db.updateRun(run.ID, "stopped", "")
+	_ = s.db.setWebFixturesStatus(run.ID, "stopped")
 	s.ctx.Emit("environment.stopped", map[string]any{"environment_id": run.EnvironmentID, "run_id": run.ID, "runtime_id": run.RuntimeID})
 	return nil
 }
@@ -171,6 +183,7 @@ func (s *service) reconcile(context.Context) error {
 		r := &runs[i]
 		if (r.Status == "starting" || r.Status == "running" || r.Status == "stopping") && live[r.RuntimeID] == nil {
 			_ = s.db.updateRun(r.ID, "expired", "runtime no longer exists")
+			_ = s.db.setWebFixturesStatus(r.ID, "expired")
 			s.ctx.Emit("environment.expired", map[string]any{"environment_id": r.EnvironmentID, "run_id": r.ID, "runtime_id": r.RuntimeID})
 		}
 	}
@@ -206,6 +219,9 @@ func (s *service) snapshot(environmentID, description string) (*Snapshot, error)
 	}
 	out := &Snapshot{ID: x.ID, EnvironmentID: environmentID, Description: x.Description, CreatedAt: x.CreatedAt}
 	if err = s.db.saveSnapshot(*out); err != nil {
+		return nil, err
+	}
+	if err = s.db.saveWebFixtureSnapshots(out.ID, run.ID); err != nil {
 		return nil, err
 	}
 	s.ctx.Emit("snapshot.created", out)
@@ -253,6 +269,50 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 			min = 1
 		}
 		return AssertionResult{Passed: n >= min, Actual: n}, nil
+	case "web_state":
+		run, err := s.db.getRun(runtimeID)
+		if err != nil || run == nil {
+			if err == nil {
+				err = errors.New("run not found")
+			}
+			return AssertionResult{}, err
+		}
+		x, err := s.db.getWebFixture(run.ID, a.Fixture)
+		if err != nil || x == nil {
+			if err == nil {
+				err = errors.New("web fixture not found")
+			}
+			return AssertionResult{}, err
+		}
+		got := jsonPath(x.State, a.Path)
+		return AssertionResult{Passed: reflect.DeepEqual(got, a.Equals), Actual: got}, nil
+	case "web_event":
+		run, err := s.db.getRun(runtimeID)
+		if err != nil || run == nil {
+			if err == nil {
+				err = errors.New("run not found")
+			}
+			return AssertionResult{}, err
+		}
+		events, err := s.db.listWebFixtureEvents(run.ID, a.Fixture)
+		if err != nil {
+			return AssertionResult{}, err
+		}
+		n := 0
+		for _, event := range events {
+			if a.EventType != "" && event.Type != a.EventType {
+				continue
+			}
+			if a.Path != "" && !reflect.DeepEqual(jsonPath(event.Data, a.Path), a.Equals) {
+				continue
+			}
+			n++
+		}
+		min := a.MinCalls
+		if min == 0 {
+			min = 1
+		}
+		return AssertionResult{Passed: n >= min, Actual: n}, nil
 	default:
 		return AssertionResult{}, fmt.Errorf("unsupported assertion type %q", a.Type)
 	}
@@ -277,6 +337,19 @@ func validateSpec(spec EnvironmentSpec) error {
 	}
 	if spec.NetworkMode == "" {
 		spec.NetworkMode = sdk.RuntimeNetworkBlock
+	}
+	seen := map[string]bool{}
+	for i, fixture := range spec.WebFixtures {
+		if !validID(fixture.ID) {
+			return fmt.Errorf("web fixture %d: valid id required", i)
+		}
+		if seen[fixture.ID] {
+			return fmt.Errorf("web fixture %d: duplicate id %q", i, fixture.ID)
+		}
+		seen[fixture.ID] = true
+		if err := validateWebFixtureSpec(fixture); err != nil {
+			return fmt.Errorf("web fixture %s: %w", fixture.ID, err)
+		}
 	}
 	return nil
 }

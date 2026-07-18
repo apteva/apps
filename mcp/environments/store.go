@@ -175,3 +175,193 @@ func (s store) setSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO environment_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
+
+func (s store) createWebFixture(x *WebFixtureInstance) error {
+	seed, err := json.Marshal(x.Seed)
+	if err != nil {
+		return err
+	}
+	initial, err := json.Marshal(x.InitialState)
+	if err != nil {
+		return err
+	}
+	state, err := json.Marshal(x.State)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if x.CreatedAt.IsZero() {
+		x.CreatedAt = now
+	}
+	x.UpdatedAt = now
+	if x.Status == "" {
+		x.Status = "running"
+	}
+	_, err = s.db.Exec(`INSERT INTO environment_web_fixtures(run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, x.RunID, x.ID, x.Pack, x.Version, x.Scenario, x.Token, string(seed), string(initial), string(state), x.Status, x.CreatedAt.Format(time.RFC3339Nano), x.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s store) getWebFixture(runID, fixtureID string) (*WebFixtureInstance, error) {
+	row := s.db.QueryRow(`SELECT run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at FROM environment_web_fixtures WHERE run_id=? AND fixture_id=?`, runID, fixtureID)
+	return scanWebFixture(row)
+}
+
+func (s store) getWebFixtureByToken(runID, fixtureID, token string) (*WebFixtureInstance, error) {
+	row := s.db.QueryRow(`SELECT run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at FROM environment_web_fixtures WHERE run_id=? AND fixture_id=? AND token=?`, runID, fixtureID, token)
+	return scanWebFixture(row)
+}
+
+func (s store) listWebFixtures(runID string) ([]WebFixtureInstance, error) {
+	rows, err := s.db.Query(`SELECT run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at FROM environment_web_fixtures WHERE run_id=? ORDER BY fixture_id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WebFixtureInstance{}
+	for rows.Next() {
+		x, err := scanWebFixture(rows)
+		if err != nil {
+			return nil, err
+		}
+		if x != nil {
+			out = append(out, *x)
+		}
+	}
+	return out, rows.Err()
+}
+
+func scanWebFixture(row rowScanner) (*WebFixtureInstance, error) {
+	var x WebFixtureInstance
+	var seed, initial, state, created, updated string
+	err := row.Scan(&x.RunID, &x.ID, &x.Pack, &x.Version, &x.Scenario, &x.Token, &seed, &initial, &state, &x.Status, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(seed), &x.Seed); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(initial), &x.InitialState); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(state), &x.State); err != nil {
+		return nil, err
+	}
+	x.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	x.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return &x, nil
+}
+
+func (s store) updateWebFixtureState(runID, fixtureID string, state map[string]any) error {
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE environment_web_fixtures SET state_json=?,updated_at=? WHERE run_id=? AND fixture_id=?`, string(raw), time.Now().UTC().Format(time.RFC3339Nano), runID, fixtureID)
+	return err
+}
+
+func (s store) setWebFixturesStatus(runID, status string) error {
+	_, err := s.db.Exec(`UPDATE environment_web_fixtures SET status=?,updated_at=? WHERE run_id=?`, status, time.Now().UTC().Format(time.RFC3339Nano), runID)
+	return err
+}
+
+func (s store) resetWebFixture(runID, fixtureID string) error {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE environment_web_fixtures SET state_json=initial_state_json,updated_at=? WHERE run_id=? AND fixture_id=?`, now, runID, fixtureID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM environment_web_fixture_events WHERE run_id=? AND fixture_id=?`, runID, fixtureID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s store) appendWebFixtureEvent(event *WebFixtureEvent) error {
+	raw, err := json.Marshal(event.Data)
+	if err != nil {
+		return err
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	result, err := s.db.Exec(`INSERT INTO environment_web_fixture_events(run_id,fixture_id,type,data_json,created_at) VALUES(?,?,?,?,?)`, event.RunID, event.FixtureID, event.Type, string(raw), event.CreatedAt.Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	event.ID, _ = result.LastInsertId()
+	return nil
+}
+
+func (s store) listWebFixtureEvents(runID, fixtureID string) ([]WebFixtureEvent, error) {
+	rows, err := s.db.Query(`SELECT id,run_id,fixture_id,type,data_json,created_at FROM environment_web_fixture_events WHERE run_id=? AND fixture_id=? ORDER BY id`, runID, fixtureID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []WebFixtureEvent{}
+	for rows.Next() {
+		var event WebFixtureEvent
+		var raw, created string
+		if err := rows.Scan(&event.ID, &event.RunID, &event.FixtureID, &event.Type, &raw, &created); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(raw), &event.Data); err != nil {
+			return nil, err
+		}
+		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
+func (s store) saveWebFixtureSnapshots(snapshotID, runID string) error {
+	fixtures, err := s.listWebFixtures(runID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM environment_web_fixture_snapshots WHERE snapshot_id=?`, snapshotID); err != nil {
+		return err
+	}
+	for _, x := range fixtures {
+		seed, _ := json.Marshal(x.Seed)
+		state, _ := json.Marshal(x.State)
+		if _, err = tx.Exec(`INSERT INTO environment_web_fixture_snapshots(snapshot_id,fixture_id,pack,pack_version,scenario,seed_json,state_json,created_at) VALUES(?,?,?,?,?,?,?,?)`, snapshotID, x.ID, x.Pack, x.Version, x.Scenario, string(seed), string(state), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s store) webFixtureSnapshot(snapshotID, fixtureID string) (map[string]any, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT state_json FROM environment_web_fixture_snapshots WHERE snapshot_id=? AND fixture_id=?`, snapshotID, fixtureID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var state map[string]any
+	if err := json.Unmarshal([]byte(raw), &state); err != nil {
+		return nil, false, err
+	}
+	return state, true, nil
+}
+
+func (s store) deleteWebFixtureSnapshots(snapshotID string) error {
+	_, err := s.db.Exec(`DELETE FROM environment_web_fixture_snapshots WHERE snapshot_id=?`, snapshotID)
+	return err
+}

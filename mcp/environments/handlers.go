@@ -146,6 +146,9 @@ func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, err)
 			return
 		}
+		for i := range rows {
+			a.svc.decorateRun(&rows[i])
+		}
 		writeJSON(w, 200, rows)
 		return
 	}
@@ -182,6 +185,37 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	a.svc.decorateRun(run)
+	if len(parts) >= 2 && parts[1] == "fixtures" {
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, run.WebFixtures)
+			return
+		}
+		if len(parts) < 3 || parts[2] == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if len(parts) == 3 && r.Method == http.MethodGet {
+			detail, err := a.svc.fixtureDetail(run.ID, parts[2])
+			if err != nil {
+				httpError(w, http.StatusNotFound, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, detail)
+			return
+		}
+		if len(parts) == 4 && parts[3] == "reset" && r.Method == http.MethodPost {
+			if err := a.svc.resetFixture(run.ID, parts[2]); err != nil {
+				httpError(w, http.StatusBadRequest, err)
+				return
+			}
+			detail, _ := a.svc.fixtureDetail(run.ID, parts[2])
+			writeJSON(w, http.StatusOK, detail)
+			return
+		}
+		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported fixture operation"))
+		return
+	}
 	if len(parts) == 2 && parts[1] == "inspect" {
 		if r.Method != http.MethodGet {
 			httpError(w, http.StatusMethodNotAllowed, errors.New("GET only"))
@@ -197,7 +231,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusBadGateway, err)
 			return
 		}
-		out := map[string]any{"run": run, "runtime": runtime, "edge_calls": edge}
+		out := map[string]any{"run": run, "runtime": runtime, "edge_calls": edge, "web_fixtures": run.WebFixtures}
 		if agent := strings.TrimSpace(r.URL.Query().Get("agent")); agent != "" {
 			events, err := a.svc.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, agent, time.Time{}, 500)
 			if err != nil {
@@ -258,7 +292,7 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 502, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots})
+	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog()})
 }
 func (a *App) handleCatalogItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -317,6 +351,7 @@ func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = a.svc.db.deleteSnapshot(id)
+	_ = a.svc.db.deleteWebFixtureSnapshots(id)
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 

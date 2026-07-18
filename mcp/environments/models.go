@@ -22,6 +22,65 @@ type EnvironmentSpec struct {
 	Seeds               []SeedStep                      `json:"seeds,omitempty"`
 	Agents              []AgentSpec                     `json:"agents,omitempty"`
 	SnapshotID          string                          `json:"snapshot_id,omitempty"`
+	WebFixtures         []WebFixtureSpec                `json:"web_fixtures,omitempty"`
+}
+
+type WebFixtureSpec struct {
+	ID       string         `json:"id"`
+	Pack     string         `json:"pack"`
+	Version  string         `json:"version,omitempty"`
+	Scenario string         `json:"scenario,omitempty"`
+	Strict   bool           `json:"strict,omitempty"`
+	Seed     map[string]any `json:"seed,omitempty"`
+}
+
+type WebFixtureCatalogItem struct {
+	ID          string                `json:"id"`
+	Name        string                `json:"name"`
+	Description string                `json:"description"`
+	Version     string                `json:"version"`
+	Scenarios   []WebFixtureScenario  `json:"scenarios"`
+	SeedFields  []WebFixtureSeedField `json:"seed_fields,omitempty"`
+}
+
+type WebFixtureScenario struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type WebFixtureSeedField struct {
+	Name        string `json:"name"`
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+	Default     any    `json:"default,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type WebFixtureInstance struct {
+	RunID        string         `json:"run_id"`
+	ID           string         `json:"id"`
+	Pack         string         `json:"pack"`
+	Version      string         `json:"version"`
+	Scenario     string         `json:"scenario"`
+	Status       string         `json:"status"`
+	Seed         map[string]any `json:"seed,omitempty"`
+	State        map[string]any `json:"state,omitempty"`
+	PreviewPath  string         `json:"preview_path,omitempty"`
+	TestURL      string         `json:"test_url,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	Token        string         `json:"-"`
+	InitialState map[string]any `json:"-"`
+}
+
+type WebFixtureEvent struct {
+	ID        int64          `json:"id"`
+	RunID     string         `json:"run_id"`
+	FixtureID string         `json:"fixture_id"`
+	Type      string         `json:"type"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type SeedStep struct {
@@ -54,14 +113,15 @@ type Definition struct {
 }
 
 type Run struct {
-	ID            string     `json:"id"`
-	EnvironmentID string     `json:"environment_id,omitempty"`
-	RuntimeID     string     `json:"runtime_id"`
-	Kind          string     `json:"kind"`
-	Status        string     `json:"status"`
-	Error         string     `json:"error,omitempty"`
-	StartedAt     time.Time  `json:"started_at"`
-	StoppedAt     *time.Time `json:"stopped_at,omitempty"`
+	ID            string               `json:"id"`
+	EnvironmentID string               `json:"environment_id,omitempty"`
+	RuntimeID     string               `json:"runtime_id"`
+	Kind          string               `json:"kind"`
+	Status        string               `json:"status"`
+	Error         string               `json:"error,omitempty"`
+	StartedAt     time.Time            `json:"started_at"`
+	StoppedAt     *time.Time           `json:"stopped_at,omitempty"`
+	WebFixtures   []WebFixtureInstance `json:"web_fixtures,omitempty"`
 }
 
 type Snapshot struct {
@@ -83,6 +143,7 @@ type Assertion struct {
 	MinCalls   int            `json:"min_calls,omitempty"`
 	AgentAlias string         `json:"agent_alias,omitempty"`
 	EventType  string         `json:"event_type,omitempty"`
+	Fixture    string         `json:"fixture,omitempty"`
 }
 
 type AssertionResult struct {

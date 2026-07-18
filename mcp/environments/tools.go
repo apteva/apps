@@ -38,11 +38,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_run_create", Description: "Start an inline eval or one-off run from spec.", InputSchema: objectSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, connections, integrations, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, connections, integrations, web fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_inspect", Description: "Inspect runtime state, edge calls, and optional agent telemetry.", InputSchema: requiredSchema("run_id"), Handler: a.toolInspect},
-		{Name: "environment_assert", Description: "Run an app_state, edge_call, or telemetry assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
+		{Name: "environment_assert", Description: "Run an app, edge, telemetry, web state, or web event assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
 		{Name: "environment_snapshot", Description: "Snapshot a running defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshot},
 		{Name: "environment_snapshot_list", Description: "List snapshots.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.runtime().ListRuntimeSnapshots() }},
 		{Name: "environment_snapshot_delete", Description: "Delete a snapshot.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshotDelete},
@@ -66,6 +66,7 @@ func (a *App) runFor(args map[string]any) (*Run, error) {
 	if r == nil {
 		return nil, errors.New("run not found")
 	}
+	a.svc.decorateRun(r)
 	return r, nil
 }
 func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -146,7 +147,7 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots}, err
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog()}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -171,7 +172,7 @@ func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge}
+	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures}
 	if agent := str(args, "agent"); agent != "" {
 		events, err := a.svc.runtime().ListRuntimeAgentTelemetry(r.RuntimeID, agent, time.Time{}, 500)
 		if err != nil {
@@ -201,6 +202,7 @@ func (a *App) toolSnapshotDelete(_ *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	_ = a.svc.db.deleteSnapshot(id)
+	_ = a.svc.db.deleteWebFixtureSnapshots(id)
 	return map[string]bool{"ok": true}, nil
 }
 func (a *App) toolAgentSpawn(_ *sdk.AppCtx, args map[string]any) (any, error) {

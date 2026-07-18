@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,12 +24,14 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	migration, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql"} {
+		migration, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return store{db: db}
 }
@@ -131,5 +138,90 @@ func TestSpecValidation(t *testing.T) {
 	}
 	if err := validateSpec(EnvironmentSpec{TTLSeconds: 3600}); err != nil {
 		t.Fatal(err)
+	}
+	if err := validateSpec(EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "site", Pack: "unknown"}}}); err == nil {
+		t.Fatal("accepted unknown web fixture pack")
+	}
+}
+
+func TestPatreonFixtureLifecycleAndAssertions(t *testing.T) {
+	svc := &service{db: testStore(t)}
+	run := &Run{ID: "run-web", RuntimeID: "runtime-web", Kind: "test", Status: "starting", StartedAt: time.Now().UTC()}
+	if err := svc.db.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	spec := EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "patreon", Pack: "patreon", Scenario: "new-visitor", Seed: map[string]any{"creator_slug": "studio-north"}}}}
+	if err := svc.createWebFixtures(run, spec); err != nil {
+		t.Fatal(err)
+	}
+	if len(run.WebFixtures) != 1 || run.WebFixtures[0].TestURL == "" {
+		t.Fatalf("fixtures=%#v", run.WebFixtures)
+	}
+	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "select_tier", map[string]any{"tier": "supporter"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "checkout", nil); err != nil {
+		t.Fatal(err)
+	} else if event == nil || event.Type != "membership.created" {
+		t.Fatalf("event=%#v", event)
+	}
+	stateResult, err := svc.assert(run.RuntimeID, Assertion{Type: "web_state", Fixture: "patreon", Path: "membership.tier", Equals: "supporter"})
+	if err != nil || !stateResult.Passed {
+		t.Fatalf("state assertion=%#v err=%v", stateResult, err)
+	}
+	eventResult, err := svc.assert(run.RuntimeID, Assertion{Type: "web_event", Fixture: "patreon", EventType: "membership.created", Path: "tier", Equals: "supporter"})
+	if err != nil || !eventResult.Passed {
+		t.Fatalf("event assertion=%#v err=%v", eventResult, err)
+	}
+	if err := svc.resetFixture(run.ID, "patreon"); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := svc.fixtureDetail(run.ID, "patreon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := detail["state"].(map[string]any)
+	if state["membership"] != nil || len(detail["events"].([]WebFixtureEvent)) != 0 {
+		t.Fatalf("fixture did not reset: %#v", detail)
+	}
+}
+
+func TestPatreonFixtureSignedRoute(t *testing.T) {
+	svc := &service{db: testStore(t)}
+	run := &Run{ID: "run-route", RuntimeID: "runtime-route", Kind: "test", Status: "starting", StartedAt: time.Now().UTC()}
+	if err := svc.db.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.createWebFixtures(run, EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "patreon", Pack: "patreon"}}}); err != nil {
+		t.Fatal(err)
+	}
+	x, _ := svc.db.getWebFixture(run.ID, "patreon")
+	app := &App{svc: svc}
+
+	bad := httptest.NewRecorder()
+	app.handleFixture(bad, httptest.NewRequest(http.MethodGet, "/fixtures/run-route/patreon/wrong/", nil))
+	if bad.Code != http.StatusNotFound {
+		t.Fatalf("bad token status=%d", bad.Code)
+	}
+
+	page := httptest.NewRecorder()
+	app.handleFixture(page, httptest.NewRequest(http.MethodGet, "/fixtures/run-route/patreon/"+x.Token+"/", nil))
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Choose your membership") {
+		t.Fatalf("page status=%d body=%s", page.Code, page.Body.String())
+	}
+
+	body, _ := json.Marshal(map[string]any{"action": "select_tier", "input": map[string]any{"tier": "supporter"}})
+	action := httptest.NewRecorder()
+	app.handleFixture(action, httptest.NewRequest(http.MethodPost, "/fixtures/run-route/patreon/"+x.Token+"/api/action", bytes.NewReader(body)))
+	if action.Code != http.StatusOK || !strings.Contains(action.Body.String(), "checkout.started") {
+		t.Fatalf("action status=%d body=%s", action.Code, action.Body.String())
+	}
+	if err := svc.db.updateRun(run.ID, "stopped", ""); err != nil {
+		t.Fatal(err)
+	}
+	stopped := httptest.NewRecorder()
+	app.handleFixture(stopped, httptest.NewRequest(http.MethodGet, "/fixtures/run-route/patreon/"+x.Token+"/", nil))
+	if stopped.Code != http.StatusNotFound {
+		t.Fatalf("stopped fixture status=%d", stopped.Code)
 	}
 }
