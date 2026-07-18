@@ -111,20 +111,23 @@ provides:
     - name: gigs_status
       description: Pre-flight read — gig + composition + assignments + submission.
     - name: gigs_list_open
-      description: Filtered queue read (status, worker, template, deadline).
+      description: Filtered lightweight queue read (status, worker, template, deadline); use gigs_status for full details.
     - name: gigs_cancel
-      description: Cancel an open gig; notifies offered workers via CRM.
+      description: Cancel an open, offered, or accepted gig; only workers originally notified are messaged.
     - name: gigs_extend_deadline
       description: Push the deadline.
     - name: gigs_accept_result
-      description: Accept a submission. Bumps worker accepted_count and logs to the contact's CRM timeline.
+      description: Accept a selected submission. Bumps that worker's accepted_count and logs to the contact's CRM timeline.
     - name: gigs_reject_result
-      description: Reject with reason. Re-opens the gig or routes to the next worker.
+      description: Reject a selected submission with a reason. Re-opens the gig or keeps the same worker for a redo.
   ui_panels:
     - slot: project.page
       label: Gigs
       icon: clipboard
       entry: /ui/GigsPanel.mjs
+  workers:
+    - name: lifecycle
+      schedule: "@every 5m"
 
 runtime:
   kind: source
@@ -171,5 +174,10 @@ config_schema:
     default: "/.gigs"
     label: Storage root folder
     description: Storage folder prefix for gig media + submissions. Dotted by convention so it stays out of dashboards.
+  - name: max_submission_file_mb
+    type: number
+    default: 2048
+    label: Maximum submission file size (MB)
+    description: Per-file limit applied before a worker upload session is created.
 
 upgrade_policy: auto-patch

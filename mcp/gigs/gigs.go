@@ -38,6 +38,7 @@ type gig struct {
 	Composition          []gigInstructionRow `json:"composition,omitempty"`
 	Assignments          []gigAssignmentView `json:"assignments,omitempty"`
 	Submission           *submission         `json:"submission,omitempty"`
+	Submissions          []*submission       `json:"submissions,omitempty"`
 }
 
 type gigInstructionRow struct {
@@ -63,6 +64,9 @@ type gigAssignmentView struct {
 	WorkerURL         string      `json:"worker_url,omitempty"`
 	Worker            *worker     `json:"worker,omitempty"`
 	Submission        *submission `json:"submission,omitempty"`
+	Mode              string      `json:"mode,omitempty"`
+	NotifyWorker      bool        `json:"notify_worker,omitempty"`
+	TokenExpiresAt    string      `json:"token_expires_at,omitempty"`
 }
 
 type submission struct {
@@ -142,12 +146,13 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_list_open",
-			Description: "Filtered queue read. Args: status? (default 'open,offered,accepted'), worker_id?, template_id?, limit? (default 50). Returns {gigs}.",
+			Description: "Filtered queue read returning lightweight gig summaries by default. Use gigs_status for one full record or include_details=true when full compositions and submissions are required. Args: status? (default 'open,offered,accepted'), worker_id?, template_id?, limit? (default 50), include_details? (default false). Returns {gigs}.",
 			InputSchema: schemaObject(map[string]any{
-				"status":      map[string]any{"type": "string"},
-				"worker_id":   map[string]any{"type": "integer"},
-				"template_id": map[string]any{"type": "integer"},
-				"limit":       map[string]any{"type": "integer"},
+				"status":          map[string]any{"type": "string"},
+				"worker_id":       map[string]any{"type": "integer"},
+				"template_id":     map[string]any{"type": "integer"},
+				"limit":           map[string]any{"type": "integer"},
+				"include_details": map[string]any{"type": "boolean"},
 			}, []string{}),
 			Handler: a.toolGigsListOpen,
 		},
@@ -171,20 +176,22 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_accept_result",
-			Description: "Accept the latest submission. Bumps the worker's accepted_count and logs to the contact's CRM timeline. Args: id, notes?. Returns {gig}.",
+			Description: "Accept a submitted result. Pass submission_id when a gig has multiple worker submissions; otherwise the latest active submission is used. Bumps that worker's accepted_count and logs to CRM. Args: id, submission_id?, notes?. Returns {gig}.",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"notes": map[string]any{"type": "string"},
+				"id":            map[string]any{"type": "integer"},
+				"submission_id": map[string]any{"type": "integer"},
+				"notes":         map[string]any{"type": "string"},
 			}, []string{"id"}),
 			Handler: a.toolGigsAccept,
 		},
 		{
 			Name:        "gigs_reject_result",
-			Description: "Reject the latest submission with a reason. The gig returns to status=open (mode=first-come picks next) or stays assigned for the same worker to redo. Args: id, reason, reopen? (default true). Returns {gig}.",
+			Description: "Reject a submitted result with a reason. Pass submission_id when a gig has multiple worker submissions. The gig reopens for another worker or stays with the same worker for a redo. Args: id, submission_id?, reason, reopen? (default true). Returns {gig}.",
 			InputSchema: schemaObject(map[string]any{
-				"id":     map[string]any{"type": "integer"},
-				"reason": map[string]any{"type": "string"},
-				"reopen": map[string]any{"type": "boolean"},
+				"id":            map[string]any{"type": "integer"},
+				"submission_id": map[string]any{"type": "integer"},
+				"reason":        map[string]any{"type": "string"},
+				"reopen":        map[string]any{"type": "boolean"},
 			}, []string{"id", "reason"}),
 			Handler: a.toolGigsReject,
 		},
@@ -464,6 +471,23 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 		}
 		deadlineAt = time.Now().UTC().Add(time.Duration(hrs) * time.Hour).Format(time.RFC3339)
 	}
+	var wk *worker
+	var token string
+	if o.WorkerID > 0 {
+		var err error
+		wk, err = getWorker(ctx.AppDB(), pid, o.WorkerID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if wk == nil || wk.Status != "active" {
+			return nil, nil, errors.New("requested worker is not active in this project")
+		}
+		max := atoi(ctx.Config().Get("max_open_per_worker"))
+		if open, _ := countOpenAssignments(ctx.AppDB(), o.WorkerID); max > 0 && open >= int64(max) {
+			return nil, nil, fmt.Errorf("worker has %d open assignments (cap=%d)", open, max)
+		}
+		token = randomToken()
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, nil, err
@@ -516,27 +540,50 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	); err != nil {
 		return nil, nil, err
 	}
+	var assignID int64
+	if o.WorkerID > 0 {
+		res, err := tx.Exec(`INSERT INTO gig_assignments
+			(gig_id,worker_id,status,magic_token,mode,notify_worker,token_expires_at)
+			VALUES (?,?,'offered',?,'direct',?,?)`, gigID, o.WorkerID, token, o.NotifyWorker, nullStr(deadlineAt))
+		if err != nil {
+			return nil, nil, err
+		}
+		assignID, _ = res.LastInsertId()
+		if _, err := tx.Exec(`UPDATE gigs SET status='offered',updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, gigID, pid); err != nil {
+			return nil, nil, err
+		}
+		if _, err := tx.Exec(`INSERT INTO gig_events (project_id,gig_id,kind,actor,body)
+			VALUES (?,?,'offered',?,'direct')`, pid, gigID, fmt.Sprintf("worker:%d", o.WorkerID)); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	ctx.Emit("gig.created", map[string]any{
-		"gig_id":              gigID,
-		"template_version_id": o.TemplateVersionID,
+	ctx.EmitWithProject("gig.created", pid, map[string]any{
+		"gig_id": gigID, "template_version_id": o.TemplateVersionID,
 	})
-
+	var ass *gigAssignmentView
+	if assignID > 0 {
+		workerURL := buildWorkerURL(ctx, token)
+		if o.NotifyWorker {
+			body := fmt.Sprintf("%s\n\nOpen: %s", o.Title, workerURL)
+			if conversationID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, o.Title); sendErr != nil {
+				ctx.Logger().Warn("crm send failed", "err", sendErr.Error(), "gig_id", gigID)
+			} else if conversationID > 0 {
+				_, _ = ctx.AppDB().Exec(`UPDATE gig_assignments SET crm_conversation_id=? WHERE id=?`, conversationID, assignID)
+			}
+		}
+		ctx.EmitWithProject("gig.offered", pid, map[string]any{"gig_id": gigID, "assignment_id": assignID, "worker_id": o.WorkerID,
+			"mode": "direct", "worker_url": workerURL, "notify_worker": o.NotifyWorker})
+		ass, err = loadAssignmentView(ctx, pid, assignID)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	g, err := loadGig(ctx, pid, gigID)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	if o.WorkerID == 0 {
-		return g, nil, nil
-	}
-	ass, err := assignGig(ctx, pid, gigID, o.WorkerID, "direct", o.NotifyWorker)
-	if err != nil {
-		// The gig is created; assignment failure is reported but
-		// non-fatal — the operator can re-assign.
-		ctx.Logger().Error("assign on create failed", "err", err.Error(), "gig_id", gigID)
 	}
 	return g, ass, nil
 }
@@ -544,6 +591,22 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 // assignGig writes an assignment and optionally notifies via CRM. Returns the
 // hydrated view so the caller can surface the magic URL.
 func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, notifyWorker bool) (*gigAssignmentView, error) {
+	if mode == "" {
+		mode = "direct"
+	}
+	if mode != "direct" && mode != "broadcast" && mode != "first-come" {
+		return nil, errors.New("mode must be direct|broadcast|first-come")
+	}
+	g, err := loadGig(ctx, pid, gigID)
+	if err != nil {
+		return nil, err
+	}
+	if g == nil {
+		return nil, errors.New("gig not found in project")
+	}
+	if g.Status != "open" && g.Status != "offered" {
+		return nil, fmt.Errorf("cannot assign gig in status %s", g.Status)
+	}
 	wk, err := getWorker(ctx.AppDB(), pid, workerID)
 	if err != nil {
 		return nil, err
@@ -562,24 +625,51 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 		}
 	}
 	token := randomToken()
-	res, err := ctx.AppDB().Exec(
-		`INSERT INTO gig_assignments (gig_id, worker_id, status, magic_token)
-		 VALUES (?, ?, 'offered', ?)`,
-		gigID, workerID, token,
+	expiresAt := g.DeadlineAt
+	if expiresAt == "" {
+		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if mode == "direct" {
+		if _, err := tx.Exec(`
+			UPDATE gig_assignments
+			   SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
+			 WHERE gig_id=? AND status IN ('offered','accepted')`, gigID); err != nil {
+			return nil, err
+		}
+	}
+	res, err := tx.Exec(
+		`INSERT INTO gig_assignments
+		   (gig_id, worker_id, status, magic_token, mode, notify_worker, token_expires_at)
+		 VALUES (?, ?, 'offered', ?, ?, ?, ?)`,
+		gigID, workerID, token, mode, notifyWorker, nullStr(expiresAt),
 	)
 	if err != nil {
 		return nil, err
 	}
 	assignID, _ := res.LastInsertId()
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE gigs SET status='offered', updated_at=CURRENT_TIMESTAMP WHERE id=?`, gigID,
+	if _, err := tx.Exec(
+		`UPDATE gigs SET status='offered', updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, gigID, pid,
 	); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
+		 VALUES (?, ?, 'offered', ?, ?)`,
+		pid, gigID, fmt.Sprintf("worker:%d", workerID), mode,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
 	workerURL := buildWorkerURL(ctx, token)
 	if notifyWorker {
-		g, _ := loadGig(ctx, pid, gigID)
 		body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
 		subject := g.Title
 		convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
@@ -593,12 +683,7 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 			)
 		}
 	}
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
-		 VALUES (?, ?, 'offered', ?, ?)`,
-		pid, gigID, fmt.Sprintf("worker:%d", workerID), mode,
-	)
-	ctx.Emit("gig.offered", map[string]any{
+	ctx.EmitWithProject("gig.offered", pid, map[string]any{
 		"gig_id":        gigID,
 		"assignment_id": assignID,
 		"worker_id":     workerID,
@@ -607,8 +692,8 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 		"notify_worker": notifyWorker,
 	})
 
-	view, _ := loadAssignmentView(ctx, pid, assignID)
-	return view, nil
+	view, err := loadAssignmentView(ctx, pid, assignID)
+	return view, err
 }
 
 func buildWorkerURL(ctx *sdk.AppCtx, token string) string {
@@ -675,6 +760,13 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if !boolArg(args, "include_details", false) {
+		items, err := listGigSummaries(ctx.AppDB(), pid, strArg(args, "status"), int64Arg(args, "worker_id"), int64Arg(args, "template_id"), intArg(args, "limit", 50))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"gigs": items}, nil
+	}
 	statusFilter := strArg(args, "status")
 	if statusFilter == "" {
 		statusFilter = "open,offered,accepted"
@@ -733,6 +825,57 @@ func (a *App) toolGigsListOpen(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return map[string]any{"gigs": out}, nil
 }
 
+func listGigSummaries(db *sql.DB, pid, statusFilter string, workerID, templateID int64, limit int) ([]*gig, error) {
+	if statusFilter == "" {
+		statusFilter = "open,offered,accepted"
+	}
+	statuses := strings.Split(statusFilter, ",")
+	marks := make([]string, 0, len(statuses))
+	args := []any{pid}
+	for _, status := range statuses {
+		status = strings.TrimSpace(status)
+		if status == "" {
+			continue
+		}
+		marks = append(marks, "?")
+		args = append(args, status)
+	}
+	if len(marks) == 0 {
+		return []*gig{}, nil
+	}
+	q := `SELECT g.id,g.project_id,COALESCE(g.template_version_id,0),g.created_by,g.title,
+		COALESCE(g.deadline_at,''),COALESCE(g.priority,''),g.status,g.created_at,g.updated_at,
+		COALESCE(g.completed_at,'') FROM gigs g WHERE g.project_id=? AND g.status IN (` + strings.Join(marks, ",") + `)`
+	if workerID > 0 {
+		q += ` AND EXISTS (SELECT 1 FROM gig_assignments a WHERE a.gig_id=g.id AND a.worker_id=?)`
+		args = append(args, workerID)
+	}
+	if templateID > 0 {
+		q += ` AND g.template_version_id IN (SELECT id FROM template_versions WHERE template_id=?)`
+		args = append(args, templateID)
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	q += ` ORDER BY CASE WHEN g.deadline_at IS NULL THEN 1 ELSE 0 END,g.deadline_at,g.created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*gig, 0)
+	for rows.Next() {
+		item := &gig{}
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.TemplateVersionID, &item.CreatedBy, &item.Title,
+			&item.DeadlineAt, &item.Priority, &item.Status, &item.CreatedAt, &item.UpdatedAt, &item.CompletedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -751,37 +894,52 @@ func (a *App) toolGigsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g == nil {
 		return nil, errors.New("gig not found")
 	}
-	if g.Status == "accepted" || g.Status == "submitted" {
+	if g.Status == "submitted" || g.Status == "reviewed" {
 		return nil, fmt.Errorf("cannot cancel gig in status %s", g.Status)
 	}
-	if _, err := ctx.AppDB().Exec(
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		`UPDATE gigs SET status='cancelled', updated_at=CURRENT_TIMESTAMP,
 		    completed_at=CURRENT_TIMESTAMP, rejection_reason=?
-		 WHERE id=?`,
-		nullStr(reason), id,
+		 WHERE id=? AND project_id=?`,
+		nullStr(reason), id, pid,
 	); err != nil {
 		return nil, err
 	}
-	// Withdraw open offers + notify each offered worker.
+	if _, err := tx.Exec(`
+		UPDATE gig_assignments
+		   SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
+		 WHERE gig_id=? AND status IN ('offered','accepted')`, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body) VALUES (?, ?, 'cancelled', 'agent', ?)`,
+		pid, id, reason,
+	); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// Notify only workers who were explicitly notified about the offer.
 	for _, ass := range g.Assignments {
 		if ass.Status == "offered" || ass.Status == "accepted" {
-			_, _ = ctx.AppDB().Exec(
-				`UPDATE gig_assignments SET status='withdrawn' WHERE id=?`, ass.ID,
-			)
-			if wk, _ := getWorker(ctx.AppDB(), pid, ass.WorkerID); wk != nil {
-				note := fmt.Sprintf("Gig cancelled: %s", g.Title)
-				if reason != "" {
-					note += fmt.Sprintf(" — %s", reason)
+			if ass.NotifyWorker {
+				if wk, _ := getWorker(ctx.AppDB(), pid, ass.WorkerID); wk != nil {
+					note := fmt.Sprintf("Gig cancelled: %s", g.Title)
+					if reason != "" {
+						note += fmt.Sprintf(" — %s", reason)
+					}
+					_, _ = crmSendMessage(ctx, pid, wk.ContactID, note, wk.DefaultChannel, "")
 				}
-				_, _ = crmSendMessage(ctx, pid, wk.ContactID, note, wk.DefaultChannel, "")
 			}
 		}
 	}
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body) VALUES (?, ?, 'cancelled', 'agent', ?)`,
-		pid, id, reason,
-	)
-	ctx.Emit("gig.cancelled", map[string]any{"gig_id": id, "reason": reason})
+	ctx.EmitWithProject("gig.cancelled", pid, map[string]any{"gig_id": id, "reason": reason})
 	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }
@@ -825,14 +983,16 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g.Status != "submitted" {
 		return nil, fmt.Errorf("gig is %s, expected submitted", g.Status)
 	}
-	// The latest submitted assignment is the one we accept.
+	requestedSubmissionID := int64Arg(args, "submission_id")
 	var subID, workerID int64
 	if err := ctx.AppDB().QueryRow(
 		`SELECT s.id, a.worker_id
 		 FROM gig_submissions s
 		 JOIN gig_assignments a ON a.id = s.assignment_id
-		 WHERE a.gig_id=? ORDER BY s.id DESC LIMIT 1`,
-		id,
+		 JOIN gigs g ON g.id=a.gig_id
+		 WHERE a.gig_id=? AND g.project_id=? AND a.status='submitted'
+		   AND (?=0 OR s.id=?) ORDER BY s.id DESC LIMIT 1`,
+		id, pid, requestedSubmissionID, requestedSubmissionID,
 	).Scan(&subID, &workerID); errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("no submission to accept")
 	} else if err != nil {
@@ -849,6 +1009,21 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		    result_json=(SELECT payload_json FROM gig_submissions WHERE id=?)
 		 WHERE id=?`,
 		subID, id,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE gig_assignments
+		    SET status='reviewed', reviewed_at=CURRENT_TIMESTAMP, token_revoked_at=CURRENT_TIMESTAMP
+		  WHERE id=(SELECT assignment_id FROM gig_submissions WHERE id=?)`, subID,
+	); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(
+		`UPDATE gig_assignments
+		    SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
+		  WHERE gig_id=? AND id<>(SELECT assignment_id FROM gig_submissions WHERE id=?)
+		    AND status IN ('offered','accepted','submitted')`, id, subID,
 	); err != nil {
 		return nil, err
 	}
@@ -874,9 +1049,10 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		_ = crmLogActivity(ctx, pid, wk.ContactID, "note",
 			fmt.Sprintf("Gig accepted: %s", g.Title), "gigs")
 	}
-	ctx.Emit("gig.reviewed", map[string]any{
-		"gig_id":    id,
-		"worker_id": workerID,
+	ctx.EmitWithProject("gig.reviewed", pid, map[string]any{
+		"gig_id":        id,
+		"submission_id": subID,
+		"worker_id":     workerID,
 	})
 	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
@@ -903,36 +1079,68 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g.Status != "submitted" {
 		return nil, fmt.Errorf("gig is %s, expected submitted", g.Status)
 	}
-	// Bump rejected_count on the worker whose submission we're rejecting.
-	var workerID int64
-	_ = ctx.AppDB().QueryRow(
-		`SELECT a.worker_id FROM gig_submissions s
+	requestedSubmissionID := int64Arg(args, "submission_id")
+	var submissionID, assignmentID, workerID int64
+	var assignmentMode string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT s.id, a.id, a.worker_id, COALESCE(a.mode,'direct') FROM gig_submissions s
 		 JOIN gig_assignments a ON a.id = s.assignment_id
-		 WHERE a.gig_id=? ORDER BY s.id DESC LIMIT 1`,
-		id,
-	).Scan(&workerID)
+		 JOIN gigs g ON g.id=a.gig_id
+		 WHERE a.gig_id=? AND g.project_id=? AND a.status='submitted'
+		   AND (?=0 OR s.id=?) ORDER BY s.id DESC LIMIT 1`,
+		id, pid, requestedSubmissionID, requestedSubmissionID,
+	).Scan(&submissionID, &assignmentID, &workerID, &assignmentMode); errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("submission not found or already reviewed")
+	} else if err != nil {
+		return nil, err
+	}
 
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	newStatus := "rejected"
-	if reopen {
-		newStatus = "open"
-	}
-	if _, err := tx.Exec(
-		`UPDATE gigs SET status=?, rejection_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		newStatus, reason, id,
-	); err != nil {
-		return nil, err
-	}
 	if workerID > 0 {
 		_, _ = tx.Exec(
 			`UPDATE workers SET rejected_count = rejected_count + 1,
 			    updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 			workerID,
 		)
+	}
+	if assignmentID > 0 {
+		if reopen {
+			_, err = tx.Exec(`UPDATE gig_assignments
+				SET status='rejected', token_revoked_at=CURRENT_TIMESTAMP WHERE id=?`, assignmentID)
+		} else {
+			_, err = tx.Exec(`UPDATE gig_assignments
+				SET status='accepted', submitted_at=NULL WHERE id=?`, assignmentID)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if reopen && assignmentMode == "first-come" {
+		if _, err := tx.Exec(`UPDATE gig_assignments SET status='offered', token_revoked_at=NULL
+			WHERE gig_id=? AND id<>? AND mode='first-come' AND status='withdrawn'
+			  AND (token_expires_at IS NULL OR datetime(token_expires_at)>datetime('now'))`, id, assignmentID); err != nil {
+			return nil, err
+		}
+	}
+	newStatus := "accepted"
+	if reopen {
+		if err := tx.QueryRow(`SELECT CASE
+			WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='submitted') THEN 'submitted'
+			WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='accepted') THEN 'accepted'
+			WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='offered') THEN 'offered'
+			ELSE 'open' END`, id, id, id).Scan(&newStatus); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(
+		`UPDATE gigs SET status=?, rejection_reason=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`,
+		newStatus, reason, id, pid,
+	); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
@@ -944,8 +1152,8 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	ctx.Emit("gig.rejected", map[string]any{
-		"gig_id": id, "worker_id": workerID, "reason": reason,
+	ctx.EmitWithProject("gig.rejected", pid, map[string]any{
+		"gig_id": id, "submission_id": submissionID, "worker_id": workerID, "reason": reason,
 	})
 	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
@@ -1039,7 +1247,9 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	}
 	// Assignments.
 	aRows, err := db.Query(
-		`SELECT id, worker_id, status, offered_at, responded_at, submitted_at, crm_conversation_id, magic_token
+		`SELECT id, worker_id, status, offered_at, responded_at, submitted_at,
+		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,'')
 		 FROM gig_assignments WHERE gig_id=? ORDER BY offered_at`,
 		id,
 	)
@@ -1049,7 +1259,7 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			var responded, submitted sql.NullString
 			var convID sql.NullInt64
 			var token string
-			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token); err != nil {
+			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt); err != nil {
 				return nil, err
 			}
 			v.RespondedAt = responded.String
@@ -1079,9 +1289,13 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			_ = parseJSON(payload.String, &g.Result)
 		}
 	}
-	if sub, err := loadLatestSubmission(db, id); err != nil {
+	subs, err := loadSubmissions(db, id)
+	if err != nil {
 		return nil, err
-	} else if sub != nil {
+	}
+	g.Submissions = subs
+	if len(subs) > 0 {
+		sub := subs[0]
 		g.Submission = sub
 		for i := range g.Assignments {
 			if g.Assignments[i].ID == sub.AssignmentID {
@@ -1094,31 +1308,41 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 }
 
 func loadLatestSubmission(db *sql.DB, gigID int64) (*submission, error) {
-	var payloadJSON, attachmentIDsJSON string
-	sub := &submission{}
-	err := db.QueryRow(
+	subs, err := loadSubmissions(db, gigID)
+	if err != nil || len(subs) == 0 {
+		return nil, err
+	}
+	return subs[0], nil
+}
+
+func loadSubmissions(db *sql.DB, gigID int64) ([]*submission, error) {
+	rows, err := db.Query(
 		`SELECT s.id, s.assignment_id, s.payload_json,
 		        COALESCE(s.attachment_file_ids_json, '[]'),
 		        COALESCE(s.channel, ''), COALESCE(s.submitted_at, '')
 		   FROM gig_submissions s
 		   JOIN gig_assignments a ON a.id = s.assignment_id
 		  WHERE a.gig_id = ?
-		  ORDER BY s.id DESC
-		  LIMIT 1`,
-		gigID,
-	).Scan(&sub.ID, &sub.AssignmentID, &payloadJSON, &attachmentIDsJSON, &sub.Channel, &sub.SubmittedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		  ORDER BY s.id DESC`, gigID)
 	if err != nil {
 		return nil, err
 	}
-	_ = parseJSON(payloadJSON, &sub.Payload)
-	_ = parseJSON(attachmentIDsJSON, &sub.AttachmentFileIDs)
-	if sub.Payload == nil {
-		sub.Payload = map[string]any{}
+	defer rows.Close()
+	var out []*submission
+	for rows.Next() {
+		var payloadJSON, attachmentIDsJSON string
+		sub := &submission{}
+		if err := rows.Scan(&sub.ID, &sub.AssignmentID, &payloadJSON, &attachmentIDsJSON, &sub.Channel, &sub.SubmittedAt); err != nil {
+			return nil, err
+		}
+		_ = parseJSON(payloadJSON, &sub.Payload)
+		_ = parseJSON(attachmentIDsJSON, &sub.AttachmentFileIDs)
+		if sub.Payload == nil {
+			sub.Payload = map[string]any{}
+		}
+		out = append(out, sub)
 	}
-	return sub, nil
+	return out, rows.Err()
 }
 
 func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssignmentView, error) {
@@ -1127,10 +1351,12 @@ func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssign
 	var convID sql.NullInt64
 	var token string
 	if err := ctx.AppDB().QueryRow(
-		`SELECT id, gig_id, worker_id, status, offered_at, responded_at, submitted_at, crm_conversation_id, magic_token
+		`SELECT id, gig_id, worker_id, status, offered_at, responded_at, submitted_at,
+		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,'')
 		 FROM gig_assignments WHERE id=?`,
 		assignID,
-	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token); err != nil {
+	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt); err != nil {
 		return nil, err
 	}
 	v.RespondedAt = responded.String
@@ -1168,6 +1394,15 @@ func (a *App) handleHTTPGigsCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
+		if r.URL.Query().Get("summary") == "true" {
+			items, err := listGigSummaries(ctx.AppDB(), pid, r.URL.Query().Get("status"), parseQueryInt(r, "worker_id"), parseQueryInt(r, "template_id"), parseQueryIntDefault(r, "limit", 50))
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			httpJSON(w, map[string]any{"gigs": items})
+			return
+		}
 		out, err := a.toolGigsListOpen(ctx, map[string]any{
 			"_project_id": pid,
 			"status":      r.URL.Query().Get("status"),
@@ -1231,10 +1466,18 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
 		switch parts[1] {
 		case "cancel":
 			var body map[string]any
-			_ = httpDecode(r, &body)
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
 			out, err := a.toolGigsCancel(ctx, map[string]any{
 				"_project_id": pid,
 				"id":          id,
@@ -1248,11 +1491,15 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "accept":
 			var body map[string]any
-			_ = httpDecode(r, &body)
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
 			out, err := a.toolGigsAccept(ctx, map[string]any{
-				"_project_id": pid,
-				"id":          id,
-				"notes":       strOf(body["notes"]),
+				"_project_id":   pid,
+				"id":            id,
+				"submission_id": body["submission_id"],
+				"notes":         strOf(body["notes"]),
 			})
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
@@ -1262,12 +1509,16 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "reject":
 			var body map[string]any
-			_ = httpDecode(r, &body)
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
 			out, err := a.toolGigsReject(ctx, map[string]any{
-				"_project_id": pid,
-				"id":          id,
-				"reason":      strOf(body["reason"]),
-				"reopen":      body["reopen"],
+				"_project_id":   pid,
+				"id":            id,
+				"submission_id": body["submission_id"],
+				"reason":        strOf(body["reason"]),
+				"reopen":        body["reopen"],
 			})
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
@@ -1277,7 +1528,10 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "assign":
 			var body map[string]any
-			_ = httpDecode(r, &body)
+			if err := httpDecode(r, &body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json")
+				return
+			}
 			out, err := a.toolGigsAssign(ctx, map[string]any{
 				"_project_id":   pid,
 				"gig_id":        id,

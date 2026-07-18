@@ -256,6 +256,7 @@ type compositionItem struct {
 	InstructionVersionID int64          `json:"instruction_version_id"`
 	Kind                 string         `json:"kind"`
 	Body                 map[string]any `json:"body"` // version body_json, post-overrides
+	Overrides            map[string]any `json:"overrides,omitempty"`
 	DeclaredVariables    []string       `json:"declared_variables"`
 	ResultKey            string         `json:"result_key,omitempty"`
 }

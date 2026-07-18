@@ -470,7 +470,7 @@ func (a *App) toolTemplatesPublish(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	tpl, _ = getTemplate(ctx.AppDB(), pid, id)
-	ctx.Emit("template.published", map[string]any{
+	ctx.EmitWithProject("template.published", pid, map[string]any{
 		"template_id":         id,
 		"template_version_id": tpl.CurrentVersion.ID,
 	})
@@ -795,6 +795,7 @@ func loadComposition(db *sql.DB, templateVersionID int64) ([]compositionItem, er
 		if overridesJSON.Valid && overridesJSON.String != "" {
 			var ov map[string]any
 			if err := parseJSON(overridesJSON.String, &ov); err == nil {
+				it.Overrides = ov
 				for k, v := range ov {
 					it.Body[k] = v
 				}

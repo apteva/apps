@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -34,10 +36,20 @@ func (a *App) handleWorkerRoot(w http.ResponseWriter, r *http.Request) {
 	switch parts[1] {
 	case "api/gig":
 		a.handleWorkerGigJSON(w, r, token)
+	case "accept":
+		a.handleWorkerAccept(w, r, token)
+	case "decline":
+		a.handleWorkerDecline(w, r, token)
 	case "submit":
 		a.handleWorkerSubmit(w, r, token)
-	case "upload":
-		a.handleWorkerUpload(w, r, token)
+	case "upload/init":
+		a.handleWorkerUploadInit(w, r, token)
+	case "upload/part":
+		a.handleWorkerUploadPart(w, r, token)
+	case "upload/complete":
+		a.handleWorkerUploadComplete(w, r, token)
+	case "upload/abort":
+		a.handleWorkerUploadAbort(w, r, token)
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 	}
@@ -97,6 +109,10 @@ func workerPageHTML(token string) string {
   .meta-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .pill { display: inline-flex; align-items: center; min-height: 28px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 13px; background: var(--surface-2); }
   .summary { margin-top: 16px; color: var(--muted); font-size: 14px; }
+  .offer { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px; display: grid; gap: 14px; }
+  .offer h2 { margin: 0; font-size: 20px; }
+  .offer-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+  .offer-actions button { min-width: 150px; }
   .section-title { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin: 8px 2px 0; }
   .section-title h2 { margin: 0; font-size: 18px; }
   .section-title span { color: var(--muted); font-size: 13px; }
@@ -140,6 +156,9 @@ func workerPageHTML(token string) string {
   .preview-media audio { padding: 10px; background: var(--surface); }
   .preview-file { padding: 14px; color: var(--fg); background: var(--surface-2); word-break: break-word; }
   .preview-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 8px 10px; color: var(--muted); font-size: 13px; }
+  .preview-progress { height: 4px; background: var(--surface-2); }
+  .preview-progress span { display: block; width: 0; height: 100%; background: var(--accent); transition: width 160ms ease; }
+  .preview-actions { display: flex; gap: 8px; padding: 0 10px 10px; }
   .preview-status.error { color: var(--crit); }
   .preview-toggle { margin: 0 10px 10px; justify-self: start; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--fg); padding: 7px 10px; font: inherit; font-size: 13px; cursor: pointer; }
   .single-input { display: grid; gap: 8px; }
@@ -163,12 +182,17 @@ func workerPageHTML(token string) string {
     padding: 12px 20px; font-size: 16px; font-weight: 600; cursor: pointer; flex: 1;
   }
   button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: var(--surface); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 11px 18px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  button.danger { color: var(--crit); }
+  button.text-button { border: 0; padding: 4px 0; background: transparent; color: var(--crit); cursor: pointer; font: inherit; font-size: 13px; }
   .status { font-size: 13px; color: var(--muted); flex: 0 1 320px; min-height: 18px; }
   .done { max-width: 560px; margin: 12vh auto 0; padding: 32px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: center; color: var(--ok); font-size: 20px; box-shadow: var(--shadow); }
   .error { color: var(--crit); }
   @media (max-width: 720px) {
     main { padding: 18px 12px 138px; }
     .hero { padding: 18px; }
+    .offer-actions { display: grid; grid-template-columns: 1fr; }
+    .offer-actions button { width: 100%; }
     .submit-bar .row { display: grid; }
     .status { min-height: 18px; }
   }
@@ -201,6 +225,7 @@ func workerPageHTML(token string) string {
 
     function render() {
       const app = document.getElementById("app");
+      document.querySelectorAll(".submit-bar").forEach(el => el.remove());
       app.innerHTML = "<div class='shell'></div>";
       const shell = app.firstElementChild;
       const hero = document.createElement("section");
@@ -213,6 +238,17 @@ func workerPageHTML(token string) string {
         "</div>" +
 	        "<div class='summary'>" + escapeHTML(summaryText()) + "</div>";
       shell.appendChild(hero);
+
+      if (gig.assignment_status === "offered") {
+        shell.appendChild(renderOffer());
+      }
+      if (gig.assignment_status !== "offered" && !canEditAssignment()) {
+        const state = document.createElement("section");
+        state.className = "done";
+        state.textContent = closedStateText();
+        shell.appendChild(state);
+        return;
+      }
 
       const title = document.createElement("div");
       title.className = "section-title";
@@ -227,11 +263,53 @@ func workerPageHTML(token string) string {
       }
       shell.appendChild(list);
 
+      if (gig.assignment_status === "offered") return;
+
       const bar = document.createElement("div");
       bar.className = "submit-bar";
 	      bar.innerHTML = '<div class="row"><span class="status" id="status">' + escapeHTML(initialStatusText()) + '</span><button class="primary" id="submit">' + escapeHTML(submitButtonLabel()) + '</button></div>';
       document.body.appendChild(bar);
       document.getElementById("submit").addEventListener("click", submit);
+    }
+
+    function renderOffer() {
+      const section = document.createElement("section");
+      section.className = "offer";
+      section.innerHTML = "<h2>Ready to take this gig?</h2><div class='text'>Accept to review the full instructions and submit your work. You can also decline this offer.</div><div class='status' data-offer-status></div><div class='offer-actions'><button class='primary' data-accept>Accept gig</button><button class='secondary danger' data-decline>Decline</button></div>";
+      section.querySelector("[data-accept]").addEventListener("click", () => respondToOffer("accept"));
+      section.querySelector("[data-decline]").addEventListener("click", () => respondToOffer("decline"));
+      return section;
+    }
+
+    async function respondToOffer(action) {
+      const buttons = Array.from(document.querySelectorAll(".offer-actions button"));
+      const status = document.querySelector("[data-offer-status]");
+      buttons.forEach(button => button.disabled = true);
+      if (status) status.textContent = action === "accept" ? "Accepting..." : "Declining...";
+      try {
+        const res = await fetch(publicWorkerURL("/" + action), {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        });
+        await responseJSON(res);
+        gig.assignment_status = action === "accept" ? "accepted" : "declined";
+        if (action === "accept") gig.gig_status = "accepted";
+        render();
+      } catch (e) {
+        buttons.forEach(button => button.disabled = false);
+        if (status) status.textContent = e.message;
+      }
+    }
+
+    function canEditAssignment() {
+      return ["accepted", "submitted"].includes(gig.assignment_status) && ["accepted", "submitted"].includes(gig.gig_status);
+    }
+
+    function closedStateText() {
+      if (gig.assignment_status === "reviewed") return "This submission has been reviewed and accepted.";
+      if (gig.assignment_status === "declined") return "You declined this gig.";
+      if (gig.gig_status === "cancelled") return "This gig was cancelled.";
+      if (gig.gig_status === "expired") return "The deadline for this gig has passed.";
+      return "This assignment is no longer open.";
     }
 
     function renderInstruction(it, index) {
@@ -349,18 +427,24 @@ func workerPageHTML(token string) string {
 	        "<div class='response-title'>" + (mode === "required" ? "Required response" : "Optional response") + " for step " + (index + 1) + "</div>" +
         "<div class='response-grid'>" +
           "<textarea data-note placeholder='Notes for this instruction'></textarea>" +
-          "<div class='file-row'><input data-files type='file' multiple /><div class='previews' data-previews></div><ul class='uploaded'></ul></div>" +
+          "<div class='file-row'><input data-files type='file' multiple /><div class='previews' data-previews></div></div>" +
         "</div>";
       const note = box.querySelector("[data-note]");
       const file = box.querySelector("[data-files]");
       const previews = box.querySelector("[data-previews]");
-      const uploaded = box.querySelector(".uploaded");
       const existing = instructionResponses[key];
       if (existing) {
         note.value = existing.note || "";
         for (const f of existing.files || []) {
           const preview = renderSubmittedFilePreview(f, "Submitted");
           previews.appendChild(preview.card);
+          preview.addRemove(() => {
+            existing.files = existing.files.filter(item => item !== f);
+            if (f.storage_file_id) allAttachmentIDs.delete(f.storage_file_id);
+            preview.card.remove();
+            pruneInstructionResponse(key);
+            updateStatus();
+          });
         }
       }
       note.addEventListener("input", () => {
@@ -377,7 +461,7 @@ func workerPageHTML(token string) string {
           setStatus("Uploading " + f.name + "...");
           let id = null;
           try {
-            id = await uploadFile(f);
+            id = await uploadFile(f, percent => preview.setProgress(percent));
           } catch (e) {
             preview.setStatus("Upload failed", true);
             setStatus("Upload failed: " + e.message);
@@ -387,9 +471,13 @@ func workerPageHTML(token string) string {
           entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
           allAttachmentIDs.add(id);
           preview.setStatus("Uploaded");
-          const li = document.createElement("li");
-          li.innerHTML = "<span>" + escapeHTML(f.name) + "</span><span>uploaded</span>";
-          uploaded.appendChild(li);
+          preview.addRemove(() => {
+            entry.files = entry.files.filter(item => item.storage_file_id !== id);
+            allAttachmentIDs.delete(id);
+            preview.card.remove();
+            pruneInstructionResponse(key);
+            updateStatus();
+          });
         }
         file.value = "";
         updateStatus();
@@ -514,6 +602,12 @@ func workerPageHTML(token string) string {
 	          if (existingValue && typeof existingValue === "object") {
 	            const preview = renderSubmittedFilePreview(existingValue, "Submitted");
 	            previews.appendChild(preview.card);
+	            preview.addRemove(() => {
+	              delete result[key];
+	              if (existingValue.storage_file_id) allAttachmentIDs.delete(existingValue.storage_file_id);
+	              preview.card.remove();
+	              updateStatus();
+	            });
 	          }
           fileInput.addEventListener("change", async () => {
             const file = fileInput.files && fileInput.files[0];
@@ -524,7 +618,7 @@ func workerPageHTML(token string) string {
             setStatus("Uploading " + file.name + "...");
             let id = null;
             try {
-              id = await uploadFile(file);
+              id = await uploadFile(file, percent => preview.setProgress(percent));
             } catch (e) {
               preview.setStatus("Upload failed", true);
               setStatus("Upload failed: " + e.message);
@@ -533,6 +627,12 @@ func workerPageHTML(token string) string {
               result[key] = { storage_file_id: id, filename: file.name, mime: file.type };
               allAttachmentIDs.add(id);
               preview.setStatus("Uploaded");
+              preview.addRemove(() => {
+                if (result[key] && result[key].storage_file_id === id) delete result[key];
+                allAttachmentIDs.delete(id);
+                preview.card.remove();
+                updateStatus();
+              });
               setStatus("Uploaded.");
             }
           });
@@ -555,17 +655,46 @@ func workerPageHTML(token string) string {
       wrap.appendChild(el);
     }
 
-	    async function uploadFile(file) {
-	      const buf = await file.arrayBuffer();
-	      const b64 = arrayBufferToBase64(buf);
-	      const res = await fetch(publicWorkerURL("/upload"), {
+	    async function uploadFile(file, onProgress) {
+	      const initRes = await fetch(publicWorkerURL("/upload/init"), {
 	        method: "POST",
 	        headers: { "Content-Type": "application/json" },
-	        body: JSON.stringify({ name: file.name, content_type: file.type, content_base64: b64 }),
+	        body: JSON.stringify({ name: file.name, content_type: file.type, size_bytes: file.size }),
 	      });
-	      const j = await responseJSON(res);
-	      if (j.error) throw new Error(j.error);
-	      return j.storage_file_id;
+	      const init = await responseJSON(initRes);
+	      if (init.storage_file_id) {
+	        if (onProgress) onProgress(100);
+	        return init.storage_file_id;
+	      }
+	      const uploadID = init.upload_id;
+	      const partSize = Number(init.part_size) || (1024 * 1024);
+	      if (!uploadID) throw new Error("Storage did not start the upload");
+	      try {
+	        let part = 1;
+	        for (let offset = 0; offset < file.size; offset += partSize, part++) {
+	          const end = Math.min(offset + partSize, file.size);
+	          const bytes = await file.slice(offset, end).arrayBuffer();
+	          const partRes = await fetch(publicWorkerURL("/upload/part"), {
+	            method: "POST",
+	            headers: { "Content-Type": "application/json" },
+	            body: JSON.stringify({ upload_id: uploadID, part_number: part, content_base64: arrayBufferToBase64(bytes) }),
+	          });
+	          await responseJSON(partRes);
+	          if (onProgress) onProgress(Math.round((end / file.size) * 100));
+	        }
+	        const completeRes = await fetch(publicWorkerURL("/upload/complete"), {
+	          method: "POST",
+	          headers: { "Content-Type": "application/json" },
+	          body: JSON.stringify({ upload_id: uploadID }),
+	        });
+	        const complete = await responseJSON(completeRes);
+	        return complete.storage_file_id;
+	      } catch (error) {
+	        fetch(publicWorkerURL("/upload/abort"), {
+	          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ upload_id: uploadID }),
+	        }).catch(() => {});
+	        throw error;
+	      }
 	    }
 
 	    async function submit() {
@@ -594,7 +723,7 @@ func workerPageHTML(token string) string {
 	        const res = await fetch(publicWorkerURL("/submit"), {
 	          method: "POST",
 	          headers: { "Content-Type": "application/json" },
-	          body: JSON.stringify({ payload: payload, attachment_file_ids: Array.from(allAttachmentIDs) }),
+	          body: JSON.stringify({ payload: payload, attachment_file_ids: currentAttachmentIDs(payload) }),
 	        });
 	        j = await responseJSON(res);
 	      } catch (e) {
@@ -615,7 +744,7 @@ func workerPageHTML(token string) string {
 
     function updateStatus() {
       const responses = Object.values(instructionResponses).length;
-      const files = Array.from(allAttachmentIDs).length;
+      const files = currentAttachmentIDs(Object.assign({}, result, { instruction_responses: Object.values(instructionResponses) })).length;
       const parts = [];
       if (responses) parts.push(responses + " step response" + (responses === 1 ? "" : "s"));
       if (files) parts.push(files + " file" + (files === 1 ? "" : "s"));
@@ -700,6 +829,17 @@ func workerPageHTML(token string) string {
 	      }
 	      return 0;
 	    }
+	    function currentAttachmentIDs(value) {
+	      const ids = new Set();
+	      const visit = item => {
+	        if (!item || typeof item !== "object") return;
+	        if (Number(item.storage_file_id) > 0) ids.add(Number(item.storage_file_id));
+	        if (Array.isArray(item)) item.forEach(visit);
+	        else Object.values(item).forEach(visit);
+	      };
+	      visit(value);
+	      return Array.from(ids);
+	    }
 	    function formatDeadline(s) {
       if (!s) return "No deadline";
       const d = new Date(s);
@@ -751,6 +891,10 @@ func workerPageHTML(token string) string {
 	      meta.appendChild(state);
 	      card.appendChild(media);
 	      card.appendChild(meta);
+	      const progress = document.createElement("div");
+	      progress.className = "preview-progress";
+	      progress.innerHTML = "<span></span>";
+	      card.appendChild(progress);
 	      if (file.type.startsWith("video/")) {
 	        card.appendChild(videoPreviewToggle(media));
 	      }
@@ -760,6 +904,10 @@ func workerPageHTML(token string) string {
 	          state.textContent = text;
 	          state.classList.toggle("error", Boolean(isError));
 	        },
+	        setProgress(percent) {
+	          progress.firstElementChild.style.width = Math.max(0, Math.min(100, percent)) + "%";
+	        },
+	        addRemove(handler) { addPreviewRemove(card, handler); },
 	      };
 	    }
 	    function renderSubmittedFilePreview(file, status) {
@@ -812,7 +960,21 @@ func workerPageHTML(token string) string {
 	      if (url && mime.startsWith("video/")) {
 	        card.appendChild(videoPreviewToggle(media));
 	      }
-	      return { card, setStatus(text) { state.textContent = text; } };
+	      return { card, setStatus(text) { state.textContent = text; }, addRemove(handler) { addPreviewRemove(card, handler); } };
+	    }
+	    function addPreviewRemove(card, handler) {
+	      let actions = card.querySelector(".preview-actions");
+	      if (!actions) {
+	        actions = document.createElement("div");
+	        actions.className = "preview-actions";
+	        card.appendChild(actions);
+	      }
+	      const button = document.createElement("button");
+	      button.type = "button";
+	      button.className = "text-button";
+	      button.textContent = "Remove";
+	      button.addEventListener("click", handler);
+	      actions.appendChild(button);
 	    }
 	    function videoPreviewToggle(media) {
 	      const button = document.createElement("button");
@@ -863,16 +1025,23 @@ type workerGigPayload struct {
 	GigID              int64            `json:"gig_id"`
 	Title              string           `json:"title"`
 	DeadlineAt         string           `json:"deadline_at,omitempty"`
+	GigStatus          string           `json:"gig_status"`
 	AssignmentStatus   string           `json:"assignment_status"`
+	AssignmentMode     string           `json:"assignment_mode"`
 	ProjectID          string           `json:"project_id"`
 	Composition        []map[string]any `json:"composition"`
 	RequiredResultKeys []string         `json:"required_result_keys,omitempty"`
 	Submission         *submission      `json:"submission,omitempty"`
 }
 
-func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token string) {
+func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
 	ctx := globalCtx
-	assignID, gigID, pid, status, err := lookupAssignment(ctx.AppDB(), token)
+	assignID, gigID, pid, status, gigStatus, mode, _, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid token")
 		return
@@ -921,7 +1090,9 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 			GigID:              g.ID,
 			Title:              g.Title,
 			DeadlineAt:         g.DeadlineAt,
+			GigStatus:          gigStatus,
 			AssignmentStatus:   status,
+			AssignmentMode:     mode,
 			ProjectID:          pid,
 			Composition:        rendered,
 			RequiredResultKeys: requiredResultKeys(g.DerivedResultSchema),
@@ -975,19 +1146,130 @@ func enrichSubmissionFileURLs(ctx *sdk.AppCtx, pid string, value any, ttl int) {
 	}
 }
 
+func (a *App) handleWorkerAccept(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if revoked || assignmentStatus != "offered" || (gigStatus != "offered" && gigStatus != "accepted") {
+		httpErr(w, http.StatusConflict, "this offer can no longer be accepted")
+		return
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE gig_assignments
+		SET status='accepted', responded_at=CURRENT_TIMESTAMP
+		WHERE id=? AND status='offered' AND token_revoked_at IS NULL`, assignmentID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		httpErr(w, http.StatusConflict, "this offer changed; reload the page")
+		return
+	}
+	if _, err = tx.Exec(`UPDATE gigs SET status='accepted', updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND project_id=? AND status IN ('offered','accepted')`, gigID, pid); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err = tx.Exec(`INSERT INTO gig_events (project_id,gig_id,kind,actor,body)
+		VALUES (?,?,'accepted_by_worker','worker','web')`, pid, gigID); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ctx.EmitWithProject("gig.accepted", pid, map[string]any{"gig_id": gigID, "assignment_id": assignmentID})
+	httpJSON(w, map[string]any{"ok": true, "assignment_status": "accepted"})
+}
+
+func (a *App) handleWorkerDecline(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, gigID, pid, assignmentStatus, _, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if revoked || (assignmentStatus != "offered" && assignmentStatus != "accepted") {
+		httpErr(w, http.StatusConflict, "this offer can no longer be declined")
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if err := httpDecode(r, &body); err != nil && !errors.Is(err, io.EOF) {
+		httpErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE gig_assignments
+		SET status='declined', responded_at=CURRENT_TIMESTAMP, token_revoked_at=CURRENT_TIMESTAMP
+		WHERE id=? AND status IN ('offered','accepted') AND token_revoked_at IS NULL`, assignmentID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		httpErr(w, http.StatusConflict, "this offer changed; reload the page")
+		return
+	}
+	if _, err = tx.Exec(`UPDATE gigs SET status=CASE
+		WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='accepted') THEN 'accepted'
+		WHEN EXISTS (SELECT 1 FROM gig_assignments WHERE gig_id=? AND status='offered') THEN 'offered'
+		ELSE 'open' END, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, gigID, gigID, gigID, pid); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if _, err = tx.Exec(`INSERT INTO gig_events (project_id,gig_id,kind,actor,body)
+		VALUES (?,?,'declined','worker',?)`, pid, gigID, strings.TrimSpace(body.Reason)); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	ctx.EmitWithProject("gig.declined", pid, map[string]any{"gig_id": gigID, "assignment_id": assignmentID})
+	httpJSON(w, map[string]any{"ok": true, "assignment_status": "declined"})
+}
+
 func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token string) {
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
 	ctx := globalCtx
-	assignID, gigID, pid, status, err := lookupAssignment(ctx.AppDB(), token)
+	assignID, gigID, pid, status, gigStatus, mode, revoked, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
-		httpErr(w, http.StatusNotFound, "invalid token")
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
 	}
-	if status == "withdrawn" {
-		httpErr(w, http.StatusGone, "already "+status)
+	if !assignmentAcceptsWork(status, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
 	var body struct {
@@ -1002,12 +1284,29 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := validateSubmissionAttachments(ctx.AppDB(), assignID, body.Attachments); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer tx.Rollback()
+	if mode == "first-come" {
+		var other int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
+			JOIN gig_assignments a ON a.id=s.assignment_id
+			WHERE a.gig_id=? AND a.id<>?`, gigID, assignID).Scan(&other); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if other > 0 {
+			httpErr(w, http.StatusConflict, "this first-come gig was already submitted by another worker")
+			return
+		}
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO gig_submissions (assignment_id, payload_json, attachment_file_ids_json, channel)
 		 VALUES (?, ?, ?, 'web')`,
@@ -1016,11 +1315,15 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if _, err := tx.Exec(
-		`UPDATE gig_assignments SET status='submitted', submitted_at=CURRENT_TIMESTAMP WHERE id=?`,
-		assignID,
-	); err != nil {
+	res, err := tx.Exec(`UPDATE gig_assignments SET status='submitted', responded_at=COALESCE(responded_at,CURRENT_TIMESTAMP),
+		submitted_at=CURRENT_TIMESTAMP WHERE id=? AND status IN ('offered','accepted','submitted')
+		AND token_revoked_at IS NULL`, assignID)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		httpErr(w, http.StatusConflict, "this assignment changed; reload the page")
 		return
 	}
 	if _, err := tx.Exec(
@@ -1029,6 +1332,13 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 	); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if mode == "first-come" {
+		if _, err := tx.Exec(`UPDATE gig_assignments SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
+			WHERE gig_id=? AND id<>? AND status IN ('offered','accepted')`, gigID, assignID); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
@@ -1050,38 +1360,240 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 	httpJSON(w, map[string]any{"ok": true})
 }
 
-func (a *App) handleWorkerUpload(w http.ResponseWriter, r *http.Request, token string) {
+func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, token string) {
 	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
 	ctx := globalCtx
-	_, gigID, pid, _, err := lookupAssignment(ctx.AppDB(), token)
+	assignmentID, gigID, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
-		httpErr(w, http.StatusNotFound, "invalid token")
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	if !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
 		return
 	}
 	var body struct {
-		Name          string `json:"name"`
-		ContentType   string `json:"content_type"`
-		ContentBase64 string `json:"content_base64"`
+		Name        string `json:"name"`
+		ContentType string `json:"content_type"`
+		SizeBytes   int64  `json:"size_bytes"`
 	}
-	if err := httpDecode(r, &body); err != nil || body.Name == "" || body.ContentBase64 == "" {
-		httpErr(w, http.StatusBadRequest, "name and content_base64 required")
+	if err := httpDecode(r, &body); err != nil || strings.TrimSpace(body.Name) == "" || body.SizeBytes <= 0 {
+		httpErr(w, http.StatusBadRequest, "name and positive size_bytes required")
 		return
 	}
-	raw, err := base64.StdEncoding.DecodeString(body.ContentBase64)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid base64")
+	maxBytes := int64(atoi(ctx.Config().Get("max_submission_file_mb"))) * 1024 * 1024
+	if maxBytes <= 0 {
+		maxBytes = 2 * 1024 * 1024 * 1024
+	}
+	if body.SizeBytes > maxBytes {
+		httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds the %d MB limit", maxBytes/(1024*1024)))
 		return
 	}
 	folder := fmt.Sprintf("submissions/%d", gigID)
-	fileID, _, err := storageUpload(ctx, pid, body.Name, folder, body.ContentType, raw)
+	init, err := storageUploadInit(ctx, pid, body.Name, folder, body.ContentType, body.SizeBytes)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if init.WasExisting {
+		fileID := int64Cast(init.File["id"])
+		if fileID == 0 {
+			httpErr(w, http.StatusBadGateway, "storage returned an invalid existing file")
+			return
+		}
+		if _, err := ctx.AppDB().Exec(`INSERT OR REPLACE INTO gig_upload_sessions
+			(upload_id,assignment_id,project_id,status,storage_file_id,completed_at)
+			VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)`, "existing:"+token+":"+fmt.Sprint(fileID), assignmentID, pid, "completed", fileID); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"was_existing": true, "storage_file_id": fileID})
+		return
+	}
+	if init.UploadID == "" || init.PartSize <= 0 {
+		httpErr(w, http.StatusBadGateway, "storage returned an invalid upload session")
+		return
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_upload_sessions
+		(upload_id,assignment_id,project_id,status) VALUES (?,?,?,'uploading')`, init.UploadID, assignmentID, pid); err != nil {
+		_ = storageUploadAbort(ctx, pid, init.UploadID, "gigs session registration failed")
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"upload_id": init.UploadID, "part_size": init.PartSize, "was_existing": false})
+}
+
+func (a *App) handleWorkerUploadPart(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
+		return
+	}
+	var body struct {
+		UploadID      string `json:"upload_id"`
+		PartNumber    int    `json:"part_number"`
+		ContentBase64 string `json:"content_base64"`
+	}
+	if err := httpDecodeLimit(r, &body, 2*1024*1024); err != nil || body.UploadID == "" || body.PartNumber < 1 || body.ContentBase64 == "" {
+		httpErr(w, http.StatusBadRequest, "upload_id, part_number and content_base64 required")
+		return
+	}
+	raw, err := base64.StdEncoding.DecodeString(body.ContentBase64)
+	if err != nil || len(raw) == 0 || len(raw) > 1024*1024 {
+		httpErr(w, http.StatusBadRequest, "invalid upload part")
+		return
+	}
+	if err := requireWorkerUploadSession(ctx.AppDB(), body.UploadID, assignmentID, pid, "uploading"); err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := storageUploadPart(ctx, pid, body.UploadID, body.PartNumber, body.ContentBase64); err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "part_number": body.PartNumber})
+}
+
+func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil || !assignmentAcceptsWork(assignmentStatus, gigStatus, revoked) {
+		httpErr(w, http.StatusGone, "this assignment is closed")
+		return
+	}
+	var body struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := httpDecode(r, &body); err != nil || body.UploadID == "" {
+		httpErr(w, http.StatusBadRequest, "upload_id required")
+		return
+	}
+	if err := requireWorkerUploadSession(ctx.AppDB(), body.UploadID, assignmentID, pid, "uploading"); err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	fileID, err := storageUploadComplete(ctx, pid, body.UploadID)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='completed', storage_file_id=?, completed_at=CURRENT_TIMESTAMP
+		WHERE upload_id=? AND assignment_id=? AND status='uploading'`, fileID, body.UploadID, assignmentID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"storage_file_id": fileID})
+	if n, _ := res.RowsAffected(); n != 1 {
+		httpErr(w, http.StatusConflict, "upload session changed")
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "storage_file_id": fileID})
+}
+
+func (a *App) handleWorkerUploadAbort(w http.ResponseWriter, r *http.Request, token string) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		return
+	}
+	ctx := globalCtx
+	assignmentID, _, pid, _, _, _, _, err := loadAssignmentState(ctx.AppDB(), token)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid or expired link")
+		return
+	}
+	var body struct {
+		UploadID string `json:"upload_id"`
+	}
+	if err := httpDecode(r, &body); err != nil || body.UploadID == "" {
+		httpErr(w, http.StatusBadRequest, "upload_id required")
+		return
+	}
+	if err := requireWorkerUploadSession(ctx.AppDB(), body.UploadID, assignmentID, pid, "uploading"); err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := storageUploadAbort(ctx, pid, body.UploadID, "worker cancelled"); err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='aborted' WHERE upload_id=? AND assignment_id=?`, body.UploadID, assignmentID)
+	httpJSON(w, map[string]any{"ok": true})
+}
+
+func requireWorkerUploadSession(db *sql.DB, uploadID string, assignmentID int64, pid, status string) error {
+	var found int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM gig_upload_sessions
+		WHERE upload_id=? AND assignment_id=? AND project_id=? AND status=?`, uploadID, assignmentID, pid, status).Scan(&found); err != nil {
+		return err
+	}
+	if found != 1 {
+		return errors.New("upload session not found")
+	}
+	return nil
+}
+
+func validateSubmissionAttachments(db *sql.DB, assignmentID int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	allowed := map[int64]bool{}
+	rows, err := db.Query(`SELECT storage_file_id FROM gig_upload_sessions
+		WHERE assignment_id=? AND status='completed' AND storage_file_id IS NOT NULL`, assignmentID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		allowed[id] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	oldRows, err := db.Query(`SELECT COALESCE(attachment_file_ids_json,'[]') FROM gig_submissions WHERE assignment_id=?`, assignmentID)
+	if err != nil {
+		return err
+	}
+	for oldRows.Next() {
+		var raw string
+		if err := oldRows.Scan(&raw); err != nil {
+			oldRows.Close()
+			return err
+		}
+		var existing []int64
+		_ = parseJSON(raw, &existing)
+		for _, id := range existing {
+			allowed[id] = true
+		}
+	}
+	if err := oldRows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if id <= 0 || !allowed[id] {
+			return fmt.Errorf("attachment %d was not uploaded for this assignment", id)
+		}
+	}
+	return nil
 }
 
 // ─── Inbound reply handler ──────────────────────────────────────────
@@ -1113,17 +1625,23 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	// Find an open assignment for this contact, optionally narrowed
 	// to the inbound conversation thread.
 	var assignID, gigID int64
-	q := `SELECT a.id, a.gig_id
+	var mode string
+	q := `SELECT a.id, a.gig_id, COALESCE(a.mode,'direct')
 	      FROM gig_assignments a
 	      JOIN workers w ON w.id = a.worker_id
-	      WHERE w.contact_id=? AND a.status IN ('offered','accepted')`
-	args := []any{contactID}
+	      JOIN gigs g ON g.id=a.gig_id
+	      WHERE w.contact_id=? AND w.project_id=? AND g.project_id=?
+	        AND a.status IN ('offered','accepted','submitted')
+	        AND g.status IN ('offered','accepted','submitted')
+	        AND a.token_revoked_at IS NULL
+	        AND (a.token_expires_at IS NULL OR datetime(a.token_expires_at)>datetime('now'))`
+	args := []any{contactID, pid, pid}
 	if convoID > 0 {
 		q += ` AND (a.crm_conversation_id=? OR a.crm_conversation_id IS NULL)`
 		args = append(args, convoID)
 	}
 	q += ` ORDER BY a.offered_at DESC LIMIT 1`
-	if err := ctx.AppDB().QueryRow(q, args...).Scan(&assignID, &gigID); errors.Is(err, sql.ErrNoRows) {
+	if err := ctx.AppDB().QueryRow(q, args...).Scan(&assignID, &gigID, &mode); errors.Is(err, sql.ErrNoRows) {
 		return nil
 	} else if err != nil {
 		return err
@@ -1150,29 +1668,61 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		_, _ = crmSendMessage(ctx, pid, contactID, nudge, "", "")
 		return nil
 	}
-	// Write the submission.
-	if _, err := ctx.AppDB().Exec(
+	if err := validateSubmission(ctx.AppDB(), gigID, payload); err != nil {
+		return err
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if mode == "first-come" {
+		var other int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
+			JOIN gig_assignments a ON a.id=s.assignment_id
+			WHERE a.gig_id=? AND a.id<>?`, gigID, assignID).Scan(&other); err != nil {
+			return err
+		}
+		if other > 0 {
+			return nil
+		}
+	}
+	if _, err := tx.Exec(
 		`INSERT INTO gig_submissions (assignment_id, payload_json, channel) VALUES (?, ?, ?)`,
 		assignID, mustJSON(payload), "channel_reply",
 	); err != nil {
 		return err
 	}
-	if _, err := ctx.AppDB().Exec(
-		`UPDATE gig_assignments SET status='submitted', submitted_at=CURRENT_TIMESTAMP WHERE id=?`,
+	res, err := tx.Exec(
+		`UPDATE gig_assignments SET status='submitted', responded_at=COALESCE(responded_at,CURRENT_TIMESTAMP), submitted_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND status IN ('offered','accepted','submitted') AND token_revoked_at IS NULL`,
 		assignID,
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
-	if _, err := ctx.AppDB().Exec(
+	if n, _ := res.RowsAffected(); n != 1 {
+		return errors.New("assignment changed during submission")
+	}
+	if _, err := tx.Exec(
 		`UPDATE gigs SET status='submitted', updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		gigID,
 	); err != nil {
 		return err
 	}
-	if _, err := ctx.AppDB().Exec(
+	if mode == "first-come" {
+		if _, err := tx.Exec(`UPDATE gig_assignments SET status='withdrawn', token_revoked_at=CURRENT_TIMESTAMP
+			WHERE gig_id=? AND id<>? AND status IN ('offered','accepted')`, gigID, assignID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(
 		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body) VALUES (?, ?, 'submitted', 'worker', 'channel_reply')`,
 		pid, gigID,
 	); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	ctx.EmitWithProject("gig.submitted", pid, map[string]any{
@@ -1248,9 +1798,6 @@ func boolFromConfig(ctx *sdk.AppCtx, key string, def bool) bool {
 
 // ─── Validation ─────────────────────────────────────────────────────
 
-// validateSubmission ensures every required key in the gig's derived
-// schema is present in the payload. We do not do full JSON Schema
-// validation in v0.1 — required-key coverage is the high-value check.
 func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
 	var schemaJSON string
 	if err := db.QueryRow(
@@ -1276,10 +1823,112 @@ func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
 			return fmt.Errorf("field %q cannot be empty", key)
 		}
 	}
+	if err := validateSchemaValue("submission", schema, payload); err != nil {
+		return err
+	}
 	if err := validateRequiredInstructionResponses(db, gigID, payload); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateSchemaValue(path string, schema map[string]any, value any) error {
+	typeName := strOf(schema["type"])
+	switch typeName {
+	case "object":
+		obj, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be an object", path)
+		}
+		for _, key := range requiredResultKeys(schema) {
+			if _, present := obj[key]; !present {
+				return fmt.Errorf("%s.%s is required", path, key)
+			}
+		}
+		if props, ok := schema["properties"].(map[string]any); ok {
+			for key, raw := range props {
+				child, present := obj[key]
+				if !present {
+					continue
+				}
+				childSchema, _ := raw.(map[string]any)
+				if err := validateSchemaValue(path+"."+key, childSchema, child); err != nil {
+					return err
+				}
+			}
+		}
+	case "array":
+		items, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("%s must be an array", path)
+		}
+		if itemSchema, ok := schema["items"].(map[string]any); ok {
+			for i, item := range items {
+				if err := validateSchemaValue(fmt.Sprintf("%s[%d]", path, i), itemSchema, item); err != nil {
+					return err
+				}
+			}
+		}
+	case "string":
+		s, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("%s must be text", path)
+		}
+		if max := intFromAny(schema["maxLength"]); max > 0 && len([]rune(s)) > max {
+			return fmt.Errorf("%s must be at most %d characters", path, max)
+		}
+		if strOf(schema["format"]) == "date" {
+			if _, err := time.Parse("2006-01-02", s); err != nil {
+				return fmt.Errorf("%s must be a date", path)
+			}
+		}
+	case "number", "integer":
+		n, ok := numberFromAny(value)
+		if !ok || (typeName == "integer" && math.Trunc(n) != n) {
+			return fmt.Errorf("%s must be %s", path, typeName)
+		}
+		if min, ok := numberFromAny(schema["minimum"]); ok && n < min {
+			return fmt.Errorf("%s must be at least %v", path, min)
+		}
+		if max, ok := numberFromAny(schema["maximum"]); ok && n > max {
+			return fmt.Errorf("%s must be at most %v", path, max)
+		}
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s must be true or false", path)
+		}
+	}
+	if allowed, ok := schema["enum"].([]any); ok && len(allowed) > 0 {
+		matched := false
+		for _, candidate := range allowed {
+			if fmt.Sprint(candidate) == fmt.Sprint(value) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s contains an unsupported value", path)
+		}
+	}
+	return nil
+}
+
+func numberFromAny(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func requiredResultKeys(schema map[string]any) []string {
@@ -1344,24 +1993,3 @@ func validateRequiredInstructionResponses(db *sql.DB, gigID int64, payload map[s
 	}
 	return rows.Err()
 }
-
-// ─── Token lookup ───────────────────────────────────────────────────
-
-func lookupAssignment(db *sql.DB, token string) (assignID, gigID int64, projectID, status string, err error) {
-	err = db.QueryRow(
-		`SELECT a.id, a.gig_id, g.project_id, a.status
-		 FROM gig_assignments a
-		 JOIN gigs g ON g.id = a.gig_id
-		 WHERE a.magic_token=?`,
-		token,
-	).Scan(&assignID, &gigID, &projectID, &status)
-	if errors.Is(err, sql.ErrNoRows) {
-		err = errors.New("not found")
-	}
-	return
-}
-
-// ─── Future: deadline expirer ───────────────────────────────────────
-// Reserved hook — once the SDK's Workers slice is wired in main.go we
-// can run a periodic sweep to mark stale gigs as 'expired'.
-var _ = time.Now

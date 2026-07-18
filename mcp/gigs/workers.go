@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -185,10 +186,6 @@ func (a *App) toolWorkersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if company := strArg(args, "company"); company != "" {
 		defaults["company"] = company
 	}
-	// CRM's contacts_upsert_by_channel keys on one channel; the
-	// second channel needs a follow-on write. Keep this simple in
-	// v0.1: pick whichever is supplied first, the operator can attach
-	// the other from the CRM panel.
 	kind, value := "email", email
 	if email == "" {
 		kind, value = "phone", phone
@@ -197,6 +194,12 @@ func (a *App) toolWorkersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	contact, wasCreated, err := crmUpsertByChannel(ctx, pid, kind, value, defaults, source)
 	if err != nil {
 		return nil, err
+	}
+	if email != "" && phone != "" {
+		contact, err = crmEnsureChannels(ctx, pid, contact, email, phone, source)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	w, wasPromoted, err := promoteContact(ctx.AppDB(), pid, contact.ID, strArg(args, "default_channel"), strArg(args, "notes"))
@@ -221,7 +224,7 @@ func (a *App) toolWorkersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := hydrateSkills(ctx.AppDB(), pid, w); err != nil {
 		return nil, err
 	}
-	ctx.Emit("worker.created", map[string]any{
+	ctx.EmitWithProject("worker.created", pid, map[string]any{
 		"worker_id":    w.ID,
 		"contact_id":   w.ContactID,
 		"was_promoted": wasPromoted,
@@ -287,13 +290,8 @@ func (a *App) toolWorkersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	includeContact := boolArg(args, "include_contact", true)
-	for _, w := range rows {
-		_ = hydrateSkills(ctx.AppDB(), pid, w)
-		if includeContact {
-			if c, err := crmGetContact(ctx, pid, w.ContactID); err == nil {
-				w.Contact = c
-			}
-		}
+	if err := hydrateWorkerRows(ctx, pid, rows, includeContact); err != nil {
+		return nil, err
 	}
 	return map[string]any{"workers": rows}, nil
 }
@@ -339,12 +337,8 @@ func (a *App) toolWorkersSearch(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	for _, w := range rows {
-		_ = hydrateSkills(ctx.AppDB(), pid, w)
-		if c, err := crmGetContact(ctx, pid, w.ContactID); err == nil {
-			w.Contact = c
-		}
-		w.OpenAssignments, _ = countOpenAssignments(ctx.AppDB(), w.ID)
+	if err := hydrateWorkerRows(ctx, pid, rows, true); err != nil {
+		return nil, err
 	}
 	return map[string]any{"workers": rows}, nil
 }
@@ -672,6 +666,83 @@ func hydrateSkills(db *sql.DB, pid string, w *worker) error {
 	return rows.Err()
 }
 
+func hydrateWorkerRows(ctx *sdk.AppCtx, pid string, workers []*worker, includeContacts bool) error {
+	if len(workers) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*worker, len(workers))
+	marks := make([]string, 0, len(workers))
+	args := make([]any, 0, len(workers)+1)
+	args = append(args, pid)
+	for _, item := range workers {
+		byID[item.ID] = item
+		item.Skills = nil
+		marks = append(marks, "?")
+		args = append(args, item.ID)
+	}
+	rows, err := ctx.AppDB().Query(`SELECT ws.worker_id,s.id,s.slug,s.name,ws.level
+		FROM worker_skills ws JOIN skills s ON s.id=ws.skill_id
+		WHERE s.project_id=? AND ws.worker_id IN (`+strings.Join(marks, ",")+`) ORDER BY s.name`, args...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var workerID int64
+		var skill workerSkillView
+		if err := rows.Scan(&workerID, &skill.SkillID, &skill.Slug, &skill.Name, &skill.Level); err != nil {
+			rows.Close()
+			return err
+		}
+		if item := byID[workerID]; item != nil {
+			item.Skills = append(item.Skills, skill)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	countArgs := make([]any, 0, len(workers))
+	for _, item := range workers {
+		countArgs = append(countArgs, item.ID)
+	}
+	countRows, err := ctx.AppDB().Query(`SELECT worker_id,COUNT(*) FROM gig_assignments
+		WHERE worker_id IN (`+strings.Join(marks, ",")+`) AND status IN ('offered','accepted','submitted') GROUP BY worker_id`, countArgs...)
+	if err != nil {
+		return err
+	}
+	for countRows.Next() {
+		var workerID, count int64
+		if err := countRows.Scan(&workerID, &count); err != nil {
+			countRows.Close()
+			return err
+		}
+		if item := byID[workerID]; item != nil {
+			item.OpenAssignments = count
+		}
+	}
+	if err := countRows.Close(); err != nil {
+		return err
+	}
+	if !includeContacts {
+		return nil
+	}
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, item := range workers {
+		item := item
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if contact, err := crmGetContact(ctx, pid, item.ContactID); err == nil {
+				item.Contact = contact
+			}
+		}()
+	}
+	wg.Wait()
+	return nil
+}
+
 func replaceWorkerSkills(db *sql.DB, pid string, workerID int64, skills []map[string]any) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -713,7 +784,7 @@ func replaceWorkerSkills(db *sql.DB, pid string, workerID int64, skills []map[st
 func countOpenAssignments(db *sql.DB, workerID int64) (int64, error) {
 	var n int64
 	err := db.QueryRow(
-		`SELECT COUNT(*) FROM gig_assignments WHERE worker_id=? AND status IN ('offered','accepted')`,
+		`SELECT COUNT(*) FROM gig_assignments WHERE worker_id=? AND status IN ('offered','accepted','submitted')`,
 		workerID,
 	).Scan(&n)
 	return n, err
@@ -740,11 +811,9 @@ func (a *App) handleHTTPWorkersCollection(w http.ResponseWriter, r *http.Request
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		for _, wk := range rows {
-			_ = hydrateSkills(ctx.AppDB(), pid, wk)
-			if c, err := crmGetContact(ctx, pid, wk.ContactID); err == nil {
-				wk.Contact = c
-			}
+		if err := hydrateWorkerRows(ctx, pid, rows, true); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 		httpJSON(w, map[string]any{"workers": rows})
 	case http.MethodPost:

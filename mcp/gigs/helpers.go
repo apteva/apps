@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -137,11 +138,29 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func httpDecode(r *http.Request, out any) error {
+	return httpDecodeLimit(r, out, 1<<20)
+}
+
+func httpDecodeLimit(r *http.Request, out any, limit int64) error {
 	if r.Body == nil {
 		return errors.New("empty body")
 	}
 	defer r.Body.Close()
-	return json.NewDecoder(r.Body).Decode(out)
+	if limit <= 0 {
+		limit = 1 << 20
+	}
+	limited := &io.LimitedReader{R: r.Body, N: limit + 1}
+	dec := json.NewDecoder(limited)
+	if err := dec.Decode(out); err != nil {
+		return err
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return errors.New("request body must contain one JSON value")
+	}
+	if limited.N <= 0 {
+		return fmt.Errorf("request body exceeds %d bytes", limit)
+	}
+	return nil
 }
 
 // ─── JSON column round-trip ─────────────────────────────────────────

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"net/http"
@@ -42,9 +43,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "lifecycle",
+		Schedule: "@every 5m",
+		Run: func(ctx context.Context, app *sdk.AppCtx) error {
+			return runLifecycleSweep(ctx, app)
+		},
+	}}
+}
 
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{

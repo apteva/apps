@@ -1,0 +1,236 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
+)
+
+func testCtx(t *testing.T) *sdk.AppCtx {
+	t.Helper()
+	return tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(&tk.BasePlatformClient{}))
+}
+
+type storagePlatformStub struct{ tk.BasePlatformClient }
+
+func (storagePlatformStub) CallAppResult(app, tool string, _ map[string]any, out any) error {
+	var payload any
+	switch app + "/" + tool {
+	case "storage/storage_upload_init":
+		payload = map[string]any{"upload_id": "01TESTUPLOAD", "part_size": 1048576, "was_existing": false}
+	case "storage/storage_upload_part":
+		payload = map[string]any{"ok": true}
+	case "storage/storage_upload_complete":
+		payload = map[string]any{"file": map[string]any{"id": 91}}
+	case "storage/storage_abort_upload":
+		payload = map[string]any{"found": true}
+	default:
+		payload = map[string]any{}
+	}
+	raw, _ := json.Marshal(payload)
+	return json.Unmarshal(raw, out)
+}
+
+func seedWorker(t *testing.T, ctx *sdk.AppCtx, project string, contactID int64) int64 {
+	t.Helper()
+	res, err := ctx.AppDB().Exec(`INSERT INTO workers (project_id,contact_id,status) VALUES (?,?,'active')`, project, contactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func seedGig(t *testing.T, ctx *sdk.AppCtx, project, status, schema string) int64 {
+	t.Helper()
+	res, err := ctx.AppDB().Exec(`INSERT INTO gigs
+		(project_id,created_by,title,derived_result_schema_json,status,deadline_at)
+		VALUES (?,'test','Test gig',?,?,datetime('now','+1 day'))`, project, schema, status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status, mode, token string) int64 {
+	t.Helper()
+	res, err := ctx.AppDB().Exec(`INSERT INTO gig_assignments
+		(gig_id,worker_id,status,magic_token,mode,token_expires_at)
+		VALUES (?,?,?,?,?,datetime('now','+1 day'))`, gigID, workerID, status, token, mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
+func TestGigActionRoutesRequirePost(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+
+	req := httptest.NewRequest(http.MethodGet, "/gigs/42/cancel?project_id=project-a", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handleHTTPGigItem(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Allow"); got != http.MethodPost {
+		t.Fatalf("Allow=%q", got)
+	}
+}
+
+func TestAssignGigDoesNotCrossProjectBoundary(t *testing.T) {
+	ctx := testCtx(t)
+	workerID := seedWorker(t, ctx, "project-a", 10)
+	gigID := seedGig(t, ctx, "project-b", "open", `{"type":"object","properties":{}}`)
+	if _, err := assignGig(ctx, "project-a", gigID, workerID, "direct", false); err == nil || !strings.Contains(err.Error(), "gig not found") {
+		t.Fatalf("expected project isolation error, got %v", err)
+	}
+}
+
+func TestValidateSubmissionChecksGeneratedSchema(t *testing.T) {
+	ctx := testCtx(t)
+	schema := `{"type":"object","properties":{"rating":{"type":"integer","minimum":1,"maximum":5},"choice":{"type":"string","enum":["a","b"]}},"required":["rating","choice"]}`
+	gigID := seedGig(t, ctx, "project-a", "accepted", schema)
+	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 6.0, "choice": "a"}); err == nil {
+		t.Fatal("expected maximum validation error")
+	}
+	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 4.0, "choice": "x"}); err == nil {
+		t.Fatal("expected enum validation error")
+	}
+	if err := validateSubmission(ctx.AppDB(), gigID, map[string]any{"rating": 4.0, "choice": "b"}); err != nil {
+		t.Fatalf("valid submission rejected: %v", err)
+	}
+}
+
+func TestFirstComeSubmissionWithdrawsOtherWorkers(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+
+	w1 := seedWorker(t, ctx, "project-a", 11)
+	w2 := seedWorker(t, ctx, "project-a", 12)
+	gigID := seedGig(t, ctx, "project-a", "offered", `{"type":"object","properties":{}}`)
+	seedAssignment(t, ctx, gigID, w1, "offered", "first-come", "token-one")
+	secondID := seedAssignment(t, ctx, gigID, w2, "offered", "first-come", "token-two")
+
+	req := httptest.NewRequest(http.MethodPost, "/worker/token-one/submit", bytes.NewBufferString(`{"payload":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	(&App{}).handleWorkerSubmit(rec, req, "token-one")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var status string
+	var revoked bool
+	if err := ctx.AppDB().QueryRow(`SELECT status,token_revoked_at IS NOT NULL FROM gig_assignments WHERE id=?`, secondID).Scan(&status, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if status != "withdrawn" || !revoked {
+		t.Fatalf("second assignment status=%s revoked=%v", status, revoked)
+	}
+}
+
+func TestReviewedSubmissionCannotBeAcceptedOrSubmittedTwice(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+
+	workerID := seedWorker(t, ctx, "project-a", 13)
+	gigID := seedGig(t, ctx, "project-a", "submitted", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "submitted", "direct", "review-token")
+	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_submissions (assignment_id,payload_json,channel) VALUES (?,'{}','web')`, assignmentID); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	if _, err := app.toolGigsAccept(ctx, map[string]any{"_project_id": "project-a", "id": gigID}); err != nil {
+		t.Fatalf("first accept: %v", err)
+	}
+	if _, err := app.toolGigsAccept(ctx, map[string]any{"_project_id": "project-a", "id": gigID}); err == nil {
+		t.Fatal("second accept unexpectedly succeeded")
+	}
+	var acceptedCount int64
+	if err := ctx.AppDB().QueryRow(`SELECT accepted_count FROM workers WHERE id=?`, workerID).Scan(&acceptedCount); err != nil {
+		t.Fatal(err)
+	}
+	if acceptedCount != 1 {
+		t.Fatalf("accepted_count=%d", acceptedCount)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/worker/review-token/submit", bytes.NewBufferString(`{"payload":{}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	app.handleWorkerSubmit(rec, req, "review-token")
+	if rec.Code != http.StatusGone {
+		t.Fatalf("resubmit status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestLifecycleExpiresGigAndRevokesAssignments(t *testing.T) {
+	ctx := testCtx(t)
+	workerID := seedWorker(t, ctx, "project-a", 14)
+	gigID := seedGig(t, ctx, "project-a", "offered", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "offered", "direct", "expiry-token")
+	if _, err := ctx.AppDB().Exec(`UPDATE gigs SET deadline_at=datetime('now','-1 minute') WHERE id=?`, gigID); err != nil {
+		t.Fatal(err)
+	}
+	if err := expireDueGigs(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var gigStatus, assignmentStatus string
+	var revoked bool
+	if err := ctx.AppDB().QueryRow(`SELECT g.status,a.status,a.token_revoked_at IS NOT NULL
+		FROM gigs g JOIN gig_assignments a ON a.gig_id=g.id WHERE g.id=? AND a.id=?`, gigID, assignmentID).
+		Scan(&gigStatus, &assignmentStatus, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if gigStatus != "expired" || assignmentStatus != "withdrawn" || !revoked {
+		t.Fatalf("gig=%s assignment=%s revoked=%v", gigStatus, assignmentStatus, revoked)
+	}
+}
+
+func TestWorkerMultipartUploadIsBoundToAssignment(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(storagePlatformStub{}))
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+	workerID := seedWorker(t, ctx, "project-a", 15)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	assignmentID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "upload-token")
+
+	initReq := httptest.NewRequest(http.MethodPost, "/worker/upload-token/upload/init", bytes.NewBufferString(`{"name":"clip.mp4","content_type":"video/mp4","size_bytes":5}`))
+	initRec := httptest.NewRecorder()
+	(&App{}).handleWorkerUploadInit(initRec, initReq, "upload-token")
+	if initRec.Code != http.StatusOK {
+		t.Fatalf("init status=%d body=%s", initRec.Code, initRec.Body.String())
+	}
+	partReq := httptest.NewRequest(http.MethodPost, "/worker/upload-token/upload/part", bytes.NewBufferString(`{"upload_id":"01TESTUPLOAD","part_number":1,"content_base64":"aGVsbG8="}`))
+	partRec := httptest.NewRecorder()
+	(&App{}).handleWorkerUploadPart(partRec, partReq, "upload-token")
+	if partRec.Code != http.StatusOK {
+		t.Fatalf("part status=%d body=%s", partRec.Code, partRec.Body.String())
+	}
+	completeReq := httptest.NewRequest(http.MethodPost, "/worker/upload-token/upload/complete", bytes.NewBufferString(`{"upload_id":"01TESTUPLOAD"}`))
+	completeRec := httptest.NewRecorder()
+	(&App{}).handleWorkerUploadComplete(completeRec, completeReq, "upload-token")
+	if completeRec.Code != http.StatusOK {
+		t.Fatalf("complete status=%d body=%s", completeRec.Code, completeRec.Body.String())
+	}
+	if err := validateSubmissionAttachments(ctx.AppDB(), assignmentID, []int64{91}); err != nil {
+		t.Fatalf("completed upload was not bound: %v", err)
+	}
+	if err := validateSubmissionAttachments(ctx.AppDB(), assignmentID, []int64{92}); err == nil {
+		t.Fatal("unrelated storage id accepted")
+	}
+}
