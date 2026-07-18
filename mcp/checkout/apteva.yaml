@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.2
+version: 0.1.3
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
