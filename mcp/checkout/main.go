@@ -25,6 +25,7 @@ package main
 import (
 	"crypto/rand"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,69 +40,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: checkout
-display_name: Checkout
-version: 0.1.2
-description: |
-  Cart + checkout flow. Creates billing invoices on conversion;
-  Stripe support lands in v0.2.0.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-  apps:
-    - name: catalog
-      optional: false
-    - name: billing
-      optional: false
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - name: cart_create
-      description: Create or fetch an open cart for a session_token or customer_id. Returns cart_id and session_token.
-    - name: cart_get
-      description: Fetch a cart by id or session_token. Returns items + materialised totals.
-    - name: cart_add_item
-      description: Add a catalog price to a cart. Snapshots description/amount from the price.
-    - name: cart_set_quantity
-      description: Change an item's quantity. Setting 0 removes it.
-    - name: cart_clear
-      description: Remove all items from a cart.
-    - name: checkout_start
-      description: Lock a cart and create a checkout_session.
-    - name: checkout_update
-      description: Capture or update email / name / addresses on a started session.
-    - name: checkout_pay
-      description: Submit the session for payment and create a Billing invoice.
-    - name: checkout_get
-      description: Fetch a checkout_session by id.
-    - name: checkout_cancel
-      description: Cancel a started or awaiting-payment session.
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/checkout
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/checkout.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 type App struct{}
 
 var globalCtx *sdk.AppCtx
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -114,15 +61,42 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("checkout mounted",
-		"version", "0.1.2",
+		"version", "0.1.3",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{{Topic: "invoice.paid", Handler: a.handleInvoicePaid}}
+}
+
+func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := strings.TrimSpace(event.ProjectID)
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	invoiceID := int64Arg(event.Data, "id")
+	if pid == "" || invoiceID == 0 || strArg(event.Data, "status") != "paid" {
+		return nil
+	}
+	result, err := ctx.AppDB().Exec(`UPDATE checkout_sessions
+		SET status='paid', completed_at=COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND invoice_id=? AND status='awaiting_payment'`, pid, invoiceID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		return nil
+	}
+	session, err := dbCheckoutGetByInvoice(ctx.AppDB(), pid, invoiceID)
+	if err == nil && session != nil {
+		emitSession(ctx.WithProject(pid), "checkout.paid", session)
+	}
+	return err
+}
 
 // ─── HTTP routes ────────────────────────────────────────────────────
 
@@ -1345,6 +1319,18 @@ func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 		return nil, nil
 	}
 	return s, err
+}
+
+func dbCheckoutGetByInvoice(db *sql.DB, pid string, invoiceID int64) (*CheckoutSession, error) {
+	var id int64
+	err := db.QueryRow(`SELECT id FROM checkout_sessions WHERE project_id=? AND invoice_id=?`, pid, invoiceID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dbCheckoutGet(db, pid, id)
 }
 
 func dbCheckoutStart(ctx *sdk.AppCtx, pid string, cartID int64) (*CheckoutSession, error) {

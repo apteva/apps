@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
@@ -339,6 +340,33 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		if !scopes[want] {
 			t.Errorf("manifest missing scope %q", want)
 		}
+	}
+}
+
+func TestInvoicePaidEventCompletesCheckout(t *testing.T) {
+	db := newTestDB(t)
+	cartID := seedCart(t, db, testPID, "paid-event", 0, "converted")
+	result, err := db.Exec(`INSERT INTO checkout_sessions
+		(project_id, cart_id, provider, status, invoice_id, subtotal_cents, total_cents, currency, created_at, updated_at)
+		VALUES (?, ?, 'manual', 'awaiting_payment', 501, 4900, 4900, 'USD', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`, testPID, cartID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil).WithProject(testPID)
+	if err := (&App{}).handleInvoicePaid(ctx, sdk.Event{
+		ProjectID: testPID,
+		Data:      map[string]any{"id": int64(501), "status": "paid"},
+	}); err != nil {
+		t.Fatalf("handle invoice paid: %v", err)
+	}
+	session, err := dbCheckoutGet(db, testPID, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "paid" || session.CompletedAt == "" {
+		t.Fatalf("session not completed: %#v", session)
 	}
 }
 

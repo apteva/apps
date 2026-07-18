@@ -1,13 +1,16 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,76 +19,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: commerce
-display_name: Commerce
-version: 0.1.0
-description: Shopify-style multi-store commerce layer for Apteva.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions: [db.write.app, platform.apps.call]
-  apps:
-    - { name: catalog, optional: false }
-    - { name: checkout, optional: false }
-    - { name: inventory, optional: true }
-    - { name: orders, optional: true }
-    - { name: billing, optional: true }
-    - { name: storage, optional: true }
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: commerce_stores_create, description: "Create a store." }
-    - { name: commerce_stores_list, description: "List stores." }
-    - { name: commerce_stores_get, description: "Fetch a store." }
-    - { name: commerce_stores_update, description: "Patch a store." }
-    - { name: commerce_products_create, description: "Create a storefront listing." }
-    - { name: commerce_products_list, description: "List storefront listings." }
-    - { name: commerce_products_get, description: "Fetch one listing with variants." }
-    - { name: commerce_products_publish, description: "Publish a listing." }
-    - { name: commerce_products_archive, description: "Archive a listing." }
-    - { name: commerce_variants_create, description: "Create a listing variant." }
-    - { name: commerce_variants_update, description: "Patch a listing variant." }
-    - { name: commerce_collections_create, description: "Create a collection." }
-    - { name: commerce_collections_list, description: "List collections." }
-    - { name: commerce_collections_add_product, description: "Add a listing to a collection." }
-    - { name: commerce_cart_create, description: "Create a Commerce cart backed by Checkout." }
-    - { name: commerce_cart_get, description: "Fetch a Commerce cart." }
-    - { name: commerce_cart_add_item, description: "Add a variant to a Commerce cart." }
-    - { name: commerce_cart_set_quantity, description: "Set Commerce cart item quantity." }
-    - { name: commerce_checkout_start, description: "Reserve inventory and start Checkout." }
-    - { name: commerce_checkout_update, description: "Update buyer info on Checkout." }
-    - { name: commerce_checkout_pay, description: "Submit Checkout for payment and create a sale." }
-    - { name: commerce_checkout_mark_paid, description: "Commit reservations and create an order." }
-    - { name: commerce_sales_list, description: "List sales." }
-    - { name: commerce_sales_get, description: "Fetch a sale." }
-  ui_panels:
-    - slot: project.page
-      label: Commerce
-      icon: shopping-bag
-      entry: /ui/CommercePanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/commerce
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/commerce.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 var globalCtx *sdk.AppCtx
 
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -97,23 +39,33 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("commerce requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("commerce mounted", "project_id", projectScope(ctx))
+	ctx.Logger().Info("commerce mounted", "project_id", ctx.CurrentProject())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
+		{Topic: "checkout.paid", Handler: a.handleCheckoutPaid},
+	}
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/admin/summary", Handler: a.handleSummary},
 		{Pattern: "/admin/stores", Handler: a.handleStores},
+		{Pattern: "/admin/stores/", Handler: a.handleStore},
 		{Pattern: "/admin/products", Handler: a.handleProducts},
 		{Pattern: "/admin/products/", Handler: a.handleProduct},
+		{Pattern: "/admin/variants/", Handler: a.handleVariant},
+		{Pattern: "/admin/collections", Handler: a.handleCollections},
+		{Pattern: "/admin/collections/", Handler: a.handleCollection},
 		{Pattern: "/admin/carts", Handler: a.handleCarts},
 		{Pattern: "/admin/sales", Handler: a.handleSales},
+		{Pattern: "/admin/sales/", Handler: a.handleSale},
 		{Pattern: "/s/", Handler: a.handlePublic, NoAuth: true},
 	}
 }
@@ -127,19 +79,25 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_products_create", Description: "Create a storefront listing and optional first variant. Args: store_id, title, handle?, description_html?, catalog_product_id?, price_cents?, sku?, inventory_item_id?.", InputSchema: schemaObject(productCreateProps(), []string{"title"}), Handler: a.toolProductsCreate},
 		{Name: "commerce_products_list", Description: "List storefront listings. Args: store_id?, status?, q?, limit?.", InputSchema: schemaObject(listingFilterProps(), nil), Handler: a.toolProductsList},
 		{Name: "commerce_products_get", Description: "Fetch one listing with variants. Args: id? or handle? plus store_id?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolProductsGet},
+		{Name: "commerce_products_update", Description: "Patch a storefront listing. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolProductsUpdate},
 		{Name: "commerce_products_publish", Description: "Publish a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsPublish},
 		{Name: "commerce_products_archive", Description: "Archive a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsArchive},
 		{Name: "commerce_variants_create", Description: "Create a listing variant. Args: listing_id, sku?, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?.", InputSchema: schemaObject(variantProps(), []string{"listing_id"}), Handler: a.toolVariantsCreate},
 		{Name: "commerce_variants_update", Description: "Patch a variant. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolVariantsUpdate},
 		{Name: "commerce_collections_create", Description: "Create a collection. Args: store_id, handle?, title, description_html?.", InputSchema: schemaObject(collectionProps(), []string{"title"}), Handler: a.toolCollectionsCreate},
 		{Name: "commerce_collections_list", Description: "List collections. Args: store_id?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, nil), Handler: a.toolCollectionsList},
+		{Name: "commerce_collections_get", Description: "Fetch a collection with products. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolCollectionsGet},
+		{Name: "commerce_collections_update", Description: "Patch a collection. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolCollectionsUpdate},
 		{Name: "commerce_collections_add_product", Description: "Add a listing to a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer"), "sort_order": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsAddProduct},
+		{Name: "commerce_collections_remove_product", Description: "Remove a listing from a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsRemoveProduct},
 		{Name: "commerce_cart_create", Description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "session_token": typ("string")}, nil), Handler: a.toolCartCreate},
+		{Name: "commerce_carts_list", Description: "List Commerce carts. Args: store_id?, status?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolCartsList},
 		{Name: "commerce_cart_get", Description: "Fetch a Commerce cart with items. Args: cart_id? or session_token? plus store_id?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "session_token": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolCartGet},
 		{Name: "commerce_cart_add_item", Description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "variant_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "variant_id"}), Handler: a.toolCartAddItem},
 		{Name: "commerce_cart_set_quantity", Description: "Set a Commerce cart item's quantity. Args: cart_id, item_id, quantity.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "item_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "item_id", "quantity"}), Handler: a.toolCartSetQuantity},
 		{Name: "commerce_checkout_start", Description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer")}, []string{"cart_id"}), Handler: a.toolCheckoutStart},
 		{Name: "commerce_checkout_update", Description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer"), "patch": typ("object")}, []string{"checkout_id", "patch"}), Handler: a.toolCheckoutUpdate},
+		{Name: "commerce_checkout_cancel", Description: "Cancel a checkout and release active inventory reservations. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutCancel},
 		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
 		{Name: "commerce_checkout_mark_paid", Description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "commerce_sales_list", Description: "List sales. Args: store_id?, status?, payment_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
@@ -205,15 +163,16 @@ type Variant struct {
 }
 
 type Collection struct {
-	ID              int64  `json:"id"`
-	StoreID         int64  `json:"store_id"`
-	Handle          string `json:"handle"`
-	Title           string `json:"title"`
-	DescriptionHTML string `json:"description_html"`
-	Status          string `json:"status"`
-	SortOrder       int    `json:"sort_order"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
+	ID              int64      `json:"id"`
+	StoreID         int64      `json:"store_id"`
+	Handle          string     `json:"handle"`
+	Title           string     `json:"title"`
+	DescriptionHTML string     `json:"description_html"`
+	Status          string     `json:"status"`
+	SortOrder       int        `json:"sort_order"`
+	Products        []*Listing `json:"products,omitempty"`
+	CreatedAt       string     `json:"created_at"`
+	UpdatedAt       string     `json:"updated_at"`
 }
 
 type Cart struct {
@@ -251,47 +210,83 @@ type CartItem struct {
 }
 
 type CheckoutSession struct {
-	ID                int64   `json:"id"`
-	StoreID           int64   `json:"store_id"`
-	CartID            int64   `json:"cart_id"`
-	CheckoutSessionID *int64  `json:"checkout_session_id,omitempty"`
-	Status            string  `json:"status"`
-	ReservationIDs    []int64 `json:"reservation_ids"`
-	InvoiceID         *int64  `json:"invoice_id,omitempty"`
-	InvoiceNumber     string  `json:"invoice_number"`
-	CustomerEmail     string  `json:"customer_email"`
-	CustomerName      string  `json:"customer_name"`
-	CreatedAt         string  `json:"created_at"`
-	UpdatedAt         string  `json:"updated_at"`
+	ID                int64          `json:"id"`
+	StoreID           int64          `json:"store_id"`
+	CartID            int64          `json:"cart_id"`
+	CheckoutSessionID *int64         `json:"checkout_session_id,omitempty"`
+	Status            string         `json:"status"`
+	ReservationIDs    []int64        `json:"reservation_ids"`
+	InvoiceID         *int64         `json:"invoice_id,omitempty"`
+	InvoiceNumber     string         `json:"invoice_number"`
+	CustomerEmail     string         `json:"customer_email"`
+	CustomerName      string         `json:"customer_name"`
+	ShippingAddress   map[string]any `json:"shipping_address,omitempty"`
+	BillingAddress    map[string]any `json:"billing_address,omitempty"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
 }
 
 type Sale struct {
-	ID                int64  `json:"id"`
-	StoreID           int64  `json:"store_id"`
-	CartID            *int64 `json:"cart_id,omitempty"`
-	CheckoutID        *int64 `json:"checkout_id,omitempty"`
-	CheckoutSessionID *int64 `json:"checkout_session_id,omitempty"`
-	InvoiceID         *int64 `json:"invoice_id,omitempty"`
-	InvoiceNumber     string `json:"invoice_number"`
-	OrderID           *int64 `json:"order_id,omitempty"`
-	Status            string `json:"status"`
-	PaymentStatus     string `json:"payment_status"`
-	FulfillmentStatus string `json:"fulfillment_status"`
-	SubtotalCents     int64  `json:"subtotal_cents"`
-	DiscountCents     int64  `json:"discount_cents"`
-	TaxCents          int64  `json:"tax_cents"`
-	ShippingCents     int64  `json:"shipping_cents"`
-	TotalCents        int64  `json:"total_cents"`
-	Currency          string `json:"currency"`
-	CustomerEmail     string `json:"customer_email"`
-	CustomerName      string `json:"customer_name"`
-	CreatedAt         string `json:"created_at"`
-	UpdatedAt         string `json:"updated_at"`
-	PaidAt            string `json:"paid_at,omitempty"`
+	ID                int64          `json:"id"`
+	StoreID           int64          `json:"store_id"`
+	CartID            *int64         `json:"cart_id,omitempty"`
+	CheckoutID        *int64         `json:"checkout_id,omitempty"`
+	CheckoutSessionID *int64         `json:"checkout_session_id,omitempty"`
+	InvoiceID         *int64         `json:"invoice_id,omitempty"`
+	InvoiceNumber     string         `json:"invoice_number"`
+	OrderID           *int64         `json:"order_id,omitempty"`
+	Status            string         `json:"status"`
+	PaymentStatus     string         `json:"payment_status"`
+	FulfillmentStatus string         `json:"fulfillment_status"`
+	SubtotalCents     int64          `json:"subtotal_cents"`
+	DiscountCents     int64          `json:"discount_cents"`
+	TaxCents          int64          `json:"tax_cents"`
+	ShippingCents     int64          `json:"shipping_cents"`
+	TotalCents        int64          `json:"total_cents"`
+	Currency          string         `json:"currency"`
+	CustomerEmail     string         `json:"customer_email"`
+	CustomerName      string         `json:"customer_name"`
+	ShippingAddress   map[string]any `json:"shipping_address,omitempty"`
+	BillingAddress    map[string]any `json:"billing_address,omitempty"`
+	ProcessingError   string         `json:"processing_error,omitempty"`
+	Items             []*SaleItem    `json:"items,omitempty"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
+	PaidAt            string         `json:"paid_at,omitempty"`
+}
+
+type SaleItem struct {
+	ID               int64          `json:"id"`
+	SaleID           int64          `json:"sale_id"`
+	VariantID        *int64         `json:"variant_id,omitempty"`
+	ListingID        *int64         `json:"listing_id,omitempty"`
+	InventoryItemID  *int64         `json:"inventory_item_id,omitempty"`
+	CatalogProductID *int64         `json:"catalog_product_id,omitempty"`
+	CatalogPriceID   *int64         `json:"catalog_price_id,omitempty"`
+	SKU              string         `json:"sku"`
+	TitleSnapshot    string         `json:"title_snapshot"`
+	UnitAmountCents  int64          `json:"unit_amount_cents"`
+	Currency         string         `json:"currency"`
+	Quantity         float64        `json:"quantity"`
+	RequiresShipping bool           `json:"requires_shipping"`
+	Metadata         map[string]any `json:"metadata,omitempty"`
+}
+
+type catalogPrice struct {
+	ID              int64  `json:"id"`
+	ProductID       int64  `json:"product_id"`
+	UnitAmountCents int64  `json:"unit_amount_cents"`
+	Currency        string `json:"currency"`
+	Active          bool   `json:"active"`
+	ArchivedAt      string `json:"archived_at"`
 }
 
 func (a *App) toolStoresCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	store, err := dbStoreCreate(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	store, err := dbStoreCreate(ctx.AppDB(), pid, args)
 	if err == nil {
 		ctx.Emit("commerce.store.created", map[string]any{"store_id": store.ID, "slug": store.Slug})
 	}
@@ -299,12 +294,20 @@ func (a *App) toolStoresCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolStoresList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	stores, err := dbStoresList(ctx.AppDB(), projectScope(ctx))
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	stores, err := dbStoresList(ctx.AppDB(), pid)
 	return map[string]any{"stores": stores, "count": len(stores)}, err
 }
 
 func (a *App) toolStoresGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	store, err := resolveStore(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	store, err := resolveStore(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -312,55 +315,127 @@ func (a *App) toolStoresGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolStoresUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	store, err := dbStoreUpdate(ctx.AppDB(), projectScope(ctx), intArg(args, "id"), mapArg(args, "patch"))
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	store, err := dbStoreUpdate(ctx.AppDB(), pid, intArg(args, "id"), mapArg(args, "patch"))
 	return map[string]any{"store": store}, err
 }
 
 func (a *App) toolProductsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	store, err := resolveStore(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
 	cp := copyMap(args)
 	cp["store_id"] = store.ID
+	requestedStatus := firstNonEmpty(strArg(cp, "status"), "draft")
+	if requestedStatus != "draft" && requestedStatus != "active" {
+		return nil, errors.New("status must be draft or active")
+	}
+	cp["status"] = "draft"
+	createdCatalogProduct := false
 	if intArg(cp, "catalog_product_id") == 0 {
 		productID, priceID, err := a.ensureCatalogProductAndPrice(ctx, pid, store, cp)
 		if err != nil {
 			return nil, err
 		}
 		cp["catalog_product_id"] = productID
+		createdCatalogProduct = true
 		if priceID != 0 {
 			cp["catalog_price_id"] = priceID
 		}
 	}
 	listing, err := dbListingCreate(ctx.AppDB(), pid, cp)
 	if err != nil {
+		if createdCatalogProduct {
+			a.archiveCatalogProduct(ctx, pid, intArg(cp, "catalog_product_id"))
+		}
 		return nil, err
 	}
 	if intArg(cp, "catalog_price_id") != 0 || intArg(cp, "price_cents") != 0 || strArg(cp, "sku") != "" {
 		cp["listing_id"] = listing.ID
-		if _, err := dbVariantCreate(ctx.AppDB(), pid, cp); err != nil {
+		canonical, err := a.canonicalVariantArgs(ctx, pid, listing, cp)
+		if err == nil {
+			_, err = dbVariantCreate(ctx.AppDB(), pid, canonical)
+		}
+		if err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM commerce_listings WHERE project_id=? AND id=?`, pid, listing.ID)
+			if createdCatalogProduct {
+				a.archiveCatalogProduct(ctx, pid, intArg(cp, "catalog_product_id"))
+			}
 			return nil, err
 		}
 	}
-	listing, _ = dbListingGet(ctx.AppDB(), pid, listing.ID, true)
+	if requestedStatus == "active" {
+		listing, err = dbListingStatus(ctx.AppDB(), pid, listing.ID, "active")
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		listing, err = dbListingGet(ctx.AppDB(), pid, listing.ID, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 	ctx.Emit("commerce.product.created", map[string]any{"listing_id": listing.ID, "store_id": listing.StoreID})
 	return map[string]any{"product": listing}, nil
 }
 
+func (a *App) archiveCatalogProduct(ctx *sdk.AppCtx, pid string, productID int64) {
+	if productID == 0 || ctx.PlatformAPI() == nil {
+		return
+	}
+	var ignored map[string]any
+	_ = ctx.PlatformAPI().CallAppResult("catalog", "catalog_products_archive", map[string]any{"_project_id": pid, "id": productID}, &ignored)
+}
+
 func (a *App) toolProductsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbListingsList(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbListingsList(ctx.AppDB(), pid, args)
+	if err == nil {
+		for _, product := range out {
+			product.Variants, err = dbVariantsForListing(ctx.AppDB(), pid, product.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	return map[string]any{"products": out, "count": len(out)}, err
 }
 
 func (a *App) toolProductsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := resolveListing(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := resolveListing(ctx.AppDB(), pid, args)
+	return map[string]any{"product": out}, err
+}
+
+func (a *App) toolProductsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbListingUpdate(ctx.AppDB(), pid, intArg(args, "id"), mapArg(args, "patch"))
 	return map[string]any{"product": out}, err
 }
 
 func (a *App) toolProductsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbListingStatus(ctx.AppDB(), projectScope(ctx), intArg(args, "id"), "active")
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbListingStatus(ctx.AppDB(), pid, intArg(args, "id"), "active")
 	if err == nil {
 		ctx.Emit("commerce.product.published", map[string]any{"listing_id": out.ID, "store_id": out.StoreID})
 	}
@@ -368,22 +443,63 @@ func (a *App) toolProductsPublish(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolProductsArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbListingStatus(ctx.AppDB(), projectScope(ctx), intArg(args, "id"), "archived")
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbListingStatus(ctx.AppDB(), pid, intArg(args, "id"), "archived")
 	return map[string]any{"product": out}, err
 }
 
 func (a *App) toolVariantsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbVariantCreate(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	listing, err := dbListingGet(ctx.AppDB(), pid, intArg(args, "listing_id"), false)
+	if err != nil || listing == nil {
+		return nil, firstErr(err, errors.New("listing not found"))
+	}
+	canonical, err := a.canonicalVariantArgs(ctx, pid, listing, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbVariantCreate(ctx.AppDB(), pid, canonical)
 	return map[string]any{"variant": out}, err
 }
 
 func (a *App) toolVariantsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbVariantUpdate(ctx.AppDB(), projectScope(ctx), intArg(args, "id"), mapArg(args, "patch"))
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	variant, err := dbVariantGet(ctx.AppDB(), pid, intArg(args, "id"))
+	if err != nil || variant == nil {
+		return nil, firstErr(err, errors.New("variant not found"))
+	}
+	listing, err := dbListingGet(ctx.AppDB(), pid, variant.ListingID, false)
+	if err != nil || listing == nil {
+		return nil, firstErr(err, errors.New("listing not found"))
+	}
+	patch := mapArg(args, "patch")
+	if hasKey(patch, "price_cents") || hasKey(patch, "currency") || hasKey(patch, "catalog_price_id") {
+		if !hasKey(patch, "catalog_price_id") && variant.CatalogPriceID != nil && !hasKey(patch, "price_cents") {
+			patch["catalog_price_id"] = *variant.CatalogPriceID
+		}
+		patch, err = a.canonicalVariantArgs(ctx, pid, listing, patch)
+		if err != nil {
+			return nil, err
+		}
+	}
+	out, err := dbVariantUpdate(ctx.AppDB(), pid, variant.ID, patch)
 	return map[string]any{"variant": out}, err
 }
 
 func (a *App) toolCollectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	store, err := resolveStore(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
@@ -395,12 +511,47 @@ func (a *App) toolCollectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func (a *App) toolCollectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbCollectionsList(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbCollectionsList(ctx.AppDB(), pid, args)
 	return map[string]any{"collections": out, "count": len(out)}, err
 }
 
+func (a *App) toolCollectionsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, intArg(args, "id"))
+	return map[string]any{"collection": out}, err
+}
+
+func (a *App) toolCollectionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbCollectionUpdate(ctx.AppDB(), pid, intArg(args, "id"), mapArg(args, "patch"))
+	return map[string]any{"collection": out}, err
+}
+
 func (a *App) toolCollectionsAddProduct(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	err := dbCollectionAddListing(ctx.AppDB(), projectScope(ctx), intArg(args, "collection_id"), intArg(args, "listing_id"), int(intArg(args, "sort_order")))
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	err = dbCollectionAddListing(ctx.AppDB(), pid, intArg(args, "collection_id"), intArg(args, "listing_id"), int(intArg(args, "sort_order")))
+	return map[string]any{"ok": err == nil}, err
+}
+
+func (a *App) toolCollectionsRemoveProduct(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	err = dbCollectionRemoveListing(ctx.AppDB(), pid, intArg(args, "collection_id"), intArg(args, "listing_id"))
 	return map[string]any{"ok": err == nil}, err
 }
 
@@ -409,8 +560,21 @@ func (a *App) toolCartCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	return map[string]any{"cart": cart}, err
 }
 
+func (a *App) toolCartsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	carts, err := dbCartsList(ctx.AppDB(), pid, args)
+	return map[string]any{"carts": carts, "count": len(carts)}, err
+}
+
 func (a *App) toolCartGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	cart, err := resolveCart(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	cart, err := resolveCart(ctx.AppDB(), pid, args)
 	return map[string]any{"cart": cart}, err
 }
 
@@ -437,6 +601,11 @@ func (a *App) toolCheckoutUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"checkout": out}, err
 }
 
+func (a *App) toolCheckoutCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.checkoutCancel(ctx, args)
+	return map[string]any{"checkout": out}, err
+}
+
 func (a *App) toolCheckoutPay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	sale, checkout, err := a.checkoutPay(ctx, args)
 	if err == nil {
@@ -447,19 +616,24 @@ func (a *App) toolCheckoutPay(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	sale, err := a.markSalePaid(ctx, args)
-	if err == nil {
-		ctx.Emit("commerce.sale.paid", map[string]any{"sale_id": sale.ID, "store_id": sale.StoreID})
-	}
 	return map[string]any{"sale": sale}, err
 }
 
 func (a *App) toolSalesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbSalesList(ctx.AppDB(), projectScope(ctx), args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbSalesList(ctx.AppDB(), pid, args)
 	return map[string]any{"sales": out, "count": len(out)}, err
 }
 
 func (a *App) toolSalesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := dbSaleGet(ctx.AppDB(), projectScope(ctx), intArg(args, "id"))
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	out, err := dbSaleGet(ctx.AppDB(), pid, intArg(args, "id"))
 	if err != nil || out == nil {
 		return nil, firstErr(err, errors.New("sale not found"))
 	}
@@ -494,6 +668,10 @@ func (a *App) ensureCatalogProductAndPrice(ctx *sdk.AppCtx, pid string, store *S
 	if priceCents == 0 {
 		return productID, 0, nil
 	}
+	if priceCents < 0 {
+		a.archiveCatalogProduct(ctx, pid, productID)
+		return 0, 0, errors.New("price_cents must be positive")
+	}
 	var priceResp map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_prices_create", map[string]any{
 		"_project_id":       pid,
@@ -504,37 +682,47 @@ func (a *App) ensureCatalogProductAndPrice(ctx *sdk.AppCtx, pid string, store *S
 		"tax_inclusive":     boolArg(args, "tax_inclusive"),
 		"metadata":          map[string]any{"source": "commerce", "store_id": store.ID},
 	}, &priceResp); err != nil {
-		return productID, 0, fmt.Errorf("create catalog price: %w", err)
+		a.archiveCatalogProduct(ctx, pid, productID)
+		return 0, 0, fmt.Errorf("create catalog price: %w", err)
 	}
 	priceID := intArg(unwrap(priceResp, "price"), "id")
 	if priceID == 0 {
 		priceID = intArg(priceResp, "id")
 	}
+	if priceID == 0 {
+		a.archiveCatalogProduct(ctx, pid, productID)
+		return 0, 0, errors.New("catalog price response missing id")
+	}
 	return productID, priceID, nil
 }
 
 func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	store, err := resolveStore(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
+	if store.Status != "active" {
+		return nil, errors.New("store is not active")
+	}
 	token := firstNonEmpty(strArg(args, "session_token"), newToken())
 	var checkoutResp map[string]any
-	var checkoutCartID int64
-	if ctx.PlatformAPI() != nil {
-		err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
-			"_project_id":   pid,
-			"session_token": token,
-			"metadata":      map[string]any{"source": "commerce", "store_id": store.ID},
-		}, &checkoutResp)
-		if err != nil {
-			return nil, fmt.Errorf("create checkout cart: %w", err)
-		}
-		checkoutCartID = intArg(unwrap(checkoutResp, "cart"), "id")
-		if checkoutCartID == 0 {
-			checkoutCartID = intArg(unwrap(checkoutResp, "cart"), "cart_id")
-		}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
+		"_project_id":   pid,
+		"session_token": token,
+		"metadata":      map[string]any{"source": "commerce", "store_id": store.ID},
+	}, &checkoutResp); err != nil {
+		return nil, fmt.Errorf("create checkout cart: %w", err)
+	}
+	checkoutCartID := intArg(unwrap(checkoutResp, "cart"), "id")
+	if checkoutCartID == 0 {
+		return nil, errors.New("checkout cart response missing id")
 	}
 	cart, err := dbCartCreate(ctx.AppDB(), pid, map[string]any{"store_id": store.ID, "session_token": token, "checkout_cart_id": checkoutCartID, "currency": store.DefaultCurrency})
 	if err != nil {
@@ -544,10 +732,16 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 }
 
 func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	cart, err := resolveCart(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
+	}
+	if cart.Status != "open" {
+		return nil, fmt.Errorf("cart is %s; only open carts accept item changes", cart.Status)
 	}
 	variant, err := dbVariantGet(ctx.AppDB(), pid, intArg(args, "variant_id"))
 	if err != nil || variant == nil {
@@ -556,11 +750,28 @@ func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 	if variant.CatalogPriceID == nil || *variant.CatalogPriceID == 0 {
 		return nil, errors.New("variant must have catalog_price_id before it can be added to cart")
 	}
+	if variant.StoreID != cart.StoreID {
+		return nil, errors.New("variant and cart must belong to the same store")
+	}
+	listing, err := dbListingGet(ctx.AppDB(), pid, variant.ListingID, false)
+	if err != nil || listing == nil || listing.Status != "active" {
+		return nil, errors.New("product is not active")
+	}
 	qty := floatArg(args, "quantity", 1)
 	if qty <= 0 {
 		return nil, errors.New("quantity must be positive")
 	}
-	if variant.InventoryItemID != nil && ctx.PlatformAPI() != nil {
+	price, err := a.catalogPriceGet(ctx, pid, *variant.CatalogPriceID)
+	if err != nil {
+		return nil, err
+	}
+	if listing.CatalogProductID == nil || *listing.CatalogProductID != price.ProductID {
+		return nil, errors.New("variant price does not belong to the product's Catalog record")
+	}
+	if len(cart.Items) > 0 && cart.Currency != "" && cart.Currency != price.Currency {
+		return nil, errors.New("all cart items must use the same currency")
+	}
+	if variant.InventoryItemID != nil && *variant.InventoryItemID > 0 && ctx.PlatformAPI() != nil {
 		var avail map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("inventory", "inventory_availability_check", map[string]any{"_project_id": pid, "item_id": *variant.InventoryItemID, "quantity": qty}, &avail); err != nil {
 			return nil, fmt.Errorf("check inventory: %w", err)
@@ -569,85 +780,184 @@ func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 			return nil, errors.New("insufficient inventory available")
 		}
 	}
-	var checkoutCart map[string]any
-	if cart.CheckoutCartID != nil && ctx.PlatformAPI() != nil {
-		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": *variant.CatalogPriceID, "quantity": qty}, &checkoutCart); err != nil {
-			return nil, fmt.Errorf("checkout cart add item: %w", err)
+	if cart.CheckoutCartID == nil || ctx.PlatformAPI() == nil {
+		return nil, errors.New("cart is not linked to Checkout")
+	}
+	previousQty := 0.0
+	for _, item := range cart.Items {
+		if item.VariantID == variant.ID {
+			previousQty = item.Quantity
+			break
 		}
 	}
-	if err := dbCartAddItem(ctx.AppDB(), pid, cart.ID, variant, qty); err != nil {
+	var checkoutCart map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": price.ID, "quantity": qty}, &checkoutCart); err != nil {
+		return nil, fmt.Errorf("checkout cart add item: %w", err)
+	}
+	checkoutItemID, checkoutQty := checkoutCartItem(checkoutCart, price.ID)
+	if checkoutItemID == 0 || math.Abs(checkoutQty-(previousQty+qty)) > 1e-9 {
+		if checkoutItemID != 0 {
+			if compensationErr := setCheckoutItemQuantity(ctx, pid, *cart.CheckoutCartID, checkoutItemID, previousQty); compensationErr != nil {
+				return nil, fmt.Errorf("Checkout returned an inconsistent cart item snapshot; compensation failed: %w", compensationErr)
+			}
+		}
+		return nil, errors.New("Checkout returned an inconsistent cart item snapshot")
+	}
+	canonicalVariant := *variant
+	canonicalVariant.PriceCents = price.UnitAmountCents
+	canonicalVariant.Currency = price.Currency
+	if err := dbCartAddItem(ctx.AppDB(), pid, cart.ID, &canonicalVariant, qty, checkoutItemID); err != nil {
+		if compensationErr := setCheckoutItemQuantity(ctx, pid, *cart.CheckoutCartID, checkoutItemID, previousQty); compensationErr != nil {
+			return nil, fmt.Errorf("persist cart item: %w; compensation failed: %v", err, compensationErr)
+		}
 		return nil, err
 	}
 	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
 }
 
 func (a *App) setCartItemQuantity(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	cart, err := resolveCart(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
-	if err := dbCartSetQuantity(ctx.AppDB(), pid, cart.ID, intArg(args, "item_id"), floatArg(args, "quantity", -1)); err != nil {
+	if cart.Status != "open" {
+		return nil, fmt.Errorf("cart is %s; only open carts accept item changes", cart.Status)
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	item, err := dbCartItemGet(ctx.AppDB(), pid, cart.ID, intArg(args, "item_id"))
+	if err != nil || item == nil {
+		return nil, firstErr(err, errors.New("cart item not found"))
+	}
+	qty := floatArg(args, "quantity", -1)
+	if qty < 0 {
+		return nil, errors.New("quantity must be >= 0")
+	}
+	if item.InventoryItemID != nil && *item.InventoryItemID > 0 && qty > item.Quantity {
+		var availability map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("inventory", "inventory_availability_check", map[string]any{
+			"_project_id": pid, "item_id": *item.InventoryItemID, "quantity": qty,
+		}, &availability); err != nil {
+			return nil, fmt.Errorf("check inventory: %w", err)
+		}
+		if ok, _ := availability["can_reserve"].(bool); !ok {
+			return nil, errors.New("insufficient inventory available")
+		}
+	}
+	if cart.CheckoutCartID == nil || item.CheckoutItemID == nil || *item.CheckoutItemID == 0 {
+		return nil, errors.New("cart item is not synchronized with Checkout")
+	}
+	var checkoutCart map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", map[string]any{
+		"_project_id": pid, "cart_id": *cart.CheckoutCartID, "item_id": *item.CheckoutItemID, "quantity": qty,
+	}, &checkoutCart); err != nil {
+		return nil, fmt.Errorf("checkout cart set quantity: %w", err)
+	}
+	if err := dbCartSetQuantity(ctx.AppDB(), pid, cart.ID, item.ID, qty); err != nil {
+		if compensationErr := setCheckoutItemQuantity(ctx, pid, *cart.CheckoutCartID, *item.CheckoutItemID, item.Quantity); compensationErr != nil {
+			return nil, fmt.Errorf("persist cart quantity: %w; compensation failed: %v", err, compensationErr)
+		}
 		return nil, err
 	}
 	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
 }
 
 func (a *App) checkoutStart(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	cart, err := resolveCart(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
+	}
+	if existing, err := dbCheckoutGetByCart(ctx.AppDB(), pid, cart.ID); err != nil {
+		return nil, err
+	} else if existing != nil && existing.Status != "cancelled" && existing.Status != "expired" {
+		return existing, nil
+	}
+	if cart.Status != "open" {
+		return nil, fmt.Errorf("cart is %s; only open carts can start checkout", cart.Status)
 	}
 	if len(cart.Items) == 0 {
 		return nil, errors.New("cannot checkout an empty cart")
 	}
 	resIDs := []int64{}
-	if ctx.PlatformAPI() != nil {
-		for _, it := range cart.Items {
-			if it.InventoryItemID == nil {
-				continue
-			}
-			var res map[string]any
-			if err := ctx.PlatformAPI().CallAppResult("inventory", "inventory_reserve", map[string]any{
-				"_project_id":    pid,
-				"item_id":        *it.InventoryItemID,
-				"quantity":       it.Quantity,
-				"reference_app":  "commerce",
-				"reference_type": "cart",
-				"reference_id":   fmt.Sprint(cart.ID),
-				"metadata":       map[string]any{"cart_item_id": it.ID, "variant_id": it.VariantID},
-			}, &res); err != nil {
-				return nil, fmt.Errorf("reserve inventory for cart item %d: %w", it.ID, err)
-			}
-			if id := intArg(unwrap(res, "reservation"), "id"); id != 0 {
-				resIDs = append(resIDs, id)
-			}
+	if ctx.PlatformAPI() == nil || cart.CheckoutCartID == nil {
+		return nil, errors.New("cart is not linked to Checkout")
+	}
+	for _, it := range cart.Items {
+		if it.InventoryItemID == nil || *it.InventoryItemID == 0 {
+			continue
 		}
+		reservationID, err := a.reserveCartItem(ctx, pid, cart, it)
+		if err != nil {
+			releaseErr := a.releaseReservations(ctx, pid, resIDs)
+			if releaseErr != nil {
+				return nil, fmt.Errorf("reserve inventory for cart item %d: %w; compensation failed: %v", it.ID, err, releaseErr)
+			}
+			return nil, fmt.Errorf("reserve inventory for cart item %d: %w", it.ID, err)
+		}
+		resIDs = append(resIDs, reservationID)
 	}
 	var checkoutResp map[string]any
-	var checkoutSessionID int64
-	if cart.CheckoutCartID != nil && ctx.PlatformAPI() != nil {
-		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_start", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID}, &checkoutResp); err != nil {
-			return nil, fmt.Errorf("checkout_start: %w", err)
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_start", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID}, &checkoutResp); err != nil {
+		releaseErr := a.releaseReservations(ctx, pid, resIDs)
+		if releaseErr != nil {
+			return nil, fmt.Errorf("checkout_start: %w; compensation failed: %v", err, releaseErr)
 		}
-		checkoutSessionID = intArg(unwrap(checkoutResp, "session"), "id")
+		return nil, fmt.Errorf("checkout_start: %w", err)
+	}
+	checkoutSession := unwrap(checkoutResp, "session")
+	checkoutSessionID := intArg(checkoutSession, "id")
+	if checkoutSessionID == 0 {
+		if releaseErr := a.releaseReservations(ctx, pid, resIDs); releaseErr != nil {
+			return nil, fmt.Errorf("Checkout response missing session id; compensation failed: %w", releaseErr)
+		}
+		return nil, errors.New("Checkout response missing session id")
+	}
+	if intArg(checkoutSession, "total_cents") != cart.TotalCents || strings.ToUpper(strArg(checkoutSession, "currency")) != cart.Currency {
+		if compensationErr := a.cancelCheckoutAndRelease(ctx, pid, checkoutSessionID, resIDs); compensationErr != nil {
+			return nil, fmt.Errorf("Commerce and Checkout cart totals do not match; compensation failed: %w", compensationErr)
+		}
+		return nil, errors.New("Commerce and Checkout cart totals do not match")
 	}
 	out, err := dbCheckoutCreate(ctx.AppDB(), pid, cart, checkoutSessionID, resIDs)
 	if err != nil {
+		if compensationErr := a.cancelCheckoutAndRelease(ctx, pid, checkoutSessionID, resIDs); compensationErr != nil {
+			return nil, fmt.Errorf("persist checkout: %w; compensation failed: %v", err, compensationErr)
+		}
 		return nil, err
 	}
-	_, _ = ctx.AppDB().Exec(`UPDATE commerce_carts SET status='checkout', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, cart.ID)
 	return out, nil
 }
 
 func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	ch, err := dbCheckoutGet(ctx.AppDB(), pid, intArg(args, "checkout_id"))
 	if err != nil || ch == nil {
 		return nil, firstErr(err, errors.New("checkout not found"))
 	}
-	patch := mapArg(args, "patch")
+	patch := copyMap(mapArg(args, "patch"))
+	if email := firstNonEmpty(strArg(patch, "email"), strArg(patch, "customer_email")); email != "" {
+		patch["email"] = strings.ToLower(email)
+		delete(patch, "customer_email")
+	}
+	if name := firstNonEmpty(strArg(patch, "customer_name"), strArg(patch, "name")); name != "" {
+		patch["customer_name"] = name
+		delete(patch, "name")
+	}
+	if ch.Status != "started" {
+		return nil, fmt.Errorf("checkout is %s; only started checkouts accept updates", ch.Status)
+	}
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
 		var out map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_update", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID, "patch": patch}, &out); err != nil {
@@ -661,91 +971,298 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 }
 
 func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, nil, err
+	}
 	ch, err := dbCheckoutGet(ctx.AppDB(), pid, intArg(args, "checkout_id"))
 	if err != nil || ch == nil {
 		return nil, nil, firstErr(err, errors.New("checkout not found"))
 	}
-	var invoiceID int64
-	var invoiceNumber string
-	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
-		var out map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &out); err != nil {
+	if ch.CheckoutSessionID == nil || ctx.PlatformAPI() == nil {
+		return nil, nil, errors.New("checkout is not linked to Checkout")
+	}
+	if existing, err := dbSaleGetByCheckout(ctx.AppDB(), pid, ch.ID); err != nil {
+		return nil, nil, err
+	} else if existing != nil {
+		return existing, ch, nil
+	}
+	var checkoutResponse map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
+		return nil, nil, fmt.Errorf("checkout_get: %w", err)
+	}
+	external := unwrap(checkoutResponse, "session")
+	externalStatus := strArg(external, "status")
+	if externalStatus != "started" && externalStatus != "awaiting_payment" && externalStatus != "paid" && externalStatus != "completed" {
+		return nil, nil, fmt.Errorf("Checkout session cannot be paid from status %q", externalStatus)
+	}
+	cart, err := dbCartGet(ctx.AppDB(), pid, ch.CartID, true)
+	if err != nil || cart == nil {
+		return nil, nil, firstErr(err, errors.New("cart not found"))
+	}
+	if intArg(external, "total_cents") != cart.TotalCents || strings.ToUpper(strArg(external, "currency")) != cart.Currency {
+		return nil, nil, errors.New("Commerce and Checkout totals do not match")
+	}
+	if strArg(external, "status") == "started" {
+		checkoutResponse = nil
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
 			return nil, nil, fmt.Errorf("checkout_pay: %w", err)
 		}
-		invoiceID = intArg(out, "invoice_id")
-		invoiceNumber = strArg(out, "invoice_number")
+		external = unwrap(checkoutResponse, "session")
+	}
+	invoiceID := firstNonZero(intArg(checkoutResponse, "invoice_id"), intArg(external, "invoice_id"))
+	invoiceNumber := strArg(checkoutResponse, "invoice_number")
+	if invoiceID == 0 {
+		return nil, nil, errors.New("Checkout has not produced an invoice")
+	}
+	if invoiceNumber == "" {
+		var billingResponse map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"_project_id": pid, "id": invoiceID}, &billingResponse); err == nil {
+			invoiceNumber = strArg(unwrap(billingResponse, "invoice"), "number")
+		}
 	}
 	if err := dbCheckoutInvoice(ctx.AppDB(), pid, ch.ID, invoiceID, invoiceNumber); err != nil {
 		return nil, nil, err
 	}
-	ch, _ = dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+	ch, err = dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+	if err != nil || ch == nil {
+		return nil, nil, firstErr(err, errors.New("checkout disappeared after invoice creation"))
+	}
 	sale, err := dbSaleCreateFromCheckout(ctx.AppDB(), pid, ch)
+	if err == nil && (externalStatus == "paid" || externalStatus == "completed") {
+		sale, err = a.completePaidSale(ctx, sale, true)
+	}
 	return sale, ch, err
 }
 
+func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	ch, err := dbCheckoutGet(ctx.AppDB(), pid, intArg(args, "checkout_id"))
+	if err != nil || ch == nil {
+		return nil, firstErr(err, errors.New("checkout not found"))
+	}
+	if ch.Status == "paid" {
+		return nil, errors.New("paid checkout cannot be cancelled")
+	}
+	if ch.Status == "cancelled" {
+		return ch, nil
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	if ch.CheckoutSessionID != nil {
+		var response map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_cancel", map[string]any{
+			"_project_id": pid, "session_id": *ch.CheckoutSessionID,
+		}, &response); err != nil && !strings.Contains(err.Error(), "already cancelled") {
+			return nil, fmt.Errorf("checkout_cancel: %w", err)
+		}
+	}
+	if err := dbReservationLinksEnsure(ctx.AppDB(), ch.ID, ch.ReservationIDs); err != nil {
+		return nil, err
+	}
+	links, err := dbReservationLinks(ctx.AppDB(), ch.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		if link.Status != "active" {
+			continue
+		}
+		if err := a.releaseReservations(ctx, pid, []int64{link.ReservationID}); err != nil {
+			_ = dbReservationLinkStatus(ctx.AppDB(), ch.ID, link.ReservationID, "active", err.Error())
+			return nil, err
+		}
+		if err := dbReservationLinkStatus(ctx.AppDB(), ch.ID, link.ReservationID, "released", ""); err != nil {
+			return nil, err
+		}
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE commerce_checkout_sessions SET status='cancelled', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, ch.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE commerce_carts SET status='open', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND status='checkout'`, pid, ch.CartID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+}
+
 func (a *App) markSalePaid(ctx *sdk.AppCtx, args map[string]any) (*Sale, error) {
-	pid := projectScope(ctx)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	sale, err := dbSaleGet(ctx.AppDB(), pid, intArg(args, "sale_id"))
 	if err != nil || sale == nil {
 		return nil, firstErr(err, errors.New("sale not found"))
+	}
+	return a.completePaidSale(ctx, sale, false)
+}
+
+func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent bool) (*Sale, error) {
+	pid := ctx.CurrentProject()
+	if sale.PaymentStatus == "paid" && sale.Status == "paid" {
+		return sale, nil
+	}
+	if sale.InvoiceID == nil || *sale.InvoiceID == 0 {
+		return nil, errors.New("sale has no Billing invoice")
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	if !trustedBillingEvent {
+		var response map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{
+			"_project_id": pid, "id": *sale.InvoiceID,
+		}, &response); err != nil {
+			return nil, fmt.Errorf("verify Billing invoice: %w", err)
+		}
+		invoice := unwrap(response, "invoice")
+		status := strArg(invoice, "status")
+		paid := intArg(invoice, "amount_paid_cents")
+		total := intArg(invoice, "total_cents")
+		currency := strings.ToUpper(strArg(invoice, "currency"))
+		if status != "paid" || total != sale.TotalCents || paid < sale.TotalCents || currency != "" && currency != sale.Currency {
+			return nil, errors.New("Billing invoice is not fully paid")
+		}
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE commerce_sales SET payment_status='paid', status='processing',
+		paid_at=COALESCE(paid_at, CURRENT_TIMESTAMP), processing_error='', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, pid, sale.ID); err != nil {
+		return nil, err
 	}
 	ch, err := dbCheckoutGet(ctx.AppDB(), pid, ptrValue(sale.CheckoutID))
 	if err != nil || ch == nil {
 		return nil, firstErr(err, errors.New("checkout not found for sale"))
 	}
-	if ctx.PlatformAPI() != nil {
-		for _, id := range ch.ReservationIDs {
-			var out map[string]any
-			_ = ctx.PlatformAPI().CallAppResult("inventory", "inventory_commit_reservation", map[string]any{"_project_id": pid, "reservation_id": id}, &out)
+	if err := dbReservationLinksEnsure(ctx.AppDB(), ch.ID, ch.ReservationIDs); err != nil {
+		return nil, err
+	}
+	links, err := dbReservationLinks(ctx.AppDB(), ch.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, link := range links {
+		if link.Status == "committed" {
+			continue
 		}
-		if sale.OrderID == nil {
-			orderID, _ := a.createOrderForSale(ctx, pid, sale)
-			if orderID != 0 {
-				_, _ = ctx.AppDB().Exec(`UPDATE commerce_sales SET order_id=?, fulfillment_status='unsubmitted', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, orderID, pid, sale.ID)
-			}
+		var response map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("inventory", "inventory_commit_reservation", map[string]any{
+			"_project_id": pid, "reservation_id": link.ReservationID,
+		}, &response); err != nil {
+			message := fmt.Sprintf("commit inventory reservation %d: %v", link.ReservationID, err)
+			_ = dbReservationLinkStatus(ctx.AppDB(), ch.ID, link.ReservationID, link.Status, message)
+			_ = dbSaleSetProcessingError(ctx.AppDB(), pid, sale.ID, message)
+			ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": sale.ID, "error": message})
+			return nil, errors.New(message)
+		}
+		if err := dbReservationLinkStatus(ctx.AppDB(), ch.ID, link.ReservationID, "committed", ""); err != nil {
+			return nil, err
 		}
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE commerce_sales SET status='paid', payment_status='paid', paid_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, sale.ID); err != nil {
+	orderID := ptrValue(sale.OrderID)
+	if orderID == 0 {
+		orderID, err = a.createOrderForSale(ctx, pid, sale)
+		if err != nil {
+			message := "create order: " + err.Error()
+			_ = dbSaleSetProcessingError(ctx.AppDB(), pid, sale.ID, message)
+			ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": sale.ID, "error": message})
+			return nil, errors.New(message)
+		}
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
 		return nil, err
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE commerce_checkout_sessions SET status='paid', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, ch.ID); err != nil {
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE commerce_sales SET status='paid', payment_status='paid', order_id=?,
+		fulfillment_status='unsubmitted', processing_error='', paid_at=COALESCE(paid_at, CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, nullableInt(orderID), pid, sale.ID); err != nil {
 		return nil, err
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='converted', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, ptrValue(sale.CartID)); err != nil {
+	if _, err := tx.Exec(`UPDATE commerce_checkout_sessions SET status='paid', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, ch.ID); err != nil {
 		return nil, err
 	}
-	return dbSaleGet(ctx.AppDB(), pid, sale.ID)
+	if _, err := tx.Exec(`UPDATE commerce_carts SET status='converted', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, ptrValue(sale.CartID)); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	completed, err := dbSaleGet(ctx.AppDB(), pid, sale.ID)
+	if err == nil && completed != nil {
+		ctx.Emit("commerce.sale.paid", map[string]any{"sale_id": completed.ID, "store_id": completed.StoreID})
+	}
+	return completed, err
 }
 
 func (a *App) createOrderForSale(ctx *sdk.AppCtx, pid string, sale *Sale) (int64, error) {
-	cart, err := dbCartGet(ctx.AppDB(), pid, ptrValue(sale.CartID), true)
-	if err != nil || cart == nil {
-		return 0, firstErr(err, errors.New("cart not found"))
+	if len(sale.Items) == 0 {
+		items, err := dbSaleItems(ctx.AppDB(), pid, sale.ID)
+		if err != nil {
+			return 0, err
+		}
+		sale.Items = items
+	}
+	if len(sale.Items) == 0 {
+		return 0, errors.New("sale has no immutable line items")
+	}
+	sourceRef := fmt.Sprintf("sale:%d", sale.ID)
+	var search map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("orders", "orders_search", map[string]any{
+		"_project_id": pid, "source": "commerce", "q": sourceRef, "limit": 10,
+	}, &search); err != nil {
+		return 0, fmt.Errorf("search existing order: %w", err)
+	}
+	if rows, ok := search["orders"].([]any); ok {
+		for _, raw := range rows {
+			order, _ := raw.(map[string]any)
+			if strArg(order, "source_ref") == sourceRef && intArg(order, "id") != 0 {
+				return intArg(order, "id"), nil
+			}
+		}
 	}
 	lines := []map[string]any{}
-	for _, it := range cart.Items {
+	for _, it := range sale.Items {
 		lines = append(lines, map[string]any{
 			"catalog_price_id":   ptrValue(it.CatalogPriceID),
-			"catalog_product_id": 0,
+			"catalog_product_id": ptrValue(it.CatalogProductID),
 			"sku":                it.SKU,
 			"title":              it.TitleSnapshot,
 			"quantity":           it.Quantity,
 			"unit_amount_cents":  it.UnitAmountCents,
 			"currency":           it.Currency,
-			"metadata":           map[string]any{"commerce_variant_id": it.VariantID},
+			"metadata":           map[string]any{"commerce_variant_id": ptrValue(it.VariantID), "commerce_listing_id": ptrValue(it.ListingID)},
 		})
 	}
 	var out map[string]any
-	err = ctx.PlatformAPI().CallAppResult("orders", "orders_create", map[string]any{
+	err := ctx.PlatformAPI().CallAppResult("orders", "orders_create", map[string]any{
 		"_project_id":         pid,
 		"source":              "commerce",
-		"source_ref":          fmt.Sprintf("sale:%d", sale.ID),
+		"source_ref":          sourceRef,
 		"checkout_session_id": ptrValue(sale.CheckoutSessionID),
+		"cart_id":             ptrValue(sale.CartID),
 		"invoice_id":          ptrValue(sale.InvoiceID),
 		"customer_email":      sale.CustomerEmail,
 		"customer_name":       sale.CustomerName,
 		"currency":            sale.Currency,
+		"subtotal_cents":      sale.SubtotalCents,
+		"discount_cents":      sale.DiscountCents,
+		"tax_cents":           sale.TaxCents,
+		"shipping_cents":      sale.ShippingCents,
+		"total_cents":         sale.TotalCents,
+		"shipping_address":    sale.ShippingAddress,
+		"billing_address":     sale.BillingAddress,
 		"payment_status":      "paid",
 		"order_status":        "paid",
 		"fulfillment_status":  "unsubmitted",
@@ -754,7 +1271,11 @@ func (a *App) createOrderForSale(ctx *sdk.AppCtx, pid string, sale *Sale) (int64
 	if err != nil {
 		return 0, err
 	}
-	return intArg(unwrap(out, "order"), "id"), nil
+	orderID := intArg(unwrap(out, "order"), "id")
+	if orderID == 0 {
+		return 0, errors.New("Orders response missing order id")
+	}
+	return orderID, nil
 }
 
 func dbStoreCreate(db *sql.DB, pid string, args map[string]any) (*Store, error) {
@@ -763,10 +1284,14 @@ func dbStoreCreate(db *sql.DB, pid string, args map[string]any) (*Store, error) 
 	if slug == "" || name == "" {
 		return nil, errors.New("slug and name required")
 	}
+	currency := strings.ToUpper(firstNonEmpty(strArg(args, "default_currency"), "USD"))
+	if !looksLikeCurrency(currency) {
+		return nil, errors.New("default_currency must be a 3-letter ISO code")
+	}
 	res, err := db.Exec(`INSERT INTO commerce_stores
 		(project_id, slug, name, public_base_url, default_currency, default_locale, timezone, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, slug, name, strArg(args, "public_base_url"), strings.ToUpper(firstNonEmpty(strArg(args, "default_currency"), "USD")),
+		pid, slug, name, strArg(args, "public_base_url"), currency,
 		firstNonEmpty(strArg(args, "default_locale"), "en"), firstNonEmpty(strArg(args, "timezone"), "UTC"), jsonText(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
@@ -814,6 +1339,9 @@ func resolveStore(db *sql.DB, pid string, args map[string]any) (*Store, error) {
 	if len(rows) == 0 {
 		return nil, errors.New("no stores exist; create one first")
 	}
+	if len(rows) > 1 {
+		return nil, errors.New("store_id or store_slug required when multiple stores exist")
+	}
 	return rows[0], nil
 }
 
@@ -836,16 +1364,31 @@ func dbStoreGetBySlug(db *sql.DB, pid, slug string) (*Store, error) {
 }
 
 func dbStoreUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Store, error) {
+	store, err := dbStoreGetByID(db, pid, id)
+	if err != nil || store == nil {
+		return nil, firstErr(err, errors.New("store not found"))
+	}
 	sets, vals := []string{}, []any{}
-	for _, k := range []string{"name", "status", "public_base_url", "default_locale", "timezone", "order_number_format", "checkout_mode"} {
+	for _, k := range []string{"name", "public_base_url", "default_locale", "timezone", "order_number_format", "checkout_mode"} {
 		if v := strArg(patch, k); v != "" {
 			sets = append(sets, k+"=?")
 			vals = append(vals, v)
 		}
 	}
+	if status := strArg(patch, "status"); status != "" {
+		if status != "active" && status != "inactive" && status != "archived" {
+			return nil, errors.New("status must be active, inactive, or archived")
+		}
+		sets = append(sets, "status=?", "archived_at=CASE WHEN ?='archived' THEN CURRENT_TIMESTAMP ELSE NULL END")
+		vals = append(vals, status, status)
+	}
 	if v := strArg(patch, "default_currency"); v != "" {
+		v = strings.ToUpper(v)
+		if !looksLikeCurrency(v) {
+			return nil, errors.New("default_currency must be a 3-letter ISO code")
+		}
 		sets = append(sets, "default_currency=?")
-		vals = append(vals, strings.ToUpper(v))
+		vals = append(vals, v)
 	}
 	if _, ok := patch["metadata"]; ok {
 		sets = append(sets, "metadata_json=?")
@@ -869,11 +1412,15 @@ func dbListingCreate(db *sql.DB, pid string, args map[string]any) (*Listing, err
 	if storeID == 0 || title == "" || handle == "" {
 		return nil, errors.New("store_id and title required")
 	}
+	status := firstNonEmpty(strArg(args, "status"), "draft")
+	if status != "draft" && status != "active" {
+		return nil, errors.New("new product status must be draft or active")
+	}
 	res, err := db.Exec(`INSERT INTO commerce_listings
 		(project_id, store_id, catalog_product_id, handle, title, description_html, vendor, product_type, status, seo_title, seo_description, featured_media_id, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, storeID, nullableInt(intArg(args, "catalog_product_id")), handle, title, strArg(args, "description_html"),
-		strArg(args, "vendor"), strArg(args, "product_type"), firstNonEmpty(strArg(args, "status"), "draft"),
+		strArg(args, "vendor"), strArg(args, "product_type"), status,
 		strArg(args, "seo_title"), strArg(args, "seo_description"), nullableInt(intArg(args, "featured_media_id")), jsonText(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
@@ -939,7 +1486,10 @@ func resolveListing(db *sql.DB, pid string, args map[string]any) (*Listing, erro
 	if err != nil {
 		return nil, firstErr(skipNoRows(err), errors.New("product not found"))
 	}
-	l.Variants, _ = dbVariantsForListing(db, pid, l.ID)
+	l.Variants, err = dbVariantsForListing(db, pid, l.ID)
+	if err != nil {
+		return nil, err
+	}
 	return l, nil
 }
 
@@ -953,13 +1503,30 @@ func dbListingGet(db *sql.DB, pid string, id int64, withVariants bool) (*Listing
 		return nil, err
 	}
 	if withVariants {
-		l.Variants, _ = dbVariantsForListing(db, pid, l.ID)
+		l.Variants, err = dbVariantsForListing(db, pid, l.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return l, nil
 }
 
 func dbListingStatus(db *sql.DB, pid string, id int64, status string) (*Listing, error) {
-	if _, err := db.Exec(`UPDATE commerce_listings SET status=?, archived_at=CASE WHEN ?='archived' THEN CURRENT_TIMESTAMP ELSE archived_at END, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, status, pid, id); err != nil {
+	listing, err := dbListingGet(db, pid, id, true)
+	if err != nil || listing == nil {
+		return nil, firstErr(err, errors.New("product not found"))
+	}
+	if status == "active" {
+		if len(listing.Variants) == 0 {
+			return nil, errors.New("product requires at least one variant before publishing")
+		}
+		for _, variant := range listing.Variants {
+			if variant.CatalogPriceID == nil || *variant.CatalogPriceID == 0 || variant.PriceCents <= 0 || !looksLikeCurrency(variant.Currency) {
+				return nil, fmt.Errorf("variant %d requires a canonical Catalog price before publishing", variant.ID)
+			}
+		}
+	}
+	if _, err := db.Exec(`UPDATE commerce_listings SET status=?, archived_at=CASE WHEN ?='archived' THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, status, pid, id); err != nil {
 		return nil, err
 	}
 	return dbListingGet(db, pid, id, true)
@@ -971,6 +1538,12 @@ func dbVariantCreate(db *sql.DB, pid string, args map[string]any) (*Variant, err
 		return nil, firstErr(err, errors.New("listing not found"))
 	}
 	currency := firstNonEmpty(strArg(args, "currency"), "USD")
+	if intArg(args, "price_cents") < 0 {
+		return nil, errors.New("price_cents cannot be negative")
+	}
+	if !looksLikeCurrency(strings.ToUpper(currency)) {
+		return nil, errors.New("currency must be a 3-letter ISO code")
+	}
 	res, err := db.Exec(`INSERT INTO commerce_variants
 		(project_id, store_id, listing_id, catalog_price_id, inventory_item_id, sku, title, option1, option2, option3, price_cents, compare_at_price_cents, currency, taxable, requires_shipping, sort_order, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -996,11 +1569,17 @@ func dbVariantGet(db *sql.DB, pid string, id int64) (*Variant, error) {
 }
 
 func dbVariantUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Variant, error) {
+	if existing, err := dbVariantGet(db, pid, id); err != nil || existing == nil {
+		return nil, firstErr(err, errors.New("variant not found"))
+	}
 	sets, vals := []string{}, []any{}
 	for _, k := range []string{"sku", "title", "option1", "option2", "option3", "currency"} {
 		if v := strArg(patch, k); v != "" {
 			if k == "sku" || k == "currency" {
 				v = strings.ToUpper(v)
+			}
+			if k == "currency" && !looksLikeCurrency(v) {
+				return nil, errors.New("currency must be a 3-letter ISO code")
 			}
 			sets = append(sets, k+"=?")
 			vals = append(vals, v)
@@ -1008,8 +1587,15 @@ func dbVariantUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*V
 	}
 	for _, k := range []string{"catalog_price_id", "inventory_item_id", "price_cents", "compare_at_price_cents", "sort_order"} {
 		if hasKey(patch, k) {
+			if (k == "price_cents" || k == "compare_at_price_cents") && intArg(patch, k) < 0 {
+				return nil, fmt.Errorf("%s cannot be negative", k)
+			}
 			sets = append(sets, k+"=?")
-			vals = append(vals, intArg(patch, k))
+			if k == "catalog_price_id" || k == "inventory_item_id" {
+				vals = append(vals, nullableInt(intArg(patch, k)))
+			} else {
+				vals = append(vals, intArg(patch, k))
+			}
 		}
 	}
 	for _, k := range []string{"taxable", "requires_shipping"} {
@@ -1052,13 +1638,21 @@ func dbVariantsForListing(db *sql.DB, pid string, listingID int64) ([]*Variant, 
 
 func dbCollectionCreate(db *sql.DB, pid string, args map[string]any) (*Collection, error) {
 	storeID := intArg(args, "store_id")
-	title := strArg(args, "title")
+	title := strings.TrimSpace(strArg(args, "title"))
 	handle := slugify(firstNonEmpty(strArg(args, "handle"), title))
-	if storeID == 0 || title == "" {
+	if storeID == 0 || title == "" || handle == "" {
 		return nil, errors.New("store_id and title required")
 	}
+	store, err := dbStoreGetByID(db, pid, storeID)
+	if err != nil || store == nil {
+		return nil, firstErr(err, errors.New("store not found"))
+	}
+	status := firstNonEmpty(strArg(args, "status"), "active")
+	if status != "active" && status != "draft" {
+		return nil, errors.New("new collection status must be active or draft")
+	}
 	res, err := db.Exec(`INSERT INTO commerce_collections (project_id, store_id, handle, title, description_html, status, sort_order, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pid, storeID, handle, title, strArg(args, "description_html"), firstNonEmpty(strArg(args, "status"), "active"), intArg(args, "sort_order"), jsonText(args["metadata"], "{}"))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pid, storeID, handle, title, strArg(args, "description_html"), status, intArg(args, "sort_order"), jsonText(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -1102,7 +1696,18 @@ func dbCollectionAddListing(db *sql.DB, pid string, collectionID, listingID int6
 	if collectionID == 0 || listingID == 0 {
 		return errors.New("collection_id and listing_id required")
 	}
-	_, err := db.Exec(`INSERT INTO commerce_collection_listings (collection_id, listing_id, sort_order)
+	collection, err := dbCollectionGet(db, pid, collectionID)
+	if err != nil || collection == nil {
+		return firstErr(err, errors.New("collection not found"))
+	}
+	listing, err := dbListingGet(db, pid, listingID, false)
+	if err != nil || listing == nil {
+		return firstErr(err, errors.New("product not found"))
+	}
+	if collection.StoreID != listing.StoreID {
+		return errors.New("collection and product must belong to the same store")
+	}
+	_, err = db.Exec(`INSERT INTO commerce_collection_listings (collection_id, listing_id, sort_order)
 		VALUES (?, ?, ?) ON CONFLICT(collection_id, listing_id) DO UPDATE SET sort_order=excluded.sort_order`, collectionID, listingID, sortOrder)
 	return err
 }
@@ -1113,17 +1718,17 @@ func dbCartCreate(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if storeID == 0 {
 		return nil, errors.New("store_id required")
 	}
-	res, err := db.Exec(`INSERT INTO commerce_carts
+	var id int64
+	err := db.QueryRow(`INSERT INTO commerce_carts
 		(project_id, store_id, checkout_cart_id, session_token, currency, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(project_id, store_id, session_token) DO UPDATE SET updated_at=CURRENT_TIMESTAMP`,
-		pid, storeID, nullableInt(intArg(args, "checkout_cart_id")), token, firstNonEmpty(strArg(args, "currency"), "USD"), jsonText(args["metadata"], "{}"))
+		ON CONFLICT(project_id, store_id, session_token) DO UPDATE SET
+		checkout_cart_id=excluded.checkout_cart_id, updated_at=CURRENT_TIMESTAMP
+		RETURNING id`,
+		pid, storeID, nullableInt(intArg(args, "checkout_cart_id")), token, firstNonEmpty(strArg(args, "currency"), "USD"), jsonText(args["metadata"], "{}"),
+	).Scan(&id)
 	if err != nil {
 		return nil, err
-	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		return resolveCart(db, pid, args)
 	}
 	return dbCartGet(db, pid, id, true)
 }
@@ -1146,7 +1751,10 @@ func resolveCart(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if err != nil {
 		return nil, firstErr(skipNoRows(err), errors.New("cart not found"))
 	}
-	c.Items, _ = dbCartItems(db, pid, c.ID)
+	c.Items, err = dbCartItems(db, pid, c.ID)
+	if err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -1160,12 +1768,15 @@ func dbCartGet(db *sql.DB, pid string, id int64, withItems bool) (*Cart, error) 
 		return nil, err
 	}
 	if withItems {
-		c.Items, _ = dbCartItems(db, pid, c.ID)
+		c.Items, err = dbCartItems(db, pid, c.ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return c, nil
 }
 
-func dbCartAddItem(db *sql.DB, pid string, cartID int64, v *Variant, qty float64) error {
+func dbCartAddItem(db *sql.DB, pid string, cartID int64, v *Variant, qty float64, checkoutItemID int64) error {
 	listing, err := dbListingGet(db, pid, v.ListingID, false)
 	if err != nil || listing == nil {
 		return firstErr(err, errors.New("listing not found"))
@@ -1175,10 +1786,12 @@ func dbCartAddItem(db *sql.DB, pid string, cartID int64, v *Variant, qty float64
 		title += " - " + v.Title
 	}
 	_, err = db.Exec(`INSERT INTO commerce_cart_items
-		(project_id, cart_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(cart_id, variant_id) DO UPDATE SET quantity=quantity+excluded.quantity, updated_at=CURRENT_TIMESTAMP`,
-		pid, cartID, v.ID, v.ListingID, ptrValue(v.InventoryItemID), ptrValue(v.CatalogPriceID), v.SKU, title, v.PriceCents, v.Currency, qty)
+		(project_id, cart_id, checkout_item_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(cart_id, variant_id) DO UPDATE SET quantity=quantity+excluded.quantity,
+		checkout_item_id=excluded.checkout_item_id, unit_amount_cents=excluded.unit_amount_cents,
+		currency=excluded.currency, updated_at=CURRENT_TIMESTAMP`,
+		pid, cartID, nullableInt(checkoutItemID), v.ID, v.ListingID, nullablePtrInt(v.InventoryItemID), nullablePtrInt(v.CatalogPriceID), v.SKU, title, v.PriceCents, v.Currency, qty)
 	if err != nil {
 		return err
 	}
@@ -1190,22 +1803,55 @@ func dbCartSetQuantity(db *sql.DB, pid string, cartID, itemID int64, qty float64
 		return errors.New("quantity must be >= 0")
 	}
 	if qty == 0 {
-		if _, err := db.Exec(`DELETE FROM commerce_cart_items WHERE project_id=? AND cart_id=? AND id=?`, pid, cartID, itemID); err != nil {
+		result, err := db.Exec(`DELETE FROM commerce_cart_items WHERE project_id=? AND cart_id=? AND id=?`, pid, cartID, itemID)
+		if err != nil {
 			return err
 		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			return errors.New("cart item not found")
+		}
 	} else {
-		if _, err := db.Exec(`UPDATE commerce_cart_items SET quantity=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND cart_id=? AND id=?`, qty, pid, cartID, itemID); err != nil {
+		result, err := db.Exec(`UPDATE commerce_cart_items SET quantity=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND cart_id=? AND id=?`, qty, pid, cartID, itemID)
+		if err != nil {
 			return err
+		}
+		if n, _ := result.RowsAffected(); n == 0 {
+			return errors.New("cart item not found")
 		}
 	}
 	return recomputeCart(db, pid, cartID)
 }
 
 func recomputeCart(db *sql.DB, pid string, cartID int64) error {
+	rows, err := db.Query(`SELECT unit_amount_cents, quantity, currency FROM commerce_cart_items WHERE project_id=? AND cart_id=?`, pid, cartID)
+	if err != nil {
+		return err
+	}
 	var subtotal int64
 	var currency string
-	_ = db.QueryRow(`SELECT COALESCE(SUM(unit_amount_cents * quantity),0), COALESCE(MAX(currency),'USD') FROM commerce_cart_items WHERE project_id=? AND cart_id=?`, pid, cartID).Scan(&subtotal, &currency)
-	_, err := db.Exec(`UPDATE commerce_carts SET subtotal_cents=?, total_cents=?-discount_cents+tax_cents+shipping_cents, currency=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, subtotal, subtotal, currency, pid, cartID)
+	for rows.Next() {
+		var amount int64
+		var quantity float64
+		var lineCurrency string
+		if err := rows.Scan(&amount, &quantity, &lineCurrency); err != nil {
+			rows.Close()
+			return err
+		}
+		if currency == "" {
+			currency = lineCurrency
+		} else if currency != lineCurrency {
+			rows.Close()
+			return errors.New("cart contains mixed currencies")
+		}
+		subtotal += int64(math.Round(float64(amount) * quantity))
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if currency == "" {
+		currency = "USD"
+	}
+	_, err = db.Exec(`UPDATE commerce_carts SET subtotal_cents=?, total_cents=?-discount_cents+tax_cents+shipping_cents, currency=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, subtotal, subtotal, currency, pid, cartID)
 	return err
 }
 
@@ -1232,23 +1878,62 @@ func dbCartItems(db *sql.DB, pid string, cartID int64) ([]*CartItem, error) {
 }
 
 func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int64, reservations []int64) (*CheckoutSession, error) {
-	res, err := db.Exec(`INSERT INTO commerce_checkout_sessions
-		(project_id, store_id, cart_id, checkout_session_id, status, reservation_ids_json)
-		VALUES (?, ?, ?, ?, 'started', ?)`, pid, cart.StoreID, cart.ID, nullableInt(checkoutSessionID), jsonText(reservations, "[]"))
+	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	defer tx.Rollback()
+	var id int64
+	err = tx.QueryRow(`SELECT id FROM commerce_checkout_sessions WHERE project_id=? AND cart_id=?`, pid, cart.ID).Scan(&id)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if id == 0 {
+		res, err := tx.Exec(`INSERT INTO commerce_checkout_sessions
+			(project_id, store_id, cart_id, checkout_session_id, status, reservation_ids_json)
+			VALUES (?, ?, ?, ?, 'started', ?)`, pid, cart.StoreID, cart.ID, nullableInt(checkoutSessionID), jsonText(reservations, "[]"))
+		if err != nil {
+			return nil, err
+		}
+		id, _ = res.LastInsertId()
+	} else {
+		if _, err := tx.Exec(`UPDATE commerce_checkout_sessions SET checkout_session_id=?, status='started', reservation_ids_json=?,
+			invoice_id=NULL, invoice_number='', customer_email='', customer_name='', shipping_address_json='{}', billing_address_json='{}',
+			completed_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, nullableInt(checkoutSessionID), jsonText(reservations, "[]"), pid, id); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`DELETE FROM commerce_reservation_links WHERE checkout_id=?`, id); err != nil {
+			return nil, err
+		}
+	}
+	for _, reservationID := range reservations {
+		if _, err := tx.Exec(`INSERT INTO commerce_reservation_links (checkout_id, reservation_id) VALUES (?, ?)`, id, reservationID); err != nil {
+			return nil, err
+		}
+	}
+	result, err := tx.Exec(`UPDATE commerce_carts SET status='checkout', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=? AND status='open'`, pid, cart.ID)
+	if err != nil {
+		return nil, err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return nil, errors.New("cart is no longer open")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return dbCheckoutGet(db, pid, id)
 }
 
 func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
-	row := db.QueryRow(`SELECT id, store_id, cart_id, checkout_session_id, status, reservation_ids_json, invoice_id, invoice_number, customer_email, customer_name, created_at, updated_at
+	row := db.QueryRow(`SELECT id, store_id, cart_id, checkout_session_id, status, reservation_ids_json, invoice_id, invoice_number, customer_email, customer_name,
+		shipping_address_json, billing_address_json, created_at, updated_at
 		FROM commerce_checkout_sessions WHERE project_id=? AND id=?`, pid, id)
 	var ch CheckoutSession
 	var checkoutID, invoiceID sql.NullInt64
-	var reservations string
-	if err := row.Scan(&ch.ID, &ch.StoreID, &ch.CartID, &checkoutID, &ch.Status, &reservations, &invoiceID, &ch.InvoiceNumber, &ch.CustomerEmail, &ch.CustomerName, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
+	var reservations, shipping, billing string
+	if err := row.Scan(&ch.ID, &ch.StoreID, &ch.CartID, &checkoutID, &ch.Status, &reservations, &invoiceID, &ch.InvoiceNumber, &ch.CustomerEmail, &ch.CustomerName,
+		&shipping, &billing, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1256,7 +1941,11 @@ func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 	}
 	ch.CheckoutSessionID = ptrIfValid(checkoutID)
 	ch.InvoiceID = ptrIfValid(invoiceID)
-	_ = json.Unmarshal([]byte(reservations), &ch.ReservationIDs)
+	if err := json.Unmarshal([]byte(reservations), &ch.ReservationIDs); err != nil {
+		return nil, fmt.Errorf("decode reservation ids for checkout %d: %w", ch.ID, err)
+	}
+	ch.ShippingAddress = jsonMap(shipping)
+	ch.BillingAddress = jsonMap(billing)
 	return &ch, nil
 }
 
@@ -1299,19 +1988,65 @@ func dbCheckoutInvoice(db *sql.DB, pid string, id, invoiceID int64, invoiceNumbe
 }
 
 func dbSaleCreateFromCheckout(db *sql.DB, pid string, ch *CheckoutSession) (*Sale, error) {
-	cart, err := dbCartGet(db, pid, ch.CartID, false)
+	if existing, err := dbSaleGetByCheckout(db, pid, ch.ID); err != nil || existing != nil {
+		return existing, err
+	}
+	cart, err := dbCartGet(db, pid, ch.CartID, true)
 	if err != nil || cart == nil {
 		return nil, firstErr(err, errors.New("cart not found"))
 	}
-	res, err := db.Exec(`INSERT INTO commerce_sales
-		(project_id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, status, payment_status, subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?)`,
+	if len(cart.Items) == 0 {
+		return nil, errors.New("cart has no items")
+	}
+	type snapshot struct {
+		item    *CartItem
+		variant *Variant
+		listing *Listing
+	}
+	snapshots := make([]snapshot, 0, len(cart.Items))
+	for _, item := range cart.Items {
+		variant, err := dbVariantGet(db, pid, item.VariantID)
+		if err != nil || variant == nil {
+			return nil, firstErr(err, errors.New("variant missing while snapshotting sale"))
+		}
+		listing, err := dbListingGet(db, pid, item.ListingID, false)
+		if err != nil || listing == nil {
+			return nil, firstErr(err, errors.New("listing missing while snapshotting sale"))
+		}
+		snapshots = append(snapshots, snapshot{item: item, variant: variant, listing: listing})
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO commerce_sales
+		(project_id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, status, payment_status,
+		subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name,
+		shipping_address_json, billing_address_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'awaiting_payment', 'unpaid', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, ch.StoreID, cart.ID, ch.ID, nullableInt(ptrValue(ch.CheckoutSessionID)), nullableInt(ptrValue(ch.InvoiceID)), ch.InvoiceNumber,
-		cart.SubtotalCents, cart.DiscountCents, cart.TaxCents, cart.ShippingCents, cart.TotalCents, cart.Currency, ch.CustomerEmail, ch.CustomerName)
+		cart.SubtotalCents, cart.DiscountCents, cart.TaxCents, cart.ShippingCents, cart.TotalCents, cart.Currency, ch.CustomerEmail, ch.CustomerName,
+		jsonText(ch.ShippingAddress, "{}"), jsonText(ch.BillingAddress, "{}"))
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	for _, snapshot := range snapshots {
+		item, variant, listing := snapshot.item, snapshot.variant, snapshot.listing
+		if _, err := tx.Exec(`INSERT INTO commerce_sale_items
+			(project_id, sale_id, variant_id, listing_id, inventory_item_id, catalog_product_id, catalog_price_id,
+			sku, title_snapshot, unit_amount_cents, currency, quantity, requires_shipping, metadata_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			pid, id, item.VariantID, item.ListingID, nullablePtrInt(item.InventoryItemID), nullablePtrInt(listing.CatalogProductID),
+			nullablePtrInt(item.CatalogPriceID), item.SKU, item.TitleSnapshot, item.UnitAmountCents, item.Currency, item.Quantity,
+			boolToInt(variant.RequiresShipping), jsonText(map[string]any{"commerce_cart_item_id": item.ID}, "{}")); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return dbSaleGet(db, pid, id)
 }
 
@@ -1321,6 +2056,10 @@ func dbSaleGet(db *sql.DB, pid string, id int64) (*Sale, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
+	if err != nil || s == nil {
+		return s, err
+	}
+	s.Items, err = dbSaleItems(db, pid, s.ID)
 	return s, err
 }
 
@@ -1376,7 +2115,9 @@ func cartSelect() string {
 }
 
 func saleSelect() string {
-	return `SELECT id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, order_id, status, payment_status, fulfillment_status, subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name, created_at, updated_at, COALESCE(paid_at,'') FROM commerce_sales`
+	return `SELECT id, store_id, cart_id, checkout_id, checkout_session_id, invoice_id, invoice_number, order_id, status, payment_status, fulfillment_status,
+		subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, customer_email, customer_name,
+		shipping_address_json, billing_address_json, processing_error, created_at, updated_at, COALESCE(paid_at,'') FROM commerce_sales`
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -1441,7 +2182,11 @@ func scanCart(s scanner) (*Cart, error) {
 func scanSale(s scanner) (*Sale, error) {
 	var sale Sale
 	var cartID, checkoutID, checkoutSessionID, invoiceID, orderID sql.NullInt64
-	if err := s.Scan(&sale.ID, &sale.StoreID, &cartID, &checkoutID, &checkoutSessionID, &invoiceID, &sale.InvoiceNumber, &orderID, &sale.Status, &sale.PaymentStatus, &sale.FulfillmentStatus, &sale.SubtotalCents, &sale.DiscountCents, &sale.TaxCents, &sale.ShippingCents, &sale.TotalCents, &sale.Currency, &sale.CustomerEmail, &sale.CustomerName, &sale.CreatedAt, &sale.UpdatedAt, &sale.PaidAt); err != nil {
+	var shipping, billing string
+	if err := s.Scan(&sale.ID, &sale.StoreID, &cartID, &checkoutID, &checkoutSessionID, &invoiceID, &sale.InvoiceNumber, &orderID,
+		&sale.Status, &sale.PaymentStatus, &sale.FulfillmentStatus, &sale.SubtotalCents, &sale.DiscountCents, &sale.TaxCents,
+		&sale.ShippingCents, &sale.TotalCents, &sale.Currency, &sale.CustomerEmail, &sale.CustomerName,
+		&shipping, &billing, &sale.ProcessingError, &sale.CreatedAt, &sale.UpdatedAt, &sale.PaidAt); err != nil {
 		return nil, err
 	}
 	sale.CartID = ptrIfValid(cartID)
@@ -1449,111 +2194,397 @@ func scanSale(s scanner) (*Sale, error) {
 	sale.CheckoutSessionID = ptrIfValid(checkoutSessionID)
 	sale.InvoiceID = ptrIfValid(invoiceID)
 	sale.OrderID = ptrIfValid(orderID)
+	sale.ShippingAddress = jsonMap(shipping)
+	sale.BillingAddress = jsonMap(billing)
 	return &sale, nil
 }
 
 func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
-	pid := projectScope(globalCtx)
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	var out struct {
 		Stores   int `json:"stores"`
 		Products int `json:"products"`
 		Carts    int `json:"open_carts"`
 		Sales    int `json:"sales"`
 	}
-	_ = globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM commerce_stores WHERE project_id=? AND archived_at IS NULL`, pid).Scan(&out.Stores)
-	_ = globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM commerce_listings WHERE project_id=? AND status!='archived'`, pid).Scan(&out.Products)
-	_ = globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM commerce_carts WHERE project_id=? AND status='open'`, pid).Scan(&out.Carts)
-	_ = globalCtx.AppDB().QueryRow(`SELECT COUNT(*) FROM commerce_sales WHERE project_id=?`, pid).Scan(&out.Sales)
+	for _, query := range []struct {
+		sql  string
+		dest *int
+	}{
+		{`SELECT COUNT(*) FROM commerce_stores WHERE project_id=? AND archived_at IS NULL`, &out.Stores},
+		{`SELECT COUNT(*) FROM commerce_listings WHERE project_id=? AND status!='archived'`, &out.Products},
+		{`SELECT COUNT(*) FROM commerce_carts WHERE project_id=? AND status='open'`, &out.Carts},
+		{`SELECT COUNT(*) FROM commerce_sales WHERE project_id=?`, &out.Sales},
+	} {
+		if err := ctx.AppDB().QueryRow(query.sql, pid).Scan(query.dest); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 	httpJSON(w, out)
 }
 
 func (a *App) handleStores(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbStoresList(globalCtx.AppDB(), projectScope(globalCtx))
+		out, err := dbStoresList(ctx.AppDB(), pid)
 		httpResult(w, out, err)
 	case http.MethodPost:
 		var body map[string]any
-		readJSON(r, &body)
-		out, err := dbStoreCreate(globalCtx.AppDB(), projectScope(globalCtx), body)
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out, err := dbStoreCreate(ctx.AppDB(), pid, body)
+		if err == nil {
+			ctx.Emit("commerce.store.created", map[string]any{"store_id": out.ID, "slug": out.Slug})
+		}
 		httpResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
+func (a *App) handleStore(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := pathInt(r.URL.Path, "/admin/stores/")
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "store id required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := dbStoreGetByID(ctx.AppDB(), pid, id)
+		httpResult(w, out, notFoundErr(out, err, "store not found"))
+	case http.MethodPatch:
+		var patch map[string]any
+		if err := readJSON(r, &patch); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out, err := dbStoreUpdate(ctx.AppDB(), pid, id, patch)
+		httpResult(w, out, notFoundErr(out, err, "store not found"))
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (a *App) handleProducts(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := dbListingsList(ctx.AppDB(), pid, queryArgs(r))
+		if err == nil {
+			for _, product := range out {
+				product.Variants, err = dbVariantsForListing(ctx.AppDB(), pid, product.ID)
+				if err != nil {
+					break
+				}
+			}
+		}
+		httpResult(w, out, err)
+	case http.MethodPost:
+		var body map[string]any
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		result, err := a.toolProductsCreate(ctx, body)
+		httpResult(w, resultValue(result, "product"), err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleProduct(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := pathInt(r.URL.Path, "/admin/products/")
+	parts := pathParts(r.URL.Path, "/admin/products/")
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "product id required")
+		return
+	}
+	if len(parts) > 1 && parts[1] == "publish" && r.Method == http.MethodPost {
+		result, err := a.toolProductsPublish(ctx, map[string]any{"id": id})
+		httpResult(w, resultValue(result, "product"), err)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "archive" && r.Method == http.MethodPost {
+		result, err := a.toolProductsArchive(ctx, map[string]any{"id": id})
+		httpResult(w, resultValue(result, "product"), err)
+		return
+	}
+	if len(parts) > 1 && parts[1] == "variants" && r.Method == http.MethodPost {
+		var body map[string]any
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		body["listing_id"] = id
+		result, err := a.toolVariantsCreate(ctx, body)
+		httpResult(w, resultValue(result, "variant"), err)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := dbListingGet(ctx.AppDB(), pid, id, true)
+		httpResult(w, out, notFoundErr(out, err, "product not found"))
+	case http.MethodPatch:
+		var patch map[string]any
+		if err := readJSON(r, &patch); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out, err := dbListingUpdate(ctx.AppDB(), pid, id, patch)
+		httpResult(w, out, err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleVariant(w http.ResponseWriter, r *http.Request) {
+	ctx, _, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if r.Method != http.MethodPatch {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	id := pathInt(r.URL.Path, "/admin/variants/")
+	var patch map[string]any
+	if err := readJSON(r, &patch); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := a.toolVariantsUpdate(ctx, map[string]any{"id": id, "patch": patch})
+	httpResult(w, resultValue(result, "variant"), err)
+}
+
+func (a *App) handleCollections(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := dbCollectionsList(ctx.AppDB(), pid, queryArgs(r))
+		httpResult(w, out, err)
+	case http.MethodPost:
+		var body map[string]any
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		result, err := a.toolCollectionsCreate(ctx, body)
+		httpResult(w, resultValue(result, "collection"), err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleCollection(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := pathInt(r.URL.Path, "/admin/collections/")
+	parts := pathParts(r.URL.Path, "/admin/collections/")
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "collection id required")
+		return
+	}
+	if len(parts) > 1 && parts[1] == "products" && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
+		var body map[string]any
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if r.Method == http.MethodPost {
+			err = dbCollectionAddListing(ctx.AppDB(), pid, id, intArg(body, "listing_id"), int(intArg(body, "sort_order")))
+		} else {
+			err = dbCollectionRemoveListing(ctx.AppDB(), pid, id, intArg(body, "listing_id"))
+		}
+		httpResult(w, map[string]any{"ok": err == nil}, err)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, id)
+		httpResult(w, out, err)
+	case http.MethodPatch:
+		var patch map[string]any
+		if err := readJSON(r, &patch); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out, err := dbCollectionUpdate(ctx.AppDB(), pid, id, patch)
+		httpResult(w, out, err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleCarts(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	out, err := dbListingsList(globalCtx.AppDB(), projectScope(globalCtx), queryArgs(r))
-	httpResult(w, out, err)
-}
-
-func (a *App) handleProduct(w http.ResponseWriter, r *http.Request) {
-	id := pathInt(r.URL.Path, "/admin/products/")
-	out, err := dbListingGet(globalCtx.AppDB(), projectScope(globalCtx), id, true)
-	httpResult(w, out, err)
-}
-
-func (a *App) handleCarts(w http.ResponseWriter, r *http.Request) {
 	args := queryArgs(r)
 	if id := intArg(args, "cart_id"); id != 0 {
-		out, err := dbCartGet(globalCtx.AppDB(), projectScope(globalCtx), id, true)
-		httpResult(w, out, err)
+		out, err := dbCartGet(ctx.AppDB(), pid, id, true)
+		httpResult(w, out, notFoundErr(out, err, "cart not found"))
 		return
 	}
-	httpErr(w, http.StatusBadRequest, "cart_id required")
+	out, err := dbCartsList(ctx.AppDB(), pid, args)
+	httpResult(w, out, err)
 }
 
 func (a *App) handleSales(w http.ResponseWriter, r *http.Request) {
-	out, err := dbSalesList(globalCtx.AppDB(), projectScope(globalCtx), queryArgs(r))
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	out, err := dbSalesList(ctx.AppDB(), pid, queryArgs(r))
 	httpResult(w, out, err)
 }
 
+func (a *App) handleSale(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	id := pathInt(r.URL.Path, "/admin/sales/")
+	parts := pathParts(r.URL.Path, "/admin/sales/")
+	if id == 0 {
+		httpErr(w, http.StatusBadRequest, "sale id required")
+		return
+	}
+	if len(parts) > 1 && parts[1] == "retry" && r.Method == http.MethodPost {
+		sale, loadErr := dbSaleGet(ctx.AppDB(), pid, id)
+		if loadErr != nil || sale == nil {
+			httpResult(w, sale, notFoundErr(sale, loadErr, "sale not found"))
+			return
+		}
+		out, retryErr := a.completePaidSale(ctx, sale, false)
+		httpResult(w, out, retryErr)
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	out, err := dbSaleGet(ctx.AppDB(), pid, id)
+	httpResult(w, out, notFoundErr(out, err, "sale not found"))
+}
+
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
-	pid := projectScope(globalCtx)
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s/"), "/")
 	parts := strings.Split(rest, "/")
 	if len(parts) == 0 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
-	store, err := dbStoreGetBySlug(globalCtx.AppDB(), pid, parts[0])
-	if err != nil || store == nil {
+	store, err := dbStoreGetBySlug(ctx.AppDB(), pid, parts[0])
+	if err != nil || store == nil || store.Status != "active" {
 		http.NotFound(w, r)
 		return
 	}
+	if len(parts) == 1 && !strings.HasSuffix(r.URL.Path, "/") {
+		target := r.URL.Path + "/"
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+		return
+	}
 	if len(parts) >= 3 && parts[1] == "products" {
-		product, err := resolveListing(globalCtx.AppDB(), pid, map[string]any{"store_id": store.ID, "handle": parts[2]})
-		if err != nil {
+		row := ctx.AppDB().QueryRow(listingSelect()+` WHERE project_id=? AND store_id=? AND handle=? AND status='active'`, pid, store.ID, slugify(parts[2]))
+		product, err := scanListing(row)
+		if err != nil || product == nil {
 			http.NotFound(w, r)
 			return
 		}
-		writeProductHTML(w, store, product)
+		product.Variants, err = dbVariantsForListing(ctx.AppDB(), pid, product.ID)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeProductHTML(w, store, product, pid)
 		return
 	}
-	products, _ := dbListingsList(globalCtx.AppDB(), pid, map[string]any{"store_id": store.ID, "status": "active", "limit": int64(100)})
-	writeStoreHTML(w, store, products)
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	products, err := dbListingsList(ctx.AppDB(), pid, map[string]any{"store_id": store.ID, "status": "active", "limit": int64(100)})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeStoreHTML(w, store, products, pid)
 }
 
-func writeStoreHTML(w http.ResponseWriter, store *Store, products []*Listing) {
+func writeStoreHTML(w http.ResponseWriter, store *Store, products []*Listing, pid string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px}.card{border:1px solid #ddd;padding:16px;border-radius:8px}a{color:#111}</style></head><body>", template.HTMLEscapeString(store.Name))
 	fmt.Fprintf(&b, "<h1>%s</h1><div class=grid>", template.HTMLEscapeString(store.Name))
 	for _, p := range products {
-		fmt.Fprintf(&b, "<div class=card><h2><a href=\"/s/%s/products/%s\">%s</a></h2><p>%s</p></div>", template.URLQueryEscaper(store.Slug), template.URLQueryEscaper(p.Handle), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
+		fmt.Fprintf(&b, "<div class=card><h2><a href=\"./products/%s?project_id=%s\">%s</a></h2><p>%s</p></div>", template.URLQueryEscaper(p.Handle), template.URLQueryEscaper(pid), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
 	}
 	b.WriteString("</div></body></html>")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
 }
 
-func writeProductHTML(w http.ResponseWriter, store *Store, p *Listing) {
+func writeProductHTML(w http.ResponseWriter, store *Store, p *Listing, pid string) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px;max-width:760px}.price{font-size:22px;font-weight:700}</style></head><body>", template.HTMLEscapeString(p.Title))
-	fmt.Fprintf(&b, "<p><a href=\"/s/%s\">%s</a></p><h1>%s</h1><div>%s</div>", template.URLQueryEscaper(store.Slug), template.HTMLEscapeString(store.Name), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
+	fmt.Fprintf(&b, "<p><a href=\"../../?project_id=%s\">%s</a></p><h1>%s</h1><div>%s</div>", template.URLQueryEscaper(pid), template.HTMLEscapeString(store.Name), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
 	if len(p.Variants) > 0 {
 		v := p.Variants[0]
 		fmt.Fprintf(&b, "<p class=price>%s %.2f</p><p>SKU: %s</p>", template.HTMLEscapeString(v.Currency), float64(v.PriceCents)/100, template.HTMLEscapeString(v.SKU))
@@ -1591,18 +2622,6 @@ func salesFilterProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "status": typ("string"), "payment_status": typ("string"), "limit": typ("integer")}
 }
 
-func projectScope(ctxs ...*sdk.AppCtx) string {
-	if len(ctxs) > 0 && ctxs[0] != nil {
-		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
-			return pid
-		}
-	}
-	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
-		return pid
-	}
-	return "default"
-}
-
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -1619,12 +2638,8 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
 }
-func readJSON(r *http.Request, dst any) {
-	if r.Body == nil {
-		return
-	}
-	defer r.Body.Close()
-	_ = json.NewDecoder(r.Body).Decode(dst)
+func readJSON(r *http.Request, dst any) error {
+	return decodeJSON(r, dst)
 }
 func queryArgs(r *http.Request) map[string]any {
 	out := map[string]any{}
@@ -1677,9 +2692,7 @@ func floatArg(args map[string]any, key string, def float64) float64 {
 		return n
 	case string:
 		n, _ := strconv.ParseFloat(v, 64)
-		if n != 0 {
-			return n
-		}
+		return n
 	}
 	return def
 }
@@ -1739,6 +2752,12 @@ func nullableInt(v int64) any {
 		return nil
 	}
 	return v
+}
+func nullablePtrInt(v *int64) any {
+	if v == nil || *v == 0 {
+		return nil
+	}
+	return *v
 }
 func ptrIfValid(v sql.NullInt64) *int64 {
 	if !v.Valid {
@@ -1836,7 +2855,11 @@ func slugify(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 func newToken() string {
-	return fmt.Sprintf("com_%d", time.Now().UnixNano())
+	buf := make([]byte, 18)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("com_%d", time.Now().UnixNano())
+	}
+	return "com_" + hex.EncodeToString(buf)
 }
 func stripTags(s string) string {
 	var b strings.Builder
@@ -1857,18 +2880,5 @@ func stripTags(s string) string {
 }
 
 func main() {
-	app := &App{}
-	wrapped := wrapApp{app: app}
-	sdk.Run(&wrapped)
+	sdk.Run(&App{})
 }
-
-type wrapApp struct{ app *App }
-
-func (w *wrapApp) Manifest() sdk.Manifest            { return w.app.Manifest() }
-func (w *wrapApp) OnMount(ctx *sdk.AppCtx) error     { globalCtx = ctx; return w.app.OnMount(ctx) }
-func (w *wrapApp) OnUnmount(c *sdk.AppCtx) error     { return w.app.OnUnmount(c) }
-func (w *wrapApp) HTTPRoutes() []sdk.Route           { return w.app.HTTPRoutes() }
-func (w *wrapApp) MCPTools() []sdk.Tool              { return w.app.MCPTools() }
-func (w *wrapApp) Channels() []sdk.ChannelFactory    { return w.app.Channels() }
-func (w *wrapApp) Workers() []sdk.Worker             { return w.app.Workers() }
-func (w *wrapApp) EventHandlers() []sdk.EventHandler { return w.app.EventHandlers() }
