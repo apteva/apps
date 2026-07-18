@@ -2,14 +2,62 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
+
+type platformCall struct {
+	App   string
+	Tool  string
+	Input map[string]any
+}
+
+type commercePlatformStub struct {
+	sdk.PlatformClient
+	calls     []platformCall
+	responses map[string]any
+	errors    map[string]error
+}
+
+type platformResponseFunc func(input map[string]any) (any, error)
+
+func newCommercePlatformStub() *commercePlatformStub {
+	return &commercePlatformStub{responses: map[string]any{}, errors: map[string]error{}}
+}
+
+func (p *commercePlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.calls = append(p.calls, platformCall{App: app, Tool: tool, Input: copyMap(input)})
+	key := app + ":" + tool
+	if err := p.errors[key]; err != nil {
+		return err
+	}
+	response, ok := p.responses[key]
+	if !ok {
+		return errors.New("unexpected app call: " + key)
+	}
+	if dynamic, ok := response.(platformResponseFunc); ok {
+		var err error
+		response, err = dynamic(input)
+		if err != nil {
+			return err
+		}
+	}
+	body, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, out)
+}
 
 func TestManifestParse(t *testing.T) {
 	embedded, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -32,6 +80,19 @@ func TestManifestParse(t *testing.T) {
 	}
 	if len(fromFile.Provides.MCPTools) == 0 {
 		t.Fatal("commerce manifest should expose MCP tools")
+	}
+	declared := map[string]bool{}
+	for _, tool := range fromFile.Provides.MCPTools {
+		declared[tool.Name] = true
+	}
+	runtimeTools := (&App{}).MCPTools()
+	if len(runtimeTools) != len(declared) {
+		t.Fatalf("manifest declares %d tools but runtime exposes %d", len(declared), len(runtimeTools))
+	}
+	for _, tool := range runtimeTools {
+		if !declared[tool.Name] {
+			t.Errorf("runtime tool %q is missing from the manifest", tool.Name)
+		}
 	}
 }
 
@@ -81,7 +142,7 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create cart: %v", err)
 	}
-	if err := dbCartAddItem(db, pid, cart.ID, variant, 2); err != nil {
+	if err := dbCartAddItem(db, pid, cart.ID, variant, 2, 301); err != nil {
 		t.Fatalf("add cart item: %v", err)
 	}
 	cart, err = dbCartGet(db, pid, cart.ID, true)
@@ -122,6 +183,320 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 	}
 }
 
+func TestCartUsesCanonicalPriceAndKeepsCheckoutInSync(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["catalog:catalog_prices_get"] = map[string]any{"price": map[string]any{
+		"id": int64(201), "product_id": int64(101), "unit_amount_cents": int64(4900), "currency": "EUR", "active": true,
+	}}
+	platform.responses["checkout:cart_add_item"] = map[string]any{"cart": map[string]any{"items": []any{
+		map[string]any{"id": int64(501), "price_id": int64(201), "quantity": float64(1)},
+	}}}
+	platform.responses["checkout:cart_set_quantity"] = map[string]any{"cart": map[string]any{"id": int64(301)}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-sync"), tk.WithPlatform(platform))
+	store, listing, variant, cart := seedCommerceCart(t, ctx.AppDB(), "proj-sync", "main", 0)
+	_ = store
+	variant.PriceCents = 1
+	if _, err := ctx.AppDB().Exec(`UPDATE commerce_variants SET price_cents=1 WHERE id=?`, variant.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{}
+	got, err := app.addCartItem(ctx, map[string]any{"cart_id": cart.ID, "variant_id": variant.ID, "quantity": 1})
+	if err != nil {
+		t.Fatalf("add cart item: %v", err)
+	}
+	if len(got.Items) != 1 || got.Items[0].UnitAmountCents != 4900 {
+		t.Fatalf("cart did not use canonical price: %#v", got.Items)
+	}
+	if got.Items[0].InventoryItemID != nil {
+		t.Fatalf("non-inventory line acquired inventory id: %#v", got.Items[0].InventoryItemID)
+	}
+	if got.Items[0].CheckoutItemID == nil || *got.Items[0].CheckoutItemID != 501 {
+		t.Fatalf("checkout item link missing: %#v", got.Items[0])
+	}
+
+	got, err = app.setCartItemQuantity(ctx, map[string]any{"cart_id": cart.ID, "item_id": got.Items[0].ID, "quantity": 3})
+	if err != nil {
+		t.Fatalf("set quantity: %v", err)
+	}
+	if got.Items[0].Quantity != 3 || got.TotalCents != 14700 {
+		t.Fatalf("unexpected synchronized cart: %#v", got)
+	}
+	last := platform.calls[len(platform.calls)-1]
+	if last.Tool != "cart_set_quantity" || intArg(last.Input, "item_id") != 501 || floatArg(last.Input, "quantity", 0) != 3 {
+		t.Fatalf("unexpected Checkout quantity call: %#v", last)
+	}
+	if listing.Status != "active" {
+		t.Fatal("seed listing should be active")
+	}
+}
+
+func TestCheckoutStartReleasesPartialReservations(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["inventory:inventory_reservations_list"] = map[string]any{"reservations": []any{}}
+	platform.responses["inventory:inventory_reserve"] = map[string]any{"reservation": map[string]any{"id": int64(700)}}
+	platform.responses["inventory:inventory_release_reservation"] = map[string]any{"reservation": map[string]any{"id": int64(700)}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-reserve"), tk.WithPlatform(platform))
+	_, _, first, cart := seedCommerceCart(t, ctx.AppDB(), "proj-reserve", "main", 901)
+	second, err := dbVariantCreate(ctx.AppDB(), "proj-reserve", map[string]any{
+		"listing_id": first.ListingID, "catalog_price_id": int64(202), "inventory_item_id": int64(902), "price_cents": int64(2500), "currency": "USD", "title": "Second",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCartAddItem(ctx.AppDB(), "proj-reserve", cart.ID, first, 1, 501); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCartAddItem(ctx.AppDB(), "proj-reserve", cart.ID, second, 1, 502); err != nil {
+		t.Fatal(err)
+	}
+	reserveCount := 0
+	platform.errors["inventory:inventory_reserve"] = nil
+	platform.responses["inventory:inventory_reserve"] = platformResponseFunc(func(input map[string]any) (any, error) {
+		reserveCount++
+		if reserveCount == 2 {
+			return nil, errors.New("insufficient stock")
+		}
+		return map[string]any{"reservation": map[string]any{"id": int64(700)}}, nil
+	})
+
+	_, err = (&App{}).checkoutStart(ctx, map[string]any{"cart_id": cart.ID})
+	if err == nil || !strings.Contains(err.Error(), "insufficient stock") {
+		t.Fatalf("expected reservation failure, got %v", err)
+	}
+	if !hasPlatformCall(platform.calls, "inventory", "inventory_release_reservation") {
+		t.Fatal("partial reservation was not released")
+	}
+}
+
+func seedCommerceCart(t *testing.T, db *sql.DB, pid, slug string, inventoryItemID int64) (*Store, *Listing, *Variant, *Cart) {
+	t.Helper()
+	store, err := dbStoreCreate(db, pid, map[string]any{"slug": slug, "name": strings.ToUpper(slug), "default_currency": "USD"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, err := dbListingCreate(db, pid, map[string]any{
+		"store_id": store.ID, "title": "Product", "catalog_product_id": int64(101), "status": "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	variantArgs := map[string]any{
+		"listing_id": listing.ID, "catalog_price_id": int64(201), "price_cents": int64(4900), "currency": "USD", "sku": "SKU-1",
+	}
+	if inventoryItemID != 0 {
+		variantArgs["inventory_item_id"] = inventoryItemID
+	}
+	variant, err := dbVariantCreate(db, pid, variantArgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cart, err := dbCartCreate(db, pid, map[string]any{
+		"store_id": store.ID, "checkout_cart_id": int64(301), "session_token": "session-" + slug, "currency": "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, listing, variant, cart
+}
+
+func hasPlatformCall(calls []platformCall, app, tool string) bool {
+	for _, call := range calls {
+		if call.App == app && call.Tool == tool {
+			return true
+		}
+	}
+	return false
+}
+
+func findPlatformCall(calls []platformCall, app, tool string) platformCall {
+	for _, call := range calls {
+		if call.App == app && call.Tool == tool {
+			return call
+		}
+	}
+	return platformCall{}
+}
+
+func TestPaidSaleRequiresBillingAndSnapshotsOrder(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["billing:invoices_get"] = map[string]any{"invoice": map[string]any{
+		"id": int64(501), "status": "paid", "total_cents": int64(9800), "amount_paid_cents": int64(9800),
+	}}
+	platform.responses["orders:orders_search"] = map[string]any{"orders": []any{}}
+	platform.responses["orders:orders_create"] = map[string]any{"order": map[string]any{"id": int64(801)}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-paid"), tk.WithPlatform(platform))
+	_, _, variant, cart := seedCommerceCart(t, ctx.AppDB(), "proj-paid", "main", 0)
+	if err := dbCartAddItem(ctx.AppDB(), "proj-paid", cart.ID, variant, 2, 301); err != nil {
+		t.Fatal(err)
+	}
+	cart, _ = dbCartGet(ctx.AppDB(), "proj-paid", cart.ID, true)
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "proj-paid", cart, 401, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCheckoutPatch(ctx.AppDB(), "proj-paid", checkout.ID, map[string]any{
+		"email": "buyer@example.com", "shipping_address": map[string]any{"city": "Madrid"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCheckoutInvoice(ctx.AppDB(), "proj-paid", checkout.ID, 501, "INV-501"); err != nil {
+		t.Fatal(err)
+	}
+	checkout, _ = dbCheckoutGet(ctx.AppDB(), "proj-paid", checkout.ID)
+	sale, err := dbSaleCreateFromCheckout(ctx.AppDB(), "proj-paid", checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sale.Items) != 1 || sale.ShippingAddress["city"] != "Madrid" {
+		t.Fatalf("sale snapshot incomplete: %#v", sale)
+	}
+	if err := dbCartSetQuantity(ctx.AppDB(), "proj-paid", cart.ID, cart.Items[0].ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	platform.responses["billing:invoices_get"] = map[string]any{"invoice": map[string]any{
+		"id": int64(501), "status": "open", "total_cents": int64(9800), "amount_paid_cents": int64(0),
+	}}
+	if _, err := (&App{}).markSalePaid(ctx, map[string]any{"sale_id": sale.ID}); err == nil || !strings.Contains(err.Error(), "not fully paid") {
+		t.Fatalf("unpaid Billing invoice should be rejected, got %v", err)
+	}
+	if hasPlatformCall(platform.calls, "orders", "orders_create") {
+		t.Fatal("order was created before Billing confirmed payment")
+	}
+	platform.responses["billing:invoices_get"] = map[string]any{"invoice": map[string]any{
+		"id": int64(501), "status": "paid", "total_cents": int64(9800), "amount_paid_cents": int64(9800),
+	}}
+	paid, err := (&App{}).markSalePaid(ctx, map[string]any{"sale_id": sale.ID})
+	if err != nil {
+		t.Fatalf("mark paid: %v", err)
+	}
+	if paid.Status != "paid" || paid.PaymentStatus != "paid" || paid.OrderID == nil || *paid.OrderID != 801 {
+		t.Fatalf("unexpected paid sale: %#v", paid)
+	}
+	orderCall := findPlatformCall(platform.calls, "orders", "orders_create")
+	items, _ := orderCall.Input["items"].([]map[string]any)
+	if len(items) == 0 {
+		if raw, ok := orderCall.Input["items"].([]any); ok && len(raw) > 0 {
+			items = []map[string]any{raw[0].(map[string]any)}
+		}
+	}
+	if len(items) != 1 || floatArg(items[0], "quantity", 0) != 2 {
+		t.Fatalf("order did not use immutable sale quantity: %#v", orderCall.Input["items"])
+	}
+}
+
+func TestPublicStorefrontScopesProjectAndHidesDrafts(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-one"))
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	_, _, _, _ = seedCommerceCart(t, ctx.AppDB(), "project-one", "main", 0)
+	storeTwo, _, _, _ := seedCommerceCart(t, ctx.AppDB(), "project-two", "main", 0)
+	if _, err := dbListingCreate(ctx.AppDB(), "project-two", map[string]any{
+		"store_id": storeTwo.ID, "title": "Draft secret", "handle": "draft-secret", "catalog_product_id": int64(202), "status": "draft",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/s/main?project_id=project-two", nil)
+	recorder := httptest.NewRecorder()
+	(&App{}).handlePublic(recorder, req)
+	if recorder.Code != http.StatusPermanentRedirect || recorder.Header().Get("Location") != "/s/main/?project_id=project-two" {
+		t.Fatalf("unexpected storefront redirect: status=%d location=%q", recorder.Code, recorder.Header().Get("Location"))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/s/main/?project_id=project-two", nil)
+	recorder = httptest.NewRecorder()
+	(&App{}).handlePublic(recorder, req)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "Product") || strings.Contains(recorder.Body.String(), "Draft secret") {
+		t.Fatalf("storefront leaked or omitted products: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `href="./products/product?project_id=project-two"`) {
+		t.Fatalf("storefront product link is not proxy-safe: %s", recorder.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/s/main/products/draft-secret?project_id=project-two", nil)
+	recorder = httptest.NewRecorder()
+	(&App{}).handlePublic(recorder, req)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("draft product status=%d, want 404", recorder.Code)
+	}
+
+	if _, err := dbListingStatus(ctx.AppDB(), "project-two", 999999, "active"); err == nil {
+		t.Fatal("publishing a missing product should return an error")
+	}
+}
+
+func TestHardeningMigrationReconcilesExistingDuplicates(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	execMigration(t, db, "migrations/001_init.sql")
+	store, err := dbStoreCreate(db, "upgrade", map[string]any{"slug": "main", "name": "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cart, err := dbCartCreate(db, "upgrade", map[string]any{"store_id": store.ID, "session_token": "duplicate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := db.Exec(`INSERT INTO commerce_checkout_sessions (project_id, store_id, cart_id, checkout_session_id) VALUES ('upgrade', ?, ?, 44)`, store.ID, cart.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := db.Query(`SELECT id FROM commerce_checkout_sessions ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkoutIDs []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		checkoutIDs = append(checkoutIDs, id)
+	}
+	rows.Close()
+	for _, checkoutID := range checkoutIDs {
+		if _, err := db.Exec(`INSERT INTO commerce_sales (project_id, store_id, cart_id, checkout_id, invoice_id) VALUES ('upgrade', ?, ?, ?, 55)`, store.ID, cart.ID, checkoutID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	execMigration(t, db, "migrations/002_harden_checkout.sql")
+	var checkoutCount, linkedSales, invoicedSales int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM commerce_checkout_sessions`).Scan(&checkoutCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM commerce_sales WHERE checkout_id IS NOT NULL`).Scan(&linkedSales); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM commerce_sales WHERE invoice_id IS NOT NULL`).Scan(&invoicedSales); err != nil {
+		t.Fatal(err)
+	}
+	if checkoutCount != 1 || linkedSales != 1 || invoicedSales != 1 {
+		t.Fatalf("duplicates not reconciled: checkouts=%d linked_sales=%d invoiced_sales=%d", checkoutCount, linkedSales, invoicedSales)
+	}
+	if _, err := db.Exec(`INSERT INTO commerce_checkout_sessions (project_id, store_id, cart_id) VALUES ('upgrade', ?, ?)`, store.ID, cart.ID); err == nil {
+		t.Fatal("checkout cart uniqueness was not enforced")
+	}
+}
+
+func TestCollectionRejectsCrossStoreProduct(t *testing.T) {
+	db := openCommerceTestDB(t)
+	first, _ := dbStoreCreate(db, "proj", map[string]any{"slug": "one", "name": "One"})
+	second, _ := dbStoreCreate(db, "proj", map[string]any{"slug": "two", "name": "Two"})
+	collection, _ := dbCollectionCreate(db, "proj", map[string]any{"store_id": first.ID, "title": "Featured"})
+	listing, _ := dbListingCreate(db, "proj", map[string]any{"store_id": second.ID, "title": "Wrong store"})
+	if err := dbCollectionAddListing(db, "proj", collection.ID, listing.ID, 0); err == nil {
+		t.Fatal("cross-store collection membership should fail")
+	}
+}
+
 func openCommerceTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -137,13 +512,18 @@ func openCommerceTestDB(t *testing.T) *sql.DB {
 		t.Fatal("no migrations found")
 	}
 	for _, path := range files {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read migration %s: %v", path, err)
-		}
-		if _, err := db.Exec(string(body)); err != nil {
-			t.Fatalf("exec migration %s: %v\n%s", path, err, strings.TrimSpace(string(body)))
-		}
+		execMigration(t, db, path)
 	}
 	return db
+}
+
+func execMigration(t *testing.T, db *sql.DB, path string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read migration %s: %v", path, err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatalf("exec migration %s: %v\n%s", path, err, strings.TrimSpace(string(body)))
+	}
 }
