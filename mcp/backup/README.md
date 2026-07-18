@@ -1,143 +1,93 @@
-# Backup (v0.1)
+# Backup
 
-Periodic backups of your Apteva instance — server DB plus every
-installed app's data — driven by the platform snapshot endpoint and
-shipped to a destination of your choice.
+Backup captures restorable Apteva database snapshots and stores them on local
+disk, AWS S3, or Cloudflare R2. It also supports per-tenant snapshots when a
+Fleet app is bound.
 
-## What's in v0.1
+## Coverage
 
-- **Two destinations**: `local` (host directory) and `s3` (any
-  S3-compatible bucket — AWS S3, Cloudflare R2, Backblaze B2, Wasabi,
-  MinIO).
-- **Cron policies** registered with the [`jobs`](../jobs/) app — one
-  scheduler used across the platform, one place to view "what's
-  running when?".
-- **Retention pruning** — `keep_last_n` per policy, with `apteva-`
-  prefix matching so files the operator dropped in the same bucket
-  survive.
-- **Restore from history** — UI button (or `backup_restore` MCP tool)
-  pulls the bytes back from the destination and POSTs them to
-  `/api/platform/restore`. App DBs swap live; the platform DB stages
-  for the next server boot.
-- **3 MCP tools** for agent-driven operation:
-  - `backup_now`
-  - `backup_list`
-  - `backup_restore`
-- **One UI panel** at `project.page` slot — status, destinations,
-  policies, history.
+The platform scope contains:
 
-## What's deliberately deferred
+- the `apteva-server` SQLite database
+- `app.db` from running sidecar apps included by the platform snapshot endpoint
 
-| Capability                | When                                    |
-|---------------------------|-----------------------------------------|
-| Encryption (`age` passphrase) | v0.2 — config field exists, not wired |
-| `storage_app` destination     | v0.2 — manifest declares optional dep |
-| Incremental backups (chunks) | Maybe v0.3, maybe never (full snapshots compress well) |
-| Verify (round-trip a backup)  | v0.2 |
-| Multi-recipient encryption (host A backs up, host B restores) | v0.3 |
+It does not contain arbitrary files from app data directories, stopped
+sidecars, external object storage, source repositories, container volumes, OS
+configuration, or secrets stored outside the captured databases. Use a host or
+volume snapshot in addition to this app when full-system disaster recovery is
+required.
 
-## Architecture
+A Fleet tenant scope contains the selected local tenant's managed config
+directory. Hosted Fleet tenants are reported as unsupported until remote
+snapshot transport is implemented.
 
-```
-┌──────────────────────┐  cron tick   ┌──────────────────────┐
-│  jobs app            │ ───────────► │  backup app          │
-│                      │   POST /run  │                      │
-└──────────────────────┘              └──────┬───────────────┘
-                                              │
-                                              │  GET /api/platform/snapshot
-                                              ▼
-                                       ┌──────────────────────┐
-                                       │  apteva-server       │
-                                       │   • VACUUM INTO each │
-                                       │     SQLite DB        │
-                                       │   • streams tar.gz   │
-                                       └──────┬───────────────┘
-                                              │
-                                              ▼
-                                       ┌──────────────────────┐
-                                       │  destination         │
-                                       │  local | s3 | r2     │
-                                       └──────────────────────┘
-```
+## Features
 
-The platform owns the privileged primitive (read every install's data
-dir + the server DB). This app owns scheduling, destinations,
-retention, and the UI. That split lets a third-party ecosystem of
-backup apps exist without server changes — `backup-borg`,
-`backup-restic`, `backup-tarsnap` are all viable plugins on top of the
-same `/api/platform/snapshot` and `/api/platform/restore` endpoints.
+- Immediate and cron-scheduled backups through the Jobs app
+- Policy- and scope-isolated object keys and retention
+- Streaming local, AWS S3, and Cloudflare R2 uploads and restores
+- Optional age encryption using an install-configured passphrase
+- SHA-256 verification before every restore
+- Per-tenant Fleet backup and restore for local tenants
+- Soft-deleted destinations, preserving historical restore metadata
+- Run history with scope, encryption, size, status, and failure details
 
-## Permissions
+## Scheduling
 
-This app installs as `scope: global` and the operator must be admin
-(user_id 1) — the snapshot/restore endpoints reject everyone else.
+Backup requires the Jobs app. Each policy creates a Jobs `app_tool` target that
+calls `backup.backup_now` with the policy ID. Policy creation is atomic from the
+operator's perspective: if Jobs registration fails, the incomplete policy is
+removed.
 
-The relevant declared permissions are:
+Retention applies independently to each policy and scope. A value of `0` keeps
+all backups. Ad-hoc runs are stored under their own namespace and are not pruned
+by scheduled policies.
 
-- `db.write.app` — its own bookmarks/policies/run log
-- `net.egress` — talk to S3/R2/B2 endpoints
-- `platform.apps.call` — call `jobs_schedule` / `jobs_cancel`
+## Cloud Storage
 
-## S3 credentials (status)
+Cloud destinations use the install's optional `cloud_storage` binding and read
+credentials through the SDK's restricted credential API. Supported connection
+types are:
 
-The S3 destination is wired end-to-end — `minio-go` client, list,
-put, get, delete, retention prune — but the credentials adapter
-currently returns "incomplete; see README" because the SDK's typed
-`PlatformConnection` doesn't yet expose the raw access/secret pair.
+- AWS S3
+- Cloudflare R2
 
-Two paths forward, neither blocking v0.1's local destination:
+One cloud account can be bound to a Backup install. Multiple destinations can
+use different buckets or key prefixes within that account. Credentials are not
+stored in Backup's database.
 
-1. **SDK extension**: add `GetConnectionWithSecrets(id)` returning
-   the decrypted credential JSON. Tightly scoped — only the install's
-   own connections, only when `platform.connections.read` is declared.
-2. **Env passthrough**: read `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`
-   from the install's config (each destination gets its own pair).
-   Lower-friction for self-hosters, but credentials live in
-   `apteva-server.db` config rather than the structured connections
-   store.
+## Encryption
 
-The local destination works fully today.
+Set `encryption_passphrase` in the app configuration to encrypt new objects
+with age before upload. The stored object's SHA-256 digest is recorded and
+verified before decryption and restore.
 
-## Local development
+Keep the passphrase outside the Apteva host. Losing it makes encrypted backups
+unrecoverable; changing it does not re-encrypt old backups, so restores require
+the passphrase used when each backup was created.
+
+## Restore Semantics
+
+Platform app databases are swapped by the platform restore endpoint. The
+platform database is staged and activated on the next `apteva-server` restart.
+Fleet restores validate the archive's provider, tenant ID, and tenant slug
+before replacing the selected tenant directory.
+
+Deleting a destination hides it from new runs but preserves its configuration
+for historical restores. A destination referenced by a policy cannot be
+deleted until the policy is removed.
+
+## Development
 
 ```bash
 cd mcp/backup
+go test ./...
 go build .
-APTEVA_GATEWAY_URL=http://localhost:5280 \
-APTEVA_APP_TOKEN=dev-1 \
-APTEVA_PROJECT_ID=test \
-DB_PATH=/tmp/backup.db \
-./backup
 ```
 
-Then:
+The panel source is `ui/BackupPanel.tsx`; rebuild panel artifacts from the apps
+repository root with:
+
 ```bash
-# Create a local destination
-curl -X POST http://localhost:8080/destinations \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"laptop","kind":"local","config":{"path":"/tmp/apteva-backups"}}'
-
-# Run a backup right now
-curl -X POST http://localhost:8080/run -d '{}'
-
-# List runs
-curl http://localhost:8080/runs
+bun run scripts/build-panels.ts
 ```
-
-See `migrations/001_init.sql` for the full schema and `main.go`'s
-`MCPTools()` for the tool surface.
-
-## Restore semantics
-
-App DBs are restored **live**: the supervisor stops the sidecar, the
-file is atomically replaced, stale `-wal`/`-shm` companions are
-removed, and `ResumeLocalInstalls` re-spawns it.
-
-The platform DB itself can't be replaced under a running server, so
-it's **staged**: the new bytes land at `<dbPath>.restored` with a
-marker file, and apteva-server's boot path swaps it in on the next
-restart. The UI surfaces a clear "restart required" banner; the app
-does not try to restart the platform itself.
-
-The previous bytes are kept as `.prerestore-<timestamp>` files at the
-same path — manual rollback is `mv <file>.prerestore-<ts> <file>`.

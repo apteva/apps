@@ -18,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.21
+version: 0.8.22
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -137,9 +137,9 @@ provides:
     - name: fleet_tenant_backup_plan
       description: Report backup coverage and Backup-app scope arguments for a tenant.
     - name: fleet_tenant_snapshot
-      description: Provider hook used by Backup to snapshot one local Fleet tenant.
+      description: Provider hook used by Backup to stream a snapshot of one local Fleet tenant.
     - name: fleet_tenant_restore
-      description: Provider hook used by Backup to restore one local Fleet tenant.
+      description: Provider hook used by Backup to stream and restore one local Fleet tenant snapshot.
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -149,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.21
+    ref: fleet/v0.8.22
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -809,29 +809,30 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "fleet_tenant_snapshot",
-			Description: "Provider hook used by Backup. Stops a local tenant if needed, archives its full data dir plus metadata, restarts it, and returns archive_b64. Args: tenant_id or scope_id.",
+			Description: "Provider hook used by Backup. Stops a local tenant if needed and returns a signed streaming snapshot URL. Args: tenant_id or scope_id, supports_streaming.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id":  map[string]any{"type": "string"},
-					"scope_id":   map[string]any{"type": "string"},
-					"scope_kind": map[string]any{"type": "string"},
+					"tenant_id":          map[string]any{"type": "string"},
+					"scope_id":           map[string]any{"type": "string"},
+					"scope_kind":         map[string]any{"type": "string"},
+					"supports_streaming": map[string]any{"type": "boolean"},
 				},
 			},
 			Handler: a.toolFleetTenantSnapshot,
 		},
 		{
 			Name:        "fleet_tenant_restore",
-			Description: "Provider hook used by Backup. Replaces a local tenant's data dir from archive_b64 and restarts it if it was running. Args: tenant_id or scope_id, archive_b64.",
+			Description: "Provider hook used by Backup. Prepares a signed streaming upload that validates and restores one local tenant. Args: tenant_id or scope_id, prepare_stream.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id":   map[string]any{"type": "string"},
-					"scope_id":    map[string]any{"type": "string"},
-					"scope_kind":  map[string]any{"type": "string"},
-					"archive_b64": map[string]any{"type": "string"},
+					"tenant_id":      map[string]any{"type": "string"},
+					"scope_id":       map[string]any{"type": "string"},
+					"scope_kind":     map[string]any{"type": "string"},
+					"archive_b64":    map[string]any{"type": "string"},
+					"prepare_stream": map[string]any{"type": "boolean"},
 				},
-				"required": []string{"archive_b64"},
 			},
 			Handler: a.toolFleetTenantRestore,
 		},

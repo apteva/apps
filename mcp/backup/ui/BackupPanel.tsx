@@ -117,6 +117,8 @@ interface Policy {
   retention_keep: number;
   enabled: boolean;
   jobs_id?: string;
+  jobs_project_id?: string;
+  scope: Scope;
   created_at?: string;
   updated_at?: string;
 }
@@ -133,6 +135,30 @@ interface Run {
   sha256?: string;
   remote_key?: string;
   error?: string;
+  encrypted: boolean;
+  scope: Scope;
+}
+
+interface Scope {
+  kind: "platform" | "fleet_tenant";
+  id?: string;
+  source_app?: string;
+}
+
+interface FleetTenantScope {
+  id: string;
+  slug: string;
+  status: string;
+  restorable: boolean;
+}
+
+interface ScopesResponse {
+  default_retention: number;
+  encryption_enabled: boolean;
+  platform: { label: string; coverage: string; gaps: string[] };
+  fleet_bound: boolean;
+  fleet_error?: string;
+  fleet_tenants: FleetTenantScope[];
 }
 
 const API = "/api/apps/backup";
@@ -169,10 +195,18 @@ function statusColor(s: Run["status"]): string {
   return "bg-warn"; // running
 }
 
+function scopeLabel(scope: Scope | undefined, scopes: ScopesResponse | null): string {
+  if (!scope || scope.kind === "platform") return "Platform";
+  const tenant = scopes?.fleet_tenants.find((item) => item.id === scope.id);
+  return tenant ? `Fleet: ${tenant.slug}` : `Fleet: ${scope.id || "tenant"}`;
+}
+
 export default function BackupPanel({ projectId, installId }: NativePanelProps) {
   const [destinations, setDestinations] = useState<Destination[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [scopes, setScopes] = useState<ScopesResponse | null>(null);
+  const [selectedScope, setSelectedScope] = useState("platform");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -188,20 +222,30 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       headers: body ? { "Content-Type": "application/json" } : {},
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+    if (!res.ok) {
+      const raw = await res.text().catch(() => "");
+      let detail = raw;
+      try {
+        const parsed = JSON.parse(raw) as { error?: string };
+        detail = parsed.error || raw;
+      } catch { /* keep response text */ }
+      throw new Error(detail ? `${res.status}: ${detail}` : String(res.status));
+    }
     return res.json();
   }, [withParams]);
 
   const reload = useCallback(async () => {
     try {
-      const [d, p, r] = await Promise.all([
+      const [d, p, r, s] = await Promise.all([
         api<{ destinations: Destination[] }>("GET", "/destinations"),
         api<{ policies: Policy[] }>("GET", "/policies"),
         api<{ runs: Run[] }>("GET", "/runs"),
+        api<ScopesResponse>("GET", "/scopes"),
       ]);
       setDestinations(d.destinations || []);
       setPolicies(p.policies || []);
       setRuns(r.runs || []);
+      setScopes(s);
       setStatus("");
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
@@ -210,6 +254,25 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
 
   useEffect(() => { reload(); }, [reload]);
   useAppEvents("backup", projectId, () => reload());
+  useEffect(() => {
+    const timer = window.setInterval(reload, 15_000);
+    return () => window.clearInterval(timer);
+  }, [reload]);
+
+  useEffect(() => {
+    if (!selectedScope.startsWith("fleet:") || !scopes) return;
+    const tenantID = selectedScope.slice(6);
+    if (!scopes.fleet_tenants.some((tenant) => tenant.id === tenantID && tenant.restorable)) {
+      setSelectedScope("platform");
+    }
+  }, [scopes, selectedScope]);
+
+  const scopeForSelection = useCallback((): Scope => {
+    if (selectedScope.startsWith("fleet:")) {
+      return { kind: "fleet_tenant", id: selectedScope.slice(6), source_app: "fleet" };
+    }
+    return { kind: "platform" };
+  }, [selectedScope]);
 
   // Status surfaces should be about *current* destinations. A run
   // whose destination was deleted is just history — showing its
@@ -217,7 +280,12 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   // broken when it's actually fine. Filter both summaries through
   // the current destination set.
   const liveDestIDs = new Set(destinations.map((d) => d.id));
-  const liveRuns = runs.filter((r) => liveDestIDs.has(r.destination_id));
+  const selectedScopeValue = scopeForSelection();
+  const liveRuns = runs.filter((r) =>
+    liveDestIDs.has(r.destination_id) &&
+    r.scope?.kind === selectedScopeValue.kind &&
+    (selectedScopeValue.kind === "platform" || r.scope?.id === selectedScopeValue.id),
+  );
   const lastSuccess = liveRuns.find(r => r.status === "success");
   const lastRun = liveRuns[0];
 
@@ -235,7 +303,13 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     setBusy(`run-${destID}`);
     setStatus("");
     try {
-      await api("POST", "/run", { destination_id: destID });
+      const scope = scopeForSelection();
+      await api("POST", "/run", {
+        destination_id: destID,
+        scope_kind: scope.kind,
+        scope_id: scope.id,
+        source_app: scope.source_app,
+      });
       await reload();
     } catch (e) {
       setStatus("Run failed: " + (e as Error).message);
@@ -247,11 +321,15 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     try {
       const out = await api<{ report: { restart_required?: boolean } }>("POST", "/restore", { run_id: runID });
       const restart = out?.report?.restart_required;
+      const run = runs.find((item) => item.id === runID);
+      const fleetTenant = run?.scope?.kind === "fleet_tenant";
       setNotice({
         title: "Restore complete",
-        body: restart
+        body: fleetTenant
+          ? `${scopeLabel(run?.scope, scopes)} was restored and restarted if it was previously running.`
+          : restart
           ? "App databases were swapped live. Restart apteva-server to activate the platform DB swap."
-          : "App databases were swapped live.",
+          : "Platform app databases were restored.",
       });
       await reload();
     } catch (e) {
@@ -285,10 +363,37 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       <header>
         <h2 className="text-text text-base font-bold">Backup</h2>
         <p className="text-text-muted text-xs mt-1">
-          Periodic snapshots of your Apteva instance shipped to local disk
-          or any S3-compatible bucket.
+            Verified database snapshots for the platform or one local Fleet tenant.
         </p>
       </header>
+
+      <section className="border-y border-border py-3 flex flex-wrap items-center gap-3">
+        <label className="text-text-muted text-xs" htmlFor="backup-scope">Backup scope</label>
+        <select
+          id="backup-scope"
+          value={selectedScope}
+          onChange={(e) => setSelectedScope(e.target.value)}
+          className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text min-w-52"
+        >
+          <option value="platform">Platform databases</option>
+          {(scopes?.fleet_tenants || []).filter((t) => t.restorable).map((tenant) => (
+            <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
+          ))}
+        </select>
+        <Pill>{scopes?.encryption_enabled ? "encrypted" : "not encrypted"}</Pill>
+        {scopes && !scopes.fleet_bound && (
+          <span className="text-text-muted text-xs">Bind Fleet to enable per-tenant backup.</span>
+        )}
+        {scopes?.fleet_error && (
+          <span className="text-error text-xs">Fleet unavailable: {scopes.fleet_error}</span>
+        )}
+      </section>
+
+      {selectedScope === "platform" && scopes?.platform && (
+        <div className="text-text-muted text-xs border-l-2 border-warn pl-3">
+          Includes {scopes.platform.coverage}. Excludes {scopes.platform.gaps.join(", ")}.
+        </div>
+      )}
 
       {status && (
         <div className="text-error text-xs border border-error/40 bg-error/10 rounded px-3 py-2">
@@ -296,8 +401,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         </div>
       )}
 
-      {/* Status card */}
-      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+      <section className="border-b border-border pb-4 space-y-2">
         <h3 className="text-text text-sm font-bold">Status</h3>
         {lastSuccess ? (
           <div className="text-text-muted text-sm">
@@ -318,7 +422,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       </section>
 
       {/* Destinations */}
-      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+      <section className="border-b border-border pb-4 space-y-2">
         <h3 className="text-text text-sm font-bold">Destinations</h3>
         {destinations.length === 0 && (
           <div className="text-text-muted text-sm italic">No destinations yet — add one below.</div>
@@ -329,9 +433,10 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
               <div className="flex items-center gap-2">
                 <strong className="text-text">{d.name}</strong>
                 <Pill>{d.kind}</Pill>
+                {d.kind === "s3" && d.connection_id ? <Pill>connection {d.connection_id}</Pill> : null}
               </div>
               <div className="text-text-muted text-xs mt-0.5 font-mono truncate">
-                {d.kind === "local" && (d.config.path as string)}
+                {d.kind === "local" && ((d.config.path as string) || "Install data directory / backups")}
                 {d.kind === "s3" && `s3://${d.config.bucket}${d.config.key_prefix ? "/" + d.config.key_prefix : ""}`}
               </div>
             </div>
@@ -352,11 +457,11 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             </div>
           </Row>
         ))}
-        <DestinationForm onCreated={reload} api={api} installId={installId} />
+        <DestinationForm destinations={destinations} onCreated={reload} api={api} installId={installId} />
       </section>
 
       {/* Policies */}
-      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+      <section className="border-b border-border pb-4 space-y-2">
         <h3 className="text-text text-sm font-bold">Policies</h3>
         {policies.length === 0 && (
           <div className="text-text-muted text-sm italic">No scheduled policies — add one to back up automatically.</div>
@@ -367,6 +472,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
               <div className="flex items-center gap-2 flex-wrap">
                 <strong className="text-text">{p.name || `policy ${p.id}`}</strong>
                 <code className="text-text-muted text-xs font-mono bg-bg-input px-1.5 py-0.5 rounded">{p.schedule}</code>
+                <Pill>{scopeLabel(p.scope, scopes)}</Pill>
               </div>
               <div className="text-text-muted text-xs mt-0.5">
                 → {destinations.find(d => d.id === p.destination_id)?.name || `destination ${p.destination_id}`}
@@ -384,11 +490,11 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             </button>
           </Row>
         ))}
-        <PolicyForm destinations={destinations} onCreated={reload} api={api} />
+        <PolicyForm destinations={destinations} scopes={scopes} onCreated={reload} api={api} />
       </section>
 
       {/* History */}
-      <section className="border border-border rounded-lg p-4 bg-bg-card space-y-2">
+      <section className="pb-4 space-y-2">
         <h3 className="text-text text-sm font-bold">History</h3>
         {runs.length === 0 && (
           <div className="text-text-muted text-sm italic">No backup runs yet.</div>
@@ -403,15 +509,17 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
                   <span className="text-text font-bold">{r.destination_name}</span>
                   {" · "}{formatBytes(r.bytes_compressed)}
                   {" · "}{durationOf(r)}
+                  {" · "}<span className="text-text">{scopeLabel(r.scope, scopes)}</span>
+                  {r.encrypted ? " · encrypted" : ""}
                 </div>
                 {r.error && (
-                  <div className="text-error text-xs mt-0.5">{r.error}</div>
+                  <div className="text-error text-xs mt-0.5 break-words">{r.error}</div>
                 )}
               </div>
             </div>
             {r.status === "success" && r.remote_key && (
               <button
-                onClick={() => setPending({ kind: "restore", runID: r.id, destName: r.destination_name })}
+                onClick={() => setPending({ kind: "restore", runID: r.id, destName: r.destination_name, scope: r.scope, encrypted: r.encrypted })}
                 disabled={busy === `restore-${r.id}`}
                 className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text disabled:opacity-50 shrink-0"
               >
@@ -437,7 +545,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
 // ─── modal + confirm types ────────────────────────────────────────
 
 type PendingAction =
-  | { kind: "restore"; runID: number; destName: string }
+  | { kind: "restore"; runID: number; destName: string; scope: Scope; encrypted: boolean }
   | { kind: "delete-destination"; id: number; name: string }
   | { kind: "delete-policy"; id: number; name: string };
 
@@ -455,6 +563,7 @@ function ConfirmModal({
     title = "Restore from this backup?";
     confirmLabel = "Restore";
     danger = true;
+    const fleetTenant = pending.scope?.kind === "fleet_tenant";
     body = (
       <>
         <div>
@@ -462,8 +571,15 @@ function ConfirmModal({
           <span className="text-text font-bold">{pending.destName}</span> (run #{pending.runID}).
         </div>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-text-muted">
-          <li>App databases will be replaced live (sidecars stop and restart).</li>
-          <li>The platform DB will be staged and applied on the next server restart.</li>
+          {fleetTenant ? (
+            <li>Only Fleet tenant {pending.scope.id} will be replaced and restarted if it is currently running.</li>
+          ) : (
+            <>
+              <li>App databases will be replaced live after integrity verification.</li>
+              <li>The platform DB will be staged and applied on the next server restart.</li>
+            </>
+          )}
+          <li>{pending.encrypted ? "The stored object is encrypted." : "The stored object is not encrypted."}</li>
           <li>This is destructive and cannot be undone.</li>
         </ul>
       </>
@@ -475,7 +591,7 @@ function ConfirmModal({
     body = (
       <>
         Delete <span className="text-text font-bold">{pending.name}</span>?
-        Past runs in history will keep working.
+        Delete its policies first. Restore history keeps the destination configuration privately.
       </>
     );
   } else if (pending.kind === "delete-policy") {
@@ -565,7 +681,7 @@ function ModalShell({
 
 function Row({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-2 border-b border-border last:border-b-0">
+    <div className="flex flex-col items-stretch sm:flex-row sm:items-center sm:justify-between gap-3 py-2 border-b border-border last:border-b-0">
       {children}
     </div>
   );
@@ -593,8 +709,9 @@ interface Connection {
 const CLOUD_STORAGE_SLUGS = ["aws-s3", "cloudflare-r2"];
 
 function DestinationForm({
-  onCreated, api, installId,
+  destinations, onCreated, api, installId,
 }: {
+  destinations: Destination[];
   onCreated: () => void;
   api: <T>(method: string, path: string, body?: unknown) => Promise<T>;
   installId: number;
@@ -608,6 +725,9 @@ function DestinationForm({
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [connID, setConnID] = useState<number | "">("");
   const [err, setErr] = useState("");
+  const existingCloudConnection = destinations.find(
+    (destination) => destination.kind === "s3" && destination.connection_id,
+  )?.connection_id;
 
   // Lazy-load operator's S3-compatible connections the first time the
   // form is opened with kind=s3. /api/connections returns a bare JSON
@@ -624,13 +744,18 @@ function DestinationForm({
           (c) => CLOUD_STORAGE_SLUGS.includes(c.app_slug) && c.status === "active",
         );
         setConnections(list);
-        if (list.length === 1) setConnID(list[0].id);
+        if (existingCloudConnection) setConnID(existingCloudConnection);
+        else if (list.length === 1) setConnID(list[0].id);
       } catch (e) {
         setErr("Couldn't load connections: " + (e as Error).message);
         setConnections([]);
       }
     })();
-  }, [kind, connections]);
+  }, [kind, connections, existingCloudConnection]);
+
+  const availableConnections = existingCloudConnection
+    ? (connections || []).filter((connection) => connection.id === existingCloudConnection)
+    : connections;
 
   if (!open) return (
     <button
@@ -663,7 +788,7 @@ function DestinationForm({
       : { bucket, key_prefix: keyPrefix };
     try {
       await api("POST", "/destinations", {
-        name, kind, config, enabled: true,
+        name, kind, config, connection_id: kind === "s3" ? connID : undefined, enabled: true,
       });
       setOpen(false); setName(""); setBucket(""); setKeyPrefix("");
       onCreated();
@@ -671,7 +796,7 @@ function DestinationForm({
   };
 
   return (
-    <div className="mt-2 p-3 bg-bg-input border border-border rounded space-y-2">
+    <div className="mt-2 pt-3 border-t border-border space-y-2">
       <div className="text-text font-bold text-sm">New destination</div>
       <FormGrid>
         <Label>Name</Label>
@@ -680,7 +805,7 @@ function DestinationForm({
         <Label>Kind</Label>
         <Select value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
           <option value="local">local — host directory</option>
-          <option value="s3">s3 — Cloudflare R2 / AWS S3 / B2 / …</option>
+          <option value="s3">Cloudflare R2 or AWS S3</option>
         </Select>
 
         {kind === "local" && <>
@@ -696,11 +821,13 @@ function DestinationForm({
           <Label>Connection</Label>
           {connections === null ? (
             <div className="text-text-muted text-xs italic py-1.5">Loading your connections…</div>
-          ) : connections.length === 0 ? (
+          ) : availableConnections?.length === 0 ? (
             <div className="text-text-muted text-xs">
-              No compatible connections found. Create one in the{" "}
-              <a href="/integrations" className="text-accent hover:underline">Integrations</a>{" "}
-              tab — pick "Cloudflare R2" or "AWS S3", paste your credentials.
+              {existingCloudConnection
+                ? `Existing cloud destinations require connection ${existingCloudConnection}, but it is not active.`
+                : <>No compatible connections found. Create one in the{" "}
+                    <a href="/integrations" className="text-accent hover:underline">Integrations</a>{" "}
+                    tab using Cloudflare R2 or AWS S3.</>}
             </div>
           ) : (
             <Select
@@ -708,7 +835,7 @@ function DestinationForm({
               onChange={(v) => setConnID(Number(v))}
             >
               <option value="">Pick a connection…</option>
-              {connections.map((c) => (
+              {availableConnections?.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name} · {c.app_slug}
                 </option>
@@ -721,10 +848,12 @@ function DestinationForm({
           <Input value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
         </>}
       </FormGrid>
-      {kind === "s3" && connections && connections.length > 0 && (
+      {kind === "s3" && availableConnections && availableConnections.length > 0 && (
         <div className="text-text-muted text-xs">
-          Saving binds the chosen connection to this app's cloud_storage role —
-          credentials never leave the platform.
+          {existingCloudConnection
+            ? `Cloud destinations on this install share connection ${existingCloudConnection}. Use different buckets or prefixes within that account.`
+            : "Cloud destinations on this install share one bound account. Use different buckets or prefixes within it."}
+          {" "}Credentials stay in the platform.
         </div>
       )}
       {err && <div className="text-error text-xs">{err}</div>}
@@ -751,9 +880,10 @@ function DestinationForm({
 }
 
 function PolicyForm({
-  destinations, onCreated, api,
+  destinations, scopes, onCreated, api,
 }: {
   destinations: Destination[];
+  scopes: ScopesResponse | null;
   onCreated: () => void;
   api: <T>(method: string, path: string, body?: unknown) => Promise<T>;
 }) {
@@ -761,9 +891,9 @@ function PolicyForm({
   const [name, setName] = useState("nightly");
   const [schedule, setSchedule] = useState("0 3 * * *");
   const [destID, setDestID] = useState<number | "">(destinations[0]?.id ?? "");
-  const [keep, setKeep] = useState("14");
+  const [keep, setKeep] = useState("");
+  const [scopeKey, setScopeKey] = useState("platform");
   const [err, setErr] = useState("");
-  const [warning, setWarning] = useState("");
 
   // The form is mounted alongside the parent; if destinations was empty
   // at first render and the user added one before opening the form,
@@ -774,6 +904,10 @@ function PolicyForm({
       setDestID(destinations[0].id);
     }
   }, [destinations, destID]);
+
+  useEffect(() => {
+    if (keep === "" && scopes) setKeep(String(scopes.default_retention));
+  }, [scopes, keep]);
 
   if (!open) return (
     <button
@@ -787,23 +921,24 @@ function PolicyForm({
   );
 
   const submit = async () => {
-    setErr(""); setWarning("");
+    setErr("");
     if (!destID) { setErr("Pick a destination"); return; }
+    const retention = Number(keep);
+    if (!Number.isInteger(retention) || retention < 0) { setErr("Retention must be a whole number of 0 or greater"); return; }
+    const scope: Scope = scopeKey.startsWith("fleet:")
+      ? { kind: "fleet_tenant", id: scopeKey.slice(6), source_app: "fleet" }
+      : { kind: "platform" };
     try {
-      const out = await api<{ jobs_warning?: string }>("POST", "/policies", {
-        name, schedule, destination_id: destID, retention_keep: Number(keep),
+      await api("POST", "/policies", {
+        name, schedule, destination_id: destID, retention_keep: retention, scope,
       });
-      if (out?.jobs_warning) {
-        setWarning("Saved, but cron registration failed: " + out.jobs_warning);
-        return;
-      }
       setOpen(false);
       onCreated();
     } catch (e) { setErr((e as Error).message); }
   };
 
   return (
-    <div className="mt-2 p-3 bg-bg-input border border-border rounded space-y-2">
+    <div className="mt-2 pt-3 border-t border-border space-y-2">
       <div className="text-text font-bold text-sm">New policy</div>
       <FormGrid>
         <Label>Name</Label>
@@ -814,11 +949,17 @@ function PolicyForm({
         <Select value={String(destID)} onChange={(v) => setDestID(Number(v))}>
           {destinations.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
         </Select>
+        <Label>Scope</Label>
+        <Select value={scopeKey} onChange={setScopeKey}>
+          <option value="platform">Platform databases</option>
+          {(scopes?.fleet_tenants || []).filter((tenant) => tenant.restorable).map((tenant) => (
+            <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
+          ))}
+        </Select>
         <Label>Retention (last N)</Label>
-        <Input value={keep} onChange={setKeep} />
+        <Input value={keep} onChange={setKeep} placeholder="0 keeps all backups" />
       </FormGrid>
       {err && <div className="text-error text-xs">{err}</div>}
-      {warning && <div className="text-warn text-xs">{warning}</div>}
       <div className="flex justify-end gap-2 pt-1">
         <button
           onClick={() => setOpen(false)}
@@ -839,7 +980,7 @@ function PolicyForm({
 
 function FormGrid({ children }: { children: React.ReactNode }) {
   return (
-    <div className="grid gap-2 items-center" style={{ gridTemplateColumns: "120px 1fr" }}>
+    <div className="grid grid-cols-1 sm:grid-cols-[120px_minmax(0,1fr)] gap-2 items-center">
       {children}
     </div>
   );
@@ -857,7 +998,7 @@ function Input({
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
-      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text font-mono focus:outline-none focus:border-accent"
+      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text font-mono focus:outline-none focus:border-accent w-full min-w-0"
     />
   );
 }
@@ -869,7 +1010,7 @@ function Select({
     <select
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text"
+      className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text w-full min-w-0"
     >
       {children}
     </select>

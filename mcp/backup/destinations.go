@@ -7,17 +7,14 @@ package main
 //   - Get bytes back by remote_key (for restore)
 //   - List existing keys and Delete one (for retention pruning)
 //
-// Two impls in v0.2:
+// Two implementations:
 //   - local: writes under a host directory; the simplest possible backup.
-//   - s3:    any S3-compatible bucket. Credentials never touch this app —
-//            we use ctx.PlatformAPI().ExecuteIntegrationTool against the
-//            install's bound `cloud_storage` integration (aws-s3,
-//            cloudflare-r2, …). The runner handles SigV4 signing.
+//   - s3: AWS S3 and Cloudflare R2. Credentials are read on demand through
+//     the SDK's restricted connection credential API and never stored here.
 
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +25,8 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 type Destination_writer interface { // disambiguates from the DB row type
@@ -75,12 +74,11 @@ func validateDestination(d *Destination) error {
 		if c.Bucket == "" {
 			return errors.New("s3 destination requires {\"bucket\": ...}")
 		}
-		// Credentials, endpoint, region all live on the bound
-		// cloud_storage integration in v0.2 — no per-destination
-		// connection_id and no access_key fields. The bind happens at
-		// install time via the install dialog's RolePicker.
+		// Credentials, endpoint, and region live on the bound
+		// cloud_storage integration. The row records the binding ID so a
+		// later global rebind cannot silently redirect existing backups.
 	case kindStorageApp:
-		return errors.New("storage_app destination is reserved for v0.3")
+		return errors.New("storage_app destinations are not supported")
 	default:
 		return fmt.Errorf("unknown destination kind %q", d.Kind)
 	}
@@ -115,13 +113,12 @@ func openDestination(d *Destination, ctx *sdk.AppCtx, defaultLocalDir string) (D
 		}
 		bound := ctx.IntegrationFor("cloud_storage")
 		if bound == nil {
-			// Most common cause: this destination was created in
-			// backup v0.2.0 before the panel had a connection
-			// picker. Deleting + recreating the destination via
-			// the v0.2.2+ form binds the connection automatically.
-			return nil, errors.New("s3 destination has no cloud storage connection bound — delete this destination and add a new one (the picker will appear when you choose kind=s3)")
+			return nil, errors.New("s3 destination has no cloud storage connection bound")
 		}
-		return &cloudDest{cfg: c, ctx: ctx, bound: bound}, nil
+		if d.ConnectionID != 0 && d.ConnectionID != bound.ConnectionID {
+			return nil, fmt.Errorf("s3 destination %q uses connection %d, but cloud_storage is currently bound to connection %d", d.Name, d.ConnectionID, bound.ConnectionID)
+		}
+		return newCloudDest(ctx, bound, c)
 	default:
 		return nil, fmt.Errorf("unsupported destination kind %q", d.Kind)
 	}
@@ -137,33 +134,57 @@ type localDest struct {
 	cfg localConfig
 }
 
+func (d *localDest) pathForKey(key string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(key))
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid backup object key %q", key)
+	}
+	return filepath.Join(d.cfg.Path, clean), nil
+}
+
 func (d *localDest) Put(_ context.Context, key string, body io.Reader, _ int64) error {
-	dst := filepath.Join(d.cfg.Path, key)
+	dst, err := d.pathForKey(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
 	}
 	tmp := dst + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmp)
+		}
+	}()
 	if _, err := io.Copy(f, body); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	if err := os.Rename(tmp, dst); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (d *localDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	return os.Open(filepath.Join(d.cfg.Path, key))
+	path, err := d.pathForKey(key)
+	if err != nil {
+		return nil, err
+	}
+	return os.Open(path)
 }
 
 func (d *localDest) List(_ context.Context) ([]storedObject, error) {
@@ -173,7 +194,10 @@ func (d *localDest) List(_ context.Context) ([]storedObject, error) {
 		return out, nil
 	}
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
@@ -188,7 +212,11 @@ func (d *localDest) List(_ context.Context) ([]storedObject, error) {
 }
 
 func (d *localDest) Delete(_ context.Context, key string) error {
-	err := os.Remove(filepath.Join(d.cfg.Path, key))
+	path, err := d.pathForKey(key)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -203,9 +231,9 @@ type s3Config struct {
 }
 
 type cloudDest struct {
-	cfg   s3Config
-	ctx   *sdk.AppCtx
-	bound *sdk.BoundIntegration
+	cfg    s3Config
+	client *minio.Client
+	region string
 }
 
 func (d *cloudDest) prefixedKey(key string) string {
@@ -215,117 +243,93 @@ func (d *cloudDest) prefixedKey(key string) string {
 	return strings.TrimSuffix(d.cfg.KeyPrefix, "/") + "/" + key
 }
 
-// callTool routes a logical capability through the bound integration's
-// configured tool name, passing the input through ExecuteIntegrationTool.
-// Returns the parsed result envelope or an actionable error.
-func (d *cloudDest) callTool(capability string, input map[string]any) (*sdk.ExecuteResult, error) {
-	tool := d.bound.ToolFor(capability)
-	res, err := d.ctx.PlatformAPI().ExecuteIntegrationTool(d.bound.ConnectionID, tool, input)
+func newCloudDest(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, cfg s3Config) (*cloudDest, error) {
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", tool, err)
+		return nil, fmt.Errorf("read cloud storage credentials: %w", err)
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
+	access := strings.TrimSpace(creds.Fields["access_key_id"])
+	secret := strings.TrimSpace(creds.Fields["secret_access_key"])
+	if access == "" || secret == "" {
+		return nil, errors.New("cloud storage connection is missing access_key_id or secret_access_key")
+	}
+	region := strings.TrimSpace(creds.Fields["region"])
+	endpoint := ""
+	lookup := minio.BucketLookupAuto
+	switch creds.Slug {
+	case "aws-s3":
+		if region == "" {
+			region = "us-east-1"
 		}
-		status := 0
-		if res != nil {
-			status = res.Status
+		endpoint = "s3." + region + ".amazonaws.com"
+	case "cloudflare-r2":
+		accountID := strings.TrimSpace(creds.Fields["account_id"])
+		if accountID == "" {
+			return nil, errors.New("Cloudflare R2 connection is missing account_id")
 		}
-		return nil, fmt.Errorf("%s: %d %s", tool, status, strings.TrimSpace(body))
+		if region == "" {
+			region = "auto"
+		}
+		endpoint = accountID + ".r2.cloudflarestorage.com"
+		lookup = minio.BucketLookupDNS
+	default:
+		return nil, fmt.Errorf("unsupported cloud storage connection %q", creds.Slug)
 	}
-	return res, nil
-}
-
-func (d *cloudDest) Put(_ context.Context, key string, body io.Reader, _ int64) error {
-	// Read the full body into memory. Snapshots are typically small
-	// (<<100MB on real instances; the tar.gz is the platform DB +
-	// per-app DBs, which are SQLite and compress well). For very large
-	// instances we'd want a streaming put — punt to v0.3.
-	bytes, err := io.ReadAll(body)
-	if err != nil {
-		return fmt.Errorf("read body: %w", err)
-	}
-	_, err = d.callTool("object.put", map[string]any{
-		"bucket": d.cfg.Bucket,
-		"key":    d.prefixedKey(key),
-		"body":   bytes,
-	})
-	return err
-}
-
-func (d *cloudDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	res, err := d.callTool("object.get", map[string]any{
-		"bucket": d.cfg.Bucket,
-		"key":    d.prefixedKey(key),
+	client, err := minio.New(endpoint, &minio.Options{
+		Creds:  credentials.NewStaticV4(access, secret, strings.TrimSpace(creds.Fields["session_token"])),
+		Secure: true, Region: region, BucketLookup: lookup,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create S3 client: %w", err)
 	}
-	// The runner returns the upstream body in res.Data; for binary
-	// responses it's the raw object bytes. JSON-decoding is *not* run
-	// for non-JSON content types, so res.Data is what S3 sent us.
-	return io.NopCloser(strings.NewReader(string(res.Data))), nil
+	return &cloudDest{cfg: cfg, client: client, region: region}, nil
 }
 
-// listBucketResult mirrors the S3 ListObjectsV2 XML response. Only the
-// fields backup needs.
-type listBucketResult struct {
-	XMLName               xml.Name           `xml:"ListBucketResult"`
-	IsTruncated           bool               `xml:"IsTruncated"`
-	NextContinuationToken string             `xml:"NextContinuationToken"`
-	Contents              []listBucketObject `xml:"Contents"`
+func (d *cloudDest) Put(ctx context.Context, key string, body io.Reader, size int64) error {
+	if size <= 0 {
+		size = -1
+	}
+	_, err := d.client.PutObject(ctx, d.cfg.Bucket, d.prefixedKey(key), body, size, minio.PutObjectOptions{
+		ContentType: "application/octet-stream", PartSize: 16 << 20, NumThreads: 4,
+	})
+	if err != nil {
+		return fmt.Errorf("S3 put %s: %w", key, err)
+	}
+	return nil
 }
 
-type listBucketObject struct {
-	Key          string    `xml:"Key"`
-	Size         int64     `xml:"Size"`
-	LastModified time.Time `xml:"LastModified"`
+func (d *cloudDest) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	object, err := d.client.GetObject(ctx, d.cfg.Bucket, d.prefixedKey(key), minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("S3 get %s: %w", key, err)
+	}
+	if _, err := object.Stat(); err != nil {
+		_ = object.Close()
+		return nil, fmt.Errorf("S3 stat %s: %w", key, err)
+	}
+	return object, nil
 }
 
-func (d *cloudDest) List(_ context.Context) ([]storedObject, error) {
+func (d *cloudDest) List(ctx context.Context) ([]storedObject, error) {
 	out := []storedObject{}
-	cursor := ""
-	for {
-		input := map[string]any{
-			"bucket":    d.cfg.Bucket,
-			"list-type": 2,
+	prefix := strings.TrimSuffix(d.cfg.KeyPrefix, "/")
+	if prefix != "" {
+		prefix += "/"
+	}
+	for object := range d.client.ListObjects(ctx, d.cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if object.Err != nil {
+			return nil, fmt.Errorf("S3 list: %w", object.Err)
 		}
-		if d.cfg.KeyPrefix != "" {
-			input["prefix"] = d.cfg.KeyPrefix
-		}
-		if cursor != "" {
-			input["continuation-token"] = cursor
-		}
-		res, err := d.callTool("object.list", input)
-		if err != nil {
-			return nil, err
-		}
-		var lbr listBucketResult
-		if err := xml.Unmarshal(res.Data, &lbr); err != nil {
-			return nil, fmt.Errorf("parse list_objects xml: %w", err)
-		}
-		for _, c := range lbr.Contents {
-			key := c.Key
-			if d.cfg.KeyPrefix != "" {
-				key = strings.TrimPrefix(key, strings.TrimSuffix(d.cfg.KeyPrefix, "/")+"/")
-			}
-			out = append(out, storedObject{Key: key, Size: c.Size, Modified: c.LastModified})
-		}
-		if !lbr.IsTruncated || lbr.NextContinuationToken == "" {
-			break
-		}
-		cursor = lbr.NextContinuationToken
+		key := strings.TrimPrefix(object.Key, prefix)
+		out = append(out, storedObject{Key: key, Size: object.Size, Modified: object.LastModified})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
 	return out, nil
 }
 
-func (d *cloudDest) Delete(_ context.Context, key string) error {
-	_, err := d.callTool("object.delete", map[string]any{
-		"bucket": d.cfg.Bucket,
-		"key":    d.prefixedKey(key),
-	})
-	return err
+func (d *cloudDest) Delete(ctx context.Context, key string) error {
+	if err := d.client.RemoveObject(ctx, d.cfg.Bucket, d.prefixedKey(key), minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("S3 delete %s: %w", key, err)
+	}
+	return nil
 }
