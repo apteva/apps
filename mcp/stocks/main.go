@@ -32,7 +32,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.7.1
+version: 0.7.2
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
