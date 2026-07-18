@@ -188,7 +188,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 	if connectionID == "" {
 		return nil, fmt.Errorf("telnyx connection has no connection_id configured")
 	}
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"connection_id":              connectionID,
 		"to":                         req.To,
 		"from":                       req.From,
@@ -202,7 +202,14 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"command_id":                 req.CallID,
 		"webhook_url":                c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"webhook_url_method":         "POST",
-	})
+	}
+	if req.RecordingMode == recordingModeAlways {
+		input["record"] = "record-from-answer"
+		input["record_channels"] = telnyxRecordingChannels(req.RecordingChannels)
+		input["record_format"] = "wav"
+		input["record_track"] = "both"
+	}
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("telnyx make_call failed: %w", err)
 	}
@@ -226,7 +233,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 }
 
 func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
-	_, err := executeCarrierTool(ctx, c.connID, "update_call", map[string]any{
+	_, err := executeCarrierTool(ctx, c.connID, "hangup_call", map[string]any{
 		"call_control_id": row.CarrierSID,
 	})
 	return err
@@ -245,6 +252,8 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 		"to":            req.To,
 		"answer_url":    c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"answer_method": "POST",
+		"ring_url":      c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"ring_method":   "POST",
 		"hangup_url":    c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"hangup_method": "POST",
 		"ring_timeout":  req.TimeoutSec,
@@ -351,10 +360,28 @@ func (a *App) handlePlivoXML(w http.ResponseWriter, r *http.Request) {
 	}
 	streamURL := xmlEscape(a.publicWSStreamURL("plivo", callID, row.CallbackSecret))
 	w.Header().Set("Content-Type", "application/xml")
-	_, _ = fmt.Fprintf(w, `<Response><Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000" audioTrack="inbound" statusCallbackUrl="%s" statusCallbackMethod="POST">%s</Stream></Response>`,
-		xmlEscape(a.statusCallbackURL(callID, row.CallbackSecret, row.ProjectID)),
-		streamURL,
-	)
+	_, _ = w.Write([]byte(a.plivoStreamXML(row, streamURL)))
+}
+
+func telnyxRecordingChannels(channels string) string {
+	if channels == "dual" {
+		return "dual"
+	}
+	return "single"
+}
+
+func (a *App) plivoStreamXML(row *callRow, escapedStreamURL string) string {
+	record := ""
+	if row != nil && row.RecordingMode == recordingModeAlways {
+		channelType := "mono"
+		if row.RecordingChannels == "dual" {
+			channelType = "stereo"
+		}
+		record = fmt.Sprintf(`<Record recordSession="true" redirect="false" fileFormat="wav" recordChannelType="%s" callbackUrl="%s" callbackMethod="POST"/>`,
+			channelType, xmlEscape(a.plivoRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
+	}
+	return fmt.Sprintf(`<Response>%s<Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-mulaw;rate=8000" audioTrack="inbound" statusCallbackUrl="%s" statusCallbackMethod="POST">%s</Stream></Response>`,
+		record, xmlEscape(a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID)), escapedStreamURL)
 }
 
 func xmlEscape(s string) string {
