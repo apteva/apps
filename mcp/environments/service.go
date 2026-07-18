@@ -20,6 +20,8 @@ type service struct {
 	fixtureMu sync.Mutex
 }
 
+const startingRunGracePeriod = 2 * time.Minute
+
 func (s *service) listDefinitions() ([]Definition, error) {
 	defs, err := s.db.listDefinitions()
 	if err != nil {
@@ -81,11 +83,14 @@ func (s *service) startDefinition(id string) (*Run, error) {
 		}
 		return nil, err
 	}
-	_ = s.db.setDesired(id, "running")
+	if err := s.db.setDesired(id, "running"); err != nil {
+		return nil, err
+	}
 	return s.start(id, "interactive", d.Spec)
 }
 
 func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *Run, err error) {
+	aborted := false
 	if err = validateSpec(spec); err != nil {
 		return nil, err
 	}
@@ -107,7 +112,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	}
 	created := false
 	defer func() {
-		if err != nil {
+		if err != nil && !aborted {
 			if created {
 				_ = s.runtime().DestroyRuntime(runtimeID)
 			}
@@ -138,34 +143,62 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 			return run, fmt.Errorf("agent %d: %w", i, err)
 		}
 	}
-	run.Status = "running"
-	if err = s.db.updateRun(run.ID, "running", ""); err != nil {
+	transitioned, transitionErr := s.db.transitionRun(run.ID, "starting", "running", "")
+	if transitionErr != nil {
+		err = transitionErr
 		return run, err
 	}
-	_ = s.db.setWebFixturesStatus(run.ID, "running")
+	if !transitioned {
+		aborted = true
+		_ = s.runtime().DestroyRuntime(runtimeID)
+		created = false
+		err = errors.New("environment run was stopped while starting")
+		return run, err
+	}
+	run.Status = "running"
+	if err = s.db.setWebFixturesStatus(run.ID, "running"); err != nil {
+		return run, err
+	}
 	s.decorateRun(run)
 	s.ctx.Emit("environment.started", map[string]any{"environment_id": environmentID, "run_id": run.ID, "runtime_id": runtimeID})
 	return run, nil
 }
 
 func (s *service) stopDefinition(id string) error {
-	_ = s.db.setDesired(id, "stopped")
-	run, err := s.db.activeRun(id)
-	if err != nil || run == nil {
+	if err := s.db.setDesired(id, "stopped"); err != nil {
 		return err
 	}
-	return s.stopRun(run)
+	runs, err := s.db.activeRuns(id)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for i := range runs {
+		if err := s.stopRun(&runs[i]); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 func (s *service) stopRun(run *Run) error {
-	_ = s.db.updateRun(run.ID, "stopping", "")
-	_ = s.db.setWebFixturesStatus(run.ID, "stopping")
+	if err := s.db.updateRun(run.ID, "stopping", ""); err != nil {
+		return err
+	}
+	if err := s.db.setWebFixturesStatus(run.ID, "stopping"); err != nil {
+		return err
+	}
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		_ = s.db.updateRun(run.ID, "failed", err.Error())
+		_ = s.db.setWebFixturesStatus(run.ID, "failed")
 		return err
 	}
-	_ = s.db.updateRun(run.ID, "stopped", "")
-	_ = s.db.setWebFixturesStatus(run.ID, "stopped")
+	if err := s.db.updateRun(run.ID, "stopped", ""); err != nil {
+		return err
+	}
+	if err := s.db.setWebFixturesStatus(run.ID, "stopped"); err != nil {
+		return err
+	}
 	s.ctx.Emit("environment.stopped", map[string]any{"environment_id": run.EnvironmentID, "run_id": run.ID, "runtime_id": run.RuntimeID})
 	return nil
 }
@@ -181,9 +214,20 @@ func (s *service) reconcile(context.Context) error {
 	}
 	for i := range runs {
 		r := &runs[i]
+		if r.Status == "starting" && time.Since(r.StartedAt) < startingRunGracePeriod {
+			continue
+		}
 		if (r.Status == "starting" || r.Status == "running" || r.Status == "stopping") && live[r.RuntimeID] == nil {
-			_ = s.db.updateRun(r.ID, "expired", "runtime no longer exists")
-			_ = s.db.setWebFixturesStatus(r.ID, "expired")
+			transitioned, transitionErr := s.db.transitionRun(r.ID, r.Status, "expired", "runtime no longer exists")
+			if transitionErr != nil {
+				return transitionErr
+			}
+			if !transitioned {
+				continue
+			}
+			if err := s.db.setWebFixturesStatus(r.ID, "expired"); err != nil {
+				return err
+			}
 			s.ctx.Emit("environment.expired", map[string]any{"environment_id": r.EnvironmentID, "run_id": r.ID, "runtime_id": r.RuntimeID})
 		}
 	}

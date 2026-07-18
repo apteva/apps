@@ -24,7 +24,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql"} {
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -66,9 +66,42 @@ func TestDefinitionAndRunPersistence(t *testing.T) {
 	if err := s.updateRun(r.ID, "stopped", ""); err != nil {
 		t.Fatal(err)
 	}
+	stopped, err := s.getRun(r.ID)
+	if err != nil || stopped == nil || stopped.StoppedAt == nil {
+		t.Fatalf("stopped=%#v err=%v", stopped, err)
+	}
+	if err := s.updateRun(r.ID, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := s.getRun(r.ID)
+	if err != nil || restarted == nil || restarted.StoppedAt != nil {
+		t.Fatalf("restarted=%#v err=%v", restarted, err)
+	}
+	if err := s.updateRun(r.ID, "stopped", ""); err != nil {
+		t.Fatal(err)
+	}
 	active, err = s.activeRun(d.ID)
 	if err != nil || active != nil {
 		t.Fatalf("active=%#v err=%v", active, err)
+	}
+}
+
+func TestOnlyOneActiveRunPerEnvironment(t *testing.T) {
+	s := testStore(t)
+	now := time.Now().UTC()
+	first := &Run{ID: "run-first", EnvironmentID: "env-one", RuntimeID: "rt-first", Kind: "interactive", Status: "starting", StartedAt: now}
+	second := &Run{ID: "run-second", EnvironmentID: "env-one", RuntimeID: "rt-second", Kind: "reconcile", Status: "starting", StartedAt: now.Add(time.Second)}
+	if err := s.createRun(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.createRun(second); err == nil {
+		t.Fatal("created a second active run for one environment")
+	}
+	if err := s.updateRun(first.ID, "expired", "runtime no longer exists"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.createRun(second); err != nil {
+		t.Fatalf("create after terminal transition: %v", err)
 	}
 }
 
@@ -223,5 +256,22 @@ func TestPatreonFixtureSignedRoute(t *testing.T) {
 	app.handleFixture(stopped, httptest.NewRequest(http.MethodGet, "/fixtures/run-route/patreon/"+x.Token+"/", nil))
 	if stopped.Code != http.StatusNotFound {
 		t.Fatalf("stopped fixture status=%d", stopped.Code)
+	}
+}
+
+func TestFixtureStatusBlocksActions(t *testing.T) {
+	svc := &service{db: testStore(t)}
+	run := &Run{ID: "run-inactive-fixture", RuntimeID: "runtime-inactive-fixture", Kind: "test", Status: "running", StartedAt: time.Now().UTC()}
+	if err := svc.db.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.createWebFixtures(run, EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "patreon", Pack: "patreon"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.setWebFixturesStatus(run.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "follow", nil); err == nil {
+		t.Fatal("action succeeded against a stopped fixture")
 	}
 }

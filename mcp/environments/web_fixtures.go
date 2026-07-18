@@ -68,7 +68,7 @@ func (s *service) createWebFixtures(run *Run, spec EnvironmentSpec) error {
 				state = restored
 			}
 		}
-		x := &WebFixtureInstance{RunID: run.ID, ID: fixtureSpec.ID, Pack: fixtureSpec.Pack, Version: fixtureSpec.Version, Scenario: fixtureSpec.Scenario, Seed: fixtureSpec.Seed, State: cloneJSONMap(state), InitialState: cloneJSONMap(state), Status: "running", Token: token(48)}
+		x := &WebFixtureInstance{RunID: run.ID, ID: fixtureSpec.ID, Pack: fixtureSpec.Pack, Version: fixtureSpec.Version, Scenario: fixtureSpec.Scenario, Seed: fixtureSpec.Seed, State: cloneJSONMap(state), InitialState: cloneJSONMap(state), Status: "starting", Token: token(48)}
 		if err := s.db.createWebFixture(x); err != nil {
 			return err
 		}
@@ -169,7 +169,7 @@ func (a *App) handleFixture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x, err := a.svc.db.getWebFixture(runID, fixtureID)
-	if err != nil || x == nil || subtle.ConstantTimeCompare([]byte(x.Token), []byte(supplied)) != 1 {
+	if err != nil || x == nil || (x.Status != "starting" && x.Status != "running") || subtle.ConstantTimeCompare([]byte(x.Token), []byte(supplied)) != 1 {
 		http.NotFound(w, r)
 		return
 	}
@@ -220,12 +220,22 @@ func (a *App) handleFixture(w http.ResponseWriter, r *http.Request) {
 func (s *service) applyFixtureAction(runID, fixtureID, action string, input map[string]any) (map[string]any, *WebFixtureEvent, error) {
 	s.fixtureMu.Lock()
 	defer s.fixtureMu.Unlock()
+	run, err := s.db.getRun(runID)
+	if err != nil || run == nil || (run.Status != "starting" && run.Status != "running") {
+		if err == nil {
+			err = errors.New("environment run is not active")
+		}
+		return nil, nil, err
+	}
 	x, err := s.db.getWebFixture(runID, fixtureID)
 	if err != nil || x == nil {
 		if err == nil {
 			err = errors.New("web fixture not found")
 		}
 		return nil, nil, err
+	}
+	if x.Status != "starting" && x.Status != "running" {
+		return nil, nil, errors.New("web fixture is not active")
 	}
 	var eventType string
 	var data map[string]any

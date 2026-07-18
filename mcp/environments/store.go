@@ -103,12 +103,45 @@ func (s store) updateRun(id, status, msg string) error {
 	if status == "stopped" || status == "failed" || status == "expired" {
 		stopped = time.Now().UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=COALESCE(?,stopped_at) WHERE id=?`, status, msg, stopped, id)
+	_, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=?`, status, msg, stopped, id)
 	return err
 }
+
+func (s store) transitionRun(id, from, status, msg string) (bool, error) {
+	var stopped any
+	if status == "stopped" || status == "failed" || status == "expired" {
+		stopped = time.Now().UTC().Format(time.RFC3339Nano)
+	}
+	result, err := s.db.Exec(`UPDATE environment_runs SET status=?,error=?,stopped_at=? WHERE id=? AND status=?`, status, msg, stopped, id, from)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
 func (s store) activeRun(environmentID string) (*Run, error) {
 	row := s.db.QueryRow(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE environment_id=? AND status IN ('starting','running','stopping') ORDER BY started_at DESC LIMIT 1`, environmentID)
 	return scanRun(row)
+}
+
+func (s store) activeRuns(environmentID string) ([]Run, error) {
+	rows, err := s.db.Query(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE environment_id=? AND status IN ('starting','running','stopping') ORDER BY started_at DESC`, environmentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		if run != nil {
+			out = append(out, *run)
+		}
+	}
+	return out, rows.Err()
 }
 func (s store) getRun(id string) (*Run, error) {
 	return scanRun(s.db.QueryRow(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE id=? OR runtime_id=? LIMIT 1`, id, id))
