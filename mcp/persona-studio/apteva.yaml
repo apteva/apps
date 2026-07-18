@@ -2,12 +2,18 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.19
+version: 0.1.20
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
+
+  v0.1.20 hardens generation state and the dashboard experience: failed
+  provider calls return truthful HTTP errors, duplicate submits are
+  blocked, async Media Studio video/avatar jobs update persona assets,
+  project switches cannot retain stale personas, and the workspace is
+  responsive in narrow dashboard panels.
 
   v0.1.18 previews persona composition renders inline in the
   Compositions panel, with audio, video, and image viewers selected
@@ -58,6 +64,9 @@ requires:
     - name: media-studio
       version: ">=0.10.8"
       reason: Generate images, videos, audio, music, and avatar clips through bound providers.
+      events:
+        - media.generated
+        - media.failed
     - name: composer
       version: ">=0.3.0"
       optional: true

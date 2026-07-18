@@ -48,10 +48,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "media.generated", Handler: a.handleMediaGenerated},
+		{Event: "media.failed", Handler: a.handleMediaFailed},
+	}
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
@@ -174,6 +179,7 @@ type Asset struct {
 	CampaignID        int64           `json:"campaign_id,omitempty"`
 	StorageFileID     int64           `json:"storage_file_id,omitempty"`
 	MediaGenerationID int64           `json:"media_generation_id,omitempty"`
+	MediaJobID        int64           `json:"media_job_id,omitempty"`
 	AssetType         string          `json:"asset_type"`
 	Status            string          `json:"status"`
 	Prompt            string          `json:"prompt"`
@@ -416,7 +422,7 @@ func (a *App) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	args["_project_id"] = pid
 	v, err := a.toolGenerateAsset(ctx, args)
-	writeOrErr(w, v, err)
+	writeGenerationResult(w, v, err)
 }
 
 func (a *App) handleClipPlan(w http.ResponseWriter, r *http.Request) {
@@ -547,6 +553,88 @@ func (a *App) handleStorageFiles(w http.ResponseWriter, r *http.Request) {
 	err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", tool, args, &out)
 	filterStorageBrowserOutput(out)
 	writeOrErr(w, out, err)
+}
+
+func (a *App) handleMediaGenerated(ctx *sdk.AppCtx, event sdk.Event) error {
+	if ctx == nil {
+		return errors.New("app context unavailable")
+	}
+	pid := strings.TrimSpace(event.ProjectID)
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	jobID := int64Arg(event.Data, "job_id")
+	if pid == "" || jobID == 0 {
+		return nil
+	}
+	return completeQueuedAsset(ctx.AppDB(), pid, jobID, int64Arg(event.Data, "generation_id"), int64Arg(event.Data, "storage_id"))
+}
+
+func (a *App) handleMediaFailed(ctx *sdk.AppCtx, event sdk.Event) error {
+	if ctx == nil {
+		return errors.New("app context unavailable")
+	}
+	pid := strings.TrimSpace(event.ProjectID)
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	jobID := int64Arg(event.Data, "job_id")
+	if pid == "" || jobID == 0 {
+		return nil
+	}
+	message := strArg(event.Data, "error")
+	if message == "" {
+		message = "Media Studio generation failed"
+	}
+	_, err := ctx.AppDB().Exec(
+		`UPDATE persona_assets
+		 SET status='failed', error=?, updated_at=CURRENT_TIMESTAMP
+		 WHERE project_id=? AND media_job_id=? AND status IN ('queued','polling')`,
+		message, pid, jobID,
+	)
+	return err
+}
+
+func completeQueuedAsset(db *sql.DB, pid string, jobID, generationID, storageID int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var assetID, personaID int64
+	var assetType, cacheKey string
+	err = tx.QueryRow(
+		`SELECT id, persona_id, asset_type, cache_key
+		 FROM persona_assets
+		 WHERE project_id=? AND media_job_id=? AND status IN ('queued','polling')
+		 ORDER BY id DESC LIMIT 1`,
+		pid, jobID,
+	).Scan(&assetID, &personaID, &assetType, &cacheKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(
+		`UPDATE persona_assets
+		 SET status='ready', storage_file_id=?, media_generation_id=?, error='', updated_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND project_id=?`,
+		nullableInt64(storageID), nullableInt64(generationID), assetID, pid,
+	); err != nil {
+		return err
+	}
+	if storageID > 0 && cacheKey != "" {
+		if _, err = tx.Exec(
+			`INSERT OR REPLACE INTO persona_generation_cache
+			 (cache_key, project_id, persona_id, asset_type, storage_file_id, asset_id, generation_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			cacheKey, pid, personaID, assetType, storageID, assetID, nullableInt64(generationID),
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // MCP tool handlers
@@ -935,14 +1023,14 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	var mediaOut map[string]any
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("media-studio", "media_generate", call, &mediaOut); err != nil {
-		asset, insertErr := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, "failed", prompt, resolved, "", "", settings, refIDs(refs), itemIDs, cacheKey, err.Error(), 0, 0)
+		asset, insertErr := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, "failed", prompt, resolved, "", "", settings, refIDs(refs), itemIDs, cacheKey, err.Error(), 0, 0, 0)
 		if insertErr != nil {
 			return nil, err
 		}
 		return map[string]any{"asset": asset, "error": err.Error()}, nil
 	}
 	if msg := mcpResultError(mediaOut); msg != "" {
-		asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, "failed", prompt, resolved, "", "", settings, refIDs(refs), itemIDs, cacheKey, msg, 0, 0)
+		asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, "failed", prompt, resolved, "", "", settings, refIDs(refs), itemIDs, cacheKey, msg, 0, 0, 0)
 		return map[string]any{"asset": asset, "error": msg}, err
 	}
 	mediaMeta := mediaStudioResultMeta(mediaOut)
@@ -952,9 +1040,10 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	storageID := firstInt(mediaMeta["storage_ids"])
 	genID := firstNonZero(int64FromMap(mediaMeta, "generation_id"), int64FromMap(mediaMeta, "id"))
+	jobID := int64FromMap(mediaMeta, "job_id")
 	provider := strFromMap(mediaMeta, "provider")
 	model := strFromMap(mediaMeta, "model")
-	asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, status, prompt, resolved, provider, model, settings, refIDs(refs), itemIDs, cacheKey, "", storageID, genID)
+	asset, err := a.insertAsset(ctx, pid, personaID, int64Arg(args, "campaign_id"), assetType, status, prompt, resolved, provider, model, settings, refIDs(refs), itemIDs, cacheKey, "", storageID, genID, jobID)
 	if err != nil {
 		return nil, err
 	}
@@ -1850,13 +1939,13 @@ func listCampaignsWhere(db *sql.DB, where string, vals ...any) ([]map[string]any
 	return out, rows.Err()
 }
 
-func (a *App) insertAsset(ctx *sdk.AppCtx, pid string, personaID, campaignID int64, assetType, status, prompt, resolved, provider, model string, settings map[string]any, referenceIDs, itemIDs []int64, cacheKey, errMsg string, storageID, generationID int64) (*Asset, error) {
+func (a *App) insertAsset(ctx *sdk.AppCtx, pid string, personaID, campaignID int64, assetType, status, prompt, resolved, provider, model string, settings map[string]any, referenceIDs, itemIDs []int64, cacheKey, errMsg string, storageID, generationID, jobID int64) (*Asset, error) {
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO persona_assets
-		 (project_id, persona_id, campaign_id, storage_file_id, media_generation_id, asset_type, status, prompt,
+		 (project_id, persona_id, campaign_id, storage_file_id, media_generation_id, media_job_id, asset_type, status, prompt,
 		  resolved_prompt, provider_slug, provider_model, settings_json, reference_ids_json, item_ids_json, cache_key, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, personaID, nullableInt64(campaignID), nullableInt64(storageID), nullableInt64(generationID), assetType, status, prompt,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, personaID, nullableInt64(campaignID), nullableInt64(storageID), nullableInt64(generationID), nullableInt64(jobID), assetType, status, prompt,
 		resolved, provider, model, mustJSON(settings, "{}"), mustJSON(referenceIDs, "[]"), mustJSON(itemIDs, "[]"), cacheKey, errMsg,
 	)
 	if err != nil {
@@ -1907,7 +1996,7 @@ func listAssetsByIDs(db *sql.DB, pid string, ids []int64) ([]Asset, error) {
 
 func listAssetsWhere(db *sql.DB, where string, vals ...any) ([]Asset, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, persona_id, COALESCE(campaign_id,0), COALESCE(storage_file_id,0), COALESCE(media_generation_id,0),
+		`SELECT id, project_id, persona_id, COALESCE(campaign_id,0), COALESCE(storage_file_id,0), COALESCE(media_generation_id,0), COALESCE(media_job_id,0),
 		        asset_type, status, prompt, resolved_prompt, provider_slug, provider_model, settings_json,
 		        reference_ids_json, item_ids_json, cache_key, error, created_at, updated_at
 		 FROM persona_assets WHERE `+where, vals...,
@@ -1920,7 +2009,7 @@ func listAssetsWhere(db *sql.DB, where string, vals ...any) ([]Asset, error) {
 	for rows.Next() {
 		var a Asset
 		var settings, refs, items string
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PersonaID, &a.CampaignID, &a.StorageFileID, &a.MediaGenerationID, &a.AssetType,
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PersonaID, &a.CampaignID, &a.StorageFileID, &a.MediaGenerationID, &a.MediaJobID, &a.AssetType,
 			&a.Status, &a.Prompt, &a.ResolvedPrompt, &a.ProviderSlug, &a.ProviderModel, &settings, &refs, &items,
 			&a.CacheKey, &a.Error, &a.CreatedAt, &a.UpdatedAt); err == nil {
 			a.Settings = rawJSON(settings, "{}")
@@ -2314,6 +2403,22 @@ func writeOrErr(w http.ResponseWriter, v any, err error) {
 	if err != nil {
 		httpErr(w, 400, err.Error())
 		return
+	}
+	writeJSON(w, v)
+}
+
+func writeGenerationResult(w http.ResponseWriter, v any, err error) {
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if result, ok := v.(map[string]any); ok {
+		if message := strArg(result, "error"); message != "" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_ = json.NewEncoder(w).Encode(result)
+			return
+		}
 	}
 	writeJSON(w, v)
 }
