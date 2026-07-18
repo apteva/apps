@@ -465,12 +465,15 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 	rawX := clampInt(int(float64(rect.Min.X)*float64(srcW)/float64(tw)), 0, srcW-cw)
 	rawY := clampInt(int(float64(rect.Min.Y)*float64(srcH)/float64(th)), 0, srcH-ch)
 	x, y := stabilizeNarrowSmartCrop(rawX, rawY, srcW, srcH, cw, ch)
-	subjectChanged := false
 	if subjectX, ok := subjectAwareNarrowSmartCropX(img, rawX, x, srcW, srcH, cw, ch, tcw); ok {
 		x = subjectX
-		subjectChanged = true
 	}
-	if silhouetteX, ok := silhouetteAwareNarrowSmartCropX(img, x, srcW, cw, tcw); ok && !subjectChanged {
+	// Warm-pixel evidence and tall-silhouette evidence are complementary.
+	// Do not let a weak warm-colored background candidate suppress a much
+	// stronger full-height person silhouette (the Maria vanity failure). The
+	// silhouette guard already requires high row coverage, concentration, and
+	// a material score improvement over the current crop.
+	if silhouetteX, ok := silhouetteAwareNarrowSmartCropX(img, x, srcW, cw, tcw); ok {
 		x = silhouetteX
 	}
 	if headX, ok := headAwareNarrowSmartCropX(img, x, srcW, cw); ok {
