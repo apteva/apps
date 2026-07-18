@@ -18,9 +18,9 @@ CREATE TABLE IF NOT EXISTS settings (
     default_passengers        INTEGER NOT NULL DEFAULT 1,
     duffel_connection_id      INTEGER,
     places_connection_id      INTEGER,
-    -- Soft cap. Daily Places spend below this is allowed; above this
-    -- the search tool returns quota_exceeded=true and the UI hides
-    -- the dropdown. Default ~$5/day (5000 cents). 0 = no cap.
+    -- Estimated daily Places cap. Cache misses are rejected before
+    -- the provider call once this amount is reached. Default ~$5/day
+    -- (500 cents); 0 disables the cap.
     daily_search_budget_cents INTEGER NOT NULL DEFAULT 500,
     created_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

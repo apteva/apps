@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -620,11 +621,18 @@ type BudgetCategoryRow struct {
 }
 
 type BudgetSummary struct {
-	HomeCurrency string              `json:"home_currency"`
-	Categories   []BudgetCategoryRow `json:"categories"`
-	TotalPlanned int64               `json:"total_planned"`
-	TotalActual  int64               `json:"total_actual"`
-	TotalCap     int64               `json:"total_cap"`
+	HomeCurrency    string              `json:"home_currency"`
+	Categories      []BudgetCategoryRow `json:"categories"`
+	TotalPlanned    int64               `json:"total_planned"`
+	TotalActual     int64               `json:"total_actual"`
+	TotalCap        int64               `json:"total_cap"`
+	OtherCurrencies []CurrencyTotal     `json:"other_currencies,omitempty"`
+}
+
+type CurrencyTotal struct {
+	Currency string `json:"currency"`
+	Planned  int64  `json:"planned"`
+	Actual   int64  `json:"actual"`
 }
 
 // TripDashboard is the dashboard tool's combined payload.
@@ -664,14 +672,14 @@ func (a *App) toolTripsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		bare = append(bare, t)
 	}
 	rows.Close()
-	// Compute per-trip budget aggregates after closing the cursor —
-	// testkit caps connections at 1 and computeBudgetSummary issues
-	// its own queries.
+	// Load every list-card total in one grouped query. The previous
+	// implementation called computeBudgetSummary per trip (1 + 5N
+	// queries), which made the timeline progressively slower.
+	totals := loadHomeCurrencyTotals(ctx, pid)
 	out := make([]Trip, 0, len(bare))
 	for _, t := range bare {
-		s, err := computeBudgetSummary(ctx, t.ID)
-		if err == nil {
-			planned, actual := s.TotalPlanned, s.TotalActual
+		if total, ok := totals[t.ID]; ok {
+			planned, actual := total.Planned, total.Actual
 			t.TotalPlanned = &planned
 			t.TotalActual = &actual
 		}
@@ -715,7 +723,10 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		startValue = startT.UTC().Format(time.RFC3339)
 		endValue = endT.UTC().Format(time.RFC3339)
 	}
-	homeCcy := strings.ToUpper(strArg(args, "home_currency", "EUR"))
+	homeCcy, err := normalizeCurrency(strArg(args, "home_currency", "EUR"))
+	if err != nil {
+		return nil, err
+	}
 	color := strArg(args, "color", "#3b82f6")
 	purpose := strArg(args, "purpose", "")
 	notes := strArg(args, "notes", "")
@@ -775,8 +786,18 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"name", "color", "notes", "purpose"} {
-		if v, ok := args[k].(string); ok && v != "" {
+	for _, k := range []string{"name", "color"} {
+		if v, ok := args[k].(string); ok {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return nil, fmt.Errorf("%s cannot be empty", k)
+			}
+			cols = append(cols, k+"=?")
+			vals = append(vals, v)
+		}
+	}
+	for _, k := range []string{"notes", "purpose"} {
+		if v, ok := args[k].(string); ok {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
@@ -845,7 +866,15 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if v, ok := args["total_budget"]; ok {
 		cols = append(cols, "total_budget=?")
-		vals = append(vals, int64(intArgFromAny(v, 0)))
+		if v == nil {
+			vals = append(vals, nil)
+		} else {
+			amount := int64(intArgFromAny(v, 0))
+			if amount < 0 {
+				return nil, errors.New("total_budget cannot be negative")
+			}
+			vals = append(vals, amount)
+		}
 	}
 	syncChanged := false
 	newSync := old.SyncCalendar
@@ -991,6 +1020,10 @@ func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if (arriveAt == "") != (departAt == "") {
 		return nil, errors.New("arrive_at and depart_at must be supplied together")
 	}
+	arriveAt, departAt, err := normalizeOptionalRange(arriveAt, departAt, "arrive_at", "depart_at")
+	if err != nil {
+		return nil, err
+	}
 	trip, err := readTrip(ctx, tripID)
 	if err != nil {
 		return nil, fmt.Errorf("trip %d not found", tripID)
@@ -1040,8 +1073,16 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	cols, vals := []string{}, []any{}
 	newArrive, newDepart := old.ArriveAt, old.DepartAt
-	for _, k := range []string{"place_name", "country", "notes"} {
-		if v, ok := args[k].(string); ok && v != "" {
+	if v, ok := args["place_name"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil, errors.New("place_name cannot be empty")
+		}
+		cols = append(cols, "place_name=?")
+		vals = append(vals, v)
+	}
+	for _, k := range []string{"country", "notes"} {
+		if v, ok := args[k].(string); ok {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
@@ -1067,11 +1108,29 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if (newArrive == "") != (newDepart == "") {
 		return nil, errors.New("arrive_at and depart_at must be supplied or cleared together")
 	}
-	if v, ok := args["lat"].(float64); ok {
+	newArrive, newDepart, err = normalizeOptionalRange(newArrive, newDepart, "arrive_at", "depart_at")
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := args["arrive_at"]; ok {
+		for i, col := range cols {
+			if col == "arrive_at=?" {
+				vals[i] = nullIfEmpty(newArrive)
+			}
+		}
+	}
+	if _, ok := args["depart_at"]; ok {
+		for i, col := range cols {
+			if col == "depart_at=?" {
+				vals[i] = nullIfEmpty(newDepart)
+			}
+		}
+	}
+	if v, ok := args["lat"]; ok {
 		cols = append(cols, "lat=?")
 		vals = append(vals, v)
 	}
-	if v, ok := args["lng"].(float64); ok {
+	if v, ok := args["lng"]; ok {
 		cols = append(cols, "lng=?")
 		vals = append(vals, v)
 	}
@@ -1216,7 +1275,26 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if (depart == "") != (arrive == "") {
 		return nil, errors.New("depart_at and arrive_at must be supplied together")
 	}
-	currency := strings.ToUpper(strArg(args, "currency", trip.HomeCurrency))
+	depart, arrive, err = normalizeOptionalRange(depart, arrive, "depart_at", "arrive_at")
+	if err != nil {
+		return nil, err
+	}
+	currency, err := normalizeCurrency(strArg(args, "currency", trip.HomeCurrency))
+	if err != nil {
+		return nil, err
+	}
+	for _, field := range []string{"from_destination_id", "to_destination_id"} {
+		if destinationID := int64(intArg(args, field, 0)); destinationID > 0 {
+			if err := validateDestinationForTrip(ctx, destinationID, tripID, field); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, field := range []string{"cost_estimated", "cost_actual"} {
+		if v, ok := args[field]; ok && v != nil && intArgFromAny(v, 0) < 0 {
+			return nil, fmt.Errorf("%s cannot be negative", field)
+		}
+	}
 	provider := strArg(args, "provider", "")
 	reference := strArg(args, "reference", "")
 	departLoc := strArg(args, "depart_location", "")
@@ -1269,9 +1347,23 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	cols, vals := []string{}, []any{}
 	newDepart, newArrive := old.DepartAt, old.ArriveAt
-	for _, k := range []string{"kind", "provider", "reference",
-		"depart_location", "arrive_location", "currency", "confirmation_number", "notes"} {
-		if v, ok := args[k].(string); ok && v != "" {
+	if v, ok := args["kind"].(string); ok {
+		if !contains(transportKinds(), v) {
+			return nil, fmt.Errorf("kind must be one of %v", transportKinds())
+		}
+		cols = append(cols, "kind=?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["currency"].(string); ok {
+		currency, err := normalizeCurrency(v)
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, "currency=?")
+		vals = append(vals, currency)
+	}
+	for _, k := range []string{"provider", "reference", "depart_location", "arrive_location", "confirmation_number", "notes"} {
+		if v, ok := args[k].(string); ok {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
@@ -1294,10 +1386,30 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 	if (newDepart == "") != (newArrive == "") {
 		return nil, errors.New("depart_at and arrive_at must be supplied or cleared together")
 	}
+	newDepart, newArrive, err = normalizeOptionalRange(newDepart, newArrive, "depart_at", "arrive_at")
+	if err != nil {
+		return nil, err
+	}
+	for i, col := range cols {
+		if col == "depart_at=?" {
+			vals[i] = nullIfEmpty(newDepart)
+		}
+		if col == "arrive_at=?" {
+			vals[i] = nullIfEmpty(newArrive)
+		}
+	}
 	for _, k := range []string{"from_destination_id", "to_destination_id", "cost_estimated", "cost_actual"} {
-		if v, ok := args[k]; ok && v != nil {
+		if v, ok := nullableUpdateInt(args, k); ok {
+			if (k == "cost_estimated" || k == "cost_actual") && v != nil && v.(int64) < 0 {
+				return nil, fmt.Errorf("%s cannot be negative", k)
+			}
+			if strings.HasSuffix(k, "destination_id") && v != nil {
+				if err := validateDestinationForTrip(ctx, v.(int64), old.TripID, k); err != nil {
+					return nil, err
+				}
+			}
 			cols = append(cols, k+"=?")
-			vals = append(vals, int64(intArgFromAny(v, 0)))
+			vals = append(vals, v)
 		}
 	}
 	if len(cols) == 0 {
@@ -1364,6 +1476,9 @@ func (a *App) toolTransportLegsMarkBooked(ctx *sdk.AppCtx, args map[string]any) 
 	cols := []string{"booked=1"}
 	vals := []any{}
 	if v, ok := args["cost_actual"]; ok && v != nil {
+		if intArgFromAny(v, 0) < 0 {
+			return nil, errors.New("cost_actual cannot be negative")
+		}
 		cols = append(cols, "cost_actual=?")
 		vals = append(vals, int64(intArgFromAny(v, 0)))
 	}
@@ -1580,11 +1695,27 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if (checkIn == "") != (checkOut == "") {
 		return nil, errors.New("check_in_at and check_out_at must be supplied together")
 	}
+	checkIn, checkOut, err = normalizeOptionalRange(checkIn, checkOut, "check_in_at", "check_out_at")
+	if err != nil {
+		return nil, err
+	}
 	kind := strArg(args, "kind", "hotel")
 	if !contains(accommodationKinds(), kind) {
 		return nil, fmt.Errorf("kind must be one of %v", accommodationKinds())
 	}
-	currency := strings.ToUpper(strArg(args, "currency", trip.HomeCurrency))
+	currency, err := normalizeCurrency(strArg(args, "currency", trip.HomeCurrency))
+	if err != nil {
+		return nil, err
+	}
+	destinationID := int64(intArg(args, "destination_id", 0))
+	if err := validateDestinationForTrip(ctx, destinationID, tripID, "destination_id"); err != nil {
+		return nil, err
+	}
+	for _, field := range []string{"cost_estimated", "cost_actual"} {
+		if v, ok := args[field]; ok && v != nil && intArgFromAny(v, 0) < 0 {
+			return nil, fmt.Errorf("%s cannot be negative", field)
+		}
+	}
 	address := strArg(args, "address", "")
 	confirm := strArg(args, "confirmation_number", "")
 	notes := strArg(args, "notes", "")
@@ -1631,9 +1762,31 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 	}
 	cols, vals := []string{}, []any{}
 	newCheckIn, newCheckOut := old.CheckInAt, old.CheckOutAt
-	for _, k := range []string{"name", "kind", "address",
-		"currency", "confirmation_number", "notes"} {
-		if v, ok := args[k].(string); ok && v != "" {
+	if v, ok := args["name"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil, errors.New("name cannot be empty")
+		}
+		cols = append(cols, "name=?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["kind"].(string); ok {
+		if !contains(accommodationKinds(), v) {
+			return nil, fmt.Errorf("kind must be one of %v", accommodationKinds())
+		}
+		cols = append(cols, "kind=?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["currency"].(string); ok {
+		currency, err := normalizeCurrency(v)
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, "currency=?")
+		vals = append(vals, currency)
+	}
+	for _, k := range []string{"address", "confirmation_number", "notes"} {
+		if v, ok := args[k].(string); ok {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
@@ -1656,10 +1809,30 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 	if (newCheckIn == "") != (newCheckOut == "") {
 		return nil, errors.New("check_in_at and check_out_at must be supplied or cleared together")
 	}
+	newCheckIn, newCheckOut, err = normalizeOptionalRange(newCheckIn, newCheckOut, "check_in_at", "check_out_at")
+	if err != nil {
+		return nil, err
+	}
+	for i, col := range cols {
+		if col == "check_in_at=?" {
+			vals[i] = nullIfEmpty(newCheckIn)
+		}
+		if col == "check_out_at=?" {
+			vals[i] = nullIfEmpty(newCheckOut)
+		}
+	}
 	for _, k := range []string{"destination_id", "cost_estimated", "cost_actual"} {
-		if v, ok := args[k]; ok && v != nil {
+		if v, ok := nullableUpdateInt(args, k); ok {
+			if (k == "cost_estimated" || k == "cost_actual") && v != nil && v.(int64) < 0 {
+				return nil, fmt.Errorf("%s cannot be negative", k)
+			}
+			if k == "destination_id" && v != nil {
+				if err := validateDestinationForTrip(ctx, v.(int64), old.TripID, k); err != nil {
+					return nil, err
+				}
+			}
 			cols = append(cols, k+"=?")
-			vals = append(vals, int64(intArgFromAny(v, 0)))
+			vals = append(vals, v)
 		}
 	}
 	if len(cols) == 0 {
@@ -1725,6 +1898,9 @@ func (a *App) toolAccommodationsMarkBooked(ctx *sdk.AppCtx, args map[string]any)
 	cols := []string{"booked=1"}
 	vals := []any{}
 	if v, ok := args["cost_actual"]; ok && v != nil {
+		if intArgFromAny(v, 0) < 0 {
+			return nil, errors.New("cost_actual cannot be negative")
+		}
 		cols = append(cols, "cost_actual=?")
 		vals = append(vals, int64(intArgFromAny(v, 0)))
 	}
@@ -1827,9 +2003,25 @@ func (a *App) toolActivitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !contains(activityCategories(), category) {
 		return nil, fmt.Errorf("category must be one of %v", activityCategories())
 	}
-	currency := strings.ToUpper(strArg(args, "currency", trip.HomeCurrency))
+	currency, err := normalizeCurrency(strArg(args, "currency", trip.HomeCurrency))
+	if err != nil {
+		return nil, err
+	}
 	startAt := strArg(args, "start_at", "")
 	endAt := strArg(args, "end_at", "")
+	startAt, endAt, err = normalizeOptionalActivityTimes(startAt, endAt)
+	if err != nil {
+		return nil, err
+	}
+	destinationID := int64(intArg(args, "destination_id", 0))
+	if err := validateDestinationForTrip(ctx, destinationID, tripID, "destination_id"); err != nil {
+		return nil, err
+	}
+	for _, field := range []string{"cost_estimated", "cost_actual"} {
+		if v, ok := args[field]; ok && v != nil && intArgFromAny(v, 0) < 0 {
+			return nil, fmt.Errorf("%s cannot be negative", field)
+		}
+	}
 	location := strArg(args, "location", "")
 	notes := strArg(args, "notes", "")
 	res, err := ctx.AppDB().Exec(
@@ -1878,26 +2070,75 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	cols, vals := []string{}, []any{}
-	for _, k := range []string{"name", "category", "location", "currency", "notes"} {
-		if v, ok := args[k].(string); ok && v != "" {
+	if v, ok := args["name"].(string); ok {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return nil, errors.New("name cannot be empty")
+		}
+		cols = append(cols, "name=?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["category"].(string); ok {
+		if !contains(activityCategories(), v) {
+			return nil, fmt.Errorf("category must be one of %v", activityCategories())
+		}
+		cols = append(cols, "category=?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["currency"].(string); ok {
+		currency, err := normalizeCurrency(v)
+		if err != nil {
+			return nil, err
+		}
+		cols = append(cols, "currency=?")
+		vals = append(vals, currency)
+	}
+	for _, k := range []string{"location", "notes"} {
+		if v, ok := args[k].(string); ok {
 			cols = append(cols, k+"=?")
 			vals = append(vals, v)
 		}
 	}
+	newStart, newEnd := old.StartAt, old.EndAt
 	for _, k := range []string{"start_at", "end_at"} {
 		if _, ok := args[k]; ok {
 			v, err := nullableDateString(args[k], k)
 			if err != nil {
 				return nil, err
 			}
+			if k == "start_at" {
+				newStart = v
+			} else {
+				newEnd = v
+			}
 			cols = append(cols, k+"=?")
 			vals = append(vals, nullIfEmpty(v))
 		}
 	}
+	newStart, newEnd, err = normalizeOptionalActivityTimes(newStart, newEnd)
+	if err != nil {
+		return nil, err
+	}
+	for i, col := range cols {
+		if col == "start_at=?" {
+			vals[i] = nullIfEmpty(newStart)
+		}
+		if col == "end_at=?" {
+			vals[i] = nullIfEmpty(newEnd)
+		}
+	}
 	for _, k := range []string{"destination_id", "cost_estimated", "cost_actual"} {
-		if v, ok := args[k]; ok && v != nil {
+		if v, ok := nullableUpdateInt(args, k); ok {
+			if (k == "cost_estimated" || k == "cost_actual") && v != nil && v.(int64) < 0 {
+				return nil, fmt.Errorf("%s cannot be negative", k)
+			}
+			if k == "destination_id" && v != nil {
+				if err := validateDestinationForTrip(ctx, v.(int64), old.TripID, k); err != nil {
+					return nil, err
+				}
+			}
 			cols = append(cols, k+"=?")
-			vals = append(vals, int64(intArgFromAny(v, 0)))
+			vals = append(vals, v)
 		}
 	}
 	if len(cols) == 0 {
@@ -1967,6 +2208,9 @@ func (a *App) toolActivitiesMarkBooked(ctx *sdk.AppCtx, args map[string]any) (an
 	cols := []string{"booked=1"}
 	vals := []any{}
 	if v, ok := args["cost_actual"]; ok && v != nil {
+		if intArgFromAny(v, 0) < 0 {
+			return nil, errors.New("cost_actual cannot be negative")
+		}
 		cols = append(cols, "cost_actual=?")
 		vals = append(vals, int64(intArgFromAny(v, 0)))
 	}
@@ -2080,7 +2324,17 @@ func (a *App) toolTodosAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if tripID == 0 || label == "" {
 		return nil, errors.New("trip_id and label required")
 	}
+	if _, err := readTrip(ctx, tripID); err != nil {
+		return nil, fmt.Errorf("trip %d not found", tripID)
+	}
 	dueAt := strArg(args, "due_at", "")
+	if dueAt != "" {
+		parsed, err := parseFlexibleTime(dueAt)
+		if err != nil {
+			return nil, fmt.Errorf("due_at: %w", err)
+		}
+		dueAt = parsed.UTC().Format(time.RFC3339)
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO todos (trip_id, label, due_at) VALUES (?, ?, ?)`,
 		tripID, label, nullIfEmpty(dueAt),
@@ -2188,6 +2442,12 @@ func (a *App) toolBudgetSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if tripID == 0 || !contains(budgetCategories(), category) {
 		return nil, fmt.Errorf("trip_id and valid category required (one of %v)", budgetCategories())
 	}
+	if _, err := readTrip(ctx, tripID); err != nil {
+		return nil, fmt.Errorf("trip %d not found", tripID)
+	}
+	if amount < 0 {
+		return nil, errors.New("amount cannot be negative")
+	}
 	if amount == 0 {
 		if _, err := ctx.AppDB().Exec(
 			`DELETE FROM trip_budgets WHERE trip_id=? AND category=?`, tripID, category,
@@ -2223,54 +2483,111 @@ func (a *App) toolBudgetSummary(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return computeBudgetSummary(ctx, tripID)
 }
 
-// computeBudgetSummary walks the trip's items and the caps table,
-// producing one row per budget category. Currency conversion is
-// degraded to 1:1 in v0.1 — items in mixed currencies sum naively.
+type budgetTotals struct {
+	Planned int64
+	Actual  int64
+}
+
+func loadHomeCurrencyTotals(ctx *sdk.AppCtx, pid string) map[int64]budgetTotals {
+	rows, err := ctx.AppDB().Query(`
+		SELECT trip_id, SUM(planned), SUM(actual)
+		FROM (
+			SELECT l.trip_id,
+			       CASE WHEN UPPER(l.currency)=UPPER(t.home_currency) THEN COALESCE(l.cost_estimated,0) ELSE 0 END planned,
+			       CASE WHEN UPPER(l.currency)=UPPER(t.home_currency) THEN COALESCE(l.cost_actual,0) ELSE 0 END actual
+			FROM transport_legs l JOIN trips t ON t.id=l.trip_id WHERE t.project_id=?
+			UNION ALL
+			SELECT a.trip_id,
+			       CASE WHEN UPPER(a.currency)=UPPER(t.home_currency) THEN COALESCE(a.cost_estimated,0) ELSE 0 END,
+			       CASE WHEN UPPER(a.currency)=UPPER(t.home_currency) THEN COALESCE(a.cost_actual,0) ELSE 0 END
+			FROM accommodations a JOIN trips t ON t.id=a.trip_id WHERE t.project_id=?
+			UNION ALL
+			SELECT a.trip_id,
+			       CASE WHEN UPPER(a.currency)=UPPER(t.home_currency) THEN COALESCE(a.cost_estimated,0) ELSE 0 END,
+			       CASE WHEN UPPER(a.currency)=UPPER(t.home_currency) THEN COALESCE(a.cost_actual,0) ELSE 0 END
+			FROM activities a JOIN trips t ON t.id=a.trip_id WHERE t.project_id=?
+		) costs
+		GROUP BY trip_id`, pid, pid, pid)
+	if err != nil {
+		return map[int64]budgetTotals{}
+	}
+	defer rows.Close()
+	out := map[int64]budgetTotals{}
+	for rows.Next() {
+		var tripID, planned, actual int64
+		if err := rows.Scan(&tripID, &planned, &actual); err == nil {
+			out[tripID] = budgetTotals{Planned: planned, Actual: actual}
+		}
+	}
+	return out
+}
+
+// computeBudgetSummary produces home-currency category totals and keeps
+// foreign-currency items separate. It deliberately does not invent an FX
+// rate: callers can see the excluded currencies without receiving a false
+// home-currency total.
 func computeBudgetSummary(ctx *sdk.AppCtx, tripID int64) (BudgetSummary, error) {
 	trip, err := readTrip(ctx, tripID)
 	if err != nil {
 		return BudgetSummary{}, err
 	}
+	legs, err := listTransportByTrip(ctx, tripID)
+	if err != nil {
+		return BudgetSummary{}, err
+	}
+	accs, err := listAccommodationsByTrip(ctx, tripID)
+	if err != nil {
+		return BudgetSummary{}, err
+	}
+	acts, err := listActivitiesByTrip(ctx, tripID)
+	if err != nil {
+		return BudgetSummary{}, err
+	}
+	return computeBudgetSummaryFromItems(ctx, trip, legs, accs, acts)
+}
+
+func computeBudgetSummaryFromItems(ctx *sdk.AppCtx, trip Trip, legs []TransportLeg, accs []Accommodation, acts []Activity) (BudgetSummary, error) {
 	planned := map[string]int64{}
 	actual := map[string]int64{}
+	other := map[string]budgetTotals{}
 	for _, c := range budgetCategories() {
 		planned[c] = 0
 		actual[c] = 0
 	}
-
-	legs, _ := listTransportByTrip(ctx, tripID)
+	add := func(category, currency string, estimate, spent *int64) {
+		currency = strings.ToUpper(currency)
+		if currency == strings.ToUpper(trip.HomeCurrency) {
+			if estimate != nil {
+				planned[category] += *estimate
+			}
+			if spent != nil {
+				actual[category] += *spent
+			}
+			return
+		}
+		total := other[currency]
+		if estimate != nil {
+			total.Planned += *estimate
+		}
+		if spent != nil {
+			total.Actual += *spent
+		}
+		other[currency] = total
+	}
 	for _, l := range legs {
-		if l.CostEstimated != nil {
-			planned["transport"] += *l.CostEstimated
-		}
-		if l.CostActual != nil {
-			actual["transport"] += *l.CostActual
-		}
+		add("transport", l.Currency, l.CostEstimated, l.CostActual)
 	}
-	accs, _ := listAccommodationsByTrip(ctx, tripID)
 	for _, ac := range accs {
-		if ac.CostEstimated != nil {
-			planned["lodging"] += *ac.CostEstimated
-		}
-		if ac.CostActual != nil {
-			actual["lodging"] += *ac.CostActual
-		}
+		add("lodging", ac.Currency, ac.CostEstimated, ac.CostActual)
 	}
-	acts, _ := listActivitiesByTrip(ctx, tripID)
 	for _, at := range acts {
-		bucket := activityToBudget(at.Category)
-		if at.CostEstimated != nil {
-			planned[bucket] += *at.CostEstimated
-		}
-		if at.CostActual != nil {
-			actual[bucket] += *at.CostActual
-		}
+		add(activityToBudget(at.Category), at.Currency, at.CostEstimated, at.CostActual)
 	}
 
 	// Load caps.
 	caps := map[string]int64{}
 	if rows, err := ctx.AppDB().Query(
-		`SELECT category, amount FROM trip_budgets WHERE trip_id=?`, tripID,
+		`SELECT category, amount FROM trip_budgets WHERE trip_id=?`, trip.ID,
 	); err == nil {
 		for rows.Next() {
 			var c string
@@ -2301,6 +2618,19 @@ func computeBudgetSummary(ctx *sdk.AppCtx, tripID int64) (BudgetSummary, error) 
 		out.TotalActual += row.Actual
 		out.TotalCap += row.Cap
 	}
+	for currency, total := range other {
+		if currency == "" || (total.Planned == 0 && total.Actual == 0) {
+			continue
+		}
+		out.OtherCurrencies = append(out.OtherCurrencies, CurrencyTotal{
+			Currency: currency,
+			Planned:  total.Planned,
+			Actual:   total.Actual,
+		})
+	}
+	sort.Slice(out.OtherCurrencies, func(i, j int) bool {
+		return out.OtherCurrencies[i].Currency < out.OtherCurrencies[j].Currency
+	})
 	return out, nil
 }
 
@@ -2320,7 +2650,10 @@ func (a *App) toolDashboard(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	accs, _ := listAccommodationsByTrip(ctx, tripID)
 	acts, _ := listActivitiesByTrip(ctx, tripID)
 	todos, _ := listTodosByTrip(ctx, tripID)
-	budget, _ := computeBudgetSummary(ctx, tripID)
+	budget, err := computeBudgetSummaryFromItems(ctx, trip, legs, accs, acts)
+	if err != nil {
+		return nil, err
+	}
 	return TripDashboard{
 		Trip: trip, Destinations: dests, TransportLegs: legs,
 		Accommodations: accs, Activities: acts, Todos: todos, Budget: budget,
@@ -2993,13 +3326,20 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	pid := projectID()
 	cols, vals := []string{}, []any{}
 	if v, ok := args["home_airport"].(string); ok {
+		v = strings.ToUpper(strings.TrimSpace(v))
+		if v != "" && !validIATA(v) {
+			return nil, errors.New("home_airport must be a 3-letter IATA code or empty")
+		}
 		cols = append(cols, "home_airport=?")
-		vals = append(vals, strings.ToUpper(v))
+		vals = append(vals, v)
 	}
 	if v, ok := args["default_passengers"]; ok {
 		n := intArgFromAny(v, 1)
 		if n < 1 {
 			n = 1
+		}
+		if n > 20 {
+			n = 20
 		}
 		cols = append(cols, "default_passengers=?")
 		vals = append(vals, n)
@@ -3021,8 +3361,12 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	if v, ok := args["daily_search_budget_cents"]; ok {
+		budget := intArgFromAny(v, 500)
+		if budget < 0 {
+			return nil, errors.New("daily_search_budget_cents cannot be negative")
+		}
 		cols = append(cols, "daily_search_budget_cents=?")
-		vals = append(vals, intArgFromAny(v, 500))
+		vals = append(vals, budget)
 	}
 	if len(cols) == 0 {
 		return nil, errors.New("no updatable fields supplied — pass at least one of: home_airport, default_passengers, duffel_connection_id, places_connection_id, daily_search_budget_cents")
@@ -3030,8 +3374,8 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	cols = append(cols, "updated_at=CURRENT_TIMESTAMP")
 	vals = append(vals, pid)
 	_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO settings (project_id) VALUES (?)`, pid)
-	// Build statement; NULL-set entries are already inlined above so
-	// we filter them out of the vals matching.
+	// Build the statement while preserving literal assignments such as
+	// `column=NULL` and `updated_at=CURRENT_TIMESTAMP`.
 	cleanCols := []string{}
 	cleanVals := []any{}
 	valIdx := 0
@@ -3042,6 +3386,8 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			cleanCols = append(cleanCols, c)
 			cleanVals = append(cleanVals, vals[valIdx])
 			valIdx++
+		} else {
+			cleanCols = append(cleanCols, c)
 		}
 	}
 	cleanVals = append(cleanVals, pid)
@@ -3091,10 +3437,66 @@ func (a *App) toolAvailableConnections(ctx *sdk.AppCtx, args map[string]any) (an
 
 // cacheKey hashes (provider, tool, normalized input) into a stable
 // string so the same query hits the same row.
-func cacheKey(provider, tool string, input map[string]any) string {
+func cacheKey(provider string, connectionID int64, tool string, input map[string]any) string {
 	b, _ := json.Marshal(input)
-	sum := sha256.Sum256([]byte(provider + "|" + tool + "|" + string(b)))
+	sum := sha256.Sum256([]byte(provider + "|" + strconv.FormatInt(connectionID, 10) + "|" + tool + "|" + string(b)))
 	return hex.EncodeToString(sum[:])
+}
+
+var searchMaintenance struct {
+	sync.Mutex
+	last time.Time
+}
+
+func maintainSearchData(ctx *sdk.AppCtx) {
+	searchMaintenance.Lock()
+	defer searchMaintenance.Unlock()
+	if time.Since(searchMaintenance.last) < time.Hour {
+		return
+	}
+	searchMaintenance.last = time.Now()
+	_, _ = ctx.AppDB().Exec(`DELETE FROM search_cache WHERE expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	_, _ = ctx.AppDB().Exec(`DELETE FROM search_usage WHERE used_at < ?`, time.Now().UTC().AddDate(0, 0, -14).Format(time.RFC3339))
+	_, _ = ctx.AppDB().Exec(`DELETE FROM travel_price_observations WHERE observed_at < ?`, time.Now().UTC().AddDate(-1, 0, 0).Format(time.RFC3339))
+}
+
+func placesEstimatedCostCents(tool string) int {
+	// Conservative first-tier estimates, rounded up to whole cents.
+	// Autocomplete is below one cent/request; Pro search is about four;
+	// details varies with requested fields, so reserve three.
+	switch tool {
+	case "autocomplete":
+		return 1
+	case "get_place":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func reservePlacesBudget(ctx *sdk.AppCtx, settings Settings, tool string) error {
+	if settings.DailySearchBudgetCents == 0 {
+		return nil
+	}
+	cost := placesEstimatedCostCents(tool)
+	dayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	res, err := ctx.AppDB().Exec(`
+		INSERT INTO search_usage(project_id, provider, tool, estimated_cents, used_at)
+		SELECT ?, 'google_places', ?, ?, ?
+		WHERE COALESCE((
+			SELECT SUM(estimated_cents) FROM search_usage
+			WHERE project_id=? AND provider='google_places' AND used_at>=?
+		), 0) + ? <= ?`,
+		projectID(), tool, cost, time.Now().UTC().Format(time.RFC3339),
+		projectID(), dayStart, cost, settings.DailySearchBudgetCents)
+	if err != nil {
+		return err
+	}
+	inserted, _ := res.RowsAffected()
+	if inserted == 0 {
+		return fmt.Errorf("places daily budget reached (%d estimated cents); raise daily_search_budget_cents or set it to 0 for unlimited", settings.DailySearchBudgetCents)
+	}
+	return nil
 }
 
 // cacheGet returns the cached response body + true if a non-expired
@@ -3108,13 +3510,16 @@ func cacheGet(ctx *sdk.AppCtx, key string) (json.RawMessage, bool) {
 	if err != nil {
 		return nil, false
 	}
-	if t, err := time.Parse(time.RFC3339, expires); err == nil && time.Now().UTC().After(t) {
+	expiresAt, err := time.Parse(time.RFC3339, expires)
+	if err != nil || time.Now().UTC().After(expiresAt) {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM search_cache WHERE key=?`, key)
 		return nil, false
 	}
 	return json.RawMessage(body), true
 }
 
 func cacheSet(ctx *sdk.AppCtx, key string, body any, ttl time.Duration) {
+	maintainSearchData(ctx)
 	b, err := json.Marshal(body)
 	if err != nil {
 		return
@@ -3236,13 +3641,16 @@ func (a *App) toolSearchPlaces(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, errors.New("either query, lat/lng, or destination_id required")
 	}
 
-	key := cacheKey("google_places", tool, input)
+	key := cacheKey("google_places", settings.PlacesConnectionID, tool, input)
 	if raw, ok := cacheGet(ctx, key); ok {
 		var cached map[string]any
 		if err := json.Unmarshal(raw, &cached); err == nil {
 			cached["cached"] = true
 			return cached, nil
 		}
+	}
+	if err := reservePlacesBudget(ctx, settings, tool); err != nil {
+		return nil, err
 	}
 
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.PlacesConnectionID, tool, input)
@@ -3272,13 +3680,16 @@ func (a *App) toolPlaceDetails(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, errors.New("place_id required")
 	}
 	input := map[string]any{"placeId": placeID}
-	key := cacheKey("google_places", "get_place", input)
+	key := cacheKey("google_places", settings.PlacesConnectionID, "get_place", input)
 	if raw, ok := cacheGet(ctx, key); ok {
 		var cached map[string]any
 		if err := json.Unmarshal(raw, &cached); err == nil {
 			cached["cached"] = true
 			return cached, nil
 		}
+	}
+	if err := reservePlacesBudget(ctx, settings, "get_place"); err != nil {
+		return nil, err
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(settings.PlacesConnectionID, "get_place", input)
 	if err != nil {
@@ -3329,7 +3740,7 @@ func (a *App) toolSearchAirports(ctx *sdk.AppCtx, args map[string]any) (any, err
 	} else if query != "" {
 		input["limit"] = 200
 	}
-	key := cacheKey("duffel", "search_airports", input)
+	key := cacheKey("duffel", settings.DuffelConnectionID, "search_airports", input)
 	if raw, ok := cacheGet(ctx, key); ok {
 		var cached map[string]any
 		if err := json.Unmarshal(raw, &cached); err == nil {
@@ -3490,7 +3901,7 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"supplier_timeout": 10000,
 		"view":             "offers",
 	}
-	key := cacheKey("duffel", "search_flights", input)
+	key := cacheKey("duffel", settings.DuffelConnectionID, "search_flights", input)
 	if raw, ok := cacheGet(ctx, key); ok {
 		var cached map[string]any
 		if err := json.Unmarshal(raw, &cached); err == nil {
@@ -3513,6 +3924,7 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	tripID := int64(intArg(args, "trip_id", 0))
 	if offers, ok := out["offers"].([]FlightOffer); ok {
 		inserted := recordFlightPriceObservations(ctx, tripID, key, input, offers)
+		out["recorded_observations"] = inserted
 		if inserted > 0 {
 			if suppress, _ := args["_suppress_price_event"].(bool); !suppress {
 				extra := map[string]any{"kind": "flight", "provider": "duffel", "count": inserted, "origin": from, "destination": to}
@@ -3520,13 +3932,8 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 					emitTripEvent(ctx, "price_observations.created", tripID, "price_observation", 0, extra)
 				} else {
 					ctx.Emit("price_observations.created", map[string]any{
-						"action":      "created",
-						"entity":      "price_observation",
-						"kind":        "flight",
-						"provider":    "duffel",
-						"count":       inserted,
-						"origin":      from,
-						"destination": to,
+						"action": "created", "entity": "price_observation", "kind": "flight",
+						"provider": "duffel", "count": inserted, "origin": from, "destination": to,
 					})
 				}
 			}
@@ -3561,6 +3968,7 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 	liveUntil := observedAt.Add(10 * time.Minute).Format(time.RFC3339)
 	project := projectID()
 	inserted := 0
+	dedupeSince := observedAt.Add(-5 * time.Minute).Format(time.RFC3339)
 
 	for _, offer := range offers {
 		if offer.TotalAmountCents <= 0 || offer.Currency == "" {
@@ -3589,18 +3997,26 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 		if tripID > 0 {
 			trip = tripID
 		}
-		if _, err := ctx.AppDB().Exec(
+		res, err := ctx.AppDB().Exec(
 			`INSERT INTO travel_price_observations
 			 (project_id, trip_id, kind, provider, search_signature, origin_code, destination_code,
 			  depart_date, return_date, party_size, cabin_or_class, provider_name, item_name,
 			  stops_or_transfers, duration, amount_cents, currency, observed_at, live_until,
 			  bookable_ref, metadata_json)
-			 VALUES (?, ?, 'flight', 'duffel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 SELECT ?, ?, 'flight', 'duffel', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			 WHERE NOT EXISTS (
+			   SELECT 1 FROM travel_price_observations
+			   WHERE project_id=? AND search_signature=? AND bookable_ref=? AND observed_at>=?
+			 )`,
 			project, trip, signature, o, d, departDate, returnDate, partySize, cc,
 			offer.Carrier, itemName, offer.Stops, offer.Duration, offer.TotalAmountCents,
 			offer.Currency, observedAt.Format(time.RFC3339), liveUntil, offer.OfferID, string(meta),
-		); err == nil {
-			inserted++
+			project, signature, offer.OfferID, dedupeSince,
+		)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				inserted += int(n)
+			}
 		}
 	}
 	return inserted
@@ -3812,37 +4228,61 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 		Offers      int    `json:"offers"`
 		Error       string `json:"error,omitempty"`
 	}
-	results := []scanResult{}
-	searches := 0
-	insertedObservations := 0
-	for d := fromDate; !d.After(toDate) && searches < maxSearches; d = d.AddDate(0, 0, 1) {
+	type scanJob struct {
+		index       int
+		destination string
+		depart      string
+		returnDate  string
+	}
+	jobs := make([]scanJob, 0, maxSearches)
+	for d := fromDate; !d.After(toDate) && len(jobs) < maxSearches; d = d.AddDate(0, 0, 1) {
 		for _, dest := range cleanDestinations {
 			for _, length := range cleanLengths {
-				if searches >= maxSearches {
+				if len(jobs) >= maxSearches {
 					break
 				}
-				depart := d.Format("2006-01-02")
 				returnDate := ""
 				if length > 0 {
 					returnDate = d.AddDate(0, 0, length).Format("2006-01-02")
 				}
+				jobs = append(jobs, scanJob{
+					index: len(jobs), destination: dest,
+					depart: d.Format("2006-01-02"), returnDate: returnDate,
+				})
+			}
+		}
+	}
+
+	results := make([]scanResult, len(jobs))
+	insertedObservations := 0
+	var scanMu sync.Mutex
+	jobCh := make(chan scanJob)
+	var workers sync.WaitGroup
+	workerCount := 3
+	if len(jobs) < workerCount {
+		workerCount = len(jobs)
+	}
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobCh {
 				callArgs := map[string]any{
 					"from":                  origin,
-					"to":                    dest,
-					"depart_date":           depart,
+					"to":                    job.destination,
+					"depart_date":           job.depart,
 					"passengers":            float64(passengers),
 					"cabin":                 cabin,
 					"_suppress_price_event": true,
 				}
-				if returnDate != "" {
-					callArgs["return_date"] = returnDate
+				if job.returnDate != "" {
+					callArgs["return_date"] = job.returnDate
 				}
 				out, err := a.toolSearchFlights(ctx, callArgs)
-				searches++
-				row := scanResult{Destination: dest, DepartDate: depart, ReturnDate: returnDate}
+				row := scanResult{Destination: job.destination, DepartDate: job.depart, ReturnDate: job.returnDate}
 				if err != nil {
 					row.Error = err.Error()
-					results = append(results, row)
+					results[job.index] = row
 					continue
 				}
 				if m, ok := out.(map[string]any); ok {
@@ -3851,27 +4291,27 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 					}
 					if offers, ok := m["offers"].([]FlightOffer); ok {
 						row.Offers = len(offers)
-						if !row.Cached {
-							insertedObservations += len(offers)
-						}
+					}
+					if inserted, ok := m["recorded_observations"].(int); ok && inserted > 0 {
+						scanMu.Lock()
+						insertedObservations += inserted
+						scanMu.Unlock()
 					}
 				}
-				results = append(results, row)
-				if searches < maxSearches {
-					time.Sleep(350 * time.Millisecond)
-				}
+				results[job.index] = row
 			}
-		}
+		}()
 	}
+	for _, job := range jobs {
+		jobCh <- job
+	}
+	close(jobCh)
+	workers.Wait()
+	searches := len(jobs)
 	if insertedObservations > 0 {
 		ctx.Emit("price_observations.created", map[string]any{
-			"action":   "created",
-			"entity":   "price_observation",
-			"kind":     "flight",
-			"provider": "duffel",
-			"count":    insertedObservations,
-			"origin":   origin,
-			"searched": searches,
+			"action": "created", "entity": "price_observation", "kind": "flight",
+			"provider": "duffel", "count": insertedObservations, "origin": origin, "searched": searches,
 		})
 	}
 	obs, _ := a.toolPriceObservations(ctx, map[string]any{"kind": "flight", "origin": origin, "since_days": float64(180), "limit": float64(500)})
@@ -4699,6 +5139,90 @@ func nullableDateString(v any, field string) (string, error) {
 		return "", nil
 	}
 	return s, nil
+}
+
+func normalizeOptionalRange(start, end, startField, endField string) (string, string, error) {
+	if (start == "") != (end == "") {
+		return "", "", fmt.Errorf("%s and %s must be supplied or cleared together", startField, endField)
+	}
+	if start == "" {
+		return "", "", nil
+	}
+	startTime, err := parseFlexibleTime(start)
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", startField, err)
+	}
+	endTime, err := parseFlexibleTime(end)
+	if err != nil {
+		return "", "", fmt.Errorf("%s: %w", endField, err)
+	}
+	if !endTime.After(startTime) {
+		return "", "", fmt.Errorf("%s must be after %s", endField, startField)
+	}
+	return startTime.UTC().Format(time.RFC3339), endTime.UTC().Format(time.RFC3339), nil
+}
+
+func normalizeOptionalActivityTimes(start, end string) (string, string, error) {
+	if start == "" && end != "" {
+		return "", "", errors.New("start_at is required when end_at is set")
+	}
+	if start == "" {
+		return "", "", nil
+	}
+	startTime, err := parseFlexibleTime(start)
+	if err != nil {
+		return "", "", fmt.Errorf("start_at: %w", err)
+	}
+	normalizedStart := startTime.UTC().Format(time.RFC3339)
+	if end == "" {
+		return normalizedStart, "", nil
+	}
+	endTime, err := parseFlexibleTime(end)
+	if err != nil {
+		return "", "", fmt.Errorf("end_at: %w", err)
+	}
+	if endTime.Before(startTime) {
+		return "", "", errors.New("end_at must be at or after start_at")
+	}
+	return normalizedStart, endTime.UTC().Format(time.RFC3339), nil
+}
+
+func nullableUpdateInt(args map[string]any, key string) (any, bool) {
+	v, ok := args[key]
+	if !ok {
+		return nil, false
+	}
+	if v == nil || (intArgFromAny(v, 0) == 0 && strings.HasSuffix(key, "destination_id")) {
+		return nil, true
+	}
+	return int64(intArgFromAny(v, 0)), true
+}
+
+func validateDestinationForTrip(ctx *sdk.AppCtx, destinationID, tripID int64, field string) error {
+	if destinationID == 0 {
+		return nil
+	}
+	var gotTripID int64
+	if err := ctx.AppDB().QueryRow(`SELECT trip_id FROM destinations WHERE id=?`, destinationID).Scan(&gotTripID); err != nil {
+		return fmt.Errorf("%s does not reference an existing destination", field)
+	}
+	if gotTripID != tripID {
+		return fmt.Errorf("%s must belong to trip %d", field, tripID)
+	}
+	return nil
+}
+
+func normalizeCurrency(raw string) (string, error) {
+	currency := strings.ToUpper(strings.TrimSpace(raw))
+	if len(currency) != 3 {
+		return "", errors.New("currency must be a 3-letter ISO code")
+	}
+	for _, r := range currency {
+		if r < 'A' || r > 'Z' {
+			return "", errors.New("currency must be a 3-letter ISO code")
+		}
+	}
+	return currency, nil
 }
 
 func pathID(path, prefix string) (int64, bool) {

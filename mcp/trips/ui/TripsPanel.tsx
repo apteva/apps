@@ -8,7 +8,7 @@
 // fmtMoney(minor, currency) for display. Colors in SVG come from CSS
 // variables because the dashboard's Tailwind JIT doesn't scan apps/mcp/*/ui/.
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/trips";
 
@@ -261,6 +261,7 @@ interface BudgetSummary {
   total_planned: number;
   total_actual: number;
   total_cap: number;
+  other_currencies?: { currency: string; planned: number; actual: number }[];
 }
 
 interface TripDashboard {
@@ -314,23 +315,38 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json();
+  if (r.status === 204) return undefined as T;
+  const body = await r.text();
+  if (!body.trim()) return undefined as T;
+  return JSON.parse(body) as T;
+}
+
+function currencyFractionDigits(currency: string): number {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  } catch {
+    return 2;
+  }
 }
 
 function fmtMoney(minor: number | null | undefined, currency: string, opts?: { signed?: boolean }): string {
   if (minor == null) return "—";
-  const v = minor / 100;
-  const s = new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: 2 }).format(v);
+  const v = minor / (10 ** currencyFractionDigits(currency));
+  const s = new Intl.NumberFormat(undefined, { style: "currency", currency }).format(v);
   if (opts?.signed && v > 0) return "+" + s;
   return s;
 }
 
 function fmtDate(s: string): string {
-  return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  const calendarDate = /^\d{4}-\d{2}-\d{2}(?:$|T(?:00:00:00|23:59:59)(?:\.000)?Z$)/.test(s);
+  const d = calendarDate ? parseYMD(s.slice(0, 10)) : new Date(s);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function fmtDateShort(s: string): string {
-  return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const calendarDate = /^\d{4}-\d{2}-\d{2}(?:$|T(?:00:00:00|23:59:59)(?:\.000)?Z$)/.test(s);
+  const d = calendarDate ? parseYMD(s.slice(0, 10)) : new Date(s);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function fmtTime(s: string): string {
@@ -470,6 +486,13 @@ function UIProvider({ children }: { children: React.ReactNode }) {
     toastTimer.current = window.setTimeout(() => setToast(null), 5000);
   }, []);
 
+  useEffect(() => () => {
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    resolverRef.current?.(false);
+  }, []);
+
+  const value = useMemo(() => ({ confirm, notify }), [confirm, notify]);
+
   const close = (result: boolean) => {
     resolverRef.current?.(result);
     resolverRef.current = null;
@@ -477,7 +500,7 @@ function UIProvider({ children }: { children: React.ReactNode }) {
   };
 
   return (
-    <UICtx.Provider value={{ confirm, notify }}>
+    <UICtx.Provider value={value}>
       {children}
       {confirmState && (
         <ConfirmDialog
@@ -503,21 +526,22 @@ function UIProvider({ children }: { children: React.ReactNode }) {
 }
 
 function ConfirmDialog({ title, message, confirmLabel = "Delete", danger = true, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
-  // Esc cancels, Enter confirms. Capture both at document level so the
-  // user doesn't need to focus the buttons first.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onConfirm, onCancel]);
+  const titleID = useId();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay p-4">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleID}
+      onKeyDown={e => {
+        e.stopPropagation();
+        if (e.key === "Escape") { e.preventDefault(); onCancel(); }
+        trapDialogTab(e);
+      }}
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-bg-overlay p-4"
+    >
       <div className="w-full max-w-sm rounded-lg border border-border bg-bg-card p-5 shadow-xl">
-        <h3 className="text-base font-semibold">{title}</h3>
+        <h3 id={titleID} className="text-base font-semibold">{title}</h3>
         {message && <p className="mt-2 text-sm text-text-muted">{message}</p>}
         <div className="mt-4 flex justify-end gap-2">
           <button
@@ -647,6 +671,7 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
     return (
       <TripDetail
         tripID={selectedID}
+        projectId={projectId}
         onBack={() => setSelectedID(null)}
         onChanged={refresh}
       />
@@ -655,8 +680,8 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
 
   return (
     <div className="flex h-full flex-col gap-3 p-4">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <header className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-3">
           <Icon name="map" size={20} />
           <h1 className="text-lg font-semibold">Trips</h1>
           <nav className="flex overflow-hidden rounded-md border border-border text-sm">
@@ -727,7 +752,10 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
         />
       )}
       {showSettings && (
-        <SettingsDialog onClose={() => setShowSettings(false)} />
+        <SettingsDialog
+          onClose={() => setShowSettings(false)}
+          onSaved={async () => { setShowSettings(false); await refreshSettings(); }}
+        />
       )}
     </div>
   );
@@ -1181,7 +1209,7 @@ function OverallBudgetBar({ trips }: { trips: Trip[] }) {
 
 // ─── Detail view ─────────────────────────────────────────────────
 
-function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () => void; onChanged: () => void }) {
+function TripDetail({ tripID, projectId, onBack, onChanged }: { tripID: number; projectId: string; onBack: () => void; onChanged: () => void }) {
   const ui = useUI();
   const [data, setData] = useState<TripDashboard | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
@@ -1198,6 +1226,10 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
     }
   }, [tripID]);
   useEffect(() => { refresh(); }, [refresh]);
+  useAppEvents("trips", projectId, ev => {
+    const data = ev.data as { trip_id?: number } | undefined;
+    if (!data?.trip_id || data.trip_id === tripID) refresh();
+  });
 
   const deleteTrip = async () => {
     if (!await ui.confirm({
@@ -1241,24 +1273,24 @@ function TripDetail({ tripID, onBack, onChanged }: { tripID: number; onBack: () 
 
   return (
     <div className="flex h-full flex-col gap-3 p-4">
-      <header className="flex items-center justify-between">
+      <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <button onClick={onBack} className="flex items-center gap-1 text-sm text-text-muted hover:text-text">
           <Icon name="chevron-left" size={14} /> Trips
         </button>
-        <div className="flex items-center gap-2">
+        <div className="flex max-w-full flex-wrap items-center gap-2">
           <button
             onClick={() => isIdea ? setShowEdit(true) : makeIdea()}
             className="rounded-md border border-border px-2.5 py-1 text-sm text-text-muted hover:border-accent hover:text-text"
           >
             {isIdea ? "Schedule" : "Make idea"}
           </button>
-          <button onClick={() => setShowEdit(true)} title="Edit trip" className="p-1 text-text-muted hover:text-text">
+          <button onClick={() => setShowEdit(true)} aria-label="Edit trip" title="Edit trip" className="p-1 text-text-muted hover:text-text">
             <Icon name="edit" size={14} />
           </button>
-          <button onClick={deleteTrip} title="Delete trip" className="p-1 text-text-muted hover:text-error">
+          <button onClick={deleteTrip} aria-label="Delete trip" title="Delete trip" className="p-1 text-text-muted hover:text-error">
             <Icon name="trash" size={14} />
           </button>
-          <nav className="flex rounded-md border border-border overflow-hidden text-sm">
+          <nav className="flex max-w-full overflow-auto rounded-md border border-border text-sm">
             {(["overview", "itinerary", "deals", "budget", "todos"] as Tab[]).map(t => (
               <button
                 key={t}
@@ -1712,6 +1744,13 @@ function ItineraryRow({
   return (
     <li
       onClick={onEdit}
+      onKeyDown={e => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onEdit();
+        }
+      }}
       role="button"
       tabIndex={0}
       className="flex items-start gap-3 rounded-lg border border-border bg-bg-card p-3 cursor-pointer hover:border-border-strong hover:bg-bg-hover"
@@ -1737,7 +1776,7 @@ function ItineraryRow({
       </div>
       <div className="flex flex-col items-end gap-1 text-right text-sm">
         <div className="tabular-nums">{cost != null ? fmtMoney(cost, costCcy) : "—"}</div>
-        <button onClick={remove} disabled={busy} className="text-text-dim hover:text-error" title="Delete">
+        <button onClick={remove} disabled={busy} aria-label={`Delete ${title}`} className="text-text-dim hover:text-error" title="Delete">
           <Icon name="trash" size={12} />
         </button>
       </div>
@@ -1817,10 +1856,10 @@ function DestinationsSection({ data, onChanged }: { data: TripDashboard; onChang
                   {d.arrive_at && d.depart_at ? `${fmtDateShort(d.arrive_at)} – ${fmtDateShort(d.depart_at)}` : "Idea"}
                 </div>
               </div>
-              <button onClick={() => move(d, -1)} disabled={busy || i === 0} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move up"><Icon name="chevron-left" size={12} /></button>
-              <button onClick={() => move(d, 1)} disabled={busy || i === dests.length - 1} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move down"><Icon name="chevron-right" size={12} /></button>
-              <button onClick={() => setEditing(d)} className="p-1 text-text-dim hover:text-text" title="Edit"><Icon name="edit" size={12} /></button>
-              <button onClick={() => remove(d)} disabled={busy} className="p-1 text-text-dim hover:text-error" title="Delete"><Icon name="trash" size={12} /></button>
+              <button onClick={() => move(d, -1)} disabled={busy || i === 0} aria-label={`Move ${d.place_name} up`} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move up"><Icon name="chevron-left" size={12} /></button>
+              <button onClick={() => move(d, 1)} disabled={busy || i === dests.length - 1} aria-label={`Move ${d.place_name} down`} className="p-1 text-text-dim hover:text-text disabled:opacity-30" title="Move down"><Icon name="chevron-right" size={12} /></button>
+              <button onClick={() => setEditing(d)} aria-label={`Edit ${d.place_name}`} className="p-1 text-text-dim hover:text-text" title="Edit"><Icon name="edit" size={12} /></button>
+              <button onClick={() => remove(d)} disabled={busy} aria-label={`Delete ${d.place_name}`} className="p-1 text-text-dim hover:text-error" title="Delete"><Icon name="trash" size={12} /></button>
             </li>
           ))}
         </ul>
@@ -1858,7 +1897,8 @@ function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => 
             {editing ? "Done" : "Set caps"}
           </button>
         </header>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+        <table className="w-full min-w-[31rem] text-sm">
           <thead className="border-b border-border-subtle text-left text-xs uppercase tracking-wide text-text-muted">
             <tr>
               <th className="px-3 py-2">Category</th>
@@ -1881,20 +1921,45 @@ function BudgetTab({ data, onChanged }: { data: TripDashboard; onChanged: () => 
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
+      {(data.budget.other_currencies?.length ?? 0) > 0 && (
+        <section className="rounded-lg border border-warn/30 bg-warn/10 p-3">
+          <div className="text-xs font-medium uppercase tracking-wide text-warn">Kept separate from {trip.home_currency}</div>
+          <p className="mt-1 text-xs text-text-muted">No FX rate was supplied, so these bookings are excluded from the home-currency totals.</p>
+          <div className="mt-2 flex flex-wrap gap-3 text-sm">
+            {data.budget.other_currencies!.map(total => (
+              <div key={total.currency} className="rounded border border-border bg-bg-card px-3 py-2">
+                <span className="font-medium">{total.currency}</span>
+                <span className="ml-2 tabular-nums text-text-muted">planned {fmtMoney(total.planned, total.currency)} · actual {fmtMoney(total.actual, total.currency)}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
 function BudgetRow({ row, currency, tripID, editing, onChanged }: { row: BudgetCategoryRow; currency: string; tripID: number; editing: boolean; onChanged: () => void }) {
-  const [val, setVal] = useState(row.cap > 0 ? (row.cap / 100).toString() : "");
+  const ui = useUI();
+  const [val, setVal] = useState(row.cap > 0 ? (row.cap / (10 ** currencyFractionDigits(currency))).toString() : "");
+  const [busy, setBusy] = useState(false);
   const save = async () => {
-    const minor = parseMoneyDecimal(val);
-    await api<unknown>("/budget", {
-      method: "POST",
-      body: JSON.stringify({ trip_id: tripID, category: row.category, amount: minor }),
-    });
-    onChanged();
+    if (busy) return;
+    setBusy(true);
+    try {
+      const minor = parseMoneyDecimal(val, currency);
+      await api<unknown>("/budget", {
+        method: "POST",
+        body: JSON.stringify({ trip_id: tripID, category: row.category, amount: minor }),
+      });
+      onChanged();
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <tr className="border-b border-border-subtle last:border-0 border-border-subtle">
@@ -1905,6 +1970,8 @@ function BudgetRow({ row, currency, tripID, editing, onChanged }: { row: BudgetC
             value={val}
             onChange={e => setVal(e.target.value)}
             onBlur={save}
+            disabled={busy}
+            aria-label={`${BUDGET_LABEL[row.category]} budget cap`}
             className="w-20 rounded border border-border px-2 py-0.5 text-right text-sm border-border bg-bg-card"
             placeholder="—"
           />
@@ -1945,22 +2012,32 @@ function BudgetBar({ row, currency }: { row: BudgetCategoryRow; currency: string
 // ─── Todos tab ───────────────────────────────────────────────────
 
 function TodosTab({ data, onChanged }: { data: TripDashboard; onChanged: () => void }) {
+  const ui = useUI();
   const [label, setLabel] = useState("");
+  const [busy, setBusy] = useState(false);
   const trip = data.trip;
+  const run = async (action: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await action();
+      onChanged();
+    } catch (e: unknown) {
+      ui.notify(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   const add = async () => {
     if (!label.trim()) return;
-    await api<Todo>("/todos", { method: "POST", body: JSON.stringify({ trip_id: trip.id, label }) });
-    setLabel("");
-    onChanged();
+    const nextLabel = label.trim();
+    await run(async () => {
+      await api<Todo>("/todos", { method: "POST", body: JSON.stringify({ trip_id: trip.id, label: nextLabel }) });
+      setLabel("");
+    });
   };
-  const toggle = async (id: number) => {
-    await api<Todo>(`/todos/${id}/toggle`, { method: "POST", body: "{}" });
-    onChanged();
-  };
-  const remove = async (id: number) => {
-    await api<unknown>(`/todos/${id}`, { method: "DELETE" });
-    onChanged();
-  };
+  const toggle = (id: number) => run(async () => { await api<Todo>(`/todos/${id}/toggle`, { method: "POST", body: "{}" }); });
+  const remove = (id: number) => run(async () => { await api<unknown>(`/todos/${id}`, { method: "DELETE" }); });
   return (
     <div className="rounded-lg border border-border bg-bg-card">
       <div className="flex items-center gap-2 border-b border-border-subtle p-3 border-border-subtle">
@@ -1968,10 +2045,11 @@ function TodosTab({ data, onChanged }: { data: TripDashboard; onChanged: () => v
           value={label}
           onChange={e => setLabel(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") add(); }}
+          disabled={busy}
           placeholder="Add a packing item or errand"
           className="flex-1 rounded border border-border px-2 py-1 text-sm border-border bg-bg-card"
         />
-        <button onClick={add} className="rounded bg-accent px-3 py-1 text-sm text-bg hover:bg-accent-hover">Add</button>
+        <button onClick={add} disabled={busy || !label.trim()} className="rounded bg-accent px-3 py-1 text-sm text-bg hover:bg-accent-hover disabled:opacity-50">Add</button>
       </div>
       {data.todos.length === 0 ? (
         <EmptyState message="No todos yet." />
@@ -1981,13 +2059,15 @@ function TodosTab({ data, onChanged }: { data: TripDashboard; onChanged: () => v
             <li key={t.id} className="flex items-center gap-3 px-3 py-2">
               <button
                 onClick={() => toggle(t.id)}
+                disabled={busy}
+                aria-label={`${t.done ? "Mark incomplete" : "Mark complete"}: ${t.label}`}
                 className={`flex h-5 w-5 items-center justify-center rounded border ${t.done ? "border-success bg-success text-bg" : "border-border"}`}
               >
                 {t.done && <Icon name="check" size={12} />}
               </button>
               <span className={`flex-1 ${t.done ? "text-text-dim line-through" : ""}`}>{t.label}</span>
               {t.due_at && <span className="text-xs text-text-muted">{fmtDateShort(t.due_at)}</span>}
-              <button onClick={() => remove(t.id)} className="text-text-dim hover:text-error">
+              <button onClick={() => remove(t.id)} disabled={busy} aria-label={`Delete ${t.label}`} className="text-text-dim hover:text-error disabled:opacity-50">
                 <Icon name="trash" size={12} />
               </button>
             </li>
@@ -2003,12 +2083,8 @@ function TodosTab({ data, onChanged }: { data: TripDashboard; onChanged: () => v
 function NewTripDialog({ onClose, onCreated }: { onClose: () => void; onCreated: (id: number) => void }) {
   const [name, setName] = useState("");
   const [datesKnown, setDatesKnown] = useState(true);
-  const [startAt, setStartAt] = useState(() => new Date().toISOString().slice(0, 10));
-  const [endAt, setEndAt] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 7);
-    return d.toISOString().slice(0, 10);
-  });
+  const [startAt, setStartAt] = useState(() => todayPlus(0));
+  const [endAt, setEndAt] = useState(() => todayPlus(7));
   const [currency, setCurrency] = useState("EUR");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -2079,7 +2155,9 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [name, setName] = useState(a?.name ?? c?.name ?? "");
   const [cost, setCost] = useState(() => {
     const v = existing?.cost_actual ?? existing?.cost_estimated;
-    return v != null ? (v / 100).toFixed(2) : "";
+    if (v == null) return "";
+    const digits = currencyFractionDigits(existing?.currency ?? trip.home_currency);
+    return (v / (10 ** digits)).toFixed(digits);
   });
   const [currency, setCurrency] = useState(existing?.currency ?? trip.home_currency);
   const [notes, setNotes] = useState(existing?.notes ?? "");
@@ -2088,8 +2166,8 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [provider, setProvider] = useState(t?.provider ?? "");
   const [reference, setReference] = useState(t?.reference ?? "");
   const [transportDatesKnown, setTransportDatesKnown] = useState(t ? hasDateRange(t.depart_at, t.arrive_at) : hasDateRange(trip.start_at, trip.end_at));
-  const [departAt, setDepartAt] = useState(t?.depart_at ? t.depart_at.slice(0, 16) : (trip.start_at ? trip.start_at.slice(0, 16) : `${todayPlus(0)}T09:00`));
-  const [arriveAt, setArriveAt] = useState(t?.arrive_at ? t.arrive_at.slice(0, 16) : (trip.start_at ? trip.start_at.slice(0, 16) : `${todayPlus(0)}T11:00`));
+  const [departAt, setDepartAt] = useState(t?.depart_at ? toDateTimeLocal(t.depart_at) : `${trip.start_at?.slice(0, 10) || todayPlus(0)}T09:00`);
+  const [arriveAt, setArriveAt] = useState(t?.arrive_at ? toDateTimeLocal(t.arrive_at) : `${trip.start_at?.slice(0, 10) || todayPlus(0)}T11:00`);
   const [departLoc, setDepartLoc] = useState(t?.depart_location ?? "");
   const [arriveLoc, setArriveLoc] = useState(t?.arrive_location ?? "");
 
@@ -2100,13 +2178,14 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
   const [checkOut, setCheckOut] = useState(a?.check_out_at ? a.check_out_at.slice(0, 10) : (trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(1)));
 
   const [actCategory, setActCategory] = useState<Activity["category"]>(c?.category ?? "activity");
-  const [actStart, setActStart] = useState(c?.start_at?.slice(0, 16) ?? "");
+  const [actStart, setActStart] = useState(c?.start_at ? toDateTimeLocal(c.start_at) : "");
+  const [actEnd, setActEnd] = useState(c?.end_at ? toDateTimeLocal(c.end_at) : "");
   const [actLocation, setActLocation] = useState(c?.location ?? "");
 
   const submit = async () => {
     setBusy(true); setErr("");
     try {
-      const cents = cost.trim() ? parseMoneyDecimal(cost) : undefined;
+      const cents = cost.trim() ? parseMoneyDecimal(cost, currency) : null;
       // Field name for the cost field switches based on edit mode:
       // when we already have a cost_actual we update it; otherwise we
       // edit cost_estimated. The mark-booked button is the dedicated
@@ -2140,7 +2219,8 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
       } else {
         const body = {
           trip_id: trip.id, name, category: actCategory,
-          start_at: actStart ? ensureRfc3339(actStart) : undefined,
+          start_at: actStart ? ensureRfc3339(actStart) : null,
+          end_at: actEnd ? ensureRfc3339(actEnd) : null,
           location: actLocation, [costField]: cents, currency, notes,
         };
         if (isEdit) {
@@ -2164,8 +2244,8 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
     setProvider(offer.carrier);
     setReference(`${offer.carrier_code}${offer.number}`);
     setTransportDatesKnown(true);
-    setDepartAt(offer.depart_at.slice(0, 16));
-    setArriveAt(offer.arrive_at.slice(0, 16));
+    setDepartAt(toDateTimeLocal(offer.depart_at));
+    setArriveAt(toDateTimeLocal(offer.arrive_at));
     setDepartLoc(offer.depart_location);
     setArriveLoc(offer.arrive_location);
     if (offer.total_amount_cents > 0) {
@@ -2273,13 +2353,16 @@ function ItemDialog({ kind, trip, destinations, existing, onClose, onSaved }: {
         <>
           <Field label="Name"><input value={name} onChange={e => setName(e.target.value)} className="input" autoFocus placeholder="Louvre" /></Field>
           <Field label="Category">
-            <select value={actCategory} onChange={e => setActCategory(e.target.value)} className="input">
+            <select value={actCategory} onChange={e => setActCategory(e.target.value as Activity["category"])} className="input">
               <option value="activity">Activity</option><option value="food">Food</option>
               <option value="shopping">Shopping</option><option value="transport_local">Local transport</option>
               <option value="other">Other</option>
             </select>
           </Field>
-          <Field label="When (optional)"><input type="datetime-local" value={actStart} onChange={e => setActStart(e.target.value)} className="input" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Starts (optional)"><input type="datetime-local" value={actStart} onChange={e => { setActStart(e.target.value); if (!e.target.value) setActEnd(""); }} className="input" /></Field>
+            <Field label="Ends (optional)"><input type="datetime-local" value={actEnd} onChange={e => setActEnd(e.target.value)} disabled={!actStart} min={actStart || undefined} className="input" /></Field>
+          </div>
           <Field label="Location"><input value={actLocation} onChange={e => setActLocation(e.target.value)} className="input" /></Field>
         </>
       )}
@@ -2400,7 +2483,7 @@ function DestinationDialog({ trip, existing, onClose, onSaved }: {
 function TripEditDialog({ trip, onClose, onSaved }: { trip: Trip; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(trip.name);
   const [datesKnown, setDatesKnown] = useState(hasDateRange(trip.start_at, trip.end_at));
-  const [startAt, setStartAt] = useState(trip.start_at ? trip.start_at.slice(0, 10) : new Date().toISOString().slice(0, 10));
+  const [startAt, setStartAt] = useState(trip.start_at ? trip.start_at.slice(0, 10) : todayPlus(0));
   const [endAt, setEndAt] = useState(trip.end_at ? trip.end_at.slice(0, 10) : todayPlus(7));
   const [status, setStatus] = useState<Trip["status"]>(trip.status);
   const [color, setColor] = useState(trip.color);
@@ -2487,7 +2570,6 @@ function PlaceAutocomplete({ value, onChange, onPick }: {
   onChange: (v: string) => void;
   onPick: (p: PlaceResult) => void;
 }) {
-  const ui = useUI();
   const [suggestions, setSuggestions] = useState<PlaceResult[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -2495,6 +2577,7 @@ function PlaceAutocomplete({ value, onChange, onPick }: {
 
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    const controller = new AbortController();
     if (!value || value.length < 2) {
       setSuggestions([]);
       return;
@@ -2503,20 +2586,20 @@ function PlaceAutocomplete({ value, onChange, onPick }: {
       setLoading(true);
       try {
         const url = `/search/places?kind=destination&query=${encodeURIComponent(value)}`;
-        const r = await api<{ places: PlaceResult[] }>(url);
+        const r = await api<{ places: PlaceResult[] }>(url, { signal: controller.signal });
         setSuggestions(r.places ?? []);
-      } catch (e: unknown) {
-        // Silent on autocomplete fail — fall back to manual text entry.
-        // We do surface the error via the toast only on explicit picks.
-        ui.notify(e instanceof Error ? e.message : String(e));
+      } catch {
+        // Autocomplete is optional; manual text entry remains available.
+        if (!controller.signal.aborted) setSuggestions([]);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }, 250);
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
+      controller.abort();
     };
-  }, [value, ui]);
+  }, [value]);
 
   return (
     <div className="relative">
@@ -2525,6 +2608,9 @@ function PlaceAutocomplete({ value, onChange, onPick }: {
         onChange={e => { onChange(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
         onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        role="combobox"
+        aria-expanded={open && suggestions.length > 0}
+        aria-autocomplete="list"
         className="input"
         autoFocus
         placeholder="Paris"
@@ -2564,6 +2650,7 @@ function AirportCodeInput({ value, onChange, onPick, placeholder = "BCN", autoFo
 
   useEffect(() => {
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    const controller = new AbortController();
     const query = value.trim();
     if (query.length < 2) {
       setSuggestions([]);
@@ -2572,16 +2659,17 @@ function AirportCodeInput({ value, onChange, onPick, placeholder = "BCN", autoFo
     debounceRef.current = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const r = await api<{ airports: AirportResult[] }>(`/search/airports?query=${encodeURIComponent(query)}&limit=12`);
+        const r = await api<{ airports: AirportResult[] }>(`/search/airports?query=${encodeURIComponent(query)}&limit=12`, { signal: controller.signal });
         setSuggestions(r.airports ?? []);
       } catch {
-        setSuggestions([]);
+        if (!controller.signal.aborted) setSuggestions([]);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }, 220);
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
+      controller.abort();
     };
   }, [value]);
 
@@ -2599,6 +2687,9 @@ function AirportCodeInput({ value, onChange, onPick, placeholder = "BCN", autoFo
         onChange={e => { onChange(e.target.value.toUpperCase()); setOpen(true); }}
         onFocus={() => setOpen(true)}
         onBlur={() => window.setTimeout(() => setOpen(false), 150)}
+        role="combobox"
+        aria-expanded={open && suggestions.length > 0}
+        aria-autocomplete="list"
         className="input uppercase"
         placeholder={placeholder}
         autoFocus={autoFocus}
@@ -2861,7 +2952,7 @@ function humanizeISO8601Duration(s: string): string {
   return parts.join(" ") || s;
 }
 
-function SettingsDialog({ onClose }: { onClose: () => void }) {
+function SettingsDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const ui = useUI();
   const [settings, setSettings] = useState<Settings | null>(null);
   const [duffelConns, setDuffelConns] = useState<AvailableConnection[]>([]);
@@ -2904,7 +2995,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           daily_search_budget_cents: settings.daily_search_budget_cents,
         }),
       });
-      onClose();
+      onSaved();
     } catch (e: unknown) {
       ui.notify(e instanceof Error ? e.message : String(e));
       setBusy(false);
@@ -2967,7 +3058,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
               />
             </Field>
           </div>
-          <Field label="Daily Places budget (cents; 0 = unlimited)">
+          <Field label="Daily Places budget (estimated cents; 0 = unlimited)">
             <input
               type="number"
               min={0}
@@ -2975,6 +3066,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
               onChange={e => update({ daily_search_budget_cents: Math.max(0, parseInt(e.target.value || "0", 10)) })}
               className="input"
             />
+            <p className="mt-1 text-xs text-text-dim">Cached requests are free. Live requests reserve a conservative estimate based on the Places operation.</p>
           </Field>
           <DialogActions>
             <button onClick={onClose} className="btn-dialog-secondary">Cancel</button>
@@ -2988,18 +3080,39 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
 
 // ─── Generic UI bits ─────────────────────────────────────────────
 
+function trapDialogTab(e: React.KeyboardEvent<HTMLElement>) {
+  if (e.key !== "Tab") return;
+  const focusable = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+  )).filter(el => !el.hasAttribute("hidden"));
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault(); last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault(); first.focus();
+  }
+}
+
 function Dialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  const titleID = useId();
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay p-4">
-      <div className="w-full max-w-md rounded-lg border border-border bg-bg-card p-5 shadow-xl border-border bg-bg-card">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleID}
+      onKeyDown={e => {
+        e.stopPropagation();
+        if (e.key === "Escape") { e.preventDefault(); onClose(); }
+        trapDialogTab(e);
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-bg-overlay p-4"
+    >
+      <div className="max-h-[calc(100vh-2rem)] w-full max-w-md overflow-auto rounded-lg border border-border bg-bg-card p-5 shadow-xl">
         <header className="mb-3 flex items-center justify-between">
-          <h3 className="text-base font-semibold">{title}</h3>
-          <button onClick={onClose} className="text-text-dim hover:text-text"><Icon name="x" size={18} /></button>
+          <h3 id={titleID} className="text-base font-semibold">{title}</h3>
+          <button type="button" onClick={onClose} aria-label={`Close ${title}`} className="text-text-dim hover:text-text"><Icon name="x" size={18} /></button>
         </header>
         <div className="space-y-3">{children}</div>
         <style>{`
@@ -3416,7 +3529,7 @@ const drfStyles = `
 // ─── helpers ─────────────────────────────────────────────────────
 
 // Lightweight echo of finance's parseMoneyToMinor.
-function parseMoneyDecimal(s: string): number {
+function parseMoneyDecimal(s: string, currency: string): number {
   s = s.trim();
   if (!s) return 0;
   let neg = false;
@@ -3431,12 +3544,20 @@ function parseMoneyDecimal(s: string): number {
     else { integer = s.slice(0, lastComma).replace(/\./g, ""); fraction = s.slice(lastComma + 1); }
   } else if (lastDot >= 0) { integer = s.slice(0, lastDot); fraction = s.slice(lastDot + 1); }
   else if (lastComma >= 0) { integer = s.slice(0, lastComma); fraction = s.slice(lastComma + 1); }
-  if (fraction.length > 2) { integer += fraction; fraction = ""; }
-  if (!fraction) fraction = "00";
-  if (fraction.length === 1) fraction += "0";
-  fraction = fraction.slice(0, 2);
-  const v = parseInt(integer || "0", 10) * 100 + parseInt(fraction, 10);
-  return neg ? -v : v;
+  const digits = currencyFractionDigits(currency);
+  if (!/^\d*$/.test(integer) || !/^\d*$/.test(fraction) || (!integer && !fraction)) {
+    throw new Error("Enter a valid amount");
+  }
+  if (fraction.length > digits) {
+    throw new Error(`${currency.toUpperCase()} supports at most ${digits} decimal place${digits === 1 ? "" : "s"}`);
+  }
+  fraction = fraction.padEnd(digits, "0").slice(0, digits);
+  const factor = 10 ** digits;
+  const v = parseInt(integer || "0", 10) * factor + (fraction ? parseInt(fraction, 10) : 0);
+  const result = neg ? -v : v;
+  if (!Number.isSafeInteger(result)) throw new Error("Amount is too large");
+  if (result < 0) throw new Error("Amount cannot be negative");
+  return result;
 }
 
 // ensureRfc3339 accepts the value an <input type="datetime-local">
@@ -3444,8 +3565,14 @@ function parseMoneyDecimal(s: string): number {
 // time parser is happy.
 function ensureRfc3339(s: string): string {
   if (!s) return s;
-  if (s.endsWith("Z")) return s;
-  if (s.length === 16) return s + ":00Z";
-  if (s.length === 19) return s + "Z";
-  return s;
+  if (/Z$|[+-]\d{2}:\d{2}$/.test(s)) return s;
+  const parsed = new Date(s);
+  return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : s;
+}
+
+function toDateTimeLocal(s: string): string {
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return s.slice(0, 16);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
