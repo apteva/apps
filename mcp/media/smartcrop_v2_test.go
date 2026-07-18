@@ -838,6 +838,86 @@ func TestReelTemporalConsensusPreservesSustainedOneSidedTraversal(t *testing.T) 
 	}
 }
 
+func TestReelStationaryRunsRecoverInsideSustainedTraversal(t *testing.T) {
+	left := makeTemporalTestSamples([]int{92, 98, 104, 110, 116}, 740)
+	moving := makeTemporalTestSamples([]int{128, 176, 224}, 300)
+	right := makeTemporalTestSamples([]int{140, 134, 128, 122, 116}, 740)
+	samples := append(append(left, moving...), right...)
+	for i := range samples {
+		samples[i].point.AtMs = int64(i) * smartCropTrackingIntervalMs
+	}
+	for i, x := range []int{300, 500, 700} {
+		idx := len(left) + i
+		samples[idx].point.X = x
+		samples[idx].motionTracked = true
+	}
+	if !smartCropSceneHasSustainedTraversal(samples, 404) {
+		t.Fatal("fixture must remain a traversal so scene-wide correction stays disabled")
+	}
+	if corrected := correctSmartCropStationaryRuns(samples, 1280, 404); corrected != len(left)+len(right) {
+		t.Fatalf("corrected %d stationary points, want %d", corrected, len(left)+len(right))
+	}
+	for i, sample := range samples {
+		if sample.motionTracked {
+			want := []int{300, 500, 700}[i-len(left)]
+			if sample.point.X != want || sample.temporalTrack {
+				t.Fatalf("motion anchor %d changed: %+v want x=%d", i, sample, want)
+			}
+			continue
+		}
+		if sample.point.X < 250 || sample.point.X > 500 || !sample.temporalTrack {
+			t.Fatalf("stationary point %d was not recovered around the person: %+v", i, sample)
+		}
+	}
+}
+
+func TestReelStationaryRunsRejectLowConfidenceBackground(t *testing.T) {
+	samples := make([]smartCropV2Sample, 5)
+	for i := range samples {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		fillImage(img, color.RGBA{R: uint8(70 + i), G: uint8(80 + i), B: uint8(90 + i), A: 255})
+		samples[i] = smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 740},
+			img:   img,
+		}
+	}
+	if corrected := correctSmartCropStationaryRuns(samples, 1280, 404); corrected != 0 {
+		t.Fatalf("low-confidence background changed %d points", corrected)
+	}
+	for i, sample := range samples {
+		if sample.point.X != 740 || sample.temporalTrack {
+			t.Fatalf("low-confidence point %d changed: %+v", i, sample)
+		}
+	}
+}
+
+func TestReelStationaryRunsDoNotCrossSceneCut(t *testing.T) {
+	left := makeTemporalTestSamples([]int{92, 98, 104}, 740)
+	right := makeTemporalTestSamples([]int{220, 226, 232}, 740)
+	samples := append(left, right...)
+	for i := range samples {
+		samples[i].point.AtMs = int64(i) * smartCropTrackingIntervalMs
+	}
+	samples[len(left)].point.Cut = true
+	if corrected := correctSmartCropStationaryRuns(samples, 1280, 404); corrected != len(samples) {
+		t.Fatalf("corrected %d points, want %d", corrected, len(samples))
+	}
+	leftX, rightX := samples[0].point.X, samples[len(left)].point.X
+	if leftX >= rightX || rightX-leftX < 300 {
+		t.Fatalf("scene cut was flattened: left=%d right=%d samples=%+v", leftX, rightX, samples)
+	}
+	for i := 1; i < len(left); i++ {
+		if samples[i].point.X != leftX {
+			t.Fatalf("left scene point %d differs: %+v", i, samples[i])
+		}
+	}
+	for i := len(left) + 1; i < len(samples); i++ {
+		if samples[i].point.X != rightX {
+			t.Fatalf("right scene point %d differs: %+v", i, samples[i])
+		}
+	}
+}
+
 func TestSustainedTraversalRejectsSingleDriftPoint(t *testing.T) {
 	samples := make([]smartCropV2Sample, 9)
 	for i := range samples {
@@ -885,6 +965,26 @@ func BenchmarkTemporalSubjectConsensusNineFrames(b *testing.B) {
 		if _, ok := temporalSubjectConsensus(samples, 1280, 404); !ok {
 			b.Fatal("expected consensus")
 		}
+	}
+}
+
+func BenchmarkCorrectSmartCropStationaryRuns(b *testing.B) {
+	left := makeTemporalTestSamples([]int{92, 98, 104, 110, 116}, 740)
+	moving := makeTemporalTestSamples([]int{128, 176, 224}, 300)
+	right := makeTemporalTestSamples([]int{140, 134, 128, 122, 116}, 740)
+	template := append(append(left, moving...), right...)
+	for i := range template {
+		template[i].point.AtMs = int64(i) * smartCropTrackingIntervalMs
+	}
+	for i, x := range []int{300, 500, 700} {
+		idx := len(left) + i
+		template[idx].point.X = x
+		template[idx].motionTracked = true
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		samples := append([]smartCropV2Sample(nil), template...)
+		correctSmartCropStationaryRuns(samples, 1280, 404)
 	}
 }
 

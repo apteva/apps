@@ -645,6 +645,54 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 	return corrected
 }
 
+// correctSmartCropStationaryRuns repairs low-confidence saliency anchors that
+// occur while a tracked subject pauses inside an otherwise moving scene.
+// Scene-wide temporal correction deliberately stays disabled for sustained
+// traversal, because flattening the whole scene would erase real movement.
+// That old all-or-nothing rule left stationary stretches unprotected: a
+// bright room feature could win for several seconds after the person stopped.
+//
+// Motion-certified points remain authoritative. Only runs of at least three
+// consecutive non-motion samples are considered, scene cuts split runs, and a
+// run changes only when its own frames establish a confident temporal or
+// recurring-person consensus. Marking corrected samples as temporalTrack also
+// prevents the later single-frame head guard from undoing the stable result.
+func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < smartCropTemporalMinSamples || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	corrected := 0
+	for i := 0; i < len(samples); {
+		if samples[i].motionTracked {
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(samples) && !samples[end].point.Cut && !samples[end].motionTracked {
+			end++
+		}
+		if end-i < smartCropTemporalMinSamples {
+			i = end
+			continue
+		}
+		result, ok := bestSmartCropTemporalConsensus(samples[i:end], srcW, cropW)
+		if !ok || !smartCropTemporalResultConfident(result) {
+			i = end
+			continue
+		}
+		x := clampInt(roundEven(result.X), 0, srcW-cropW)
+		for j := i; j < end; j++ {
+			if samples[j].point.X != x {
+				samples[j].point.X = x
+				corrected++
+			}
+			samples[j].temporalTrack = true
+		}
+		i = end
+	}
+	return corrected
+}
+
 func smartCropSceneHasSustainedTraversal(samples []smartCropV2Sample, cropW int) bool {
 	if len(samples) < 5 || cropW <= 0 {
 		return false

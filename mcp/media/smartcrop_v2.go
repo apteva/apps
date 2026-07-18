@@ -384,6 +384,7 @@ func computeSmartCropReelV2(
 	}
 	markSmartCropSceneCuts(samples)
 	trackingFrames := 0
+	stationaryCorrections := 0
 	if smartCropReelNeedsTracking(samples, row.Width, cw) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
 		if len(positions) >= 2 {
@@ -395,8 +396,9 @@ func computeSmartCropReelV2(
 				sampleSource += "+tracking"
 				markSmartCropSceneCuts(samples)
 				refineSmartCropMotionSamples(samples, row.Width, cw)
-				refineSmartCropHeadSamples(samples, row.Width, cw)
 				fillSmartCropMotionGaps(samples, row.Width, cw)
+				stationaryCorrections = correctSmartCropStationaryRuns(samples, row.Width, cw)
+				refineSmartCropHeadSamples(samples, row.Width, cw)
 			} else {
 				app.Logger().Info("smartcrop v2 adaptive tracking unavailable",
 					"file_id", sourceFileID, "err", sampleErr.Error())
@@ -425,6 +427,7 @@ func computeSmartCropReelV2(
 			"sample_source", sampleSource,
 			"crop_w", cw, "crop_h", ch, "crop_x", x,
 			"temporal_corrections", temporalCorrections,
+			"stationary_corrections", stationaryCorrections,
 			"head_corrections", headCorrections,
 			"tracking_frames", trackingFrames)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
@@ -435,6 +438,7 @@ func computeSmartCropReelV2(
 		"sample_source", sampleSource,
 		"path_points", len(path), "crop_w", cw, "crop_h", ch,
 		"temporal_corrections", temporalCorrections,
+		"stationary_corrections", stationaryCorrections,
 		"head_corrections", headCorrections,
 		"tracking_frames", trackingFrames)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil

@@ -62,6 +62,43 @@ func TestMaria10526LocalRegression(t *testing.T) {
 		})
 	}
 
+	t.Run("reel-first-zombie-stationary-recovery", func(t *testing.T) {
+		const start, end = int64(154_985), int64(190_944)
+		path := mariaReelPath(t, video, duration, start, end)
+		for _, point := range path {
+			if point.Cut {
+				t.Fatalf("single shot was misclassified as a scene cut at %+v; path=%v", point, path)
+			}
+		}
+		for _, want := range []struct {
+			at       int64
+			min, max int
+		}{
+			{159_000, 300, 750},
+			{160_000, 300, 800},
+			{178_000, 250, 750},
+			{179_000, 250, 750},
+			{185_000, 300, 800},
+			{188_000, 300, 850},
+			{190_000, 300, 850},
+		} {
+			x, ok := mariaInterpolatedPathX(path, want.at)
+			if !ok || x < want.min || x > want.max {
+				t.Fatalf("stationary recovery at %dms x=%d found=%v want [%d,%d]; path=%v", want.at, x, ok, want.min, want.max, path)
+			}
+		}
+		if outputDir := os.Getenv("MARIA_10526_OUTPUT_DIR"); outputDir != "" {
+			if err := os.MkdirAll(outputDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			filter := "setpts=PTS-STARTPTS," + cropFilterForPath(1214, 2158, 0, start, path) + ",scale=1080:1920,setsar=1"
+			runFFmpeg(t, "-ss", secondsString(start), "-i", video,
+				"-t", secondsString(end-start), "-vf", filter, "-an",
+				"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y",
+				filepath.Join(outputDir, "maria-first-zombie-stationary-recovery.mp4"))
+		}
+	})
+
 	for _, tc := range []struct {
 		name       string
 		start, end int64
@@ -81,7 +118,19 @@ func TestMaria10526LocalRegression(t *testing.T) {
 	}
 
 	t.Run("reel-zombie-tracking", func(t *testing.T) {
-		path := mariaReelPath(t, video, duration, 191_990, 226_680)
+		// Exact range selected for production render 954 / output 10664.
+		const start, end = int64(191_990), int64(229_720)
+		path := mariaReelPath(t, video, duration, start, end)
+		if outputDir := os.Getenv("MARIA_10526_OUTPUT_DIR"); outputDir != "" {
+			if err := os.MkdirAll(outputDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			filter := "setpts=PTS-STARTPTS," + cropFilterForPath(1214, 2158, 0, start, path) + ",scale=1080:1920,setsar=1"
+			runFFmpeg(t, "-ss", secondsString(start), "-i", video,
+				"-t", secondsString(end-start), "-vf", filter, "-an",
+				"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y",
+				filepath.Join(outputDir, "maria-zombie-tracking.mp4"))
+		}
 		for _, point := range path {
 			if point.Cut {
 				t.Fatalf("foreground traversal was misclassified as a scene cut at %+v; path=%v", point, path)
@@ -91,17 +140,19 @@ func TestMaria10526LocalRegression(t *testing.T) {
 			at       int64
 			min, max int
 		}{
-			{192_000, 0, 400},
+			{192_000, 300, 700},
 			{194_000, 500, 1_000},
 			{196_000, 1_700, 2_300},
 			{200_000, 0, 400},
-			{207_000, 1_200, 1_800},
+			{207_000, 1_900, 2_600},
 			{211_000, 0, 400},
-			{218_000, 2_300, 2_626},
+			{218_000, 1_800, 2_400},
 			{220_000, 1_200, 1_900},
 			{225_000, 0, 400},
+			{228_000, 300, 1_100},
+			{229_000, 300, 1_100},
 		} {
-			x, ok := mariaExactPathX(path, want.at)
+			x, ok := mariaInterpolatedPathX(path, want.at)
 			if !ok || x < want.min || x > want.max {
 				t.Fatalf("tracking at %dms x=%d found=%v want [%d,%d]; path=%v", want.at, x, ok, want.min, want.max, path)
 			}
@@ -128,13 +179,16 @@ func mariaStandaloneImageX(t *testing.T, path string) int {
 	return window.X
 }
 
-func mariaExactPathX(path []cropPathPoint, at int64) (int, bool) {
-	for _, point := range path {
-		if point.AtMs == at {
-			return point.X, true
+func mariaInterpolatedPathX(path []cropPathPoint, at int64) (int, bool) {
+	if len(path) == 0 || at < path[0].AtMs || at > path[len(path)-1].AtMs {
+		return 0, false
+	}
+	for i := 1; i < len(path); i++ {
+		if at <= path[i].AtMs {
+			return interpolateSmartCropStillX(path[i-1], path[i], at), true
 		}
 	}
-	return 0, false
+	return path[len(path)-1].X, true
 }
 
 func mariaStillX(t *testing.T, video string, duration, focus int64) int {
@@ -216,6 +270,8 @@ func mariaReelPath(t *testing.T, video string, duration, start, end int64) []cro
 		samples = mergeSmartCropSamples(samples, extra)
 		markSmartCropSceneCuts(samples)
 		refineSmartCropMotionSamples(samples, srcW, cropW)
+		fillSmartCropMotionGaps(samples, srcW, cropW)
+		correctSmartCropStationaryRuns(samples, srcW, cropW)
 		refineSmartCropHeadSamples(samples, srcW, cropW)
 	}
 	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
