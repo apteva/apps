@@ -1131,24 +1131,35 @@ function LineChart({ bars, currency }: { bars: Bar[]; currency?: string }) {
       <div className="mb-1 flex justify-between text-xs text-text-dim">
         <span>{fmtMoney(min, currency)}</span><span>{fmtMoney(max, currency)}</span>
       </div>
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 180, width: "100%" }}
-        role="img" aria-label={`Price history from ${fmtDate(bars[0].t)} to ${fmtDate(bars[bars.length - 1].t)}`}
-        onMouseMove={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-          setHover(Math.round(ratio * (bars.length - 1)));
-        }}
-        onMouseLeave={() => setHover(null)}>
-        {[0.25, 0.5, 0.75].map((ratio) => <line key={ratio} x1={0} x2={W} y1={H * ratio} y2={H * ratio} stroke="var(--border)" opacity={0.45} />)}
-        <path d={area} fill={color} opacity={0.08} />
-        <path d={line} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      <div className="relative" style={{ height: 180 }}>
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ height: 180, width: "100%" }}
+          role="img" aria-label={`Price history from ${fmtDate(bars[0].t)} to ${fmtDate(bars[bars.length - 1].t)}`}
+          onMouseMove={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+            setHover(Math.round(ratio * (bars.length - 1)));
+          }}
+          onMouseLeave={() => setHover(null)}>
+          {[0.25, 0.5, 0.75].map((ratio) => <line key={ratio} x1={0} x2={W} y1={H * ratio} y2={H * ratio} stroke="var(--border)" opacity={0.45} />)}
+          <path d={area} fill={color} opacity={0.08} />
+          <path d={line} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+          {hovered && hover != null && (
+            <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--text-muted)"
+              strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />
+          )}
+        </svg>
         {hovered && hover != null && (
-          <>
-            <line x1={x(hover)} x2={x(hover)} y1={0} y2={H} stroke="var(--text-muted)" strokeDasharray="3 3" />
-            <circle cx={x(hover)} cy={y(hovered.c)} r={4} fill={color} vectorEffect="non-scaling-stroke" />
-          </>
+          <span aria-hidden="true" className="pointer-events-none absolute rounded-full"
+            style={{
+              width: 8, height: 8,
+              left: `${(x(hover) / W) * 100}%`,
+              top: `${(y(hovered.c) / H) * 100}%`,
+              transform: "translate(-50%, -50%)",
+              backgroundColor: color,
+              boxShadow: "0 0 0 2px var(--bg-card)",
+            }} />
         )}
-      </svg>
+      </div>
       <div className="mt-1 flex justify-between text-xs text-text-dim">
         <span>{fmtDate(bars[0].t)}</span><span>{fmtDate(bars[bars.length - 1].t)}</span>
       </div>
