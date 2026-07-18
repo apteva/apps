@@ -179,7 +179,7 @@ func (a *App) toolInstructionsCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("instruction.created", map[string]any{
+	ctx.EmitWithProject("instruction.created", pid, map[string]any{
 		"instruction_id": id,
 		"kind":           kind,
 	})
@@ -297,7 +297,7 @@ func (a *App) toolInstructionsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 
 	updated, _ := getInstruction(ctx.AppDB(), pid, id)
-	ctx.Emit("instruction.updated", map[string]any{
+	ctx.EmitWithProject("instruction.updated", pid, map[string]any{
 		"instruction_id": id,
 		"new_version":    newVer,
 	})

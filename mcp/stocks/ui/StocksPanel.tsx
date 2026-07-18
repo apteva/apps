@@ -439,6 +439,8 @@ function List({ onOpen, watchlists, api, url, reloadWL }: {
         {loading && stocks.length > 0 && <span role="status" className="text-xs text-text-dim">Updating…</span>}
       </div>
 
+      <p className="mb-3 text-xs text-text-muted">Select a stock to view price history, fundamentals, and dividends.</p>
+
       <SyncBar url={url} onDataChanged={refreshVisibleStocks} />
 
       {watchlists.length > 0 && (
@@ -554,17 +556,28 @@ function List({ onOpen, watchlists, api, url, reloadWL }: {
               <th className="stx-col-mid px-3 py-2 text-right">P/E</th>
               <th className="stx-col-wide px-3 py-2 text-right">Payout</th>
               <th className="stx-col-wide px-3 py-2 text-right">5Y Gr</th>
+              <th className="px-3 py-2 text-right" aria-label="Details" />
             </tr>
           </thead>
           <tbody>
             {loading && stocks.length === 0 && (
-              <tr><td colSpan={activeWL != null ? 11 : 10} className="px-3 py-8 text-center text-text-muted">Loading…</td></tr>
+              <tr><td colSpan={activeWL != null ? 12 : 11} className="px-3 py-8 text-center text-text-muted">Loading…</td></tr>
             )}
             {!loading && shown.length === 0 && (
-              <tr><td colSpan={activeWL != null ? 11 : 10} className="px-3 py-8 text-center text-text-muted">{activeWL != null ? "This watchlist is empty." : "No stocks match."}</td></tr>
+              <tr><td colSpan={activeWL != null ? 12 : 11} className="px-3 py-8 text-center text-text-muted">{activeWL != null ? "This watchlist is empty." : "No stocks match."}</td></tr>
             )}
             {shown.map((s) => (
-              <tr key={s.symbol} className="border-b border-border-subtle hover:bg-bg-hover">
+              <tr key={s.symbol} tabIndex={0} aria-label={`Open ${s.symbol} details`}
+                onClick={(event) => {
+                  if (event.target instanceof Element && event.target.closest("button")) return;
+                  onOpen(s.symbol);
+                }}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                  event.preventDefault();
+                  onOpen(s.symbol);
+                }}
+                className="cursor-pointer border-b border-border-subtle hover:bg-bg-hover focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">
                 {activeWL != null && (
                   <td className="px-2 py-2">
                     <button type="button" aria-label={`Remove ${s.symbol} from watchlist`} disabled={mutationBusy}
@@ -587,6 +600,12 @@ function List({ onOpen, watchlists, api, url, reloadWL }: {
                 <td className="stx-col-mid px-3 py-2 text-right tabular-nums text-text-muted">{s.pe != null ? s.pe.toFixed(1) : "—"}</td>
                 <td className="stx-col-wide px-3 py-2 text-right tabular-nums text-text-muted">{fmtYield(s.payout_pct)}</td>
                 <td className="stx-col-wide px-3 py-2 text-right tabular-nums" style={{ color: changeColor(s.growth_pct) }}>{fmtPct(s.growth_pct)}</td>
+                <td className="px-3 py-2 text-right">
+                  <button type="button" onClick={() => onOpen(s.symbol)} aria-label={`View ${s.symbol} price history, fundamentals, and dividends`}
+                    className="inline-flex items-center gap-1 text-xs text-accent hover:underline">
+                    View <svg {...ico} width={12} height={12}><polyline points="9 18 15 12 9 6" /></svg>
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>

@@ -12,16 +12,24 @@ import (
 // `_project_id` for global-scope CRM installs.
 
 type crmContact struct {
-	ID           int64  `json:"id"`
-	ProjectID    string `json:"project_id"`
-	FirstName    string `json:"first_name"`
-	LastName     string `json:"last_name"`
-	DisplayName  string `json:"display_name"`
-	PrimaryEmail string `json:"primary_email"`
-	PrimaryPhone string `json:"primary_phone"`
-	Company      string `json:"company"`
-	JobTitle     string `json:"job_title"`
-	Status       string `json:"status"`
+	ID           int64        `json:"id"`
+	ProjectID    string       `json:"project_id"`
+	FirstName    string       `json:"first_name"`
+	LastName     string       `json:"last_name"`
+	DisplayName  string       `json:"display_name"`
+	PrimaryEmail string       `json:"primary_email"`
+	PrimaryPhone string       `json:"primary_phone"`
+	Company      string       `json:"company"`
+	JobTitle     string       `json:"job_title"`
+	Status       string       `json:"status"`
+	Channels     []crmChannel `json:"channels,omitempty"`
+}
+
+type crmChannel struct {
+	Kind      string `json:"kind"`
+	Value     string `json:"value"`
+	Label     string `json:"label,omitempty"`
+	IsPrimary bool   `json:"is_primary"`
 }
 
 // crmUpsertByChannel finds or creates a contact by email/phone.
@@ -41,8 +49,8 @@ func crmUpsertByChannel(ctx *sdk.AppCtx, pid, kind, value string, defaults map[s
 		args["source"] = source
 	}
 	var got struct {
-		Contact     *crmContact `json:"contact"`
-		WasCreated  bool        `json:"was_created"`
+		Contact    *crmContact `json:"contact"`
+		WasCreated bool        `json:"was_created"`
 	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_upsert_by_channel", args, &got); err != nil {
 		return nil, false, fmt.Errorf("crm.contacts_upsert_by_channel: %w", err)
@@ -70,6 +78,48 @@ func crmGetContact(ctx *sdk.AppCtx, pid string, contactID int64) (*crmContact, e
 	}
 	if !got.Found || got.Contact == nil {
 		return nil, nil
+	}
+	return got.Contact, nil
+}
+
+func crmEnsureChannels(ctx *sdk.AppCtx, pid string, contact *crmContact, email, phone, source string) (*crmContact, error) {
+	if contact == nil {
+		return nil, errors.New("contact required")
+	}
+	channels := append([]crmChannel(nil), contact.Channels...)
+	if len(channels) == 0 {
+		if contact.PrimaryEmail != "" {
+			channels = append(channels, crmChannel{Kind: "email", Value: contact.PrimaryEmail, IsPrimary: true})
+		}
+		if contact.PrimaryPhone != "" {
+			channels = append(channels, crmChannel{Kind: "phone", Value: contact.PrimaryPhone, IsPrimary: true})
+		}
+	}
+	ensure := func(kind, value string) {
+		if value == "" {
+			return
+		}
+		for _, channel := range channels {
+			if channel.Kind == kind && channel.Value == value {
+				return
+			}
+		}
+		channels = append(channels, crmChannel{Kind: kind, Value: value, IsPrimary: true})
+	}
+	ensure("email", email)
+	ensure("phone", phone)
+	args := map[string]any{"id": contact.ID, "patch": map[string]any{"channels": channels}}
+	if source != "" {
+		args["source"] = source
+	}
+	var got struct {
+		Contact *crmContact `json:"contact"`
+	}
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_update", args, &got); err != nil {
+		return nil, fmt.Errorf("crm.contacts_update channels: %w", err)
+	}
+	if got.Contact == nil {
+		return nil, errors.New("crm.contacts_update returned no contact")
 	}
 	return got.Contact, nil
 }

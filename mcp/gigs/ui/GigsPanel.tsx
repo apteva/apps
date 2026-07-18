@@ -84,6 +84,7 @@ interface CompositionItem {
   kind: string;
   body: Record<string, unknown>;
   result_key?: string;
+  overrides?: Record<string, unknown>;
 }
 interface TemplateVersion {
   id: number;
@@ -136,6 +137,7 @@ interface Gig {
   composition?: Array<{
     sort_order: number;
     instruction_kind: string;
+    instruction_name?: string;
     rendered_body: Record<string, unknown>;
     result_key?: string;
   }>;
@@ -143,12 +145,15 @@ interface Gig {
     id: number;
     worker_id: number;
     status: string;
+    mode?: string;
+    notify_worker?: boolean;
     submitted_at?: string;
     worker_url?: string;
     submission?: Submission;
   }>;
   result?: Record<string, unknown>;
   submission?: Submission;
+  submissions?: Submission[];
   rejection_reason?: string;
 }
 interface StorageFile {
@@ -179,7 +184,7 @@ async function api<T>(
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  const j = await res.json();
+  const j = await parseResponse(res);
   if (!res.ok || (j && typeof j === "object" && "error" in j && (j as any).error)) {
     throw new Error((j as any)?.error || res.statusText);
   }
@@ -197,7 +202,7 @@ async function crmApi<T>(
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  const j = await res.json();
+  const j = await parseResponse(res);
   if (!res.ok || (j && typeof j === "object" && "error" in j && (j as any).error)) {
     throw new Error((j as any)?.error || res.statusText);
   }
@@ -215,11 +220,21 @@ async function storageApi<T>(
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  const j = await res.json();
+  const j = await parseResponse(res);
   if (!res.ok || (j && typeof j === "object" && "error" in j && (j as any).error)) {
     throw new Error((j as any)?.error || res.statusText);
   }
   return j as T;
+}
+
+async function parseResponse(res: Response): Promise<any> {
+  const text = await res.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(res.ok ? "The server returned an invalid response." : text.slice(0, 300));
+  }
 }
 
 // ─── small UI primitives ─────────────────────────────────────────
@@ -227,11 +242,11 @@ async function storageApi<T>(
 function Pill({ children, tone }: { children: React.ReactNode; tone?: string }) {
   const t = tone || "default";
   const colors: Record<string, string> = {
-    default: "bg-bg-subtle text-text-muted border-border",
-    success: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30",
-    warn:    "bg-amber-500/10  text-amber-600  border-amber-500/30",
-    danger:  "bg-rose-500/10   text-rose-600   border-rose-500/30",
-    info:    "bg-sky-500/10    text-sky-600    border-sky-500/30",
+    default: "bg-bg-input text-text-muted border-border",
+    success: "bg-green/10 text-green border-green/30",
+    warn:    "bg-yellow/10  text-yellow  border-yellow/30",
+    danger:  "bg-red/10   text-red   border-red/30",
+    info:    "bg-accent/10    text-accent    border-accent/30",
   };
   return (
     <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded border ${colors[t]}`}>
@@ -299,11 +314,11 @@ function Button({
   size?: ButtonSize;
 }) {
   const tones: Record<ButtonTone, string> = {
-    primary: "bg-sky-600 text-white border-sky-600 hover:bg-sky-500 hover:border-sky-500",
-    secondary: "bg-bg border-border text-text hover:bg-bg-subtle hover:border-text-muted/40",
-    danger: "bg-rose-600 text-white border-rose-600 hover:bg-rose-500 hover:border-rose-500",
-    success: "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-500 hover:border-emerald-500",
-    ghost: "bg-transparent border-transparent text-text-muted hover:text-text hover:bg-bg-subtle",
+    primary: "bg-accent text-white border-accent hover:opacity-90 hover:border-accent",
+    secondary: "bg-bg-card border-border text-text hover:bg-bg-input hover:border-text-muted/40",
+    danger: "bg-red text-white border-red hover:opacity-90 hover:border-red",
+    success: "bg-green text-white border-green hover:opacity-90 hover:border-green",
+    ghost: "bg-transparent border-transparent text-text-muted hover:text-text hover:bg-bg-input",
   };
   const sizes: Record<ButtonSize, string> = {
     xs: "px-2 py-1 text-xs",
@@ -315,7 +330,7 @@ function Button({
       {...props}
       className={cx(
         "inline-flex items-center justify-center gap-1.5 rounded border font-medium transition-colors",
-        "focus:outline-none focus:ring-2 focus:ring-sky-500/40 disabled:opacity-50 disabled:cursor-not-allowed",
+        "focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed",
         tones[tone],
         sizes[size],
         className,
@@ -336,8 +351,8 @@ function Field({
   React.TextareaHTMLAttributes<HTMLTextAreaElement>
 ) & { as?: "input" | "select" | "textarea" }) {
   const cls = cx(
-    "w-full rounded border border-border bg-bg px-3 py-2 text-sm text-text",
-    "placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500/60",
+    "w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text",
+    "placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent/60",
     "disabled:opacity-60 disabled:cursor-not-allowed",
     className,
   );
@@ -351,7 +366,7 @@ function Panel({
   className,
 }: { children: React.ReactNode; className?: string }) {
   return (
-    <section className={cx("rounded border border-border bg-bg-subtle", className)}>
+    <section className={cx("rounded border border-border bg-bg-card", className)}>
       {children}
     </section>
   );
@@ -380,7 +395,7 @@ function Segmented<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="inline-flex rounded border border-border bg-bg p-0.5 text-sm">
+    <div className="inline-flex rounded border border-border bg-bg-input p-0.5 text-sm">
       {options.map((option) => (
         <button
           key={option.value}
@@ -389,7 +404,7 @@ function Segmented<T extends string>({
           className={cx(
             "px-3 py-1.5 rounded transition-colors",
             value === option.value
-              ? "bg-sky-600 text-white"
+              ? "bg-accent text-white"
               : "text-text-muted hover:text-text hover:bg-bg-subtle",
           )}
         >
@@ -417,7 +432,7 @@ export default function GigsPanel(props: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("queue");
   return (
     <div className="flex flex-col h-full bg-bg text-text">
-      <nav className="flex gap-1 border-b border-border px-4 pt-4">
+      <nav className="flex gap-1 border-b border-border px-3 pt-3 overflow-x-auto shrink-0">
         {(["queue","templates","instructions","workers"] as Tab[]).map((t) => (
           <button
             key={t}
@@ -454,7 +469,7 @@ function QueueTab({ projectId }: { projectId: string }) {
 
   const reload = useCallback(async () => {
     try {
-      const data = await api<{ gigs: Gig[] }>(`/gigs?status=${encodeURIComponent(status)}`, projectId);
+      const data = await api<{ gigs: Gig[] }>(`/gigs?summary=true&status=${encodeURIComponent(status)}`, projectId);
       setGigs(data.gigs || []);
     } catch (e) {
       setErr((e as Error).message);
@@ -463,8 +478,8 @@ function QueueTab({ projectId }: { projectId: string }) {
   useEffect(() => { reload(); }, [reload]);
 
   return (
-    <div className="grid grid-cols-[minmax(300px,380px)_1fr] h-full">
-      <aside className="border-r border-border overflow-auto bg-bg">
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(300px,380px)_1fr] h-full">
+      <aside className={cx("border-r border-border overflow-auto bg-bg", (selected || adding) && "hidden lg:block")}>
         <div className="sticky top-0 z-10 bg-bg border-b border-border p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-semibold text-text">Gigs</h2>
@@ -486,7 +501,7 @@ function QueueTab({ projectId }: { projectId: string }) {
             <option value="open,offered,accepted,submitted,reviewed,rejected,cancelled,expired">All</option>
           </Field>
         </div>
-        {err && <div className="m-3 p-3 rounded border border-rose-500/30 bg-rose-500/10 text-rose-600 text-sm">{err}</div>}
+        {err && <div className="m-3 p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{err}</div>}
         {gigs?.length === 0 && <div className="p-6 text-text-muted text-sm">No gigs in this view.</div>}
         {gigs?.map((g) => (
           <button
@@ -494,7 +509,7 @@ function QueueTab({ projectId }: { projectId: string }) {
             onClick={() => { setSelected(g); setAdding(false); }}
             className={
               "w-full text-left px-4 py-3 border-b border-border transition-colors " +
-              (selected?.id === g.id ? "bg-sky-500/10 border-l-4 border-l-sky-500" : "hover:bg-bg-subtle border-l-4 border-l-transparent")
+              (selected?.id === g.id ? "bg-accent/10 border-l-4 border-l-accent" : "hover:bg-bg-subtle border-l-4 border-l-transparent")
             }
           >
             <div className="text-sm truncate">{g.title}</div>
@@ -507,7 +522,12 @@ function QueueTab({ projectId }: { projectId: string }) {
           </button>
         ))}
       </aside>
-      <section className="p-5 overflow-auto">
+      <section className={cx("p-4 md:p-5 overflow-auto", !selected && !adding && "hidden lg:block")}>
+        {(selected || adding) && (
+          <Button className="mb-4 lg:hidden" tone="ghost" onClick={() => { setSelected(null); setAdding(false); }}>
+            Back to gigs
+          </Button>
+        )}
         {adding ? (
           <NewGigForm
             projectId={projectId}
@@ -530,23 +550,32 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
   const [full, setFull] = useState<Gig | null>(null);
   const [busy, setBusy] = useState(false);
   const [assigning, setAssigning] = useState(false);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
   useEffect(() => {
-    api<{ gig: Gig }>(`/gigs/${gig.id}`, projectId).then((d) => setFull(d.gig)).catch(() => setFull(gig));
+    setActionErr(null);
+    api<{ gig: Gig }>(`/gigs/${gig.id}`, projectId).then((d) => setFull(d.gig)).catch((e) => {
+      setFull(gig);
+      setActionErr((e as Error).message);
+    });
   }, [gig.id, projectId, gig]);
   const g = full || gig;
 
   const doAction = async (path: string, body: unknown) => {
     setBusy(true);
+    setActionErr(null);
     try {
       await api(`/gigs/${gig.id}/${path}`, projectId, { method: "POST", body: JSON.stringify(body || {}) });
       onChange();
       const d = await api<{ gig: Gig }>(`/gigs/${gig.id}`, projectId);
       setFull(d.gig);
-    } catch (e) { alert((e as Error).message); } finally { setBusy(false); }
+    } catch (e) { setActionErr((e as Error).message); } finally { setBusy(false); }
   };
 
   return (
     <div className="space-y-5">
+      {actionErr && <div role="alert" className="p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{actionErr}</div>}
       <Panel className="p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -564,8 +593,9 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
         <Panel className="mt-2 divide-y divide-border overflow-hidden">
           {(g.composition || []).map((c, i) => (
             <div key={i} className="p-3 text-sm flex gap-3 items-start">
-              <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(c.instruction_kind)} /></span>
+              <span className="text-accent mt-0.5"><Icon name={kindIcon(c.instruction_kind)} /></span>
               <div className="flex-1 min-w-0">
+                <div className="font-medium text-text">{c.instruction_name || `Instruction ${i + 1}`}</div>
                 <div className="text-xs text-text-muted">{c.instruction_kind}{c.result_key ? ` -> ${c.result_key}` : ""}</div>
                 <div className="truncate text-text">{summariseBody(c.instruction_kind, c.rendered_body)}</div>
               </div>
@@ -582,10 +612,11 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
             <div key={a.id} className="p-3 text-sm flex items-center justify-between gap-3">
               <div>
                 Worker #{a.worker_id} <Pill tone={a.status === "submitted" ? "info" : "default"}>{a.status}</Pill>
+                {a.mode && <span className="ml-2 text-xs text-text-muted">{a.mode}</span>}
                 {a.submitted_at && <span className="ml-2 text-xs text-text-muted">submitted {formatDate(a.submitted_at)}</span>}
               </div>
               {a.worker_url && (
-                <a className="text-sky-600 text-xs underline" target="_blank" rel="noreferrer" href={a.worker_url}>worker link</a>
+                <a className="text-accent text-xs underline" target="_blank" rel="noreferrer" href={a.worker_url}>worker link</a>
               )}
             </div>
           ))}
@@ -598,8 +629,8 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
               projectId={projectId}
               busy={busy}
               onCancel={() => setAssigning(false)}
-              onAssign={(workerId, notifyWorker) =>
-                doAction("assign", { worker_id: workerId, mode: "direct", notify_worker: notifyWorker }).then(() => setAssigning(false))
+              onAssign={(workerId, mode, notifyWorker) =>
+                doAction("assign", { worker_id: workerId, mode, notify_worker: notifyWorker }).then(() => setAssigning(false))
               }
             />
           ) : (
@@ -614,10 +645,16 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
 
       <div className="flex gap-2">
         {(g.status === "open" || g.status === "offered" || g.status === "accepted") && (
-          <Button disabled={busy} tone="danger" size="md" onClick={() => {
-            const reason = prompt("Cancel reason:") || "";
-            doAction("cancel", { reason });
-          }}>Cancel</Button>
+          cancelOpen ? (
+            <Panel className="w-full p-3 space-y-2">
+              <label className="block text-sm font-medium text-text">Cancel gig</label>
+              <Field value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} placeholder="Reason (optional)" />
+              <div className="flex gap-2">
+                <Button disabled={busy} tone="danger" onClick={() => doAction("cancel", { reason: cancelReason.trim() }).then(() => setCancelOpen(false))}>Confirm cancel</Button>
+                <Button disabled={busy} tone="ghost" onClick={() => setCancelOpen(false)}>Keep gig</Button>
+              </div>
+            </Panel>
+          ) : <Button disabled={busy} tone="danger" size="md" onClick={() => setCancelOpen(true)}>Cancel gig</Button>
         )}
       </div>
     </div>
@@ -632,7 +669,21 @@ function SubmissionReview({
   busy: boolean;
   onAction: (path: string, body: unknown) => Promise<void>;
 }) {
-  const submission = gig.submission;
+  const submissions = useMemo(() => {
+    if (gig.submissions?.length) return gig.submissions;
+    return gig.submission ? [gig.submission] : [];
+  }, [gig.submissions, gig.submission]);
+  const [selectedSubmissionId, setSelectedSubmissionId] = useState<number | null>(null);
+  useEffect(() => {
+    if (!submissions.length) {
+      setSelectedSubmissionId(null);
+      return;
+    }
+    if (!submissions.some((item) => item.id === selectedSubmissionId)) {
+      setSelectedSubmissionId(submissions[0].id);
+    }
+  }, [submissions, selectedSubmissionId]);
+  const submission = submissions.find((item) => item.id === selectedSubmissionId) || submissions[0];
   const payload = submission?.payload || gig.result || {};
   const responses = useMemo(() => instructionResponsesFromPayload(payload), [payload]);
   const extraEntries = useMemo(
@@ -693,6 +744,21 @@ function SubmissionReview({
         {gig.status === "reviewed" && <Pill tone="success">accepted</Pill>}
       </div>
 
+      {submissions.length > 1 && (
+        <div className="flex gap-2 overflow-x-auto p-3 border-b border-border bg-bg">
+          {submissions.map((item) => (
+            <Button
+              key={item.id}
+              tone={item.id === submission?.id ? "primary" : "secondary"}
+              size="xs"
+              onClick={() => setSelectedSubmissionId(item.id)}
+            >
+              Submission #{item.id} · assignment #{item.assignment_id}
+            </Button>
+          ))}
+        </div>
+      )}
+
       {submission || gig.result ? (
         <div className="p-3 space-y-4">
           {responses.length > 0 && (
@@ -741,7 +807,7 @@ function SubmissionReview({
                   <SubmissionFileLink key={id} id={id} meta={files[id]} projectId={projectId} />
                 ))}
               </div>
-              {fileErr && <div className="mt-2 text-xs text-amber-600">Could not load file metadata: {fileErr}</div>}
+              {fileErr && <div className="mt-2 text-xs text-yellow">Could not load file metadata: {fileErr}</div>}
             </div>
           ) : null}
 
@@ -775,7 +841,7 @@ function SubmissionReview({
               <div className="flex flex-wrap gap-2">
                 <Button
                   disabled={busy}
-                  onClick={() => onAction("accept", { notes: acceptNotes })}
+                  onClick={() => onAction("accept", { submission_id: submission?.id, notes: acceptNotes })}
                   tone="success"
                   size="md"
                 >
@@ -793,7 +859,7 @@ function SubmissionReview({
                 </label>
                 <Button
                   disabled={busy || !rejectReason.trim()}
-                  onClick={() => onAction("reject", { reason: rejectReason.trim(), reopen })}
+                  onClick={() => onAction("reject", { submission_id: submission?.id, reason: rejectReason.trim(), reopen })}
                   tone="danger"
                   size="md"
                 >
@@ -804,7 +870,7 @@ function SubmissionReview({
           )}
         </div>
       ) : (
-        <div className="p-3 text-sm text-amber-600">
+        <div className="p-3 text-sm text-yellow">
           This gig is marked submitted, but the latest submission was not returned by the backend.
         </div>
       )}
@@ -834,7 +900,7 @@ function SubmissionFileLink({
       target="_blank"
       rel="noreferrer"
     >
-      <span className="font-medium text-sky-600">{name}</span>
+      <span className="font-medium text-accent">{name}</span>
       <span className="text-text-muted">{detail}</span>
     </a>
   );
@@ -983,7 +1049,7 @@ function NewGigForm({
         className="font-mono"
         placeholder='{"customer_name":"Acme"}'
       />
-      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      {err && <div className="text-red text-xs">{err}</div>}
       <Button disabled={busy} tone="primary" size="md">Create gig</Button>
     </form>
     </Panel>
@@ -992,18 +1058,24 @@ function NewGigForm({
 
 function AssignGigForm({
   projectId, busy, onAssign, onCancel,
-}: { projectId: string; busy: boolean; onAssign: (workerId: number, notifyWorker: boolean) => Promise<void>; onCancel: () => void }) {
+}: { projectId: string; busy: boolean; onAssign: (workerId: number, mode: string, notifyWorker: boolean) => Promise<void>; onCancel: () => void }) {
   const [workerId, setWorkerId] = useState("");
+  const [mode, setMode] = useState("direct");
   const [notifyWorker, setNotifyWorker] = useState(false);
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (workerId) onAssign(Number(workerId), notifyWorker);
+        if (workerId) onAssign(Number(workerId), mode, notifyWorker);
       }}
       className="p-3 border border-border rounded bg-bg-subtle space-y-3"
     >
       <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} />
+      <Field as="select" value={mode} onChange={(e) => setMode(e.target.value)}>
+        <option value="direct">Direct assignment</option>
+        <option value="broadcast">Broadcast</option>
+        <option value="first-come">First come</option>
+      </Field>
       <label className="inline-flex items-center gap-2 text-sm text-text-muted">
         <input
           type="checkbox"
@@ -1084,8 +1156,8 @@ function InstructionOrderEditor({
         {selected.length === 0 && <div className="p-3 text-xs text-text-muted">No instructions selected.</div>}
         {selected.map((i, index) => (
           <div key={`${i.id}-${index}`} className="p-2 flex items-start gap-2 text-sm">
-            <span className="mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded bg-sky-600 text-white text-xs">{index + 1}</span>
-            <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
+            <span className="mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded bg-accent text-white text-xs">{index + 1}</span>
+            <span className="text-accent mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
             <div className="flex-1 min-w-0">
               <div className="truncate">{i.name}</div>
               <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
@@ -1105,6 +1177,21 @@ function InstructionOrderEditor({
 function instructionLabelById(instructions: Instruction[], id: number): string {
   const found = instructions.find((i) => i.id === id);
   return found ? found.name : `Instruction #${id}`;
+}
+
+function preserveCompositionMetadata(selectedIds: number[], existing: CompositionItem[]): Array<Record<string, unknown>> {
+  const remaining = existing.slice();
+  return selectedIds.map((instructionId) => {
+    const index = remaining.findIndex((item) => item.instruction_id === instructionId);
+    if (index < 0) return { instruction_id: instructionId };
+    const item = remaining.splice(index, 1)[0];
+    return {
+      instruction_id: instructionId,
+      instruction_version_id: item.instruction_version_id || undefined,
+      result_key: item.result_key || undefined,
+      overrides: item.overrides,
+    };
+  });
 }
 
 function parseJSONMap(raw: string, label: string): Record<string, unknown> {
@@ -1232,17 +1319,19 @@ function TemplatesTab({ projectId }: { projectId: string }) {
   const [adding, setAdding] = useState(false);
   const [selected, setSelected] = useState<Template | null>(null);
   const [instructions, setInstructions] = useState<Instruction[]>([]);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const reload = useCallback(() => {
+    setLoadErr(null);
     api<{ templates: Template[] }>("/templates?include_archived=false", projectId)
       .then((d) => {
         setItems(d.templates || []);
         setSelected((cur) => cur ? (d.templates || []).find((t) => t.id === cur.id) || cur : cur);
       })
-      .catch(() => setItems([]));
+      .catch((e) => { setItems([]); setLoadErr((e as Error).message); });
     api<{ instructions: Instruction[] }>("/instructions?include_archived=false", projectId)
       .then((d) => setInstructions(d.instructions || []))
-      .catch(() => setInstructions([]));
+      .catch((e) => { setInstructions([]); setLoadErr((e as Error).message); });
   }, [projectId]);
   useEffect(() => { reload(); }, [reload]);
 
@@ -1256,6 +1345,7 @@ function TemplatesTab({ projectId }: { projectId: string }) {
         </Button>
         )}
       />
+      {loadErr && <div role="alert" className="p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{loadErr}</div>}
       {adding && <NewTemplateForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} />}
       {selected && (
         <TemplateComposer
@@ -1340,7 +1430,7 @@ function TemplateComposer({
       await api(`/templates/${template.id}/instructions`, projectId, {
         method: "PUT",
         body: JSON.stringify({
-          instructions: selectedIds.map((id) => ({ instruction_id: id })),
+          instructions: preserveCompositionMetadata(selectedIds, template.current_version?.composition || []),
         }),
       });
       onDone();
@@ -1361,7 +1451,7 @@ function TemplateComposer({
         <Button onClick={onClose} tone="ghost" size="xs">Close</Button>
       </div>
       <InstructionOrderEditor instructions={instructions} selectedIds={selectedIds} onChange={setSelectedIds} />
-      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
         <Button disabled={busy} onClick={save} tone="primary">Save composition</Button>
         {template.current_version?.status === "draft" && (
@@ -1381,20 +1471,23 @@ function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () 
   const [name, setName] = useState("");
   const [title, setTitle] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
   return (
     <form
       onSubmit={async (e) => {
         e.preventDefault();
         setBusy(true);
+        setErr(null);
         try {
           await api(`/templates`, projectId, { method: "POST", body: JSON.stringify({ name, title_template: title }) });
           onDone();
-        } catch (err) { alert((err as Error).message); } finally { setBusy(false); }
+        } catch (error) { setErr((error as Error).message); } finally { setBusy(false); }
       }}
       className="p-3 border border-border rounded space-y-2 bg-bg-subtle"
     >
       <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="Template name" required />
       <Field value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title with {{vars}}" required />
+      {err && <div role="alert" className="text-xs text-red">{err}</div>}
       <Button disabled={busy} tone="primary">Create draft</Button>
     </form>
   );
@@ -1407,12 +1500,14 @@ function InstructionsTab({ projectId }: { projectId: string }) {
   const [kind, setKind] = useState<string>("");
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<Instruction | null>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
 
   const reload = useCallback(() => {
+    setLoadErr(null);
     const k = kind ? `&kind=${encodeURIComponent(kind)}` : "";
     api<{ instructions: Instruction[] }>(`/instructions?include_archived=false${k}`, projectId)
       .then((d) => setItems(d.instructions || []))
-      .catch(() => setItems([]));
+      .catch((e) => { setItems([]); setLoadErr((e as Error).message); });
   }, [projectId, kind]);
   useEffect(() => { reload(); }, [reload]);
 
@@ -1443,6 +1538,7 @@ function InstructionsTab({ projectId }: { projectId: string }) {
         </div>
         )}
       />
+      {loadErr && <div role="alert" className="p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{loadErr}</div>}
       {adding && <NewInstructionForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} onCancel={() => setAdding(false)} />}
       {editing && (
         <NewInstructionForm
@@ -1459,7 +1555,7 @@ function InstructionsTab({ projectId }: { projectId: string }) {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
             {list.map((i) => (
               <Panel key={i.id} className="p-3 flex items-start gap-2">
-                <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
+                <span className="text-accent mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
                 <div className="min-w-0">
                   <div className="text-sm truncate">{i.name}</div>
                   <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
@@ -1594,7 +1690,7 @@ function NewInstructionForm({
         />
       )}
 
-      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
         <Button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} tone="primary">{editMode ? "Save draft" : "Create draft"}</Button>
         <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
@@ -1707,7 +1803,7 @@ function StorageFilePicker({
         )}
       </Panel>
       {selected && (
-        <div className="flex items-center justify-between gap-3 p-2 border border-sky-500/30 rounded bg-sky-500/10">
+        <div className="flex items-center justify-between gap-3 p-2 border border-accent/30 rounded bg-accent/10">
           <div className="min-w-0">
             <div className="text-sm truncate">{selected.name}</div>
             <div className="text-xs text-text-muted truncate">{selected.folder} · {formatBytes(selected.size_bytes || 0)}</div>
@@ -1717,14 +1813,14 @@ function StorageFilePicker({
       )}
       <Panel className="divide-y divide-border bg-bg max-h-56 overflow-auto">
         {busy && <div className="p-2 text-xs text-text-muted">Loading files…</div>}
-        {!busy && err && <div className="p-2 text-xs text-rose-600">{err}</div>}
+        {!busy && err && <div className="p-2 text-xs text-red">{err}</div>}
         {!busy && !err && files.length === 0 && <div className="p-2 text-xs text-text-muted">No {kind} files found.</div>}
         {!busy && files.map((file) => (
           <button
             type="button"
             key={file.id}
             onClick={() => onSelect(file)}
-            className={"w-full p-2 text-left hover:bg-bg-subtle " + (selected?.id === file.id ? "bg-sky-500/10" : "")}
+            className={"w-full p-2 text-left hover:bg-bg-subtle " + (selected?.id === file.id ? "bg-accent/10" : "")}
           >
             <div className="text-sm truncate">{file.name}</div>
             <div className="text-xs text-text-muted truncate">{file.folder} · {file.content_type || "unknown"} · {formatBytes(file.size_bytes || 0)}</div>
@@ -1812,16 +1908,18 @@ function WorkersTab({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<Worker[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const existingContactIds = useMemo(
     () => new Set((items || []).map((wk) => wk.contact_id)),
     [items],
   );
 
   const reload = useCallback(() => {
+    setLoadErr(null);
     api<{ workers: Worker[] }>("/workers?status=&include_contact=true", projectId)
       .then((d) => setItems(d.workers || []))
-      .catch(() => setItems([]));
-    api<{ skills: Skill[] }>("/skills", projectId).then((d) => setSkills(d.skills || [])).catch(() => {});
+      .catch((e) => { setItems([]); setLoadErr((e as Error).message); });
+    api<{ skills: Skill[] }>("/skills", projectId).then((d) => setSkills(d.skills || [])).catch((e) => setLoadErr((e as Error).message));
   }, [projectId]);
   useEffect(() => { reload(); }, [reload]);
 
@@ -1835,6 +1933,7 @@ function WorkersTab({ projectId }: { projectId: string }) {
         </Button>
         )}
       />
+      {loadErr && <div role="alert" className="p-3 rounded border border-red/30 bg-red/10 text-red text-sm">{loadErr}</div>}
       {adding && (
         <NewWorkerForm
           projectId={projectId}
@@ -1848,7 +1947,7 @@ function WorkersTab({ projectId }: { projectId: string }) {
         {items?.length === 0 && <div className="p-4 text-text-muted text-sm">No workers yet.</div>}
         {items?.map((wk) => (
           <div key={wk.id} className="p-3 flex items-start gap-3">
-            <span className="text-sky-600 mt-1"><Icon name="user" /></span>
+            <span className="text-accent mt-1"><Icon name="user" /></span>
             <div className="flex-1 min-w-0">
               <div className="text-sm font-medium">{wk.contact ? contactName(wk.contact) : `Worker #${wk.id}`}</div>
               <div className="text-xs text-text-muted">
@@ -1983,7 +2082,7 @@ function NewWorkerForm({
           />
           <Panel className="divide-y divide-border bg-bg max-h-52 overflow-auto">
             {crmBusy && <div className="p-2 text-xs text-text-muted">Searching…</div>}
-            {!crmBusy && crmErr && <div className="p-2 text-xs text-rose-600">{crmErr}</div>}
+            {!crmBusy && crmErr && <div className="p-2 text-xs text-red">{crmErr}</div>}
             {!crmBusy && !crmErr && crmResults.length === 0 && (
               <div className="p-2 text-xs text-text-muted">No contacts found</div>
             )}
@@ -1998,7 +2097,7 @@ function NewWorkerForm({
                   onClick={() => { setSelectedContact(c); setErr(null); }}
                   className={
                     "w-full text-left p-2 flex items-center justify-between gap-3 " +
-                    (selected ? "bg-sky-500/10" : "hover:bg-bg-subtle ") +
+                    (selected ? "bg-accent/10" : "hover:bg-bg-subtle ") +
                     (alreadyWorker ? "opacity-60 cursor-not-allowed" : "")
                   }
                 >
@@ -2047,7 +2146,7 @@ function NewWorkerForm({
                   type="button"
                   key={s.id}
                   onClick={() => setSkillIds((cur) => on ? cur.filter((x) => x !== s.id) : [...cur, s.id])}
-                  className={"px-2 py-0.5 text-xs rounded border " + (on ? "bg-sky-500/10 border-sky-500/30 text-sky-700" : "border-border text-text-muted")}
+                  className={"px-2 py-0.5 text-xs rounded border " + (on ? "bg-accent/10 border-accent/30 text-accent" : "border-border text-text-muted")}
                 >
                   {s.name}
                 </button>
@@ -2056,7 +2155,7 @@ function NewWorkerForm({
           </div>
         </div>
       )}
-      {err && <div className="text-rose-600 text-xs">{err}</div>}
+      {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
         <Button disabled={busy || (mode === "crm" && !selectedContact)} tone="primary">Add worker</Button>
         <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>

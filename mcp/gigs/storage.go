@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,33 +22,73 @@ func storageRoot(ctx *sdk.AppCtx) string {
 	return "/.gigs"
 }
 
-// storageUpload posts bytes to storage. `folder` is a sub-path
-// appended to the root (e.g. "submissions/42").
-func storageUpload(ctx *sdk.AppCtx, pid, name, folder, contentType string, body []byte) (fileID int64, signedURL string, err error) {
-	if name == "" || len(body) == 0 {
-		return 0, "", errors.New("storage upload: name + body required")
+type storageUploadInitResult struct {
+	UploadID    string         `json:"upload_id"`
+	PartSize    int64          `json:"part_size"`
+	WasExisting bool           `json:"was_existing"`
+	File        map[string]any `json:"file"`
+}
+
+func storageUploadInit(ctx *sdk.AppCtx, pid, name, folder, contentType string, size int64) (*storageUploadInitResult, error) {
+	if name == "" || size <= 0 {
+		return nil, errors.New("storage upload init: name + positive size required")
 	}
-	folder = strings.TrimLeft(folder, "/")
 	full := storageRoot(ctx)
-	if folder != "" {
-		full = full + "/" + folder
+	if folder = strings.Trim(folder, "/"); folder != "" {
+		full += "/" + folder
 	}
 	args := map[string]any{
-		"name":           name,
-		"folder":         full,
-		"content_base64": base64.StdEncoding.EncodeToString(body),
+		"name":       name,
+		"size_bytes": size,
+		"folder":     full,
+		"visibility": "private",
+		"source":     "gigs-worker",
 	}
 	if contentType != "" {
 		args["content_type"] = contentType
 	}
+	var got storageUploadInitResult
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "storage_upload_init", args, &got); err != nil {
+		return nil, fmt.Errorf("storage.storage_upload_init: %w", err)
+	}
+	return &got, nil
+}
+
+func storageUploadPart(ctx *sdk.AppCtx, pid, uploadID string, partNumber int, contentBase64 string) error {
+	args := map[string]any{
+		"upload_id":      uploadID,
+		"part_number":    partNumber,
+		"content_base64": contentBase64,
+	}
+	var got map[string]any
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "storage_upload_part", args, &got); err != nil {
+		return fmt.Errorf("storage.storage_upload_part: %w", err)
+	}
+	return nil
+}
+
+func storageUploadComplete(ctx *sdk.AppCtx, pid, uploadID string) (int64, error) {
 	var got struct {
-		ID  int64  `json:"id"`
-		URL string `json:"url"`
+		File map[string]any `json:"file"`
 	}
-	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_upload", args, &got); err != nil {
-		return 0, "", fmt.Errorf("storage.files_upload: %w", err)
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "storage_upload_complete", map[string]any{"upload_id": uploadID}, &got); err != nil {
+		return 0, fmt.Errorf("storage.storage_upload_complete: %w", err)
 	}
-	return got.ID, got.URL, nil
+	id := int64Cast(got.File["id"])
+	if id == 0 {
+		return 0, errors.New("storage upload completed without a file id")
+	}
+	return id, nil
+}
+
+func storageUploadAbort(ctx *sdk.AppCtx, pid, uploadID, reason string) error {
+	var got map[string]any
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "storage_abort_upload", map[string]any{
+		"id": uploadID, "reason": reason,
+	}, &got); err != nil {
+		return fmt.Errorf("storage.storage_abort_upload: %w", err)
+	}
+	return nil
 }
 
 // storageSignedURL mints a TTL-bounded fetch URL for the worker page.
