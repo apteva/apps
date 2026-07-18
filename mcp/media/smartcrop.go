@@ -451,6 +451,100 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 	return x, true
 }
 
+// recliningSubjectAwareNarrowSmartCropX protects the full horizontal extent
+// of a reclining person when no isolated face-shaped component is available.
+// A face can merge with a hand, hair, or patterned cushion and evade the
+// compact head guard above, while the torso and head-side skin regions still
+// form two strong, tall components along the lower edge of the frame.
+//
+// The rule is deliberately narrow: both components must be lower-frame,
+// person-sized, similarly substantial, close to each other, and already touch
+// the current crop or its small halo. It therefore does not turn generic warm
+// furniture elsewhere in the room into a new subject. The correction moves
+// only far enough to give the outer component breathing room.
+func recliningSubjectAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
+	if img == nil || srcW <= cropW || cropW <= 0 ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return srcX, false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	if thumbCropW >= w {
+		return srcX, false
+	}
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	currentEnd := currentStart + thumbCropW - 1
+	components := warmSubjectComponents(normalizedSmartCropRGB(img, w, h), w, h, thumbCropW, 0, w-1)
+	minScore := 260.0 * float64(w*h) / (320.0 * 180.0)
+	eligible := make([]warmSubjectComponent, 0, len(components))
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		boxArea := maxInt(1, componentW*componentH)
+		fill := float64(component.area) / float64(boxArea)
+		if componentW < maxInt(6, w*6/100) || componentW > w*20/100 ||
+			componentH < maxInt(10, h*18/100) || componentH > h*48/100 ||
+			component.minY < h*55/100 || component.maxY < h*88/100 ||
+			component.score < minScore || fill < 0.14 || fill > 0.82 {
+			continue
+		}
+		eligible = append(eligible, component)
+	}
+	if len(eligible) < 2 {
+		return srcX, false
+	}
+
+	halo := maxInt(6, thumbCropW/4)
+	var left, right warmSubjectComponent
+	bestScore := 0.0
+	for i := 0; i < len(eligible); i++ {
+		for j := i + 1; j < len(eligible); j++ {
+			a, c := eligible[i], eligible[j]
+			if a.centerX > c.centerX {
+				a, c = c, a
+			}
+			gap := c.centerX - a.centerX
+			span := c.maxX - a.minX + 1
+			if gap < float64(thumbCropW)/3.0 || gap > float64(thumbCropW) ||
+				span > thumbCropW*3/2 ||
+				c.maxX < currentStart-halo || a.minX > currentEnd+halo {
+				continue
+			}
+			ratio := a.score / c.score
+			if ratio < 0.35 || ratio > 2.85 {
+				continue
+			}
+			if score := a.score + c.score; score > bestScore {
+				left, right, bestScore = a, c, score
+			}
+		}
+	}
+	if bestScore == 0 {
+		return srcX, false
+	}
+
+	margin := maxInt(4, thumbCropW/5)
+	newStart := currentStart
+	if left.minX < currentStart+margin {
+		newStart = left.minX - margin
+	} else if right.maxX > currentEnd-margin {
+		newStart = right.maxX + margin - thumbCropW + 1
+	} else {
+		return srcX, false
+	}
+	newStart = clampInt(newStart, 0, w-thumbCropW)
+	x := clampInt(roundEven(int(math.Round(float64(newStart)*float64(srcW)/float64(w)))), 0, srcW-cropW)
+	if x == srcX {
+		return srcX, false
+	}
+	return x, true
+}
+
 func subjectColumnWeights(img image.Image) []float64 {
 	bounds := img.Bounds()
 	w := bounds.Dx()

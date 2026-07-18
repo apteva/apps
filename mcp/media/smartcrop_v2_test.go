@@ -265,6 +265,31 @@ func TestHeadAwareNarrowCropDoesNotChaseHandsAtCropEdge(t *testing.T) {
 	}
 }
 
+func TestRecliningSubjectAwareCropProtectsPairedLowerExtent(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// A head/arm region and torso region are both tall, substantial, low in
+	// frame, and close enough to form one horizontal reclining subject.
+	fillSmartCropTestEllipse(img, 108, 157, 13, 21, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	fillSmartCropTestEllipse(img, 170, 156, 17, 23, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	x, changed := recliningSubjectAwareNarrowSmartCropX(img, 448, 1280, 404)
+	if !changed {
+		t.Fatal("paired reclining extent was not protected")
+	}
+	if x < 250 || x > 380 {
+		t.Fatalf("reclining extent crop x=%d want [250,380]", x)
+	}
+}
+
+func TestRecliningSubjectAwareCropRejectsSingleLowerObject(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	fillSmartCropTestEllipse(img, 108, 157, 13, 21, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := recliningSubjectAwareNarrowSmartCropX(img, 448, 1280, 404); changed || x != 448 {
+		t.Fatalf("single lower object moved crop: x=%d changed=%v", x, changed)
+	}
+}
+
 func TestStaticSmartCropPathStaysFixed(t *testing.T) {
 	path := []cropPathPoint{
 		{AtMs: 0, X: 300}, {AtMs: 5_000, X: 316}, {AtMs: 10_000, X: 326},
@@ -1037,6 +1062,35 @@ func TestReelStationaryRunsRecoverFromAdjacentMotionContinuity(t *testing.T) {
 		if !samples[i].motionTracked {
 			t.Fatalf("motion anchor %d changed: %+v", i, samples[i])
 		}
+	}
+}
+
+func TestDenseRunWideUncertifiedExtentIsBounded(t *testing.T) {
+	xs := []int{1_092, 1_080, 660, 660, 660, 624}
+	samples := make([]smartCropV2Sample, len(xs))
+	for i, x := range xs {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: x}
+	}
+	correctSmartCropDenseRun(samples, 1_104, 3_840, 1_214)
+	for i, sample := range samples {
+		if sample.point.X < 800 || sample.point.X > 1_104 || !sample.temporalTrack {
+			t.Fatalf("uncertified wide extent point %d escaped safe bound: %+v", i, sample)
+		}
+	}
+}
+
+func TestDenseRunReversalReleasesPreviousExtent(t *testing.T) {
+	xs := []int{512, 448, 396, 448, 648, 636}
+	samples := make([]smartCropV2Sample, len(xs))
+	for i, x := range xs {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: x}
+	}
+	correctSmartCropDenseRun(samples, 524, 1280, 404)
+	if samples[2].point.X > 460 {
+		t.Fatalf("leftward extent was not entered: %+v", samples)
+	}
+	if samples[len(samples)-1].point.X < 600 {
+		t.Fatalf("opposite extent did not release prior state: %+v", samples)
 	}
 }
 

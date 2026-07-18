@@ -918,6 +918,20 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			i = end
 			continue
 		}
+		// A locally dense foreground means this nominally "stationary" run is
+		// actually a posture change or a traversal that the pairwise motion
+		// detector did not certify at every frame. Resolve that run from its own
+		// frames before considering adjacent anchors. Otherwise a person who
+		// lies down or reverses direction can be held at the previous position
+		// for the rest of the reel.
+		result, resultOK := bestSmartCropTemporalConsensus(samples[i:end], srcW, cropW)
+		if resultOK && result.Concentration >= smartCropTemporalDenseMinConcentration &&
+			result.MeanActivity >= smartCropTemporalDenseMinMeanActivity &&
+			result.ActiveFraction >= smartCropTemporalDenseMinActiveFraction {
+			corrected += correctSmartCropDenseRun(samples[i:end], result.X, srcW, cropW)
+			i = end
+			continue
+		}
 		// A run bracketed by trusted motion positions is an identity-continuity
 		// problem before it is a fresh saliency problem. This also rejects a
 		// locally "confident" background change when both adjacent subject
@@ -927,8 +941,7 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			i = end
 			continue
 		}
-		result, ok := bestSmartCropTemporalConsensus(samples[i:end], srcW, cropW)
-		if !ok || !smartCropTemporalResultConfident(result) {
+		if !resultOK || !smartCropTemporalResultConfident(result) {
 			i = end
 			continue
 		}
@@ -941,6 +954,129 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			samples[j].temporalTrack = true
 		}
 		i = end
+	}
+	return corrected
+}
+
+// correctSmartCropDenseRun uses the local temporal consensus as the stable
+// baseline, but keeps a repeated one-sided extent as a new state. This matters
+// when a person lies down or reverses direction: the inexpensive per-frame
+// guard may recognize the outer head only intermittently, while flattening the
+// entire run would erase the transition. Three clustered observations are
+// required to enter a state; aligned generic frames do not immediately clear
+// it, which prevents a visible one-second crop oscillation.
+func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cropW int) int {
+	consensusX = clampInt(roundEven(consensusX), 0, srcW-cropW)
+	if len(samples) < 4 || cropW <= 0 || srcW <= cropW {
+		return 0
+	}
+	threshold := maxInt(48, cropW/6)
+	clusterRadius := maxInt(32, cropW/6)
+	const maxGapMs = 4 * smartCropTrackingIntervalMs
+	type extentEvent struct {
+		index int
+		x     int
+		dir   int
+	}
+	events := make([]extentEvent, 0, 2)
+	lastEventEnd := -1
+	for i := 0; i+2 < len(samples); i++ {
+		if i <= lastEventEnd {
+			continue
+		}
+		for j := i + 2; j < len(samples) && samples[j].point.AtMs-samples[i].point.AtMs <= maxGapMs; j++ {
+			left, right := make([]int, 0, 3), make([]int, 0, 3)
+			for k := i; k <= j; k++ {
+				delta := samples[k].point.X - consensusX
+				if delta <= -threshold {
+					left = append(left, samples[k].point.X)
+				} else if delta >= threshold {
+					right = append(right, samples[k].point.X)
+				}
+			}
+			values, dir := left, -1
+			if len(right) > len(left) {
+				values, dir = right, 1
+			}
+			if len(values) < 3 {
+				continue
+			}
+			sort.Ints(values)
+			if values[len(values)-1]-values[0] > clusterRadius {
+				continue
+			}
+			events = append(events, extentEvent{
+				index: maxInt(0, i-1),
+				x:     clampInt(roundEven(values[len(values)/2]), 0, srcW-cropW),
+				dir:   dir,
+			})
+			lastEventEnd = j
+			break
+		}
+	}
+	// Once an extent state is established, two tightly clustered observations
+	// on the opposite side are enough to release it. Requiring three again
+	// would hold the old crop one or two seconds into a clear reversal.
+	if len(events) > 0 {
+		last := events[len(events)-1]
+		for i := last.index + 1; i+1 < len(samples); i++ {
+			a, b := samples[i], samples[i+1]
+			if b.point.AtMs-a.point.AtMs > maxGapMs || absInt(b.point.X-a.point.X) > clusterRadius {
+				continue
+			}
+			da, db := a.point.X-consensusX, b.point.X-consensusX
+			dir := 0
+			if da <= -threshold && db <= -threshold {
+				dir = -1
+			} else if da >= threshold && db >= threshold {
+				dir = 1
+			}
+			if dir == 0 || dir == last.dir {
+				continue
+			}
+			events = append(events, extentEvent{
+				index: maxInt(last.index+1, i-1),
+				x:     clampInt(roundEven((a.point.X+b.point.X)/2), 0, srcW-cropW),
+				dir:   dir,
+			})
+			break
+		}
+	}
+	for i := range events {
+		if absInt(events[i].x-consensusX) <= cropW/4 {
+			continue
+		}
+		certifiedRecliningExtent := false
+		for _, sample := range samples {
+			candidate, changed := recliningSubjectAwareNarrowSmartCropX(sample.img, consensusX, srcW, cropW)
+			if !changed || (candidate-consensusX)*events[i].dir <= 0 {
+				continue
+			}
+			if absInt(candidate-events[i].x) <= cropW/3 {
+				certifiedRecliningExtent = true
+				break
+			}
+		}
+		if !certifiedRecliningExtent {
+			events[i].x = clampInt(events[i].x, consensusX-cropW/4, consensusX+cropW/4)
+			events[i].x = clampInt(roundEven(events[i].x), 0, srcW-cropW)
+		}
+	}
+
+	currentX, currentDir, eventIndex := consensusX, 0, 0
+	corrected := 0
+	for i := range samples {
+		for eventIndex < len(events) && events[eventIndex].index <= i {
+			if events[eventIndex].dir != currentDir || absInt(events[eventIndex].x-currentX) >= threshold {
+				currentX, currentDir = events[eventIndex].x, events[eventIndex].dir
+			}
+			eventIndex++
+		}
+		if samples[i].point.X != currentX {
+			samples[i].point.X = currentX
+			corrected++
+		}
+		samples[i].temporalTrack = true
 	}
 	return corrected
 }

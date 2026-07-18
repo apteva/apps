@@ -196,6 +196,10 @@ func computeSmartCropStillV2(
 			x = corrected
 			method += "+head"
 		}
+		if corrected, changed := recliningSubjectAwareNarrowSmartCropX(sample.img, x, row.Width, cw); changed {
+			x = corrected
+			method += "+reclining"
+		}
 	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
 	app.Logger().Info("smartcrop v2 resolved still",
@@ -484,6 +488,9 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 	if headX, ok := headAwareNarrowSmartCropX(img, x, srcW, cw); ok {
 		x = headX
 	}
+	if recliningX, ok := recliningSubjectAwareNarrowSmartCropX(img, x, srcW, cw); ok {
+		x = recliningX
+	}
 	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, nil
 }
 
@@ -749,6 +756,10 @@ func refineSmartCropHeadSamples(samples []smartCropV2Sample, srcW, cropW int) in
 			continue
 		}
 		if x, ok := headAwareNarrowSmartCropX(samples[i].img, samples[i].point.X, srcW, cropW); ok {
+			samples[i].point.X = x
+			refined++
+		}
+		if x, ok := recliningSubjectAwareNarrowSmartCropX(samples[i].img, samples[i].point.X, srcW, cropW); ok {
 			samples[i].point.X = x
 			refined++
 		}
