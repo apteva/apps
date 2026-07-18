@@ -16,7 +16,7 @@ func webFixtureCatalog() []WebFixtureCatalogItem {
 	return []WebFixtureCatalogItem{{
 		ID:          "patreon",
 		Name:        "Patreon",
-		Description: "Creator discovery, memberships, checkout, posts, and messaging.",
+		Description: "Memberships, creator posts and scheduling, payouts, and member conversations.",
 		Version:     "1.0.0",
 		Scenarios: []WebFixtureScenario{
 			{ID: "new-visitor", Name: "New visitor", Description: "Signed in without an existing membership."},
@@ -67,6 +67,9 @@ func (s *service) createWebFixtures(run *Run, spec EnvironmentSpec) error {
 			} else if ok {
 				state = restored
 			}
+		}
+		if fixtureSpec.Pack == "patreon" {
+			state = normalizePatreonState(fixtureSpec, state)
 		}
 		x := &WebFixtureInstance{RunID: run.ID, ID: fixtureSpec.ID, Pack: fixtureSpec.Pack, Version: fixtureSpec.Version, Scenario: fixtureSpec.Scenario, Seed: fixtureSpec.Seed, State: cloneJSONMap(state), InitialState: cloneJSONMap(state), Status: "starting", Token: token(48)}
 		if err := s.db.createWebFixture(x); err != nil {

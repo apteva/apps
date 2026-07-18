@@ -239,7 +239,7 @@ func TestPatreonFixtureSignedRoute(t *testing.T) {
 
 	page := httptest.NewRecorder()
 	app.handleFixture(page, httptest.NewRequest(http.MethodGet, "/fixtures/run-route/patreon/"+x.Token+"/", nil))
-	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Choose your membership") {
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "Choose your membership") || !strings.Contains(page.Body.String(), "Creator dashboard") || !strings.Contains(page.Body.String(), "Video link") || !strings.Contains(page.Body.String(), "Request payout") {
 		t.Fatalf("page status=%d body=%s", page.Code, page.Body.String())
 	}
 
@@ -273,5 +273,91 @@ func TestFixtureStatusBlocksActions(t *testing.T) {
 	}
 	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "follow", nil); err == nil {
 		t.Fatal("action succeeded against a stopped fixture")
+	}
+}
+
+func TestPatreonCreatorOperations(t *testing.T) {
+	legacy := normalizePatreonState(WebFixtureSpec{Pack: "patreon"}, map[string]any{
+		"posts": []any{map[string]any{"id": "legacy", "excerpt": "Old snapshot", "locked": true}},
+	})
+	legacyPost := legacy["posts"].([]any)[0].(map[string]any)
+	if legacy["payouts"] == nil || legacy["members"] == nil || legacyPost["status"] != "published" || legacyPost["audience"] != "members" {
+		t.Fatalf("legacy state was not normalized: %#v", legacy)
+	}
+
+	svc := &service{db: testStore(t)}
+	run := &Run{ID: "run-creator", RuntimeID: "runtime-creator", Kind: "test", Status: "running", StartedAt: time.Now().UTC()}
+	if err := svc.db.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.createWebFixtures(run, EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "patreon", Pack: "patreon"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.setWebFixturesStatus(run.ID, "running"); err != nil {
+		t.Fatal(err)
+	}
+
+	postInput := map[string]any{
+		"title":        "Director commentary",
+		"body":         "The new cut is ready for members.",
+		"video_url":    "https://vimeo.com/123456789",
+		"audience":     "paid",
+		"publish_mode": "schedule",
+		"scheduled_at": "2026-07-20T18:30",
+	}
+	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "create_post", postInput); err != nil {
+		t.Fatal(err)
+	} else if event == nil || event.Type != "post.scheduled" || event.Data["video_url"] != postInput["video_url"] {
+		t.Fatalf("post event=%#v", event)
+	}
+	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "create_post", map[string]any{"title": "Bad link", "body": "Body", "video_url": "javascript:alert(1)"}); err == nil {
+		t.Fatal("accepted an unsafe video URL")
+	}
+
+	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "request_payout", map[string]any{"amount": 200.0}); err != nil {
+		t.Fatal(err)
+	} else if event == nil || event.Type != "payout.requested" || event.Data["amount"] != 200.0 {
+		t.Fatalf("payout event=%#v", event)
+	}
+	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "request_payout", map[string]any{"amount": 5000.0}); err == nil {
+		t.Fatal("accepted a payout above the available balance")
+	}
+
+	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "send_member_message", map[string]any{"member_id": "member-maya", "message": "Yes, commentary is included."}); err != nil {
+		t.Fatal(err)
+	} else if event == nil || event.Type != "member_message.sent" || event.Data["member_id"] != "member-maya" {
+		t.Fatalf("member message event=%#v", event)
+	}
+
+	detail, err := svc.fixtureDetail(run.ID, "patreon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := detail["state"].(map[string]any)
+	posts := state["posts"].([]any)
+	created := posts[0].(map[string]any)
+	if created["status"] != "scheduled" || created["scheduled_at"] != "2026-07-20T18:30" || created["video_url"] != "https://vimeo.com/123456789" {
+		t.Fatalf("created post=%#v", created)
+	}
+	payouts := state["payouts"].(map[string]any)
+	if payouts["available"] != 1048.75 || payouts["pending"] != 200.0 {
+		t.Fatalf("payouts=%#v", payouts)
+	}
+	threads := state["member_threads"].(map[string]any)
+	thread := threads["member-maya"].([]any)
+	lastMessage := thread[len(thread)-1].(map[string]any)
+	if lastMessage["from"] != "creator" || lastMessage["body"] != "Yes, commentary is included." {
+		t.Fatalf("thread=%#v", thread)
+	}
+
+	for _, assertion := range []Assertion{
+		{Type: "web_event", Fixture: "patreon", EventType: "post.scheduled", Path: "video_url", Equals: "https://vimeo.com/123456789"},
+		{Type: "web_event", Fixture: "patreon", EventType: "payout.requested", Path: "amount", Equals: 200.0},
+		{Type: "web_event", Fixture: "patreon", EventType: "member_message.sent", Path: "member_id", Equals: "member-maya"},
+	} {
+		result, err := svc.assert(run.RuntimeID, assertion)
+		if err != nil || !result.Passed {
+			t.Fatalf("assertion=%#v result=%#v err=%v", assertion, result, err)
+		}
 	}
 }
