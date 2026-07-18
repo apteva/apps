@@ -326,6 +326,11 @@ func TestPatreonCreatorOperations(t *testing.T) {
 	if _, _, err := svc.applyFixtureAction(run.ID, "patreon", "request_payout", map[string]any{"amount": 5000.0}); err == nil {
 		t.Fatal("accepted a payout above the available balance")
 	}
+	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "set_payout_method", map[string]any{"type": "paypal", "last_four": "7788"}); err != nil {
+		t.Fatal(err)
+	} else if event == nil || event.Type != "payout.method_updated" || event.Data["last_four"] != "7788" {
+		t.Fatalf("payout method event=%#v", event)
+	}
 
 	if _, event, err := svc.applyFixtureAction(run.ID, "patreon", "send_member_message", map[string]any{"member_id": "member-maya", "message": "Yes, commentary is included."}); err != nil {
 		t.Fatal(err)
@@ -347,6 +352,10 @@ func TestPatreonCreatorOperations(t *testing.T) {
 	if payouts["available"] != 1048.75 || payouts["pending"] != 200.0 {
 		t.Fatalf("payouts=%#v", payouts)
 	}
+	method := payouts["method"].(map[string]any)
+	if method["type"] != "paypal" || method["last_four"] != "7788" {
+		t.Fatalf("payout method=%#v", method)
+	}
 	threads := state["member_threads"].(map[string]any)
 	thread := threads["member-maya"].([]any)
 	lastMessage := thread[len(thread)-1].(map[string]any)
@@ -357,6 +366,7 @@ func TestPatreonCreatorOperations(t *testing.T) {
 	for _, assertion := range []Assertion{
 		{Type: "web_event", Fixture: "patreon", EventType: "post.scheduled", Path: "video_url", Equals: "https://vimeo.com/123456789"},
 		{Type: "web_event", Fixture: "patreon", EventType: "payout.requested", Path: "amount", Equals: 200.0},
+		{Type: "web_event", Fixture: "patreon", EventType: "payout.method_updated", Path: "last_four", Equals: "7788"},
 		{Type: "web_event", Fixture: "patreon", EventType: "member_message.sent", Path: "member_id", Equals: "member-maya"},
 	} {
 		result, err := svc.assert(run.RuntimeID, assertion)
