@@ -270,6 +270,7 @@ func mariaReelPath(t *testing.T, video string, duration, start, end int64) []cro
 		samples = mergeSmartCropSamples(samples, extra)
 		markSmartCropSceneCuts(samples)
 		refineSmartCropMotionSamples(samples, srcW, cropW)
+		correctSmartCropIsolatedMotionBoundaryScenes(samples, srcW, cropW)
 		fillSmartCropMotionGaps(samples, srcW, cropW)
 		correctSmartCropStationaryRuns(samples, srcW, cropW)
 		refineSmartCropHeadSamples(samples, srcW, cropW)

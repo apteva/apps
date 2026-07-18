@@ -819,6 +819,126 @@ func TestReelTemporalConsensusPreservesOpposingSubjectMovement(t *testing.T) {
 	}
 }
 
+func TestReelAbruptStaticClustersUseBroadActivityToKeepSubject(t *testing.T) {
+	samples := make([]smartCropV2Sample, 10)
+	for i := range samples {
+		x := 1_020
+		if i >= 5 {
+			x = 0
+		}
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: x}
+	}
+	result := smartCropTemporalResult{
+		X:              760,
+		Samples:        len(samples),
+		Concentration:  0.40,
+		MeanActivity:   4.0,
+		ActiveFraction: 0.20,
+	}
+	corrected := correctSmartCropAbruptStaticClusters(samples, result, 3840, 1214)
+	if corrected != 5 {
+		t.Fatalf("corrected %d points, want 5", corrected)
+	}
+	for i, sample := range samples {
+		if sample.point.X != 1_020 || !sample.temporalTrack {
+			t.Fatalf("sample %d did not retain subject cluster: %+v", i, sample)
+		}
+	}
+}
+
+func TestReelAbruptStaticClustersPreserveTraversalAndAmbiguity(t *testing.T) {
+	result := smartCropTemporalResult{
+		X: 600, Samples: 8, Concentration: 0.40, MeanActivity: 4.0, ActiveFraction: 0.20,
+	}
+	gradual := make([]smartCropV2Sample, 8)
+	for i := range gradual {
+		gradual[i].point.X = i * 220
+	}
+	if corrected := correctSmartCropAbruptStaticClusters(gradual, result, 3840, 1214); corrected != 0 {
+		t.Fatalf("gradual traversal changed %d points: %+v", corrected, gradual)
+	}
+
+	ambiguous := make([]smartCropV2Sample, 8)
+	for i := range ambiguous {
+		if i < 4 {
+			ambiguous[i].point.X = 200
+		} else {
+			ambiguous[i].point.X = 1_000
+		}
+	}
+	result.X = 600
+	if corrected := correctSmartCropAbruptStaticClusters(ambiguous, result, 3840, 1214); corrected != 0 {
+		t.Fatalf("ambiguous clusters changed %d points: %+v", corrected, ambiguous)
+	}
+}
+
+func TestReelIsolatedMotionBoundarySceneKeepsBracketedSubject(t *testing.T) {
+	samples := make([]smartCropV2Sample, 18)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 0}
+	}
+	for i, x := range []int{1_008, 996, 984} {
+		samples[i].point.X = x
+	}
+	samples[3].point.X = 1_716
+	samples[3].motionTracked = true
+	for i, x := range []int{996, 984, 972} {
+		samples[i+4].point.X = x
+	}
+
+	corrected := correctSmartCropIsolatedMotionBoundaryScenes(samples, 3840, 1214)
+	if corrected != len(samples) {
+		t.Fatalf("corrected %d points, want %d", corrected, len(samples))
+	}
+	for i, sample := range samples {
+		if sample.point.X < 970 || sample.point.X > 1_010 || !sample.temporalTrack {
+			t.Fatalf("sample %d did not retain the bracketed subject: %+v", i, sample)
+		}
+	}
+}
+
+func TestReelIsolatedMotionBoundarySceneRejectsTraversalAndWeakEvidence(t *testing.T) {
+	fixture := func() []smartCropV2Sample {
+		samples := make([]smartCropV2Sample, 18)
+		for i := range samples {
+			samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 0}
+		}
+		for i := 0; i < 3; i++ {
+			samples[i].point.X = 1_000
+		}
+		samples[3].point.X = 1_700
+		samples[3].motionTracked = true
+		for i := 4; i < 7; i++ {
+			samples[i].point.X = 1_000
+		}
+		return samples
+	}
+
+	multipleMotion := fixture()
+	multipleMotion[8].point.X = 1_800
+	multipleMotion[8].motionTracked = true
+	if corrected := correctSmartCropIsolatedMotionBoundaryScenes(multipleMotion, 3840, 1214); corrected != 0 {
+		t.Fatalf("multiple motion anchors changed %d points: %+v", corrected, multipleMotion)
+	}
+
+	unbracketed := fixture()
+	for i := 4; i < 7; i++ {
+		unbracketed[i].point.X = 0
+	}
+	if corrected := correctSmartCropIsolatedMotionBoundaryScenes(unbracketed, 3840, 1214); corrected != 0 {
+		t.Fatalf("unbracketed transition changed %d points: %+v", corrected, unbracketed)
+	}
+
+	gradual := fixture()
+	for i := range gradual {
+		gradual[i].point.X = i * 120
+	}
+	gradual[3].motionTracked = true
+	if corrected := correctSmartCropIsolatedMotionBoundaryScenes(gradual, 3840, 1214); corrected != 0 {
+		t.Fatalf("gradual traversal changed %d points: %+v", corrected, gradual)
+	}
+}
+
 func TestReelTemporalConsensusPreservesSustainedOneSidedTraversal(t *testing.T) {
 	samples := makeTemporalTestSamples([]int{92, 98, 104, 110, 116, 122, 128, 134, 140}, 300)
 	tracked := []int{420, 450, 500, 560, 630, 700, 760, 790, 810}
@@ -888,6 +1008,64 @@ func TestReelStationaryRunsRejectLowConfidenceBackground(t *testing.T) {
 		if sample.point.X != 740 || sample.temporalTrack {
 			t.Fatalf("low-confidence point %d changed: %+v", i, sample)
 		}
+	}
+}
+
+func TestReelStationaryRunsRecoverFromAdjacentMotionContinuity(t *testing.T) {
+	samples := make([]smartCropV2Sample, 12)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 40}
+		samples[i].img = temporalTestFrame(320, 180, color.RGBA{R: 70, G: 80, B: 90, A: 255}, 100)
+	}
+	samples[8].point.X = 1_080
+	samples[8].motionTracked = true
+	for i := 9; i < len(samples); i++ {
+		samples[i].point.X = 1_100
+		samples[i].motionTracked = true
+	}
+
+	corrected := correctSmartCropStationaryRuns(samples, 3840, 1214)
+	if corrected != 8 {
+		t.Fatalf("corrected %d points, want 8", corrected)
+	}
+	for i := 0; i < 8; i++ {
+		if samples[i].point.X != 1_080 || !samples[i].temporalTrack || samples[i].motionTracked {
+			t.Fatalf("leading stationary point %d not recovered: %+v", i, samples[i])
+		}
+	}
+	for i := 8; i < len(samples); i++ {
+		if !samples[i].motionTracked {
+			t.Fatalf("motion anchor %d changed: %+v", i, samples[i])
+		}
+	}
+}
+
+func TestReelStationaryContinuityRejectsOpposingOrDistantAnchors(t *testing.T) {
+	makeSamples := func() []smartCropV2Sample {
+		samples := make([]smartCropV2Sample, 7)
+		for i := range samples {
+			samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 700}
+		}
+		samples[0].point.X = 100
+		samples[0].motionTracked = true
+		samples[6].point.X = 1_500
+		samples[6].motionTracked = true
+		return samples
+	}
+
+	distant := makeSamples()
+	if corrected := correctSmartCropStationaryRunFromMotionContinuity(distant, 1, 6, 3840, 1214); corrected != 0 {
+		t.Fatalf("distant traversal anchors changed %d points: %+v", corrected, distant)
+	}
+
+	opposing := makeSamples()
+	opposing[0].point.X = 900
+	opposing[6].point.X = 1_000
+	for i, x := range []int{100, 1_800, 100, 1_800, 100} {
+		opposing[i+1].point.X = x
+	}
+	if corrected := correctSmartCropStationaryRunFromMotionContinuity(opposing, 1, 6, 3840, 1214); corrected != 0 {
+		t.Fatalf("opposing outliers changed %d points: %+v", corrected, opposing)
 	}
 }
 

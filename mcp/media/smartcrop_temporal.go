@@ -585,6 +585,14 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		for end < len(samples) && !samples[end].point.Cut {
 			end++
 		}
+		scene := samples[start:end]
+		if result, ok := temporalSubjectConsensus(scene, srcW, cropW); ok {
+			if n := correctSmartCropAbruptStaticClusters(scene, result, srcW, cropW); n > 0 {
+				corrected += n
+				start = end
+				continue
+			}
+		}
 		// Once adaptive sampling shows the crop occupying substantially
 		// different regions for a meaningful fraction of the scene, this is a
 		// tracked traversal rather than isolated saliency drift. A scene-wide
@@ -645,6 +653,241 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 	return corrected
 }
 
+// correctSmartCropIsolatedMotionBoundaryScenes rejects a single-frame motion
+// ghost when the surrounding frames provide stronger containment evidence.
+// A narrow crop can clamp to a frame edge for a mostly still person, while one
+// transient shadow produces a confident motion window on the opposite side of
+// that person. Propagating that lone motion point then follows the empty room.
+//
+// This recovery is deliberately narrow: the scene must contain exactly one
+// motion-certified sample, most non-motion samples must be clamped to the same
+// edge, and a tight interior crop cluster must bracket the motion sample in
+// time and lie geometrically between the edge and the motion window. Genuine
+// traversal, multiple moving subjects, and unbracketed transitions are left
+// untouched.
+func correctSmartCropIsolatedMotionBoundaryScenes(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 8 || srcW <= cropW || cropW <= 0 || float64(srcW)/float64(cropW) < 1.8 {
+		return 0
+	}
+	corrected := 0
+	for sceneStart := 0; sceneStart < len(samples); {
+		sceneEnd := sceneStart + 1
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		corrected += correctSmartCropIsolatedMotionBoundaryScene(samples[sceneStart:sceneEnd], srcW, cropW)
+		sceneStart = sceneEnd
+	}
+	return corrected
+}
+
+func correctSmartCropIsolatedMotionBoundaryScene(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 8 {
+		return 0
+	}
+	motionIndex := -1
+	for i, sample := range samples {
+		if !sample.motionTracked {
+			continue
+		}
+		if motionIndex >= 0 {
+			return 0
+		}
+		motionIndex = i
+	}
+	if motionIndex < 0 {
+		return 0
+	}
+
+	maxX := srcW - cropW
+	edgeBand := maxInt(48, cropW/8)
+	leftEdge, rightEdge := 0, 0
+	for i, sample := range samples {
+		if i == motionIndex {
+			continue
+		}
+		if sample.point.X <= edgeBand {
+			leftEdge++
+		}
+		if sample.point.X >= maxX-edgeBand {
+			rightEdge++
+		}
+	}
+	edgeX, edgeCount := 0, leftEdge
+	leftBoundary := true
+	if rightEdge > leftEdge {
+		edgeX, edgeCount, leftBoundary = maxX, rightEdge, false
+	}
+	if edgeCount < maxInt(5, len(samples)/2) {
+		return 0
+	}
+
+	// Find the largest tight interior cluster without allowing the dominant
+	// boundary fallback or the isolated motion answer to vote for itself.
+	radius := maxInt(72, cropW/8)
+	clusters := make([]smartCropXCluster, 0, 3)
+	clusterMembers := make([][]int, 0, 3)
+	for i, sample := range samples {
+		if i == motionIndex || sample.point.X <= edgeBand || sample.point.X >= maxX-edgeBand {
+			continue
+		}
+		best, distance := -1, math.MaxFloat64
+		for j, cluster := range clusters {
+			d := math.Abs(float64(sample.point.X) - cluster.center)
+			if d <= float64(radius) && d < distance {
+				best, distance = j, d
+			}
+		}
+		if best < 0 {
+			clusters = append(clusters, smartCropXCluster{center: float64(sample.point.X), count: 1})
+			clusterMembers = append(clusterMembers, []int{i})
+			continue
+		}
+		cluster := &clusters[best]
+		cluster.center = (cluster.center*float64(cluster.count) + float64(sample.point.X)) / float64(cluster.count+1)
+		cluster.count++
+		clusterMembers[best] = append(clusterMembers[best], i)
+	}
+	best := -1
+	for i, cluster := range clusters {
+		if best < 0 || cluster.count > clusters[best].count {
+			best = i
+		}
+	}
+	if best < 0 || clusters[best].count < 4 {
+		return 0
+	}
+	interiorCount := 0
+	for _, cluster := range clusters {
+		interiorCount += cluster.count
+	}
+	if clusters[best].count*3 < interiorCount*2 {
+		return 0
+	}
+
+	before, after := 0, 0
+	for _, index := range clusterMembers[best] {
+		if index < motionIndex {
+			before++
+		} else if index > motionIndex {
+			after++
+		}
+	}
+	if before < 2 || after < 2 {
+		return 0
+	}
+
+	candidateX := clampInt(roundEven(int(math.Round(clusters[best].center))), 0, maxX)
+	motionX := samples[motionIndex].point.X
+	if leftBoundary {
+		if candidateX <= edgeBand || motionX <= candidateX {
+			return 0
+		}
+	} else if candidateX >= maxX-edgeBand || motionX >= candidateX {
+		return 0
+	}
+	if absInt(candidateX-edgeX) < cropW/3 || absInt(candidateX-edgeX) > cropW ||
+		absInt(motionX-candidateX) < cropW/3 || absInt(motionX-candidateX) > cropW {
+		return 0
+	}
+
+	corrected := 0
+	for i := range samples {
+		if samples[i].point.X != candidateX {
+			samples[i].point.X = candidateX
+			corrected++
+		}
+		samples[i].temporalTrack = true
+	}
+	return corrected
+}
+
+type smartCropXCluster struct {
+	center float64
+	count  int
+}
+
+// correctSmartCropAbruptStaticClusters repairs a second low-motion failure
+// shape: a scene has no motion-certified points and generic saliency abruptly
+// switches between two long-lived static crops. Broad foreground activity can
+// still locate the person approximately, even when it is too diffuse to be an
+// authoritative crop by itself (for example, a head dropping over dark
+// clothes). We use that activity only to choose an already-observed stable
+// crop cluster; gradual/multi-step traversal and ambiguous choices are left
+// untouched.
+func correctSmartCropAbruptStaticClusters(
+	samples []smartCropV2Sample,
+	result smartCropTemporalResult,
+	srcW, cropW int,
+) int {
+	if len(samples) < 6 || srcW <= cropW || cropW <= 0 ||
+		result.MeanActivity < smartCropTemporalDenseMinMeanActivity ||
+		result.ActiveFraction < 0.10 || result.Concentration < 0.30 {
+		return 0
+	}
+	for _, sample := range samples {
+		if sample.motionTracked {
+			return 0
+		}
+	}
+
+	clusterRadius := maxInt(96, cropW/4)
+	clusters := make([]smartCropXCluster, 0, 3)
+	assignments := make([]int, len(samples))
+	for i, sample := range samples {
+		best, bestDistance := -1, math.MaxFloat64
+		for j, cluster := range clusters {
+			distance := math.Abs(float64(sample.point.X) - cluster.center)
+			if distance <= float64(clusterRadius) && distance < bestDistance {
+				best, bestDistance = j, distance
+			}
+		}
+		if best < 0 {
+			clusters = append(clusters, smartCropXCluster{center: float64(sample.point.X), count: 1})
+			assignments[i] = len(clusters) - 1
+			continue
+		}
+		cluster := &clusters[best]
+		cluster.center = (cluster.center*float64(cluster.count) + float64(sample.point.X)) / float64(cluster.count+1)
+		cluster.count++
+		assignments[i] = best
+	}
+	if len(clusters) != 2 || clusters[0].count < 3 || clusters[1].count < 3 {
+		return 0
+	}
+
+	candidate := 0
+	firstDistance := math.Abs(clusters[0].center - float64(result.X))
+	secondDistance := math.Abs(clusters[1].center - float64(result.X))
+	if secondDistance < firstDistance {
+		candidate = 1
+		firstDistance, secondDistance = secondDistance, firstDistance
+	}
+	if firstDistance > float64(cropW)/2 || secondDistance-firstDistance < float64(cropW)/6 {
+		return 0
+	}
+	transitions := 0
+	for i := 1; i < len(assignments); i++ {
+		if assignments[i] != assignments[i-1] {
+			transitions++
+		}
+	}
+	if transitions > 2 {
+		return 0
+	}
+
+	x := clampInt(roundEven(int(math.Round(clusters[candidate].center))), 0, srcW-cropW)
+	corrected := 0
+	for i := range samples {
+		if samples[i].point.X != x {
+			samples[i].point.X = x
+			corrected++
+		}
+		samples[i].temporalTrack = true
+	}
+	return corrected
+}
+
 // correctSmartCropStationaryRuns repairs low-confidence saliency anchors that
 // occur while a tracked subject pauses inside an otherwise moving scene.
 // Scene-wide temporal correction deliberately stays disabled for sustained
@@ -675,6 +918,15 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			i = end
 			continue
 		}
+		// A run bracketed by trusted motion positions is an identity-continuity
+		// problem before it is a fresh saliency problem. This also rejects a
+		// locally "confident" background change when both adjacent subject
+		// anchors remain on the other side of the frame.
+		if n := correctSmartCropStationaryRunFromMotionContinuity(samples, i, end, srcW, cropW); n > 0 {
+			corrected += n
+			i = end
+			continue
+		}
 		result, ok := bestSmartCropTemporalConsensus(samples[i:end], srcW, cropW)
 		if !ok || !smartCropTemporalResultConfident(result) {
 			i = end
@@ -689,6 +941,74 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			samples[j].temporalTrack = true
 		}
 		i = end
+	}
+	return corrected
+}
+
+// correctSmartCropStationaryRunFromMotionContinuity handles the case where a
+// person becomes too still for temporal foreground scoring immediately before
+// or after a motion-certified stretch. Generic saliency can then jump to a
+// static room feature and remain there for many seconds. The adjacent tracked
+// position is a stronger identity/continuity signal, but it is only allowed to
+// repair a run when at least two thirds of the run disagrees in one direction.
+// Opposing outliers and distant anchors are preserved as real traversal.
+func correctSmartCropStationaryRunFromMotionContinuity(
+	samples []smartCropV2Sample,
+	start, end, srcW, cropW int,
+) int {
+	if end-start < smartCropTemporalMinSamples || start < 0 || end > len(samples) ||
+		srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	prev := start - 1
+	next := end
+	prevOK := prev >= 0 && !samples[start].point.Cut && samples[prev].motionTracked
+	nextOK := next < len(samples) && !samples[next].point.Cut && samples[next].motionTracked
+	if !prevOK && !nextOK {
+		return 0
+	}
+	if prevOK && nextOK && absInt(samples[prev].point.X-samples[next].point.X) > cropW/2 {
+		return 0
+	}
+
+	predictedX := func(atMs int64) int {
+		switch {
+		case prevOK && nextOK:
+			return interpolateSmartCropStillX(samples[prev].point, samples[next].point, atMs)
+		case prevOK:
+			return samples[prev].point.X
+		default:
+			return samples[next].point.X
+		}
+	}
+	deadZone := maxInt(48, cropW/4)
+	left, right, aligned := 0, 0, 0
+	for j := start; j < end; j++ {
+		delta := samples[j].point.X - predictedX(samples[j].point.AtMs)
+		switch {
+		case delta < -deadZone:
+			left++
+		case delta > deadZone:
+			right++
+		default:
+			aligned++
+		}
+	}
+	required := maxInt(3, (2*(end-start)+2)/3)
+	bracketedMinority := prevOK && nextOK && aligned >= 2 &&
+		((left >= 2 && right == 0) || (right >= 2 && left == 0))
+	if !bracketedMinority && !((left >= required && right == 0) || (right >= required && left == 0)) {
+		return 0
+	}
+
+	corrected := 0
+	for j := start; j < end; j++ {
+		x := clampInt(roundEven(predictedX(samples[j].point.AtMs)), 0, srcW-cropW)
+		if absInt(samples[j].point.X-x) > deadZone {
+			samples[j].point.X = x
+			corrected++
+		}
+		samples[j].temporalTrack = true
 	}
 	return corrected
 }

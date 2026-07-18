@@ -396,8 +396,9 @@ func computeSmartCropReelV2(
 				sampleSource += "+tracking"
 				markSmartCropSceneCuts(samples)
 				refineSmartCropMotionSamples(samples, row.Width, cw)
+				stationaryCorrections = correctSmartCropIsolatedMotionBoundaryScenes(samples, row.Width, cw)
 				fillSmartCropMotionGaps(samples, row.Width, cw)
-				stationaryCorrections = correctSmartCropStationaryRuns(samples, row.Width, cw)
+				stationaryCorrections += correctSmartCropStationaryRuns(samples, row.Width, cw)
 				refineSmartCropHeadSamples(samples, row.Width, cw)
 			} else {
 				app.Logger().Info("smartcrop v2 adaptive tracking unavailable",
