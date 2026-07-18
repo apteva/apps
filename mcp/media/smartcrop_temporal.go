@@ -33,6 +33,8 @@ type smartCropTemporalResult struct {
 	StaticAnchored  bool
 	AnchorCoverage  int
 	AnchorScore     float64
+	AnchorX         int
+	AnchorAligned   bool
 }
 
 // smartCropSceneSamples keeps temporal evidence inside the scene containing
@@ -187,12 +189,13 @@ func temporalSubjectConsensus(samples []smartCropV2Sample, srcW, cropW int) (sma
 	anchorCenter, anchorCoverage, anchorScore, anchored := persistentWarmSubjectCenter(
 		pixels, w, h, bestStart, normalizedCropW,
 	)
+	anchorStart := clampInt(int(math.Round(anchorCenter-float64(normalizedCropW)/2.0)), 0, w-normalizedCropW)
+	anchorAligned := absInt(anchorStart-bestStart) <= normalizedCropW*3/5
 	if anchored {
-		anchorStart := clampInt(int(math.Round(anchorCenter-float64(normalizedCropW)/2.0)), 0, w-normalizedCropW)
 		// A recurring skin-colored component certifies the temporal region, but
 		// does not position it. A face, hand, or arm can be the strongest warm
 		// component and centering that fragment would move the torso off-center.
-		anchored = absInt(anchorStart-bestStart) <= normalizedCropW*3/5
+		anchored = anchorAligned
 	}
 	result := smartCropTemporalResult{
 		X:               clampInt(roundEven(int(math.Round(float64(bestStart)*float64(srcW)/float64(w)))), 0, srcW-cropW),
@@ -203,6 +206,8 @@ func temporalSubjectConsensus(samples []smartCropV2Sample, srcW, cropW int) (sma
 		SubjectAnchored: anchored,
 		AnchorCoverage:  anchorCoverage,
 		AnchorScore:     anchorScore,
+		AnchorX:         clampInt(roundEven(int(math.Round(float64(anchorStart)*float64(srcW)/float64(w)))), 0, srcW-cropW),
+		AnchorAligned:   anchorAligned,
 	}
 	return result, true
 }
@@ -211,7 +216,7 @@ func applySmartCropTemporalOverride(baseX int, result smartCropTemporalResult, c
 	if !smartCropTemporalResultConfident(result) || absInt(baseX-result.X) <= cropW/8 {
 		return baseX, false
 	}
-	if result.StaticAnchored {
+	if result.StaticAnchored && !result.AnchorAligned {
 		// Static colour evidence is intentionally only an edge-recovery signal.
 		// The candidate person's centre must already be inside the saliency crop
 		// and stranded in its outer fifth. Otherwise a warm lamp or chair across
@@ -265,6 +270,20 @@ func smartCropTemporalResultConfident(result smartCropTemporalResult) bool {
 		result.ActiveFraction >= smartCropTemporalStaticMinActiveFraction &&
 		result.AnchorCoverage >= (result.Samples+1)/2 &&
 		result.AnchorScore >= smartCropTemporalStaticMinAnchorScore {
+		return true
+	}
+	// Some production clips have a nearly motionless, dark-clothed person:
+	// only the face/legs contribute warm evidence and codec activity is below
+	// the normal static-motion floor. An extremely concentrated region with a
+	// modest recurring human component is still safe at this lower floor.
+	if result.Concentration >= 0.98 &&
+		result.MeanActivity >= 0.10 &&
+		result.MeanActivity < 0.20 &&
+		result.ActiveFraction >= 0.006 &&
+		result.ActiveFraction < smartCropTemporalStaticMinActiveFraction &&
+		result.AnchorCoverage >= maxInt(3, (2*result.Samples+2)/3) &&
+		result.AnchorScore >= smartCropTemporalStaticMinAnchorScore &&
+		result.AnchorScore < smartCropTemporalStaticMaxAnchorScore {
 		return true
 	}
 	return result.Concentration >= smartCropTemporalMinConcentration &&
@@ -387,6 +406,43 @@ func staticWarmSubjectConsensus(samples []smartCropV2Sample, srcW, cropW int) (s
 	}, true
 }
 
+// bestSmartCropTemporalConsensus distinguishes "a temporal score could be
+// calculated" from "that score is safe to use". A recurring static human
+// anchor is preferred when unanchored activity points elsewhere and the
+// evidence path is not a genuine tracked traversal. This covers people who
+// pause, wear dark clothes, or move too little for background subtraction.
+func bestSmartCropTemporalConsensus(samples []smartCropV2Sample, srcW, cropW int) (smartCropTemporalResult, bool) {
+	temporal, temporalOK := temporalSubjectConsensus(samples, srcW, cropW)
+	static, staticOK := staticWarmSubjectConsensus(samples, srcW, cropW)
+	staticConfident := staticOK && smartCropTemporalResultConfident(static)
+	if temporalOK && !smartCropTemporalResultConfident(temporal) && temporal.AnchorAligned &&
+		temporal.AnchorCoverage >= maxInt(3, (2*temporal.Samples+2)/3) &&
+		temporal.AnchorScore >= smartCropTemporalStaticMinAnchorScore &&
+		temporal.AnchorScore < smartCropTemporalStaticMaxAnchorScore {
+		anchored := temporal
+		anchored.X = temporal.AnchorX
+		anchored.StaticAnchored = true
+		return anchored, true
+	}
+	if staticConfident {
+		if !temporalOK || !smartCropTemporalResultConfident(temporal) {
+			return static, true
+		}
+		if !temporal.SubjectAnchored &&
+			absInt(temporal.X-static.X) > cropW/4 &&
+			!smartCropSceneHasSustainedTraversal(samples, cropW) {
+			return static, true
+		}
+	}
+	if temporalOK {
+		return temporal, true
+	}
+	if staticOK {
+		return static, true
+	}
+	return smartCropTemporalResult{}, false
+}
+
 func warmSubjectComponents(frame []uint8, w, h, cropW, regionMin, regionMax int) []warmSubjectComponent {
 	if len(frame) != w*h*3 {
 		return nil
@@ -463,6 +519,18 @@ func strictWarmSubjectPixel(r, g, b int) bool {
 func normalizedSmartCropRGB(img image.Image, w, h int) []uint8 {
 	b := img.Bounds()
 	out := make([]uint8, w*h*3)
+	if rgba, ok := img.(*image.RGBA); ok && b.Dx() == w && b.Dy() == h {
+		for y := 0; y < h; y++ {
+			src := rgba.PixOffset(b.Min.X, b.Min.Y+y)
+			for x := 0; x < w; x++ {
+				dst := (y*w + x) * 3
+				out[dst] = rgba.Pix[src+x*4]
+				out[dst+1] = rgba.Pix[src+x*4+1]
+				out[dst+2] = rgba.Pix[src+x*4+2]
+			}
+		}
+		return out
+	}
 	for y := 0; y < h; y++ {
 		sy := b.Min.Y + (2*y+1)*b.Dy()/(2*h)
 		if sy >= b.Max.Y {
@@ -526,10 +594,7 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			start = end
 			continue
 		}
-		result, ok := temporalSubjectConsensus(samples[start:end], srcW, cropW)
-		if !ok {
-			result, ok = staticWarmSubjectConsensus(samples[start:end], srcW, cropW)
-		}
+		result, ok := bestSmartCropTemporalConsensus(samples[start:end], srcW, cropW)
 		if ok {
 			if !smartCropTemporalResultConfident(result) {
 				start = end
@@ -554,7 +619,19 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			// Four agreeing frames are the minimum for modifying a reel path.
 			// Three-frame scenes are too short to distinguish a static saliency
 			// miss from deliberate subject movement reliably.
-			direction := smartCropTemporalCorrectionDirection(result, left, right, aligned, end-start)
+			legacyDirection := smartCropTemporalLegacyCorrectionDirection(result, left, right, aligned, end-start)
+			direction := legacyDirection
+			if direction == 0 {
+				direction = smartCropTemporalAnchoredCorrectionDirection(result, left, right, aligned, end-start)
+			}
+			// Static-anchor corrections and the new anchored-minority recovery
+			// are authoritative. Legacy majority corrections still allow the
+			// released face/head edge guard to refine reclining people.
+			if direction != 0 && (result.StaticAnchored || legacyDirection == 0) {
+				for i := start; i < end; i++ {
+					samples[i].temporalTrack = true
+				}
+			}
 			for i := start; direction != 0 && i < end; i++ {
 				delta := samples[i].point.X - result.X
 				if (direction < 0 && delta < -deadZone) || (direction > 0 && delta > deadZone) {
@@ -572,19 +649,63 @@ func smartCropSceneHasSustainedTraversal(samples []smartCropV2Sample, cropW int)
 	if len(samples) < 5 || cropW <= 0 {
 		return false
 	}
-	xs := make([]int, len(samples))
-	for i, sample := range samples {
-		xs[i] = sample.point.X
+	xs := make([]int, 0, len(samples))
+	for _, sample := range samples {
+		if sample.motionTracked {
+			xs = append(xs, sample.point.X)
+		}
 	}
+	if len(xs) < 3 {
+		xs = xs[:0]
+		for _, sample := range samples {
+			xs = append(xs, sample.point.X)
+		}
+	}
+	ordered := append([]int(nil), xs...)
 	sort.Ints(xs)
 	// Robust 20th-to-80th percentile range ignores one isolated drift point,
 	// while accepting movement that persists across several adjacent frames.
 	lo := xs[(len(xs)-1)/5]
 	hi := xs[(len(xs)-1)*4/5]
-	return hi-lo > maxInt(96, cropW/3)
+	spread := hi - lo
+	if spread <= maxInt(96, cropW/3) {
+		return false
+	}
+	// Alternating between a static background and one subject crop is saliency
+	// flicker, not traversal. Genuine following is directionally coherent for
+	// several samples even when the person later turns around.
+	stepThreshold := maxInt(48, cropW/6)
+	lastDirection, significant, reversals := 0, 0, 0
+	for i := 1; i < len(ordered); i++ {
+		delta := ordered[i] - ordered[i-1]
+		if absInt(delta) <= stepThreshold {
+			continue
+		}
+		direction := 1
+		if delta < 0 {
+			direction = -1
+		}
+		if lastDirection != 0 && direction != lastDirection {
+			reversals++
+		}
+		lastDirection = direction
+		significant++
+	}
+	if significant >= 4 && reversals*3 >= significant &&
+		absInt(ordered[len(ordered)-1]-ordered[0]) < spread/2 {
+		return false
+	}
+	return true
 }
 
 func smartCropTemporalCorrectionDirection(result smartCropTemporalResult, left, right, aligned, samples int) int {
+	if direction := smartCropTemporalLegacyCorrectionDirection(result, left, right, aligned, samples); direction != 0 {
+		return direction
+	}
+	return smartCropTemporalAnchoredCorrectionDirection(result, left, right, aligned, samples)
+}
+
+func smartCropTemporalLegacyCorrectionDirection(result smartCropTemporalResult, left, right, aligned, samples int) int {
 	required := maxInt(4, (2*samples+2)/3)
 	if left >= required && right == 0 {
 		return -1
@@ -609,6 +730,21 @@ func smartCropTemporalCorrectionDirection(result smartCropTemporalResult, left, 
 		return -1
 	}
 	if stableMinority && right > 0 && left == 0 {
+		return 1
+	}
+	return 0
+}
+
+func smartCropTemporalAnchoredCorrectionDirection(result smartCropTemporalResult, left, right, aligned, samples int) int {
+	anchoredMinority := result.SubjectAnchored &&
+		result.Concentration >= 0.85 &&
+		result.AnchorCoverage >= maxInt(3, (2*result.Samples+2)/3) &&
+		result.AnchorScore < 1500.0 &&
+		aligned >= maxInt(3, samples/3)
+	if anchoredMinority && left > 0 && right == 0 {
+		return -1
+	}
+	if anchoredMinority && right > 0 && left == 0 {
 		return 1
 	}
 	return 0

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -162,7 +164,7 @@ func analyzeSmartCropV2Input(
 			}
 			defer func() { <-sem }()
 			framePath := filepath.Join(dir, fmt.Sprintf("%02d.jpg", i))
-			if err := extractKeyframe(ctx, ffmpegPath, input, framePath, float64(pos)/1000, 320); err != nil {
+			if err := extractSmartCropFrame(ctx, ffmpegPath, input, framePath, float64(pos)/1000, 320); err != nil {
 				errs[i] = err
 				return
 			}
@@ -205,4 +207,27 @@ func analyzeSmartCropV2Input(
 		return nil, fmt.Errorf("only %d/%d supplemental frames decoded: %w", len(samples), len(positions), firstErr)
 	}
 	return samples, nil
+}
+
+// extractSmartCropFrame samples the requested instant, not the most
+// representative frame from the following second. The thumbnail=30 filter is
+// useful for catalog thumbnails but shifts a moving subject in time and makes
+// a crop computed for 166.0s describe roughly 166.0-167.0s instead.
+func extractSmartCropFrame(ctx context.Context, ffmpegPath, input, output string, seekSeconds float64, width int) error {
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	args := []string{
+		"-y", "-loglevel", "error",
+		"-ss", fmt.Sprintf("%.3f", seekSeconds),
+		"-i", input,
+		"-vf", fmt.Sprintf("scale=%d:-2", width),
+		"-frames:v", "1",
+		"-q:v", "3",
+		output,
+	}
+	out, err := exec.CommandContext(cctx, ffmpegPath, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg smart crop frame @%.3fs: %w: %s", seekSeconds, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }

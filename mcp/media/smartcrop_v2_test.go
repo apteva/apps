@@ -349,6 +349,80 @@ func TestAdaptiveTrackingStaysOffForNearlyStableSubject(t *testing.T) {
 	}
 }
 
+func TestSmartCropTraversalRejectsAlternatingBackgroundSaliency(t *testing.T) {
+	xs := []int{0, 900, 0, 900, 0, 900, 0, 900, 0}
+	samples := make([]smartCropV2Sample, len(xs))
+	for i, x := range xs {
+		samples[i] = smartCropV2Sample{
+			point:         cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+			motionTracked: true,
+		}
+	}
+	if smartCropSceneHasSustainedTraversal(samples, 606) {
+		t.Fatal("alternating subject/background guesses must not disable temporal correction")
+	}
+}
+
+func TestSmartCropTraversalAcceptsCoherentFollowing(t *testing.T) {
+	xs := []int{0, 140, 300, 470, 650, 820, 960}
+	samples := make([]smartCropV2Sample, len(xs))
+	for i, x := range xs {
+		samples[i] = smartCropV2Sample{
+			point:         cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+			motionTracked: true,
+		}
+	}
+	if !smartCropSceneHasSustainedTraversal(samples, 606) {
+		t.Fatal("directionally coherent subject motion must remain a tracked traversal")
+	}
+}
+
+func TestFillSmartCropMotionGapsInterpolatesOnlyShortHoles(t *testing.T) {
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 200}, motionTracked: true},
+		{point: cropPathPoint{AtMs: 1_000, X: 0}},
+		{point: cropPathPoint{AtMs: 2_000, X: 600}, motionTracked: true},
+		{point: cropPathPoint{AtMs: 6_000, X: 0}},
+	}
+	if got := fillSmartCropMotionGaps(samples, 1920, 606); got != 1 {
+		t.Fatalf("filled=%d want 1", got)
+	}
+	if samples[1].point.X != 400 || !samples[1].motionTracked {
+		t.Fatalf("short tracking hole was not interpolated: %+v", samples[1])
+	}
+	if samples[3].point.X != 0 || samples[3].motionTracked {
+		t.Fatalf("long boundary gap must stay untouched: %+v", samples[3])
+	}
+}
+
+func TestAnchorSmartCropPathDeduplicatesClampedBoundaries(t *testing.T) {
+	path := []cropPathPoint{
+		{AtMs: 1_000, X: 10},
+		{AtMs: 1_500, X: 200},
+		{AtMs: 2_000, X: 300},
+		{AtMs: 2_500, X: 400},
+	}
+	got := anchorSmartCropPath(path, 1_500, 2_000)
+	if len(got) != 2 || got[0].AtMs != 1_500 || got[0].X != 200 ||
+		got[1].AtMs != 2_000 || got[1].X != 300 {
+		t.Fatalf("duplicate boundary anchors survived: %v", got)
+	}
+}
+
+func TestVeryLowMotionRecurringSubjectConfidence(t *testing.T) {
+	result := smartCropTemporalResult{
+		Samples:        9,
+		Concentration:  0.9845,
+		MeanActivity:   0.1227,
+		ActiveFraction: 0.0072,
+		AnchorCoverage: 7,
+		AnchorScore:    610,
+	}
+	if !smartCropTemporalResultConfident(result) {
+		t.Fatalf("Maria low-motion person profile was rejected: %+v", result)
+	}
+}
+
 func TestCropFilterForPathInterpolatesAndPreservesCuts(t *testing.T) {
 	path := []cropPathPoint{
 		{AtMs: 10_000, X: 100},
