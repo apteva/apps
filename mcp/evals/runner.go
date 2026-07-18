@@ -58,7 +58,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return fmt.Errorf("spawn agent: %w", err)
 	}
 	var accepted map[string]any
-	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": run.CaseSnapshot.Prompt}, &accepted); err != nil {
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": environmentTaskMessage(run.CaseSnapshot.Prompt, created.WebFixtures)}, &accepted); err != nil {
 		return fmt.Errorf("send task: %w", err)
 	}
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_control", map[string]any{"run_id": created.ID, "agent": "main", "action": "run"}, &accepted); err != nil {
@@ -76,7 +76,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	}
 
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType}
+		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
 		var result AssertionResult
 		if callErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result); callErr != nil {
 			result = AssertionResult{Name: assertion.Name, Passed: false, Message: callErr.Error()}
@@ -121,6 +121,28 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 	return nil
+}
+
+func environmentTaskMessage(task string, fixtures []EnvironmentWebFixture) string {
+	if len(fixtures) == 0 {
+		return task
+	}
+	lines := []string{"Test environment:"}
+	for _, fixture := range fixtures {
+		if strings.TrimSpace(fixture.TestURL) == "" {
+			continue
+		}
+		name := fixture.Pack
+		if name == "" {
+			name = fixture.ID
+		}
+		lines = append(lines, fmt.Sprintf("- The simulated %s website is available at %s", name, fixture.TestURL))
+	}
+	if len(lines) == 1 {
+		return task
+	}
+	lines = append(lines, "Use the Computer app for website tasks. The site and all actions inside it are simulated.", "", "Task:", task)
+	return strings.Join(lines, "\n")
 }
 
 func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerdict, error) {

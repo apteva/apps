@@ -110,6 +110,7 @@ interface Assertion {
   min_calls?: number;
   agent_alias?: string;
   event_type?: string;
+  fixture?: string;
 }
 
 interface EvalCase {

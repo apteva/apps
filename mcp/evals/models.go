@@ -54,6 +54,7 @@ type Assertion struct {
 	MinCalls   int            `json:"min_calls,omitempty"`
 	AgentAlias string         `json:"agent_alias,omitempty"`
 	EventType  string         `json:"event_type,omitempty"`
+	Fixture    string         `json:"fixture,omitempty"`
 }
 
 type AssertionResult struct {
@@ -178,9 +179,16 @@ type EnvironmentDefinition struct {
 }
 
 type EnvironmentRun struct {
-	ID        string `json:"id"`
-	RuntimeID string `json:"runtime_id"`
-	Status    string `json:"status"`
+	ID          string                  `json:"id"`
+	RuntimeID   string                  `json:"runtime_id"`
+	Status      string                  `json:"status"`
+	WebFixtures []EnvironmentWebFixture `json:"web_fixtures,omitempty"`
+}
+
+type EnvironmentWebFixture struct {
+	ID      string `json:"id"`
+	Pack    string `json:"pack"`
+	TestURL string `json:"test_url"`
 }
 
 type LLMModels struct {

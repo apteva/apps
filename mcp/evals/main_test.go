@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,6 +94,17 @@ func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	}
 }
 
+func TestEnvironmentTaskMessageIncludesFixtureContext(t *testing.T) {
+	task := "Join the creator's most affordable paid membership."
+	message := environmentTaskMessage(task, []EnvironmentWebFixture{{ID: "patreon", Pack: "patreon", TestURL: "http://gateway.test/fixture"}})
+	if !strings.Contains(message, "simulated patreon website") || !strings.Contains(message, "http://gateway.test/fixture") || !strings.HasSuffix(message, task) {
+		t.Fatalf("message=%q", message)
+	}
+	if got := environmentTaskMessage(task, nil); got != task {
+		t.Fatalf("plain message=%q", got)
+	}
+}
+
 func TestParseJudgeToleratesSurroundingTextAndBoundsScore(t *testing.T) {
 	verdict, err := parseJudge("result:\n```json\n{\"passed\":false,\"score\":120,\"reasoning\":\"missing tool call\",\"per_goal\":[]}\n```")
 	if err != nil {
@@ -115,7 +127,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.1.2" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.1.3" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 }
