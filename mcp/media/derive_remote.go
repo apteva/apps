@@ -195,7 +195,7 @@ func buildRemoteIndexScript(in remoteIndexScriptInputs) string {
 	// Export config + secrets as env so curl args stay clean and the
 	// token doesn't appear in `ps` per process.
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(in.StorageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+boundStorageProxyPath))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(in.ProjectID))
 	fmt.Fprintf(&b, "export SRC_ID=%s\n", shellQuote(in.FileID))
 	fmt.Fprintf(&b, "export SIGNED_URL=%s\n", shellQuote(in.SignedURL))

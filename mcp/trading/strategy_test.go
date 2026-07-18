@@ -159,6 +159,31 @@ func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
 	}
 }
 
+func TestLiveStrategyMarketLoadsEnoughBarsForRebalanceSchedule(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{}
+	globalEngine.provider = provider
+	def := &StrategyDefinition{
+		Universe:       []string{"AAPL"},
+		Cadence:        "1d",
+		RebalanceEvery: 5,
+		Rules: []StrategyRule{{
+			Name: "fixed", Allocate: []StrategyAllocation{{Symbol: "AAPL", Weight: 0.5}},
+		}},
+	}
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, limit, _, _ := provider.calls()
+	if interval != "1d" || limit != 6 {
+		t.Fatalf("history request = %s/%d, want 1d/6 for a five-bar schedule", interval, limit)
+	}
+	if len(market.barTimes) != 6 {
+		t.Fatalf("schedule bars = %d, want 6", len(market.barTimes))
+	}
+}
+
 func TestLiveStrategyMarketFailsClosedOnPartialUniverse(t *testing.T) {
 	ctx := newTestCtx(t)
 	provider := &recordingStrategyProvider{errors: map[string]error{"ETH-USD": errors.New("upstream unavailable")}}
@@ -293,18 +318,169 @@ func TestStrategyAssignmentUsesImmutableVersion(t *testing.T) {
 	}
 }
 
-func TestStrategyAssignmentCadenceUsesAlignedSlots(t *testing.T) {
-	def := &StrategyDefinition{Cadence: "1h"}
-	a := &StrategyAssignment{Cadence: "1h", LastEvaluatedAt: "2026-07-13T10:00:00Z"}
-	if strategyAssignmentDue(a, def, time.Date(2026, 7, 13, 10, 59, 59, 0, time.UTC)) {
-		t.Fatal("assignment became due before the next hourly candle boundary")
+func TestStockStrategyExecutionWaitsForRegularSession(t *testing.T) {
+	def := &StrategyDefinition{Universe: []string{"AAPL", "SPY"}}
+	e := &engine{provider: &recordingStrategyProvider{}}
+	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy became executable before the US regular session")
 	}
-	next := time.Date(2026, 7, 13, 11, 0, 0, 0, time.UTC)
-	if !strategyAssignmentDue(a, def, next) {
-		t.Fatal("assignment was not due at the next hourly candle boundary")
+	if !stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy did not become executable during the US regular session")
 	}
-	if slot := strategyAssignmentSlot(a, def, next.Add(37*time.Minute)); !slot.Equal(next) {
-		t.Fatalf("slot = %s, want %s", slot, next)
+	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy became executable on a weekend")
+	}
+	if !stockStrategyExecutionReady(e, &StrategyDefinition{Universe: []string{"BTC-USD"}}, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("crypto strategy should not be constrained by the stock session")
+	}
+}
+
+func TestStockStrategyExecutionHonorsUSHolidaysAndEarlyClose(t *testing.T) {
+	def := &StrategyDefinition{Universe: []string{"AAPL"}}
+	e := &engine{provider: &recordingStrategyProvider{}}
+	// July 4 falls on Saturday in 2026, so Friday July 3 is the observed
+	// exchange holiday.
+	holiday := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	if usEquityRegularSession(holiday) || stockStrategyExecutionReady(e, def, holiday) {
+		t.Fatal("stock strategy became executable on observed Independence Day")
+	}
+	if _, ok := strategyAssignmentCheckSlot(def, holiday); ok {
+		t.Fatal("holiday produced a strategy check slot")
+	}
+
+	// The session after Thanksgiving closes at 13:00 New York.
+	afterEarlyClose := time.Date(2026, 11, 27, 19, 0, 0, 0, time.UTC)
+	if usEquityRegularSession(afterEarlyClose) {
+		t.Fatal("stock session remained open after the scheduled early close")
+	}
+	// NYSE explicitly does not observe Saturday New Year's Day on the
+	// preceding Friday.
+	newYearsEve := time.Date(2027, 12, 31, 16, 0, 0, 0, time.UTC)
+	if !usEquityRegularSession(newYearsEve) {
+		t.Fatal("Friday before Saturday New Year's Day should remain open")
+	}
+}
+
+func TestStrategyAssignmentScheduleExposesHolidayDecision(t *testing.T) {
+	assignment := &StrategyAssignment{}
+	def := &StrategyDefinition{Universe: []string{"AAPL"}, Cadence: "1d"}
+	now := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	decorateStrategyAssignmentSchedule(assignment, def, now)
+
+	if assignment.Eligibility != "waiting" || assignment.EligibilityReason != "market_holiday: Independence Day" {
+		t.Fatalf("schedule = %#v", assignment)
+	}
+	if assignment.NextEligibleAt != "2026-07-06T13:30:00Z" {
+		t.Fatalf("next eligible = %q", assignment.NextEligibleAt)
+	}
+}
+
+func TestStrategyRuntimeDistinguishesAssignedAndUnassigned(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Assigned portfolio", []string{"crypto"})
+	assignedID := mustCreateFixedStrategy(t, ctx, "Assigned strategy", "BTC-USD", 0.5)
+	unassignedID := mustCreateFixedStrategy(t, ctx, "Unassigned strategy", "ETH-USD", 0.5)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: assignedID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	strategies, err := dbListStrategies(ctx.AppDB(), "test-proj", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), "test-proj", strategies, time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[int64]*Strategy{}
+	for _, strategy := range strategies {
+		byID[strategy.ID] = strategy
+	}
+	if byID[assignedID].AssignmentStatus != "assigned" || len(byID[assignedID].Assignments) != 1 {
+		t.Fatalf("assigned strategy = %#v", byID[assignedID])
+	}
+	if byID[assignedID].Assignments[0].PortfolioName != "Assigned portfolio" {
+		t.Fatalf("portfolio name = %q", byID[assignedID].Assignments[0].PortfolioName)
+	}
+	if byID[unassignedID].AssignmentStatus != "unassigned" || len(byID[unassignedID].Assignments) != 0 {
+		t.Fatalf("unassigned strategy = %#v", byID[unassignedID])
+	}
+}
+
+func TestStrategyAssignmentCadenceCountsCompletedBars(t *testing.T) {
+	def := &StrategyDefinition{Cadence: "1d", RebalanceEvery: 5, Universe: []string{"AAPL"}}
+	a := &StrategyAssignment{LastMarketBarAt: "2026-07-02T13:30:00Z"}
+	market := strategyMarket{barTimes: []time.Time{
+		time.Date(2026, 7, 6, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 7, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 8, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 9, 13, 30, 0, 0, time.UTC),
+	}}
+	if strategyAssignmentDueForMarket(a, def, market) {
+		t.Fatal("four completed sessions became due after a weekend")
+	}
+	market.barTimes = append(market.barTimes, time.Date(2026, 7, 10, 13, 30, 0, 0, time.UTC))
+	if !strategyAssignmentDueForMarket(a, def, market) {
+		t.Fatal("five completed sessions did not become due")
+	}
+}
+
+func TestStrategyAssignmentStockCheckSlotsAlignToSessionBars(t *testing.T) {
+	def := &StrategyDefinition{Cadence: "1h", Universe: []string{"AAPL"}}
+	now := time.Date(2026, 7, 14, 14, 37, 0, 0, time.UTC) // 10:37 New York.
+	slot, ok := strategyAssignmentCheckSlot(def, now)
+	want := time.Date(2026, 7, 14, 14, 30, 0, 0, time.UTC)
+	if !ok || !slot.Equal(want) {
+		t.Fatalf("stock check slot = %s ok=%v, want %s", slot, ok, want)
+	}
+	a := &StrategyAssignment{LastCheckedAt: want.Format(time.RFC3339)}
+	if strategyAssignmentCheckDue(a, slot) {
+		t.Fatal("assignment checked the same completed-bar slot twice")
+	}
+	next, _ := strategyAssignmentCheckSlot(def, time.Date(2026, 7, 14, 15, 31, 0, 0, time.UTC))
+	if !strategyAssignmentCheckDue(a, next) {
+		t.Fatal("assignment did not check the next session-aligned bar slot")
+	}
+}
+
+func TestStrategyAssignmentUpgradeInitializesBarClockWithoutTrading(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	portfolioID := mustCreatePortfolio(t, ctx, "Legacy schedule", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Legacy BTC", "BTC-USD", 0.5)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const previousEvaluation = "2026-07-13T09:00:00Z"
+	if _, err := ctx.AppDB().Exec(`
+		UPDATE portfolio_strategy_assignments SET last_evaluated_at = ?
+		WHERE portfolio_id = ? AND status = 'active'`, previousEvaluation, portfolioID); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 0 {
+		t.Fatalf("strategy orders = %d, want no upgrade-time trade", got)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.LastEvaluatedAt != previousEvaluation {
+		t.Fatalf("last evaluated = %q, want existing value preserved", assignment.LastEvaluatedAt)
+	}
+	if assignment.LastMarketBarAt == "" || assignment.LastSeenBarAt == "" || assignment.LastCheckedAt == "" {
+		t.Fatalf("bar scheduler was not initialized: %#v", assignment)
+	}
+	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled) != 0 {
+		t.Fatalf("upgrade initialization created orders: %#v", filled)
 	}
 }
 
@@ -471,8 +647,18 @@ func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
 	if len(snaps) != 2 {
 		t.Fatalf("snapshots=%d, want baseline + step", len(snaps))
 	}
-	if len(snaps[1].Positions) != 1 {
-		t.Fatalf("positions=%#v, want one BTC position", snaps[1].Positions)
+	if len(snaps[1].Positions) != 0 || len(snaps[1].Orders) != 0 {
+		t.Fatalf("step-one state positions=%#v orders=%#v, want signal only", snaps[1].Positions, snaps[1].Orders)
+	}
+	if _, err := stepStrategyBacktestRun(next); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err = dbListBacktestSnapshots(ctx.AppDB(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps[2].Positions) != 1 || len(snaps[2].Orders) != 1 {
+		t.Fatalf("step-two state positions=%#v orders=%#v, want next-open BTC fill", snaps[2].Positions, snaps[2].Orders)
 	}
 	events, err := dbListBacktestEvents(ctx.AppDB(), runID, 20)
 	if err != nil {
@@ -511,6 +697,13 @@ func TestStrategyBacktestUsesPinnedDefinitionAfterUpdate(t *testing.T) {
 	}
 	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
 	if _, err := startStrategyBacktestRun(run); err != nil {
+		t.Fatal(err)
+	}
+	next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stepStrategyBacktestRun(next); err != nil {
 		t.Fatal(err)
 	}
 	snapshots, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
@@ -760,14 +953,55 @@ func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
 	if len(snaps) != 9 {
 		t.Fatalf("snapshots=%d, want baseline + 8 steps", len(snaps))
 	}
-	if len(snaps[4].Orders) != 1 {
-		t.Fatalf("step 4 orders=%d, want first buy after return_3 crosses threshold", len(snaps[4].Orders))
+	if len(snaps[4].Orders) != 0 {
+		t.Fatalf("step 4 orders=%d, want signal only", len(snaps[4].Orders))
 	}
-	if len(snaps[5].Orders) != 0 || len(snaps[5].Positions) != 1 {
-		t.Fatalf("step 5 should hold without a new order; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
+	if len(snaps[5].Orders) != 1 || len(snaps[5].Positions) != 1 {
+		t.Fatalf("step 5 should execute step 4 signal; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
 	}
-	if len(snaps[7].Orders) == 0 {
-		t.Fatalf("step 7 should rebalance again; orders=%d", len(snaps[7].Orders))
+	if len(snaps[7].Orders) != 0 || len(snaps[8].Orders) == 0 {
+		t.Fatalf("step 7 should signal and step 8 execute; orders=%d/%d", len(snaps[7].Orders), len(snaps[8].Orders))
+	}
+}
+
+func TestStrategyBacktestExecutesPriorCloseSignalAtNextOpen(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Stock timing", []string{"equity"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5)
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		RunKind: "strategy", StrategyVersion: 1, Name: "next-open timing", Status: "queued",
+		Symbols: []string{"AAPL"}, StartAt: "2026-07-09", EndAt: "2026-07-10",
+		Interval: "1d", StartingCash: 100000, SlippageBps: 5, TotalSteps: 2, Summary: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []*BacktestMarketBar{
+		{Step: 1, Symbol: "AAPL", AssetClass: "equity", T: 1783603800, O: 310, H: 317, L: 309, C: 316.22, Source: "fixture"},
+		{Step: 2, Symbol: "AAPL", AssetClass: "equity", T: 1783690200, O: 300, H: 312, L: 299, C: 310, Source: "fixture"},
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows); err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runStrategyBacktestToEnd(run); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 3 || len(snaps[1].Orders) != 0 || len(snaps[2].Orders) != 1 {
+		t.Fatalf("snapshot orders = %#v, want no step-one fill and one step-two fill", snaps)
+	}
+	wantFill := 300.0 * 1.0005
+	assertClose(t, "next-open fill", snaps[2].Orders[0].AvgFillPrice, wantFill)
+	if math.Abs(snaps[2].Orders[0].AvgFillPrice-316.22*1.0005) < 0.0001 {
+		t.Fatal("fill still uses the signal session close")
 	}
 }
 

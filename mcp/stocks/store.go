@@ -48,6 +48,7 @@ type instrumentRow struct {
 // Nil pointers mean "no constraint"; rows missing a filtered metric are
 // excluded from that filter (and sorted last when it's the sort key).
 type listFilter struct {
+	Query     string
 	Sector    string
 	MinYield  *float64
 	MaxYield  *float64
@@ -61,6 +62,7 @@ type listFilter struct {
 	MaxMcap   *float64
 	Sort      string // name | price | change | yield | pe | payout | growth
 	Limit     int
+	Offset    int
 }
 
 // ensureInstrument inserts a symbol into the universe if absent, leaving
@@ -88,7 +90,7 @@ func (s *store) updateSnapshot(symbol string, price, changePct float64, yieldPct
 		    SET last_price = ?, last_change_pct = ?, last_yield_pct = ?,
 		        last_growth_pct = ?, refreshed_at = ?
 		  WHERE symbol = ?`,
-		nullF(price), nullF(changePct), yieldPct, growthPct, time.Now().Unix(), strings.ToUpper(symbol),
+		nullF(price), changePct, yieldPct, growthPct, time.Now().Unix(), strings.ToUpper(symbol),
 	)
 	return err
 }
@@ -116,6 +118,7 @@ func (s *store) touch(symbol string) error {
 //  1. recently-viewed symbols stale beyond hotTTL (the hot tier),
 //  2. then never-warmed symbols,
 //  3. then the oldest cold symbols stale beyond coldTTL.
+//
 // This keeps what the user is looking at fresh while the rest of the
 // universe trickles within the global rate budget.
 func (s *store) warmCandidates(limit int, coldTTL, hotTTL, hotWindow time.Duration) ([]string, error) {
@@ -153,8 +156,28 @@ func (s *store) warmCandidates(limit int, coldTTL, hotTTL, hotWindow time.Durati
 
 // listUniverse returns the universe filtered + sorted for the list tool.
 func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
+	where, args := listWhere(f)
+	q := "SELECT " + instrumentCols + " FROM instrument"
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += orderClause(f.Sort)
+	if f.Limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", f.Limit)
+		if f.Offset > 0 {
+			q += fmt.Sprintf(" OFFSET %d", f.Offset)
+		}
+	}
+	return s.scanInstruments(q, args...)
+}
+
+func listWhere(f listFilter) ([]string, []any) {
 	var where []string
 	var args []any
+	if q := strings.TrimSpace(f.Query); q != "" {
+		where = append(where, "(symbol LIKE ? OR LOWER(name) LIKE ?)")
+		args = append(args, strings.ToUpper(q)+"%", "%"+strings.ToLower(q)+"%")
+	}
 	if f.Sector != "" {
 		where = append(where, "LOWER(sector) = LOWER(?)")
 		args = append(args, f.Sector)
@@ -180,15 +203,37 @@ func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
 	bound("last_pe", f.MinPE, f.MaxPE, true)
 	bound("last_growth_pct", f.MinGrowth, f.MaxGrowth, false)
 	bound("last_mcap", f.MinMcap, f.MaxMcap, false)
-	q := "SELECT " + instrumentCols + " FROM instrument"
+	return where, args
+}
+
+func (s *store) countUniverse(f listFilter) (int, error) {
+	where, args := listWhere(f)
+	q := "SELECT COUNT(*) FROM instrument"
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += orderClause(f.Sort)
-	if f.Limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", f.Limit)
+	var total int
+	if err := s.db.QueryRow(q, args...).Scan(&total); err != nil {
+		return 0, err
 	}
-	return s.scanInstruments(q, args...)
+	return total, nil
+}
+
+func (s *store) sectors() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT sector FROM instrument WHERE sector <> '' ORDER BY sector`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var sector string
+		if err := rows.Scan(&sector); err != nil {
+			return nil, err
+		}
+		out = append(out, sector)
+	}
+	return out, rows.Err()
 }
 
 // orderClause maps a sort key to an ORDER BY. "<col> IS NULL" first pushes
@@ -197,19 +242,19 @@ func (s *store) listUniverse(f listFilter) ([]instrumentRow, error) {
 func orderClause(sort string) string {
 	switch sort {
 	case "price":
-		return " ORDER BY last_price IS NULL, last_price DESC"
+		return " ORDER BY last_price IS NULL, last_price DESC, symbol ASC"
 	case "change":
-		return " ORDER BY last_change_pct IS NULL, last_change_pct DESC"
+		return " ORDER BY last_change_pct IS NULL, last_change_pct DESC, symbol ASC"
 	case "yield":
-		return " ORDER BY last_yield_pct IS NULL, last_yield_pct DESC"
+		return " ORDER BY last_yield_pct IS NULL, last_yield_pct DESC, symbol ASC"
 	case "pe":
-		return " ORDER BY last_pe IS NULL OR last_pe <= 0, last_pe ASC"
+		return " ORDER BY last_pe IS NULL OR last_pe <= 0, last_pe ASC, symbol ASC"
 	case "payout":
-		return " ORDER BY last_payout_pct IS NULL, last_payout_pct ASC"
+		return " ORDER BY last_payout_pct IS NULL, last_payout_pct ASC, symbol ASC"
 	case "growth":
-		return " ORDER BY last_growth_pct IS NULL, last_growth_pct DESC"
+		return " ORDER BY last_growth_pct IS NULL, last_growth_pct DESC, symbol ASC"
 	default:
-		return " ORDER BY symbol ASC"
+		return " ORDER BY LOWER(name) ASC, symbol ASC"
 	}
 }
 
@@ -407,6 +452,24 @@ func (s *store) cacheSet(key string, v any) error {
 	return err
 }
 
+// cachePrune removes expired payloads and then caps the remaining cache. The
+// chart key space grows with user-entered symbols and range/interval variants,
+// so TTL reads alone are not sufficient to bound the database over time.
+func (s *store) cachePrune(maxAge time.Duration, maxRows int) error {
+	cutoff := time.Now().Add(-maxAge).Unix()
+	if _, err := s.db.Exec(`DELETE FROM cache WHERE fetched_at < ?`, cutoff); err != nil {
+		return err
+	}
+	if maxRows <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec(`DELETE FROM cache
+		WHERE key IN (
+			SELECT key FROM cache ORDER BY fetched_at DESC, key DESC LIMIT -1 OFFSET ?
+		)`, maxRows)
+	return err
+}
+
 // ─── Watchlists (project-scoped) ───────────────────────────────────
 
 // watchlistRow is a saved list: rules (JSON filter blob; "{}" = manual)
@@ -442,8 +505,18 @@ func (s *store) watchlistUpdate(projectID string, id int64, name, rules string) 
 }
 
 func (s *store) watchlistDelete(projectID string, id int64) error {
-	_, err := s.db.Exec(`DELETE FROM watchlist WHERE id = ? AND project_id = ?`, id, projectID)
-	return err
+	res, err := s.db.Exec(`DELETE FROM watchlist WHERE id = ? AND project_id = ?`, id, projectID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *store) watchlistList(projectID string) ([]watchlistRow, error) {

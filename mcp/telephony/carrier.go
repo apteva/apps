@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -10,15 +11,21 @@ import (
 )
 
 type carrierPlaceRequest struct {
-	CallID         string
-	To             string
-	From           string
-	TimeoutSec     int
-	AudioBridgeURL string
+	CallID            string
+	CallbackSecret    string
+	ProjectID         string
+	To                string
+	From              string
+	TimeoutSec        int
+	MaxDurationSec    int
+	AudioBridgeURL    string
+	RecordingMode     string
+	RecordingChannels string
 }
 
 type carrierPlaceResult struct {
-	CarrierSID string
+	CarrierSID       string
+	CarrierRequestID string
 }
 
 type carrierAdapter interface {
@@ -91,12 +98,15 @@ type twilioCarrier struct {
 func (c *twilioCarrier) Slug() string { return "twilio" }
 
 func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
-	twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("twilio", req.CallID)))
+	twiml := c.app.twilioStreamTwiML(&callRow{
+		ID: req.CallID, CallbackSecret: req.CallbackSecret, ProjectID: req.ProjectID,
+		RecordingMode: req.RecordingMode, RecordingChannels: req.RecordingChannels,
+	})
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"To":             req.To,
 		"From":           req.From,
 		"Twiml":          twiml,
-		"StatusCallback": c.app.publicAppURL() + "/webhook/status/" + req.CallID,
+		"StatusCallback": c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"Timeout":        req.TimeoutSec,
 	})
 	if err != nil {
@@ -105,7 +115,12 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 	var out struct {
 		SID string `json:"sid"`
 	}
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode twilio make_call response: %w", err)
+	}
+	if out.SID == "" {
+		return nil, errors.New("twilio make_call returned no call SID")
+	}
 	return &carrierPlaceResult{CarrierSID: out.SID}, nil
 }
 
@@ -125,12 +140,12 @@ type signalWireCarrier struct {
 func (c *signalWireCarrier) Slug() string { return "signalwire" }
 
 func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
-	cxml := fmt.Sprintf(`<Response><Connect><Stream url="%s" codec="L16@24000h" realtime="true"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("signalwire", req.CallID)))
+	cxml := fmt.Sprintf(`<Response><Connect><Stream url="%s" codec="L16@24000h" realtime="true"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("signalwire", req.CallID, req.CallbackSecret)))
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"To":                   req.To,
 		"From":                 req.From,
 		"Twiml":                cxml,
-		"StatusCallback":       c.app.publicAppURL() + "/webhook/status/" + req.CallID,
+		"StatusCallback":       c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"StatusCallbackMethod": "POST",
 		"Timeout":              req.TimeoutSec,
 	})
@@ -140,7 +155,12 @@ func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*ca
 	var out struct {
 		SID string `json:"sid"`
 	}
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode signalwire make_call response: %w", err)
+	}
+	if out.SID == "" {
+		return nil, errors.New("signalwire make_call returned no call SID")
+	}
 	return &carrierPlaceResult{CarrierSID: out.SID}, nil
 }
 
@@ -172,13 +192,16 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"connection_id":              connectionID,
 		"to":                         req.To,
 		"from":                       req.From,
-		"stream_url":                 c.app.publicWSStreamURL("telnyx", req.CallID),
+		"stream_url":                 c.app.publicWSStreamURL("telnyx", req.CallID, req.CallbackSecret),
 		"stream_track":               "inbound_track",
 		"stream_codec":               "PCMU",
 		"stream_bidirectional_mode":  "rtp",
 		"stream_bidirectional_codec": "PCMU",
 		"timeout_secs":               req.TimeoutSec,
+		"time_limit_secs":            req.MaxDurationSec,
 		"command_id":                 req.CallID,
+		"webhook_url":                c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"webhook_url_method":         "POST",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("telnyx make_call failed: %w", err)
@@ -189,10 +212,15 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 			CallLegID     string `json:"call_leg_id"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode telnyx make_call response: %w", err)
+	}
 	sid := out.Data.CallControlID
 	if sid == "" {
 		sid = out.Data.CallLegID
+	}
+	if sid == "" {
+		return nil, errors.New("telnyx make_call returned no call control id")
 	}
 	return &carrierPlaceResult{CarrierSID: sid}, nil
 }
@@ -215,11 +243,12 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
 		"from":          req.From,
 		"to":            req.To,
-		"answer_url":    c.app.publicAppURL() + "/xml/plivo/" + req.CallID,
+		"answer_url":    c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"answer_method": "POST",
-		"hangup_url":    c.app.publicAppURL() + "/webhook/status/" + req.CallID,
+		"hangup_url":    c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"hangup_method": "POST",
 		"ring_timeout":  req.TimeoutSec,
+		"time_limit":    req.MaxDurationSec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("plivo make_call failed: %w", err)
@@ -228,12 +257,13 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 		RequestUUID string `json:"request_uuid"`
 		CallUUID    string `json:"call_uuid"`
 	}
-	_ = json.Unmarshal(data, &out)
-	sid := out.CallUUID
-	if sid == "" {
-		sid = out.RequestUUID
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode plivo make_call response: %w", err)
 	}
-	return &carrierPlaceResult{CarrierSID: sid}, nil
+	if out.CallUUID == "" && out.RequestUUID == "" {
+		return nil, errors.New("plivo make_call returned no request or call UUID")
+	}
+	return &carrierPlaceResult{CarrierSID: out.CallUUID, CarrierRequestID: out.RequestUUID}, nil
 }
 
 func (c *plivoCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
@@ -255,7 +285,7 @@ func (c *vonageCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"action": "connect",
 		"endpoint": []map[string]any{{
 			"type":         "websocket",
-			"uri":          c.app.publicWSStreamURL("vonage", req.CallID),
+			"uri":          c.app.publicWSStreamURL("vonage", req.CallID, req.CallbackSecret),
 			"content-type": "audio/l16;rate=16000",
 			"headers": map[string]string{
 				"call_id": req.CallID,
@@ -272,7 +302,7 @@ func (c *vonageCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 			"number": vonageNumber(req.From),
 		},
 		"ncco":      ncco,
-		"event_url": []string{c.app.publicAppURL() + "/webhook/status/" + req.CallID},
+		"event_url": []string{c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID)},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("vonage create_voice_call failed: %w", err)
@@ -280,7 +310,12 @@ func (c *vonageCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 	var out struct {
 		UUID string `json:"uuid"`
 	}
-	_ = json.Unmarshal(data, &out)
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("decode vonage create_voice_call response: %w", err)
+	}
+	if out.UUID == "" {
+		return nil, errors.New("vonage create_voice_call returned no UUID")
+	}
 	return &carrierPlaceResult{CarrierSID: out.UUID}, nil
 }
 
@@ -299,10 +334,25 @@ func (a *App) handlePlivoXML(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
 	}
-	streamURL := xmlEscape(a.publicWSStreamURL("plivo", callID))
+	row, err := a.db().findCall(callID)
+	if err != nil || row == nil || row.CarrierSlug != "plivo" {
+		http.Error(w, "unknown call_id", http.StatusNotFound)
+		return
+	}
+	if err := a.authorizeCallRequest(r, row); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if callUUID := firstNonEmpty(r.FormValue("CallUUID"), r.URL.Query().Get("CallUUID")); callUUID != "" {
+		if err := a.db().updateCarrierIdentity(callID, callUUID, row.CarrierRequestID); err != nil {
+			http.Error(w, "persist Plivo call id", http.StatusInternalServerError)
+			return
+		}
+	}
+	streamURL := xmlEscape(a.publicWSStreamURL("plivo", callID, row.CallbackSecret))
 	w.Header().Set("Content-Type", "application/xml")
-	_, _ = fmt.Fprintf(w, `<Response><Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=24000" audioTrack="inbound" statusCallbackUrl="%s" statusCallbackMethod="POST">%s</Stream></Response>`,
-		xmlEscape(a.publicAppURL()+"/webhook/status/"+callID),
+	_, _ = fmt.Fprintf(w, `<Response><Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000" audioTrack="inbound" statusCallbackUrl="%s" statusCallbackMethod="POST">%s</Stream></Response>`,
+		xmlEscape(a.statusCallbackURL(callID, row.CallbackSecret, row.ProjectID)),
 		streamURL,
 	)
 }

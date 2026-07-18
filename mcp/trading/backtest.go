@@ -1141,10 +1141,9 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 	if len(symbols) == 0 {
 		return nil, 0, "", errors.New("at least one symbol required")
 	}
-	for _, symbol := range symbols {
-		if inferAssetClass(symbol) != "crypto" {
-			return nil, 0, "", fmt.Errorf("real backtest bars currently require crypto symbols via Binance; %s is %s", symbol, inferAssetClass(symbol))
-		}
+	provider, source, err := backtestBarsProviderForSymbols(symbols)
+	if err != nil {
+		return nil, 0, "", err
 	}
 	limit := estimateBacktestBarsLimit(startAt, endAt, interval)
 	if limit <= 0 {
@@ -1153,8 +1152,6 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 	if limit > 1000 {
 		return nil, 0, "", fmt.Errorf("backtest real market data is capped at 1000 bars per symbol for now; requested %d", limit)
 	}
-	source := "binance-public"
-	provider := newBinancePublic()
 	bySymbol := map[string]map[int64]Bar{}
 	commonTimes := map[int64]bool{}
 	for i, symbol := range symbols {
@@ -1208,6 +1205,38 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 		}
 	}
 	return out, len(times), source, nil
+}
+
+type historicalBacktestBarsProvider interface {
+	BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
+}
+
+func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsProvider, string, error) {
+	group := ""
+	for _, symbol := range symbols {
+		class := inferAssetClass(symbol)
+		next := ""
+		switch class {
+		case "crypto":
+			next = "crypto"
+		case "equity", "etf":
+			next = "stocks"
+		default:
+			return nil, "", fmt.Errorf("real backtest bars are not available for %s (%s)", symbol, class)
+		}
+		if group != "" && group != next {
+			return nil, "", errors.New("real backtests require a single market calendar; do not mix crypto with equity/ETF symbols")
+		}
+		group = next
+	}
+	switch group {
+	case "crypto":
+		return newBinancePublic(), "binance-public", nil
+	case "stocks":
+		return newYahooPublic(), "yahoo-finance", nil
+	default:
+		return nil, "", errors.New("no supported backtest symbols")
+	}
 }
 
 func estimateBacktestBarsLimit(startAt, endAt time.Time, interval string) int {

@@ -1,4 +1,4 @@
-// Docs v0.2 — generated client documents stored in storage.
+// Docs v0.4 - generated client documents stored in storage.
 //
 // Templates live in this app's DB; agents call docs_render(template,
 // data) to produce a PDF that lands in storage as a real file. All
@@ -17,77 +17,20 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
-// ─── Embedded manifest ────────────────────────────────────────────────
+// Embed the install manifest as the runtime manifest too. One source of
+// truth prevents the sidecar /manifest response from drifting away from
+// the marketplace/install contract.
 //
-// Mirrors apteva.yaml. manifest_test.go enforces they stay in sync.
-
-const manifestYAML = `schema: apteva-app/v1
-name: docs
-display_name: Documents
-version: 0.2.7
-description: |
-  Generate client-facing PDFs from markdown templates and store them
-  in storage. Pure-Go render pipeline (no Chromium): headings, lists,
-  GFM tables, and images/logo (storage:<id> or data: URIs). Audit
-  trail on every render.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-  apps:
-    - name: storage
-      version: ">=0.8.1"
-      reason: rendered PDFs are uploaded to storage; the file's URL/visibility/sharing all flow through storage's surface.
-provides:
-  http_routes:
-    - prefix: /
-  resources:
-    - name: template
-      label: "Document template"
-      list_endpoint: /templates
-      matcher: id_set
-      picker: list
-  permissions:
-    - { name: docs.read,   resource: template, description: "List + read templates." }
-    - { name: docs.write,  resource: template, description: "Create / update / delete templates." }
-    - { name: docs.render, resource: template, description: "Render a document from a template." }
-  mcp_tools:
-    - { name: docs_list_templates,  description: "List templates available in this install.", requires: docs.read }
-    - { name: docs_get_template,    description: "Fetch one template's full body + metadata. Args - id (int) OR slug (string).", requires: docs.read }
-    - { name: docs_create_template, description: "Create a template. Args - slug, name, body, description?, source_format? (markdown), output_format? (pdf), default_folder?.", requires: docs.write }
-    - { name: docs_update_template, description: "Partial update. Args - id, plus any of name/description/body/default_folder.", requires: docs.write }
-    - { name: docs_delete_template, description: "Remove a template. Past renders keep working.", requires: docs.write }
-    - { name: docs_render,          description: "Render a template with data into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args - template_id (int) or template_slug (string), data (object), output_name?, output_folder?.", requires: docs.render }
-    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes (images render too).", requires: docs.render }
-    - { name: docs_list_renders,    description: "Audit trail. Filter by template_id, since, limit.", requires: docs.read }
-    - { name: docs_get_render,      description: "Replay one render - data snapshot, output file_id, timestamps.", requires: docs.read }
-  ui_panels:
-    - slot: project.page
-      label: Documents
-      icon: file-text
-      entry: /ui/DocsPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/docs
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/docs.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // globalCtx — set in OnMount so HTTP handlers can read AppDB() +
 // logger without threading the ctx through every call site.
@@ -107,9 +50,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("docs requires a db block")
 	}
+	if strings.TrimSpace(ctx.CurrentProject()) == "" {
+		return errors.New("docs v0.4 requires a project-scoped install; reinstall global Docs installs per project")
+	}
 	globalCtx = ctx
+	version := a.Manifest().Version
 	ctx.Logger().Info("docs mounted",
-		"version", "0.2.7",
+		"version", version,
 		"default_folder", ctx.Config().Get("default_output_folder"),
 	)
 	return nil
@@ -151,7 +98,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "docs_list_templates",
 			Description: "List templates in this install.",
 			InputSchema: schemaObject(nil, nil),
-			Handler:     a.toolListTemplates,
+			HandlerCtx:  a.toolListTemplatesCtx,
 		},
 		{
 			Name:        "docs_get_template",
@@ -160,78 +107,88 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id":   map[string]any{"type": "integer"},
 				"slug": map[string]any{"type": "string"},
 			}, nil),
-			Handler: a.toolGetTemplate,
+			HandlerCtx: a.toolGetTemplateCtx,
 		},
 		{
 			Name:        "docs_create_template",
-			Description: "Create a template. Args: slug, name, body, description?, source_format?, output_format?, default_folder?.",
+			Description: "Create a Markdown or HTML/CSS template.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":           map[string]any{"type": "string"},
 				"name":           map[string]any{"type": "string"},
 				"body":           map[string]any{"type": "string"},
+				"stylesheet":     map[string]any{"type": "string"},
+				"source_format":  map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":       documentSettingsSchema(),
 				"description":    map[string]any{"type": "string"},
-				"source_format":  map[string]any{"type": "string"},
-				"output_format":  map[string]any{"type": "string"},
 				"default_folder": map[string]any{"type": "string"},
 			}, []string{"slug", "name", "body"}),
-			Handler: a.toolCreateTemplate,
+			HandlerCtx: a.toolCreateTemplateCtx,
 		},
 		{
 			Name:        "docs_update_template",
-			Description: "Partial update. Args: id, plus any of name/description/body/default_folder.",
+			Description: "Partial template update, including HTML/CSS and document settings.",
 			InputSchema: schemaObject(map[string]any{
 				"id":             map[string]any{"type": "integer"},
 				"name":           map[string]any{"type": "string"},
 				"description":    map[string]any{"type": "string"},
 				"body":           map[string]any{"type": "string"},
+				"stylesheet":     map[string]any{"type": "string"},
+				"source_format":  map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":       documentSettingsSchema(),
 				"default_folder": map[string]any{"type": "string"},
 			}, []string{"id"}),
-			Handler: a.toolUpdateTemplate,
+			HandlerCtx: a.toolUpdateTemplateCtx,
 		},
 		{
 			Name:        "docs_delete_template",
 			Description: "Remove a template.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolDeleteTemplate,
+			HandlerCtx:  a.toolDeleteTemplateCtx,
 		},
 		{
 			Name:        "docs_render",
-			Description: "Render a template into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args: template_id or template_slug, data, output_name?, output_folder?.",
+			Description: "Render a Markdown or HTML/CSS template into a PDF in Storage.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
 				"data":          map[string]any{"type": "object"},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
+				"page_size":     map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
 			}, []string{"data"}),
-			Handler: a.toolRender,
+			HandlerCtx: a.toolRenderCtx,
 		},
 		{
 			Name:        "docs_preview",
-			Description: "Render but don't persist. Returns base64 PDF bytes (images render too).",
+			Description: "Render but don't persist. Returns base64 PDF bytes.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
 				"body":          map[string]any{"type": "string"},
+				"stylesheet":    map[string]any{"type": "string"},
+				"source_format": map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":      documentSettingsSchema(),
 				"data":          map[string]any{"type": "object"},
+				"page_size":     map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
 			}, []string{"data"}),
-			Handler: a.toolPreview,
+			HandlerCtx: a.toolPreviewCtx,
 		},
 		{
 			Name:        "docs_list_renders",
-			Description: "Audit trail. Args: template_id?, since?, limit?.",
+			Description: "Audit trail. Args: template_id?, since?, limit?, offset?.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id": map[string]any{"type": "integer"},
 				"since":       map[string]any{"type": "string"},
 				"limit":       map[string]any{"type": "integer"},
+				"offset":      map[string]any{"type": "integer"},
 			}, nil),
-			Handler: a.toolListRenders,
+			HandlerCtx: a.toolListRendersCtx,
 		},
 		{
 			Name:        "docs_get_render",
 			Description: "Replay one render. Args: render_id.",
 			InputSchema: schemaObject(map[string]any{"render_id": map[string]any{"type": "integer"}}, []string{"render_id"}),
-			Handler:     a.toolGetRender,
+			HandlerCtx:  a.toolGetRenderCtx,
 		},
 	}
 }
@@ -275,4 +232,17 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		o["required"] = required
 	}
 	return o
+}
+
+func documentSettingsSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"layout_mode":      map[string]any{"type": "string", "enum": []string{"flow", "fixed"}, "description": "Fixed layouts lock page-size overrides and can use --document-page-width/height CSS variables."},
+		"page_size":        map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
+		"landscape":        map[string]any{"type": "boolean"},
+		"margin_top_mm":    map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_right_mm":  map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_bottom_mm": map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_left_mm":   map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"print_background": map[string]any{"type": "boolean"},
+	}, nil)
 }

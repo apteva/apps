@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: entitlements
 display_name: Entitlements
-version: 0.1.1
+version: 0.2.0
 description: Shared access-control and usage layer.
 author: Apteva
 scopes: [project, global]
@@ -59,7 +59,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("entitlements requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("entitlements mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("entitlements mounted", "version", "0.2.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -81,6 +81,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "entitlement_grants_create", Description: "Grant a feature/key to a subject.", InputSchema: subjectSchema(map[string]any{"source_type": map[string]any{"type": "string"}, "source_id": map[string]any{"type": "string"}, "starts_at": map[string]any{"type": "string"}, "expires_at": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolGrantCreate},
+		{Name: "entitlement_grants_upsert", Description: "Idempotently create or refresh an active source-scoped grant.", InputSchema: subjectSchema(map[string]any{"source_type": map[string]any{"type": "string"}, "source_id": map[string]any{"type": "string"}, "starts_at": map[string]any{"type": "string"}, "expires_at": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolGrantUpsert},
 		{Name: "entitlement_grants_revoke", Description: "Revoke a grant.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolGrantRevoke},
 		{Name: "entitlements_check", Description: "Check subject access to a feature/key.", InputSchema: subjectSchema(nil), Handler: a.toolCheck},
 		{Name: "entitlement_grants_list", Description: "List grants for a subject.", InputSchema: schemaObject(map[string]any{"subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"}, "feature_key": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"subject_id"}), Handler: a.toolGrantsList},
@@ -133,6 +134,25 @@ func (a *App) toolGrantCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	ctx.Emit("entitlement.granted", map[string]any{"grant_id": g.ID, "subject_id": g.SubjectID, "feature_key": g.FeatureKey})
 	return map[string]any{"grant": g}, nil
+}
+
+func (a *App) toolGrantUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	g, created, changed, err := dbGrantUpsert(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		event := "entitlement.updated"
+		if created {
+			event = "entitlement.granted"
+		}
+		ctx.Emit(event, map[string]any{"grant_id": g.ID, "subject_id": g.SubjectID, "feature_key": g.FeatureKey})
+	}
+	return map[string]any{"grant": g, "created": created, "changed": changed}, nil
 }
 
 func (a *App) toolGrantRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -226,6 +246,55 @@ func dbGrantCreate(db *sql.DB, pid string, args map[string]any) (*Grant, error) 
 		return nil, err
 	}
 	return dbGrantGet(db, pid, id)
+}
+
+func dbGrantUpsert(db *sql.DB, pid string, args map[string]any) (*Grant, bool, bool, error) {
+	subjectID := strArg(args, "subject_id")
+	featureKey := strArg(args, "feature_key")
+	sourceType := strings.TrimSpace(strArg(args, "source_type"))
+	sourceID := strings.TrimSpace(strArg(args, "source_id"))
+	if subjectID == "" || featureKey == "" {
+		return nil, false, false, errors.New("subject_id and feature_key required")
+	}
+	if sourceType == "" || sourceID == "" {
+		return nil, false, false, errors.New("source_type and source_id required for grant upsert")
+	}
+
+	var existingID int64
+	err := db.QueryRow(`SELECT id FROM entitlement_grants
+		WHERE project_id=? AND subject_type=? AND subject_id=? AND feature_key=? AND source_type=? AND source_id=? AND status='active'
+		LIMIT 1`, pid, subjectType(args), subjectID, featureKey, sourceType, sourceID).Scan(&existingID)
+	created := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !created {
+		return nil, false, false, err
+	}
+	metadata := jsonOrEmpty(args["metadata"], "{}")
+	var id int64
+	err = db.QueryRow(`INSERT INTO entitlement_grants
+		(project_id, subject_type, subject_id, feature_key, status, source_type, source_id, starts_at, expires_at, metadata)
+		VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, subject_type, subject_id, feature_key, source_type, source_id)
+		WHERE status='active' AND source_id IS NOT NULL AND source_id != ''
+		DO UPDATE SET starts_at=excluded.starts_at, expires_at=excluded.expires_at, metadata=excluded.metadata, updated_at=CURRENT_TIMESTAMP
+		WHERE IFNULL(entitlement_grants.starts_at,'') != IFNULL(excluded.starts_at,'')
+		   OR IFNULL(entitlement_grants.expires_at,'') != IFNULL(excluded.expires_at,'')
+		   OR entitlement_grants.metadata != excluded.metadata
+		RETURNING id`, pid, subjectType(args), subjectID, featureKey, sourceType, sourceID,
+		nullStr(strArg(args, "starts_at")), nullStr(strArg(args, "expires_at")), metadata,
+	).Scan(&id)
+	changed := true
+	if errors.Is(err, sql.ErrNoRows) {
+		created = false
+		changed = false
+		err = db.QueryRow(`SELECT id FROM entitlement_grants
+			WHERE project_id=? AND subject_type=? AND subject_id=? AND feature_key=? AND source_type=? AND source_id=? AND status='active'`,
+			pid, subjectType(args), subjectID, featureKey, sourceType, sourceID).Scan(&id)
+	}
+	if err != nil {
+		return nil, false, false, err
+	}
+	g, err := dbGrantGet(db, pid, id)
+	return g, created, changed, err
 }
 
 func dbGrantRevoke(db *sql.DB, pid string, id int64, reason string) (*Grant, error) {

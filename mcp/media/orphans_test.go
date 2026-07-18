@@ -186,7 +186,7 @@ func TestPurgeOrphans_VerifyByID_DeletesUnreported(t *testing.T) {
 	stillPresent := map[int64]bool{100: true, 102: true, 104: true}
 	var resolveCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/apps/storage/files") {
+		if !strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/storage/proxy/files") {
 			http.Error(w, "unexpected path "+r.URL.Path, 404)
 			return
 		}

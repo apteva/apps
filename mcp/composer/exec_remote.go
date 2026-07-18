@@ -8,12 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+const composerBoundStorageProxyPath = "/api/apps/callback/apps/storage/proxy"
 
 // remoteFFmpegExecutor runs the same ffmpeg command on a host managed
 // by the `instances` app. Strategy lifted from media's remote_exec.go:
@@ -25,12 +28,13 @@ import (
 //  3. SSH a single bash script via instances.instance_run_command
 //     that downloads the inputs, runs ffmpeg with the same filter
 //     graph the local executor builds, then multipart-POSTs the
-//     output back to storage's /files endpoint and echoes a result
+//     output back to Storage through the binding-gated callback proxy and echoes a result
 //     marker the sidecar parses.
 //
 // Remote renders return a Storage file id directly. We do not stream
 // the result through the Composer sidecar; the selected host uploads
-// the finished file to Storage with Composer's outbound token.
+// the finished file through the platform callback proxy. The platform
+// validates Composer's Storage binding and swaps in Storage's token.
 type remoteFFmpegExecutor struct {
 	hostID int64
 }
@@ -112,6 +116,10 @@ func (e *remoteFFmpegExecutor) Render(
 	} else {
 		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(edit))
 	}
+	usesFont := argsUseComposerFont(args)
+	if usesFont {
+		args = materializeComposerFontArgs(args, "./"+composerFontFilename)
+	}
 	cmd := shellEcho("ffmpeg", args)
 
 	publicURL, err := resolveComposerPublicURL(app)
@@ -123,13 +131,17 @@ func (e *remoteFFmpegExecutor) Render(
 		return Result{FFmpegCommand: cmd}, errors.New("remote render requires APTEVA_OUTBOUND_TOKEN or APTEVA_APP_TOKEN for Storage upload")
 	}
 	filename := fmt.Sprintf("composition-remote-%d.%s", time.Now().UnixNano(), output.Format)
-	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format))
+	fontURL := ""
+	if usesFont {
+		fontURL = strings.TrimRight(publicURL, "/") + "/api/apps/composer/render-font?project_id=" + url.QueryEscape(projectID)
+	}
+	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURL)
 
 	app.Logger().Info("remote ffmpeg render", "host_id", e.hostID, "inputs", len(urls), "format", output.Format)
 
 	res, err := remoteRunScript(ctx, e.hostID, script)
 	if err != nil {
-		return Result{FFmpegCommand: cmd}, fmt.Errorf("remote exec: %w", err)
+		return Result{FFmpegCommand: cmd}, remoteExecFailure(err, res)
 	}
 
 	storageID, parseErr := parseRemoteResult(res)
@@ -143,6 +155,14 @@ func (e *remoteFFmpegExecutor) Render(
 		DurationMS:    time.Since(start).Milliseconds(),
 		FFmpegCommand: cmd,
 	}, nil
+}
+
+func remoteExecFailure(err error, output string) error {
+	detail := strings.TrimSpace(output)
+	if detail == "" {
+		return fmt.Errorf("remote exec: %w", err)
+	}
+	return fmt.Errorf("remote exec: %w\nremote output (last 4KB):\n%s", err, truncTail(detail, 4096))
 }
 
 func remoteVisualAudioDefaults(edit *Edit) []bool {
@@ -189,13 +209,16 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 // Convention: input URLs become ./in0, ./in1, … in the working dir,
 // the ffmpeg command is appended verbatim, and the output is
 // echoed back as APTEVA_RESULT:{...} for the parser.
-func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string) string {
+func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType, fontURL string) string {
 	var b strings.Builder
 	b.WriteString("set -eu -o pipefail\n")
 	b.WriteString("WORKDIR=$(mktemp -d)\n")
 	b.WriteString("trap 'rm -rf \"$WORKDIR\"' EXIT\n")
 	b.WriteString("cd \"$WORKDIR\"\n")
 	b.WriteString(remoteFFmpegBootstrapScript())
+	if strings.TrimSpace(fontURL) != "" {
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %q -o ./%s %q\n", "Authorization: Bearer "+token, composerFontFilename, fontURL)
+	}
 	for i, u := range urls {
 		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %q\n", i, u)
 	}
@@ -211,7 +234,7 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString("  exit 127\n")
 	b.WriteString("fi\n")
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%q\n", token)
-	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+"/api/apps/storage")
+	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+composerBoundStorageProxyPath)
 	fmt.Fprintf(&b, "export PROJECT_ID=%q\n", projectID)
 	b.WriteString("export FOLDER=/.composer/\n")
 	fmt.Fprintf(&b, "export NAME=%q\n", shellFormValue(filename))
@@ -260,6 +283,8 @@ if [ "$INIT_CODE" = "200" ]; then
   else
     echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
   fi
+else
+  echo "STORAGE_INIT_FAILED code=$INIT_CODE body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
 fi
 rm -f "$INIT_BODY_FILE"
 if [ "$NEED_MULTIPART" = "1" ]; then
@@ -317,7 +342,8 @@ if [ "$NEED_MULTIPART" = "1" ]; then
   rm -f "$UPLOADS_INIT_FILE"
 fi
 if [ "$NEED_MULTIPART" = "1" ]; then
-  RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+  LEGACY_BODY_FILE=$(mktemp)
+  LEGACY_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$LEGACY_BODY_FILE" -w "%{http_code}" -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=$FOLDER" \
     -F "visibility=private" \
@@ -325,8 +351,13 @@ if [ "$NEED_MULTIPART" = "1" ]; then
     -F "tags=composer" \
     -F "tags=render" \
     -F "file=@$OUT;type=$CT;filename=$NAME" \
-    "$STORAGE_BASE/files?project_id=$PROJECT_ID")
-  STORAGE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+    "$STORAGE_BASE/files?project_id=$PROJECT_ID" || echo 000)
+  if [ "$LEGACY_CODE" -ge 200 ] 2>/dev/null && [ "$LEGACY_CODE" -lt 300 ] 2>/dev/null; then
+    STORAGE_ID=$(sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$LEGACY_BODY_FILE" | head -1)
+  else
+    echo "STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE body[0:300]=$(head -c 300 "$LEGACY_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+  fi
+  rm -f "$LEGACY_BODY_FILE"
 fi
 if [ -z "$STORAGE_ID" ]; then
   echo "STORAGE_UPLOAD_FAILED" >&2

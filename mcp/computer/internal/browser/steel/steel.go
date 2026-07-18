@@ -372,16 +372,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "screenshot":
 		return c.Screenshot()
 
-	case "navigate":
-		navCtx, navCancel := context.WithTimeout(c.ctx, 30*time.Second)
-		err := chromedp.Run(navCtx, chromedp.Navigate(action.URL))
-		navCancel()
-		if err != nil {
-			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
-				fmt.Fprintf(os.Stderr, "[STEEL] navigate load timeout recovered at %s\n", current)
-			} else {
-				return nil, fmt.Errorf("navigate: %w", err)
-			}
+	case "navigate", "back", "reload":
+		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
+			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()

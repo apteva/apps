@@ -47,6 +47,52 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 	}
 }
 
+func TestGenerationCardBundleAndManifestContract(t *testing.T) {
+	bundle, err := os.ReadFile("ui/GenerationCard.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(bundle)
+	if strings.Contains(text, "jsxDEV") || strings.Contains(text, "jsx-dev-runtime") {
+		t.Fatal("GenerationCard.mjs contains the development JSX transform")
+	}
+	if !strings.Contains(text, "react/jsx-runtime") {
+		t.Fatal("GenerationCard.mjs does not import the production JSX runtime")
+	}
+	manifest, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"name: generation-card",
+		"entry: /ui/GenerationCard.mjs",
+		"chat.message_attachment",
+		"generation_id",
+		"job_id",
+	} {
+		if !strings.Contains(string(manifest), want) {
+			t.Fatalf("manifest missing generation-card contract %q", want)
+		}
+	}
+}
+
+func TestGenerationChatComponentHints(t *testing.T) {
+	if got := generationChatComponent(42, 0); got["app"] != "media-studio" || got["name"] != "generation-card" {
+		t.Fatalf("generation component = %+v", got)
+	} else if got["props"].(map[string]any)["generation_id"] != int64(42) {
+		t.Fatalf("generation props = %+v", got["props"])
+	}
+	if got := generationChatComponent(0, 17); got["props"].(map[string]any)["job_id"] != int64(17) {
+		t.Fatalf("job props = %+v", got["props"])
+	}
+	if got := generationChatComponent(0, 0); got != nil {
+		t.Fatalf("empty component = %+v, want nil", got)
+	}
+	if got := defaultMime(KindImage); got != "image/jpeg" {
+		t.Fatalf("default image mime = %q, want image/jpeg", got)
+	}
+}
+
 func TestPanelProjectScopedWritesIncludeProjectQuery(t *testing.T) {
 	source, err := os.ReadFile("ui/MediaPanel.tsx")
 	if err != nil {
@@ -440,12 +486,23 @@ func TestToolMediaGenerate_Image_HappyPath_WithStorage(t *testing.T) {
 	if pf.executeCalls[0].Input["prompt"] != "a cat in a hat" {
 		t.Errorf("prompt mismatch")
 	}
+	if pf.executeCalls[0].Input["output_format"] != "jpeg" {
+		t.Errorf("default output_format = %v, want jpeg", pf.executeCalls[0].Input["output_format"])
+	}
 
 	if len(pf.callAppCalls) != 1 {
 		t.Fatalf("expected 1 CallApp, got %d", len(pf.callAppCalls))
 	}
-	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_from_url" {
+	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_upload" {
 		t.Errorf("storage call = %+v", pf.callAppCalls[0])
+	}
+	if pf.callAppCalls[0].Input["content_type"] != "image/jpeg" ||
+		!strings.HasSuffix(pf.callAppCalls[0].Input["name"].(string), ".jpg") {
+		t.Errorf("storage output is not JPEG: %+v", pf.callAppCalls[0].Input)
+	}
+	stored, err := base64.StdEncoding.DecodeString(pf.callAppCalls[0].Input["content_base64"].(string))
+	if err != nil || len(stored) >= maxGeneratedImageBytes {
+		t.Fatalf("stored JPEG bytes=%d err=%v", len(stored), err)
 	}
 	// Folder must be the dotted convention.
 	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/images/" {
@@ -744,6 +801,89 @@ func TestToolMediaHistory_LimitCap(t *testing.T) {
 	gens := out.(map[string]any)["generations"].([]map[string]any)
 	if len(gens) != 3 {
 		t.Errorf("expected limit=3, got %d", len(gens))
+	}
+}
+
+func TestToolMediaHistory_CursorPaginationNewestFirst(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	for i := 0; i < 5; i++ {
+		app.dbInsertGeneration(generationRecord{
+			ProjectID: "test-proj", Kind: "image",
+			Prompt: fmt.Sprintf("p%d", i), Provider: "openai-api", Count: 1,
+		})
+	}
+
+	page1, err := app.toolMediaHistory(ctx, map[string]any{"limit": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := page1.(map[string]any)
+	gens1 := first["generations"].([]map[string]any)
+	if len(gens1) != 2 || gens1[0]["prompt"] != "p4" || gens1[1]["prompt"] != "p3" {
+		t.Fatalf("first page is not newest-first: %+v", gens1)
+	}
+	if first["has_more"] != true || first["next_cursor"] == "" {
+		t.Fatalf("first page metadata = %+v", first)
+	}
+
+	page2, err := app.toolMediaHistory(ctx, map[string]any{
+		"limit": 2, "cursor": first["next_cursor"],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := page2.(map[string]any)
+	gens2 := second["generations"].([]map[string]any)
+	if len(gens2) != 2 || gens2[0]["prompt"] != "p2" || gens2[1]["prompt"] != "p1" {
+		t.Fatalf("second page mismatch: %+v", gens2)
+	}
+	if gens1[1]["id"] == gens2[0]["id"] {
+		t.Fatal("cursor page repeated the final row from the previous page")
+	}
+
+	page3, err := app.toolMediaHistory(ctx, map[string]any{
+		"limit": 2, "cursor": second["next_cursor"],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := page3.(map[string]any)
+	gens3 := third["generations"].([]map[string]any)
+	if len(gens3) != 1 || gens3[0]["prompt"] != "p0" || third["has_more"] != false || third["next_cursor"] != "" {
+		t.Fatalf("final page mismatch: %+v", third)
+	}
+}
+
+func TestToolMediaHistory_SinceAndCursorValidation(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	oldID := app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "old", Provider: "openai-api", Count: 1})
+	newID := app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "new", Provider: "openai-api", Count: 1})
+	if _, err := ctx.AppDB().Exec(`UPDATE generations SET created_at='2025-01-01 00:00:00' WHERE id=?`, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE generations SET created_at='2026-01-02 00:00:00' WHERE id=?`, newID); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolMediaHistory(ctx, map[string]any{"since": "2026-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gens := out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 1 || gens[0]["prompt"] != "new" {
+		t.Fatalf("since filter mismatch: %+v", gens)
+	}
+	for name, args := range map[string]map[string]any{
+		"cursor": {"cursor": "not-an-id"},
+		"since":  {"since": "yesterday"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := app.toolMediaHistory(ctx, args); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
 	}
 }
 
@@ -1143,7 +1283,7 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	}
 }
 
-func TestToolMediaGenerate_VeniceB64_SniffsJPEGWithoutRequestedFormat(t *testing.T) {
+func TestToolMediaGenerate_VeniceB64_DefaultsToJPEG(t *testing.T) {
 	jpegB64 := base64.StdEncoding.EncodeToString(fakeJPEG())
 
 	pf := newRecordingPlatform()
@@ -1173,6 +1313,9 @@ func TestToolMediaGenerate_VeniceB64_SniffsJPEGWithoutRequestedFormat(t *testing
 
 	if len(pf.callAppCalls) != 1 {
 		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	if got := pf.executeCalls[0].Input["format"]; got != "jpeg" {
+		t.Fatalf("default Venice format = %v, want jpeg", got)
 	}
 	got := pf.callAppCalls[0]
 	if got.Tool != "files_upload" {
@@ -1894,6 +2037,7 @@ func TestResolveSourceImage_Empty(t *testing.T) {
 // Full toolMediaGenerate edit-path coverage
 
 func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
 	// Storage returns the source bytes; Venice returns a binary envelope;
@@ -1908,7 +2052,7 @@ func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
 	}
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+		Data: json.RawMessage(fmt.Sprintf(`{"_binary":true,"base64":%q,"mimeType":"image/png","size":%d}`, pngB64, len(fakePNG()))),
 	}
 	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
@@ -1968,6 +2112,7 @@ func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
 }
 
 func TestToolMediaGenerate_Image_MultiEditPath_VeniceStorageSources(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
 	pf.perAppCallResults = map[string]json.RawMessage{
@@ -1977,7 +2122,7 @@ func TestToolMediaGenerate_Image_MultiEditPath_VeniceStorageSources(t *testing.T
 	}
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+		Data: json.RawMessage(fmt.Sprintf(`{"_binary":true,"base64":%q,"mimeType":"image/png","size":%d}`, pngB64, len(fakePNG()))),
 	}
 	pf.identity.Bindings = map[string]any{"image_provider": float64(42)}
 	ctx := newMediaStudioCtx(t, pf)
@@ -2106,7 +2251,7 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
 		"list_models": {
 			Success: true, Status: 200,
-			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","durations":["3s","5s","8s","10s"]}}}]}`),
+			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","aspect_ratios":["16:9","9:16"],"durations":["3s","5s","8s","10s"]}}}]}`),
 		},
 		"queue_video": {
 			Success: true, Status: 200,
@@ -2120,6 +2265,7 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 		"prompt":   "a cat walking through a sunlit garden",
 		"model":    "kling-2",
 		"duration": "9s",
+		"aspect":   "9:16",
 	})
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
@@ -2137,6 +2283,11 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	}
 	if pf.executeCalls[1].Input["duration"] != "10s" {
 		t.Errorf("duration not normalized: %+v", pf.executeCalls[1].Input)
+	}
+	for _, call := range pf.executeCalls[1:] {
+		if call.Input["aspect_ratio"] != "9:16" {
+			t.Errorf("supported aspect missing from %s: %+v", call.Tool, call.Input)
+		}
 	}
 
 	// video_jobs row landed in 'queued' state.
@@ -2262,10 +2413,16 @@ func TestToolMediaGenerate_Video_VeniceImageToVideo_RejectsMultipleSourceImages(
 func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
-	pf.identity.Bindings["video_provider"] = float64(77)
-	pf.nextExecuteResult = &sdk.ExecuteResult{
-		Success: true, Status: 200,
-		Data: json.RawMessage(`{"data":{"quote":{"usd":0.42}}}`),
+	pf.identity.Bindings["video_provider"] = float64(277)
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","aspect_ratios":["16:9"],"durations":["5s","10s"]}}}]}`),
+		},
+		"quote_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":{"quote":{"usd":0.42}}}`),
+		},
 	}
 	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
@@ -2283,13 +2440,13 @@ func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
 	if !meta.Available || meta.CostUSD != 0.42 || meta.Source != "provider_quote" {
 		t.Fatalf("estimate meta = %+v", meta)
 	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "quote_video" {
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "list_models" || pf.executeCalls[1].Tool != "quote_video" {
 		t.Fatalf("expected quote_video call, got %+v", pf.executeCalls)
 	}
-	if got := pf.executeCalls[0].Input["duration"]; got != "10s" {
+	if got := pf.executeCalls[1].Input["duration"]; got != "10s" {
 		t.Fatalf("quote duration = %v, want 10s", got)
 	}
-	if got := pf.executeCalls[0].Input["audio"]; got != false {
+	if got := pf.executeCalls[1].Input["audio"]; got != false {
 		t.Fatalf("quote audio = %v, want false", got)
 	}
 }
@@ -2652,6 +2809,168 @@ func TestVeniceImageVideoModelsRequireSourceImage(t *testing.T) {
 		"source_image": "data:image/jpeg;base64,/9j/",
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestListVideoJobs_DefaultOnlyReturnsActiveJobs(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	for _, row := range []struct {
+		queueID string
+		status  string
+	}{
+		{queueID: "q-active", status: "polling"},
+		{queueID: "q-failed", status: "failed"},
+		{queueID: "q-complete", status: "complete"},
+	} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO video_jobs (project_id, queue_id, provider, model, prompt, status)
+			 VALUES (?, ?, 'venice-ai', 'wan-2-7-image-to-video', 'animate', ?)`,
+			"test-proj", row.queueID, row.status,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/video-jobs?project_id=test-proj", nil)
+	response := httptest.NewRecorder()
+	(&App{}).handleListVideoJobs(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("default response = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0]["queue_id"] != "q-active" {
+		t.Fatalf("default jobs = %+v, want only active job", body.Jobs)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/video-jobs?project_id=test-proj&status=failed", nil)
+	response = httptest.NewRecorder()
+	(&App{}).handleListVideoJobs(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("failed response = %d: %s", response.Code, response.Body.String())
+	}
+	body.Jobs = nil
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0]["queue_id"] != "q-failed" {
+		t.Fatalf("failed jobs = %+v, want explicit failed job", body.Jobs)
+	}
+}
+
+func TestGenerationDetailHTTPIsProjectScoped(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	id := app.dbInsertGeneration(generationRecord{
+		ProjectID: "owner-project", Kind: KindImage, Prompt: "chat preview",
+		Provider: "venice-ai", Model: "gpt-image-2", StorageIDs: []int64{4818},
+		Count: 1, Status: "ready",
+	})
+
+	owner := httptest.NewRecorder()
+	app.handleGetGeneration(owner, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/generations/%d?project_id=owner-project", id), nil))
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner response = %d: %s", owner.Code, owner.Body.String())
+	}
+	var body struct {
+		Generation map[string]any `json:"generation"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if int64(body.Generation["id"].(float64)) != id || body.Generation["prompt"] != "chat preview" {
+		t.Fatalf("generation response = %+v", body.Generation)
+	}
+
+	denied := httptest.NewRecorder()
+	app.handleGetGeneration(denied, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/generations/%d?project_id=other-project", id), nil))
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-project response = %d, want 404", denied.Code)
+	}
+	_ = ctx
+}
+
+func TestVideoJobDetailHTTPIsProjectScoped(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	result, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs
+		 (project_id, kind, queue_id, provider, model, prompt, status, cost_usd, estimated_duration_seconds)
+		 VALUES (?, 'video', 'q-chat', 'venice-ai', 'wan-2-7', 'animate', 'polling', 0.55, 8)`,
+		"owner-project",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	app := &App{}
+
+	owner := httptest.NewRecorder()
+	app.handleGetVideoJob(owner, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/video-jobs/%d?project_id=owner-project", id), nil))
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner response = %d: %s", owner.Code, owner.Body.String())
+	}
+	var body struct {
+		Job map[string]any `json:"job"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Job["status"] != "polling" || body.Job["kind"] != "video" {
+		t.Fatalf("job response = %+v", body.Job)
+	}
+
+	denied := httptest.NewRecorder()
+	app.handleGetVideoJob(denied, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/video-jobs/%d?project_id=other-project", id), nil))
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-project response = %d, want 404", denied.Code)
+	}
+}
+
+func TestToolMediaGenerate_Video_VeniceWANImageToVideoOmitsUnsupportedAspect(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(1777)
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"wan-2-7-image-to-video","model_spec":{"constraints":{"model_type":"image-to-video","durations":["5s","10s"]}}}]}`),
+		},
+		"queue_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"model":"wan-2-7-image-to-video","queue_id":"q-wan-i2v"}`),
+		},
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":         "video",
+		"prompt":       "animate this frame",
+		"model":        "wan-2-7-image-to-video",
+		"duration":     "5s",
+		"aspect":       "16:9",
+		"source_image": "https://example.com/source.jpg",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	if result, ok := out.(map[string]any); !ok || result["isError"] == true {
+		t.Fatalf("unexpected result: %+v", out)
+	}
+	for _, call := range pf.executeCalls {
+		if call.Tool != "queue_video" && call.Tool != "quote_video" {
+			continue
+		}
+		if _, exists := call.Input["aspect_ratio"]; exists {
+			t.Fatalf("%s received unsupported aspect_ratio: %+v", call.Tool, call.Input)
+		}
 	}
 }
 

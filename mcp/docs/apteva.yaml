@@ -2,27 +2,27 @@ schema: apteva-app/v1
 
 name: docs
 display_name: Documents
-version: 0.2.7
+version: 0.4.1
 description: |
-  Generate client-facing documents (PDFs from markdown templates) and
+  Generate client-facing documents from Markdown or authored HTML/CSS and
   store them in storage. Templates live in this app's DB; agents call
   docs_render(template, data) to produce a finished PDF that lands in
   storage as a real file with all the URL/visibility/permissions
-  machinery storage already provides. Pure-Go render pipeline (no
-  Chromium): markdown body + Go template syntax for placeholders,
-  rendered via maroto. Supports headings, lists, GFM tables, and
-  images/logo (referenced as storage:<id> or inline data: URIs).
+  machinery storage already provides. Markdown renders through Maroto;
+  professional lead magnets can use the isolated Chromium HTML/CSS renderer.
+  Both formats support Go-template data and Storage-backed images.
 
-  Audit trail on every render — who rendered what template with which
-  data — for compliance use cases (invoices, contracts, NDAs). Past
+  Project-isolated templates, resource-scoped agent permissions, strict
+  input validation, and an audit trail on every render — who rendered
+  what template with which data — for compliance use cases. Past
   renders keep working even if the template is later edited or
   deleted, because the output is a stable storage file_id, not a
   derivation pointer.
 
 author: Apteva
-tags: [documents, pdf, templates, invoices, contracts]
+tags: [documents, pdf, templates, invoices, contracts, lead-magnets, html]
 
-scopes: [project, global]
+scopes: [project]
 
 requires:
   permissions:
@@ -30,7 +30,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.8.1"
+      version: ">=0.10.0"
       reason: rendered PDFs are uploaded to storage; the file's URL/visibility/sharing all flow through storage's surface.
 
 provides:
@@ -56,17 +56,19 @@ provides:
       description: Render a document from a template.
 
   mcp_tools:
-    - { name: docs_list_templates,  description: "List templates available in this install. Returns id, slug, name, description, source_format, output_format, default_folder.", requires: docs.read }
-    - { name: docs_get_template,    description: "Fetch one template's full body + metadata. Args - id (int) OR slug (string).", requires: docs.read }
-    - { name: docs_create_template, description: "Create a template. Args - slug, name, body, description?, source_format? (markdown), output_format? (pdf), default_folder?.", requires: docs.write }
-    - { name: docs_update_template, description: "Partial update of a template. Args - id, plus any of name/description/body/default_folder.", requires: docs.write }
-    - { name: docs_delete_template, description: "Remove a template. Past renders keep working - output_file_ids in storage are stable. Args - id.", requires: docs.write }
+    # Resource authorization is resolved after slug/id lookup in HandlerCtx,
+    # because resource_from cannot express "id OR slug" safely.
+    - { name: docs_list_templates,  description: "List templates visible to the caller. Returns summary metadata; fetch one template for its body." }
+    - { name: docs_get_template,    description: "Fetch one authorized template's full body + metadata. Args - id (int) OR slug (string)." }
+    - { name: docs_create_template, description: "Create a Markdown or HTML/CSS template. Requires broad docs.write permission." }
+    - { name: docs_update_template, description: "Update an authorized template, including HTML/CSS and document settings." }
+    - { name: docs_delete_template, description: "Remove an authorized template. Past renders keep working. Args - id." }
 
-    - { name: docs_render,          description: "Render a template with data into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args - template_id (int) OR template_slug (string), data (object), output_name?, output_folder? (defaults to template's default). Returns file_id + url + render_id.", requires: docs.render }
-    - { name: docs_preview,         description: "Render but do not persist. Returns base64 PDF bytes for inline display - used by the panel during template authoring (images render too). Args - template_id (or template_slug), data.", requires: docs.render }
+    - { name: docs_render,          description: "Render an authorized template into Storage. Args - template_id OR template_slug, data, output_name?, output_folder?, page_size? (A4|letter|legal). Returns file metadata, render_id, and warnings." }
+    - { name: docs_preview,         description: "Preview an authorized template without persisting. Inline body previews require broad docs.render permission. Args - template_id/template_slug or body, data, page_size?." }
 
-    - { name: docs_list_renders,    description: "Audit trail. Filter by template_id, since (RFC3339), limit. Returns render_id, template_id, output_file_id, rendered_by, rendered_at, data_snapshot.", requires: docs.read }
-    - { name: docs_get_render,      description: "Replay one render - data snapshot, output file_id, timestamps. Args - render_id.", requires: docs.read }
+    - { name: docs_list_renders,    description: "List authorized audit summaries. Filter by template_id, since (RFC3339), limit, offset. Data snapshots are returned only by docs_get_render." }
+    - { name: docs_get_render,      description: "Fetch one authorized render including its data snapshot. Args - render_id." }
 
   ui_panels:
     - slot: project.page
@@ -100,7 +102,37 @@ config_schema:
     default: "A4"
     options: ["A4", "letter", "legal"]
     label: Page size
-    description: Default page size for rendered PDFs. Templates can override per render via data.page_size.
+    description: Default page size for rendered PDFs. The page_size render argument overrides it.
+
+  - name: max_template_bytes
+    type: text
+    default: "524288"
+    label: Maximum template size
+    description: Maximum UTF-8 bytes accepted for a template body.
+
+  - name: max_render_data_bytes
+    type: text
+    default: "262144"
+    label: Maximum render data size
+    description: Maximum JSON bytes accepted for one render data object.
+
+  - name: max_image_bytes
+    type: text
+    default: "10485760"
+    label: Maximum image size
+    description: Maximum decoded bytes accepted for each embedded image.
+
+  - name: max_pdf_bytes
+    type: text
+    default: "20971520"
+    label: Maximum PDF size
+    description: Maximum generated PDF size before upload.
+
+  - name: html_render_timeout_seconds
+    type: text
+    default: "25"
+    label: HTML render timeout
+    description: Maximum seconds Chromium may spend producing one HTML/CSS PDF.
 
   - name: prune_renders_older_than_days
     type: text

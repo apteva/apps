@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,7 @@ type stubPlatform struct {
 	executeErr       error
 	callAppReply     json.RawMessage
 	callAppErr       error
+	callAppResultErr error
 	connectionCreds  map[int64]map[string]string
 	domainGrants     []sdk.DomainGrant
 	domainGrantsErr  error
@@ -124,10 +126,51 @@ func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out
 	if err != nil {
 		return err
 	}
+	if s.callAppResultErr != nil {
+		return s.callAppResultErr
+	}
 	if len(raw) == 0 || out == nil {
 		return nil
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func TestDispatchInbound_MCPToolErrorMarksTargetFailed(t *testing.T) {
+	plat := &stubPlatform{callAppResultErr: errors.New("crm.messaging_inbound_receive: project_id required")}
+	ctx := newTestCtx(t, plat)
+	if _, err := dbInboundRouteUpsert(ctx.AppDB(), "test-proj", channelEmail, "*", "crm", "/inbound", 0); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, route_status, received_at)
+		 VALUES ('test-proj', 'email', 'in', 'sender@example.com', '["contact@example.com"]', 'received', 'pending', '2026-07-17T14:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := dispatchInbound(ctx, "test-proj", msg); err == nil {
+		t.Fatal("expected target MCP error")
+	}
+	got, err := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RouteStatus != "target_failed" {
+		t.Fatalf("route_status=%q, want target_failed", got.RouteStatus)
+	}
+	if !strings.Contains(got.RouteError, "project_id required") {
+		t.Fatalf("route_error=%q", got.RouteError)
+	}
+	if len(plat.callAppCalls) != 1 {
+		t.Fatalf("expected one app call, got %d", len(plat.callAppCalls))
+	}
 }
 
 func TestDispatchInbound_CRMLegacyRouteCallsInboundToolWithProject(t *testing.T) {

@@ -1,5 +1,6 @@
 export type DurationKind = "video" | "audio_sfx" | "music";
 
+export const DEFAULT_IMAGE_FORMAT = "jpeg";
 export const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
 export const MAX_AUDIO_UPLOAD_BYTES = 25 * 1024 * 1024;
 
@@ -57,8 +58,47 @@ export function videoSourceRequired(modelType: string | undefined, modelID: stri
     normalizedID.includes("reference-to-video");
 }
 
+export function shouldSendVideoAspect(
+  aspectRatios: string[] | undefined,
+  hasModelMetadata: boolean,
+): boolean {
+  return !hasModelMetadata || !!aspectRatios?.length;
+}
+
+export function ttsProviderUsesSeparateVoice(provider: string): boolean {
+  return provider !== "deepgram";
+}
+
+export function ttsOutputFormats(provider: string): string[] {
+  if (provider === "deepgram") return ["mp3", "wav", "opus", "flac", "aac"];
+  if (provider === "fish-audio") return ["mp3", "wav", "opus", "pcm"];
+  return [];
+}
+
+export function formatMediaTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 export function shouldCommitScopedResponse(requestKind: string, activeKind: string): boolean {
   return requestKind === activeKind;
+}
+
+export function mergeHistoryPage<T extends { id: number }>(
+  current: T[],
+  incoming: T[],
+  append: boolean,
+): T[] {
+  if (!append) return incoming;
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...incoming.filter((item) => !seen.has(item.id))];
 }
 
 export function isDurableMediaReference(value: string): boolean {

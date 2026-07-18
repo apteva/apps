@@ -300,9 +300,11 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Pre-dedup short-circuit.
+	// Pre-dedup short-circuit. A file record is identified by its
+	// requested destination as well as its bytes: identical content under
+	// a different name/folder must still materialise a distinct row.
 	if body.SHA256 != "" {
-		if existing, err := dbFindBySHA(ctx.AppDB(), pid, strings.ToLower(body.SHA256)); err == nil && existing != nil {
+		if existing, err := dbFindExact(ctx.AppDB(), pid, strings.ToLower(body.SHA256), body.Folder, body.Filename); err == nil && existing != nil {
 			httpJSON(w, map[string]any{
 				"file":         existing,
 				"was_existing": true,
@@ -625,9 +627,10 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// Dedup before uploading: cheapest possible short-circuit. If the
-	// project already has these bytes, drop everything and return.
-	if existing, err := dbFindBySHA(ctx.AppDB(), meta.ProjectID, finalSHA); err == nil && existing != nil {
+	// Dedup before uploading only when both bytes and destination match.
+	// SHA-only reuse would return an unrelated filename/folder and make
+	// callers believe their requested output was created when it was not.
+	if existing, err := dbFindExact(ctx.AppDB(), meta.ProjectID, finalSHA, meta.Folder, meta.Filename); err == nil && existing != nil {
 		_ = os.RemoveAll(dir)
 		mu.Unlock()
 		locked = false

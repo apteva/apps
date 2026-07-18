@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { jsx, jsxs, Fragment } from "react/jsx-runtime";
 
 const API = "/api/apps/creators";
@@ -35,6 +35,7 @@ async function api(path, projectId, opts = {}) {
 }
 
 function CreatorsPanel({ projectId }) {
+  const loadSequence = useRef(0);
   const [tab, setTab] = useState("posts");
   const [spaces, setSpaces] = useState([]);
   const [selectedSpaceId, setSelectedSpaceId] = useState(null);
@@ -43,6 +44,7 @@ function CreatorsPanel({ projectId }) {
   const [members, setMembers] = useState([]);
   const [posts, setPosts] = useState([]);
   const [events, setEvents] = useState([]);
+  const [revenue, setRevenue] = useState({ mrr_by_currency: {} });
   const [status, setStatus] = useState("");
   const [draft, setDraft] = useState({ title: "", body: "", visibility: "members" });
   const [tierDraft, setTierDraft] = useState({ name: "", price_cents: 500, currency: "USD", interval: "month" });
@@ -50,26 +52,31 @@ function CreatorsPanel({ projectId }) {
   const [spaceDraft, setSpaceDraft] = useState({ name: "", slug: "" });
 
   const load = async () => {
+    const sequence = ++loadSequence.current;
     try {
       const s = await api("/space", projectId, { query: selectedSpaceId ? { space_id: selectedSpaceId } : {} });
       const sid = s.space?.id;
       if (sid && sid !== selectedSpaceId) setSelectedSpaceId(sid);
       const query = sid ? { space_id: sid } : {};
-      const [allSpaces, t, m, p, e] = await Promise.all([
+      const [allSpaces, t, m, p, e, revenueMetrics] = await Promise.all([
         api("/spaces", projectId),
         api("/tiers", projectId, { query }),
         api("/members", projectId, { query }),
         api("/posts", projectId, { query }),
         api("/activity", projectId, { query }),
+        api("/metrics", projectId, { query }),
       ]);
+      if (sequence !== loadSequence.current) return;
       setSpace(s.space);
       setSpaces(allSpaces.spaces || []);
       setTiers(t || []);
       setMembers(m || []);
       setPosts(p || []);
       setEvents(e || []);
+      setRevenue(revenueMetrics || { mrr_by_currency: {} });
       setStatus("");
     } catch (err) {
+      if (sequence !== loadSequence.current) return;
       setStatus(err.message || "failed to load");
     }
   };
@@ -79,13 +86,12 @@ function CreatorsPanel({ projectId }) {
   const metrics = useMemo(() => {
     const active = members.filter((m) => m.status === "active" || m.status === "comped").length;
     const published = posts.filter((p) => p.status === "published").length;
-    const monthly = members.reduce((sum, m) => {
-      if (!(m.status === "active" || m.status === "comped") || !m.tier_id) return sum;
-      const tier = tiers.find((t) => t.id === m.tier_id);
-      return sum + (tier?.interval === "month" ? tier.price_cents || 0 : 0);
-    }, 0);
-    return { active, published, monthly };
-  }, [members, posts, tiers]);
+    return { active, published };
+  }, [members, posts]);
+
+  const mrr = Object.entries(revenue.mrr_by_currency || {})
+    .map(([currency, cents]) => money(cents, currency))
+    .join(" + ") || money(0, space?.default_currency || "USD");
 
   const createPost = async (e) => {
     e.preventDefault();
@@ -150,7 +156,7 @@ function CreatorsPanel({ projectId }) {
       jsx("div", { className: "ml-auto grid grid-cols-3 gap-2 text-right", children: [
         metric("Members", metrics.active),
         metric("Posts", metrics.published),
-        metric("MRR", money(metrics.monthly, space?.default_currency || "USD")),
+        metric("MRR", mrr),
       ]})
     ]}),
     jsxs("nav", { className: "px-5 py-3 border-b border-border flex gap-2", children: ["posts", "tiers", "members", "events"].map((t) =>

@@ -14,9 +14,9 @@ package main
 //   - storage schema migrations / id allocation behaviour
 //   - the gateway prefix-strip + token-swap actually working
 //
-// The fixture we use for the source video is the same checked-in
-// 5-second sample-5s.mp4 the Tier 3 scenario uses, so a regression
-// here usually shows up identically there.
+// The source is generated with the local ffmpeg at test time. Keeping
+// the integration suite self-contained avoids silently depending on a
+// binary fixture that is not tracked in this repository.
 
 import (
 	"bytes"
@@ -67,7 +67,7 @@ func uploadFixtureToStorage(t *testing.T, sc *tk.Sidecar, projectID, name, conte
 	}
 	mw.Close()
 
-	url := gw + "/api/apps/storage/files?project_id=" + projectID
+	url := gw + "/api/apps/callback/apps/storage/proxy/files?project_id=" + projectID
 	req, _ := http.NewRequest(http.MethodPost, url, &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	// Any bearer is fine — the gateway's token-swap layer replaces
@@ -132,7 +132,7 @@ func mintSignedURL(t *testing.T, sc *tk.Sidecar, projectID string, fileID int64)
 		},
 	}
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest(http.MethodPost, gw+"/api/apps/storage/mcp", bytes.NewReader(raw))
+	req, _ := http.NewRequest(http.MethodPost, gw+"/api/apps/callback/apps/storage/proxy/mcp", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
 	resp, err := http.DefaultClient.Do(req)
@@ -171,6 +171,9 @@ func mintSignedURL(t *testing.T, sc *tk.Sidecar, projectID string, fileID int64)
 	// expecting the platform to mount it. Rewrite it to go through
 	// our test gateway, which also strips the /api/apps/storage prefix
 	// before forwarding.
+	if strings.HasPrefix(rawURL, "/api/apps/storage/") {
+		return gw + rawURL
+	}
 	if strings.HasPrefix(rawURL, "/") {
 		return gw + "/api/apps/storage" + rawURL
 	}
@@ -181,7 +184,7 @@ func mintSignedURL(t *testing.T, sc *tk.Sidecar, projectID string, fileID int64)
 func listStorageFolder(t *testing.T, sc *tk.Sidecar, projectID, folder string) []map[string]any {
 	t.Helper()
 	gw := sc.GatewayURL()
-	url := fmt.Sprintf("%s/api/apps/storage/files?project_id=%s&folder=%s", gw, projectID, folder)
+	url := fmt.Sprintf("%s/api/apps/callback/apps/storage/proxy/files?project_id=%s&folder=%s", gw, projectID, folder)
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
 	resp, err := http.DefaultClient.Do(req)
@@ -205,9 +208,29 @@ func listStorageFolder(t *testing.T, sc *tk.Sidecar, projectID, folder string) [
 
 func fixtureBytes(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("scenarios", "fixtures", "sample-5s.mp4"))
+	path := filepath.Join(t.TempDir(), "sample-5s.mp4")
+	baseArgs := []string{
+		"-v", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc=size=320x180:rate=24:duration=5",
+		"-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000:duration=5",
+		"-c:a", "aac", "-shortest", "-movflags", "+faststart",
+	}
+	// Prefer the codec/keyframe shape the stream-copy trim assertions
+	// were written against, with a native-codec fallback for minimal
+	// ffmpeg builds that omit libx264.
+	args := append(append([]string{}, baseArgs...),
+		"-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "24", path)
+	if out, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
+		args = append(append([]string{}, baseArgs...),
+			"-c:v", "mpeg4", "-q:v", "5", "-g", "24", path)
+		if fallbackOut, fallbackErr := exec.Command("ffmpeg", args...).CombinedOutput(); fallbackErr != nil {
+			t.Fatalf("generate media fixture: libx264=%v (%s); mpeg4=%v (%s)",
+				err, strings.TrimSpace(string(out)), fallbackErr, strings.TrimSpace(string(fallbackOut)))
+		}
+	}
+	b, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read fixture: %v", err)
+		t.Fatalf("read generated fixture: %v", err)
 	}
 	return b
 }
@@ -460,8 +483,10 @@ func spawnMediaWithStorageFastIndexer(t *testing.T) *tk.Sidecar {
 	)
 }
 
-// waitForIndexed polls media_get until a row exists with probe_status
-// ok or fails the test on timeout.
+// waitForIndexed polls media_get until probe metadata and the video
+// thumbnail are both available. probe_status flips before derivation
+// uploads finish, so waiting on it alone would miss the production
+// failure mode where catalog rows exist but previews stay empty.
 func waitForIndexed(t *testing.T, sc *tk.Sidecar, projectID, fileID string, timeout time.Duration) map[string]any {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -472,7 +497,7 @@ func waitForIndexed(t *testing.T, sc *tk.Sidecar, projectID, fileID string, time
 		})
 		if found, _ := out["found"].(bool); found {
 			row, _ := out["media"].(map[string]any)
-			if status, _ := row["probe_status"].(string); status == "ok" {
+			if status, _ := row["probe_status"].(string); status == "ok" && hasOKDerivation(row, "thumbnail") {
 				return row
 			}
 		}
@@ -480,6 +505,17 @@ func waitForIndexed(t *testing.T, sc *tk.Sidecar, projectID, fileID string, time
 	}
 	t.Fatalf("file_id %s never reached probe_status=ok within %v", fileID, timeout)
 	return nil
+}
+
+func hasOKDerivation(row map[string]any, kind string) bool {
+	derivations, _ := row["derivations"].([]any)
+	for _, raw := range derivations {
+		d, _ := raw.(map[string]any)
+		if d["kind"] == kind && d["status"] == "ok" {
+			return true
+		}
+	}
+	return false
 }
 
 func TestSidecar_SetDescription_FullFlow(t *testing.T) {
@@ -492,7 +528,11 @@ func TestSidecar_SetDescription_FullFlow(t *testing.T) {
 	srcStr := strconv.FormatInt(srcID, 10)
 
 	// 2. Wait for the indexer to create a media row.
-	waitForIndexed(t, sc, "test-proj", srcStr, 15*time.Second)
+	indexed := waitForIndexed(t, sc, "test-proj", srcStr, 15*time.Second)
+	if indexed["has_video"] != true || indexed["width"].(float64) <= 0 ||
+		indexed["height"].(float64) <= 0 || indexed["duration_ms"].(float64) <= 0 {
+		t.Fatalf("incomplete probe metadata: %v", indexed)
+	}
 
 	// 3. Set description via MCP.
 	res := sc.MCP("media_set_description", map[string]any{

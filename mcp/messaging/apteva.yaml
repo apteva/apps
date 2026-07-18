@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.37
+version: 0.13.39
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -98,6 +98,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { prefix: /webhooks/ses-bounces, method: POST, no_auth: true }
+    - { prefix: /webhooks/ses-inbound, method: POST, no_auth: true }
+    - { prefix: /webhooks/twilio-inbound, method: POST, no_auth: true }
+    - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     # outbound
     - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{storage_id|url|content_base64, filename?, content_type?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }

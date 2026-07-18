@@ -5,8 +5,8 @@
 //     (OAuth in popup → page picker if needed → finalize).
 //   - Tab "Compose": prompt body + multi-select accounts + media picker
 //     (storage app, when bound) + Schedule/Now → post_create.
-//   - Tab "Posts": list of recent posts with per-target status pills,
-//     retry button on failed/partial.
+//   - Tab "Posts": compact list or bounded month/week calendar with
+//     shared filters, post details, and lifecycle actions.
 //
 // Lives in the social app's sidecar at /api/apps/social/ui/SocialPanel.mjs.
 // The host React (19) + react-dom come from the dashboard's importmap;
@@ -23,6 +23,27 @@ import {
 } from "recharts";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
+import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
+import {
+  ACCOUNT_METRICS_STALE_MS,
+  accountMetricsNeedRefresh,
+  metricTrendEntries,
+} from "./metricsPresentation";
+import { platformPresentation } from "./platformPresentation";
+import {
+  calendarWindow,
+  filterCalendarPosts,
+  groupPostsByLocalDay,
+  listLeadMediaStyle,
+  listPostRowStyle,
+  localDateKey,
+  moveCalendarCursor,
+  postLifecycleDate,
+  sortPostList,
+  stableSquareStyle,
+  type CalendarScale,
+  type PostViewMode,
+} from "./postCalendar";
 
 const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
@@ -412,10 +433,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, []);
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
+  const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
+  const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
+    setOauthLanding({ pendingId, connectionId });
+  }, []);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="flex items-center gap-1 border-b border-border px-4 py-2">
+    <div className="h-full min-w-0 overflow-hidden flex flex-col">
+      <header className="flex flex-shrink-0 flex-wrap items-center gap-1 border-b border-border px-4 py-2">
         <ProfileSwitcher
           profiles={profiles}
           activeId={activeProfileId}
@@ -446,17 +471,22 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             activeProfile={activeProfile}
             projectId={projectId}
             oauthLanding={oauthLanding}
-            onClearLanding={() => setOauthLanding(null)}
-            onSetLanding={(pendingId, connId) =>
-              setOauthLanding({ pendingId, connectionId: connId })
-            }
+            onClearLanding={clearOauthLanding}
+            onSetLanding={setOauthLandingFromReuse}
             onChange={loadAccounts}
             onImported={loadPosts}
             setStatus={setStatus}
           />
         )}
         {tab === "posts" && (
-          <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
+          <PostsView
+            posts={posts}
+            accounts={accounts}
+            activeProfileId={activeProfile?.id || null}
+            onChange={loadPosts}
+            setStatus={setStatus}
+            projectId={projectId}
+          />
         )}
         {tab === "inbox" && (
           <InboxView
@@ -880,6 +910,10 @@ function AccountsView({
   const [adding, setAdding] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [providerImportOpen, setProviderImportOpen] = useState(false);
+  const closePicker = useCallback(() => {
+    onClearLanding();
+    onChange();
+  }, [onChange, onClearLanding]);
 
   const handleLanded = useCallback(async (pendingId: number) => {
     // After OAuth, fetch the page list. If empty (no picker required),
@@ -889,9 +923,9 @@ function AccountsView({
       const res = await fetch(appURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      if (data?.isError) {
-        const inner = (data.content || []).find((c: any) => c.type === "text")?.text;
-        setStatus(inner || "Account picker is not ready yet.");
+      const pickerError = mcpEnvelopeError(data);
+      if (pickerError) {
+        setStatus(pickerError);
         return;
       }
       if (!data.requires_picker) {
@@ -902,6 +936,9 @@ function AccountsView({
           body: JSON.stringify({ pending_account_id: pendingId }),
         });
         if (!finalizeRes.ok) throw new Error(await finalizeRes.text());
+        const finalizeData = await finalizeRes.json();
+        const finalizeError = finalizedAccountError(finalizeData);
+        if (finalizeError) throw new Error(finalizeError);
         setStatus("Account added.");
         onClearLanding();
         onChange();
@@ -1001,7 +1038,7 @@ function AccountsView({
         <PagePicker
           pendingId={oauthLanding.pendingId}
           projectId={projectId}
-          onClose={() => { onClearLanding(); onChange(); }}
+          onClose={closePicker}
           setStatus={setStatus}
         />
       )}
@@ -2355,9 +2392,9 @@ function PagePicker({
         return r.json();
       })
       .then((d) => {
-        if (d?.isError) {
-          const inner = (d.content || []).find((c: any) => c.type === "text")?.text;
-          setStatus(inner || "Account picker failed.");
+        const pickerError = mcpEnvelopeError(d);
+        if (pickerError) {
+          setStatus(pickerError);
           setLoading(false);
           return;
         }
@@ -2368,7 +2405,10 @@ function PagePicker({
           onClose();
         }
       })
-      .catch(() => setLoading(false));
+      .catch((e) => {
+        setStatus("Account picker failed: " + (e as Error).message);
+        setLoading(false);
+      });
   }, [pendingId, onClose, projectId, setStatus]);
 
   const pick = async (page: PageEntry) => {
@@ -2385,6 +2425,9 @@ function PagePicker({
         }),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const finalizeError = finalizedAccountError(data);
+      if (finalizeError) throw new Error(finalizeError);
       setStatus("Account added: " + page.name);
       onClose();
     } catch (e) {
@@ -3692,20 +3735,104 @@ function StoragePickerDialog({
 // --- PostsView ----------------------------------------------------
 
 function PostsView({
-  posts, onChange, setStatus, projectId,
-}: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
-  // Open reschedule dialog for a specific post (null = closed).
+  posts, accounts, activeProfileId, onChange, setStatus, projectId,
+}: {
+  posts: Post[];
+  accounts: SocialAccount[];
+  activeProfileId: number | null;
+  onChange: () => void | Promise<void>;
+  setStatus: (s: string) => void;
+  projectId?: string | null;
+}) {
+  const preferenceKey = "social.posts.view";
+  const [view, setView] = useState<PostViewMode>(() => {
+    try {
+      return localStorage.getItem(preferenceKey) === "calendar" ? "calendar" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  const [calendarScale, setCalendarScale] = useState<CalendarScale>("month");
+  const [calendarCursor, setCalendarCursor] = useState(() => new Date());
+  const [calendarPosts, setCalendarPosts] = useState<Post[]>([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const calendarRequestRef = useRef(0);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [menuPostID, setMenuPostID] = useState<number | null>(null);
+  const [dayDialog, setDayDialog] = useState<{ date: Date; posts: Post[] } | null>(null);
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
-  // Same pattern for the delete-confirm modal: which post (null = closed).
   const [deleteFor, setDeleteFor] = useState<Post | null>(null);
-  // And for the edit dialog.
   const [editFor, setEditFor] = useState<Post | null>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(preferenceKey, view); } catch {}
+  }, [view]);
+
+  useEffect(() => {
+    setSelectedPost(null);
+    setMenuPostID(null);
+    setDayDialog(null);
+  }, [activeProfileId]);
+
+  useEffect(() => {
+    if (accountFilter !== "all" && !accounts.some((account) => String(account.id) === accountFilter)) {
+      setAccountFilter("all");
+    }
+  }, [accountFilter, accounts]);
+
+  const range = calendarWindow(calendarCursor, calendarScale);
+  const rangeStart = range.start.toISOString();
+  const rangeEnd = range.end.toISOString();
+  const loadCalendarPosts = useCallback(async () => {
+    const requestID = ++calendarRequestRef.current;
+    setCalendarLoading(true);
+    try {
+      const params = new URLSearchParams({ from: rangeStart, to: rangeEnd, limit: "1000" });
+      if (activeProfileId) params.set("profile_id", String(activeProfileId));
+      const res = await fetch(appURL(`/posts?${params.toString()}`, projectId), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      if (calendarRequestRef.current === requestID) setCalendarPosts(data.posts || []);
+    } catch (e) {
+      if (calendarRequestRef.current === requestID) {
+        setCalendarPosts([]);
+        setStatus("Load calendar: " + (e as Error).message);
+      }
+    } finally {
+      if (calendarRequestRef.current === requestID) setCalendarLoading(false);
+    }
+  }, [activeProfileId, projectId, rangeEnd, rangeStart, setStatus]);
+
+  const postsRevision = posts.map((post) => `${post.id}:${post.status}:${post.schedule_at}:${post.published_at}`).join("|");
+  useEffect(() => {
+    if (view === "calendar") loadCalendarPosts();
+  }, [loadCalendarPosts, postsRevision, view]);
+
+  const refreshAll = useCallback(async () => {
+    await Promise.resolve(onChange());
+    if (view === "calendar") await loadCalendarPosts();
+  }, [loadCalendarPosts, onChange, view]);
+
+  const sourcePosts = view === "calendar" ? calendarPosts : posts;
+  const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter, accountFilter);
+  const sortedListPosts = sortPostList(filteredPosts);
+
+  useEffect(() => {
+    if (!selectedPost) return;
+    const current = sourcePosts.find((post) => post.id === selectedPost.id);
+    if (current) setSelectedPost(current);
+  }, [sourcePosts, selectedPost?.id]);
 
   const retry = async (postId: number) => {
     try {
-      await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
+      const res = await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
       setStatus("Retry triggered.");
-      onChange();
+      await refreshAll();
     } catch (e) {
       setStatus("Retry failed: " + (e as Error).message);
     }
@@ -3730,96 +3857,123 @@ function PostsView({
       } else {
         setStatus("Deleted.");
       }
-      onChange();
+      setSelectedPost(null);
+      await refreshAll();
     } catch (e) {
       setStatus("Delete failed: " + (e as Error).message);
     }
   };
 
-  if (posts.length === 0) {
-    return (
-      <div className="py-12 text-center text-text-muted text-sm">
-        No posts yet. Compose your first one.
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 flex flex-col gap-3">
-      {posts.map((p) => (
-        <div key={p.id} className="border border-border rounded p-3">
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="text-text text-sm whitespace-pre-wrap">{p.body}</div>
-              <div className="text-text-dim text-xs mt-1">
-                {new Date(p.created_at).toLocaleString()}
-                {p.schedule_at && ` · scheduled for ${new Date(p.schedule_at).toLocaleString()}`}
-              </div>
-            </div>
-            <StatusPill status={p.status} />
-            {(p.status === "failed" || p.status === "partial") && (
-              <button
-                onClick={() => retry(p.id)}
-                className="text-xs text-accent hover:underline"
-              >
-                Retry
-              </button>
-            )}
-            {p.status === "scheduled" && (
-              <button
-                onClick={() => setRescheduleFor(p)}
-                className="text-xs text-accent hover:underline"
-                title="Pick a new run time"
-              >
-                Reschedule
-              </button>
-            )}
-            {(p.status === "published" || p.status === "partial") &&
-              p.targets.some((t) => isEditablePlatform(t.platform)) && (
-              <button
-                onClick={() => setEditFor(p)}
-                className="text-xs text-accent hover:underline"
-                title="Edit post body and metadata where the platform allows"
-              >
-                Edit
-              </button>
-            )}
-            <button
-              onClick={() => setDeleteFor(p)}
-              className="text-xs text-text-muted hover:text-red"
-              title={p.status === "scheduled" ? "Cancel + delete" : "Delete"}
-            >
-              {p.status === "scheduled" ? "Cancel" : "Delete"}
-            </button>
-          </div>
-          {p.media_storage_ids && p.media_storage_ids.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.media_storage_ids.map((id) => (
-                <MediaThumb key={id} fileId={id} projectId={projectId} />
-              ))}
-            </div>
-          )}
-          {p.external_media_urls && p.external_media_urls.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.external_media_urls.map((url) => (
-                <ExternalMediaThumb key={url} url={url} />
-              ))}
-            </div>
-          )}
-          {p.targets.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.targets.map((t) => (
-                <TargetChip key={t.id} target={t} />
-              ))}
-            </div>
-          )}
+    <div className="p-4 flex flex-col gap-3 min-h-full">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
+        <div className="inline-flex border border-border rounded overflow-hidden" aria-label="Post view">
+          <button
+            type="button"
+            onClick={() => setView("list")}
+            className={`px-3 py-1.5 text-sm ${view === "list" ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("calendar")}
+            className={`px-3 py-1.5 text-sm border-l border-border ${view === "calendar" ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+          >
+            Calendar
+          </button>
         </div>
-      ))}
+        <select
+          value={statusFilter}
+          onChange={(event) => setStatusFilter(event.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          aria-label="Filter posts by status"
+        >
+          <option value="all">All statuses</option>
+          <option value="scheduled">Scheduled</option>
+          <option value="published">Published</option>
+          <option value="failed">Failed</option>
+          <option value="partial">Partial</option>
+          <option value="draft">Draft</option>
+        </select>
+        <select
+          value={accountFilter}
+          onChange={(event) => setAccountFilter(event.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          style={{ minWidth: 170 }}
+          aria-label="Filter posts by account"
+        >
+          <option value="all">All accounts</option>
+          {accounts.map((account) => (
+            <option key={account.id} value={account.id}>{account.display_name} · {account.platform}</option>
+          ))}
+        </select>
+        <span className="text-text-dim text-xs ml-auto">
+          {filteredPosts.length} post{filteredPosts.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {view === "list" ? (
+        sortedListPosts.length === 0 ? (
+          <PostsEmptyState filtered={posts.length > 0} />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {sortedListPosts.map((post) => (
+              <PostListRow
+                key={post.id}
+                post={post}
+                projectId={projectId}
+                menuOpen={menuPostID === post.id}
+                onToggleMenu={() => setMenuPostID((current) => current === post.id ? null : post.id)}
+                onOpen={() => setSelectedPost(post)}
+                onRetry={() => retry(post.id)}
+                onReschedule={() => { setMenuPostID(null); setRescheduleFor(post); }}
+                onEdit={() => { setMenuPostID(null); setEditFor(post); }}
+                onDelete={() => { setMenuPostID(null); setDeleteFor(post); }}
+              />
+            ))}
+          </div>
+        )
+      ) : (
+        <PostCalendarView
+          posts={filteredPosts}
+          loading={calendarLoading}
+          cursor={calendarCursor}
+          scale={calendarScale}
+          projectId={projectId}
+          onScaleChange={setCalendarScale}
+          onCursorChange={setCalendarCursor}
+          onOpen={setSelectedPost}
+          onMore={(date, dayPosts) => setDayDialog({ date, posts: dayPosts })}
+        />
+      )}
+
+      {selectedPost && (
+        <PostDetailPanel
+          post={selectedPost}
+          projectId={projectId}
+          onClose={() => setSelectedPost(null)}
+          onRetry={() => retry(selectedPost.id)}
+          onReschedule={() => setRescheduleFor(selectedPost)}
+          onEdit={() => setEditFor(selectedPost)}
+          onDelete={() => setDeleteFor(selectedPost)}
+        />
+      )}
+      {dayDialog && (
+        <CalendarDayDialog
+          date={dayDialog.date}
+          posts={dayDialog.posts}
+          projectId={projectId}
+          onClose={() => setDayDialog(null)}
+          onOpen={(post) => { setDayDialog(null); setSelectedPost(post); }}
+        />
+      )}
       {rescheduleFor && (
         <RescheduleDialog
           post={rescheduleFor}
+          projectId={projectId}
           onClose={() => setRescheduleFor(null)}
-          onChanged={() => { setRescheduleFor(null); onChange(); }}
+          onChanged={() => { setRescheduleFor(null); refreshAll(); }}
           setStatus={setStatus}
         />
       )}
@@ -3828,9 +3982,9 @@ function PostsView({
           post={deleteFor}
           onClose={() => setDeleteFor(null)}
           onConfirm={async () => {
-            const p = deleteFor;
+            const post = deleteFor;
             setDeleteFor(null);
-            await executeDelete(p);
+            await executeDelete(post);
           }}
         />
       )}
@@ -3839,10 +3993,503 @@ function PostsView({
           post={editFor}
           projectId={projectId}
           onClose={() => setEditFor(null)}
-          onSaved={() => { setEditFor(null); onChange(); }}
+          onSaved={() => { setEditFor(null); refreshAll(); }}
           setStatus={setStatus}
         />
       )}
+    </div>
+  );
+}
+
+function PostsEmptyState({ filtered }: { filtered: boolean }) {
+  return (
+    <div className="py-12 text-center text-text-muted text-sm">
+      {filtered ? "No posts match these filters." : "No posts yet. Compose your first one."}
+    </div>
+  );
+}
+
+function PlatformBadge({ platform, size = 18 }: { platform: string; size?: number }) {
+  const presentation = platformPresentation(platform);
+  return (
+    <span
+      title={presentation.label}
+      aria-label={presentation.label}
+      style={{
+        minWidth: size,
+        height: size,
+        padding: "0 4px",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `1px solid ${presentation.color}88`,
+        borderRadius: 4,
+        backgroundColor: `${presentation.color}1F`,
+        color: presentation.color,
+        fontSize: size <= 16 ? 8 : size <= 20 ? 9 : 11,
+        fontWeight: 700,
+        lineHeight: 1,
+        flexShrink: 0,
+      }}
+    >
+      {presentation.mark}
+    </span>
+  );
+}
+
+function PlatformBadges({ targets, size = 18, limit = 3 }: { targets: PostTarget[]; size?: number; limit?: number }) {
+  const platforms = Array.from(new Set(targets.map((target) => target.platform).filter(Boolean)));
+  return (
+    <span className="inline-flex items-center gap-1 flex-shrink-0">
+      {platforms.slice(0, limit).map((platform) => <PlatformBadge key={platform} platform={platform} size={size} />)}
+      {platforms.length > limit && <span className="text-[10px] text-text-dim">+{platforms.length - limit}</span>}
+    </span>
+  );
+}
+
+function PostListRow({
+  post, projectId, menuOpen, onToggleMenu, onOpen, onRetry, onReschedule, onEdit, onDelete,
+}: {
+  post: Post;
+  projectId?: string | null;
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  onOpen: () => void;
+  onRetry: () => void;
+  onReschedule: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const displayDate = postLifecycleDate(post);
+  const targetLabel = post.targets.length > 0
+    ? post.targets.map((target) => `${target.platform} · ${target.display_name}`).join("  ·  ")
+    : "No targets";
+  const editable = (post.status === "published" || post.status === "partial") &&
+    post.targets.some((target) => isEditablePlatform(target.platform));
+  return (
+    <div
+      className="relative border border-border rounded bg-bg-card/30 hover:bg-bg-card/50 transition-colors"
+    >
+      <div className="flex items-stretch gap-3 p-2.5" style={listPostRowStyle()}>
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex flex-1 min-w-0 items-stretch gap-3 text-left"
+          style={{ overflow: "hidden" }}
+        >
+          <PostLeadMedia post={post} projectId={projectId} variant="list" />
+          <div className="flex-1 min-w-0 py-1 flex flex-col">
+            <div
+              className="text-text text-sm whitespace-pre-line leading-5"
+              style={{
+                display: "-webkit-box",
+                WebkitBoxOrient: "vertical",
+                WebkitLineClamp: 3,
+                overflow: "hidden",
+              }}
+            >
+              {post.body || <span className="text-text-dim italic">No caption</span>}
+            </div>
+            <div className="mt-auto min-w-0 pt-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <PlatformBadges targets={post.targets} />
+                <div className="text-text-dim text-xs truncate">{targetLabel}</div>
+              </div>
+              <div className="text-text-muted text-xs mt-0.5">
+                {displayDate ? displayDate.toLocaleString() : "No date"}
+              </div>
+            </div>
+          </div>
+        </button>
+        <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
+          <StatusPill status={post.status} />
+          {(post.status === "failed" || post.status === "partial") && (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onRetry(); }}
+              className="text-xs text-accent hover:underline"
+            >
+              Retry
+            </button>
+          )}
+          <div className="relative mt-auto">
+            <button
+              type="button"
+              onClick={onToggleMenu}
+              className="w-8 h-8 grid place-items-center text-text-muted hover:text-text border border-transparent hover:border-border rounded"
+              aria-label="Post actions"
+              title="Post actions"
+            >
+              ⋮
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 bottom-9 z-20 bg-bg-card border border-border rounded shadow-lg py-1" style={{ minWidth: 150 }}>
+                {post.status === "scheduled" && <PostMenuButton label="Reschedule" onClick={onReschedule} />}
+                {editable && <PostMenuButton label="Edit" onClick={onEdit} />}
+                <PostMenuButton label={post.status === "scheduled" ? "Cancel post" : "Delete"} danger onClick={onDelete} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostMenuButton({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full text-left px-3 py-2 text-xs hover:bg-bg-input ${danger ? "text-red" : "text-text"}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PostCalendarView({
+  posts, loading, cursor, scale, projectId, onScaleChange, onCursorChange, onOpen, onMore,
+}: {
+  posts: Post[];
+  loading: boolean;
+  cursor: Date;
+  scale: CalendarScale;
+  projectId?: string | null;
+  onScaleChange: (scale: CalendarScale) => void;
+  onCursorChange: (date: Date) => void;
+  onOpen: (post: Post) => void;
+  onMore: (date: Date, posts: Post[]) => void;
+}) {
+  const window = calendarWindow(cursor, scale);
+  const grouped = groupPostsByLocalDay(posts);
+  const todayKey = localDateKey(new Date());
+  const heading = scale === "month"
+    ? cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : `${window.days[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${window.days[6].toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+  const daysWithPosts = window.days.filter((day) => (grouped.get(localDateKey(day)) || []).length > 0);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onCursorChange(moveCalendarCursor(cursor, scale, -1))}
+          className="w-8 h-8 border border-border rounded text-text hover:bg-bg-card"
+          aria-label="Previous period"
+          title="Previous"
+        >
+          ‹
+        </button>
+        <button
+          type="button"
+          onClick={() => onCursorChange(new Date())}
+          className="px-3 h-8 border border-border rounded text-xs text-text hover:bg-bg-card"
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => onCursorChange(moveCalendarCursor(cursor, scale, 1))}
+          className="w-8 h-8 border border-border rounded text-text hover:bg-bg-card"
+          aria-label="Next period"
+          title="Next"
+        >
+          ›
+        </button>
+        <h2 className="text-text font-medium ml-1">{heading}</h2>
+        {loading && <span className="text-text-dim text-xs">Loading…</span>}
+        <div className="inline-flex ml-auto border border-border rounded overflow-hidden">
+          <button
+            type="button"
+            onClick={() => onScaleChange("month")}
+            className={`px-2.5 py-1.5 text-xs ${scale === "month" ? "bg-bg-card text-text" : "text-text-muted"}`}
+          >
+            Month
+          </button>
+          <button
+            type="button"
+            onClick={() => onScaleChange("week")}
+            className={`px-2.5 py-1.5 text-xs border-l border-border ${scale === "week" ? "bg-bg-card text-text" : "text-text-muted"}`}
+          >
+            Week
+          </button>
+        </div>
+      </div>
+
+      <div className="hidden md:block overflow-x-auto border border-border rounded">
+        <div
+          className="grid border-b border-border bg-bg-card/30"
+          style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))", minWidth: 840 }}
+        >
+          {window.days.slice(0, 7).map((day) => (
+            <div key={day.getDay()} className="px-2 py-1.5 text-center text-[11px] uppercase text-text-dim border-r border-border last:border-r-0">
+              {day.toLocaleDateString(undefined, { weekday: "short" })}
+            </div>
+          ))}
+        </div>
+        <div className="grid" style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))", minWidth: 840 }}>
+          {window.days.map((day, index) => {
+            const key = localDateKey(day);
+            const dayPosts = grouped.get(key) || [];
+            const outsideMonth = scale === "month" && day.getMonth() !== cursor.getMonth();
+            return (
+              <div
+                key={key}
+                className={`min-h-[150px] p-1.5 border-b border-border ${index % 7 !== 6 ? "border-r" : ""} ${outsideMonth ? "bg-bg/40" : "bg-bg"}`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span
+                    className={`text-xs rounded ${key === todayKey ? "bg-accent text-bg font-bold" : outsideMonth ? "text-text-dim" : "text-text"}`}
+                    style={stableSquareStyle(24)}
+                  >
+                    {day.getDate()}
+                  </span>
+                  {dayPosts.length > 0 && <span className="text-[10px] text-text-dim">{dayPosts.length}</span>}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {dayPosts.slice(0, 3).map((post) => (
+                    <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} />
+                  ))}
+                  {dayPosts.length > 3 && (
+                    <button
+                      type="button"
+                      onClick={() => onMore(day, dayPosts)}
+                      className="text-left px-1 py-0.5 text-[10px] text-accent hover:underline"
+                    >
+                      +{dayPosts.length - 3} more
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="md:hidden flex flex-col gap-3">
+        {daysWithPosts.length === 0 && !loading ? (
+          <div className="py-10 text-center text-text-muted text-sm">No posts in this period.</div>
+        ) : daysWithPosts.map((day) => {
+          const dayPosts = grouped.get(localDateKey(day)) || [];
+          return (
+            <section key={localDateKey(day)} className="flex flex-col gap-1.5">
+              <div className="text-xs text-text-dim uppercase">
+                {day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+              </div>
+              {dayPosts.map((post) => (
+                <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} mobile />
+              ))}
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
+  post: Post;
+  projectId?: string | null;
+  onOpen: () => void;
+  mobile?: boolean;
+}) {
+  const date = postLifecycleDate(post);
+  const platform = Array.from(new Set(post.targets.map((target) => target.platform))).join(", ");
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`w-full text-left flex items-center gap-1.5 border border-border rounded bg-bg-card/60 hover:border-accent overflow-hidden ${mobile ? "p-2" : "p-1"}`}
+    >
+      <PostLeadMedia post={post} projectId={projectId} variant="calendar" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1 text-[10px]">
+          <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
+          <StatusPill status={post.status} />
+        </div>
+        <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
+        {mobile && (
+          <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
+            <PlatformBadges targets={post.targets} size={16} limit={2} />
+            <div className="text-[10px] text-text-dim truncate">{platform || "No target"}</div>
+          </div>
+        )}
+      </div>
+    </button>
+  );
+}
+
+function CalendarDayDialog({ date, posts, projectId, onClose, onOpen }: {
+  date: Date;
+  posts: Post[];
+  projectId?: string | null;
+  onClose: () => void;
+  onOpen: (post: Post) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="max-h-[80vh] bg-bg-card border border-border rounded-lg shadow-lg flex flex-col"
+        style={{ width: "min(560px, 94vw)" }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <div className="text-text font-medium">{date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</div>
+            <div className="text-text-dim text-xs">{posts.length} posts</div>
+          </div>
+          <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
+        </div>
+        <div className="overflow-y-auto p-3 flex flex-col gap-2">
+          {posts.map((post) => (
+            <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} mobile />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostLeadMedia({ post, projectId, variant }: {
+  post: Post;
+  projectId?: string | null;
+  variant: "list" | "calendar";
+}) {
+  const storageID = post.media_storage_ids?.[0];
+  const externalURL = !storageID ? post.external_media_urls?.[0] : "";
+  const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (storageID) loadMediaMeta(storageID, projectId).then((next) => { if (alive) setMeta(next); });
+    else setMeta(null);
+    return () => { alive = false; };
+  }, [projectId, storageID]);
+  const source = storageID ? storageURL(`/files/${storageID}/content`, projectId) : externalURL || "";
+  const total = (post.media_storage_ids?.length || 0) + (post.external_media_urls?.length || 0);
+  const isVideo = !!storageID && !!meta?.mime.startsWith("video/");
+  const primaryPlatform = post.targets[0]?.platform || "";
+  const presentation = platformPresentation(primaryPlatform);
+  return (
+    <div
+      className="relative overflow-hidden rounded border border-border bg-bg-input"
+      style={variant === "list" ? listLeadMediaStyle() : stableSquareStyle(32)}
+      aria-hidden="true"
+    >
+      {!source || (storageID && !meta) ? (
+        <div
+          className="text-text-dim text-[10px] uppercase"
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "grid",
+            placeItems: "center",
+            backgroundColor: `${presentation.color}12`,
+          }}
+        >
+          {source ? "..." : <PlatformBadge platform={primaryPlatform} size={variant === "list" ? 36 : 20} />}
+        </div>
+      ) : isVideo ? (
+        <>
+          <video
+            src={source}
+            preload="metadata"
+            muted
+            playsInline
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+          <div
+            className="absolute inset-0 bg-black/20"
+            style={{ display: "grid", placeItems: "center" }}
+          >
+            <span className="text-white text-xs">▶</span>
+          </div>
+        </>
+      ) : (
+        <img
+          src={source}
+          alt=""
+          loading="lazy"
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+        />
+      )}
+      {total > 1 && (
+        <span className="absolute right-1 bottom-1 px-1 py-0.5 rounded bg-black/80 text-white text-[9px]">+{total - 1}</span>
+      )}
+    </div>
+  );
+}
+
+function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete }: {
+  post: Post;
+  projectId?: string | null;
+  onClose: () => void;
+  onRetry: () => void;
+  onReschedule: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const editable = (post.status === "published" || post.status === "partial") &&
+    post.targets.some((target) => isEditablePlatform(target.platform));
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60" onClick={onClose}>
+      <aside
+        className="ml-auto h-full bg-bg border-l border-border shadow-lg flex flex-col"
+        style={{ width: "min(620px, 100vw)" }}
+        onClick={(event) => event.stopPropagation()}
+        aria-label="Post details"
+      >
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+          <div className="min-w-0 flex-1">
+            <div className="text-text font-medium">Post #{post.id}</div>
+            <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
+          </div>
+          <StatusPill status={post.status} />
+          <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {(post.media_storage_ids?.length > 0 || (post.external_media_urls?.length || 0) > 0) && (
+            <section className="p-4 border-b border-border">
+              <div className="flex flex-wrap gap-2">
+                {post.media_storage_ids.map((id) => <MediaThumb key={id} fileId={id} projectId={projectId} />)}
+                {(post.external_media_urls || []).map((url) => <ExternalMediaThumb key={url} url={url} />)}
+              </div>
+            </section>
+          )}
+          <section className="p-4 border-b border-border">
+            <div className="text-xs uppercase text-text-dim mb-2">Caption</div>
+            <div className="text-text text-sm whitespace-pre-wrap leading-6">{post.body || <span className="text-text-dim italic">No caption</span>}</div>
+          </section>
+          <section className="p-4 border-b border-border grid grid-cols-2 gap-3 text-xs">
+            <div><div className="text-text-dim uppercase">Created</div><div className="text-text mt-1">{new Date(post.created_at).toLocaleString()}</div></div>
+            <div><div className="text-text-dim uppercase">Scheduled</div><div className="text-text mt-1">{post.schedule_at ? new Date(post.schedule_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Published</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Targets</div><div className="text-text mt-1">{post.targets.length}</div></div>
+          </section>
+          <section className="p-4">
+            <div className="text-xs uppercase text-text-dim mb-2">Destinations</div>
+            <div className="flex flex-col gap-2">
+              {post.targets.length === 0 ? <div className="text-text-dim text-sm">No targets.</div> : post.targets.map((target) => (
+                <div key={target.id} className="border border-border rounded px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-text">{target.display_name}</span>
+                    <span className="text-text-dim">{target.platform}</span>
+                    <span className="ml-auto"><StatusPill status={target.status} /></span>
+                  </div>
+                  {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
+                  {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-border bg-bg-card/30">
+          {(post.status === "failed" || post.status === "partial") && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
+          {post.status === "scheduled" && <button type="button" onClick={onReschedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Reschedule</button>}
+          {editable && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit</button>}
+          <button type="button" onClick={onDelete} className="px-3 py-1.5 text-sm border border-error text-error rounded">{post.status === "scheduled" ? "Cancel post" : "Delete"}</button>
+        </div>
+      </aside>
     </div>
   );
 }
@@ -4288,9 +4935,10 @@ function FieldText({
 }
 
 function RescheduleDialog({
-  post, onClose, onChanged, setStatus,
+  post, projectId, onClose, onChanged, setStatus,
 }: {
   post: Post;
+  projectId?: string | null;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
@@ -4306,7 +4954,7 @@ function RescheduleDialog({
     if (!when) return;
     setBusy(true);
     try {
-      const res = await fetch(appURL(`/posts/${post.id}/reschedule`), {
+      const res = await fetch(appURL(`/posts/${post.id}/reschedule`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -4458,8 +5106,16 @@ interface AccountMetrics {
   impressions?: number;
   engagements?: number;
   views?: number;
+  likes?: number;
+  comments?: number;
+  shares?: number;
+  saves?: number;
+  sends?: number;
+  clicks?: number;
+  engagement_rate?: number;
   insights?: Record<string, { time?: string; value: number }[]>;
   history_source?: string;
+  updated_at?: string;
   raw?: any;
 }
 
@@ -4477,15 +5133,20 @@ function MetricsView({
   const [expanded, setExpanded] = useState<number | null>(null);
   const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
-  const autoLoadedAccounts = useRef<Set<number>>(new Set());
+  const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
+  const [rangeDays, setRangeDays] = useState<30 | 90 | 365>(30);
+  const autoLoadedAccounts = useRef<Set<string>>(new Set());
+  const autoRefreshedAccounts = useRef<Set<string>>(new Set());
   const accountIds = accounts.map((a) => a.id).join(",");
 
   useEffect(() => {
     setAccountFor({});
     setPostFor({});
     setSyncFor({});
+    setRefreshingFor({});
     setExpanded(null);
     autoLoadedAccounts.current.clear();
+    autoRefreshedAccounts.current.clear();
   }, [projectId]);
 
   useEffect(() => {
@@ -4498,17 +5159,34 @@ function MetricsView({
     }
   }, [accounts, activeAccountId]);
 
-  const loadAccount = async (id: number, refresh = false) => {
-    setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
+  const loadAccount = async (id: number, refresh = false, background = false) => {
+    if (!background) setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
+    if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: true }));
     try {
-      const res = await fetch(appURL(`/accounts/${id}/metrics?refresh=${refresh ? "1" : "0"}`, projectId), { credentials: "same-origin" });
+      const params = new URLSearchParams({
+        refresh: refresh ? "1" : "0",
+        period: `${rangeDays}d`,
+      });
+      const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
       setAccountFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
-      setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      if (!background) {
+        setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
+      }
+    } finally {
+      if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: false }));
     }
   };
+
+  useAppEvents<{ social_account_id?: number }>("social", projectId, (event) => {
+    if (event.topic !== "metrics.updated") return;
+    const accountID = Number(event.data?.social_account_id || 0);
+    if (accountID > 0 && accounts.some((account) => account.id === accountID)) {
+      loadAccount(accountID, false, true);
+    }
+  });
 
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -4536,12 +5214,13 @@ function MetricsView({
 
   useEffect(() => {
     for (const account of accounts) {
-      if (!autoLoadedAccounts.current.has(account.id)) {
-        autoLoadedAccounts.current.add(account.id);
+      const key = `${account.id}:${rangeDays}`;
+      if (!autoLoadedAccounts.current.has(key)) {
+        autoLoadedAccounts.current.add(key);
         loadAccount(account.id);
       }
     }
-  }, [accountIds]);
+  }, [accountIds, rangeDays]);
 
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
@@ -4569,6 +5248,29 @@ function MetricsView({
 
   const activeAccount = accounts.find((a) => a.id === activeAccountId) || accounts[0] || null;
   const activeMetrics = activeAccount ? accountFor[activeAccount.id] : null;
+
+  useEffect(() => {
+    if (!activeAccount || !activeMetrics || activeMetrics === "loading" || "error" in activeMetrics) return;
+    const refreshIfStale = () => {
+      if (!accountMetricsNeedRefresh(activeMetrics)) return;
+      const key = `${activeAccount.id}:${activeMetrics.updated_at || "missing"}`;
+      if (autoRefreshedAccounts.current.has(key)) return;
+      autoRefreshedAccounts.current.add(key);
+      loadAccount(activeAccount.id, true, true);
+    };
+    if (accountMetricsNeedRefresh(activeMetrics)) {
+      refreshIfStale();
+      return;
+    }
+    const updatedAt = Date.parse(activeMetrics.updated_at || "");
+    if (!Number.isFinite(updatedAt)) return;
+    const timer = window.setTimeout(
+      refreshIfStale,
+      Math.max(1000, updatedAt + ACCOUNT_METRICS_STALE_MS - Date.now()),
+    );
+    return () => window.clearTimeout(timer);
+  }, [activeAccount?.id, activeMetrics]);
+
   const published = posts.filter((p) =>
     (p.status === "published" || p.status === "partial") &&
     (!activeAccount || (p.targets || []).some((t) => t.social_account_id === activeAccount.id))
@@ -4577,10 +5279,7 @@ function MetricsView({
   return (
     <div className="p-4 flex flex-col gap-6">
       <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
-          <span className="text-text-dim text-xs">Shows stored history first</span>
-        </div>
+        <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
         {accounts.length === 0 ? (
           <div className="text-text-dim text-sm py-6 text-center">No accounts connected.</div>
         ) : (
@@ -4614,22 +5313,28 @@ function MetricsView({
       </section>
 
       {activeAccount && (
-        <section className="flex flex-col gap-3 border border-border rounded p-3 bg-bg-card/30">
-          <div className="flex items-center gap-3">
+        <section className="flex flex-col gap-4 border-t border-border pt-4">
+          <div className="flex flex-wrap items-center gap-3">
             <div className="flex-1 min-w-0">
               <div className="text-text font-medium truncate">{activeAccount.display_name}</div>
               <div className="text-text-dim text-xs">{activeAccount.platform}</div>
+              {activeMetrics && activeMetrics !== "loading" && !("error" in activeMetrics) && activeMetrics.updated_at && (
+                <div className="text-text-dim text-xs mt-0.5">
+                  Updated {new Date(activeMetrics.updated_at).toLocaleString()}
+                </div>
+              )}
             </div>
             <button
-              onClick={() => loadAccount(activeAccount.id, true)}
-              className="text-xs text-accent hover:underline"
+              onClick={() => loadAccount(activeAccount.id, true, true)}
+              disabled={refreshingFor[activeAccount.id]}
+              className="px-2.5 py-1.5 text-xs border border-border rounded text-accent hover:border-accent disabled:opacity-50"
             >
-              Refresh metrics
+              {refreshingFor[activeAccount.id] ? "Refreshing…" : "Refresh metrics"}
             </button>
             <button
               onClick={() => syncAccountPosts(activeAccount.id)}
               disabled={syncFor[activeAccount.id] === "loading"}
-              className="text-xs text-accent hover:underline disabled:opacity-50"
+              className="px-2.5 py-1.5 text-xs border border-border rounded text-accent hover:border-accent disabled:opacity-50"
             >
               {syncFor[activeAccount.id] === "loading" ? "Syncing..." : "Sync posts"}
             </button>
@@ -4640,8 +5345,28 @@ function MetricsView({
             <div className="text-red text-sm">{activeMetrics.error}</div>
           ) : activeMetrics && typeof activeMetrics === "object" && "status" in activeMetrics ? (
             <>
+              <div className="text-xs uppercase tracking-wide text-text-dim">Overview</div>
               <AccountMetricsSummary metrics={activeMetrics as AccountMetrics} />
-              <InsightCharts metrics={activeMetrics as AccountMetrics} />
+              {(activeMetrics as AccountMetrics).status === "ok" && (
+                <>
+                  <div className="flex items-center justify-between gap-3 mt-1">
+                    <div className="text-xs uppercase tracking-wide text-text-dim">Trends</div>
+                    <div className="inline-flex border border-border rounded overflow-hidden" aria-label="Metrics history range">
+                      {([30, 90, 365] as const).map((days) => (
+                        <button
+                          key={days}
+                          type="button"
+                          onClick={() => setRangeDays(days)}
+                          className={`px-2.5 py-1 text-xs border-r border-border last:border-r-0 ${rangeDays === days ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+                        >
+                          {days === 365 ? "1y" : `${days}d`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <InsightCharts metrics={activeMetrics as AccountMetrics} />
+                </>
+              )}
             </>
           ) : (
             <div className="text-text-dim text-sm">Waiting for metrics...</div>
@@ -4652,13 +5377,9 @@ function MetricsView({
         </section>
       )}
 
-      {accounts.length > 1 && (
-        <AccountHistoryGrid accounts={accounts} accountFor={accountFor} />
-      )}
-
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm uppercase tracking-wide text-text-dim">Recent posts</h2>
+          <h2 className="text-sm uppercase tracking-wide text-text-dim">Post performance</h2>
           {activeAccount && <span className="text-text-dim text-xs">{published.length} loaded</span>}
         </div>
         {published.length === 0 ? (
@@ -4761,12 +5482,20 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     ["following", metrics.following],
     ["videos", metrics.total_videos],
     ["posts", metrics.posts],
-    ["likes", metrics.total_likes],
+    ["likes", metrics.likes ?? metrics.total_likes],
     ["reach", metrics.reach],
     ["impressions", metrics.impressions],
     ["engagements", metrics.engagements],
     ["views", metrics.views],
+    ["comments", metrics.comments],
+    ["shares", metrics.shares],
+    ["saves", metrics.saves],
+    ["sends", metrics.sends],
+    ["clicks", metrics.clicks],
   ].filter(([, value]) => value != null && Number(value) > 0) as [string, number][];
+  if (metrics.engagement_rate != null && metrics.engagement_rate > 0) {
+    stats.push(["engagement rate", metrics.engagement_rate]);
+  }
   if (stats.length === 0) {
     return <div className="text-text-dim text-sm">No totals returned by the platform.</div>;
   }
@@ -4774,7 +5503,9 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
       {stats.map(([label, value]) => (
         <div key={label} className="border border-border rounded px-3 py-2 bg-bg">
-          <div className="text-text font-medium">{formatNumber(value)}</div>
+          <div className="text-text font-medium">
+            {label === "engagement rate" ? `${value.toFixed(2)}%` : formatNumber(value)}
+          </div>
           <div className="text-text-dim text-[10px] uppercase tracking-wide">{label}</div>
         </div>
       ))}
@@ -4782,51 +5513,13 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
   );
 }
 
-function AccountHistoryGrid({
-  accounts,
-  accountFor,
-}: {
-  accounts: SocialAccount[];
-  accountFor: Record<number, AccountMetrics | "loading" | { error: string }>;
-}) {
-  const loaded = accounts
-    .map((account) => ({ account, metrics: accountFor[account.id] }))
-    .filter(({ metrics }) => metrics && metrics !== "loading" && typeof metrics === "object" && "status" in metrics) as {
-      account: SocialAccount;
-      metrics: AccountMetrics;
-    }[];
-  if (loaded.length === 0) return null;
-  return (
-    <section className="flex flex-col gap-2">
-      <h2 className="text-sm uppercase tracking-wide text-text-dim">Account history</h2>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2">
-        {loaded.map(({ account, metrics }) => (
-          <div key={account.id} className="border border-border rounded p-3 bg-bg-card/30">
-            <div className="flex items-center justify-between gap-3 mb-2">
-              <div className="min-w-0">
-                <div className="text-text text-sm truncate">{account.display_name}</div>
-                <div className="text-text-dim text-xs">{account.platform}</div>
-              </div>
-              <AccountMetricsCell m={metrics} />
-            </div>
-            <InsightCharts metrics={metrics} compact />
-          </div>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; compact?: boolean }) {
-  const entries = Object.entries(metrics.insights || {})
-    .map(([name, points]) => ({ name, points }))
-    .filter((entry) => entry.points.length > 0);
+function InsightCharts({ metrics }: { metrics: AccountMetrics }) {
+  const entries = metricTrendEntries(metrics.insights);
   if (entries.length === 0) {
-    if (compact) return <div className="text-text-dim text-xs">Totals only</div>;
-    return null;
+    return <div className="py-6 text-center text-text-dim text-sm">No trend data yet.</div>;
   }
   return (
-    <div className={`grid grid-cols-1 ${compact ? "" : "md:grid-cols-2"} gap-2`}>
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
       {entries.map(({ name, points }) => {
         const latest = points[points.length - 1];
         return (
@@ -4835,7 +5528,7 @@ function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; 
               <span className="text-text text-sm">{name.replace(/_/g, " ")}</span>
               <span className="text-text font-medium">{formatNumber(latest.value)}</span>
             </div>
-            <Sparkline points={points} />
+            <Sparkline points={points} gradientId={`socialMetricFill-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`} />
             <div className="text-text-dim text-xs mt-1">
               {points.length} point{points.length !== 1 ? "s" : ""}
               {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
@@ -4847,7 +5540,7 @@ function InsightCharts({ metrics, compact = false }: { metrics: AccountMetrics; 
   );
 }
 
-function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
+function Sparkline({ points, gradientId }: { points: { time?: string; value: number }[]; gradientId: string }) {
   const data = points.map((point, index) => ({
     index,
     label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),
@@ -4859,7 +5552,7 @@ function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
           <defs>
-            <linearGradient id="socialMetricFill" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#f97316" stopOpacity={0.28} />
               <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
             </linearGradient>
@@ -4883,7 +5576,7 @@ function Sparkline({ points }: { points: { time?: string; value: number }[] }) {
             dataKey="value"
             stroke="#f97316"
             strokeWidth={2}
-            fill="url(#socialMetricFill)"
+            fill={`url(#${gradientId})`}
             dot={false}
             activeDot={{ r: 3, stroke: "#f97316", strokeWidth: 1, fill: "#111" }}
             isAnimationActive={false}

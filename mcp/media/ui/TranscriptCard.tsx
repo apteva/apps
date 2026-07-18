@@ -105,7 +105,7 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
   const refetch = () => {
     if (preview || !projectId) return;
     const url =
-      `/api/apps/media/transcripts/${encodeURIComponent(fid)}` +
+      `/api/apps/media/media/${encodeURIComponent(fid)}/transcript` +
       `?project_id=${encodeURIComponent(projectId)}`;
     fetch(url, { credentials: "same-origin" })
       .then((r) => {

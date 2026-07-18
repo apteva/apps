@@ -36,12 +36,32 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.43
+version: 0.10.51
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.43 fixes multi-provider
+  as a subscription-backed image provider. v0.10.51 adds a responsive chat
+  generation card with image previews, custom media controls, metadata, and
+  live queued-job promotion. v0.10.50 makes JPEG the default
+  image output and guarantees final JPEG files stay below 2 MB, preserving
+  quality 90 when possible and adapting quality or dimensions only when
+  required. v0.10.49 replaces browser-default
+  audio and video controls with a reusable Media Studio player, stable video
+  stages, generated thumbnail posters, exclusive playback, responsive controls,
+  and consistent card metadata. v0.10.48 adds Deepgram Aura as a
+  generic TTS provider with provider-specific routing, model choices, output
+  formats, and Storage saves. v0.10.47 keeps historical failed
+  jobs out of the active gallery feed and makes current UI errors dismissible
+  and temporary. v0.10.46 omits aspect_ratio for
+  Venice video models whose live constraints do not support it, including WAN
+  image-to-video variants. v0.10.45 adds newest-first cursor
+  pagination to media_history and the gallery, a history index, functional
+  since filtering, and 24-item incremental UI pages for large histories.
+  v0.10.44 moves generation into
+  a focused responsive dialog with a large prompt editor, grouped settings,
+  mobile sheet layout, sticky actions, keyboard focus handling, and automatic
+  reference-edit opening. v0.10.43 fixes multi-provider
   image options, stale panel responses, required video references,
   project-scoped previews, upload validation, and responsive/accessibility
   behavior. v0.10.42 includes project_id
@@ -106,7 +126,7 @@ requires:
     - role: audio_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [elevenlabs, fish-audio]
+      compatible_slugs: [elevenlabs, fish-audio, deepgram]
       capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech
@@ -139,7 +159,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image and audio ids may include a provider prefix when multiple providers are bound." }
-    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?. In chat, attach the returned _meta.chat_component through respond(components=[...])." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Voice creation is provider-neutral: source_type=prompt designs an ElevenLabs voice; source_type=audio clones through Fish Audio or ElevenLabs from source_audio/source_audios. Args also include provider?, name, transcripts?, source_image?, source_video?, labels?, options?." }
@@ -149,13 +169,26 @@ provides:
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
-    - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
+    - { name: media_history,  description: "List generations newest-first. Args: kind?, limit?, cursor?, since?. Returns next_cursor and has_more." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
     - slot: project.page
       label: Studio
       icon: image
       entry: /ui/MediaPanel.mjs
+  ui_components:
+    - name: generation-card
+      entry: /ui/GenerationCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          generation_id: { type: integer, minimum: 1 }
+          job_id: { type: integer, minimum: 1 }
+        anyOf:
+          - required: [generation_id]
+          - required: [job_id]
+      preview_props: { preview: true, generation_id: 1 }
 runtime:
   kind: source
   source:
@@ -215,6 +248,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/generations", Handler: a.handleListGenerations},
+		{Pattern: "/generations/", Handler: a.handleGetGeneration},
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/estimate", Handler: a.handleEstimate},
 		{Pattern: "/delete", Handler: a.handleDeleteGeneration},
@@ -228,6 +262,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/avatar-create-jobs", Handler: a.handleListAvatarCreateJobs},
 		{Pattern: "/voices", Handler: a.handleListVoices},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
+		{Pattern: "/video-jobs/", Handler: a.handleGetVideoJob},
 		{Pattern: "/storage-files", Handler: a.handleStorageFiles},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 	}
@@ -258,7 +293,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
 				"source_image? or source_images? (image edit and video references; Venice reference-to-video models support multiple refs), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras; video supports consents.seedance when required). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
-				"when no storage), text (summary), resource (fetchable URL per storage_id).",
+				"when no storage), text (summary), resource (fetchable URL per storage_id). For chat responses, " +
+				"pass the returned _meta.chat_component object unchanged in respond(components=[...]) so the generated " +
+				"media appears as a live attachment.",
 			InputSchema: schemaObject(map[string]any{
 				"kind": map[string]any{
 					"type":        "string",
@@ -320,7 +357,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"options": map[string]any{
 					"type":        "object",
-					"description": "Per-provider extras. For images, output_format (png|jpeg|webp) guarantees the final stored format even when the provider returns different bytes. Other extras include background, lyrics, style, seed, image_storage_id, background_url, fast, …",
+					"description": "Per-provider extras. Images default to JPEG below 2 MB. output_format (png|jpeg|webp) can override the format and guarantees final stored bytes match it even when the provider returns something different. Other extras include background, lyrics, style, seed, image_storage_id, background_url, fast, …",
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,
@@ -509,11 +546,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_history",
-			Description: "List recent generations for this project. Args: kind? (filter), limit? (default 50, max 200), since? (ISO8601).",
+			Description: "List generations for this project newest-first. Args: kind? (filter), limit? (default 50, max 200), cursor? (next_cursor from the previous page), since? (RFC3339). Returns generations, next_cursor, and has_more.",
 			InputSchema: schemaObject(map[string]any{
-				"kind":  map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music"}},
-				"limit": map[string]any{"type": "integer", "default": 50},
-				"since": map[string]any{"type": "string"},
+				"kind":   map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"}},
+				"limit":  map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+				"cursor": map[string]any{"type": "string", "description": "Opaque next_cursor returned by the previous media_history page."},
+				"since":  map[string]any{"type": "string", "description": "Only include generations created at or after this RFC3339 timestamp."},
 			}, nil),
 			Handler: a.toolMediaHistory,
 		},

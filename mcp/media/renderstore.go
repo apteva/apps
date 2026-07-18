@@ -18,15 +18,15 @@ import (
 // stores ISO8601 already; we don't round-trip to time.Time so panels
 // can render strings as-is).
 type RenderRow struct {
-	ID            int64    `json:"id"`
-	ProjectID     string   `json:"project_id"`
-	Operation     string   `json:"operation"`
-	SourceFileIDs []string `json:"source_file_ids"`
+	ID            int64           `json:"id"`
+	ProjectID     string          `json:"project_id"`
+	Operation     string          `json:"operation"`
+	SourceFileIDs []string        `json:"source_file_ids"`
 	Params        json.RawMessage `json:"params"`
-	Status        string   `json:"status"`
-	ProgressPct   int      `json:"progress_pct"`
-	OutputFileID  string   `json:"output_file_id,omitempty"`
-	OutputName    string   `json:"output_name,omitempty"`
+	Status        string          `json:"status"`
+	ProgressPct   int             `json:"progress_pct"`
+	OutputFileID  string          `json:"output_file_id,omitempty"`
+	OutputName    string          `json:"output_name,omitempty"`
 	// OutputFolder — where the result lands in storage. Set per-call
 	// at submit time, falling back to the install's
 	// render_output_folder config when empty.
@@ -101,6 +101,16 @@ func claimNextPending(db *sql.DB) (*RenderRow, error) {
 	return scanRender(row)
 }
 
+func recoverInterruptedRenders(db *sql.DB) (int64, error) {
+	res, err := db.Exec(`UPDATE renders
+		SET status = 'pending', progress_pct = 0, started_at = NULL, error = ''
+		WHERE status = 'running'`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // updateProgress writes the latest progress_pct without touching
 // status. Cheap (no row movement) so the worker can call it on
 // every ffmpeg progress chunk without coordination.
@@ -119,14 +129,24 @@ func renderUpdateProgress(db *sql.DB, id int64, pct int) error {
 // rejected by the WHERE clause.
 func renderMarkOk(db *sql.DB, id int64, outputFileID string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(`
+	res, err := db.Exec(`
 		UPDATE renders
 		   SET status = 'ok', progress_pct = 100,
 		       output_file_id = ?, completed_at = ?
 		 WHERE id = ? AND status = 'running'`,
 		outputFileID, now, id,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return errors.New("render is no longer running")
+	}
+	return nil
 }
 
 // markFailed records the error string and stamps completed_at.
@@ -178,19 +198,19 @@ type RenderFilters struct {
 // everything the queue header + lists need.
 type RenderQueueSummary struct {
 	Counts  RenderCounts `json:"counts"`
-	Running []RenderRow  `json:"running"`           // current running rows, oldest first (FIFO order)
-	Pending []RenderRow  `json:"pending"`           // oldest pending rows (FIFO), up to 20
-	Recent  []RenderRow  `json:"recent"`            // most recent terminal rows (ok/failed/cancelled), up to 10
+	Running []RenderRow  `json:"running"` // current running rows, oldest first (FIFO order)
+	Pending []RenderRow  `json:"pending"` // oldest pending rows (FIFO), up to 20
+	Recent  []RenderRow  `json:"recent"`  // most recent terminal rows (ok/failed/cancelled), up to 10
 }
 
 // RenderCounts is a snapshot of pipeline state. ok_24h + failed_24h
 // give the panel a "how's the queue been recently" feel without
 // dumping the whole history; pending + running are point-in-time.
 type RenderCounts struct {
-	Pending    int `json:"pending"`
-	Running    int `json:"running"`
-	Ok24h      int `json:"ok_24h"`
-	Failed24h  int `json:"failed_24h"`
+	Pending      int `json:"pending"`
+	Running      int `json:"running"`
+	Ok24h        int `json:"ok_24h"`
+	Failed24h    int `json:"failed_24h"`
 	Cancelled24h int `json:"cancelled_24h"`
 }
 

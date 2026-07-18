@@ -1,9 +1,7 @@
 package main
 
-// Tests for the v0.4 Provider abstraction. The slice-1 acceptance
-// bar is "no behavior change vs v0.3"; these prove that the new
-// activeProvider() picker mirrors the old currentMode() logic so
-// downstream callers see exactly the same answer either way.
+// Tests for explicit provider selection. Integration bindings and persisted
+// named-tunnel resources do not change providers without operator action.
 
 import (
 	"testing"
@@ -26,9 +24,8 @@ func TestActiveProvider_DefaultsToQuick(t *testing.T) {
 	}
 }
 
-// TestActiveProvider_FlipsToNamedWhenRowExists — the named provider
-// takes over as soon as a named_tunnels row is present, regardless
-// of prior install state. Mirrors v0.3's currentMode contract.
+// TestActiveProvider_FlipsToNamedWhenRowExists verifies the selection changes
+// only when runtime_state is explicitly updated.
 func TestActiveProvider_FlipsToNamedWhenRowExists(t *testing.T) {
 	ctx, _ := newTestCtxWithCF(t)
 	app := &App{}
@@ -41,12 +38,18 @@ func TestActiveProvider_FlipsToNamedWhenRowExists(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := dbSetActiveProvider(ctx.AppDB(), providerNameNamed); err != nil {
+		t.Fatal(err)
+	}
 	if got := app.activeProviderName(ctx); got != providerNameNamed {
 		t.Errorf("with named row: got %q, want %q", got, providerNameNamed)
 	}
 
 	// And after deletion the picker falls back to quick.
 	if err := dbDeleteNamedTunnel(ctx.AppDB(), "h.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSetActiveProvider(ctx.AppDB(), providerNameQuick); err != nil {
 		t.Fatal(err)
 	}
 	if got := app.activeProviderName(ctx); got != providerNameQuick {

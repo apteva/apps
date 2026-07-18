@@ -4,9 +4,10 @@ package main
 //
 // Deepgram can accept remote URLs directly, but handing it a 4 GB MOV
 // makes it fetch and demux a video container just to reach the audio
-// stream. For video sources we first create a small, normalized MP3
-// under /.media/transcript-audio/, store it as an internal derivation,
-// and pass that URL to Deepgram instead.
+// stream. For video sources we first create normalized transcription audio
+// under /.media/transcript-audio/, store it as an internal derivation, and
+// pass that URL to Deepgram. MP3 remains the compact primary format; PCM WAV
+// is the encoder-independent fallback for libmp3lame failures.
 
 import (
 	"context"
@@ -20,16 +21,23 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 const (
-	transcriptAudioFolder      = "/.media/transcript-audio/"
+	transcriptAudioFolder = "/.media/transcript-audio/"
+	// Keep the existing recipe key so already-prepared MP3 derivations remain
+	// reusable. New preparations still prefer MP3, but may store WAV when LAME
+	// rejects an otherwise valid source.
 	transcriptAudioRecipe      = "v1_loudnorm_16k_mono_mp3"
 	transcriptAudioKindPrefix  = "transcript_audio:"
-	transcriptAudioContentType = "audio/mpeg"
+	transcriptAudioMP3Type     = "audio/mpeg"
+	transcriptAudioWAVType     = "audio/wav"
 	transcriptAudioTimeoutSec  = 600
+	transcriptAudioLogMaxBytes = 64 << 10
+	remoteAudioLogTailBytes    = 16 << 10
 )
 
 const transcriptAudioFilter = "loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=80,lowpass=f=8000"
@@ -169,12 +177,20 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 	}
 	defer os.RemoveAll(work)
 
-	outPath := filepath.Join(work, fileID+".mp3")
-	args := transcriptAudioFFmpegArgs(sourceURL, outPath)
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	out, err := cmd.CombinedOutput()
+	mp3Path := filepath.Join(work, fileID+".mp3")
+	usedPCMFallback, err := runTranscriptAudioFFmpeg(ctx, ffmpegPath, sourceURL, mp3Path)
 	if err != nil {
-		return 0, fmt.Errorf("ffmpeg transcript audio: %w: %s", err, strings.TrimSpace(string(out)))
+		return 0, err
+	}
+	outPath := mp3Path
+	outputName := fileID + ".mp3"
+	contentType := transcriptAudioMP3Type
+	if usedPCMFallback {
+		outPath = transcriptAudioWAVPath(mp3Path)
+		outputName = fileID + ".wav"
+		contentType = transcriptAudioWAVType
+		app.Logger().Warn("transcript audio CBR encode failed; PCM WAV retry succeeded",
+			"file_id", fileID)
 	}
 	f, err := os.Open(outPath)
 	if err != nil {
@@ -182,7 +198,7 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 	}
 	defer f.Close()
 	storageID, err := sc.UploadInternalFile(ctx, projectID,
-		transcriptAudioFolder, fileID+".mp3", transcriptAudioContentType, f,
+		transcriptAudioFolder, outputName, contentType, f,
 		"media-transcript-audio", "internal,transcript-audio")
 	if err != nil {
 		return 0, fmt.Errorf("upload transcript audio: %w", err)
@@ -205,6 +221,124 @@ func transcriptAudioFFmpegArgs(sourceURL, outPath string) []string {
 		"-b:a", "64k",
 		outPath,
 	}
+}
+
+func transcriptAudioPCMFFmpegArgs(sourceURL, outPath string) []string {
+	return []string{
+		"-y",
+		"-loglevel", "error",
+		"-nostdin",
+		"-i", sourceURL,
+		"-vn",
+		"-map", "0:a:0",
+		"-ac", "1",
+		"-ar", "16000",
+		"-af", transcriptAudioFilter,
+		"-c:a", "pcm_s16le",
+		"-f", "wav",
+		outPath,
+	}
+}
+
+func transcriptAudioWAVPath(mp3Path string) string {
+	ext := filepath.Ext(mp3Path)
+	if ext == "" {
+		return mp3Path + ".wav"
+	}
+	return strings.TrimSuffix(mp3Path, ext) + ".wav"
+}
+
+// runTranscriptAudioFFmpeg preserves the established 64 kbit/s CBR MP3
+// output for the common path. libmp3lame's CBR and VBR paths both contain
+// content-dependent fatal edge cases, so any primary failure removes the
+// partial MP3 and retries with encoder-independent 16-bit PCM WAV. The caller
+// uses the boolean to select the fallback path and correct Storage MIME type.
+func runTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceURL, outPath string) (bool, error) {
+	primaryOut, primaryErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioFFmpegArgs(sourceURL, outPath), outPath)
+	if primaryErr == nil {
+		return false, nil
+	}
+	primaryFailure := transcriptAudioFFmpegFailure(primaryErr, primaryOut)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("ffmpeg transcript audio CBR: %w: %s", ctxErr, primaryFailure)
+	}
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("remove partial transcript audio after CBR failure: %w (CBR: %s)", err, primaryFailure)
+	}
+
+	fallbackPath := transcriptAudioWAVPath(outPath)
+	if err := os.Remove(fallbackPath); err != nil && !os.IsNotExist(err) {
+		return true, fmt.Errorf("remove stale PCM transcript audio before retry: %w (CBR: %s)", err, primaryFailure)
+	}
+	fallbackOut, fallbackErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioPCMFFmpegArgs(sourceURL, fallbackPath), fallbackPath)
+	if fallbackErr != nil {
+		_ = os.Remove(fallbackPath)
+		return true, fmt.Errorf("ffmpeg transcript audio failed (CBR: %s; PCM WAV retry: %s)",
+			primaryFailure, transcriptAudioFFmpegFailure(fallbackErr, fallbackOut))
+	}
+	return true, nil
+}
+
+func executeTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath string, args []string, outPath string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	logs := &transcriptAudioLogBuffer{max: transcriptAudioLogMaxBytes}
+	cmd.Stdout = logs
+	cmd.Stderr = logs
+	err := cmd.Run()
+	out := logs.Bytes()
+	if err != nil {
+		return out, err
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		return out, fmt.Errorf("stat output: %w", err)
+	}
+	if info.Size() == 0 {
+		return out, errors.New("ffmpeg produced an empty transcript audio output")
+	}
+	return out, nil
+}
+
+// transcriptAudioLogBuffer retains the tail of noisy FFmpeg output without
+// allowing a broken encoder to consume unbounded memory. The useful LAME
+// assertion and exit diagnostics are at the end of stderr.
+type transcriptAudioLogBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func (b *transcriptAudioLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if b.max <= 0 {
+		return n, nil
+	}
+	if len(p) >= b.max {
+		b.buf = append(b.buf[:0], p[len(p)-b.max:]...)
+		return n, nil
+	}
+	b.buf = append(b.buf, p...)
+	if extra := len(b.buf) - b.max; extra > 0 {
+		copy(b.buf, b.buf[extra:])
+		b.buf = b.buf[:b.max]
+	}
+	return n, nil
+}
+
+func (b *transcriptAudioLogBuffer) Bytes() []byte {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]byte(nil), b.buf...)
+}
+
+func transcriptAudioFFmpegFailure(err error, out []byte) string {
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		return err.Error()
+	}
+	return fmt.Sprintf("%v: %s", err, truncate(detail, 1200))
 }
 
 type remoteTranscriptAudioResult struct {
@@ -247,7 +381,7 @@ func prepareTranscriptAudioRemote(ctx context.Context, app *sdk.AppCtx, projectI
 	}
 	res, err := parseRemoteTranscriptAudio(out)
 	if err != nil {
-		return 0, fmt.Errorf("parse remote transcript audio result: %w (output=%s)", err, truncate(out, 400))
+		return 0, fmt.Errorf("parse remote transcript audio result after successful remote exit: %w (output may have been truncated; output=%s)", err, truncate(out, 400))
 	}
 	if res.StorageFileID <= 0 {
 		return 0, errors.New("remote transcript audio returned empty storage_file_id")
@@ -271,24 +405,47 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(in.StorageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+boundStorageProxyPath))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(in.ProjectID))
 	fmt.Fprintf(&b, "export SRC_ID=%s\n", shellQuote(in.FileID))
 	fmt.Fprintf(&b, "export SIGNED_URL=%s\n", shellQuote(in.SignedURL))
 	fmt.Fprintf(&b, "export FFMPEG=%s\n", shellQuote(in.FFmpeg))
 	fmt.Fprintf(&b, "export AUDIO_FILTER=%s\n", shellQuote(transcriptAudioFilter))
-	b.WriteString(`"$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3` + "\n")
-	b.WriteString(`if [ ! -s audio.mp3 ]; then echo "ffmpeg produced no transcript audio output" >&2; exit 1; fi` + "\n")
+	fmt.Fprintf(&b, "export AUDIO_LOG_TAIL_BYTES=%d\n", remoteAudioLogTailBytes)
+	b.WriteString(`CBR_STATUS=0` + "\n")
+	b.WriteString(`"$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3 >cbr.log 2>&1 || CBR_STATUS=$?` + "\n")
+	b.WriteString(`if [ "$CBR_STATUS" -eq 0 ] && [ -s audio.mp3 ]; then` + "\n")
+	b.WriteString(`  AUDIO_PATH=audio.mp3` + "\n")
+	b.WriteString(`  AUDIO_CONTENT_TYPE=audio/mpeg` + "\n")
+	b.WriteString(`  AUDIO_FILENAME="$SRC_ID.mp3"` + "\n")
+	b.WriteString(`else` + "\n")
+	b.WriteString(`  if [ "$CBR_STATUS" -eq 0 ]; then CBR_STATUS=1; fi` + "\n")
+	b.WriteString(`  echo "ffmpeg CBR transcript audio failed (exit=$CBR_STATUS); retrying PCM WAV" >&2` + "\n")
+	b.WriteString(`  tail -c "$AUDIO_LOG_TAIL_BYTES" cbr.log >&2 2>/dev/null || true` + "\n")
+	b.WriteString(`  rm -f audio.mp3 audio.wav` + "\n")
+	b.WriteString(`  PCM_STATUS=0` + "\n")
+	b.WriteString(`  "$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a pcm_s16le -f wav audio.wav >pcm.log 2>&1 || PCM_STATUS=$?` + "\n")
+	b.WriteString(`  if [ "$PCM_STATUS" -ne 0 ] || [ ! -s audio.wav ]; then` + "\n")
+	b.WriteString(`    if [ "$PCM_STATUS" -eq 0 ]; then PCM_STATUS=1; fi` + "\n")
+	b.WriteString(`    echo "ffmpeg PCM WAV transcript audio failed (exit=$PCM_STATUS)" >&2` + "\n")
+	b.WriteString(`    tail -c "$AUDIO_LOG_TAIL_BYTES" pcm.log >&2 2>/dev/null || true` + "\n")
+	b.WriteString(`    exit "$PCM_STATUS"` + "\n")
+	b.WriteString(`  fi` + "\n")
+	b.WriteString(`  AUDIO_PATH=audio.wav` + "\n")
+	b.WriteString(`  AUDIO_CONTENT_TYPE=audio/wav` + "\n")
+	b.WriteString(`  AUDIO_FILENAME="$SRC_ID.wav"` + "\n")
+	b.WriteString(`fi` + "\n")
 	b.WriteString(`RESP=$(curl -sS --fail -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
   -F "folder=/.media/transcript-audio/" \
   -F "visibility=private" \
   -F "source=media-transcript-audio" \
   -F "tags=internal,transcript-audio" \
-  -F "file=@audio.mp3;type=audio/mpeg;filename=$SRC_ID.mp3" \
+  -F "file=@$AUDIO_PATH;type=$AUDIO_CONTENT_TYPE;filename=$AUDIO_FILENAME" \
   "$STORAGE_BASE/files?project_id=$PROJECT_ID")` + "\n")
 	b.WriteString(`AUDIO_FILE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)` + "\n")
 	b.WriteString(`: "${AUDIO_FILE_ID:=0}"` + "\n")
+	b.WriteString(`if [ "$AUDIO_FILE_ID" -le 0 ]; then echo "storage transcript audio upload returned no file id: $(printf '%.400s' "$RESP")" >&2; exit 1; fi` + "\n")
 	b.WriteString(`printf 'APTEVA_TRANSCRIPT_AUDIO:{"storage_file_id":%s}\n' "$AUDIO_FILE_ID"` + "\n")
 	return b.String()
 }

@@ -33,6 +33,9 @@ func (a *App) toolTenantInventory(appCtx *sdk.AppCtx, args map[string]any) (any,
 	if grants, err := a.store.listDomainGrants(tenantID); err == nil {
 		out["domain_grants"] = grants
 	}
+	if hosts, err := a.store.listTenantHosts(tenantID); err == nil {
+		out["tenant_hosts"] = hosts
+	}
 	if grants, err := a.store.listProviderGrants(tenantID); err == nil {
 		out["provider_grants"] = grants
 	}

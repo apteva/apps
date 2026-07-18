@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -220,6 +221,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 		"cache_key":                  cacheKey,
 		"storage_folder":             storageFolder,
 		"estimated_duration_seconds": estimatedSeconds,
+		"chat_component":             generationChatComponent(draftID, jobID),
 	}
 	if refs, ok := args["_source_image_refs"].([]string); ok && len(refs) > 0 {
 		safeRefs := persistedMediaRefs(refs)
@@ -297,6 +299,7 @@ func veniceVideoQuote(ctx *sdk.AppCtx, providerSlug string, args map[string]any)
 	if bound == nil {
 		return 0
 	}
+	normalizeVeniceVideoArgsForModel(ctx, args, "video.generate")
 	// Quote accepts a subset of queue's args — model + duration required;
 	// aspect_ratio, resolution, upscale_factor, audio optional.
 	quoteArgs := map[string]any{
@@ -330,11 +333,7 @@ func videoDurationArg(args map[string]any) string {
 	return "5s"
 }
 
-func normalizeVeniceVideoDurationForModel(ctx *sdk.AppCtx, args map[string]any, capability string) {
-	requested := durationArgSeconds(args)
-	if requested <= 0 {
-		return
-	}
+func normalizeVeniceVideoArgsForModel(ctx *sdk.AppCtx, args map[string]any, capability string) {
 	model := strings.TrimSpace(strArg(args, "model", ""))
 	if model == "" {
 		return
@@ -347,8 +346,15 @@ func normalizeVeniceVideoDurationForModel(ctx *sdk.AppCtx, args map[string]any, 
 		if entry.ID != model {
 			continue
 		}
-		if snapped := snapDurationToSupported(requested, entry.Durations); snapped > 0 {
-			args["duration"] = fmt.Sprintf("%ds", snapped)
+		if requested := durationArgSeconds(args); requested > 0 {
+			if snapped := snapDurationToSupported(requested, entry.Durations); snapped > 0 {
+				args["duration"] = fmt.Sprintf("%ds", snapped)
+			}
+		}
+		// An empty published aspect list means Venice rejects the
+		// aspect_ratio field entirely.
+		if len(entry.AspectRatios) == 0 {
+			delete(args, "aspect")
 		}
 		return
 	}
@@ -396,8 +402,8 @@ func videoJobUpdateStatus(ctx *sdk.AppCtx, jobID int64, status, errMsg string) {
 	}
 }
 
-// HTTP /video-jobs — panel polls this to render an "X processing" badge
-// and to surface failures the user might otherwise miss.
+// HTTP /video-jobs — panel polls this to render active processing jobs.
+// Historical failures remain available through ?status=failed.
 func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -423,8 +429,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 		q += ` AND status = ?`
 		args = append(args, statusFilter)
 	} else {
-		// Default: in-flight + recently-failed (last 24h).
-		q += ` AND (status IN ('queued','polling','finalizing','failed') OR updated_at > datetime('now','-1 day'))`
+		q += ` AND status IN ('queued','polling','finalizing')`
 	}
 	q += ` ORDER BY id DESC LIMIT 100`
 
@@ -468,6 +473,62 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"jobs": out})
+}
+
+// HTTP /video-jobs/<id> lets a chat attachment follow an asynchronous
+// generation until it can promote itself to the completed generation.
+func (a *App) handleGetVideoJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	id, err := pathID(r.URL.Path, "/video-jobs/")
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var (
+		storageID, generationID, attempts                      int64
+		queueID, kind, provider, model, prompt, status, errMsg string
+		createdAt, updatedAt                                   string
+		costUSD, estimatedDuration, actualDuration             float64
+	)
+	err = globalCtx.AppDB().QueryRow(
+		`SELECT queue_id, kind, provider, model, prompt, status, error,
+		        result_storage_id, generation_id, attempts, cost_usd,
+		        estimated_duration_seconds, actual_duration_seconds, created_at, updated_at
+		 FROM video_jobs WHERE id = ? AND project_id = ?`,
+		id, pid,
+	).Scan(&queueID, &kind, &provider, &model, &prompt, &status, &errMsg,
+		&storageID, &generationID, &attempts, &costUSD, &estimatedDuration,
+		&actualDuration, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"job": map[string]any{
+		"id": id, "queue_id": queueID, "kind": kind, "provider": provider,
+		"model": model, "prompt": prompt, "status": status, "error": errMsg,
+		"result_storage_id": storageID, "generation_id": generationID,
+		"attempts": attempts, "cost_usd": costUSD,
+		"estimated_duration_seconds": estimatedDuration,
+		"actual_duration_seconds":    actualDuration,
+		"created_at":                 createdAt, "updated_at": updatedAt,
+	}})
 }
 
 // videoJobMarkComplete records the storage handoff + generations row id.

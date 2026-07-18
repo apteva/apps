@@ -134,6 +134,66 @@ func TestMCPMultipartUpload_HappyPath(t *testing.T) {
 	}
 }
 
+func TestMCPMultipartUpload_SameBytesDifferentDestinationDoesNotDedup(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+	existing := mustUpload(t, ctx, "old.png", "/renders/", "identical rendered pixels")
+
+	out, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"name":       "requested.png",
+		"folder":     "/hgv/tracy/",
+		"size_bytes": existing.SizeBytes,
+		"sha256":     existing.SHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsp := out.(map[string]any)
+	if rsp["was_existing"] == true {
+		t.Fatalf("different destination must not dedupe: %+v", rsp)
+	}
+	if id, _ := rsp["upload_id"].(string); id == "" {
+		t.Fatalf("expected a new upload session: %+v", rsp)
+	}
+}
+
+func TestMCPMultipartUpload_CompleteSameBytesElsewhereCreatesRequestedFile(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+	payload := []byte("agent render bytes")
+	sha := hex.EncodeToString(sha256SumOf(payload))
+
+	out, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"name": "requested.png", "folder": "/hgv/tracy/",
+		"size_bytes": int64(len(payload)), "sha256": sha,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.(map[string]any)["upload_id"].(string)
+	if _, err := app.toolUploadPartCtx(context.Background(), ctx, map[string]any{
+		"upload_id": id, "part_number": 1, "content_base64": b64(string(payload)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	existing := mustUpload(t, ctx, "old.png", "/renders/", string(payload))
+
+	done, err := app.toolUploadCompleteCtx(context.Background(), ctx, map[string]any{
+		"upload_id": id, "sha256": sha,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsp := done.(map[string]any)
+	file := rsp["file"].(*File)
+	if file.ID == existing.ID || file.Name != "requested.png" || file.Folder != "/hgv/tracy/" {
+		t.Fatalf("requested destination was not materialised: existing=%+v result=%+v", existing, file)
+	}
+	if rsp["was_existing"] == true {
+		t.Fatalf("unexpected reuse: %+v", rsp)
+	}
+}
+
 func TestMCPMultipartUpload_RejectsOversizedChunk(t *testing.T) {
 	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
 	app := &App{}
@@ -373,8 +433,9 @@ func TestUploads_PreDedupShortCircuit(t *testing.T) {
 
 	app := &App{}
 	bj, _ := json.Marshal(map[string]any{
-		"filename": "redundant.bin",
-		"size":     1,
+		"filename": "preseed.bin",
+		"folder":   "/",
+		"size":     existing.SizeBytes,
 		"sha256":   wantSHA,
 	})
 	req := httptest.NewRequest("POST", "/uploads?project_id=test-proj", bytes.NewReader(bj))
@@ -391,6 +452,68 @@ func TestUploads_PreDedupShortCircuit(t *testing.T) {
 	}
 	if rsp["upload_id"] != nil {
 		t.Errorf("expected no upload_id (short-circuit), got %v", rsp["upload_id"])
+	}
+}
+
+func TestUploads_PreDedupSameBytesDifferentDestinationCreatesSession(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	existing := mustUpload(t, ctx, "old.png", "/renders/", "the same bytes")
+
+	app := &App{}
+	rsp := startUpload(t, app, map[string]any{
+		"filename": "requested.png",
+		"folder":   "/hgv/tracy/",
+		"size":     existing.SizeBytes,
+		"sha256":   existing.SHA256,
+	})
+	if rsp["was_existing"] == true {
+		t.Fatalf("same bytes at a different destination must not dedupe: %+v", rsp)
+	}
+	if id, _ := rsp["upload_id"].(string); id == "" {
+		t.Fatalf("expected upload session for requested destination: %+v", rsp)
+	}
+}
+
+func TestUploads_CompleteSameBytesElsewhereCreatesRequestedFile(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()))
+	app := &App{}
+	payload := []byte("identical rendered pixels")
+	sha := sha256.Sum256(payload)
+	shaHex := hex.EncodeToString(sha[:])
+
+	init := startUpload(t, app, map[string]any{
+		"filename": "requested.png",
+		"folder":   "/hgv/tracy/",
+		"size":     len(payload),
+		"sha256":   shaHex,
+	})
+	id, _ := init["upload_id"].(string)
+	if id == "" {
+		t.Fatalf("missing upload_id: %+v", init)
+	}
+	if rec := putPart(t, app, id, 1, payload, "1"); rec.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+	}
+	// Simulate an identical render landing elsewhere after init but before
+	// complete. The defensive dedupe check must still respect destination.
+	existing := mustUpload(t, ctx, "old.png", "/renders/", string(payload))
+
+	rec := completeUpload(t, app, id)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("complete: %d %s", rec.Code, rec.Body.String())
+	}
+	var rsp struct {
+		File        *File `json:"file"`
+		WasExisting bool  `json:"was_existing"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&rsp); err != nil {
+		t.Fatal(err)
+	}
+	if rsp.File == nil || rsp.File.Name != "requested.png" || rsp.File.Folder != "/hgv/tracy/" {
+		t.Fatalf("requested destination was not materialised: %+v", rsp.File)
+	}
+	if rsp.File.ID == existing.ID || rsp.WasExisting {
+		t.Fatalf("unexpected reuse of file %d: %+v", existing.ID, rsp)
 	}
 }
 

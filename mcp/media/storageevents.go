@@ -280,7 +280,10 @@ func updateFolderFromEvent(app *sdk.AppCtx, data map[string]any, projectID strin
 //
 // The actual probe + thumbnail + waveform work happens in
 // indexOneFile; this is just the event-payload → StorageFile
-// adapter.
+// adapter. The periodic indexer remains the fallback when the small
+// immediate-work pool is saturated.
+var eventIndexSlots = make(chan struct{}, 4)
+
 func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 	if existed, _ := data["was_existing"].(bool); existed {
 		return
@@ -298,11 +301,19 @@ func indexFromEvent(app *sdk.AppCtx, data map[string]any, projectID string) {
 		return
 	}
 
-	// Spawn a goroutine: indexOneFile downloads bytes, runs ffprobe,
-	// generates derivations — all of which can take seconds. We
-	// don't want to block the SSE reader from picking up the next
-	// event while one file is being processed.
-	go indexOneFile(context.Background(), app, projectID, *f)
+	// Never let an upload burst create an unbounded number of ffmpeg
+	// goroutines. If all slots are occupied, the scheduled indexer
+	// will pick this file up on its next sweep.
+	select {
+	case eventIndexSlots <- struct{}{}:
+		go func() {
+			defer func() { <-eventIndexSlots }()
+			indexOneFile(context.Background(), app, projectID, *f)
+		}()
+	default:
+		app.Logger().Info("event index pool saturated; deferring to scheduled sweep",
+			"project_id", projectID, "file_id", f.ID)
+	}
 }
 
 // storageFileFromEvent reconstructs a StorageFile from the event's
@@ -380,8 +391,17 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 		return
 	}
 
-	// Lookup our row + its derivations BEFORE deleting; we'll need
-	// the derivations.storage_file_id list to clean their blobs.
+	// A file.deleted event may describe a hidden thumbnail/keyframe rather
+	// than a catalogued source. Invalidate that pointer before looking for a
+	// media row whose source ID matches the event ID. This closes the stale-ID
+	// window for legacy Storage installs and is harmless for source deletions.
+	if removed, err := deleteDerivationReferencesByStorageID(app.AppDB(), projectID, fileID); err != nil {
+		log.Warn("derivation reference cleanup failed", "storage_file_id", fileID, "err", err)
+	} else if removed > 0 {
+		log.Info("removed deleted storage derivative references", "storage_file_id", fileID, "count", removed)
+	}
+
+	// Confirm this is an indexed source before running the targeted cascade.
 	row, err := getMedia(app.AppDB(), projectID, fileID)
 	if err != nil {
 		// notFound is the common case — storage delete fired for a
@@ -389,28 +409,9 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 		return
 	}
 
-	for _, d := range row.Derivations {
-		if d.StorageFileID == "" {
-			continue
-		}
-		// Hard-delete the thumbnail/waveform blob in storage. Best-
-		// effort: storage may already be in the process of cleaning
-		// (cascading delete cascade), or the derivation file may
-		// already be gone — both fine.
-		sid, err := strconv.ParseInt(d.StorageFileID, 10, 64)
-		if err != nil {
-			continue
-		}
-		if err := deleteStorageFile(app, projectID, sid); err != nil {
-			log.Info("derivation blob delete failed (probably already gone)",
-				"file_id", fileID, "kind", d.Kind, "storage_file_id", d.StorageFileID, "err", err)
-		}
-	}
-
-	// Cascade the DB rows. purgeOrphans takes a current-storage list
-	// and deletes media rows NOT in it; we synthesise the inverse —
-	// pass everything BUT this one file_id. Cleaner approach: a
-	// targeted helper.
+	// cascadeDeleteOne owns both storage-blob and DB cleanup. Keeping
+	// all deletion in that helper avoids issuing every derivation
+	// DELETE twice for a single storage event.
 	if err := cascadeDeleteOne(app, newStorageClient(), app.AppDB(), projectID, fileID); err != nil {
 		log.Warn("cascade delete failed", "file_id", fileID, "err", err)
 		return
@@ -418,34 +419,4 @@ func cascadeDeleteFromEvent(app *sdk.AppCtx, data map[string]any, projectID stri
 	log.Info("cascade-deleted media row from storage event",
 		"file_id", fileID, "derivations", len(row.Derivations))
 	app.EmitWithProject("media.deleted", projectID, map[string]any{"file_id": fileID})
-}
-
-// deleteStorageFile calls storage's HTTP DELETE for one file, with
-// the gateway URL + bearer plumbing.
-func deleteStorageFile(app *sdk.AppCtx, projectID string, fileID int64) error {
-	gw := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
-	if gw == "" {
-		return errors.New("APTEVA_GATEWAY_URL not set")
-	}
-	token := os.Getenv("APTEVA_OUTBOUND_TOKEN")
-	if token == "" {
-		token = os.Getenv("APTEVA_APP_TOKEN")
-	}
-	url := fmt.Sprintf("%s/api/apps/storage/files/%d?project_id=%s",
-		gw, fileID, projectID)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodDelete, url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	return nil
 }

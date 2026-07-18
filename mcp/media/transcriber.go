@@ -128,7 +128,7 @@ func transcriberOne(app *sdk.AppCtx, msg transcriberMsg) {
 		log.Error("queue pending transcript failed", "file_id", msg.FileID, "err", err)
 		return
 	}
-	row, err := claimNextPendingTranscript(app.AppDB())
+	row, err := claimNextPendingTranscript(app.AppDB(), msg.ProjectID)
 	if err != nil {
 		if !isNoRows(err) {
 			log.Error("claim transcript failed", "err", err)
@@ -178,6 +178,14 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 		// next tick will retry.
 		return
 	}
+	bound := app.IntegrationFor("transcripts")
+	if bound == nil {
+		// Do not create and immediately skip the same queue rows on
+		// every sweep. Once an integration is connected, the normal
+		// candidate query will discover both missing and previously
+		// integration-skipped rows.
+		return
+	}
 
 	// 1. Find eligible media rows that don't yet have a transcript
 	// (or whose source has changed). Insert pending rows for each.
@@ -194,19 +202,8 @@ func transcriberSweepOne(app *sdk.AppCtx) {
 
 	// 2. Drain pending rows. Stop if integration unavailable so we
 	// don't churn the queue against a wall.
-	bound := app.IntegrationFor("transcripts")
-	if bound == nil {
-		// Surface once per sweep; flip pending rows to skipped so we
-		// don't pile them up while no integration is bound.
-		for _, fid := range candidates {
-			_ = transcriptMarkSkipped(db, fid, "no transcripts integration bound — connect Deepgram in app settings")
-		}
-		log.Info("no transcripts integration bound; skipping pending rows", "project", pid)
-		return
-	}
-
 	for {
-		row, err := claimNextPendingTranscript(db)
+		row, err := claimNextPendingTranscript(db, pid)
 		if err != nil {
 			// sql.ErrNoRows = queue empty; anything else is a real error.
 			if isNoRows(err) {
@@ -237,11 +234,11 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	maxMinutes := parseConfigIntFallback(cfg.Get("transcribe_max_duration_minutes"), 120)
 	media, err := getMedia(db, row.ProjectID, row.FileID)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "media row missing: "+err.Error())
+		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "media row missing: "+err.Error())
 		return
 	}
 	if media.DurationMs > int64(maxMinutes)*60_000 {
-		_ = transcriptMarkSkipped(db, row.FileID,
+		_ = transcriptMarkSkipped(db, row.ProjectID, row.FileID,
 			fmt.Sprintf("source duration %d ms exceeds cap of %d minutes", media.DurationMs, maxMinutes))
 		return
 	}
@@ -257,7 +254,7 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	sc := newStorageClient()
 	signedURL, err := signedURLForDeepgram(ctx, app, sc, media)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "prepare transcript audio: "+err.Error())
+		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "prepare transcript audio: "+err.Error())
 		return
 	}
 
@@ -288,13 +285,14 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 	}
 
 	// Call Deepgram via the platform.
-	res, err := app.PlatformAPI().ExecuteIntegrationTool(
+	res, err := executeIntegrationToolWithTimeout(app,
 		bound.ConnectionID,
 		bound.ToolFor("transcribe"),
 		args,
+		time.Duration(parseConfigIntFallback(cfg.Get("transcribe_timeout_seconds"), 600))*time.Second,
 	)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "deepgram call: "+err.Error())
+		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "deepgram call: "+err.Error())
 		return
 	}
 	if res == nil || !res.Success {
@@ -302,14 +300,14 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		if res != nil {
 			body = string(res.Data)
 		}
-		_ = transcriptMarkFailed(db, row.FileID, "deepgram non-2xx: "+truncate(body, 500))
+		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "deepgram non-2xx: "+truncate(body, 500))
 		return
 	}
 
 	// Parse Deepgram's response into our TranscriptRow shape.
 	parsed, err := parseDeepgramResponse(res.Data)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "parse deepgram: "+err.Error())
+		_ = transcriptMarkFailed(db, row.ProjectID, row.FileID, "parse deepgram: "+err.Error())
 		return
 	}
 

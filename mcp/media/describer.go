@@ -262,7 +262,6 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 	// bearing files where the transcript can easily run 5000+ chars.
 	maxTokens := parseConfigIntFallback(cfg.Get("describe_max_tokens"), 8000)
 	timeout := time.Duration(parseConfigIntFallback(cfg.Get("describe_timeout_seconds"), 120)) * time.Second
-	_ = timeout // timeout is enforced by the platform's HTTP client; reserved for future per-call override.
 
 	args := map[string]any{
 		"model":      model,
@@ -276,10 +275,11 @@ func runOneDescription(app *sdk.AppCtx, bound *sdk.BoundIntegration, projectID, 
 		args["temperature"] = 0.3
 	}
 
-	res, err := app.PlatformAPI().ExecuteIntegrationTool(
+	res, err := executeIntegrationToolWithTimeout(app,
 		bound.ConnectionID,
 		bound.ToolFor("chat.complete"),
 		args,
+		timeout,
 	)
 	if err != nil {
 		_ = markDescribeAttempt(db, projectID, fileID, "describe call: "+err.Error())
@@ -585,6 +585,9 @@ func sampleEvenly(rows []DerivationRow, n int) []DerivationRow {
 	}
 	if len(rows) <= n {
 		return rows
+	}
+	if n == 1 {
+		return []DerivationRow{rows[len(rows)/2]}
 	}
 	out := make([]DerivationRow, 0, n)
 	// Use float steps so the last index lands near len-1 instead of

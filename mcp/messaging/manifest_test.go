@@ -74,6 +74,48 @@ func TestManifestAndYAMLAgree(t *testing.T) {
 	if !reflect.DeepEqual(configContracts(disk), configContracts(embedded)) {
 		t.Fatalf("config drift: disk=%v embedded=%v", configContracts(disk), configContracts(embedded))
 	}
+	if !reflect.DeepEqual(routeContracts(disk), routeContracts(embedded)) {
+		t.Fatalf("HTTP route drift: disk=%v embedded=%v", routeContracts(disk), routeContracts(embedded))
+	}
+}
+
+func TestProviderWebhookRoutesArePublic(t *testing.T) {
+	expected := map[string]bool{
+		"/webhooks/ses-bounces":    false,
+		"/webhooks/ses-inbound":    false,
+		"/webhooks/twilio-inbound": false,
+		"/webhooks/twilio-status":  false,
+	}
+	for _, route := range (&App{}).HTTPRoutes() {
+		if _, ok := expected[route.Pattern]; !ok {
+			if route.NoAuth {
+				t.Errorf("non-webhook route %q must require app authentication", route.Pattern)
+			}
+			continue
+		}
+		if route.Method != "POST" || !route.NoAuth {
+			t.Errorf("provider webhook %q must be public POST, got method=%q no_auth=%v", route.Pattern, route.Method, route.NoAuth)
+		}
+		expected[route.Pattern] = true
+	}
+	for pattern, found := range expected {
+		if !found {
+			t.Errorf("provider webhook route %q is not registered", pattern)
+		}
+	}
+
+	manifest := (&App{}).Manifest()
+	public := map[string]bool{}
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if route.NoAuth {
+			public[route.Prefix] = route.Method == "POST"
+		}
+	}
+	for pattern := range expected {
+		if !public[pattern] {
+			t.Errorf("manifest must expose %q as public POST", pattern)
+		}
+	}
 }
 
 func sortedToolNames(tools []sdk.MCPToolSpec) []string {
@@ -107,6 +149,15 @@ func configContracts(manifest *sdk.Manifest) []string {
 	contracts := make([]string, 0, len(manifest.ConfigSchema))
 	for _, field := range manifest.ConfigSchema {
 		contracts = append(contracts, field.Name+"|"+field.Type)
+	}
+	sort.Strings(contracts)
+	return contracts
+}
+
+func routeContracts(manifest *sdk.Manifest) []string {
+	contracts := make([]string, 0, len(manifest.Provides.HTTPRoutes))
+	for _, route := range manifest.Provides.HTTPRoutes {
+		contracts = append(contracts, route.Method+"|"+route.Prefix+"|"+strconv.FormatBool(route.NoAuth))
 	}
 	sort.Strings(contracts)
 	return contracts

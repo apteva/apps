@@ -1,4 +1,4 @@
-// Catalog v0.1.0 — the source-of-truth app for "what your business sells".
+// Catalog v0.2.0 — the source-of-truth app for "what your business sells".
 //
 // Two entities (Stripe-shaped):
 //   - Product: the thing (SaaS plan, ecommerce SKU, consulting service).
@@ -32,9 +32,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: catalog
 display_name: Catalog
-version: 0.1.2
+version: 0.2.0
 description: |
-  Products and prices — source of truth for what the business sells.
+  Products, prices, and discounts — source of truth for what the business sells.
   Modelled after Stripe's Product + Price split. Self-contained: calls
   no other app; downstream apps (billing, subscriptions, checkout)
   call catalog.
@@ -79,7 +79,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("catalog mounted",
-		"version", "0.1.2",
+		"version", "0.2.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -169,7 +169,7 @@ func (a *App) handleHTTPPriceItem(w http.ResponseWriter, r *http.Request) {
 // ─── MCP tools ──────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		// ── Products ─────────────────────────────────────────────────
 		{
 			Name:        "catalog_products_list",
@@ -291,6 +291,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPricesArchive,
 		},
 	}
+	return append(tools, a.discountTools()...)
 }
 
 func main() { sdk.Run(&App{}) }

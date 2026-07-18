@@ -132,9 +132,10 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		visibility = configuredDefaultVisibility(ctx)
 	}
 
-	// Pre-dedup: if we already have these bytes in this project,
-	// short-circuit. Saves the client an upload + the bucket a write.
-	if existing, err := dbFindBySHA(ctx.AppDB(), pid, body.SHA256); err == nil && existing != nil {
+	// Pre-dedup only an exact destination match. The same bytes under a
+	// new filename/folder are a distinct user-visible file and must be
+	// uploaded/materialised there.
+	if existing, err := dbFindExact(ctx.AppDB(), pid, body.SHA256, body.Folder, body.Name); err == nil && existing != nil {
 		httpJSON(w, map[string]any{
 			"file":         existing,
 			"was_existing": true,
@@ -259,11 +260,10 @@ func (a *App) handleDirectFinalize(w http.ResponseWriter, r *http.Request, uploa
 		return
 	}
 
-	// Defensive dedup re-check — between init and finalize, another
-	// upload of the same bytes might have raced ahead and already
-	// inserted a row. Use the existing one and tombstone the bucket
-	// object we just verified.
-	if existing, err := dbFindBySHA(ctx.AppDB(), pid, declaredSHA); err == nil && existing != nil {
+	// Defensive exact-destination dedup re-check — between init and
+	// finalize, another upload might have created this same file. A row
+	// with the same bytes elsewhere must not replace the requested output.
+	if existing, err := dbFindExact(ctx.AppDB(), pid, declaredSHA, folder, name); err == nil && existing != nil {
 		_ = be.Delete(r.Context(), objKey)
 		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_uploads WHERE upload_id = ?`, uploadID)
 		httpJSON(w, map[string]any{

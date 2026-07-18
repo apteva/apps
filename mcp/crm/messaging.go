@@ -1118,29 +1118,96 @@ func (a *App) toolSendTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.sendMessageImpl(ctx, args, true)
 }
 
-func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
-	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
+func positiveMessageInteger(raw any, field string) (int64, error) {
+	var value int64
+	switch typed := raw.(type) {
+	case float64:
+		value = int64(typed)
+		if float64(value) != typed {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+	case int:
+		value = int64(typed)
+	case int64:
+		value = typed
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+		value = parsed
+	case string:
+		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("%s must be an integer", field)
+		}
+		value = parsed
+	default:
+		return 0, fmt.Errorf("%s must be an integer", field)
 	}
+	if value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", field)
+	}
+	return value, nil
+}
+
+func validateOutboundMessageArgs(args map[string]any) (int64, string, int64, string, error) {
+	contactRaw, hasContactID := args["id"]
+	if !hasContactID {
+		contactRaw, hasContactID = args["contact_id"]
+	}
+	if !hasContactID {
+		return 0, "", 0, "", errors.New("id (contact id) must be a positive integer")
+	}
+	cid, err := positiveMessageInteger(contactRaw, "id (contact id)")
+	if err != nil {
+		return 0, "", 0, "", err
+	}
+
+	body := ""
+	if raw, exists := args["body"]; exists {
+		var ok bool
+		body, ok = raw.(string)
+		if !ok {
+			return 0, "", 0, "", errors.New("body must be a string")
+		}
+	}
+	templateID := int64(0)
+	if raw, exists := args["template_id"]; exists {
+		templateID, err = positiveMessageInteger(raw, "template_id")
+		if err != nil {
+			return 0, "", 0, "", err
+		}
+	}
+	contentSID := ""
+	if raw, exists := args["content_sid"]; exists {
+		var ok bool
+		contentSID, ok = raw.(string)
+		if !ok {
+			return 0, "", 0, "", errors.New("content_sid must be a string")
+		}
+		contentSID = strings.TrimSpace(contentSID)
+	}
+	if strings.TrimSpace(body) == "" && templateID == 0 && contentSID == "" {
+		return 0, "", 0, "", errors.New("body, template_id, or content_sid required")
+	}
+	return cid, body, templateID, contentSID, nil
+}
+
+func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
+	cid, body, templateID, contentSID, err := validateOutboundMessageArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if messagingBound(ctx) == nil {
+		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
+	}
 	if err := ensureMessagingInboundRoutes(ctx, pid); err != nil {
 		ctx.Logger().Warn("crm messaging inbound route auto-wire failed", "project_id", pid, "err", err)
-	}
-	cid := int64Arg(args, "id")
-	if cid == 0 {
-		cid = int64Arg(args, "contact_id")
-	}
-	if cid == 0 {
-		return nil, errors.New("id (contact id) required")
-	}
-	body, _ := args["body"].(string)
-	templateID := int64Arg(args, "template_id")
-	contentSID := strArg(args, "content_sid")
-	if body == "" && templateID == 0 && contentSID == "" {
-		return nil, errors.New("body or template_id required")
 	}
 
 	c, err := dbGetByID(ctx.AppDB(), pid, cid)
@@ -1373,23 +1440,16 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 // ─── Tool: contacts_reply ─────────────────────────────────────────
 
 func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
-	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	cid := int64Arg(args, "id")
-	if cid == 0 {
-		cid = int64Arg(args, "contact_id")
+	cid, body, templateID, contentSID, err := validateOutboundMessageArgs(args)
+	if err != nil {
+		return nil, err
 	}
-	if cid == 0 {
-		return nil, errors.New("id required")
-	}
-	body, _ := args["body"].(string)
-	if body == "" && int64Arg(args, "template_id") == 0 {
-		return nil, errors.New("body or template_id required")
+	if messagingBound(ctx) == nil {
+		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
 	}
 
 	convoID := int64Arg(args, "conversation_id")
@@ -1439,8 +1499,11 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if bodyHTML := strArg(args, "body_html"); bodyHTML != "" {
 		sendArgs["body_html"] = bodyHTML
 	}
-	if templateID := int64Arg(args, "template_id"); templateID != 0 {
+	if templateID > 0 {
 		sendArgs["template_id"] = templateID
+	}
+	if contentSID != "" {
+		sendArgs["content_sid"] = contentSID
 	}
 	if vars, ok := args["template_vars"].(map[string]any); ok {
 		sendArgs["template_vars"] = vars

@@ -1,0 +1,469 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "files",
+  "version": "1.0.0",
+  "title": "Files",
+  "description": "Browse, upload, organize, and share project files.",
+  "icon": "folder",
+  "context": {
+    "scope": "project"
+  },
+  "state": {
+    "folder": {
+      "type": "string",
+      "default": "/",
+      "persistence": "project"
+    },
+    "query": {
+      "type": "string",
+      "default": ""
+    },
+    "content_type": {
+      "type": "string",
+      "default": ""
+    },
+    "tag": {
+      "type": "string",
+      "default": ""
+    },
+    "recursive": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "data_sources": {
+    "files": {
+      "request": {
+        "method": "GET",
+        "path": "/files",
+        "query": {
+          "folder": "$state.folder",
+          "q": "$state.query",
+          "content_type": "$state.content_type",
+          "tag": "$state.tag",
+          "recursive": "$state.recursive",
+          "limit": 50
+        }
+      },
+      "response": {
+        "items": "$.files",
+        "id": "$.id"
+      },
+      "pagination": {
+        "type": "page",
+        "request_key": "offset",
+        "page_size": 50
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
+    },
+    "file": {
+      "request": {
+        "method": "GET",
+        "path": "/files/{item.id}"
+      },
+      "response": {
+        "item": "$.file",
+        "id": "$.id"
+      }
+    },
+    "folders": {
+      "request": {
+        "method": "GET",
+        "path": "/folders",
+        "query": {
+          "format": "picker"
+        }
+      },
+      "response": {
+        "items": "$.items",
+        "id": "$.id"
+      }
+    }
+  },
+  "primary_actions": [
+    "upload_file",
+    "import_url"
+  ],
+  "sections": [
+    {
+      "id": "files",
+      "kind": "collection",
+      "title": "Files",
+      "source": "files",
+      "presentation": "adaptive",
+      "search": {
+        "state": "query",
+        "placeholder": "Search files",
+        "query_key": "q"
+      },
+      "filters": [
+        {
+          "id": "folder",
+          "type": "resource_picker",
+          "state": "folder",
+          "label": "Folder",
+          "query_key": "folder",
+          "options": [
+            {
+              "label": "All files",
+              "value": "/"
+            }
+          ],
+          "source": "folders",
+          "mapping": {
+            "value": "$.label",
+            "label": "$.label"
+          }
+        },
+        {
+          "id": "content_type",
+          "type": "choice",
+          "state": "content_type",
+          "label": "Type",
+          "query_key": "content_type",
+          "options": [
+            {"label": "All", "value": ""},
+            {"label": "Images", "value": "image/", "match": "prefix"},
+            {"label": "Video", "value": "video/", "match": "prefix"},
+            {"label": "Audio", "value": "audio/", "match": "prefix"},
+            {"label": "PDF", "value": "application/pdf", "match": "exact"}
+          ]
+        },
+        {
+          "id": "recursive",
+          "type": "toggle",
+          "state": "recursive",
+          "label": "Include subfolders",
+          "query_key": "recursive"
+        }
+      ],
+      "item": {
+        "id": "$item.id",
+        "title": "$item.name",
+        "subtitle": [
+          {
+            "value": "$item.folder"
+          },
+          {
+            "value": "$item.size_bytes",
+            "format": "file_size"
+          },
+          {
+            "value": "$item.updated_at",
+            "format": "relative_time"
+          }
+        ],
+        "icon": {
+          "value": "$item.content_type",
+          "format": "file_icon",
+          "fallback": "file"
+        },
+        "badge": {
+          "value": "$item.visibility"
+        },
+        "destination": "file_detail",
+        "actions": [
+          "open_file",
+          "share_link",
+          "rename_move",
+          "delete_file"
+        ]
+      },
+      "empty": {
+        "title": "No files",
+        "description": "Upload a file or import one from a URL.",
+        "icon": "folder"
+      },
+      "loading": {
+        "description": "Loading files"
+      },
+      "error": {
+        "title": "Could not load files",
+        "description": "Check the connection and try again.",
+        "retry": true
+      }
+    }
+  ],
+  "destinations": {
+    "file_detail": {
+      "type": "detail",
+      "title": "{item.name}",
+      "source": "file",
+      "sections": [
+        {
+          "id": "preview",
+          "kind": "file_preview",
+          "preview": {
+            "path": "/files/{item.id}/content/{item.name}",
+            "name": "$item.name",
+            "content_type": "$item.content_type",
+            "share_action": "share_link",
+            "delete_action": "delete_file"
+          }
+        },
+        {
+          "id": "metadata",
+          "kind": "properties",
+          "title": "Details",
+          "fields": [
+            {"id": "folder", "label": "Folder", "value": "$item.folder"},
+            {"id": "size", "label": "Size", "value": "$item.size_bytes", "format": "file_size"},
+            {"id": "type", "label": "Type", "value": "$item.content_type"},
+            {"id": "visibility", "label": "Visibility", "value": "$item.visibility"},
+            {"id": "tags", "label": "Tags", "value": "$item.tags", "format": "tags"},
+            {"id": "updated", "label": "Updated", "value": "$item.updated_at", "format": "date_time"},
+            {"id": "sha256", "label": "SHA256", "value": "$item.sha256", "hidden": true}
+          ]
+        }
+      ],
+      "actions": [
+        "open_file",
+        "share_link",
+        "copy_link",
+        "rename_move",
+        "edit_tags",
+        "set_visibility",
+        "delete_file"
+      ]
+    }
+  },
+  "actions": {
+    "upload_file": {
+      "type": "file_upload",
+      "label": "Upload file",
+      "icon": "upload",
+      "placements": ["primary"],
+      "request": {
+        "method": "POST",
+        "path": "/files",
+        "encoding": "multipart",
+        "body": {
+          "file": "$input.file",
+          "folder": "$state.folder",
+          "visibility": "$input.visibility",
+          "tags": "$input.tags"
+        }
+      },
+      "fields": [
+        {"name": "file", "type": "file", "label": "File", "required": true},
+        {
+          "name": "visibility",
+          "type": "choice",
+          "label": "Visibility",
+          "default": "private",
+          "options": [
+            {"label": "Private", "value": "private"},
+            {"label": "Signed link", "value": "signed"},
+            {"label": "Public", "value": "public"}
+          ]
+        },
+        {"name": "tags", "type": "string_list", "label": "Tags"}
+      ],
+      "success": {
+        "refresh": ["files", "folders"],
+        "dismiss": true,
+        "toast": "File uploaded"
+      }
+    },
+    "import_url": {
+      "type": "form",
+      "label": "Import from URL",
+      "icon": "link",
+      "placements": ["primary"],
+      "request": {
+        "method": "POST",
+        "path": "/files/from-url",
+        "encoding": "json",
+        "body": {
+          "url": "$input.url",
+          "name": "$input.name",
+          "folder": "$state.folder",
+          "visibility": "$input.visibility",
+          "tags": "$input.tags"
+        }
+      },
+      "fields": [
+        {"name": "url", "type": "url", "label": "URL", "required": true},
+        {"name": "name", "type": "string", "label": "File name"},
+        {
+          "name": "visibility",
+          "type": "choice",
+          "label": "Visibility",
+          "default": "private",
+          "options": [
+            {"label": "Private", "value": "private"},
+            {"label": "Signed link", "value": "signed"},
+            {"label": "Public", "value": "public"}
+          ]
+        },
+        {"name": "tags", "type": "string_list", "label": "Tags"}
+      ],
+      "success": {
+        "refresh": ["files", "folders"],
+        "dismiss": true,
+        "toast": "File imported"
+      }
+    },
+    "open_file": {
+      "type": "open_url",
+      "label": "Open",
+      "icon": "open",
+      "placements": ["item", "detail"],
+      "request": {
+        "method": "GET",
+        "path": "/files/{item.id}/content/{item.name}"
+      }
+    },
+    "share_link": {
+      "type": "share_result",
+      "label": "Share link",
+      "icon": "share",
+      "placements": ["item", "detail"],
+      "request": {
+        "method": "POST",
+        "path": "/files/{item.id}/url",
+        "encoding": "json",
+        "body": {
+          "ttl_seconds": 86400
+        }
+      },
+      "result": "$.url"
+    },
+    "copy_link": {
+      "type": "copy_result",
+      "label": "Copy link",
+      "icon": "copy",
+      "placements": ["detail"],
+      "request": {
+        "method": "POST",
+        "path": "/files/{item.id}/url",
+        "encoding": "json",
+        "body": {
+          "ttl_seconds": 86400
+        }
+      },
+      "result": "$.url",
+      "success": {
+        "toast": "Link copied"
+      }
+    },
+    "rename_move": {
+      "type": "form",
+      "label": "Rename or move",
+      "icon": "move",
+      "placements": ["item", "detail"],
+      "request": {
+        "method": "PATCH",
+        "path": "/files/{item.id}",
+        "encoding": "json",
+        "body": {
+          "name": "$input.name",
+          "folder": "$input.folder"
+        }
+      },
+      "fields": [
+        {"name": "name", "type": "string", "label": "Name", "default": "$item.name", "required": true},
+        {"name": "folder", "type": "resource", "label": "Folder", "default": "$item.folder", "resource": "folder", "required": true}
+      ],
+      "success": {
+        "refresh": ["files", "folders"],
+        "dismiss": true,
+        "toast": "File updated"
+      }
+    },
+    "edit_tags": {
+      "type": "form",
+      "label": "Edit tags",
+      "icon": "tag",
+      "placements": ["detail"],
+      "request": {
+        "method": "PATCH",
+        "path": "/files/{item.id}",
+        "encoding": "json",
+        "body": {
+          "tags": "$input.tags"
+        }
+      },
+      "fields": [
+        {"name": "tags", "type": "string_list", "label": "Tags", "default": "$item.tags"}
+      ],
+      "success": {
+        "refresh": ["files"],
+        "dismiss": true,
+        "toast": "Tags updated"
+      }
+    },
+    "set_visibility": {
+      "type": "form",
+      "label": "Set visibility",
+      "icon": "visibility",
+      "placements": ["detail"],
+      "request": {
+        "method": "PATCH",
+        "path": "/files/{item.id}",
+        "encoding": "json",
+        "body": {
+          "visibility": "$input.visibility"
+        }
+      },
+      "fields": [
+        {
+          "name": "visibility",
+          "type": "choice",
+          "label": "Visibility",
+          "default": "$item.visibility",
+          "required": true,
+          "options": [
+            {"label": "Private", "value": "private"},
+            {"label": "Signed link", "value": "signed"},
+            {"label": "Public", "value": "public"}
+          ]
+        }
+      ],
+      "success": {
+        "refresh": ["files"],
+        "dismiss": true,
+        "toast": "Visibility updated"
+      }
+    },
+    "delete_file": {
+      "type": "confirm",
+      "label": "Delete",
+      "icon": "delete",
+      "placements": ["item", "detail"],
+      "destructive": true,
+      "request": {
+        "method": "DELETE",
+        "path": "/files/{item.id}",
+        "query": {
+          "keep_record": false
+        }
+      },
+      "confirmation": {
+        "title": "Delete this file?",
+        "message": "The file and its stored bytes will be permanently removed.",
+        "confirm_label": "Delete"
+      },
+      "success": {
+        "refresh": ["files", "folders"],
+        "dismiss": true,
+        "toast": "File deleted"
+      }
+    }
+  },
+  "resources": {
+    "folder": {
+      "type": "tree",
+      "label": "Folder",
+      "source": "folders",
+      "mapping": {
+        "id": "$.id",
+        "label": "$.label",
+        "parent": "$.parent"
+      }
+    }
+  }
+}

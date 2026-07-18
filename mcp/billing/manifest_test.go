@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The embedded manifest must always parse — sdk.Run validates it at
 // boot, so a regression here means the binary won't start.
@@ -110,6 +113,21 @@ func TestMCPTools_AllHaveDescriptionAndSchema(t *testing.T) {
 		}
 		if _, ok := tool.InputSchema["properties"]; !ok {
 			t.Errorf("tool %q schema missing properties", tool.Name)
+		}
+	}
+}
+
+func TestPaymentLinkTool_ExplicitlyOnDemandAndDoesNotClaimDelivery(t *testing.T) {
+	var description string
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "invoices_send_payment_link" {
+			description = strings.ToLower(tool.Description)
+			break
+		}
+	}
+	for _, phrase := range []string{"on demand only", "explicitly asks", "does not send email", "separate"} {
+		if !strings.Contains(description, phrase) {
+			t.Errorf("payment-link description must contain %q; got %q", phrase, description)
 		}
 	}
 }

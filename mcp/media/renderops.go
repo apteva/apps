@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -41,6 +42,9 @@ type opPlan struct {
 // extension (transcode via `format`, audio_extract via `format`,
 // extract_frame/reel are always image/mp4) and ignore the hint.
 func buildPlan(op string, sources []string, params json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
+	if err := validateOutputName(outputName); err != nil {
+		return nil, err
+	}
 	switch op {
 	case "trim":
 		return planTrim(sources, params, outputName)
@@ -63,6 +67,17 @@ func buildPlan(op string, sources []string, params json.RawMessage, outputName, 
 	default:
 		return nil, fmt.Errorf("unknown operation: %s", op)
 	}
+}
+
+func validateOutputName(name string) error {
+	if name == "" {
+		return nil
+	}
+	if name == "." || name == ".." || strings.ContainsRune(name, '\x00') ||
+		strings.ContainsAny(name, `/\\`) || filepath.IsAbs(name) || filepath.Base(name) != name {
+		return errors.New("output_name must be a filename, not a path")
+	}
+	return nil
 }
 
 // ErrNotImplemented marks ops that ship in v0.2's manifest but whose
@@ -406,6 +421,9 @@ type extractReelParams struct {
 	CropH int `json:"crop_h,omitempty"`
 	CropX int `json:"crop_x,omitempty"`
 	CropY int `json:"crop_y,omitempty"`
+	// CropPath is injected by Smart Crop v2 for reels whose subject moves.
+	// Times are source-timeline milliseconds; callers should not set it.
+	CropPath []cropPathPoint `json:"crop_path,omitempty"`
 }
 
 func planExtractReel(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -447,6 +465,11 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	}
 	outputSeekMs := p.StartMs - seekStartMs
 	durationMs := p.EndMs - p.StartMs
+	if p.CropW > 0 && p.CropH > 0 && len(p.CropPath) > 1 {
+		// The input clock starts at seekStartMs because of the preroll. Shift
+		// the source-timeline path to that clock before building x(t).
+		cropExpr = cropFilterForPath(p.CropW, p.CropH, p.CropY, seekStartMs, p.CropPath)
+	}
 	args := []string{
 		"-y",
 		"-loglevel", "error",

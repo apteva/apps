@@ -233,6 +233,13 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	if err != nil {
 		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(out, 500))
 	}
+	uploaded, err := sc.GetFile(ctx, row.ProjectID, res.FileID)
+	if err != nil {
+		return 0, fmt.Errorf("verify remote render destination: %w", err)
+	}
+	if err := validateRenderUploadDestination(uploaded, folder, plan.Filename); err != nil {
+		return 0, err
+	}
 	log.Info("remote render complete",
 		"id", row.ID, "file_id", res.FileID, "size", res.Size, "sha256", res.SHA256)
 	return res.FileID, nil
@@ -340,7 +347,7 @@ func (e *remoteExecutor) buildScript(
 	// Env vars carry the inputs so they don't appear in `ps` output
 	// and so the inline JSON / curl args stay readable.
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(e.storageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(publicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(publicURL+boundStorageProxyPath))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(row.ProjectID))
 	fmt.Fprintf(&b, "export FOLDER=%s\n", shellQuote(folder))
 	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(plan.Filename))

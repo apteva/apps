@@ -2,13 +2,43 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.43
+version: 0.10.51
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs and Fish Audio can power TTS and reusable
   voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.43 fixes multi-provider image options, stale panel
+  references. v0.10.51 adds a responsive generation card for chat with image
+  previews, custom video and audio controls, generation metadata, and live
+  promotion from queued jobs to completed media. Project-scoped detail APIs
+  keep each card fast and isolated.
+
+  v0.10.50 makes JPEG the default image output and guarantees
+  final JPEG files stay below 2 MB, preserving quality 90 when possible and
+  adapting quality or dimensions only when required.
+
+  v0.10.49 replaces browser-default audio and video controls with
+  a reusable Media Studio player, stable video stages, generated thumbnail
+  posters, exclusive playback, responsive controls, and consistent card metadata.
+
+  v0.10.48 adds Deepgram Aura as a generic TTS provider with
+  provider-specific routing, model choices, output formats, and Storage saves.
+
+  v0.10.47 keeps historical failed jobs out of the active gallery
+  feed and makes current UI errors dismissible and temporary.
+
+  v0.10.46 omits aspect_ratio for Venice video models whose live
+  constraints do not support it, including WAN image-to-video variants.
+
+  v0.10.45 adds newest-first cursor pagination to media_history
+  and the gallery, a history index, functional since filtering, and 24-item
+  incremental UI pages for fast projects with large generation histories.
+
+  v0.10.44 moves generation into a focused responsive dialog
+  with a large prompt editor, grouped settings, mobile sheet layout, sticky
+  actions, keyboard focus handling, and automatic reference-edit opening.
+
+  v0.10.43 fixes multi-provider image options, stale panel
   responses, required video references, project-scoped previews, upload
   validation, and responsive/accessibility behavior.
 
@@ -115,7 +145,7 @@ requires:
     - role: audio_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [elevenlabs, fish-audio]
+      compatible_slugs: [elevenlabs, fish-audio, deepgram]
       capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech
@@ -123,7 +153,7 @@ requires:
         voice.create: design_voice
       required: false
       label: "Audio provider"
-      hint: "Bind ElevenLabs and/or Fish Audio for text-to-speech and reusable voices. Sound effects and prompt-based Voice Design remain ElevenLabs-specific; Fish Audio supports instant cloning from consented audio."
+      hint: "Bind ElevenLabs, Fish Audio, and/or Deepgram for text-to-speech. Deepgram Aura voices are selected as models. Sound effects and prompt-based Voice Design remain ElevenLabs-specific; Fish Audio supports instant cloning from consented audio."
 
     - role: music_provider
       kind: integration
@@ -158,7 +188,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image and audio ids may include a provider prefix when multiple providers are bound." }
-    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options? (provider extras; video supports consents.seedance when required), cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options? (provider extras; video supports consents.seedance when required), cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). In chat, attach the returned _meta.chat_component through respond(components=[...]) to show the live generated-media card." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it." }
     - { name: media_delete, description: "Delete one generation for this project. Args: id, delete_storage? (default true). Also removes linked Storage files, async job rows, and local cache files when enabled." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Voice creation is provider-neutral: source_type=prompt designs an ElevenLabs voice; source_type=audio clones through Fish Audio or ElevenLabs from source_audio/source_audios. Args also include provider?, name, transcripts?, source_image?, source_video?, labels?, options?." }
@@ -168,13 +198,26 @@ provides:
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar through the bound avatar provider. Generic args: name, source_type (photo|prompt|video), source_image?, source_video?, consent_video?, prompt?, options?. Returns an avatar_create job." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
-    - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
+    - { name: media_history,  description: "List generations for this project newest-first. Args: kind?, limit?, cursor? (next_cursor from the previous page), since? (RFC3339). Returns generations, next_cursor, and has_more." }
     - { name: media_get,      description: "Fetch one generation for this project. Args: id." }
   ui_panels:
     - slot: project.page
       label: Studio
       icon: image
       entry: /ui/MediaPanel.mjs
+  ui_components:
+    - name: generation-card
+      entry: /ui/GenerationCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          generation_id: { type: integer, minimum: 1 }
+          job_id: { type: integer, minimum: 1 }
+        anyOf:
+          - required: [generation_id]
+          - required: [job_id]
+      preview_props: { preview: true, generation_id: 1 }
 
 runtime:
   kind: source

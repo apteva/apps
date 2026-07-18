@@ -111,25 +111,32 @@ type installedPaths struct {
 	FFprobe string
 }
 
-// hostInstallState is the per-host single-flight + result cache. The
-// mutex serialises concurrent Ensure() calls for the same host; once
-// resolved (ready or failed), subsequent callers read the cached
-// answer without touching the remote.
+// hostInstallState is the per-host single-flight + result cache. The mutex
+// serialises concurrent Ensure() calls for the same host. Successes remain
+// cached; failures suppress duplicate work only until their bounded retryAt.
 type hostInstallState struct {
-	mu    sync.Mutex
-	ready bool
-	paths installedPaths
-	err   error
+	mu       sync.Mutex
+	ready    bool
+	paths    installedPaths
+	err      error
+	retryAt  time.Time
+	failures int
 }
 
 // remoteFFmpegInstaller manages the per-host install lifecycle.
 // Construct once at executor startup; share across renders.
 type remoteFFmpegInstaller struct {
-	hosts sync.Map // map[int64]*hostInstallState
+	hosts     sync.Map // map[int64]*hostInstallState
+	installFn func(context.Context, *sdk.AppCtx, int64) (installedPaths, error)
+	now       func() time.Time
+	sleep     func(context.Context, time.Duration) error
 }
 
 func newRemoteFFmpegInstaller() *remoteFFmpegInstaller {
-	return &remoteFFmpegInstaller{}
+	return &remoteFFmpegInstaller{
+		now:   time.Now,
+		sleep: sleepRemoteInstallRetry,
+	}
 }
 
 // sharedRemoteInstaller — process-wide singleton. Workers share the
@@ -153,9 +160,10 @@ func sharedRemoteInstaller() *remoteFFmpegInstaller {
 // arch detect → existence probe → (download+verify+extract on miss)
 // sequence; subsequent calls are a map lookup.
 //
-// On install failure, the error is cached so we don't hammer a host
-// that's missing curl, has no disk space, etc. Operators must restart
-// the media sidecar to retry after fixing the remote.
+// Successful installs are cached for the process lifetime. Failures are only
+// cached for a bounded backoff: a server restart can briefly expose a persisted
+// Instances binding before that dependency is reachable, and that transient
+// failure must never poison Media until its next sidecar restart.
 func (i *remoteFFmpegInstaller) Ensure(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
 	v, _ := i.hosts.LoadOrStore(hostID, &hostInstallState{})
 	st := v.(*hostInstallState)
@@ -163,14 +171,101 @@ func (i *remoteFFmpegInstaller) Ensure(ctx context.Context, app *sdk.AppCtx, hos
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if st.ready {
-		return st.paths, st.err
+		return st.paths, nil
+	}
+	now := i.now()
+	if st.err != nil && now.Before(st.retryAt) {
+		return installedPaths{}, st.err
 	}
 
-	paths, err := i.install(ctx, app, hostID)
-	st.paths = paths
+	paths, err := i.installWithStartupRetry(ctx, app, hostID)
+	if err == nil {
+		st.paths = paths
+		st.err = nil
+		st.retryAt = time.Time{}
+		st.failures = 0
+		st.ready = true
+		return paths, nil
+	}
 	st.err = err
-	st.ready = true
-	return paths, err
+	st.failures++
+	st.retryAt = i.now().Add(remoteInstallFailureCooldown(st.failures))
+	return installedPaths{}, err
+}
+
+const (
+	remoteInstallStartupAttempts = 5
+	remoteInstallStartupDelay    = 250 * time.Millisecond
+	remoteInstallFailureBase     = 5 * time.Second
+	remoteInstallFailureMax      = 30 * time.Second
+)
+
+func (i *remoteFFmpegInstaller) installWithStartupRetry(ctx context.Context, app *sdk.AppCtx, hostID int64) (installedPaths, error) {
+	var lastErr error
+	for attempt := 0; attempt < remoteInstallStartupAttempts; attempt++ {
+		var paths installedPaths
+		if i.installFn != nil {
+			paths, lastErr = i.installFn(ctx, app, hostID)
+		} else {
+			paths, lastErr = i.install(ctx, app, hostID)
+		}
+		if lastErr == nil {
+			return paths, nil
+		}
+		if !isRetryableRemoteInstallError(lastErr) || attempt == remoteInstallStartupAttempts-1 {
+			return installedPaths{}, lastErr
+		}
+		delay := remoteInstallStartupDelay << attempt
+		if err := i.sleep(ctx, delay); err != nil {
+			return installedPaths{}, fmt.Errorf("%w (retry interrupted: %v)", lastErr, err)
+		}
+	}
+	return installedPaths{}, lastErr
+}
+
+func sleepRemoteInstallRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func remoteInstallFailureCooldown(failures int) time.Duration {
+	if failures < 1 {
+		failures = 1
+	}
+	delay := remoteInstallFailureBase
+	for n := 1; n < failures && delay < remoteInstallFailureMax; n++ {
+		delay *= 2
+	}
+	if delay > remoteInstallFailureMax {
+		return remoteInstallFailureMax
+	}
+	return delay
+}
+
+func isRetryableRemoteInstallError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "http 403") && strings.Contains(msg, "app not bound") {
+		return true
+	}
+	for _, marker := range []string{
+		"http 502", "http 503", "http 504",
+		"target app not ready", "target app not running", "target unreachable",
+		"connection refused", "connection reset", "unexpected eof", "no such host",
+	} {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // install runs the full provision flow. Caller holds st.mu.

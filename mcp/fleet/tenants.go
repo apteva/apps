@@ -32,6 +32,12 @@ const (
 	KindRemote = "remote"
 )
 
+const (
+	IngressParent        = "parent"
+	IngressDirectPending = "direct_pending"
+	IngressDirect        = "direct"
+)
+
 type Tenant struct {
 	ID             string     `json:"id"`
 	Slug           string     `json:"slug"`
@@ -66,11 +72,21 @@ type Tenant struct {
 	//   >0 = row id in the Instances app's table; tenant runs as an
 	//        apteva-server on that VPS, driven via instance_run_command.
 	InstanceID int64 `json:"instance_id"`
+
+	// IngressMode controls only hosted tenant traffic. Existing tenants and
+	// every tenant on the parent host use parent ingress. direct_pending keeps
+	// the parent route available while the remote listener and DNS are checked.
+	IngressMode  string `json:"ingress_mode"`
+	IngressError string `json:"ingress_error,omitempty"`
 }
 
 // IsHosted returns true when this tenant runs on a remote instance
 // (managed via the Instances app), not on the parent.
 func (t *Tenant) IsHosted() bool { return t.InstanceID > 0 }
+
+func (t *Tenant) UsesDirectIngress() bool {
+	return t != nil && t.IsHosted() && (t.IngressMode == IngressDirectPending || t.IngressMode == IngressDirect)
+}
 
 // DomainGrant delegates a base domain to a tenant. It is separate
 // from Tenant.Domain, which is the public hostname of the tenant's own
@@ -85,6 +101,20 @@ type DomainGrant struct {
 	WildcardRecordID string    `json:"wildcard_record_id,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+// TenantHost is one exact hostname routed through the parent ingress to a
+// managed tenant. DomainGrantID is optional: client-managed DNS and adopted
+// legacy routes still need Fleet-owned tunnel refreshes without a grant.
+type TenantHost struct {
+	ID            int64     `json:"id"`
+	TenantID      string    `json:"tenant_id"`
+	Hostname      string    `json:"hostname"`
+	DomainGrantID int64     `json:"domain_grant_id,omitempty"`
+	Status        string    `json:"status"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // ProviderGrant exposes a parent integration connection as a
@@ -155,16 +185,19 @@ func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 	if t.Kind == "" {
 		t.Kind = KindRemote
 	}
+	if t.IngressMode == "" {
+		t.IngressMode = IngressParent
+	}
 	var stTok any
 	if len(setupTokenEnc) > 0 {
 		stTok = setupTokenEnc
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id, ingress_mode, ingress_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
-		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID)
+		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID, t.IngressMode, nullStr(t.IngressError))
 	return err
 }
 
@@ -191,7 +224,7 @@ func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
 
 func (s *store) get(id string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '')
 		FROM fleet_tenants WHERE id = ?
 	`, id)
 	return scanTenant(row)
@@ -199,7 +232,7 @@ func (s *store) get(id string) (*Tenant, []byte, error) {
 
 func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '')
 		FROM fleet_tenants WHERE slug = ?
 	`, slug)
 	return scanTenant(row)
@@ -208,7 +241,7 @@ func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 	q := strings.Builder{}
 	// api_key_enc is intentionally elided from list results.
-	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id FROM fleet_tenants WHERE 1=1`)
+	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '') FROM fleet_tenants WHERE 1=1`)
 	args := []any{}
 	cols := map[string]string{
 		"status":      "status",
@@ -337,7 +370,7 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		&t.OwnerEmail, &ownerUID, &curVer, &tgtVer, &t.Status,
 		&lastSeen, &lastHealthRaw, &t.CreatedAt, &t.UpdatedAt,
 		&domain, &domainRec, &domainAt, &t.RespawnAttempts, &lastRespawn,
-		&t.InstanceID,
+		&t.InstanceID, &t.IngressMode, &t.IngressError,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -378,7 +411,37 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		lr := lastRespawn.Time
 		t.LastRespawnAt = &lr
 	}
+	if t.IngressMode == "" {
+		t.IngressMode = IngressParent
+	}
 	return &t, apiKeyEnc, nil
+}
+
+func validIngressMode(mode string) bool {
+	switch mode {
+	case IngressParent, IngressDirectPending, IngressDirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *store) setIngressMode(id, mode, lastError string) error {
+	if !validIngressMode(mode) {
+		return fmt.Errorf("unsupported ingress mode %q", mode)
+	}
+	t, _, err := s.get(id)
+	if err != nil {
+		return err
+	}
+	if mode != IngressParent && !t.IsHosted() {
+		return errors.New("direct ingress is only available for hosted tenants")
+	}
+	_, err = s.db.Exec(
+		`UPDATE fleet_tenants SET ingress_mode = ?, ingress_error = ?, updated_at = ? WHERE id = ?`,
+		mode, nullStr(lastError), time.Now().UTC(), id,
+	)
+	return err
 }
 
 // setDomain stamps the domain link triple atomically. Called by
@@ -579,12 +642,178 @@ func (s *store) getDomainGrant(tenantID, domain string) (*DomainGrant, error) {
 	))
 }
 
+func (s *store) getDomainGrantByID(id int64) (*DomainGrant, error) {
+	return scanDomainGrant(s.db.QueryRow(
+		`SELECT `+domainGrantCols+`
+		   FROM fleet_domain_grants
+		  WHERE id = ?`,
+		id,
+	))
+}
+
 func (s *store) deleteDomainGrant(tenantID, domain string) error {
 	_, err := s.db.Exec(
 		`DELETE FROM fleet_domain_grants WHERE tenant_id = ? AND domain = ?`,
 		tenantID, domain,
 	)
 	return err
+}
+
+func (s *store) upsertTenantHost(h *TenantHost) error {
+	if h == nil {
+		return errors.New("tenant host required")
+	}
+	now := time.Now().UTC()
+	status := strings.TrimSpace(h.Status)
+	if status == "" {
+		status = "pending"
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO fleet_tenant_hosts
+			(tenant_id, hostname, domain_grant_id, status, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id, hostname) DO UPDATE SET
+		   domain_grant_id = excluded.domain_grant_id,
+		   status = excluded.status,
+		   last_error = excluded.last_error,
+		   updated_at = excluded.updated_at`,
+		h.TenantID, h.Hostname, nullInt64(h.DomainGrantID), status, nullStr(h.LastError), now, now,
+	)
+	if err != nil {
+		return err
+	}
+	stored, err := s.getTenantHost(h.TenantID, h.Hostname)
+	if err != nil {
+		return err
+	}
+	if stored == nil {
+		return errors.New("tenant host was not persisted")
+	}
+	*h = *stored
+	return nil
+}
+
+func (s *store) setTenantHostStatus(tenantID, hostname, status, lastError string) error {
+	res, err := s.db.Exec(
+		`UPDATE fleet_tenant_hosts
+		    SET status = ?, last_error = ?, updated_at = ?
+		  WHERE tenant_id = ? AND hostname = ?`,
+		status, nullStr(lastError), time.Now().UTC(), tenantID, hostname,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("tenant host not found")
+	}
+	return nil
+}
+
+const tenantHostCols = `id, tenant_id, hostname, domain_grant_id, status,
+	COALESCE(last_error, ''), created_at, updated_at`
+
+func scanTenantHost(s interface{ Scan(...any) error }) (*TenantHost, error) {
+	var (
+		h       TenantHost
+		grantID sql.NullInt64
+	)
+	err := s.Scan(&h.ID, &h.TenantID, &h.Hostname, &grantID, &h.Status,
+		&h.LastError, &h.CreatedAt, &h.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if grantID.Valid {
+		h.DomainGrantID = grantID.Int64
+	}
+	return &h, nil
+}
+
+func (s *store) getTenantHost(tenantID, hostname string) (*TenantHost, error) {
+	return scanTenantHost(s.db.QueryRow(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE tenant_id = ? AND hostname = ?`,
+		tenantID, hostname,
+	))
+}
+
+func (s *store) getTenantHostByHostname(hostname string) (*TenantHost, error) {
+	return scanTenantHost(s.db.QueryRow(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE hostname = ?`,
+		hostname,
+	))
+}
+
+func (s *store) listTenantHosts(tenantID string) ([]*TenantHost, error) {
+	query := `SELECT ` + tenantHostCols + ` FROM fleet_tenant_hosts`
+	args := []any{}
+	if tenantID != "" {
+		query += ` WHERE tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY tenant_id, hostname`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*TenantHost{}
+	for rows.Next() {
+		h, err := scanTenantHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			out = append(out, h)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *store) listTenantHostsByGrant(tenantID string, grantID int64) ([]*TenantHost, error) {
+	rows, err := s.db.Query(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE tenant_id = ? AND domain_grant_id = ?
+		  ORDER BY hostname`,
+		tenantID, grantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*TenantHost{}
+	for rows.Next() {
+		h, err := scanTenantHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			out = append(out, h)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *store) deleteTenantHost(tenantID, hostname string) error {
+	res, err := s.db.Exec(
+		`DELETE FROM fleet_tenant_hosts WHERE tenant_id = ? AND hostname = ?`,
+		tenantID, hostname,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("tenant host not found")
+	}
+	return nil
 }
 
 // bumpRespawn records an auto-respawn attempt. The counter caps in code
@@ -613,6 +842,13 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullInt64(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 var ErrNotFound = errors.New("tenant not found")

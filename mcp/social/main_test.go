@@ -18,10 +18,15 @@ package main
 //   - post_retry: resets failed → pending and re-publishes
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,7 +51,8 @@ type recordingPlatform struct {
 	nextStartOAuth   *sdk.OAuthStartResult
 	nextStartErr     error
 	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
-	callAppResponses map[string]json.RawMessage    // keyed by "app:tool"
+	executeQueues    map[string][]*sdk.ExecuteResult
+	callAppResponses map[string]json.RawMessage // keyed by "app:tool"
 	connections      []sdk.PlatformConnection
 	executeErr       error
 	identity         *sdk.InstallIdentity
@@ -66,6 +72,7 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
+		executeQueues:    map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
 }
@@ -98,9 +105,17 @@ func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) { return p.id
 func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.mu.Lock()
 	p.executeCalls = append(p.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
+	var queued *sdk.ExecuteResult
+	if queue := p.executeQueues[tool]; len(queue) > 0 {
+		queued = queue[0]
+		p.executeQueues[tool] = queue[1:]
+	}
 	p.mu.Unlock()
 	if p.executeErr != nil {
 		return nil, p.executeErr
+	}
+	if queued != nil {
+		return queued, nil
 	}
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
@@ -493,6 +508,77 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	}
 }
 
+func TestAccountFinalize_FacebookLegacyExpiryPreservesProfile(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_pages"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":[{"id":"100","name":"Clara Lance"}]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	profile, err := ctx.AppDB().Exec(
+		`INSERT INTO profiles (project_id, name, slug, is_default) VALUES ('test-proj', 'Clara Lance', 'clara-lance', 0)`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileID, _ := profile.LastInsertId()
+	legacyExpiry := time.Now().UTC().Add(10 * time.Minute)
+	pending, err := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts
+		   (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
+		 VALUES ('test-proj', 'facebook', 'facebook-api', 42, 'ready', ?, ?)`,
+		legacyExpiry, profileID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID, _ := pending.LastInsertId()
+
+	out, err := (&App{}).toolAccountFinalize(ctx, map[string]any{
+		"pending_account_id": pendingID,
+		"page_id":            "100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["social_account_id"] == nil {
+		t.Fatalf("finalize result = %+v", result)
+	}
+	var gotProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT profile_id FROM social_accounts WHERE id=?`, result["social_account_id"],
+	).Scan(&gotProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if gotProfileID != profileID {
+		t.Fatalf("profile_id = %d, want %d", gotProfileID, profileID)
+	}
+}
+
+func TestPendingAccountExpiredSupportsCurrentAndLegacyFormats(t *testing.T) {
+	now := time.Date(2026, 7, 14, 14, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		raw     string
+		expired bool
+	}{
+		{name: "rfc3339 future", raw: pendingExpiry(now.Add(time.Minute)), expired: false},
+		{name: "rfc3339 past", raw: pendingExpiry(now.Add(-time.Minute)), expired: true},
+		{name: "legacy future", raw: now.Add(time.Minute).String(), expired: false},
+		{name: "legacy past", raw: now.Add(-time.Minute).String(), expired: true},
+		{name: "sqlite future", raw: "2026-07-14 14:01:00", expired: false},
+		{name: "invalid fails closed", raw: "not-a-time", expired: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pendingAccountExpired(tt.raw, now); got != tt.expired {
+				t.Fatalf("pendingAccountExpired(%q) = %v, want %v", tt.raw, got, tt.expired)
+			}
+		})
+	}
+}
+
 // --- account_disconnect -------------------------------------------
 
 func TestAccountDisconnect_LastSiblingDisconnectsConnection(t *testing.T) {
@@ -773,6 +859,544 @@ func TestPostList_DoesNotDeadlockLoadingTargets(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("toolPostList deadlocked while loading targets")
+	}
+}
+
+func TestPostList_DateRangeUsesLifecycleDate(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	insert := func(body, status, createdAt, scheduleAt, publishedAt string) int64 {
+		t.Helper()
+		res, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, status, created_at, schedule_at, published_at)
+			 VALUES ('test-proj', ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))`,
+			body, status, createdAt, scheduleAt, publishedAt,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+
+	scheduledID := insert("scheduled", "scheduled", "2026-06-01 10:00:00", "2026-07-15T10:00:00Z", "")
+	publishedID := insert("published", "published", "2026-06-01 10:00:00", "2026-07-01T10:00:00Z", "2026-07-16T10:00:00Z")
+	draftID := insert("draft", "draft", "2026-07-17 10:00:00", "", "")
+	failedID := insert("failed", "failed", "2026-06-01 10:00:00", "2026-07-18T10:00:00Z", "")
+	_ = insert("outside", "scheduled", "2026-06-01 10:00:00", "2026-07-19T10:00:00Z", "")
+
+	out, err := (&App{}).listPosts(ctx, map[string]any{
+		"from":  "2026-07-15T00:00:00Z",
+		"to":    "2026-07-19T00:00:00Z",
+		"limit": 1000,
+	}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := out.(map[string]any)["posts"].([]map[string]any)
+	got := map[int64]bool{}
+	for _, post := range posts {
+		got[post["id"].(int64)] = true
+	}
+	for _, id := range []int64{scheduledID, publishedID, draftID, failedID} {
+		if !got[id] {
+			t.Errorf("post %d missing from lifecycle date range: %+v", id, got)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("range returned %d posts, want 4: %+v", len(got), got)
+	}
+}
+
+func TestPostList_DateRangeRejectsInvalidBounds(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, args := range []map[string]any{
+		{"from": "not-a-date"},
+		{"from": "2026-07-20T00:00:00Z", "to": "2026-07-19T00:00:00Z"},
+	} {
+		out, err := (&App{}).listPosts(ctx, args, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(map[string]any)["isError"] != true {
+			t.Fatalf("invalid bounds were accepted: args=%+v out=%+v", args, out)
+		}
+	}
+}
+
+func TestLoadPostByID_IsProjectScopedAndIncludesTargets(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'Channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, external_media_urls, status, schedule_at)
+		 VALUES ('test-proj', 'Scheduled video', '[17]', '[]', 'scheduled', '2026-07-20T18:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status) VALUES (?, ?, 'pending')`,
+		postID, accountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	post, err := (&App{}).loadPostByID(ctx, "test-proj", postID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post["body"] != "Scheduled video" || post["status"] != "scheduled" {
+		t.Fatalf("unexpected post: %+v", post)
+	}
+	targets, _ := post["targets"].([]map[string]any)
+	if len(targets) != 1 || targets[0]["social_account_id"] != accountID {
+		t.Fatalf("unexpected targets: %+v", post["targets"])
+	}
+	if _, err := (&App{}).loadPostByID(ctx, "other-project", postID); err == nil {
+		t.Fatal("cross-project post lookup unexpectedly succeeded")
+	}
+}
+
+func TestAccountMetrics_OmitsRawAndHonorsHistoryPeriod(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{
+			"items":[{
+				"statistics":{"viewCount":"123","subscriberCount":"45","videoCount":"6"},
+				"snippet":{"title":"Test channel","description":"provider-only detail"}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'channel_1', 'Test channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	now := time.Now().UTC()
+	for _, point := range []struct {
+		age   time.Duration
+		value int64
+	}{
+		{age: 3 * 24 * time.Hour, value: 40},
+		{age: 20 * 24 * time.Hour, value: 30},
+	} {
+		if err := insertSocialMetricPoint(
+			ctx, "test-proj", 0, accountID, 0, 0, "youtube", "account",
+			"followers", "snapshot", now.Add(-point.age).Format(time.RFC3339),
+			point.value, "test", "ok", "",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "7d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.UpdatedAt == "" {
+		t.Fatal("fresh metrics response omitted updated_at")
+	}
+	if _, leaked := metrics.Insights["_refresh"]; leaked {
+		t.Fatalf("refresh heartbeat leaked into insights: %+v", metrics.Insights)
+	}
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider data returned without include_raw: %d bytes", len(metrics.Raw))
+	}
+	encoded, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"raw"`) {
+		t.Fatalf("default response still contains a raw field: %s", encoded)
+	}
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for _, point := range metrics.Insights["followers"] {
+		parsed, ok := parseMetricPointTime(point.Time)
+		if !ok || parsed.Before(cutoff) {
+			t.Fatalf("period=7d returned out-of-window point: %+v", point)
+		}
+	}
+
+	debugOut, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "7d",
+		"include_raw":       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugMetrics := debugOut.(accountMetricsResult)
+	if len(debugMetrics.Raw) == 0 || !strings.Contains(string(debugMetrics.Raw), "provider-only detail") {
+		t.Fatalf("include_raw did not return sanitized provider detail: %s", debugMetrics.Raw)
+	}
+}
+
+func TestAnalyticsCollector_GlobalInstallRefreshesEveryProjectAndEmitsScopedEvents(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_me"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"data":{"username":"test","public_metrics":{"followers_count":10,"following_count":2,"tweet_count":4}}}`),
+	}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID(""),
+		tk.WithPlatform(pf),
+		tk.WithEmitter(rec),
+	)
+	globalCtx = ctx
+	for _, pid := range []string{"project-a", "project-b"} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO social_accounts
+			   (project_id, platform, connection_id, display_name, status)
+			 VALUES (?, 'twitter', 77, ?, 'active')`,
+			pid, pid,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := (&App{}).runAnalyticsCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var refreshedProjects int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(DISTINCT project_id) FROM social_metric_points
+		  WHERE metric='_refresh' AND period='heartbeat'`,
+	).Scan(&refreshedProjects); err != nil {
+		t.Fatal(err)
+	}
+	if refreshedProjects != 2 {
+		t.Fatalf("refreshed projects = %d, want 2", refreshedProjects)
+	}
+	events := rec.EventsByTopic("metrics.updated")
+	if len(events) != 2 || events[0].ProjectID != "project-a" || events[1].ProjectID != "project-b" {
+		t.Fatalf("metrics events were not project scoped: %+v", events)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("provider calls = %d, want 2", len(pf.executeCalls))
+	}
+
+	if err := (&App{}).runAnalyticsCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("fresh accounts were collected again: calls=%d", len(pf.executeCalls))
+	}
+}
+
+func TestAccountMetrics_RejectsInvalidHistoryPeriod(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, period := range []string{"week", "0d", "731d", "-2d"} {
+		out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+			"social_account_id": 1,
+			"period":            period,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(map[string]any)["isError"] != true {
+			t.Fatalf("invalid period %q was accepted: %+v", period, out)
+		}
+	}
+}
+
+func TestAccountMetrics_ZernioGenericProviderUsesCurrentPayloadShape(t *testing.T) {
+	pf := newRecordingPlatform()
+	now := time.Now().UTC()
+	day1 := now.AddDate(0, 0, -2).Format("2006-01-02")
+	day2 := now.AddDate(0, 0, -1).Format("2006-01-02")
+	pf.executeResponses["get_daily_metrics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(fmt.Sprintf(`{
+			"dailyData":[
+				{"date":%q,"postCount":2,"platforms":{"linkedin":2},"metrics":{"impressions":100,"reach":80,"likes":7,"comments":2,"shares":1,"views":10}},
+				{"date":%q,"postCount":1,"platforms":{"linkedin":1},"metrics":{"impressions":50,"reach":40,"likes":3,"comments":0,"shares":0,"views":5}}
+			],
+			"platformBreakdown":[]
+		}`, day1, day2)),
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(fmt.Sprintf(`{
+			"accounts":[{"_id":"za_linkedin","platform":"linkedin","currentFollowers":1250}],
+			"stats":{"za_linkedin":[{"date":%q,"followers":1230},{"date":%q,"followers":1250}]},
+			"granularity":"daily"
+		}`, day1, day2)),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'facebook', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "30d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 1250 || metrics.Posts != 3 || metrics.Impressions != 150 || metrics.Reach != 120 || metrics.Views != 15 || metrics.Likes != 10 || metrics.Comments != 2 || metrics.Shares != 1 || metrics.Engagements != 13 {
+		t.Fatalf("unexpected zernio account metrics: %+v", metrics)
+	}
+	if metrics.HistorySource != "social_metric_points" || len(metrics.Insights["followers"]) < 2 || len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["comments"]) != 2 || metrics.Insights["comments"][1].Value != 0 {
+		t.Fatalf("provider history was not normalized and persisted: %+v", metrics.Insights)
+	}
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider response leaked by default: %s", metrics.Raw)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "get_daily_metrics" || pf.executeCalls[1].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["accountId"] != "za_linkedin" || pf.executeCalls[0].Input["attribution"] != "received" {
+		t.Fatalf("daily metrics input = %+v", pf.executeCalls[0].Input)
+	}
+	if pf.executeCalls[1].Input["granularity"] != "daily" {
+		t.Fatalf("follower metrics input = %+v", pf.executeCalls[1].Input)
+	}
+}
+
+func TestAccountMetrics_ZernioLinkedInUsesAggregateAnalytics(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeQueues["get_linkedin_aggregate_analytics"] = []*sdk.ExecuteResult{
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{
+				"accountId":"za_linkedin","accountType":"personal","aggregation":"TOTAL",
+				"analytics":{"impressions":160,"reach":110,"reactions":2,"comments":1,"shares":3,"saves":4,"sends":5,"engagementRate":1.25}
+			}`),
+		},
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{
+				"accountId":"za_linkedin","accountType":"personal","aggregation":"DAILY",
+				"analytics":{
+					"impressions":[{"date":"2026-07-15","count":60},{"date":"2026-07-16","count":100}],
+					"reactions":[{"date":"2026-07-15","count":0},{"date":"2026-07-16","count":2}]
+				}
+			}`),
+		},
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"accounts":[{"_id":"za_linkedin","currentFollowers":659}],"stats":{"za_linkedin":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Marco Schwartz', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{"social_account_id": accountID, "period": "30d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 659 || metrics.Impressions != 160 || metrics.Reach != 110 || metrics.Likes != 2 || metrics.Comments != 1 || metrics.Shares != 3 || metrics.Saves != 4 || metrics.Sends != 5 || metrics.Engagements != 15 || metrics.EngagementRate != 1.25 {
+		t.Fatalf("unexpected LinkedIn aggregate metrics: %+v", metrics)
+	}
+	if len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["likes"]) != 2 {
+		t.Fatalf("LinkedIn daily analytics were not normalized: %+v", metrics.Insights)
+	}
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider response leaked by default: %s", metrics.Raw)
+	}
+	if len(pf.executeCalls) != 3 || pf.executeCalls[0].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[1].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[2].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["aggregation"] != "TOTAL" || pf.executeCalls[1].Input["aggregation"] != "DAILY" {
+		t.Fatalf("unexpected LinkedIn analytics inputs: %+v", pf.executeCalls)
+	}
+}
+
+func TestAccountMetrics_ZernioLinkedInFallsBackToOrganizationAnalytics(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_linkedin_aggregate_analytics"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  http.StatusBadRequest,
+		Data:    json.RawMessage(`{"code":"org_account_not_supported","error":"Use organization analytics"}`),
+	}
+	pf.executeQueues["get_linkedin_org_aggregate_analytics"] = []*sdk.ExecuteResult{
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{"metrics":{
+				"impressions":{"total":900},"unique_impressions":{"total":700},"clicks":{"total":20},
+				"likes":{"total":30},"comments":{"total":4},"shares":{"total":2},
+				"engagement_rate":{"total":0.0622},"page_views_total":{"total":50}
+			}}`),
+		},
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data: json.RawMessage(`{"metrics":{
+				"impressions":{"total":900,"values":[{"date":"2026-07-15","value":400},{"date":"2026-07-16","value":500}]},
+				"likes":{"total":30,"values":[{"date":"2026-07-15","value":10},{"date":"2026-07-16","value":20}]}
+			}}`),
+		},
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"accounts":[{"_id":"za_org","currentFollowers":5000}],"stats":{"za_org":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Organization', 'active', 'zernio', 'za_org')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{"social_account_id": accountID, "period": "30d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 5000 || metrics.Impressions != 900 || metrics.Reach != 700 || metrics.Views != 50 || metrics.Clicks != 20 || metrics.Likes != 30 || metrics.Comments != 4 || metrics.Shares != 2 || metrics.Engagements != 56 || metrics.EngagementRate != 6.22 {
+		t.Fatalf("unexpected LinkedIn organization metrics: %+v", metrics)
+	}
+	if len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["likes"]) != 2 {
+		t.Fatalf("organization history was not normalized: %+v", metrics.Insights)
+	}
+	if len(pf.executeCalls) != 4 || pf.executeCalls[0].Tool != "get_linkedin_aggregate_analytics" || pf.executeCalls[1].Tool != "get_linkedin_org_aggregate_analytics" || pf.executeCalls[2].Tool != "get_linkedin_org_aggregate_analytics" || pf.executeCalls[3].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected organization analytics calls: %+v", pf.executeCalls)
+	}
+}
+
+func TestPostMetrics_ZernioUsesProviderAdapterForLinkedIn(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(`{
+			"postId":"zp_123",
+			"analytics":{"impressions":1000,"reach":800,"likes":20,"comments":4,"shares":3,"views":0},
+			"platformAnalytics":[{
+				"platform":"linkedin","platformPostId":"urn:li:share:456","accountId":"za_linkedin",
+				"analytics":{"impressions":1000,"reach":800,"likes":20,"comments":4,"shares":3,"views":0}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, published_at) VALUES ('test-proj', 'Provider post', 'published', datetime('now'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets
+		   (post_id, social_account_id, status, platform_post_id, provider_post_id)
+		 VALUES (?, ?, 'published', 'urn:li:share:456', 'zp_123')`,
+		postID, accountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolPostMetrics(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	targets := result["targets"].([]targetMetricsOutcome)
+	if len(targets) != 1 || targets[0].Status != "ok" || targets[0].Metrics == nil {
+		t.Fatalf("unexpected provider post metrics: %+v", targets)
+	}
+	got := targets[0].Metrics
+	if got.Views != 1000 || got.Likes != 20 || got.Comments != 4 || got.Shares != 3 {
+		t.Fatalf("normalized provider post metrics = %+v", got)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_analytics" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["postId"] != "zp_123" || pf.executeCalls[0].Input["accountId"] != "za_linkedin" {
+		t.Fatalf("post analytics input = %+v", pf.executeCalls[0].Input)
+	}
+	var points int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM social_metric_points WHERE project_id='test-proj' AND post_id=? AND scope='post'`,
+		postID,
+	).Scan(&points); err != nil {
+		t.Fatal(err)
+	}
+	if points != 4 {
+		t.Fatalf("persisted metric points = %d, want 4", points)
+	}
+}
+
+func TestPostMetrics_ZernioFallsBackToExternalPostID(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"analytics":{"impressions":42,"likes":2,"comments":1,"shares":0}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	out := (&App{}).getPostMetrics(ctx, metricsTarget{
+		TargetID:          1,
+		SocialAccountID:   2,
+		ConnID:            77,
+		Platform:          "linkedin",
+		ExtPostID:         "urn:li:share:external",
+		ProviderSlug:      "zernio",
+		ProviderAccountID: "za_linkedin",
+	})
+	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Views != 42 {
+		t.Fatalf("external provider post metrics = %+v", out)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Input["postId"] != "urn:li:share:external" {
+		t.Fatalf("external post id was not forwarded: %+v", pf.executeCalls)
 	}
 }
 
@@ -2093,6 +2717,108 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	}
 }
 
+func TestPrepareYouTubeThumbnail_PreservesSmallImage(t *testing.T) {
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 16, 9))); err != nil {
+		t.Fatal(err)
+	}
+
+	got, mime, err := prepareYouTubeThumbnail(source.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/png" {
+		t.Fatalf("mime = %q, want image/png", mime)
+	}
+	if !bytes.Equal(got, source.Bytes()) {
+		t.Fatal("small thumbnail bytes changed")
+	}
+}
+
+func TestPrepareYouTubeThumbnail_CompressesOversizedPNG(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 900, 900))
+	var state uint32 = 1
+	for i := 0; i < len(img.Pix); i += 4 {
+		state = state*1664525 + 1013904223
+		img.Pix[i] = byte(state >> 24)
+		img.Pix[i+1] = byte(state >> 16)
+		img.Pix[i+2] = byte(state >> 8)
+		img.Pix[i+3] = 0xff
+	}
+	var source bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := encoder.Encode(&source, img); err != nil {
+		t.Fatal(err)
+	}
+	if int64(source.Len()) <= youtubeThumbnailMaxBytes {
+		t.Fatalf("test image is only %d bytes; expected oversized input", source.Len())
+	}
+
+	got, mime, err := prepareYouTubeThumbnail(source.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/jpeg" {
+		t.Fatalf("mime = %q, want image/jpeg", mime)
+	}
+	if int64(len(got)) > youtubeThumbnailMaxBytes {
+		t.Fatalf("optimized thumbnail = %d bytes, max %d", len(got), youtubeThumbnailMaxBytes)
+	}
+	config, err := jpeg.DecodeConfig(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("optimized output is not valid JPEG: %v", err)
+	}
+	if config.Width != 900 || config.Height != 900 {
+		t.Fatalf("optimized dimensions = %dx%d, want 900x900", config.Width, config.Height)
+	}
+}
+
+func TestPrepareYouTubeThumbnail_RejectsInvalidOversizedImage(t *testing.T) {
+	bad := bytes.Repeat([]byte("not-an-image"), int(youtubeThumbnailMaxBytes/12)+1)
+	if int64(len(bad)) <= youtubeThumbnailMaxBytes {
+		bad = append(bad, make([]byte, youtubeThumbnailMaxBytes-int64(len(bad))+1)...)
+	}
+	if _, _, err := prepareYouTubeThumbnail(bad, "image/png"); err == nil || !strings.Contains(err.Error(), "decode oversized youtube thumbnail") {
+		t.Fatalf("error = %v, want oversized image decode error", err)
+	}
+}
+
+func TestFetchYouTubeThumbnailEnvelope_UsesOptimizedMime(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 900, 900))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i] = byte(i)
+		img.Pix[i+1] = byte(i >> 3)
+		img.Pix[i+2] = byte(i >> 7)
+		img.Pix[i+3] = 0xff
+	}
+	var source bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := encoder.Encode(&source, img); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(source.Bytes())
+	}))
+	defer srv.Close()
+
+	envelope, err := fetchYouTubeThumbnailEnvelope(srv.URL, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope["mimeType"] != "image/jpeg" {
+		t.Fatalf("mimeType = %v, want image/jpeg", envelope["mimeType"])
+	}
+	encoded, _ := envelope["base64"].(string)
+	body, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(body)) > youtubeThumbnailMaxBytes {
+		t.Fatalf("envelope body = %d bytes, max %d", len(body), youtubeThumbnailMaxBytes)
+	}
+}
+
 // --- jobs scheduling ---------------------------------------------
 
 func TestSchedule_DispatchesToJobsApp(t *testing.T) {
@@ -2118,11 +2844,12 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := out.(map[string]any)
+	postID := toInt64Loose(res["post_id"])
 	if res["status"] != "scheduled" {
 		t.Errorf("post status = %v, want scheduled", res["status"])
 	}
 
-	// jobs_schedule was called with run_at + http target back at us.
+	// jobs_schedule was called with run_at + a brokered app_tool target.
 	var sawSchedule bool
 	for _, c := range pf.callAppCalls {
 		if c.AppName == "jobs" && c.Tool == "jobs_schedule" {
@@ -2135,17 +2862,21 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 				t.Errorf("run_at = %v", schedule["run_at"])
 			}
 			target, _ := c.Input["target"].(map[string]any)
-			if target["kind"] != "http" {
-				t.Errorf("target.kind = %v", target["kind"])
+			if target["kind"] != "app_tool" {
+				t.Errorf("target.kind = %v, want app_tool", target["kind"])
 			}
-			// v0.5.1+: cross-app {app, path} shape (the old `url`
-			// was a relative path that the jobs dispatcher couldn't
-			// resolve at fire time).
 			if target["app"] != "social" {
 				t.Errorf("target.app = %v, want social", target["app"])
 			}
-			if path, _ := target["path"].(string); path != "/jobs/publish_post" {
-				t.Errorf("target.path = %v, want /jobs/publish_post", target["path"])
+			if tool, _ := target["tool"].(string); tool != "post_publish_scheduled" {
+				t.Errorf("target.tool = %v, want post_publish_scheduled", target["tool"])
+			}
+			input, _ := target["input"].(map[string]any)
+			if got := toInt64Loose(input["post_id"]); got != postID {
+				t.Errorf("target.input.post_id = %v, want %d", input["post_id"], postID)
+			}
+			if target["path"] != nil || target["body"] != nil {
+				t.Errorf("app_tool target must not contain legacy HTTP fields: %+v", target)
 			}
 			if c.Input["idempotency_key"] == "" {
 				t.Errorf("missing idempotency_key")
@@ -2506,6 +3237,94 @@ func TestJobCallbackDoesNotAcknowledgeOverlappingPublisher(t *testing.T) {
 	(&App{}).handleJobPublishPost(rr, httptest.NewRequest(http.MethodPost, "/jobs/publish_post", strings.NewReader(fmt.Sprintf(`{"post_id":%d}`, postID))))
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("overlapping callback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestScheduledPublishToolReturnsPublishedOnlyAfterDownstreamSuccess(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"data":{"id":"scheduled_ok"}}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'scheduled', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id) VALUES (?, ?)`, postID, acctID)
+
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "published" {
+		t.Fatalf("result=%+v, want published", result)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("execute calls=%d, want 1", len(pf.executeCalls))
+	}
+
+	out, err = (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = out.(map[string]any)
+	if result["status"] != "published" || result["idempotent"] != true {
+		t.Fatalf("idempotent result=%+v", result)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("idempotent call republished target: calls=%d", len(pf.executeCalls))
+	}
+}
+
+func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":"permanent"}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'publishing', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, attempts) VALUES (?, ?, 'pending', 3)`,
+		postID, acctID,
+	)
+
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "failed" {
+		t.Fatalf("result=%+v, want failed", result)
+	}
+	if !strings.Contains(toString(result["error"]), "upstream 400") {
+		t.Fatalf("result error=%q, want downstream error", result["error"])
+	}
+	var targetStatus, postStatus string
+	var attempts int
+	_ = ctx.AppDB().QueryRow(`SELECT status, attempts FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus, &attempts)
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&postStatus)
+	if targetStatus != "failed" || postStatus != "failed" || attempts != 4 {
+		t.Fatalf("target=%q post=%q attempts=%d", targetStatus, postStatus, attempts)
+	}
+}
+
+func TestScheduledPublishToolCannotCrossProjects(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status) VALUES ('other-project', 'x', 'scheduled')`)
+	postID, _ := post.LastInsertId()
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID, "_project_id": "other-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "failed" || result["error"] != "post not found" {
+		t.Fatalf("foreign result=%+v", result)
 	}
 }
 

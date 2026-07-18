@@ -72,7 +72,7 @@ func TestInsertPendingTranscript_IdempotentOnRunningRow(t *testing.T) {
 	// Re-queueing a file that's currently running shouldn't reset it.
 	ctx := newTestCtx(t)
 	insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
-	_, _ = claimNextPendingTranscript(ctx.AppDB()) // → running
+	_, _ = claimNextPendingTranscript(ctx.AppDB(), testProj) // → running
 
 	// A second auto-queue must not flip status back to pending.
 	if err := insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto"); err != nil {
@@ -89,8 +89,8 @@ func TestInsertPendingTranscript_RetriesFailedRow(t *testing.T) {
 	// is supposed to be retryable.
 	ctx := newTestCtx(t)
 	insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
-	_, _ = claimNextPendingTranscript(ctx.AppDB())
-	_ = transcriptMarkFailed(ctx.AppDB(), "1", "boom")
+	_, _ = claimNextPendingTranscript(ctx.AppDB(), testProj)
+	_ = transcriptMarkFailed(ctx.AppDB(), testProj, "1", "boom")
 
 	if err := insertPendingTranscript(ctx.AppDB(), testProj, "1", "manual"); err != nil {
 		t.Fatal(err)
@@ -106,11 +106,11 @@ func TestClaimNextPendingTranscript_Atomic(t *testing.T) {
 	insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
 	insertPendingTranscript(ctx.AppDB(), testProj, "2", "auto")
 
-	a, err := claimNextPendingTranscript(ctx.AppDB())
+	a, err := claimNextPendingTranscript(ctx.AppDB(), testProj)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := claimNextPendingTranscript(ctx.AppDB())
+	b, err := claimNextPendingTranscript(ctx.AppDB(), testProj)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,16 +124,45 @@ func TestClaimNextPendingTranscript_Atomic(t *testing.T) {
 
 func TestClaimNextPendingTranscript_Empty(t *testing.T) {
 	ctx := newTestCtx(t)
-	_, err := claimNextPendingTranscript(ctx.AppDB())
+	_, err := claimNextPendingTranscript(ctx.AppDB(), testProj)
 	if !isNoRows(err) {
 		t.Errorf("expected sql.ErrNoRows, got %v", err)
+	}
+}
+
+func TestClaimNextPendingTranscript_ProjectScoped(t *testing.T) {
+	ctx := newTestCtx(t)
+	const otherProject = "other-project"
+	if err := insertPendingTranscript(ctx.AppDB(), otherProject, "other-file", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimNextPendingTranscript(ctx.AppDB(), testProj); !isNoRows(err) {
+		t.Fatalf("claim crossed project boundary: %v", err)
+	}
+	row, err := claimNextPendingTranscript(ctx.AppDB(), otherProject)
+	if err != nil || row.ProjectID != otherProject {
+		t.Fatalf("other project claim = %+v, %v", row, err)
+	}
+}
+
+func TestRecoverInterruptedTranscripts(t *testing.T) {
+	ctx := newTestCtx(t)
+	_ = insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
+	_, _ = claimNextPendingTranscript(ctx.AppDB(), testProj)
+	n, err := recoverInterruptedTranscripts(ctx.AppDB())
+	if err != nil || n != 1 {
+		t.Fatalf("recover = %d, %v", n, err)
+	}
+	row, _ := getTranscript(ctx.AppDB(), testProj, "1")
+	if row.Status != "pending" || row.StartedAt != "" {
+		t.Fatalf("recovered row = %+v", row)
 	}
 }
 
 func TestTranscriptMarkOk_PersistsFields(t *testing.T) {
 	ctx := newTestCtx(t)
 	insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
-	_, _ = claimNextPendingTranscript(ctx.AppDB())
+	_, _ = claimNextPendingTranscript(ctx.AppDB(), testProj)
 
 	segs, _ := formatSegments([]TranscriptSegment{
 		{StartMs: 0, EndMs: 1500, Text: "Hello world"},
@@ -184,7 +213,7 @@ func TestTranscriptMarkOk_GuardsNonRunning(t *testing.T) {
 func TestTranscriptMarkSkipped_PullsOutOfQueue(t *testing.T) {
 	ctx := newTestCtx(t)
 	insertPendingTranscript(ctx.AppDB(), testProj, "1", "auto")
-	if err := transcriptMarkSkipped(ctx.AppDB(), "1", "too long"); err != nil {
+	if err := transcriptMarkSkipped(ctx.AppDB(), testProj, "1", "too long"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := getTranscript(ctx.AppDB(), testProj, "1")

@@ -2,16 +2,23 @@
 // Loaded by the dashboard via dynamic import; uses host React via
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { AudioLines, Maximize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import {
   clampDuration,
+  DEFAULT_IMAGE_FORMAT,
+  formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
+  mergeHistoryPage,
   projectScopedStorageContentURL,
   providerFromQualifiedId,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldSendVideoAspect,
+  ttsOutputFormats,
+  ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
   type DurationKind,
@@ -258,6 +265,7 @@ interface SourceImageRef {
 }
 
 const API = "/api/apps/media-studio";
+const HISTORY_PAGE_SIZE = 24;
 
 const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
   image: "Images",
@@ -265,6 +273,15 @@ const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
   audio_tts: "Audio",
   music: "Music",
   avatar: "Avatar",
+};
+
+const KIND_SINGULAR: Record<Kind, string> = {
+  image: "image",
+  video: "video",
+  audio_tts: "voiceover",
+  audio_sfx: "sound effect",
+  music: "music track",
+  avatar: "avatar video",
 };
 
 // Image-specific option matrices, lifted from the old StudioPanel.
@@ -313,6 +330,7 @@ function modelLabel(m: LiveModel): string {
 function providerLabel(provider: string): string {
   if (provider === "fish-audio") return "Fish Audio";
   if (provider === "elevenlabs") return "ElevenLabs";
+  if (provider === "deepgram") return "Deepgram";
   return provider;
 }
 
@@ -393,6 +411,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     tab === "audio" ? audioSubKind : (tab as Kind);
 
   const [items, setItems] = useState<Generation[]>([]);
+  const [historyCursor, setHistoryCursor] = useState("");
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [bindings, setBindings] = useState<BindingsStatus | null>(null);
   const [status, setStatus] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -401,6 +423,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Generation | null>(null);
   const [lightbox, setLightbox] = useState<Generation | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // Per-kind composer state.
   const [prompt, setPrompt] = useState("");
@@ -408,7 +431,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [imageSize, setImageSize] = useState("1024x1024");
   const [imageResolution, setImageResolution] = useState("1K");
   const [imageQuality, setImageQuality] = useState("auto");
-  const [imageFormat, setImageFormat] = useState("png");
+  const [imageFormat, setImageFormat] = useState(DEFAULT_IMAGE_FORMAT);
   const [durations, setDurations] = useState<Record<DurationKind, number>>({
     video: 5,
     audio_sfx: 5,
@@ -491,6 +514,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [folderSuggestions, setFolderSuggestions] = useState<string[]>([]);
   const activeKindRef = useRef<Kind>(activeKind);
   const promptRef = useRef(prompt);
+  const historyRequestRef = useRef(0);
   activeKindRef.current = activeKind;
   promptRef.current = prompt;
   const durationKind: DurationKind | null =
@@ -520,26 +544,43 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     } catch {}
   }, [projectId]);
 
-  const loadGenerations = useCallback(async () => {
+  const loadGenerations = useCallback(async (cursor = "") => {
     const requestedKind = activeKind;
+    const requestID = ++historyRequestRef.current;
+    const append = cursor !== "";
+    if (append) setHistoryLoadingMore(true);
+    else setHistoryLoading(true);
     try {
+      const params = new URLSearchParams({
+        project_id: projectId,
+        kind: activeKind,
+        limit: String(HISTORY_PAGE_SIZE),
+      });
+      if (cursor) params.set("cursor", cursor);
       const res = await fetch(
-        `${API}/generations?project_id=${encodeURIComponent(projectId)}&kind=${activeKind}`,
+        `${API}/generations?${params.toString()}`,
         { credentials: "same-origin" },
       );
-      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
+      if (requestID !== historyRequestRef.current || !shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       if (!res.ok) {
         setStatus(`Error: ${res.status}`);
         return;
       }
       const data = await res.json();
-      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
-      setItems(data.generations || []);
-      const n = (data.generations || []).length;
-      setStatus(`${n} generation${n === 1 ? "" : "s"}`);
+      if (requestID !== historyRequestRef.current || !shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
+      const incoming: Generation[] = Array.isArray(data.generations) ? data.generations : [];
+      setItems((current) => mergeHistoryPage(current, incoming, append));
+      setHistoryCursor(String(data.next_cursor || ""));
+      setHistoryHasMore(Boolean(data.has_more));
+      setStatus("");
     } catch (e) {
-      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
+      if (requestID === historyRequestRef.current && shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
         setStatus("Error: " + (e as Error).message);
+      }
+    } finally {
+      if (requestID === historyRequestRef.current && shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
+        setHistoryLoading(false);
+        setHistoryLoadingMore(false);
       }
     }
   }, [projectId, activeKind]);
@@ -626,6 +667,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     loadBindings();
   }, [loadBindings]);
   useEffect(() => {
+    setItems([]);
+    setHistoryCursor("");
+    setHistoryHasMore(false);
     loadGenerations();
   }, [loadGenerations]);
 
@@ -710,6 +754,15 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       window.clearInterval(t);
     };
   }, [activeKind, projectId, loadGenerations]);
+
+  useEffect(() => {
+    if (!status.startsWith("Error") && !status.startsWith("Delete failed")) return;
+    const current = status;
+    const timer = window.setTimeout(() => {
+      setStatus((value) => (value === current ? "" : value));
+    }, 12000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
 
   useEffect(() => {
     if (activeKind !== "avatar") return;
@@ -894,6 +947,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setVoice(candidates[0].id);
     }
   }, [activeKind, selectedAudioProvider, voices, voice]);
+  useEffect(() => {
+    const formats = ttsOutputFormats(selectedAudioProvider);
+    if (formats.length > 0 && !formats.includes(audioFormat)) {
+      setAudioFormat(formats[0]);
+    }
+  }, [selectedAudioProvider, audioFormat]);
   const promptLength = Array.from(prompt).length;
   const promptLimit =
     currentModel?.prompt_char_limit ||
@@ -1060,7 +1119,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
-    const provider = voiceCreateProvider || selectedAudioProvider || audioProviders[0]?.slug;
+    const provider = voiceCreateProvider || audioProviders.find((item) => item.slug === "elevenlabs" || item.slug === "fish-audio")?.slug;
     const sourceType = provider === "fish-audio" ? "audio" : voiceCreateSourceType;
     if (!name) {
       setStatus("Voice name required.");
@@ -1196,7 +1255,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     } else if (activeKind === "video") {
       if (videoModel) body.model = videoModel;
       body.duration = duration;
-      body.aspect = aspect;
+      if (shouldSendVideoAspect(currentModel?.aspect_ratios, !!currentModel)) {
+        body.aspect = aspect;
+      }
       if (videoNoSound) {
         body.options = { audio: false };
       }
@@ -1211,12 +1272,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       }
     } else if (activeKind === "audio_tts") {
       if (audioModel) body.model = audioModel;
-      if (voice) body.voice = voice;
+      if (voice && ttsProviderUsesSeparateVoice(selectedAudioProvider)) body.voice = voice;
       if (selectedAudioProvider === "fish-audio") {
         body.options = {
           output_format: audioFormat,
           prosody: { speed: audioSpeed, normalize_loudness: true },
         };
+      } else if (selectedAudioProvider === "deepgram") {
+        body.options = { output_format: audioFormat };
       }
     } else if (activeKind === "audio_sfx") {
       if (sfxModel) body.model = sfxModel;
@@ -1313,19 +1376,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     sourceImages,
   ]);
 
-  const submitGeneration = async (mode: "generate" | "draft") => {
-    if (!prompt.trim() || generating || creatingDraft) return;
+  const submitGeneration = async (mode: "generate" | "draft"): Promise<boolean> => {
+    if (!prompt.trim() || generating || creatingDraft) return false;
     if (promptTooLong) {
       setStatus(`Error: prompt is ${promptLength} characters; this model allows ${promptLimit}.`);
-      return;
+      return false;
     }
     if (videoSourceMissing) {
       setStatus("Error: the selected video model requires at least one source image.");
-      return;
+      return false;
     }
     if (mode === "draft" && draftHasInlineSource) {
       setStatus("Error: drafts require Storage references or HTTP(S) source URLs.");
-      return;
+      return false;
     }
     const submittedKind = activeKind;
     const submittedPrompt = prompt;
@@ -1353,7 +1416,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
     try {
       const body = buildGenerationBody();
-      if (!body) return;
+      if (!body) return false;
       if (mode === "draft") body.mode = "draft";
       const res = await fetch(`${API}/generate?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
@@ -1364,7 +1427,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       const text = await res.text();
       if (!res.ok) {
         commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
-        return;
+        return false;
       }
       let result: { isError?: boolean; content?: { type: string; text?: string }[] } = {};
       try {
@@ -1373,7 +1436,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
         commitStatus(`Error: ${msg}`);
-        return;
+        return false;
       }
       // Async kinds (video today) return _meta.status === "queued".
       // Tell the user the bytes will arrive later via the event/poll loop.
@@ -1385,7 +1448,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
         commitStatus(`Draft saved.${costStr}`);
         loadGenerations();
-        return;
+        return true;
       }
       if (meta?.status === "queued") {
         const queuedPrompt = submittedPrompt;
@@ -1410,21 +1473,27 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             ];
           });
         }
-        return;
+        return true;
       }
       clearPromptIfUnchanged();
       commitStatus("Done.");
       loadGenerations();
+      return true;
     } catch (e) {
       commitStatus("Error: " + (e as Error).message);
+      return false;
     } finally {
       setGenerating(false);
       setCreatingDraft(false);
     }
   };
 
-  const generate = () => submitGeneration("generate");
-  const createDraft = () => submitGeneration("draft");
+  const generate = async () => {
+    if (await submitGeneration("generate")) setCreateOpen(false);
+  };
+  const createDraft = async () => {
+    if (await submitGeneration("draft")) setCreateOpen(false);
+  };
 
   const generateDraft = async (g: Generation) => {
     if (generatingDraftId || g.status !== "draft") return;
@@ -1524,13 +1593,203 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setDeletingId(null);
     }
   };
+  const generationCountLabel = `${items.length}${historyHasMore ? "+" : ""} generation${items.length === 1 && !historyHasMore ? "" : "s"}`;
 
   return (
     <div className="h-full flex flex-col">
       <style>{`
         .ms-media-main { flex-direction: row; overflow: hidden; }
-        .ms-media-content { padding: 24px; }
+        .ms-media-content { padding: 12px; }
         .ms-media-detail { width: 384px; border-left-width: 1px; border-left-style: solid; }
+        .ms-create-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 9998;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(0, 0, 0, 0.72);
+        }
+        .ms-create-dialog {
+          width: min(960px, calc(100vw - 48px));
+          max-height: min(820px, calc(100vh - 48px));
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+        .ms-create-body { overflow: auto; padding: 20px; }
+        .ms-create-body > * + * { margin-top: 16px; }
+        .ms-composer { display: flex; flex-direction: column; gap: 20px; }
+        .ms-prompt-input { min-height: 156px; line-height: 1.5; }
+        .ms-composer-options {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 14px;
+          align-items: end;
+        }
+        .ms-composer-options select,
+        .ms-composer-options input[type="text"],
+        .ms-composer-options input[type="number"] { width: 100%; min-width: 0 !important; }
+        .ms-option-wide { grid-column: 1 / -1; }
+        .ms-composer-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          padding-top: 16px;
+          border-top-width: 1px;
+          border-top-style: solid;
+        }
+        .ms-composer-actions { margin-left: auto; }
+        .ms-gallery-grid {
+          display: grid;
+          gap: 10px;
+          padding: 10px;
+          align-items: start;
+          align-content: start;
+        }
+        .ms-gallery-video {
+          grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
+        }
+        .ms-gallery-audio {
+          grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+        }
+        .ms-media-card {
+          min-width: 0;
+          overflow: hidden;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--bg-card);
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .ms-media-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+        .ms-video-player {
+          position: relative;
+          width: 100%;
+          aspect-ratio: 16 / 10;
+          overflow: hidden;
+          background: #050505;
+        }
+        .ms-video-player video {
+          display: block;
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+        }
+        .ms-video-player.ms-player-lightbox {
+          width: min(1100px, 92vw, calc(82vh * 1.6));
+        }
+        .ms-video-player:fullscreen,
+        .ms-video-player:-webkit-full-screen {
+          width: 100vw;
+          height: 100vh;
+          aspect-ratio: auto;
+        }
+        .ms-audio-player {
+          display: grid;
+          grid-template-columns: 42px minmax(0, 1fr);
+          align-items: center;
+          gap: 10px;
+          min-height: 84px;
+          padding: 12px;
+          background: var(--bg-input);
+        }
+        .ms-audio-player.ms-player-lightbox {
+          width: min(560px, calc(100vw - 32px));
+          border: 1px solid var(--border);
+          border-radius: 6px;
+        }
+        .ms-audio-mark {
+          width: 42px;
+          height: 42px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--accent);
+          border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+          border-radius: 6px;
+          background: var(--bg-card);
+        }
+        .ms-audio-content { min-width: 0; }
+        .ms-audio-kicker {
+          margin-bottom: 6px;
+          color: var(--text-dim);
+          font-size: 10px;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+        .ms-player-controls {
+          display: grid;
+          grid-template-columns: 32px minmax(56px, 1fr) auto 32px;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+        .ms-video-player .ms-player-controls {
+          position: absolute;
+          inset: auto 0 0;
+          z-index: 2;
+          padding: 8px 10px;
+          color: #fff;
+          background: rgba(0, 0, 0, 0.78);
+          grid-template-columns: 32px minmax(56px, 1fr) auto 32px 32px;
+        }
+        .ms-player-button {
+          width: 32px;
+          height: 32px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+          border: 0;
+          border-radius: 50%;
+          color: inherit;
+          background: transparent;
+          cursor: pointer;
+        }
+        .ms-player-button:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+        .ms-player-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        .ms-player-range {
+          width: 100%;
+          min-width: 0;
+          margin: 0;
+          accent-color: var(--accent);
+          cursor: pointer;
+        }
+        .ms-player-time {
+          min-width: 68px;
+          color: var(--text-muted);
+          font-size: 10px;
+          font-variant-numeric: tabular-nums;
+          text-align: right;
+          white-space: nowrap;
+        }
+        .ms-video-player .ms-player-time { color: rgba(255, 255, 255, 0.82); }
+        .ms-video-play-overlay {
+          position: absolute;
+          inset: 50% auto auto 50%;
+          z-index: 2;
+          width: 48px;
+          height: 48px;
+          transform: translate(-50%, -50%);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 255, 255, 0.28);
+          border-radius: 50%;
+          color: #fff;
+          background: rgba(0, 0, 0, 0.72);
+          cursor: pointer;
+        }
+        .ms-video-play-overlay:hover { color: var(--accent); border-color: var(--accent); }
+        .ms-card-meta { min-height: 54px; }
+        .ms-card-facts {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+        }
         @media (max-width: 1023px) {
           .ms-media-main { flex-direction: column; overflow: auto; }
           .ms-media-content { padding: 12px; }
@@ -1541,6 +1800,26 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             border-top-width: 1px;
             border-top-style: solid;
           }
+        }
+        @media (max-width: 640px) {
+          .ms-gallery-grid { gap: 8px; padding: 8px; }
+          .ms-gallery-video, .ms-gallery-audio { grid-template-columns: minmax(0, 1fr); }
+          .ms-create-backdrop { padding: 0; align-items: stretch; }
+          .ms-create-dialog { width: 100%; max-height: none; height: 100%; border-radius: 0 !important; }
+          .ms-create-body { padding: 16px; }
+          .ms-composer-options { grid-template-columns: 1fr; }
+          .ms-composer-footer {
+            position: sticky;
+            bottom: -16px;
+            z-index: 2;
+            align-items: stretch;
+            flex-direction: column;
+            margin-bottom: -16px;
+            padding: 16px 0;
+            background: var(--bg-card);
+          }
+          .ms-composer-actions { display: grid; grid-template-columns: 1fr 1fr; margin-left: 0; }
+          .ms-composer-actions button { width: 100%; }
         }
       `}</style>
       {/* Kind tabs */}
@@ -1614,6 +1893,50 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           role="tabpanel"
           className="ms-media-content flex-1 flex flex-col gap-4 min-w-0 min-h-0"
         >
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-text">
+                {generationCountLabel}
+              </div>
+              {status && status !== generationCountLabel && (
+                <div
+                  role={status.startsWith("Error") || status.startsWith("Delete failed") ? "alert" : "status"}
+                  className="flex items-center gap-1 text-xs text-text-dim min-w-0"
+                >
+                  <span className="truncate" title={status}>{status}</span>
+                  {(status.startsWith("Error") || status.startsWith("Delete failed")) && (
+                    <button
+                      type="button"
+                      onClick={() => setStatus("")}
+                      className="flex-shrink-0 px-1 text-text-muted hover:text-text"
+                      aria-label="Dismiss error"
+                      title="Dismiss"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                setStatus("");
+                setCreateOpen(true);
+              }}
+              disabled={!isBound}
+              className="flex items-center gap-2 px-3 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+              title={isBound ? `Create a new ${KIND_SINGULAR[activeKind]}` : "Bind a provider first"}
+            >
+              <span aria-hidden="true" className="text-base leading-none">+</span>
+              New {KIND_SINGULAR[activeKind]}
+            </button>
+          </div>
+
+          {createOpen && (
+            <CreationDialog
+              title={isEditMode ? "Edit image" : `Create ${KIND_SINGULAR[activeKind]}`}
+              onClose={() => setCreateOpen(false)}
+            >
           {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
               projectId={projectId}
@@ -1748,20 +2071,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             sourceRequiredMissing={videoSourceMissing}
             draftBlocked={draftHasInlineSource}
           />
-
-          {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
-            <VideoJobsBanner jobs={videoJobs} />
+            </CreationDialog>
           )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
             {items.length === 0 && !generating && pendingVideoJobs.length === 0 ? (
               <div className="py-12 px-6 text-center text-text-muted text-sm">
-                {status || "No generations yet for this kind."}
+                {historyLoading ? "Loading…" : status || "No generations yet for this kind."}
               </div>
             ) : (
-              <Gallery
-                kind={activeKind}
-                items={items}
+              <>
+                <Gallery
+                  kind={activeKind}
+                  items={items}
                   onSelect={setSelected}
                   onOpenLightbox={setLightbox}
                   onGenerateDraft={generateDraft}
@@ -1772,9 +2094,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   pendingJobs={pendingVideoJobs}
                   generatingDraftId={generatingDraftId}
                 />
+                {historyHasMore && historyCursor && (
+                  <div className="flex justify-center px-3 py-4 border-t border-border">
+                    <button
+                      onClick={() => loadGenerations(historyCursor)}
+                      disabled={historyLoadingMore}
+                      className="px-4 py-2 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+                    >
+                      {historyLoadingMore ? "Loading…" : "Load more"}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
-          <div className="text-xs text-text-dim">{status}</div>
         </div>
 
         {selected && (
@@ -1790,6 +2123,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                     addSourceImage(`storage:${id}`, `Storage #${id}`);
                     setSelected(null);
                     setTab("image");
+                    setCreateOpen(true);
                   }
                 : undefined
             }
@@ -1808,6 +2142,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   addSourceImage(`storage:${id}`, `Storage #${id}`);
                   setLightbox(null);
                   setTab("image");
+                  setCreateOpen(true);
                 }
               : undefined
           }
@@ -1818,6 +2153,80 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 }
 
 // ─── sub-components ────────────────────────────────────────────────
+
+function CreationDialog({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]',
+        ),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    dialogRef.current?.querySelector("textarea")?.focus();
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+  return (
+    <div className="ms-create-backdrop" onMouseDown={onClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="media-create-title"
+        className="ms-create-dialog border border-border rounded bg-bg-card"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center justify-between gap-4 px-5 py-4 border-b border-border flex-shrink-0">
+          <h2 id="media-create-title" className="text-base font-semibold text-text">
+            {title}
+          </h2>
+          <button
+            onClick={onClose}
+            aria-label="Close creation dialog"
+            className="text-text-muted hover:text-text leading-none px-2 py-1"
+            style={{ fontSize: 22 }}
+          >
+            ×
+          </button>
+        </header>
+        <div className="ms-create-body">{children}</div>
+      </div>
+    </div>
+  );
+}
 
 function KindIcon({ kind }: { kind: Kind }) {
   if (kind === "image") return <IconImage />;
@@ -2012,6 +2421,12 @@ function Composer(p: ComposerProps) {
             : "a cat in a hat";
   const selectedAvatar = p.avatars.find((av) => av.id === p.selectedAvatar);
   const ttsProvider = p.currentModel?.provider || providerFromQualifiedId(p.audioModel) || p.audioProviders[0]?.slug || "";
+  const voiceCreationProviders = p.audioProviders.filter(
+    (item) => item.slug === "elevenlabs" || item.slug === "fish-audio",
+  );
+  const voiceCreationProvider = voiceCreationProviders.some((item) => item.slug === p.voiceCreateProvider)
+    ? p.voiceCreateProvider
+    : voiceCreationProviders[0]?.slug || "";
   const ttsVoices = ttsProvider ? p.voices.filter((item) => !item.provider || item.provider === ttsProvider) : p.voices;
   const avatarVBlocked =
     p.kind === "avatar" &&
@@ -2020,8 +2435,8 @@ function Composer(p: ComposerProps) {
     !!selectedAvatar &&
     !avatarSupportsEngine(selectedAvatar, "avatar_v");
   return (
-    <div className="flex items-end gap-3 flex-wrap">
-      <div className="flex-1" style={{ minWidth: 240 }}>
+    <div className="ms-composer">
+      <div>
         <label className="text-text-muted text-xs flex items-center justify-between gap-2">
           <span>Prompt</span>
           {p.promptLimit > 0 && (
@@ -2031,16 +2446,18 @@ function Composer(p: ComposerProps) {
           )}
         </label>
         <textarea
-          rows={2}
+          rows={7}
           value={p.prompt}
           onChange={(e) => p.setPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) p.generate();
           }}
           placeholder={promptPlaceholder}
-          className={`w-full bg-bg-input border rounded px-2 py-1.5 text-sm resize-y ${p.promptTooLong ? "border-red" : "border-border"}`}
+          autoFocus
+          className={`ms-prompt-input w-full bg-bg-input border rounded px-3 py-2.5 text-sm resize-y ${p.promptTooLong ? "border-red" : "border-border"}`}
         />
       </div>
+      <div className="ms-composer-options">
       {p.kind === "image" && p.isEditMode && (
         <EditOptions
           model={p.editModel}
@@ -2090,8 +2507,10 @@ function Composer(p: ComposerProps) {
             value={p.aspect}
             onChange={p.setAspect}
             disabledHint={
-              p.currentModel?.model_type === "image-to-video"
-                ? "Inherited from source image"
+              p.currentModel && !shouldSendVideoAspect(p.currentModel.aspect_ratios, true)
+                ? p.currentModel.model_type === "image-to-video"
+                  ? "Inherited from source image"
+                  : "Not supported by this model"
                 : undefined
             }
           />
@@ -2104,58 +2523,61 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "audio_tts" && (
         <>
-          <VoiceCreatePanel
-            providers={p.audioProviders}
-            provider={p.voiceCreateProvider || ttsProvider}
-            setProvider={p.setVoiceCreateProvider}
-            sourceType={p.voiceCreateSourceType}
-            setSourceType={p.setVoiceCreateSourceType}
-            identities={p.voiceIdentities}
-            open={p.voiceCreateOpen}
-            setOpen={p.setVoiceCreateOpen}
-            name={p.voiceCreateName}
-            setName={p.setVoiceCreateName}
-            description={p.voiceCreateDescription}
-            setDescription={p.setVoiceCreateDescription}
-            model={p.voiceCreateModel}
-            setModel={p.setVoiceCreateModel}
-            previewText={p.voiceCreatePreviewText}
-            setPreviewText={p.setVoiceCreatePreviewText}
-            enhance={p.voiceCreateEnhance}
-            setEnhance={p.setVoiceCreateEnhance}
-            audio={p.voiceCreateAudio}
-            setAudio={p.setVoiceCreateAudio}
-            audioFilename={p.voiceCreateAudioFilename}
-            setAudioFilename={p.setVoiceCreateAudioFilename}
-            transcript={p.voiceCreateTranscript}
-            setTranscript={p.setVoiceCreateTranscript}
-            creating={p.voiceCreating}
-            createVoice={p.createVoice}
-            onError={p.onError}
-            selectedVoice={p.voice}
-            setSelectedVoice={p.setVoice}
-          />
+          {voiceCreationProviders.length > 0 && (
+            <VoiceCreatePanel
+              providers={voiceCreationProviders}
+              provider={voiceCreationProvider}
+              setProvider={p.setVoiceCreateProvider}
+              sourceType={p.voiceCreateSourceType}
+              setSourceType={p.setVoiceCreateSourceType}
+              identities={p.voiceIdentities}
+              open={p.voiceCreateOpen}
+              setOpen={p.setVoiceCreateOpen}
+              name={p.voiceCreateName}
+              setName={p.setVoiceCreateName}
+              description={p.voiceCreateDescription}
+              setDescription={p.setVoiceCreateDescription}
+              model={p.voiceCreateModel}
+              setModel={p.setVoiceCreateModel}
+              previewText={p.voiceCreatePreviewText}
+              setPreviewText={p.setVoiceCreatePreviewText}
+              enhance={p.voiceCreateEnhance}
+              setEnhance={p.setVoiceCreateEnhance}
+              audio={p.voiceCreateAudio}
+              setAudio={p.setVoiceCreateAudio}
+              audioFilename={p.voiceCreateAudioFilename}
+              setAudioFilename={p.setVoiceCreateAudioFilename}
+              transcript={p.voiceCreateTranscript}
+              setTranscript={p.setVoiceCreateTranscript}
+              creating={p.voiceCreating}
+              createVoice={p.createVoice}
+              onError={p.onError}
+              selectedVoice={p.voice}
+              setSelectedVoice={p.setVoice}
+            />
+          )}
           <MediaModelPicker
             model={p.audioModel}
             setModel={p.setAudioModel}
             liveModels={p.liveModels}
             liveProvider={p.liveProvider}
           />
-          {ttsProvider === "fish-audio" && (
+          {(ttsProvider === "fish-audio" || ttsProvider === "deepgram") && (
             <>
               <div>
                 <label className="text-text-muted text-xs block">Format</label>
                 <select value={p.audioFormat} onChange={(e) => p.setAudioFormat(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
-                  <option value="mp3">MP3</option>
-                  <option value="wav">WAV</option>
-                  <option value="opus">Opus</option>
-                  <option value="pcm">PCM</option>
+                  {ttsOutputFormats(ttsProvider).map((format) => (
+                    <option key={format} value={format}>{format.toUpperCase()}</option>
+                  ))}
                 </select>
               </div>
-              <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+              {ttsProvider === "fish-audio" && (
+                <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+              )}
             </>
           )}
-          {ttsVoices.length > 0 ? (
+          {!ttsProviderUsesSeparateVoice(ttsProvider) ? null : ttsVoices.length > 0 ? (
             <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={ttsVoices} />
           ) : (
             <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="voice_id" />
@@ -2237,35 +2659,40 @@ function Composer(p: ComposerProps) {
           suggestions={p.folderSuggestions}
         />
       )}
-      <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
-      <button
-        onClick={p.generate}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
-        className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        title={
-          avatarVBlocked
-            ? "Selected avatar does not advertise Avatar V support"
-            : p.sourceRequiredMissing
-              ? "The selected video model requires a source image"
-              : undefined
-        }
-      >
-        {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
-      </button>
-      <button
-        onClick={p.createDraft}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.sourceRequiredMissing || p.draftBlocked}
-        title={
-          p.sourceRequiredMissing
-            ? "The selected video model requires a source image"
-            : p.draftBlocked
-              ? "Drafts require Storage references or HTTP(S) source URLs"
-              : undefined
-        }
-        className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
-      >
-        {p.creatingDraft ? "Saving…" : "Create draft"}
-      </button>
+      </div>
+      <div className="ms-composer-footer border-border">
+        <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
+        <div className="ms-composer-actions flex items-center gap-2">
+          <button
+            onClick={p.createDraft}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || p.sourceRequiredMissing || p.draftBlocked}
+            title={
+              p.sourceRequiredMissing
+                ? "The selected video model requires a source image"
+                : p.draftBlocked
+                  ? "Drafts require Storage references or HTTP(S) source URLs"
+                  : undefined
+            }
+            className="px-3 py-2 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
+          >
+            {p.creatingDraft ? "Saving…" : "Save draft"}
+          </button>
+          <button
+            onClick={p.generate}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
+            className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            title={
+              avatarVBlocked
+                ? "Selected avatar does not advertise Avatar V support"
+                : p.sourceRequiredMissing
+                  ? "The selected video model requires a source image"
+                  : undefined
+            }
+          >
+            {p.generating ? "Generating…" : p.isEditMode ? "Generate edit" : p.kind === "avatar" ? "Generate video" : "Generate"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2393,7 +2820,7 @@ function VoiceCreatePanel({
   return (
     <div
       style={{ flexBasis: "100%" }}
-      className="border border-border rounded p-2 bg-bg-card"
+      className="ms-option-wide border border-border rounded p-2 bg-bg-card"
     >
       <div className="flex items-center gap-2 flex-wrap">
         <button
@@ -2672,7 +3099,7 @@ function AvatarCreatePanel({
   return (
     <div
       style={{ flexBasis: "100%" }}
-      className="border border-border rounded p-2 bg-bg-card"
+      className="ms-option-wide border border-border rounded p-2 bg-bg-card"
     >
       <div className="flex items-center gap-2">
         <button
@@ -2848,7 +3275,7 @@ function AvatarPicker({
   }
   const sections = avatarSections(avatars);
   return (
-    <div style={{ flexBasis: "100%" }}>
+    <div className="ms-option-wide" style={{ flexBasis: "100%" }}>
       <label className="text-text-muted text-xs block mb-1">Avatar / replica ({avatars.length})</label>
       <div className="flex flex-col gap-2" style={{ maxHeight: 324, overflow: "auto", paddingRight: 4 }}>
         {sections.map((section) => (
@@ -3210,6 +3637,12 @@ function ReferenceImageInput({
       .slice(0, Math.max(0, maxSources - sources.length));
     files.forEach(handleFile);
   };
+  const addURL = () => {
+    const trimmed = urlInput.trim();
+    if (!trimmed || atLimit) return;
+    onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
+    setUrlInput("");
+  };
 
   return (
     <div
@@ -3265,18 +3698,28 @@ function ReferenceImageInput({
           })}
         </div>
       )}
-      <div className="flex items-center gap-3 flex-wrap">
-        <span className="text-text-muted text-xs">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-text-muted text-xs font-medium">
           {hint || "Reference images"}
           <span className="text-text-dim"> · {sources.length}/{maxSources}</span>
         </span>
-        <button
-          disabled={atLimit}
-          onClick={() => fileInputRef.current?.click()}
-          className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50"
-        >
-          Upload
-        </button>
+        <div className="flex items-center gap-2">
+          {sources.length > 0 && (
+            <button
+              onClick={onClear}
+              className="text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded"
+            >
+              Clear
+            </button>
+          )}
+          <button
+            disabled={atLimit}
+            onClick={() => fileInputRef.current?.click()}
+            className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50"
+          >
+            Upload
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -3289,32 +3732,29 @@ function ReferenceImageInput({
           }}
           style={{ display: "none" }}
         />
-        <span className="text-text-dim text-xs">or paste URL:</span>
+      </div>
+      <div className="flex items-end gap-2">
+        <label className="flex-1 min-w-0 text-text-muted text-xs">
+          Image URL
         <input
           type="text"
           value={urlInput}
           disabled={atLimit}
           onChange={(e) => setUrlInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && urlInput.trim() && !atLimit) {
-              const trimmed = urlInput.trim();
-              onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
-              setUrlInput("");
-            }
+            if (e.key === "Enter") addURL();
           }}
           placeholder={atLimit ? "reference limit reached" : "https://..."}
-          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
-          style={{ minWidth: 180 }}
+          className="block w-full mt-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm disabled:opacity-50"
         />
-        {sources.length > 0 && (
-          <button
-            onClick={onClear}
-            className="text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded"
-          >
-            Clear
-          </button>
-        )}
-        <span className="text-text-dim text-xs">pick from history with Use as reference</span>
+        </label>
+        <button
+          onClick={addURL}
+          disabled={atLimit || !urlInput.trim()}
+          className="px-3 py-1.5 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+        >
+          Add
+        </button>
       </div>
     </div>
   );
@@ -3760,6 +4200,20 @@ function defaultOutputFolder(kind: Kind): string {
   return "/.generated/audio/";
 }
 
+function mediaPlayerLabel(kind: Kind): string {
+  if (kind === "music") return "Music";
+  if (kind === "audio_sfx") return "Sound effect";
+  if (kind === "audio_tts") return "Voiceover";
+  if (kind === "avatar") return "Avatar video";
+  return "Video";
+}
+
+function generationPoster(generation: Generation): string | undefined {
+  return generation.thumbnail_b64
+    ? `data:image/jpeg;base64,${generation.thumbnail_b64}`
+    : undefined;
+}
+
 function storageFoldersFromFiles(files: { folder?: string }[]): string[] {
   const set = new Set<string>();
   for (const file of files || []) {
@@ -3778,6 +4232,187 @@ function normalizeFolderInput(raw: string): string {
 
 function folderHasDotSegment(folder: string): boolean {
   return folder.split("/").some((part) => part.startsWith("."));
+}
+
+const MEDIA_PLAYER_PLAY_EVENT = "media-studio:player-play";
+
+function StudioMediaPlayer({
+  src,
+  mediaType,
+  label,
+  durationSeconds = 0,
+  poster,
+  variant = "card",
+}: {
+  src: string;
+  mediaType: "audio" | "video";
+  label: string;
+  durationSeconds?: number;
+  poster?: string;
+  variant?: "card" | "detail" | "lightbox";
+}) {
+  const playerId = useId();
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(durationSeconds > 0 ? durationSeconds : 0);
+
+  useEffect(() => {
+    const pauseForOtherPlayer = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== playerId) mediaRef.current?.pause();
+    };
+    window.addEventListener(MEDIA_PLAYER_PLAY_EVENT, pauseForOtherPlayer);
+    return () => window.removeEventListener(MEDIA_PLAYER_PLAY_EVENT, pauseForOtherPlayer);
+  }, [playerId]);
+
+  useEffect(() => {
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(durationSeconds > 0 ? durationSeconds : 0);
+  }, [src, durationSeconds]);
+
+  const announcePlay = () => {
+    window.dispatchEvent(new CustomEvent(MEDIA_PLAYER_PLAY_EVENT, { detail: playerId }));
+  };
+  const togglePlayback = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    if (media.paused) {
+      announcePlay();
+      void media.play().catch(() => setPlaying(false));
+    } else {
+      media.pause();
+    }
+  };
+  const toggleMuted = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    media.muted = !media.muted;
+    setMuted(media.muted);
+  };
+  const openFullscreen = () => {
+    const stage = stageRef.current;
+    if (stage?.requestFullscreen) {
+      void stage.requestFullscreen();
+      return;
+    }
+    const video = mediaRef.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+    video?.webkitEnterFullscreen?.();
+  };
+  const syncDuration = () => {
+    const value = mediaRef.current?.duration || 0;
+    if (Number.isFinite(value) && value > 0) setDuration(value);
+  };
+  const controls = (
+    <div className="ms-player-controls">
+      <button
+        type="button"
+        className="ms-player-button"
+        onClick={togglePlayback}
+        aria-label={playing ? `Pause ${label}` : `Play ${label}`}
+        title={playing ? "Pause" : "Play"}
+      >
+        {playing ? <Pause size={16} strokeWidth={1.8} /> : <Play size={16} strokeWidth={1.8} fill="currentColor" />}
+      </button>
+      <input
+        type="range"
+        className="ms-player-range"
+        min={0}
+        max={Math.max(duration, 0.01)}
+        step={0.01}
+        value={Math.min(currentTime, Math.max(duration, 0.01))}
+        onChange={(event) => {
+          const value = Number(event.currentTarget.value);
+          if (mediaRef.current) mediaRef.current.currentTime = value;
+          setCurrentTime(value);
+        }}
+        aria-label={`Seek ${label}`}
+      />
+      <span className="ms-player-time">
+        {formatMediaTime(currentTime)} / {formatMediaTime(duration)}
+      </span>
+      <button
+        type="button"
+        className="ms-player-button"
+        onClick={toggleMuted}
+        aria-label={muted ? `Unmute ${label}` : `Mute ${label}`}
+        title={muted ? "Unmute" : "Mute"}
+      >
+        {muted ? <VolumeX size={16} strokeWidth={1.8} /> : <Volume2 size={16} strokeWidth={1.8} />}
+      </button>
+      {mediaType === "video" && (
+        <button
+          type="button"
+          className="ms-player-button"
+          onClick={openFullscreen}
+          aria-label={`View ${label} fullscreen`}
+          title="Fullscreen"
+        >
+          <Maximize2 size={16} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+
+  if (mediaType === "audio") {
+    return (
+      <div className={`ms-audio-player ms-player-${variant}`}>
+        <div className="ms-audio-mark" aria-hidden="true">
+          <AudioLines size={22} strokeWidth={1.7} />
+        </div>
+        <div className="ms-audio-content">
+          <div className="ms-audio-kicker">{label}</div>
+          <audio
+            ref={(node) => { mediaRef.current = node; }}
+            src={src}
+            preload="metadata"
+            onLoadedMetadata={syncDuration}
+            onDurationChange={syncDuration}
+            onTimeUpdate={() => setCurrentTime(mediaRef.current?.currentTime || 0)}
+            onPlay={() => { announcePlay(); setPlaying(true); }}
+            onPause={() => setPlaying(false)}
+            onEnded={() => setPlaying(false)}
+            onVolumeChange={() => setMuted(Boolean(mediaRef.current?.muted))}
+          />
+          {controls}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={stageRef} className={`ms-video-player ms-player-${variant}`}>
+      <video
+        ref={(node) => { mediaRef.current = node; }}
+        src={src}
+        poster={poster}
+        preload="metadata"
+        playsInline
+        onClick={togglePlayback}
+        onLoadedMetadata={syncDuration}
+        onDurationChange={syncDuration}
+        onTimeUpdate={() => setCurrentTime(mediaRef.current?.currentTime || 0)}
+        onPlay={() => { announcePlay(); setPlaying(true); }}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onVolumeChange={() => setMuted(Boolean(mediaRef.current?.muted))}
+      />
+      {!playing && (
+        <button
+          type="button"
+          className="ms-video-play-overlay"
+          onClick={togglePlayback}
+          aria-label={`Play ${label}`}
+          title="Play"
+        >
+          <Play size={20} strokeWidth={1.8} fill="currentColor" />
+        </button>
+      )}
+      {controls}
+    </div>
+  );
 }
 
 function Gallery({
@@ -3855,19 +4490,10 @@ function Gallery({
     );
   }
   // Video, audio, music: responsive grid of media-card players.
+  const videoKind = kind === "video" || kind === "avatar";
+  const playerLabel = mediaPlayerLabel(kind);
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: kind === "video" || kind === "avatar"
-          ? "repeat(auto-fill, minmax(min(360px, 100%), 1fr))"
-          : "repeat(auto-fill, minmax(min(280px, 100%), 1fr))",
-        gap: 8,
-        padding: 8,
-        alignItems: "start",
-        alignContent: "start",
-      }}
-    >
+    <div className={`ms-gallery-grid ${videoKind ? "ms-gallery-video" : "ms-gallery-audio"}`}>
       {generating && (
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
       )}
@@ -3907,16 +4533,18 @@ function Gallery({
           return (
             <div
               key={g.id}
-              className="border border-border rounded overflow-hidden bg-bg-card"
+              className="ms-media-card"
             >
               {draft ? (
                 <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
               ) : url ? (
-                kind === "video" || kind === "avatar" ? (
-                  <video controls src={url} className="w-full" />
-                ) : (
-                  <audio controls src={url} className="w-full" />
-                )
+                <StudioMediaPlayer
+                  src={url}
+                  mediaType={videoKind ? "video" : "audio"}
+                  label={playerLabel}
+                  durationSeconds={g.duration_ms > 0 ? g.duration_ms / 1000 : 0}
+                  poster={generationPoster(g)}
+                />
               ) : (
                 <div className="bg-bg-input py-6 text-center text-text-muted text-xs">no source</div>
               )}
@@ -4011,23 +4639,19 @@ function CardMeta({ g }: { g: Generation }) {
   const cost = formatCost(g.cost_usd);
   const status = g.status && g.status !== "ready" ? g.status : "";
   return (
-    <div className="p-2">
+    <div className="ms-card-meta p-2">
       <div className="text-text text-xs truncate flex items-center gap-1.5">
         {status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted uppercase">{status}</span>}
         <span className="truncate">{g.prompt}</span>
       </div>
-      <div className="text-text-dim mt-0.5 flex items-center gap-1.5" style={{ fontSize: 10 }}>
-        <span>{g.provider}</span>
-        <span>·</span>
-        <span>{g.model || g.size || "—"}</span>
-        <span>·</span>
-        <span>{new Date(g.created_at).toLocaleString()}</span>
-        {cost && (
-          <>
-            <span>·</span>
-            <span className="text-accent">{cost}</span>
-          </>
-        )}
+      <div className="ms-card-facts text-text-dim mt-1" style={{ fontSize: 10 }}>
+        <span className="truncate" title={`${g.provider} · ${g.model || g.size || "—"}`}>
+          {g.provider} · {g.model || g.size || "—"}
+        </span>
+        <span className="flex items-center gap-1.5 whitespace-nowrap">
+          <span>{new Date(g.created_at).toLocaleString()}</span>
+          {cost && <span className="text-accent">· {cost}</span>}
+        </span>
       </div>
     </div>
   );
@@ -4047,6 +4671,7 @@ function DetailAside({
   onUseAsReference?: () => void;
 }) {
   const url = selected.storage_urls?.[0] || selected.local_cache_url || selected.upstream_urls?.[0] || "";
+  const playerLabel = mediaPlayerLabel(selected.kind);
   return (
     <aside
       className="ms-media-detail flex-shrink-0 border-border bg-bg-card flex flex-col"
@@ -4081,9 +4706,24 @@ function DetailAside({
       </header>
       <div className="flex-1 overflow-auto">
         {url && selected.kind === "image" && <img src={url} alt="" className="w-full" />}
-        {url && (selected.kind === "video" || selected.kind === "avatar") && <video controls src={url} className="w-full" />}
+        {url && (selected.kind === "video" || selected.kind === "avatar") && (
+          <StudioMediaPlayer
+            src={url}
+            mediaType="video"
+            label={playerLabel}
+            durationSeconds={selected.duration_ms > 0 ? selected.duration_ms / 1000 : 0}
+            poster={generationPoster(selected)}
+            variant="detail"
+          />
+        )}
         {url && (selected.kind === "audio_tts" || selected.kind === "audio_sfx" || selected.kind === "music") && (
-          <audio controls src={url} className="w-full p-3" />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="audio"
+            label={playerLabel}
+            durationSeconds={selected.duration_ms > 0 ? selected.duration_ms / 1000 : 0}
+            variant="detail"
+          />
         )}
         <dl className="px-4 py-3 text-xs flex flex-col gap-2">
           <Row label="Kind" value={selected.kind} />
@@ -4128,29 +4768,6 @@ function DetailAside({
   );
 }
 
-function VideoJobsBanner({
-  jobs,
-}: {
-  jobs: VideoJob[];
-}) {
-  const failed = jobs.filter((j) => j.status === "failed");
-  if (failed.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-1 p-2 rounded border border-border bg-bg-card">
-      {failed.map((j) => (
-        <div key={j.id} className="flex items-start gap-2 text-xs">
-          <span className="text-text" style={{ color: "var(--apteva-danger, #ef4444)" }}>
-            Failed #{j.id} ({j.model})
-          </span>
-          <span className="text-text-dim flex-1 truncate" title={j.error}>
-            {j.error || "(no detail)"}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // sourceImagePreviewSrc renders a tiny <img> for the reference state.
 // Handles three shapes: storage handle ("storage:N" → platform-proxy
 // URL), http(s) URL (pass-through), or base64 (assume PNG, wrap in
@@ -4180,6 +4797,7 @@ function Lightbox({
   onUseAsReference?: () => void;
 }) {
   const url = item.storage_urls?.[0] || item.local_cache_url || item.upstream_urls?.[0] || imageSrc(item);
+  const playerLabel = mediaPlayerLabel(item.kind);
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -4234,10 +4852,23 @@ function Lightbox({
           />
         )}
         {url && (item.kind === "video" || item.kind === "avatar") && (
-          <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="video"
+            label={playerLabel}
+            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+            poster={generationPoster(item)}
+            variant="lightbox"
+          />
         )}
         {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (
-          <audio controls src={url} style={{ width: "min(480px, calc(100vw - 48px))", maxWidth: "100%" }} />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="audio"
+            label={playerLabel}
+            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+            variant="lightbox"
+          />
         )}
         <div className="text-text text-sm text-center" style={{ maxWidth: 700 }}>
           {item.prompt}

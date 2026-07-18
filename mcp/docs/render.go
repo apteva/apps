@@ -61,11 +61,28 @@ import (
 type RenderOptions struct {
 	// PageSize is "A4" | "letter" | "legal". Empty = "A4".
 	PageSize string
+	// Cover adds a first-page lead-magnet cover before the markdown body.
+	Cover *CoverOptions
+	// HeaderBrand, HeaderTitle and FooterWebsite enable lightweight branded chrome.
+	HeaderBrand   string
+	HeaderTitle   string
+	FooterWebsite string
 	// ImageResolver turns a markdown image src into bytes. Set by the
 	// tool layer (backed by the storage client). Nil = images render
 	// as a labeled placeholder rather than failing the render — see
 	// imageResolver.
 	ImageResolver imageResolver
+	// OnWarning reports recoverable quality problems such as an image
+	// that could not be resolved and was replaced with a placeholder.
+	OnWarning func(string)
+}
+
+type CoverOptions struct {
+	Brand     string
+	Title     string
+	Promise   string
+	Subtitle  string
+	VisualSrc string
 }
 
 // renderPDF is the one-shot render entry point. Takes the raw
@@ -108,13 +125,33 @@ func mergeTemplate(body string, data map[string]any) (string, error) {
 // markdownToPDF — the AST→maroto walk. Builds rows in document
 // order; each block type emits a row of the right height.
 func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
-	cfg := config.NewBuilder().
+	builder := config.NewBuilder().
 		WithPageSize(pageSizeFromString(opts.PageSize)).
 		WithLeftMargin(18).
 		WithRightMargin(18).
-		WithTopMargin(18).
-		Build()
+		WithTopMargin(18)
+	if opts.HeaderTitle != "" || opts.FooterWebsite != "" {
+		builder = builder.WithPageNumber(props.PageNumber{
+			Pattern: "Page {current} of {total}",
+			Place:   props.RightBottom,
+			Size:    7.2,
+			Color:   mutedColor(),
+		})
+	}
+	cfg := builder.Build()
 	m := maroto.New(cfg)
+	if opts.HeaderTitle != "" || opts.FooterWebsite != "" {
+		if err := m.RegisterHeader(headerRows(opts.HeaderBrand, opts.HeaderTitle)...); err != nil {
+			return nil, fmt.Errorf("register header: %w", err)
+		}
+		if err := m.RegisterFooter(footerRows(opts.FooterWebsite, opts.HeaderTitle)...); err != nil {
+			return nil, fmt.Errorf("register footer: %w", err)
+		}
+	}
+	if opts.Cover != nil {
+		m.AddRows(coverRows(opts.Cover, opts.ImageResolver, opts.OnWarning)...)
+		m.AddPages(page.New())
+	}
 
 	source := []byte(md)
 	// goldmark.New(WithExtensions(Table)) keeps the CommonMark base
@@ -131,7 +168,7 @@ func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
 				continue
 			}
 		}
-		rows := blockToRows(n, source, opts.ImageResolver)
+		rows := blockToRows(n, source, opts.ImageResolver, opts.OnWarning)
 		if len(rows) > 0 {
 			if _, ok := n.(*extast.Table); ok {
 				addRowsWithTableGuard(m, rows)
@@ -167,10 +204,163 @@ func addRowsWithTableGuard(m core.Maroto, rows []core.Row) {
 	m.AddRows(rows...)
 }
 
+func headerRows(brand, title string) []core.Row {
+	if brand == "" {
+		brand = "Apteva"
+	}
+	if title == "" {
+		title = "Document"
+	}
+	return []core.Row{
+		row.New(7).Add(
+			col.New(4).Add(text.New(brand, props.Text{
+				Size:  8,
+				Style: fontstyle.Bold,
+				Color: accentColor(),
+				Top:   1.2,
+			})),
+			col.New(8).Add(text.New(title, props.Text{
+				Size:  7.2,
+				Align: align.Right,
+				Color: mutedColor(),
+				Top:   1.4,
+			})),
+		),
+		line.NewRow(2, props.Line{
+			Color:         ruleColor(),
+			Thickness:     0.08,
+			OffsetPercent: 18,
+			SizePercent:   100,
+		}),
+	}
+}
+
+func footerRows(website, title string) []core.Row {
+	if website == "" {
+		website = "apteva.com"
+	}
+	return []core.Row{
+		line.NewRow(2, props.Line{
+			Color:         ruleColor(),
+			Thickness:     0.08,
+			OffsetPercent: 20,
+			SizePercent:   100,
+		}),
+		row.New(8).Add(
+			col.New(5).Add(text.New(website, props.Text{
+				Size:  7.2,
+				Color: accentColor(),
+				Top:   1,
+			})),
+			col.New(5).Add(text.New(title, props.Text{
+				Size:  7.2,
+				Color: mutedColor(),
+				Top:   1,
+				Align: align.Center,
+			})),
+			col.New(2).Add(text.New("", props.Text{Size: 7.2})),
+		),
+	}
+}
+
+func coverRows(cover *CoverOptions, resolve imageResolver, warn func(string)) []core.Row {
+	if cover == nil {
+		return nil
+	}
+	brand := cover.Brand
+	if brand == "" {
+		brand = "Apteva"
+	}
+	title := cover.Title
+	if title == "" {
+		title = "Lead Magnet"
+	}
+	var rows []core.Row
+	rows = append(rows,
+		row.New(16).Add(col.New(12).Add(text.New(strings.ToUpper(brand), props.Text{
+			Size:  9,
+			Style: fontstyle.Bold,
+			Color: accentColor(),
+			Top:   4,
+		}))),
+		row.New(24).Add(col.New(12)),
+		row.New().Add(col.New(10).Add(text.New(title, props.Text{
+			Size:            28,
+			Style:           fontstyle.Bold,
+			Color:           headingColor(),
+			Top:             3,
+			Bottom:          2,
+			VerticalPadding: 1.2,
+		}))),
+	)
+	if cover.Promise != "" {
+		rows = append(rows, row.New().Add(col.New(10).Add(text.New(cover.Promise, props.Text{
+			Size:            13.2,
+			Color:           bodyColor(),
+			Top:             2,
+			Bottom:          2,
+			VerticalPadding: 0.8,
+		}))))
+	}
+	if cover.Subtitle != "" {
+		rows = append(rows, row.New().Add(col.New(9).Add(text.New(cover.Subtitle, props.Text{
+			Size:            9.6,
+			Color:           mutedColor(),
+			Top:             1,
+			Bottom:          4,
+			VerticalPadding: 0.5,
+		}))))
+	}
+	if strings.TrimSpace(cover.VisualSrc) != "" {
+		rows = append(rows, coverVisualRow(cover.VisualSrc, resolve, warn))
+	}
+	if cover.Promise != "" {
+		rows = append(rows,
+			row.New(10).Add(col.New(12)),
+			row.New().Add(col.New(7).WithStyle(coverPromiseStyle()).Add(text.New("Outcome: "+cover.Promise, props.Text{
+				Size:            9.2,
+				Style:           fontstyle.Bold,
+				Color:           headingColor(),
+				Top:             3,
+				Bottom:          3,
+				Left:            4,
+				Right:           4,
+				VerticalPadding: 0.45,
+			}))),
+		)
+	}
+	return rows
+}
+
+func coverVisualRow(src string, resolve imageResolver, warn func(string)) core.Row {
+	if resolve == nil {
+		if warn != nil {
+			warn("cover visual " + src + " could not be resolved: no image resolver")
+		}
+		return placeholderRow("cover visual", src)
+	}
+	data, ext, err := resolve(src)
+	if err != nil || len(data) == 0 {
+		if warn != nil {
+			message := "empty image"
+			if err != nil {
+				message = err.Error()
+			}
+			warn("cover visual " + src + " could not be resolved: " + message)
+		}
+		return placeholderRow("cover visual", src)
+	}
+	return row.New(74).Add(
+		col.New(1),
+		col.New(10).Add(mimage.NewFromBytes(data, imageExt(ext), props.Rect{Percent: 82})),
+		col.New(1),
+	)
+}
+
 // blockToRows turns one top-level AST block into 0+ maroto rows.
 // Returning a slice (vs a single row) lets a list emit one row per
 // item, a code block split across pages cleanly, etc.
-func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
+func blockToRows(n gast.Node, source []byte, resolve imageResolver, warn func(string)) []core.Row {
 	switch b := n.(type) {
 	case *gast.Heading:
 		return []core.Row{headingRow(b, source)}
@@ -180,7 +370,7 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 		// inline with text). The common "logo on its own line" case
 		// yields a single image row.
 		if paragraphHasImage(b) {
-			return paragraphToRows(b, source, resolve)
+			return paragraphToRows(b, source, resolve, warn)
 		}
 		return paragraphRows(b, source)
 	case *gast.List:
@@ -190,21 +380,11 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 	case *gast.ThematicBreak:
 		return []core.Row{thematicBreakRow()}
 	case *gast.FencedCodeBlock:
-		return []core.Row{codeRow(extractText(b, source))}
+		return codeRows(extractCodeLines(b.Lines(), source))
 	case *gast.CodeBlock:
-		return []core.Row{codeRow(extractText(b, source))}
+		return codeRows(extractCodeLines(b.Lines(), source))
 	case *gast.Blockquote:
-		return []core.Row{
-			row.New().Add(
-				col.New(12).Add(text.New(extractText(b, source), props.Text{
-					Style: fontstyle.Italic,
-					Left:  10,
-					Top:   2,
-					Size:  8.6,
-					Color: bodyColor(),
-				})),
-			),
-		}
+		return blockquoteRows(b, source)
 	}
 	// Unknown / unhandled: skip silently (raw HTML blocks, etc.) so
 	// partial templates still render.
@@ -300,7 +480,10 @@ func splitRenderedLines(s string) []string {
 // page breaks. Numbered lists (Ordered=true) get "1. " prefixes.
 func listRows(list *gast.List, source []byte) []core.Row {
 	out := []core.Row{}
-	idx := 1
+	idx := list.Start
+	if idx <= 0 {
+		idx = 1
+	}
 	for li := list.FirstChild(); li != nil; li = li.NextSibling() {
 		txt := extractText(li, source)
 		var prefix string
@@ -331,16 +514,84 @@ func listRows(list *gast.List, source []byte) []core.Row {
 	return out
 }
 
+func blockquoteRows(b *gast.Blockquote, source []byte) []core.Row {
+	body := strings.TrimSpace(extractText(b, source))
+	label := "Note"
+	kind := "note"
+	if strings.HasPrefix(body, "[!") {
+		if end := strings.Index(body, "]"); end > 2 {
+			raw := strings.TrimSpace(body[2:end])
+			if raw != "" {
+				label = humanizeCallout(raw)
+				kind = strings.ToLower(strings.ReplaceAll(raw, " ", "-"))
+				body = strings.TrimSpace(body[end+1:])
+			}
+		}
+	}
+	if body == "" {
+		body = label
+	}
+	textValue := label + ": " + body
+	return []core.Row{
+		row.New().Add(
+			col.New(12).WithStyle(calloutCellStyle(kind)).Add(text.New(textValue, props.Text{
+				Size:            8.9,
+				Style:           fontstyle.Bold,
+				Left:            4.5,
+				Right:           4,
+				Top:             2.7,
+				Bottom:          2.7,
+				VerticalPadding: 0.45,
+				Color:           calloutTextColor(kind),
+			})),
+		),
+	}
+}
+
+func humanizeCallout(s string) string {
+	s = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "_", " ")
+	parts := strings.Fields(strings.ReplaceAll(s, "-", " "))
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	}
+	return strings.Join(parts, " ")
+}
+
 func codeRow(s string) core.Row {
 	return row.New().Add(
-		col.New(12).Add(text.New(s, props.Text{
-			Family: "courier",
-			Size:   8,
-			Top:    2,
-			Left:   6,
-			Color:  bodyColor(),
+		col.New(12).WithStyle(codeCellStyle()).Add(text.New(s, props.Text{
+			Family:          "courier",
+			Size:            7.6,
+			Top:             1.1,
+			Bottom:          1.1,
+			Left:            4,
+			Right:           4,
+			VerticalPadding: 0.2,
+			Color:           bodyColor(),
 		})),
 	)
+}
+
+func codeRows(s string) []core.Row {
+	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	if len(lines) == 0 {
+		return nil
+	}
+	rows := make([]core.Row, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, codeRow(line))
+	}
+	return rows
+}
+
+func extractCodeLines(lines *gtext.Segments, source []byte) string {
+	if lines == nil || lines.Len() == 0 {
+		return ""
+	}
+	return strings.TrimSuffix(string(lines.Value(source)), "\n")
 }
 
 // extractText flattens the node's text content. Drops formatting —
@@ -446,6 +697,13 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 	if n == 0 {
 		return row.New()
 	}
+	if n > 12 {
+		parts := make([]string, 0, n)
+		for _, cell := range cells {
+			parts = append(parts, strings.TrimSpace(renderInline(cell, source)))
+		}
+		return textRow(strings.Join(parts, " | "), 8.1, 1.2, 0)
+	}
 	spans := tableSpans(n, aligns)
 	cols := make([]core.Col, 0, n)
 	for i, cell := range cells {
@@ -511,6 +769,33 @@ func tableCellStyle(header bool) *props.Cell {
 	return c
 }
 
+func codeCellStyle() *props.Cell {
+	return &props.Cell{
+		BackgroundColor: codeBackgroundColor(),
+		BorderType:      border.Left,
+		BorderThickness: 0.5,
+		BorderColor:     mutedColor(),
+	}
+}
+
+func calloutCellStyle(kind string) *props.Cell {
+	return &props.Cell{
+		BackgroundColor: calloutBackgroundColor(kind),
+		BorderType:      border.Left,
+		BorderThickness: 0.9,
+		BorderColor:     calloutAccentColor(kind),
+	}
+}
+
+func coverPromiseStyle() *props.Cell {
+	return &props.Cell{
+		BackgroundColor: &props.Color{Red: 255, Green: 247, Blue: 237},
+		BorderType:      border.Left,
+		BorderThickness: 0.9,
+		BorderColor:     accentColor(),
+	}
+}
+
 func cellAlign(aligns []extast.Alignment, i int) align.Type {
 	if i >= len(aligns) {
 		return align.Left
@@ -546,7 +831,7 @@ func paragraphHasImage(p gast.Node) bool {
 // paragraphToRows splits a paragraph containing image(s) into a
 // sequence of rows: accumulated inline text flushes to a text row,
 // each image emits its own image row, preserving document order.
-func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.Row {
+func paragraphToRows(p gast.Node, source []byte, resolve imageResolver, warn func(string)) []core.Row {
 	var rows []core.Row
 	var buf strings.Builder
 	flush := func() {
@@ -563,7 +848,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 	for c := p.FirstChild(); c != nil; c = c.NextSibling() {
 		if img, ok := c.(*gast.Image); ok {
 			flush()
-			rows = append(rows, imageRow(img, source, resolve))
+			rows = append(rows, imageRow(img, source, resolve, warn))
 			continue
 		}
 		buf.WriteString(renderInline(c, source))
@@ -576,7 +861,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 // from the image title (`"width=30%"` / `"30%"`), defaulting to 30%.
 // Any resolution failure degrades to a placeholder so the render
 // always completes.
-func imageRow(img *gast.Image, source []byte, resolve imageResolver) core.Row {
+func imageRow(img *gast.Image, source []byte, resolve imageResolver, warn func(string)) core.Row {
 	src := strings.TrimSpace(string(img.Destination))
 	alt := strings.TrimSpace(extractText(img, source))
 	width := parseWidthPercent(string(img.Title))
@@ -584,10 +869,20 @@ func imageRow(img *gast.Image, source []byte, resolve imageResolver) core.Row {
 		width = 30 // sensible logo default
 	}
 	if resolve == nil {
+		if warn != nil {
+			warn("image " + src + " could not be resolved: no image resolver")
+		}
 		return placeholderRow(alt, src)
 	}
 	data, ext, err := resolve(src)
 	if err != nil || len(data) == 0 {
+		if warn != nil {
+			message := "empty image"
+			if err != nil {
+				message = err.Error()
+			}
+			warn("image " + src + " could not be resolved: " + message)
+		}
 		return placeholderRow(alt, src)
 	}
 	return row.New().Add(
@@ -635,6 +930,53 @@ func ruleColor() *props.Color {
 
 func tableHeaderColor() *props.Color {
 	return &props.Color{Red: 247, Green: 249, Blue: 251}
+}
+
+func codeBackgroundColor() *props.Color {
+	return &props.Color{Red: 246, Green: 248, Blue: 250}
+}
+
+func accentColor() *props.Color {
+	return &props.Color{Red: 234, Green: 88, Blue: 12}
+}
+
+func calloutBackgroundColor(kind string) *props.Color {
+	switch kind {
+	case "common-mistake", "mistake", "warning":
+		return &props.Color{Red: 255, Green: 241, Blue: 242}
+	case "quick-check", "check":
+		return &props.Color{Red: 239, Green: 246, Blue: 255}
+	case "next-step", "next":
+		return &props.Color{Red: 240, Green: 253, Blue: 244}
+	default:
+		return &props.Color{Red: 248, Green: 250, Blue: 252}
+	}
+}
+
+func calloutAccentColor(kind string) *props.Color {
+	switch kind {
+	case "common-mistake", "mistake", "warning":
+		return &props.Color{Red: 225, Green: 29, Blue: 72}
+	case "quick-check", "check":
+		return &props.Color{Red: 37, Green: 99, Blue: 235}
+	case "next-step", "next":
+		return &props.Color{Red: 22, Green: 163, Blue: 74}
+	default:
+		return mutedColor()
+	}
+}
+
+func calloutTextColor(kind string) *props.Color {
+	switch kind {
+	case "common-mistake", "mistake", "warning":
+		return &props.Color{Red: 136, Green: 19, Blue: 55}
+	case "quick-check", "check":
+		return &props.Color{Red: 30, Green: 64, Blue: 175}
+	case "next-step", "next":
+		return &props.Color{Red: 22, Green: 101, Blue: 52}
+	default:
+		return bodyColor()
+	}
 }
 
 // parseWidthPercent reads a width hint from a markdown image title:

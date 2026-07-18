@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.21
+version: 0.8.22
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -706,8 +706,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name:        "contacts_send_message",
 			Description: "Send a message to a contact via the bound messaging app. Auto-resolves channel + address (channel arg overrides). Logs the send to the activity timeline and links it to a conversation. Sender precedence: from > list.default_sender > install default. Args: id (contact id), body? (required unless template_id/content_sid), channel? (email|sms|whatsapp), subject?, body_html?, from? (verified sender override), list_id? (use this list's sender defaults), conversation_id? (attach to existing thread), template_id? (approved Messaging template, required for WhatsApp outside 24h), template_vars? or vars?, idempotency_key?. For WhatsApp: call messaging_whatsapp_session_check first; if active=false, call messaging_templates_list and send with template_id/template_vars.",
-			InputSchema: schemaObject(map[string]any{
-				"id":              map[string]any{"type": "integer"},
+			InputSchema: messageInputSchema(map[string]any{
+				"id":              map[string]any{"type": "integer", "minimum": 1},
 				"body":            map[string]any{"type": "string"},
 				"channel":         map[string]any{"type": "string"},
 				"subject":         map[string]any{"type": "string"},
@@ -715,43 +715,46 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":            map[string]any{"type": "string"},
 				"list_id":         map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
-				"template_id":     map[string]any{"type": "integer"},
+				"template_id":     map[string]any{"type": "integer", "minimum": 1},
+				"content_sid":     map[string]any{"type": "string"},
 				"template_vars":   map[string]any{"type": "object"},
 				"vars":            map[string]any{"type": "object"},
 				"idempotency_key": map[string]any{"type": "string"},
-			}, []string{"id"}),
+			}),
 			Handler: a.toolSendMessage,
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
-			InputSchema: schemaObject(map[string]any{
-				"id":              map[string]any{"type": "integer"},
+			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id/content_sid), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, content_sid?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			InputSchema: messageInputSchema(map[string]any{
+				"id":              map[string]any{"type": "integer", "minimum": 1},
 				"body":            map[string]any{"type": "string"},
 				"conversation_id": map[string]any{"type": "integer"},
 				"subject":         map[string]any{"type": "string"},
 				"from":            map[string]any{"type": "string"},
 				"list_id":         map[string]any{"type": "integer"},
 				"body_html":       map[string]any{"type": "string"},
-				"template_id":     map[string]any{"type": "integer"},
+				"template_id":     map[string]any{"type": "integer", "minimum": 1},
+				"content_sid":     map[string]any{"type": "string"},
 				"template_vars":   map[string]any{"type": "object"},
 				"vars":            map[string]any{"type": "object"},
 				"idempotency_key": map[string]any{"type": "string"},
-			}, []string{"id"}),
+			}),
 			Handler: a.toolReply,
 		},
 		{
 			Name:        "contacts_send_test",
 			Description: "Send a test message — same wire path as contacts_send_message but logged as *_test_sent and not linked to a conversation. UI filters these out by default. Args: same as contacts_send_message.",
-			InputSchema: schemaObject(map[string]any{
-				"id":            map[string]any{"type": "integer"},
+			InputSchema: messageInputSchema(map[string]any{
+				"id":            map[string]any{"type": "integer", "minimum": 1},
 				"body":          map[string]any{"type": "string"},
 				"channel":       map[string]any{"type": "string"},
 				"subject":       map[string]any{"type": "string"},
 				"from":          map[string]any{"type": "string"},
-				"template_id":   map[string]any{"type": "integer"},
+				"template_id":   map[string]any{"type": "integer", "minimum": 1},
+				"content_sid":   map[string]any{"type": "string"},
 				"template_vars": map[string]any{"type": "object"},
-			}, []string{"id"}),
+			}),
 			Handler: a.toolSendTest,
 		},
 		{
@@ -1431,6 +1434,10 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	listIDs, err := resolveCreateListIDs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	c, err := dbCreate(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
@@ -1438,11 +1445,11 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := loadChannels(ctx.AppDB(), c); err != nil {
 		return nil, err
 	}
-	listsAdded := addContactToLists(ctx, pid, c.ID, args, "contacts_create")
+	emitListMembershipsAdded(ctx, c.ID, listIDs)
 	emitContact(ctx, "contact.added", c)
 	out := map[string]any{"contact": c}
-	if len(listsAdded) > 0 {
-		out["lists_added"] = listsAdded
+	if len(listIDs) > 0 {
+		out["lists_added"] = listIDs
 	}
 	return out, nil
 }
@@ -1543,11 +1550,10 @@ func emitContact(ctx *sdk.AppCtx, topic string, c *Contact) {
 	})
 }
 
-// addContactToLists reads list_ids (array) and list_id (scalar) off the
-// args and adds the contact to each — referenced by numeric id OR slug.
-// Idempotent (INSERT OR IGNORE) and best-effort: an unknown/typo'd list
-// ref is skipped, not fatal, since the contact write already succeeded.
-// Returns the list ids actually applied (for the response + events).
+// addContactToLists provides the idempotent best-effort membership semantics
+// used by upsert: a found contact is still added to every valid requested
+// list, while stale references are skipped. New contact creation uses the
+// strict transactional path in dbCreate instead.
 func addContactToLists(ctx *sdk.AppCtx, pid string, contactID int64, args map[string]any, source string) []int64 {
 	db := ctx.AppDB()
 	refs := []any{}
@@ -1569,6 +1575,97 @@ func addContactToLists(ctx *sdk.AppCtx, pid string, contactID int64, args map[st
 		}
 	}
 	return applied
+}
+
+func emitListMembershipsAdded(ctx *sdk.AppCtx, contactID int64, listIDs []int64) {
+	if ctx == nil {
+		return
+	}
+	for _, listID := range listIDs {
+		ctx.Emit("list.member.added", map[string]any{"list_id": listID, "contact_id": contactID})
+	}
+}
+
+func resolveCreateListIDs(db *sql.DB, pid string, args map[string]any) ([]int64, error) {
+	refs := []any{}
+	if raw, exists := args["list_ids"]; exists {
+		switch items := raw.(type) {
+		case []any:
+			refs = append(refs, items...)
+		case []int64:
+			for _, item := range items {
+				refs = append(refs, item)
+			}
+		case []string:
+			for _, item := range items {
+				refs = append(refs, item)
+			}
+		default:
+			return nil, fmt.Errorf("list_ids: expected array of list ids or slugs, got %T", raw)
+		}
+	}
+	if ref, exists := args["list_id"]; exists && ref != nil {
+		refs = append(refs, ref)
+	}
+
+	ids := make([]int64, 0, len(refs))
+	seen := map[int64]bool{}
+	for i, ref := range refs {
+		id, err := resolveCreateListRef(db, pid, ref)
+		if err != nil {
+			return nil, fmt.Errorf("list reference %d: %w", i, err)
+		}
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+func resolveCreateListRef(db *sql.DB, pid string, ref any) (int64, error) {
+	var id int64
+	switch value := ref.(type) {
+	case float64:
+		id = int64(value)
+		if id <= 0 || float64(id) != value {
+			return 0, fmt.Errorf("invalid numeric list id %v", value)
+		}
+	case int:
+		id = int64(value)
+	case int64:
+		id = value
+	case string:
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return 0, errors.New("list id or slug cannot be empty")
+		}
+		if parsed, err := strconv.ParseInt(value, 10, 64); err == nil {
+			id = parsed
+		} else {
+			list, err := dbListBySlug(db, pid, value)
+			if err != nil {
+				return 0, err
+			}
+			if list == nil || list.ArchivedAt != "" {
+				return 0, fmt.Errorf("list slug %q not found in this project", value)
+			}
+			return list.ID, nil
+		}
+	default:
+		return 0, fmt.Errorf("expected list id or slug, got %T", ref)
+	}
+	if id <= 0 {
+		return 0, fmt.Errorf("invalid list id %d", id)
+	}
+	list, err := dbListGet(db, pid, id)
+	if err != nil {
+		return 0, err
+	}
+	if list == nil || list.ArchivedAt != "" {
+		return 0, fmt.Errorf("list %d not found in this project", id)
+	}
+	return list.ID, nil
 }
 
 // resolveListRef turns a list reference (numeric id or slug, in either
@@ -1727,6 +1824,11 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	listIDs, err := resolveCreateListIDs(ctx.AppDB(), pid, body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	c, err := dbCreate(ctx.AppDB(), pid, body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1736,11 +1838,11 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	listsAdded := addContactToLists(ctx, pid, c.ID, body, "contacts_create")
+	emitListMembershipsAdded(ctx, c.ID, listIDs)
 	emitContact(ctx, "contact.added", c)
 	out := map[string]any{"contact": c}
-	if len(listsAdded) > 0 {
-		out["lists_added"] = listsAdded
+	if len(listIDs) > 0 {
+		out["lists_added"] = listIDs
 	}
 	httpJSON(w, out)
 }
@@ -1883,6 +1985,44 @@ func (a *App) handleHTTPCreateAttrDef(w http.ResponseWriter, r *http.Request) {
 
 // ─── DB helpers ────────────────────────────────────────────────────
 
+type sqlQueryExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func parseContactTags(args map[string]any) ([]string, error) {
+	raw, exists := args["tags"]
+	if !exists {
+		return nil, nil
+	}
+	var values []any
+	switch items := raw.(type) {
+	case []any:
+		values = items
+	case []string:
+		values = make([]any, len(items))
+		for i := range items {
+			values[i] = items[i]
+		}
+	default:
+		return nil, fmt.Errorf("tags: expected array of non-empty strings, got %T", raw)
+	}
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for i, rawTag := range values {
+		tag, ok := rawTag.(string)
+		tag = strings.TrimSpace(tag)
+		if !ok || tag == "" {
+			return nil, fmt.Errorf("tags[%d]: expected non-empty string", i)
+		}
+		if !seen[tag] {
+			seen[tag] = true
+			out = append(out, tag)
+		}
+	}
+	return out, nil
+}
+
 func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 	c := &Contact{
 		ProjectID:   pid,
@@ -1896,6 +2036,27 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 		Source:      strArg(args, "source"),
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Validate all relation inputs before opening the write transaction.
+	// The same checks run again while writing where necessary so a
+	// concurrent definition/list change also rolls the transaction back.
+	if rawChannels, ok := args["channels"]; ok {
+		if _, err := parseChannelInputs(rawChannels); err != nil {
+			return nil, err
+		}
+	}
+	tags, err := parseContactTags(args)
+	if err != nil {
+		return nil, err
+	}
+	attributeWrites, err := prepareAttributeWrites(db, pid, args["attributes"], c.Source)
+	if err != nil {
+		return nil, err
+	}
+	listIDs, err := resolveCreateListIDs(db, pid, args)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -1912,7 +2073,10 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.ID, _ = res.LastInsertId()
+	c.ID, err = res.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
 	c.CreatedAt = now
 	c.UpdatedAt = now
 
@@ -1924,33 +2088,54 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 	}
 
 	// Tags.
-	tags, _ := args["tags"].([]any)
-	for _, t := range tags {
-		name, ok := t.(string)
-		if !ok || name == "" {
-			continue
+	for _, name := range tags {
+		if _, err := tx.Exec(
+			`INSERT INTO contact_tags (project_id, contact_id, tag_name) VALUES (?, ?, ?)`,
+			pid, c.ID, name,
+		); err != nil {
+			return nil, err
 		}
-		tx.Exec(`INSERT OR IGNORE INTO contact_tags (project_id, contact_id, tag_name) VALUES (?, ?, ?)`,
-			pid, c.ID, name)
+	}
+
+	// Typed attributes are part of the same contact write. A missing
+	// definition, invalid enum value, or type mismatch rolls back every
+	// row inserted above.
+	if err := applyPreparedAttributeWrites(tx, pid, c.ID, attributeWrites); err != nil {
+		return nil, err
+	}
+
+	// Initial list membership is also atomic. INSERT ... SELECT repeats
+	// the active/project check inside the transaction to close the race
+	// between prevalidation and commit.
+	for _, listID := range listIDs {
+		res, err := tx.Exec(
+			`INSERT INTO contact_list_members (list_id, contact_id, project_id, source)
+			 SELECT id, ?, ?, ? FROM contact_lists
+			 WHERE id = ? AND project_id = ? AND archived_at IS NULL`,
+			c.ID, pid, "contacts_create", listID, pid,
+		)
+		if err != nil {
+			return nil, err
+		}
+		inserted, err := res.RowsAffected()
+		if err != nil {
+			return nil, err
+		}
+		if inserted != 1 {
+			return nil, fmt.Errorf("list %d is no longer active in this project", listID)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
-	// Attributes. Done after commit because dbSetAttribute is its own
-	// statement and any def-missing error should surface as a contact-
-	// created-but-attributes-failed signal rather than swallowing the
-	// contact itself (the create succeeded; attribute writes are a
-	// separate write path with their own validation).
-	if rawAttrs, ok := args["attributes"]; ok {
-		if err := applyAttributesPatch(db, pid, c.ID, rawAttrs, c.Source); err != nil {
-			return c, fmt.Errorf("contact created (id=%d) but attribute write failed: %w", c.ID, err)
-		}
-	}
 	fresh, err := dbGetByID(db, pid, c.ID)
 	if err != nil || fresh == nil {
-		return c, err
+		if err == nil {
+			err = errors.New("created contact could not be reloaded")
+		}
+		return nil, err
 	}
 	return fresh, nil
 }
@@ -2347,40 +2532,49 @@ func applyChannelsPatch(db *sql.DB, pid string, contactID int64, raw any, source
 	return tx.Commit()
 }
 
-func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, source string) error {
+type channelInput struct {
+	Kind      string
+	Value     string
+	Label     string
+	IsPrimary bool
+}
+
+func parseChannelInputs(raw any) ([]channelInput, error) {
 	arr, ok := raw.([]any)
 	if !ok {
-		return fmt.Errorf("channels: expected array of {kind,value,label,is_primary}, got %T", raw)
+		return nil, fmt.Errorf("channels: expected array of {kind,value,label,is_primary}, got %T", raw)
 	}
-	type chInput struct {
-		Kind      string
-		Value     string
-		Label     string
-		IsPrimary bool
-	}
-	channels := make([]chInput, 0, len(arr))
-	seenKind := map[string]bool{}
+	channels := make([]channelInput, 0, len(arr))
 	kindHasPrimary := map[string]bool{}
+	seenChannel := map[string]bool{}
 	for i, item := range arr {
 		m, ok := item.(map[string]any)
 		if !ok {
-			return fmt.Errorf("channels[%d]: expected object, got %T", i, item)
+			return nil, fmt.Errorf("channels[%d]: expected object, got %T", i, item)
 		}
 		kind := strings.ToLower(strings.TrimSpace(anyString(m["kind"])))
 		value := normaliseChannel(kind, anyString(m["value"]))
 		if kind == "" || value == "" {
-			return fmt.Errorf("channels[%d]: kind and value required", i)
+			return nil, fmt.Errorf("channels[%d]: kind and value required", i)
 		}
-		ch := chInput{
+		channelKey := kind + "\x00" + value
+		if seenChannel[channelKey] {
+			return nil, fmt.Errorf("channels[%d]: duplicate %s channel %q", i, kind, value)
+		}
+		seenChannel[channelKey] = true
+
+		ch := channelInput{
 			Kind:      kind,
 			Value:     value,
 			Label:     strings.TrimSpace(anyString(m["label"])),
 			IsPrimary: boolFromAny(m["is_primary"]),
 		}
 		if ch.IsPrimary {
+			if kindHasPrimary[kind] {
+				return nil, fmt.Errorf("channels[%d]: more than one primary %s channel", i, kind)
+			}
 			kindHasPrimary[kind] = true
 		}
-		seenKind[kind] = true
 		channels = append(channels, ch)
 	}
 	for i := range channels {
@@ -2388,6 +2582,18 @@ func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, sour
 			channels[i].IsPrimary = true
 			kindHasPrimary[channels[i].Kind] = true
 		}
+	}
+	return channels, nil
+}
+
+func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, source string) error {
+	channels, err := parseChannelInputs(raw)
+	if err != nil {
+		return err
+	}
+	seenKind := map[string]bool{}
+	for _, ch := range channels {
+		seenKind[ch.Kind] = true
 	}
 	if _, err := tx.Exec(`DELETE FROM contact_channels WHERE project_id = ? AND contact_id = ?`, pid, contactID); err != nil {
 		return err
@@ -2422,7 +2628,7 @@ func applyChannelsPatchTx(tx *sql.Tx, pid string, contactID int64, raw any, sour
 	if seenKind["phone"] && primaryPhone != "" {
 		phoneArg = primaryPhone
 	}
-	_, err := tx.Exec(
+	_, err = tx.Exec(
 		`UPDATE contacts
 		 SET primary_email = ?, primary_phone = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
@@ -2448,33 +2654,83 @@ func boolFromAny(v any) bool {
 	return false
 }
 
-// applyAttributesPatch iterates an array of {key, value, source?}
-// items and writes each via dbSetAttribute. Errors short-circuit: the
-// caller learns which attribute failed and why (typically: the def
-// doesn't exist yet — call contacts_define_attribute first).
-func applyAttributesPatch(db *sql.DB, pid string, contactID int64, raw any, patchSource string) error {
+type attributeWrite struct {
+	Key    string
+	Value  any
+	Source string
+}
+
+func parseAttributeWrites(raw any, patchSource string) ([]attributeWrite, error) {
+	if raw == nil {
+		return nil, nil
+	}
 	arr, ok := raw.([]any)
 	if !ok {
-		return fmt.Errorf("attributes: expected array of {key, value, source?}, got %T", raw)
+		return nil, fmt.Errorf("attributes: expected array of {key, value, source?}, got %T", raw)
 	}
+	writes := make([]attributeWrite, 0, len(arr))
+	seen := map[string]bool{}
 	for i, item := range arr {
 		m, ok := item.(map[string]any)
 		if !ok {
-			return fmt.Errorf("attributes[%d]: expected object, got %T", i, item)
+			return nil, fmt.Errorf("attributes[%d]: expected object, got %T", i, item)
 		}
-		key, _ := m["key"].(string)
+		key := strings.TrimSpace(anyString(m["key"]))
 		if key == "" {
-			return fmt.Errorf("attributes[%d]: 'key' required", i)
+			return nil, fmt.Errorf("attributes[%d]: 'key' required", i)
 		}
-		src, _ := m["source"].(string)
+		if seen[key] {
+			return nil, fmt.Errorf("attributes[%d]: duplicate key %q", i, key)
+		}
+		seen[key] = true
+		src := strings.TrimSpace(anyString(m["source"]))
 		if src == "" {
 			src = patchSource
 		}
-		if err := dbSetAttribute(db, pid, contactID, key, m["value"], src); err != nil {
-			return fmt.Errorf("attributes[%d] %q: %w", i, key, err)
+		writes = append(writes, attributeWrite{Key: key, Value: m["value"], Source: src})
+	}
+	return writes, nil
+}
+
+func prepareAttributeWrites(db sqlQueryExecer, pid string, raw any, patchSource string) ([]attributeWrite, error) {
+	writes, err := parseAttributeWrites(raw, patchSource)
+	if err != nil {
+		return nil, err
+	}
+	for i, write := range writes {
+		def, err := resolveAttributeDefinition(db, pid, write.Key)
+		if err != nil {
+			return nil, fmt.Errorf("attributes[%d] %q: %w", i, write.Key, err)
+		}
+		if write.Value == nil {
+			if def.Required {
+				return nil, fmt.Errorf("attributes[%d] %q: attribute %q is required", i, write.Key, write.Key)
+			}
+		} else if err := validateAttributeValue(write.Key, def.Type, def.EnumJSON, write.Value); err != nil {
+			return nil, fmt.Errorf("attributes[%d] %q: %w", i, write.Key, err)
+		}
+	}
+	return writes, nil
+}
+
+func applyPreparedAttributeWrites(db sqlQueryExecer, pid string, contactID int64, writes []attributeWrite) error {
+	for i, write := range writes {
+		if err := dbSetAttribute(db, pid, contactID, write.Key, write.Value, write.Source); err != nil {
+			return fmt.Errorf("attributes[%d] %q: %w", i, write.Key, err)
 		}
 	}
 	return nil
+}
+
+// applyAttributesPatch validates the complete patch before writing any
+// attributes. Callers that need atomicity with other contact mutations pass a
+// transaction through applyPreparedAttributeWrites directly.
+func applyAttributesPatch(db sqlQueryExecer, pid string, contactID int64, raw any, patchSource string) error {
+	writes, err := prepareAttributeWrites(db, pid, raw, patchSource)
+	if err != nil {
+		return err
+	}
+	return applyPreparedAttributeWrites(db, pid, contactID, writes)
 }
 
 func dbUpsertByChannel(db *sql.DB, pid, kind, value string, defaults map[string]any, source string) (*Contact, bool, error) {
@@ -2711,7 +2967,32 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 	return out, nil
 }
 
-func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value any, source string) error {
+type attributeDefinition struct {
+	ID       int64
+	Type     string
+	EnumJSON string
+	Required bool
+}
+
+func resolveAttributeDefinition(db sqlQueryExecer, pid, key string) (*attributeDefinition, error) {
+	def := &attributeDefinition{}
+	var required int
+	err := db.QueryRow(
+		`SELECT id, type, COALESCE(enum_values,''), required
+		 FROM contact_attribute_defs WHERE project_id = ? AND key = ?`,
+		pid, key,
+	).Scan(&def.ID, &def.Type, &def.EnumJSON, &required)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("attribute %q not defined — call contacts_define_attribute first", key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	def.Required = required != 0
+	return def, nil
+}
+
+func dbSetAttribute(db sqlQueryExecer, pid string, contactID int64, key string, value any, source string) error {
 	var contactExists int
 	if err := db.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM contacts
@@ -2725,16 +3006,7 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 	}
 
 	// Resolve the project-owned definition and validate before writing.
-	var defID int64
-	var typ, enumJSON string
-	var required int
-	err := db.QueryRow(
-		`SELECT id, type, COALESCE(enum_values,''), required
-		 FROM contact_attribute_defs WHERE project_id = ? AND key = ?`,
-		pid, key).Scan(&defID, &typ, &enumJSON, &required)
-	if err == sql.ErrNoRows {
-		return fmt.Errorf("attribute %q not defined — call contacts_define_attribute first", key)
-	}
+	def, err := resolveAttributeDefinition(db, pid, key)
 	if err != nil {
 		return err
 	}
@@ -2743,13 +3015,13 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 	var vd sql.NullString
 	var vb sql.NullBool
 	if value == nil {
-		if required != 0 {
+		if def.Required {
 			return fmt.Errorf("attribute %q is required", key)
 		}
-	} else if err := validateAttributeValue(key, typ, enumJSON, value); err != nil {
+	} else if err := validateAttributeValue(key, def.Type, def.EnumJSON, value); err != nil {
 		return err
 	}
-	switch typ {
+	switch def.Type {
 	case "text", "url", "select":
 		if value != nil {
 			vt = sql.NullString{String: value.(string), Valid: true}
@@ -2773,11 +3045,14 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 		}
 	case "multi_select":
 		if value != nil {
-			raw, _ := json.Marshal(value)
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return fmt.Errorf("attribute %q: encode multi_select: %w", key, err)
+			}
 			vt = sql.NullString{String: string(raw), Valid: true}
 		}
 	default:
-		return fmt.Errorf("attribute %q has unsupported type %q", key, typ)
+		return fmt.Errorf("attribute %q has unsupported type %q", key, def.Type)
 	}
 	_, err = db.Exec(
 		`INSERT INTO contact_attributes
@@ -2790,7 +3065,7 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 			value_bool = excluded.value_bool,
 			source = excluded.source,
 			set_at = CURRENT_TIMESTAMP`,
-		pid, contactID, defID, vt, vn, vd, vb, source)
+		pid, contactID, def.ID, vt, vn, vd, vb, source)
 	return err
 }
 
@@ -3147,6 +3422,31 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 	}
 	if len(required) > 0 {
 		out["required"] = required
+	}
+	return out
+}
+
+func messageInputSchema(props map[string]any) map[string]any {
+	out := schemaObject(props, []string{"id"})
+	out["anyOf"] = []any{
+		map[string]any{
+			"required": []string{"body"},
+			"properties": map[string]any{
+				"body": map[string]any{"type": "string", "minLength": 1},
+			},
+		},
+		map[string]any{
+			"required": []string{"template_id"},
+			"properties": map[string]any{
+				"template_id": map[string]any{"type": "integer", "minimum": 1},
+			},
+		},
+		map[string]any{
+			"required": []string{"content_sid"},
+			"properties": map[string]any{
+				"content_sid": map[string]any{"type": "string", "minLength": 1},
+			},
+		},
 	}
 	return out
 }

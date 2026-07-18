@@ -25,7 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,14 +37,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.4
+version: 0.1.5
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - net.egress
     - platform.connections.execute
-    - platform.connections.manage
     - platform.oauth.start
     - platform.apps.call
   integrations:
@@ -243,8 +242,10 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func main() { sdk.Run(&App{}) }
 
 func projectScope(ctx *sdk.AppCtx, argSets ...map[string]any) string {
-	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
-		return pid
+	if ctx != nil {
+		if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+			return pid
+		}
 	}
 	for _, args := range argSets {
 		if pid := strings.TrimSpace(stringArgAny(args, "_project_id", "project_id")); pid != "" {
@@ -252,6 +253,13 @@ func projectScope(ctx *sdk.AppCtx, argSets ...map[string]any) string {
 		}
 	}
 	return ""
+}
+
+func requireProject(ctx *sdk.AppCtx, argSets ...map[string]any) (string, error) {
+	if pid := projectScope(ctx, argSets...); pid != "" {
+		return pid, nil
+	}
+	return "", errors.New("project_id required for the global Ads install")
 }
 
 // ─── HTTP routes ────────────────────────────────────────────────────
@@ -280,13 +288,8 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 	connStr := q.Get("conn_id")
 	pendingStr := q.Get("pending")
 	status := q.Get("status")
-	if connStr == "" || pendingStr == "" {
-		http.Error(w, "missing conn_id or pending", http.StatusBadRequest)
-		return
-	}
-	connID, err := strconv.ParseInt(connStr, 10, 64)
-	if err != nil {
-		http.Error(w, "bad conn_id", http.StatusBadRequest)
+	if pendingStr == "" {
+		http.Error(w, "missing pending", http.StatusBadRequest)
 		return
 	}
 	pendingID, err := strconv.ParseInt(pendingStr, 10, 64)
@@ -294,21 +297,66 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad pending", http.StatusBadRequest)
 		return
 	}
+	row, err := a.getPending(pendingID)
+	if err != nil || row.status != "pending_oauth" || !row.expiresAt.After(time.Now().UTC()) {
+		http.Error(w, "pending authorization is invalid or expired", http.StatusGone)
+		return
+	}
 	if status != "ok" {
-		_, _ = globalCtx.AppDB().Exec(`UPDATE pending_accounts SET status='expired' WHERE id=?`, pendingID)
+		_, _ = globalCtx.AppDB().Exec(
+			`UPDATE pending_accounts SET status='expired' WHERE id=? AND status='pending_oauth'`,
+			pendingID,
+		)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
 <div style="text-align:center"><div style="font-size:20px">Authorization failed</div>
 <div style="opacity:.7;margin-top:8px">You can close this window and try again.</div></div>
-<script>try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_failed"}, "*"); } } catch(e){}</script>
+<script>try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_failed"}, window.location.origin); } } catch(e){}</script>
 </body></html>`)
 		return
 	}
-	_, _ = globalCtx.AppDB().Exec(
-		`UPDATE pending_accounts SET connection_id=?, status='ready' WHERE id=?`,
-		connID, pendingID,
+
+	if connStr == "" {
+		http.Error(w, "missing conn_id", http.StatusBadRequest)
+		return
+	}
+	connID, err := strconv.ParseInt(connStr, 10, 64)
+	if err != nil {
+		http.Error(w, "bad conn_id", http.StatusBadRequest)
+		return
+	}
+	validConnection := false
+	conns, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		ProjectID: row.projectID,
+		AppSlug:   row.integrationSlug,
+	})
+	if err == nil {
+		for _, conn := range conns {
+			if conn.ID == connID && conn.Status == "active" {
+				validConnection = true
+				break
+			}
+		}
+	}
+	if !validConnection {
+		http.Error(w, "connection does not belong to this authorization", http.StatusForbidden)
+		return
+	}
+	res, err := globalCtx.AppDB().Exec(
+		`UPDATE pending_accounts SET connection_id=?, status='ready'
+		 WHERE id=? AND project_id=? AND status='pending_oauth' AND expires_at > CURRENT_TIMESTAMP`,
+		connID, pendingID, row.projectID,
 	)
-	globalCtx.Emit("account.oauth_ready", map[string]any{
+	if err != nil {
+		http.Error(w, "could not complete authorization", http.StatusInternalServerError)
+		return
+	}
+	changed, _ := res.RowsAffected()
+	if changed != 1 {
+		http.Error(w, "authorization was already used or expired", http.StatusConflict)
+		return
+	}
+	globalCtx.EmitWithProject("account.oauth_ready", row.projectID, map[string]any{
 		"pending_account_id": pendingID,
 		"connection_id":      connID,
 	})
@@ -317,9 +365,9 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 <div style="text-align:center"><div style="font-size:20px">Authorization complete</div>
 <div style="opacity:.7;margin-top:8px">You can close this window.</div></div>
 <script>
-try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_ready",pending_account_id:%d,connection_id:%d}, "*"); window.close(); } } catch(e){}
-setTimeout(function(){ window.location.href = "/admin/apps/ads/?pending=%d" }, 1500);
-</script></body></html>`, pendingID, connID, pendingID)
+try { if (window.opener) { window.opener.postMessage({type:"ads.oauth_ready",pending_account_id:%d,connection_id:%d}, window.location.origin); window.close(); } } catch(e){}
+setTimeout(function(){ window.location.href = "/apps/ads/page?project_id=%s&pending=%d" }, 1500);
+</script></body></html>`, pendingID, connID, url.QueryEscape(row.projectID), pendingID)
 }
 
 // ─── MCP tools ──────────────────────────────────────────────────────
@@ -641,7 +689,10 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if !ok {
 		return mcpError(fmt.Sprintf("unsupported platform %q — available: %s", plat, strings.Join(platformKeys(), ", "))), nil
 	}
-	pid := projectScope(ctx, args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	forceNew, _ := args["force_new"].(bool)
 
 	// Reuse path (mirrors social): the access token from any active
@@ -695,7 +746,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 	returnTo, _ := args["return_to"].(string)
 	if returnTo == "" {
-		returnTo = "/api/apps/ads/accounts/oauth_done"
+		returnTo = "/api/apps/ads/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
 	}
 
 	now := time.Now().UTC()
@@ -743,7 +794,7 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
 	}
-	row, err := a.getPending(pendingID)
+	row, err := a.getPendingForProject(ctx, args, pendingID, "ready")
 	if err != nil {
 		return mcpError("pending account not found: " + err.Error()), nil
 	}
@@ -779,7 +830,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
 	}
-	row, err := a.getPending(pendingID)
+	row, err := a.getPendingForProject(ctx, args, pendingID, "ready")
 	if err != nil {
 		return mcpError("pending account not found: " + err.Error()), nil
 	}
@@ -826,41 +877,56 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	currency = toString(matched["currency"])
 	timezone = toString(matched["timezone"])
 
-	pid := projectScope(ctx, args)
-	insertRes, err := ctx.AppDB().Exec(
+	pid := row.projectID
+	var existingID int64
+	reactivated := ctx.AppDB().QueryRow(
+		`SELECT id FROM ad_accounts WHERE project_id=? AND platform=? AND native_account_id=?`,
+		pid, def.Platform, pageID,
+	).Scan(&existingID) == nil
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	claim, err := tx.Exec(
+		`UPDATE pending_accounts SET status='finalized'
+		 WHERE id=? AND project_id=? AND status='ready' AND expires_at > CURRENT_TIMESTAMP`,
+		pendingID, pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	claimed, _ := claim.RowsAffected()
+	if claimed != 1 {
+		return mcpError("pending account was already finalized or expired"), nil
+	}
+	_, err = tx.Exec(
 		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+		 ON CONFLICT(project_id, platform, native_account_id) DO UPDATE SET
+		   connection_id=excluded.connection_id,
+		   display_name=excluded.display_name,
+		   currency=excluded.currency,
+		   timezone_name=excluded.timezone_name,
+		   status='active'`,
 		pid, def.Platform, row.connectionID, pageID, displayName, nullable(currency), nullable(timezone),
 	)
 	if err != nil {
-		// UNIQUE collision = same ad_account already added — re-activate.
-		if strings.Contains(err.Error(), "UNIQUE") {
-			_, _ = ctx.AppDB().Exec(
-				`UPDATE ad_accounts SET status='active', display_name=?, currency=?, timezone_name=?
-				 WHERE project_id=? AND platform=? AND native_account_id=?`,
-				displayName, nullable(currency), nullable(timezone),
-				pid, def.Platform, pageID,
-			)
-			var id int64
-			_ = ctx.AppDB().QueryRow(
-				`SELECT id FROM ad_accounts WHERE project_id=? AND platform=? AND native_account_id=?`,
-				pid, def.Platform, pageID,
-			).Scan(&id)
-			_, _ = ctx.AppDB().Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID)
-			return map[string]any{
-				"ad_account_id":     id,
-				"platform":          def.Platform,
-				"display_name":      displayName,
-				"native_account_id": pageID,
-				"reactivated":       true,
-			}, nil
-		}
-		return nil, fmt.Errorf("insert ad_account: %w", err)
+		return nil, fmt.Errorf("save ad_account: %w", err)
 	}
-	id, _ := insertRes.LastInsertId()
-	_, _ = ctx.AppDB().Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID)
+	var id int64
+	if err := tx.QueryRow(
+		`SELECT id FROM ad_accounts WHERE project_id=? AND platform=? AND native_account_id=?`,
+		pid, def.Platform, pageID,
+	).Scan(&id); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 
-	ctx.Emit("account.added", map[string]any{
+	ctx.EmitWithProject("account.added", pid, map[string]any{
 		"ad_account_id":     id,
 		"platform":          def.Platform,
 		"native_account_id": pageID,
@@ -873,11 +939,15 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"native_account_id": pageID,
 		"currency":          currency,
 		"timezone":          timezone,
+		"reactivated":       reactivated,
 	}, nil
 }
 
 func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectScope(ctx, args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	platformFilter, _ := args["platform"].(string)
 	statusFilter, _ := args["status"].(string)
 
@@ -928,7 +998,10 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope(ctx, args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	var connID int64
 	if err := ctx.AppDB().QueryRow(
 		`SELECT connection_id FROM ad_accounts WHERE id=? AND project_id=?`,
@@ -936,19 +1009,10 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	).Scan(&connID); err != nil {
 		return mcpError("account not found"), nil
 	}
-	if _, err := ctx.AppDB().Exec(`DELETE FROM ad_accounts WHERE id=?`, id); err != nil {
+	if _, err := ctx.AppDB().Exec(`DELETE FROM ad_accounts WHERE id=? AND project_id=?`, id, pid); err != nil {
 		return nil, err
 	}
-	var siblings int
-	_ = ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM ad_accounts WHERE connection_id=?`, connID,
-	).Scan(&siblings)
-	if siblings == 0 {
-		if err := ctx.PlatformAPI().DisconnectConnection(connID); err != nil {
-			ctx.Logger().Warn("DisconnectConnection failed", "conn", connID, "err", err)
-		}
-	}
-	ctx.Emit("account.removed", map[string]any{"ad_account_id": id})
+	ctx.EmitWithProject("account.removed", pid, map[string]any{"ad_account_id": id, "connection_id": connID})
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1093,7 +1157,11 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	pid := projectScope(globalCtx, projectArgsFromRequest(r))
+	pid, err := requireProject(globalCtx, projectArgsFromRequest(r))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	out := make([]map[string]any, 0, len(adsPlatformOptions))
 	for _, opt := range adsPlatformOptions {
 		connectionCount := 0
@@ -1123,10 +1191,10 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			activeAccount = n > 0
 		}
 		available := activeAccount || connectionCount > 0
-		canAdd := opt.Supported && available
+		canAdd := opt.Supported
 		unavailable := opt.Unavailable
-		if !available {
-			unavailable = "No active " + opt.DisplayName + " connection found. Connect the integration first, then return here."
+		if !opt.Supported && unavailable == "" {
+			unavailable = opt.DisplayName + " is not supported by this Ads version."
 		}
 		out = append(out, map[string]any{
 			"platform":             opt.Platform,
@@ -1155,7 +1223,10 @@ type adAccount struct {
 }
 
 func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount, *platformDef, map[string]any) {
-	pid := projectScope(ctx, args)
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, nil, mcpError(err.Error())
+	}
 	id := int64(intArg(args, "ad_account_id", 0))
 	if id <= 0 {
 		return nil, nil, mcpError("ad_account_id required")
@@ -1199,15 +1270,71 @@ func (a *App) execIntegrationTool(ctx *sdk.AppCtx, acct *adAccount, tool string,
 	return parsed, nil
 }
 
-// mergeOptions overlays platform_options onto the base input map. Keys
-// in platform_options win — this is the escape hatch for fields the
-// unified schema doesn't model. nil/empty options is a no-op.
+// mergeOptions overlays native fields while preserving account and
+// resource identifiers resolved by the app's project-scoped boundary.
 func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 	opts, _ := args["platform_options"].(map[string]any)
+	protected := map[string]bool{
+		"adAccountId": true, "customer_id": true,
+		"campaignId": true, "campaign_id": true,
+		"adsetId": true, "adset_id": true,
+		"adId": true, "ad_id": true,
+		"resourceName": true,
+	}
 	for k, v := range opts {
+		if protected[k] {
+			continue
+		}
 		base[k] = v
 	}
 	return base
+}
+
+func (a *App) metaResourceBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, tool, resourceID string) (bool, error) {
+	after := ""
+	for page := 0; page < 20; page++ {
+		input := map[string]any{"adAccountId": acct.NativeAccountID, "limit": 100}
+		if after != "" {
+			input["after"] = after
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		if err != nil {
+			return false, err
+		}
+		if res == nil || !res.Success {
+			return false, fmt.Errorf("%s ownership lookup failed", tool)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(res.Data, &payload); err != nil {
+			return false, err
+		}
+		if rows, ok := payload["data"].([]any); ok {
+			for _, raw := range rows {
+				if row, ok := raw.(map[string]any); ok && toString(row["id"]) == resourceID {
+					return true, nil
+				}
+			}
+		}
+		paging, _ := payload["paging"].(map[string]any)
+		cursors, _ := paging["cursors"].(map[string]any)
+		next := toString(cursors["after"])
+		if next == "" || next == after {
+			return false, nil
+		}
+		after = next
+	}
+	return false, errors.New("resource ownership lookup exceeded pagination limit")
+}
+
+func (a *App) requireMetaResource(ctx *sdk.AppCtx, acct *adAccount, tool, resourceType, resourceID string) map[string]any {
+	ok, err := a.metaResourceBelongsToAccount(ctx, acct, tool, resourceID)
+	if err != nil {
+		return mcpError("verify " + resourceType + " ownership: " + err.Error())
+	}
+	if !ok {
+		return mcpError(resourceType + " does not belong to the selected ad account")
+	}
+	return nil
 }
 
 // ─── Campaign tools ────────────────────────────────────────────────
@@ -1393,6 +1520,9 @@ func (metaAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
 	}
+	if errOut := a.requireMetaResource(ctx, acct, def.CampaignListTool, "campaign", cid); errOut != nil {
+		return errOut, nil
+	}
 	input := map[string]any{"campaignId": cid}
 	if v, _ := args["name"].(string); v != "" {
 		input["name"] = v
@@ -1425,6 +1555,9 @@ func (metaAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
+	}
+	if errOut := a.requireMetaResource(ctx, acct, def.CampaignListTool, "campaign", cid); errOut != nil {
+		return errOut, nil
 	}
 	return a.execOrErr(ctx, acct, def.CampaignDeleteTool, map[string]any{"campaignId": cid})
 }
@@ -1513,6 +1646,9 @@ func (metaAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if asid == "" {
 		return mcpError("adset_id required"), nil
 	}
+	if errOut := a.requireMetaResource(ctx, acct, def.AdSetListTool, "ad set", asid); errOut != nil {
+		return errOut, nil
+	}
 	input := map[string]any{"adsetId": asid}
 	if v, _ := args["name"].(string); v != "" {
 		input["name"] = v
@@ -1540,6 +1676,9 @@ func (metaAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	asid, _ := args["adset_id"].(string)
 	if asid == "" {
 		return mcpError("adset_id required"), nil
+	}
+	if errOut := a.requireMetaResource(ctx, acct, def.AdSetListTool, "ad set", asid); errOut != nil {
+		return errOut, nil
 	}
 	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{"adsetId": asid})
 }
@@ -1585,6 +1724,9 @@ func (metaAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 	if adID == "" {
 		return mcpError("ad_id required"), nil
 	}
+	if errOut := a.requireMetaResource(ctx, acct, def.AdListTool, "ad", adID); errOut != nil {
+		return errOut, nil
+	}
 	input := map[string]any{"adId": adID}
 	if v, _ := args["name"].(string); v != "" {
 		input["name"] = v
@@ -1603,6 +1745,9 @@ func (metaAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 	adID, _ := args["ad_id"].(string)
 	if adID == "" {
 		return mcpError("ad_id required"), nil
+	}
+	if errOut := a.requireMetaResource(ctx, acct, def.AdListTool, "ad", adID); errOut != nil {
+		return errOut, nil
 	}
 	return a.execOrErr(ctx, acct, def.AdDeleteTool, map[string]any{"adId": adID})
 }
@@ -1750,6 +1895,9 @@ func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def 
 func (googleAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	query := `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros, campaign_budget.resource_name FROM campaign`
 	if status, _ := args["status"].(string); status != "" {
+		if !googleValidStatus(status) {
+			return mcpError("status must be ACTIVE or PAUSED"), nil
+		}
 		query += " WHERE campaign.status = " + googleCampaignStatus(status)
 	}
 	if limit := intArg(args, "limit", 0); limit > 0 {
@@ -1771,10 +1919,19 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	if name == "" {
 		return mcpError("name required"), nil
 	}
+	if status := stringArgAny(args, "status"); !googleValidStatus(status) {
+		return mcpError("status must be ACTIVE or PAUSED"), nil
+	}
+	if intArg(args, "lifetime_budget_cents", 0) > 0 {
+		return mcpError("Google Ads generic campaigns support daily_budget_cents only; use native platform_options for other budget semantics"), nil
+	}
+	if objective := strings.ToLower(stringArgAny(args, "objective")); objective != "traffic" {
+		return mcpError("Google Ads generic campaign_create currently supports objective=traffic (Search) only"), nil
+	}
 	budgetMicros := googleBudgetMicros(args)
 	opts, _ := args["platform_options"].(map[string]any)
 	if budgetMicros == "" && opts["campaignBudget"] == nil && opts["campaign_budget"] == nil {
-		return mcpError("google campaign_create requires daily_budget_cents/lifetime_budget_cents or platform_options.campaignBudget"), nil
+		return mcpError("google campaign_create requires daily_budget_cents or platform_options.campaignBudget"), nil
 	}
 
 	var budget any
@@ -1828,12 +1985,21 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	delete(campaign, "budget")
 	delete(campaign, "campaign")
 	delete(campaign, "campaign_budget")
-	out, err := a.execOrErr(ctx, acct, def.CampaignCreateTool, map[string]any{
+	out, errOut := a.execIntegrationTool(ctx, acct, def.CampaignCreateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"create": campaign}},
 	})
-	if err != nil {
-		return nil, err
+	if errOut != nil {
+		if budget != nil {
+			_, cleanupErr := a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
+				"customer_id": acct.NativeAccountID,
+				"operations":  []any{map[string]any{"remove": budgetResource}},
+			})
+			if cleanupErr != nil {
+				errOut["cleanup_warning"] = "campaign creation failed and the new budget could not be removed"
+			}
+		}
+		return errOut, nil
 	}
 	return map[string]any{"budget": budget, "campaign": out}, nil
 }
@@ -1843,6 +2009,55 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
 	}
+	if !googleNumericID(cid) {
+		return mcpError("google campaign_id must be numeric"), nil
+	}
+	if intArg(args, "lifetime_budget_cents", 0) > 0 {
+		return mcpError("Google Ads generic campaigns support daily_budget_cents only"), nil
+	}
+	opts, _ := args["platform_options"].(map[string]any)
+	var budgetOut any
+	if cents := intArg(args, "daily_budget_cents", 0); cents > 0 {
+		budgetResource := firstString(opts, "campaignBudgetResource", "campaign_budget_resource")
+		if budgetResource == "" {
+			query := fmt.Sprintf(
+				"SELECT campaign.id, campaign_budget.resource_name FROM campaign WHERE campaign.id = %s LIMIT 1",
+				cid,
+			)
+			found, lookupErr := a.execIntegrationTool(ctx, acct, def.CampaignListTool, map[string]any{
+				"customer_id": acct.NativeAccountID,
+				"query":       query,
+			})
+			if lookupErr != nil {
+				return lookupErr, nil
+			}
+			rows := resultRows(found)
+			if len(rows) > 0 {
+				budgetMap := mapAt(rows[0], "campaignBudget")
+				if len(budgetMap) == 0 {
+					budgetMap = mapAt(rows[0], "campaign_budget")
+				}
+				budgetResource = firstString(budgetMap, "resourceName", "resource_name")
+			}
+		}
+		if budgetResource == "" {
+			return mcpError("could not resolve the campaign budget; pass platform_options.campaignBudgetResource"), nil
+		}
+		var budgetErr map[string]any
+		budgetOut, budgetErr = a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
+			"customer_id": acct.NativeAccountID,
+			"operations": []any{map[string]any{
+				"update": map[string]any{
+					"resourceName": budgetResource,
+					"amountMicros": strconv.Itoa(cents * 10000),
+				},
+				"updateMask": "amount_micros",
+			}},
+		})
+		if budgetErr != nil {
+			return budgetErr, nil
+		}
+	}
 	update := map[string]any{"resourceName": googleCampaignResource(acct.NativeAccountID, cid)}
 	fields := []string{}
 	if v, _ := args["name"].(string); v != "" {
@@ -1850,6 +2065,9 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		fields = append(fields, "name")
 	}
 	if v, _ := args["status"].(string); v != "" {
+		if !googleValidStatus(v) {
+			return mcpError("status must be ACTIVE or PAUSED"), nil
+		}
 		update["status"] = googleCampaignStatus(v)
 		fields = append(fields, "status")
 	}
@@ -1861,7 +2079,6 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		update["endDate"] = googleDate(v)
 		fields = append(fields, "end_date")
 	}
-	opts, _ := args["platform_options"].(map[string]any)
 	if custom, ok := opts["campaign"].(map[string]any); ok {
 		for k, v := range custom {
 			if k == "resourceName" {
@@ -1872,21 +2089,34 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		}
 	}
 	if len(fields) == 0 {
+		if budgetOut != nil {
+			return map[string]any{"budget": budgetOut}, nil
+		}
 		return mcpError("no google campaign fields to update"), nil
 	}
-	return a.execOrErr(ctx, acct, def.CampaignUpdateTool, map[string]any{
+	campaignOut, err := a.execOrErr(ctx, acct, def.CampaignUpdateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations": []any{map[string]any{
 			"update":     update,
 			"updateMask": strings.Join(fields, ","),
 		}},
 	})
+	if err != nil {
+		return nil, err
+	}
+	if budgetOut != nil {
+		return map[string]any{"budget": budgetOut, "campaign": campaignOut}, nil
+	}
+	return campaignOut, nil
 }
 
 func (googleAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
+	}
+	if !googleNumericID(cid) {
+		return mcpError("google campaign_id must be numeric"), nil
 	}
 	return a.execOrErr(ctx, acct, def.CampaignDeleteTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
@@ -1897,6 +2127,9 @@ func (googleAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	query := `SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id FROM ad_group`
 	if cid, _ := args["campaign_id"].(string); cid != "" {
+		if !googleNumericID(cid) {
+			return mcpError("google campaign_id must be numeric"), nil
+		}
 		query += " WHERE campaign.id = " + cid
 	}
 	if limit := intArg(args, "limit", 0); limit > 0 {
@@ -1914,6 +2147,12 @@ func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 	cid, _ := args["campaign_id"].(string)
 	if name == "" || cid == "" {
 		return mcpError("name and campaign_id required"), nil
+	}
+	if !googleNumericID(cid) {
+		return mcpError("google campaign_id must be numeric"), nil
+	}
+	if status := stringArgAny(args, "status"); !googleValidStatus(status) {
+		return mcpError("status must be ACTIVE or PAUSED"), nil
 	}
 	adGroup := map[string]any{
 		"name":     name,
@@ -1941,6 +2180,9 @@ func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 	if asid == "" {
 		return mcpError("adset_id required"), nil
 	}
+	if !googleNumericID(asid) {
+		return mcpError("google adset_id must be numeric"), nil
+	}
 	update := map[string]any{"resourceName": googleAdGroupResource(acct.NativeAccountID, asid)}
 	fields := []string{}
 	if v, _ := args["name"].(string); v != "" {
@@ -1948,6 +2190,9 @@ func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 		fields = append(fields, "name")
 	}
 	if v, _ := args["status"].(string); v != "" {
+		if !googleValidStatus(v) {
+			return mcpError("status must be ACTIVE or PAUSED"), nil
+		}
 		update["status"] = googleCampaignStatus(v)
 		fields = append(fields, "status")
 	}
@@ -1969,6 +2214,9 @@ func (googleAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 	if asid == "" {
 		return mcpError("adset_id required"), nil
 	}
+	if !googleNumericID(asid) {
+		return mcpError("google adset_id must be numeric"), nil
+	}
 	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"remove": googleAdGroupResource(acct.NativeAccountID, asid)}},
@@ -1978,6 +2226,9 @@ func (googleAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	query := `SELECT ad_group_ad.resource_name, ad_group_ad.ad.id, ad_group_ad.status, ad_group.id, campaign.id FROM ad_group_ad`
 	if asid, _ := args["adset_id"].(string); asid != "" {
+		if !googleNumericID(asid) {
+			return mcpError("google adset_id must be numeric"), nil
+		}
 		query += " WHERE ad_group.id = " + asid
 	}
 	if limit := intArg(args, "limit", 0); limit > 0 {
@@ -1993,12 +2244,24 @@ func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		if !googlePayloadScoped(ops, acct.NativeAccountID) {
+			return mcpError("google operations contain a resource from another customer"), nil
+		}
 		return a.execOrErr(ctx, acct, def.AdCreateTool, map[string]any{"customer_id": acct.NativeAccountID, "operations": ops})
 	}
 	ad, _ := opts["ad"].(map[string]any)
 	asid, _ := args["adset_id"].(string)
 	if asid == "" || len(ad) == 0 {
 		return mcpError("google ad_create requires adset_id and platform_options.ad, or platform_options.operations"), nil
+	}
+	if !googleNumericID(asid) {
+		return mcpError("google adset_id must be numeric"), nil
+	}
+	if status := stringArgAny(args, "status"); !googleValidStatus(status) {
+		return mcpError("status must be ACTIVE or PAUSED"), nil
+	}
+	if !googlePayloadScoped(ad, acct.NativeAccountID) {
+		return mcpError("google ad payload contains a resource from another customer"), nil
 	}
 	create := map[string]any{
 		"adGroup": googleAdGroupResource(acct.NativeAccountID, asid),
@@ -2014,6 +2277,9 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		if !googlePayloadScoped(ops, acct.NativeAccountID) {
+			return mcpError("google operations contain a resource from another customer"), nil
+		}
 		return a.execOrErr(ctx, acct, def.AdUpdateTool, map[string]any{"customer_id": acct.NativeAccountID, "operations": ops})
 	}
 	return mcpError("google ad_update requires platform_options.operations with native adGroupAds mutate operations"), nil
@@ -2025,10 +2291,17 @@ func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 		return mcpError("ad_id required"), nil
 	}
 	resource := adID
-	if !strings.HasPrefix(resource, "customers/") {
+	if strings.HasPrefix(resource, "customers/") {
+		if !strings.HasPrefix(resource, "customers/"+acct.NativeAccountID+"/") {
+			return mcpError("google ad resource belongs to another customer"), nil
+		}
+	} else {
 		asid, _ := args["adset_id"].(string)
 		if asid == "" {
 			return mcpError("google ad_delete requires adset_id unless ad_id is a full resourceName"), nil
+		}
+		if !googleNumericID(asid) || !googleNumericID(adID) {
+			return mcpError("google adset_id and ad_id must be numeric"), nil
 		}
 		resource = fmt.Sprintf("customers/%s/adGroupAds/%s~%s", acct.NativeAccountID, asid, adID)
 	}
@@ -2263,6 +2536,49 @@ func googleCampaignStatus(status string) string {
 	}
 }
 
+func googleValidStatus(status string) bool {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "", "PAUSED", "ACTIVE", "ENABLED":
+		return true
+	default:
+		return false
+	}
+}
+
+func googleNumericID(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func googlePayloadScoped(value any, customerID string) bool {
+	prefix := "customers/" + customerID + "/"
+	switch v := value.(type) {
+	case string:
+		return !strings.Contains(v, "customers/") || strings.HasPrefix(v, prefix)
+	case []any:
+		for _, item := range v {
+			if !googlePayloadScoped(item, customerID) {
+				return false
+			}
+		}
+	case map[string]any:
+		for _, item := range v {
+			if !googlePayloadScoped(item, customerID) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func googleDisplayStatus(status string) string {
 	switch strings.ToUpper(strings.TrimSpace(status)) {
 	case "ENABLED":
@@ -2274,9 +2590,6 @@ func googleDisplayStatus(status string) string {
 
 func googleBudgetMicros(args map[string]any) string {
 	if cents := intArg(args, "daily_budget_cents", 0); cents > 0 {
-		return strconv.Itoa(cents * 10000)
-	}
-	if cents := intArg(args, "lifetime_budget_cents", 0); cents > 0 {
 		return strconv.Itoa(cents * 10000)
 	}
 	return ""
@@ -2493,19 +2806,45 @@ type pendingRow struct {
 	integrationSlug string
 	connectionID    int64
 	status          string
+	expiresAt       time.Time
 }
 
 func (a *App) getPending(id int64) (*pendingRow, error) {
 	var p pendingRow
 	err := globalCtx.AppDB().QueryRow(
-		`SELECT id, project_id, platform, integration_slug, connection_id, status
+		`SELECT id, project_id, platform, integration_slug, connection_id, status, expires_at
 		 FROM pending_accounts WHERE id=?`,
 		id,
-	).Scan(&p.id, &p.projectID, &p.platform, &p.integrationSlug, &p.connectionID, &p.status)
+	).Scan(&p.id, &p.projectID, &p.platform, &p.integrationSlug, &p.connectionID, &p.status, &p.expiresAt)
 	if err != nil {
 		return nil, err
 	}
 	return &p, nil
+}
+
+func (a *App) getPendingForProject(ctx *sdk.AppCtx, args map[string]any, id int64, status string) (*pendingRow, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := a.getPending(id)
+	if err != nil {
+		return nil, err
+	}
+	if row.projectID != pid {
+		return nil, errors.New("pending account belongs to another project")
+	}
+	if row.status != status {
+		return nil, fmt.Errorf("pending account is %s, expected %s", row.status, status)
+	}
+	if !row.expiresAt.After(time.Now().UTC()) {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE pending_accounts SET status='expired' WHERE id=? AND status=?`,
+			id, status,
+		)
+		return nil, errors.New("pending account expired")
+	}
+	return row, nil
 }
 
 // ─── Common JSON helpers (mirrors social/main.go) ──────────────────

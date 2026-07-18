@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.3
+version: 0.1.14
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -17,14 +17,20 @@ icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
 tags: [voice, telephony, communication]
 
 scopes: [project, global]
-min_apteva_version: "0.11.0"
+min_apteva_version: "0.25.12"
 
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
     - platform.connections.execute        # invoke carrier API
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.realtime.spawn             # open realtime threads in core
+  apps:
+    - name: storage
+      version: ">=0.8.1"
+      optional: true
+      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
   integrations:
     - role: carrier
       kind: integration
@@ -44,17 +50,52 @@ requires:
 
 provides:
   http_routes:
-    - prefix: /
+    - { prefix: /media/, no_auth: true }
+    - { prefix: /webhook/, no_auth: true }
+    - { prefix: /inbound/, no_auth: true }
+    - { prefix: /xml/, no_auth: true }
+    - { prefix: /ui/ }
+    - { prefix: /calls }
+    - { prefix: /calls/ }
+    - { prefix: /recordings/ }
+    - { prefix: /recording-settings }
+    - { prefix: /numbers/ }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, timeout_sec?. Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
-    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_sid?, hold_prompt?, timeout_sec?." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Args: phone_number?, phone_number_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?." }
+    - { name: telephony_routes_set_answer_mode, description: "Configure agent-decided or immediate realtime answering for an inbound route." }
+    - { name: telephony_routes_set_recording_policy, description: "Set recording behavior for future calls on an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route. Args: route_id." }
+    - { name: telephony_routes_disable, description: "Disable an inbound route and restore its previous carrier webhook. Args: route_id." }
     - { name: telephony_routes_list,  description: "List inbound call routes." }
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
+    - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
+    - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
+    - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
+    - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
+    - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
+    - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
+    - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
+    - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
+    - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
+    - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
+    - { name: telephony_regulatory_bundle_get, description: "Get a bundle with its regulation and assigned items. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_item_create, description: "Create and assign an end user or document. Args: bundle_sid, kind, friendly_name, type, attributes, file?, file_name?." }
+    - { name: telephony_regulatory_bundle_evaluate, description: "Evaluate bundle compliance. Args: bundle_sid." }
+    - { name: telephony_regulatory_bundle_submit, description: "Evaluate and submit a compliant bundle for review. Args: bundle_sid." }
+    - { name: telephony_compliance_profiles_list, description: "List provider compliance profiles. Args: country?, number_type?, status?, friendly_name?, limit?." }
+    - { name: telephony_compliance_profile_create, description: "Create a provider compliance profile. Args depend on the bound provider." }
+    - { name: telephony_compliance_profile_get, description: "Get a compliance profile and its requirements. Args: compliance_id." }
+    - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document. Args: compliance_id plus provider requirement fields." }
+    - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
+    - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
   ui_panels:
     - slot: project.page
       label: Calls

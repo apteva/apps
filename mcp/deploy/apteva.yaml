@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.16.1
+version: 0.16.2
 description: |
   Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),

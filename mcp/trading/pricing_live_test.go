@@ -214,6 +214,87 @@ func TestPolymarketPublic_RejectsNonBinaryMarket(t *testing.T) {
 	}
 }
 
+func TestPolymarketPublic_ActiveMarketsUsesDiscoveryAndNumericVolume(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("active") != "true" || r.URL.Query().Get("closed") != "false" {
+			t.Errorf("discovery query = %q", r.URL.RawQuery)
+		}
+		if r.URL.Query().Get("order") != "volume_24hr" {
+			t.Errorf("order = %q", r.URL.Query().Get("order"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[{
+			"slug":"current-market","active":true,"closed":false,
+			"outcomes":"[\"Yes\",\"No\"]","outcomePrices":"[\"0.63\",\"0.37\"]",
+			"volume24hr":1234.5
+		}]`))
+	}))
+	defer srv.Close()
+	p := &polymarketPublic{base: srv.URL, client: srv.Client()}
+
+	marks, err := p.ActiveMarkets(25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(marks) != 1 || marks[0].Symbol != "POLY:current-market" {
+		t.Fatalf("marks = %#v", marks)
+	}
+	if marks[0].Volume24h == nil || *marks[0].Volume24h != 1234.5 {
+		t.Fatalf("volume = %v", marks[0].Volume24h)
+	}
+}
+
+func TestLiveProviderPolymarketMissingSymbolIsNegativeCached(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+	lp := newLiveProvider()
+	lp.poly = &polymarketPublic{base: srv.URL, client: srv.Client()}
+
+	for i := 0; i < 2; i++ {
+		if mark, err := lp.Quote("POLY:expired-market"); err == nil || mark != nil {
+			t.Fatalf("quote %d = %#v, err=%v", i, mark, err)
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one negative-cached lookup", requests)
+	}
+	if health := lp.Health()["polymarket"]; health != nil {
+		t.Fatalf("missing symbol counted as provider outage: %v", health)
+	}
+}
+
+func TestLiveProviderPolymarketFailureBacksOff(t *testing.T) {
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	lp := newLiveProvider()
+	lp.poly = &polymarketPublic{base: srv.URL, client: srv.Client()}
+	fixedNow := time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)
+	lp.now = func() time.Time { return fixedNow }
+
+	if _, attempted, err := lp.discoverPolymarket(); !attempted || err == nil {
+		t.Fatalf("first discovery attempted=%v err=%v", attempted, err)
+	}
+	if _, attempted, err := lp.discoverPolymarket(); attempted || err != nil {
+		t.Fatalf("backoff discovery attempted=%v err=%v", attempted, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want one during backoff", requests)
+	}
+	health := lp.Health()["polymarket"].(map[string]any)
+	if retryAt, ok := health["retry_at"].(time.Time); !ok || retryAt.IsZero() {
+		t.Fatalf("retry_at = %#v", health["retry_at"])
+	}
+}
+
 // ─── liveProvider composition ─────────────────────────────────────
 
 // FailingBinance simulates an upstream that always errors.
@@ -363,6 +444,16 @@ func TestProviderHealth_SlidingWindow(t *testing.T) {
 	}
 	if c["name"] != "binance-public" {
 		t.Errorf("name=%v", c["name"])
+	}
+	if retryAt, _ := c["retry_at"].(time.Time); !retryAt.IsZero() {
+		t.Errorf("retry_at remained set after recovery: %v", retryAt)
+	}
+	h.mu.Lock()
+	h.m["crypto"].Errors = []time.Time{time.Now().Add(-2 * healthRecentWindow)}
+	h.mu.Unlock()
+	c = h.snapshot()["crypto"].(map[string]any)
+	if c["errors_60s"] != 0 {
+		t.Errorf("expired errors remained in snapshot: %v", c["errors_60s"])
 	}
 }
 

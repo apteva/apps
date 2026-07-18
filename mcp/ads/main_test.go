@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -250,6 +253,82 @@ func TestAccountAdd_RollsBackPendingOnOAuthErr(t *testing.T) {
 	}
 }
 
+func TestPlatforms_AllowsFirstAccountOAuth(t *testing.T) {
+	pf := newRecordingPlatform()
+	newAdsCtx(t, pf)
+	app := &App{}
+	request := httptest.NewRequest(http.MethodGet, "/platforms?project_id=test-proj", nil)
+	response := httptest.NewRecorder()
+	app.handlePlatforms(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Platforms []map[string]any `json:"platforms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Platforms) != 2 {
+		t.Fatalf("platforms=%#v", payload.Platforms)
+	}
+	for _, platform := range payload.Platforms {
+		if platform["can_add"] != true {
+			t.Fatalf("first account is disabled for %#v", platform)
+		}
+	}
+}
+
+func TestOAuthDone_RequiresMatchingActiveConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{{
+		ID: 7, AppSlug: "facebook-ads", ProjectID: "test-proj", Status: "active",
+	}}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	insertPending := func() int64 {
+		res, err := ctx.AppDB().Exec(
+			`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at)
+			 VALUES ('test-proj','meta','facebook-ads','pending_oauth',datetime('now','+1 hour'))`,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+
+	deniedID := insertPending()
+	deniedRequest := httptest.NewRequest(http.MethodGet, "/accounts/oauth_done?status=denied&pending="+strconv.FormatInt(deniedID, 10), nil)
+	deniedResponse := httptest.NewRecorder()
+	app.handleOAuthDone(deniedResponse, deniedRequest)
+	if deniedResponse.Code != http.StatusOK {
+		t.Fatalf("denied callback without conn_id status=%d body=%s", deniedResponse.Code, deniedResponse.Body.String())
+	}
+
+	badID := insertPending()
+	badRequest := httptest.NewRequest(http.MethodGet, "/accounts/oauth_done?status=ok&conn_id=99&pending="+strconv.FormatInt(badID, 10), nil)
+	badResponse := httptest.NewRecorder()
+	app.handleOAuthDone(badResponse, badRequest)
+	if badResponse.Code != http.StatusForbidden {
+		t.Fatalf("mismatched connection status=%d body=%s", badResponse.Code, badResponse.Body.String())
+	}
+
+	goodID := insertPending()
+	goodRequest := httptest.NewRequest(http.MethodGet, "/accounts/oauth_done?status=ok&conn_id=7&pending="+strconv.FormatInt(goodID, 10), nil)
+	goodResponse := httptest.NewRecorder()
+	app.handleOAuthDone(goodResponse, goodRequest)
+	if goodResponse.Code != http.StatusOK {
+		t.Fatalf("matching connection status=%d body=%s", goodResponse.Code, goodResponse.Body.String())
+	}
+	var status string
+	var connectionID int64
+	_ = ctx.AppDB().QueryRow(`SELECT status, connection_id FROM pending_accounts WHERE id=?`, goodID).Scan(&status, &connectionID)
+	if status != "ready" || connectionID != 7 {
+		t.Fatalf("pending row status=%s connection=%d", status, connectionID)
+	}
+}
+
 // --- account_finalize ----------------------------------------------
 
 func TestAccountFinalize_WritesAdAccount(t *testing.T) {
@@ -358,9 +437,65 @@ func TestGoogleAccountFinalize_WritesCustomerAccount(t *testing.T) {
 	}
 }
 
+func TestAccountFinalize_RejectsExpiredAndCrossProjectPending(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	expired, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj','meta','facebook-ads',7,'ready',datetime('now','-1 minute'))`,
+	)
+	expiredID, _ := expired.LastInsertId()
+	out, _ := app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": expiredID, "page_id": "act_1"})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("expired pending account was accepted: %#v", out)
+	}
+
+	foreign, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('other-proj','meta','facebook-ads',7,'ready',datetime('now','+1 hour'))`,
+	)
+	foreignID, _ := foreign.LastInsertId()
+	out, _ = app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": foreignID, "page_id": "act_1"})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("cross-project pending account was accepted: %#v", out)
+	}
+}
+
+func TestAccountFinalize_ReactivationUpdatesConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["account_list"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"data":[{"id":"act_111","name":"Reconnected","currency":"EUR"}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, status)
+		 VALUES ('test-proj','meta',5,'act_111','Old','disconnected')`,
+	)
+	pending, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj','meta','facebook-ads',8,'ready',datetime('now','+1 hour'))`,
+	)
+	pendingID, _ := pending.LastInsertId()
+	out, err := app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": pendingID, "page_id": "act_111"})
+	if err != nil || out.(map[string]any)["reactivated"] != true {
+		t.Fatalf("reactivation failed: out=%#v err=%v", out, err)
+	}
+	var connectionID int64
+	_ = ctx.AppDB().QueryRow(
+		`SELECT connection_id FROM ad_accounts WHERE project_id='test-proj' AND native_account_id='act_111'`,
+	).Scan(&connectionID)
+	if connectionID != 8 {
+		t.Fatalf("connection_id = %d, want 8", connectionID)
+	}
+}
+
 // --- account_disconnect --------------------------------------------
 
-func TestAccountDisconnect_ReleasesConnectionWhenLast(t *testing.T) {
+func TestAccountDisconnect_KeepsSharedIntegrationConnection(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
@@ -374,8 +509,8 @@ func TestAccountDisconnect_ReleasesConnectionWhenLast(t *testing.T) {
 	if _, err := app.toolAccountDisconnect(ctx, map[string]any{"id": id}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.disconnectCalls) != 1 || pf.disconnectCalls[0] != 7 {
-		t.Fatalf("expected DisconnectConnection(7), got %v", pf.disconnectCalls)
+	if len(pf.disconnectCalls) != 0 {
+		t.Fatalf("local account removal must not disconnect the shared integration; got %v", pf.disconnectCalls)
 	}
 }
 
@@ -468,6 +603,7 @@ func TestCampaignCreate_PlatformOptionsOverride(t *testing.T) {
 		"platform_options": map[string]any{
 			"special_ad_categories": []any{"HOUSING"},
 			"spend_cap":             "100000",
+			"adAccountId":           "act_attacker",
 		},
 	})
 	if err != nil {
@@ -481,10 +617,17 @@ func TestCampaignCreate_PlatformOptionsOverride(t *testing.T) {
 	if call.Input["spend_cap"] != "100000" {
 		t.Fatalf("spend_cap passthrough lost: %v", call.Input["spend_cap"])
 	}
+	if call.Input["adAccountId"] != "act_42" {
+		t.Fatalf("protected account id was overridden: %v", call.Input["adAccountId"])
+	}
 }
 
 func TestCampaignPause_SetsStatusPaused(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.executeResponses["campaign_list"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"data":[{"id":"120000"}]}`),
+	}
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -500,7 +643,10 @@ func TestCampaignPause_SetsStatusPaused(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	call := pf.executeCalls[0]
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("expected ownership lookup + update, got %#v", pf.executeCalls)
+	}
+	call := pf.executeCalls[1]
 	if call.Tool != "campaign_update" || call.Input["status"] != "PAUSED" {
 		t.Fatalf("expected campaign_update with PAUSED, got tool=%s status=%v", call.Tool, call.Input["status"])
 	}
@@ -574,6 +720,93 @@ func TestGoogleCampaignCreate_CreatesBudgetThenCampaign(t *testing.T) {
 	}
 	if create["status"] != "PAUSED" {
 		t.Fatalf("default status not PAUSED: %#v", create)
+	}
+}
+
+func TestGoogleCampaignCreate_RejectsUnsupportedGenericSemantics(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	out, _ := app.toolCampaignCreate(ctx, map[string]any{
+		"ad_account_id": acctID, "name": "Sales", "objective": "sales", "daily_budget_cents": 1000,
+	})
+	if out.(map[string]any)["isError"] != true || len(pf.executeCalls) != 0 {
+		t.Fatalf("unsupported objective was not rejected before mutation: %#v", out)
+	}
+	out, _ = app.toolCampaignCreate(ctx, map[string]any{
+		"ad_account_id": acctID, "name": "Traffic", "objective": "traffic", "lifetime_budget_cents": 1000,
+	})
+	if out.(map[string]any)["isError"] != true || len(pf.executeCalls) != 0 {
+		t.Fatalf("lifetime budget was not rejected before mutation: %#v", out)
+	}
+}
+
+func TestGoogleCampaignCreate_RemovesBudgetWhenCampaignFails(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["budget_mutate"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"resourceName":"customers/123/campaignBudgets/55"}]}`),
+	}
+	pf.executeResponses["campaign_mutate"] = &sdk.ExecuteResult{
+		Success: false, Status: 400, Data: json.RawMessage(`{"error":"invalid campaign"}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+	out, _ := app.toolCampaignCreate(ctx, map[string]any{
+		"ad_account_id": acctID, "name": "Search", "objective": "traffic", "daily_budget_cents": 1000,
+	})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("expected campaign failure, got %#v", out)
+	}
+	if len(pf.executeCalls) != 3 || pf.executeCalls[2].Tool != "budget_mutate" {
+		t.Fatalf("expected compensating budget removal, got %#v", pf.executeCalls)
+	}
+	remove := pf.executeCalls[2].Input["operations"].([]any)[0].(map[string]any)["remove"]
+	if remove != "customers/123/campaignBudgets/55" {
+		t.Fatalf("wrong budget removed: %v", remove)
+	}
+}
+
+func TestGoogleCampaignUpdate_UpdatesDailyBudget(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["search"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"campaign":{"id":"987"},"campaignBudget":{"resourceName":"customers/123/campaignBudgets/55"}}]}`),
+	}
+	pf.executeResponses["budget_mutate"] = &sdk.ExecuteResult{
+		Success: true, Status: 200, Data: json.RawMessage(`{"results":[{"resourceName":"customers/123/campaignBudgets/55"}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+	out, err := app.toolCampaignUpdate(ctx, map[string]any{
+		"ad_account_id": acctID, "campaign_id": "987", "daily_budget_cents": 4200,
+	})
+	if err != nil || out.(map[string]any)["isError"] == true {
+		t.Fatalf("budget update failed: out=%#v err=%v", out, err)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[1].Tool != "budget_mutate" {
+		t.Fatalf("expected search + budget update, got %#v", pf.executeCalls)
+	}
+	op := pf.executeCalls[1].Input["operations"].([]any)[0].(map[string]any)
+	update := op["update"].(map[string]any)
+	if update["amountMicros"] != "42000000" || op["updateMask"] != "amount_micros" {
+		t.Fatalf("wrong budget mutation: %#v", op)
 	}
 }
 

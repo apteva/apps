@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: catalog
 display_name: Catalog
-version: 0.1.2
+version: 0.2.0
 description: |
-  Products and prices — the source of truth for what your business
-  sells. Modelled after Stripe's Product + Price split: one product,
-  many prices (currencies, intervals, tiers). Lower-layer app:
-  catalog calls nothing, downstream apps (billing, future
-  subscriptions/checkout/finance) call catalog.
+  Products, prices, and generic discounts — the source of truth for
+  what your business sells. Modelled after Stripe's Product + Price
+  split: one product, many prices (currencies, intervals, tiers).
+  Discounts support one-time commerce purchases and recurring plans
+  through immutable application snapshots. Lower-layer app: catalog
+  calls nothing; downstream apps call catalog.
 
   Per-project partitioning matches billing — a project running
   multiple businesses keeps separate catalogs even in a global-scope
@@ -16,7 +17,7 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/catalog
-tags: [catalog, products, pricing, commerce, ecommerce, saas]
+tags: [catalog, products, pricing, discounts, commerce, ecommerce, saas]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -51,6 +52,47 @@ provides:
       description: "Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval/metering changes are rejected; create a new price and archive the old one."
     - name: catalog_prices_archive
       description: Soft-delete a price. Existing references keep resolving.
+    - name: catalog_discounts_list
+      description: List generic Catalog discounts.
+    - name: catalog_discounts_create
+      description: Create a percentage, fixed-amount, or price-override discount with Catalog scopes and duration terms.
+    - name: catalog_discounts_get
+      description: Fetch a discount with scopes, codes, and usage counts.
+    - name: catalog_discounts_update
+      description: Update a discount definition or replace its Catalog scopes.
+    - name: catalog_discounts_archive
+      description: Archive a discount while preserving historical reservations and redemptions.
+    - name: catalog_discount_codes_create
+      description: Create a case-insensitive redemption code for a discount.
+    - name: catalog_discount_codes_list
+      description: List a discount's codes and usage counts.
+    - name: catalog_discount_codes_update
+      description: Update a code's active state, redemption limit, or metadata.
+    - name: catalog_discounts_quote
+      description: Evaluate discount eligibility and return calculated amounts plus an immutable application snapshot.
+    - name: catalog_discounts_reserve
+      description: Atomically and idempotently reserve discount capacity for a checkout or subscription.
+    - name: catalog_discounts_redeem
+      description: Commit a reserved discount after its purchase or subscription is created.
+    - name: catalog_discounts_release
+      description: Release an unused discount reservation.
+  publishes:
+    - name: discount.created
+      description: A Catalog discount was created.
+    - name: discount.updated
+      description: A Catalog discount definition or scope changed.
+    - name: discount.archived
+      description: A Catalog discount was archived.
+    - name: discount.code_created
+      description: A redemption code was created.
+    - name: discount.code_updated
+      description: A redemption code changed.
+    - name: discount.reserved
+      description: Discount capacity was reserved.
+    - name: discount.redeemed
+      description: A discount reservation was committed.
+    - name: discount.released
+      description: A discount reservation was released.
   ui_panels:
     - slot: project.page
       label: Catalog
@@ -87,8 +129,9 @@ provides:
       body_file: skills/how-to-use-catalog.md
       description: |
         Catalog's mental model + conventions. Load when working with
-        products and prices. Triggers on: "product", "price", "plan",
-        "subscription tier", "catalog", or any catalog tool call.
+        products, prices, and discounts. Triggers on: "product", "price",
+        "plan", "coupon", "discount", "subscription tier", "catalog",
+        or any catalog tool call.
       metadata:
         category: commerce
 

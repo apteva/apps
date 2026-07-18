@@ -141,6 +141,7 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 		Low    float64 `json:"l"`
 		Close  float64 `json:"c"`
 		Volume float64 `json:"v"`
+		Time   string  `json:"t"`
 	}
 	type alpacaSnap struct {
 		LatestTrade  *alpacaTrade `json:"latestTrade"`
@@ -162,17 +163,20 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 		}
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339)
 	out := make([]*Mark, 0, len(snaps))
 	for sym, s := range snaps {
 		price := 0.0
+		markedAt := ""
 		switch {
 		case s.LatestTrade != nil && s.LatestTrade.Price > 0:
 			price = s.LatestTrade.Price
+			markedAt = s.LatestTrade.Time
 		case s.MinuteBar != nil && s.MinuteBar.Close > 0:
 			price = s.MinuteBar.Close
+			markedAt = s.MinuteBar.Time
 		case s.DailyBar != nil && s.DailyBar.Close > 0:
 			price = s.DailyBar.Close
+			markedAt = s.DailyBar.Time
 		}
 		if price <= 0 {
 			continue
@@ -181,7 +185,7 @@ func parseAlpacaSnapshots(raw json.RawMessage) ([]*Mark, error) {
 			Symbol:     strings.ToUpper(sym),
 			AssetClass: inferAssetClass(sym),
 			Price:      price,
-			MarkedAt:   now,
+			MarkedAt:   markedAt,
 		}
 		if s.PrevDailyBar != nil && s.PrevDailyBar.Close > 0 {
 			pc := s.PrevDailyBar.Close

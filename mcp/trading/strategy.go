@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,9 +84,10 @@ type StrategyValidationPeriod struct {
 }
 
 type strategyMarket struct {
-	prices  map[string]float64
-	history map[string][]float64
-	asOf    time.Time
+	prices   map[string]float64
+	history  map[string][]float64
+	asOf     time.Time
+	barTimes []time.Time
 }
 
 func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
@@ -551,6 +553,12 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: time.Now().UTC()}
 	interval := strategyHistoryInterval(def)
 	limit := strategyRequiredBars(def)
+	if scheduleLimit := strategyRebalanceEvery(def, interval) + 1; scheduleLimit > limit {
+		limit = scheduleLimit
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
 	if globalEngine == nil || globalEngine.provider == nil {
 		return market, errors.New("live strategy market provider not ready")
 	}
@@ -579,6 +587,14 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 	for result := range results {
 		loaded[result.symbol] = result
 	}
+	scheduleSymbol := def.Universe[0]
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			scheduleSymbol = symbol
+			break
+		}
+	}
 	for _, symbol := range def.Universe {
 		result, ok := loaded[symbol]
 		if !ok || result.err != nil {
@@ -593,8 +609,37 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 			return market, fmt.Errorf("strategy history incomplete for %s: need %d valid closed bars, got %d", symbol, limit, len(h))
 		}
 		market.prices[symbol] = h[len(h)-1]
+		if symbol == scheduleSymbol {
+			for _, bar := range result.bars {
+				if bar.T > 0 && strategyBarPrice(bar) > 0 {
+					market.barTimes = append(market.barTimes, time.Unix(bar.T, 0).UTC())
+				}
+			}
+		}
 	}
+	if len(market.barTimes) == 0 {
+		return market, errors.New("strategy schedule has no completed market bars")
+	}
+	sort.Slice(market.barTimes, func(i, j int) bool { return market.barTimes[i].Before(market.barTimes[j]) })
+	deduped := market.barTimes[:0]
+	for _, barAt := range market.barTimes {
+		if len(deduped) == 0 || !barAt.Equal(deduped[len(deduped)-1]) {
+			deduped = append(deduped, barAt)
+		}
+	}
+	market.barTimes = deduped
+	market.asOf = market.barTimes[len(market.barTimes)-1]
 	return market, nil
+}
+
+func strategyBarPrice(bar Bar) float64 {
+	if bar.C > 0 {
+		return bar.C
+	}
+	if bar.Yes > 0 {
+		return bar.Yes
+	}
+	return bar.O
 }
 
 func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int) ([]Bar, error) {
@@ -615,13 +660,7 @@ func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int)
 
 func appendStrategyHistory(history map[string][]float64, symbol string, bars []Bar) {
 	for _, b := range bars {
-		price := b.C
-		if price <= 0 {
-			price = b.Yes
-		}
-		if price <= 0 {
-			price = b.O
-		}
+		price := strategyBarPrice(b)
 		if price > 0 {
 			history[symbol] = append(history[symbol], price)
 		}
@@ -769,6 +808,9 @@ func (a *App) toolStrategyGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+		return nil, err
+	}
 	return map[string]any{"strategy": strategy}, nil
 }
 
@@ -781,7 +823,149 @@ func (a *App) toolStrategyList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, rows, time.Now()); err != nil {
+		return nil, err
+	}
 	return map[string]any{"strategies": rows, "count": len(rows)}, nil
+}
+
+func enrichStrategyRuntime(db *sql.DB, projectID string, strategies []*Strategy, now time.Time) error {
+	assignments, err := dbActiveStrategyAssignmentsForProject(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolios, err := dbListPortfolios(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolioNames := map[int64]string{}
+	for _, portfolio := range portfolios {
+		portfolioNames[portfolio.ID] = portfolio.Name
+	}
+	byStrategy := map[int64][]*StrategyAssignment{}
+	for _, assignment := range assignments {
+		assignment.PortfolioName = portfolioNames[assignment.PortfolioID]
+		pinned, err := dbGetStrategyVersion(db, projectID, assignment.StrategyID, assignment.StrategyVersion)
+		if err == nil {
+			if def, _, validationErr := validateStrategyDefinition(pinned.Definition); validationErr == nil {
+				decorateStrategyAssignmentSchedule(assignment, def, now)
+			}
+		}
+		byStrategy[assignment.StrategyID] = append(byStrategy[assignment.StrategyID], assignment)
+	}
+	for _, strategy := range strategies {
+		strategy.Assignments = byStrategy[strategy.ID]
+		if len(strategy.Assignments) == 0 {
+			strategy.AssignmentStatus = "unassigned"
+		} else {
+			strategy.AssignmentStatus = "assigned"
+		}
+	}
+	return nil
+}
+
+func decorateStrategyAssignmentSchedule(assignment *StrategyAssignment, def *StrategyDefinition, now time.Time) {
+	if !strategyHasStocks(def) {
+		slot, _ := strategyAssignmentCheckSlot(def, now)
+		if strategyAssignmentCheckDue(assignment, slot) {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "cadence_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		duration, ok := strategyCadenceDuration(strategyHistoryInterval(def))
+		if !ok || duration <= 0 {
+			duration = time.Hour
+		}
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = slot.Add(duration).UTC().Format(time.RFC3339)
+		return
+	}
+
+	session := usEquitySessionAt(now)
+	if session.OpenDay {
+		assignment.SessionOpenAt = session.Open.UTC().Format(time.RFC3339)
+		assignment.SessionCloseAt = session.Close.UTC().Format(time.RFC3339)
+	}
+	if !session.OpenDay {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = session.Reason
+		assignment.NextEligibleAt = nextUSEquityOpen(now).Format(time.RFC3339)
+		return
+	}
+	if now.Before(session.Open) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "before_market_open"
+		assignment.NextEligibleAt = session.Open.UTC().Format(time.RFC3339)
+		return
+	}
+	if !now.Before(session.Close) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "market_closed"
+		assignment.NextEligibleAt = nextUSEquityOpen(session.Close.Add(time.Second)).Format(time.RFC3339)
+		return
+	}
+	slot, ok := strategyAssignmentCheckSlot(def, now)
+	if !ok || !strategyAssignmentCheckDue(assignment, slot) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = nextStockStrategyCheck(def, slot, session).Format(time.RFC3339)
+		return
+	}
+	if globalEngine != nil {
+		if _, live := globalEngine.provider.(*liveProvider); !live {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "regular_session_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		for _, symbol := range def.Universe {
+			class := inferAssetClass(symbol)
+			if class != "equity" && class != "etf" {
+				continue
+			}
+			mark, err := dbGetMark(globalEngine.db, symbol)
+			if err != nil || !markFresh(mark, now.UTC()) {
+				assignment.Eligibility = "waiting"
+				assignment.EligibilityReason = "waiting_for_fresh_market_data"
+				assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+				return
+			}
+		}
+	}
+	assignment.Eligibility = "eligible"
+	assignment.EligibilityReason = "regular_session_ready"
+	assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+}
+
+func strategyHasStocks(def *StrategyDefinition) bool {
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			return true
+		}
+	}
+	return false
+}
+
+func nextStockStrategyCheck(def *StrategyDefinition, slot time.Time, session usEquitySession) time.Time {
+	cadence := strategyHistoryInterval(def)
+	if cadence == "1d" {
+		return nextUSEquityOpen(session.Close.Add(time.Second))
+	}
+	if cadence == "1w" {
+		return nextUSEquityOpen(slot.AddDate(0, 0, 7))
+	}
+	duration, ok := strategyCadenceDuration(cadence)
+	if !ok || duration <= 0 {
+		duration = time.Hour
+	}
+	next := slot.Add(duration)
+	if next.Before(session.Close) {
+		return next.UTC()
+	}
+	return nextUSEquityOpen(session.Close.Add(time.Second))
 }
 
 func (a *App) toolStrategyValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1191,6 +1375,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, 500, err.Error())
 				return
 			}
+			if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, rows, time.Now()); err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
 			httpJSON(w, 200, map[string]any{"strategies": rows})
 		case http.MethodPost:
 			var body struct {
@@ -1237,6 +1425,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 		strategy, err := dbGetStrategy(globalCtx.AppDB(), pid, id)
 		if err != nil {
 			httpErr(w, 404, "strategy not found")
+			return
+		}
+		if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+			httpErr(w, 500, err.Error())
 			return
 		}
 		httpJSON(w, 200, map[string]any{"strategy": strategy})
@@ -1458,8 +1650,18 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return nil, err
 	}
 	orders := []*Order{}
-	if rebalance {
-		orders = applyStrategyTargets(run, state, eval.TargetAllocations, prices)
+	executedSignalStep := 0
+	if step > 1 && shouldRebalanceStrategy(def, run.Interval, step-1) {
+		priorMarket, marketErr := backtestStrategyMarket(run, step-1)
+		if marketErr != nil {
+			return nil, marketErr
+		}
+		priorEval, evalErr := evaluateStrategy(strategy, priorMarket)
+		if evalErr != nil {
+			return nil, evalErr
+		}
+		orders = applyStrategyTargets(run, state, priorEval.TargetAllocations, backtestExecutionPrices(prices))
+		executedSignalStep = step - 1
 	}
 	snap := strategySnapshot(run, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
@@ -1473,13 +1675,16 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 		status = "completed"
 	}
 	summary := map[string]any{
-		"last_step":          step,
-		"prices":             prices,
-		"rebalance":          rebalance,
-		"strategy_id":        strategy.ID,
-		"strategy_name":      strategy.Name,
-		"target_allocations": eval.TargetAllocations,
-		"decisions":          eval.Decisions,
+		"last_step":            step,
+		"prices":               prices,
+		"rebalance":            rebalance,
+		"strategy_id":          strategy.ID,
+		"strategy_name":        strategy.Name,
+		"target_allocations":   eval.TargetAllocations,
+		"decisions":            eval.Decisions,
+		"signal_as_of":         eval.AsOf,
+		"executed_signal_step": executedSignalStep,
+		"execution_model":      "next_bar_open",
 	}
 	if err := dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, step, summary, status); err != nil {
 		return nil, err
@@ -1516,11 +1721,20 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 		next.Status = "completed"
 		return &next, nil
 	}
-	prices, err := advanceBacktestStrategyMarket(run, step, market)
+	def, _, err := validateStrategyDefinition(strategy.Definition)
 	if err != nil {
 		return nil, err
 	}
-	def, _, err := validateStrategyDefinition(strategy.Definition)
+	var executionEval *StrategyEvaluation
+	executedSignalStep := 0
+	if step > 1 && shouldRebalanceStrategy(def, run.Interval, step-1) {
+		executionEval, err = evaluateStrategy(strategy, *market)
+		if err != nil {
+			return nil, err
+		}
+		executedSignalStep = step - 1
+	}
+	prices, err := advanceBacktestStrategyMarket(run, step, market)
 	if err != nil {
 		return nil, err
 	}
@@ -1531,8 +1745,8 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	stepRun := *run
 	stepRun.CurrentStep = step - 1
 	orders := []*Order{}
-	if rebalance {
-		orders = applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
+	if executionEval != nil {
+		orders = applyStrategyTargets(&stepRun, state, executionEval.TargetAllocations, backtestExecutionPrices(prices))
 	}
 	snap := strategySnapshot(&stepRun, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
@@ -1546,13 +1760,16 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 		status = "completed"
 	}
 	summary := map[string]any{
-		"last_step":          step,
-		"prices":             prices,
-		"rebalance":          rebalance,
-		"strategy_id":        strategy.ID,
-		"strategy_name":      strategy.Name,
-		"target_allocations": eval.TargetAllocations,
-		"decisions":          eval.Decisions,
+		"last_step":            step,
+		"prices":               prices,
+		"rebalance":            rebalance,
+		"strategy_id":          strategy.ID,
+		"strategy_name":        strategy.Name,
+		"target_allocations":   eval.TargetAllocations,
+		"decisions":            eval.Decisions,
+		"signal_as_of":         eval.AsOf,
+		"executed_signal_step": executedSignalStep,
+		"execution_model":      "next_bar_open",
 	}
 	if err := dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, step, summary, status); err != nil {
 		return nil, err
@@ -1762,6 +1979,21 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 		orders = append(orders, order)
 	}
 	return orders
+}
+
+func backtestExecutionPrices(prices []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(prices))
+	for _, row := range prices {
+		copyRow := make(map[string]any, len(row))
+		for key, value := range row {
+			copyRow[key] = value
+		}
+		if open := anyFloat(row["open"]); open > 0 {
+			copyRow["price"] = open
+		}
+		out = append(out, copyRow)
+	}
+	return out
 }
 
 func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, prices []map[string]any, orders []*Order) *BacktestSnapshot {

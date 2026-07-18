@@ -256,6 +256,12 @@ func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, boun
 		}
 		return []modelEntry{}, nil
 	}
+	if bound.AppSlug == "deepgram" {
+		if kind == KindAudioTTS {
+			return deepgramDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
+	}
 	cacheKind := kind
 	if capability != "" {
 		cacheKind = kind + ":" + capability
@@ -640,6 +646,20 @@ func fishAudioDefaultModels() []modelEntry {
 		{ID: "s2-pro", Label: "S2 Pro"},
 		{ID: "s1", Label: "S1"},
 	}
+}
+
+func deepgramDefaultModels() []modelEntry {
+	ids := []string{
+		"aura-2-thalia-en",
+		"aura-asteria-en", "aura-luna-en", "aura-stella-en", "aura-athena-en", "aura-hera-en",
+		"aura-orion-en", "aura-arcas-en", "aura-perseus-en", "aura-angus-en", "aura-orpheus-en",
+		"aura-helios-en", "aura-zeus-en", "aura-sirio-es", "aura-nestor-es",
+	}
+	out := make([]modelEntry, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, modelEntry{ID: id, Label: id, PromptCharLimit: 2000})
+	}
+	return out
 }
 
 // buildModelEntryFromVeniceSpec parses a Venice model object into the

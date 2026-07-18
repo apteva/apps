@@ -1,0 +1,304 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"math"
+	"sync"
+	"time"
+)
+
+const (
+	twilioMediaSampleRate = 8000
+	// Realtime models may generate faster than playback. Fifteen seconds keeps
+	// normal multi-sentence turns intact while placing a hard bound on memory
+	// and remote conversational drift.
+	twilioMaxQueuedAudioSamples = twilioMediaSampleRate * 15
+)
+
+var (
+	errTwilioPacerClosed   = errors.New("twilio audio pacer closed")
+	errTwilioPacerOverflow = errors.New("twilio audio pacer queue overflow")
+)
+
+type twilioPacedPacket struct {
+	PCM        []int16
+	ItemID     string
+	AudioEndMS int
+}
+
+type twilioPacerResult struct {
+	queuedMS  int
+	clearedMS int
+	err       error
+}
+
+type twilioPacerCommand struct {
+	packets  []twilioPacedPacket
+	clear    bool
+	response chan twilioPacerResult
+}
+
+// twilioAudioPacer is the single writer for outbound carrier media. It keeps
+// generated audio in a local queue so interruption can discard it before the
+// carrier sees it, then writes one packet per packet duration.
+type twilioAudioPacer struct {
+	ctx              context.Context
+	commands         chan twilioPacerCommand
+	done             chan struct{}
+	streamSID        string
+	playback         *twilioPlaybackTracker
+	write            func([]byte) error
+	onError          func(error)
+	maxQueuedSamples int
+
+	errMu sync.Mutex
+	err   error
+}
+
+func newTwilioAudioPacer(
+	ctx context.Context,
+	streamSID string,
+	playback *twilioPlaybackTracker,
+	write func([]byte) error,
+	onError func(error),
+) *twilioAudioPacer {
+	p := &twilioAudioPacer{
+		ctx: ctx, commands: make(chan twilioPacerCommand), done: make(chan struct{}),
+		streamSID: streamSID, playback: playback, write: write, onError: onError,
+		maxQueuedSamples: twilioMaxQueuedAudioSamples,
+	}
+	go p.run()
+	return p
+}
+
+func (p *twilioAudioPacer) enqueue(ctx context.Context, packets []twilioAudioPacket, frame realtimeBridgeControl) (int, error) {
+	if len(packets) == 0 {
+		return 0, nil
+	}
+	paced := make([]twilioPacedPacket, len(packets))
+	for i, packet := range packets {
+		paced[i] = twilioPacedPacket{PCM: packet.PCM, ItemID: frame.ItemID, AudioEndMS: packet.AudioEndMS}
+	}
+	result := p.command(ctx, twilioPacerCommand{packets: paced})
+	return result.queuedMS, result.err
+}
+
+func (p *twilioAudioPacer) clear(ctx context.Context) (int, error) {
+	result := p.command(ctx, twilioPacerCommand{clear: true})
+	return result.clearedMS, result.err
+}
+
+func (p *twilioAudioPacer) command(ctx context.Context, command twilioPacerCommand) twilioPacerResult {
+	command.response = make(chan twilioPacerResult, 1)
+	select {
+	case p.commands <- command:
+	case <-ctx.Done():
+		return twilioPacerResult{err: ctx.Err()}
+	case <-p.done:
+		return twilioPacerResult{err: p.failure()}
+	}
+	select {
+	case result := <-command.response:
+		return result
+	case <-ctx.Done():
+		return twilioPacerResult{err: ctx.Err()}
+	case <-p.done:
+		return twilioPacerResult{err: p.failure()}
+	}
+}
+
+func (p *twilioAudioPacer) failure() error {
+	p.errMu.Lock()
+	defer p.errMu.Unlock()
+	if p.err != nil {
+		return p.err
+	}
+	return errTwilioPacerClosed
+}
+
+func (p *twilioAudioPacer) finish(err error) {
+	if err != nil {
+		p.errMu.Lock()
+		p.err = err
+		p.errMu.Unlock()
+		if p.onError != nil {
+			p.onError(err)
+		}
+	}
+	close(p.done)
+}
+
+func (p *twilioAudioPacer) run() {
+	var (
+		queue         []twilioPacedPacket
+		queuedSamples int
+		timer         *time.Timer
+		timerC        <-chan time.Time
+	)
+	stopTimer := func() {
+		if timer == nil {
+			return
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer, timerC = nil, nil
+	}
+	clear := func() (int, error) {
+		clearedSamples := queuedSamples
+		stopTimer()
+		queue = nil
+		queuedSamples = 0
+		p.playback.clear()
+		payload, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": p.streamSID})
+		return samplesToMS(clearedSamples), p.write(payload)
+	}
+	sendNext := func() error {
+		if len(queue) == 0 {
+			return nil
+		}
+		packet := queue[0]
+		queue = queue[1:]
+		queuedSamples -= len(packet.PCM)
+
+		out := twilioOutbound{Event: "media", StreamSID: p.streamSID}
+		out.Media.Payload = base64.StdEncoding.EncodeToString(pcm16ToUlaw(packet.PCM))
+		payload, _ := json.Marshal(out)
+		if err := p.write(payload); err != nil {
+			return err
+		}
+		if markName := p.playback.add(packet.ItemID, packet.AudioEndMS); markName != "" {
+			mark, _ := json.Marshal(map[string]any{
+				"event": "mark", "streamSid": p.streamSID, "mark": map[string]string{"name": markName},
+			})
+			if err := p.write(mark); err != nil {
+				return err
+			}
+		}
+		duration := time.Duration(len(packet.PCM)) * time.Second / twilioMediaSampleRate
+		if duration <= 0 {
+			duration = time.Millisecond
+		}
+		timer = time.NewTimer(duration)
+		timerC = timer.C
+		return nil
+	}
+	handleCommand := func(command twilioPacerCommand) error {
+		if command.clear {
+			clearedMS, err := clear()
+			command.response <- twilioPacerResult{clearedMS: clearedMS, err: err}
+			return err
+		}
+		incomingSamples := 0
+		for _, packet := range command.packets {
+			incomingSamples += len(packet.PCM)
+		}
+		if queuedSamples+incomingSamples > p.maxQueuedSamples {
+			clearedMS, err := clear()
+			if err == nil {
+				err = errTwilioPacerOverflow
+			}
+			command.response <- twilioPacerResult{clearedMS: clearedMS, err: err}
+			return nil
+		}
+		queue = append(queue, command.packets...)
+		queuedSamples += incomingSamples
+		command.response <- twilioPacerResult{queuedMS: samplesToMS(queuedSamples)}
+		return nil
+	}
+
+	defer stopTimer()
+	for {
+		// Controls take priority over an expired pacing timer so clear cannot sit
+		// behind another packet once Core has observed an interruption.
+		select {
+		case command := <-p.commands:
+			if err := handleCommand(command); err != nil {
+				p.finish(err)
+				return
+			}
+			continue
+		default:
+		}
+
+		if timerC == nil && len(queue) > 0 {
+			if err := sendNext(); err != nil {
+				p.finish(err)
+				return
+			}
+			continue
+		}
+
+		select {
+		case <-p.ctx.Done():
+			p.finish(nil)
+			return
+		case command := <-p.commands:
+			if err := handleCommand(command); err != nil {
+				p.finish(err)
+				return
+			}
+		case <-timerC:
+			timer, timerC = nil, nil
+		}
+	}
+}
+
+func samplesToMS(samples int) int {
+	return (samples*1000 + twilioMediaSampleRate - 1) / twilioMediaSampleRate
+}
+
+// pcmSpeechStartDetector is a conservative local fallback for providers that
+// do not surface speech-start promptly. It only emits the transition into a
+// speech interval; silence rearms it for the next interval.
+type pcmSpeechStartDetector struct {
+	threshold       float64
+	requiredLoud    int
+	requiredSilence int
+	loudFrames      int
+	silentFrames    int
+	active          bool
+}
+
+func newPCMSpeechStartDetector() *pcmSpeechStartDetector {
+	return &pcmSpeechStartDetector{threshold: 0.035, requiredLoud: 2, requiredSilence: 12}
+}
+
+func (d *pcmSpeechStartDetector) observe(pcm []int16) bool {
+	if len(pcm) == 0 {
+		return false
+	}
+	var sum float64
+	for _, sample := range pcm {
+		normalized := float64(sample) / math.MaxInt16
+		sum += normalized * normalized
+	}
+	loud := math.Sqrt(sum/float64(len(pcm))) >= d.threshold
+	if loud {
+		d.silentFrames = 0
+		if d.active {
+			return false
+		}
+		d.loudFrames++
+		if d.loudFrames >= d.requiredLoud {
+			d.active = true
+			return true
+		}
+		return false
+	}
+	d.loudFrames = 0
+	if d.active {
+		d.silentFrames++
+		if d.silentFrames >= d.requiredSilence {
+			d.active = false
+			d.silentFrames = 0
+		}
+	}
+	return false
+}

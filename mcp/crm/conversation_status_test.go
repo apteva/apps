@@ -23,10 +23,13 @@ type crmCallAppCall struct {
 
 type crmRecordingPlatform struct {
 	tk.BasePlatformClient
-	calls []crmCallAppCall
+	calls            []crmCallAppCall
+	whoAmICalls      int
+	getInstanceCalls int
 }
 
 func (p *crmRecordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	p.whoAmICalls++
 	return &sdk.InstallIdentity{
 		AppName:   "crm",
 		InstallID: 99,
@@ -36,6 +39,7 @@ func (p *crmRecordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 }
 
 func (p *crmRecordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	p.getInstanceCalls++
 	return &sdk.PlatformInstance{ID: id, Name: "messaging", Status: "running", ProjectID: "test-proj"}, nil
 }
 

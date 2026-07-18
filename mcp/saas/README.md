@@ -1,5 +1,12 @@
 # SaaS
 
+Catalog products define independently sold SaaS products. Multiple SaaS plans
+may point to prices under the same Catalog product and can be changed within
+that product. Moving an account to a different Catalog product requires a
+separate purchase or an explicit migration workflow. The SaaS panel exposes
+this boundary with separate product and plan selectors and product-level
+account filtering.
+
 Shared SaaS access control for Apteva apps.
 
 SaaS generalizes the access, lifecycle, and live-usage parts that worked
@@ -32,7 +39,10 @@ they do not need SaaS-specific hooks.
 
 - creates or links the Billing customer;
 - resolves the Catalog price;
+- reserves an optional Catalog discount from the plan or `discount_code`;
 - creates an idempotent Subscription and durable checkout record;
+- passes Catalog's immutable discount application to Subscriptions and redeems
+  the reservation after the Subscription is durable;
 - creates the first subscription cycle and prepares its lines through
   Subscriptions before asking Billing to create the invoice;
 - returns a payment link and leaves the account `past_due`, or returns a
@@ -42,6 +52,18 @@ they do not need SaaS-specific hooks.
 
 This keeps the sales flow inside SaaS without moving invoices, payments,
 subscriptions, auth, or product data out of their owner apps.
+
+Plans may set `catalog_discount_id` for one automatic promotion. Public checkout
+may instead provide one `discount_code`; automatic and code discounts do not
+stack. SaaS stores reservation and pricing state for recovery, while Catalog
+owns eligibility and redemption limits and Subscriptions owns application by
+billing cycle. Billing receives only the final prepared line items from
+Subscriptions. Checkout responses include `discount` and `pricing` summaries
+when a promotion applies.
+
+If Subscriptions prepares a zero-total cycle, SaaS marks that cycle paid and
+activates it without creating a Billing invoice or payment link. This covers
+100% promotions without inventing a zero-value payment.
 
 Paid plans with `trial_days > 0` and
 `trial_requires_payment_method: false` in plan or Catalog price metadata
@@ -61,6 +83,37 @@ cycle paid and asks Subscriptions to transition to `active`; the resulting
 Administrative manual payments use the separately permission-gated
 `saas_checkout_mark_paid` tool. Public checkout cannot override plan pricing,
 trial policy, provider, billing/auth IDs, lifecycle dates, or payment state.
+When Billing publishes `invoice.paid` during an administrative payment, the
+tool and event handler share the same idempotent operation: the loser waits for
+the winner and returns the completed checkout instead of a false duplicate
+payment error.
+
+## Plan Changes
+
+`saas_account_change_plan` upgrades or downgrades an active subscription-backed
+account between plans attached to the same Catalog product. A move to another
+product is intentionally rejected because it may require a separate data and
+fulfillment migration.
+
+SaaS validates the product boundary, asks Subscriptions to create a durable
+item replacement, coordinates any Billing invoice and payment link, replaces
+Entitlements, and runs the target plan's `plan_upgraded`, `plan_downgraded`, or
+`plan_changed` fulfillment action. The account plan is committed only after
+those steps succeed. Subscriptions remains authoritative for item history,
+cycle-effective changes, generic proration, and discount continuation.
+
+Changes can be `immediate` or `next_cycle`. Immediate upgrades support
+`prorate`, `charge_full`, and `none`; any positive adjustment is held until
+Billing confirms payment. Next-cycle changes use `none` and are applied by the
+Subscriptions due worker. Existing discounts can be `preserve`d or `drop`ped.
+Immediate prorated downgrades are rejected until Billing provides a generic
+credit-note workflow; operators can schedule them for the next cycle instead.
+
+Every request requires an `idempotency_key`. `saas_plan_change_get` returns the
+durable state and payment URL, and the recovery worker resumes interrupted
+Billing, Subscriptions, Entitlements, and fulfillment steps without creating a
+second invoice or subscription transition. Completion emits
+`saas.account.plan_changed`.
 
 SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
 fulfillment, account-management, usage-write, and manual-payment tools require
@@ -109,7 +162,8 @@ Later lifecycle actions can use stored metadata:
 ```
 
 Supported lifecycle events are `account_active`, `account_past_due`,
-`account_suspended`, `account_resumed`, and `account_cancelled`.
+`account_suspended`, `account_resumed`, `account_cancelled`, `plan_upgraded`,
+`plan_downgraded`, and `plan_changed`.
 
 ## Live Usage
 

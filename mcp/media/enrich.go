@@ -110,6 +110,9 @@ func enrichRows(ctx context.Context, projectID string, rows []MediaRow) ([]Media
 // still ships with everything else.
 func mergeRow(r MediaRow, files map[string]*StorageFile) MediaResponseRow {
 	out := MediaResponseRow{MediaRow: r}
+	// Never let the embedded row serialize stale IDs when every candidate is
+	// rejected below.
+	out.MediaRow.Derivations = nil
 	out.DisplayOrientation = displayOrientation(r.Width, r.Height)
 	out.DisplayAspectRatio = displayAspectRatio(r.Width, r.Height)
 	if f := files[r.FileID]; f != nil {
@@ -120,9 +123,10 @@ func mergeRow(r MediaRow, files map[string]*StorageFile) MediaResponseRow {
 		out.SizeBytes = f.SizeBytes
 		out.ContentType = f.ContentType
 	}
-	if len(r.Derivations) > 0 {
-		out.Derivations = make([]EnrichedDerivation, len(r.Derivations))
-		for i, d := range r.Derivations {
+	validDerivations := filterResolvedDerivations(r.Derivations, files)
+	if len(validDerivations) > 0 {
+		out.Derivations = make([]EnrichedDerivation, len(validDerivations))
+		for i, d := range validDerivations {
 			out.Derivations[i] = enrichDerivation(d, files)
 		}
 	}

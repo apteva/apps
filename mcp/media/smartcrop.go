@@ -111,6 +111,13 @@ func computeSmartCrop(
 	if strings.EqualFold(mode, "center") {
 		return center, nil
 	}
+	validDerivations, validateErr := resolveValidDerivations(ctx, sc, projectID, row.Derivations)
+	if validateErr != nil {
+		app.Logger().Warn("smartcrop fallback to center: derivative identity lookup failed",
+			"file_id", sourceFileID, "err", validateErr.Error())
+		return center, nil
+	}
+	row.Derivations = validDerivations
 
 	// Smart mode — prefer the nearest cached keyframe for timed
 	// renders. If keyframes are missing, fall back to the canonical
@@ -184,16 +191,6 @@ func computeSmartCrop(
 			"crop_x_before", srcX,
 			"crop_x_after", subjectX)
 		srcX = subjectX
-	}
-	if motionX, ok := motionAwareNarrowSmartCropX(ctx, app, sc, projectID, sourceFileID, row.Derivations, cropSource, thumb, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
-		app.Logger().Info("smartcrop motion correction applied",
-			"file_id", sourceFileID,
-			"derivation_kind", cropSource.Kind,
-			"derivation_file_id", cropSource.StorageFileID,
-			"derivation_position_ms", cropSource.PositionMs,
-			"crop_x_before", srcX,
-			"crop_x_after", motionX)
-		srcX = motionX
 	}
 	app.Logger().Info("smartcrop resolved",
 		"file_id", sourceFileID,
@@ -352,9 +349,103 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 		edgeGuard := cropW / 4
 		rawNearEdge := rawSrcX <= edgeGuard || rawSrcX >= maxX-edgeGuard
 		if rawNearEdge {
-			centerX := clampInt(roundEven(maxX/2), 0, maxX)
-			return centerX, true
+			// A strong, concentrated subject window is a better recovery
+			// than geometric center when generic saliency has parked at a
+			// frame edge.
+			return x, true
 		}
+		// A concentrated foreground subject may legitimately be far from
+		// a center-ish generic crop. Broad warm backgrounds remain guarded.
+		if bestScore >= total*0.55 {
+			return x, true
+		}
+		return srcX, false
+	}
+	return x, true
+}
+
+// headAwareNarrowSmartCropX is a conservative edge guard for reclining or
+// low-positioned people. Generic saliency and whole-body motion naturally
+// favour the torso; on a narrow portrait crop that can leave a clearly visible
+// face cut by the left or right edge even though the current crop otherwise
+// contains most of the person.
+//
+// This is intentionally not a general face detector. It only considers a
+// compact, face-sized warm component in the middle/lower part of the frame.
+// The component may sit just outside the chosen crop, but must overlap a
+// tightly bounded edge halo; the crop then moves only far enough to restore a
+// small safety margin. Upright people, products, animals, animation, broad
+// warm furniture, posters near the top of the frame, lower-body regions, and
+// already-safe crops stay on the released path.
+func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
+	if img == nil || srcW <= 0 || cropW <= 0 || srcW <= cropW ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return srcX, false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	if thumbCropW >= w {
+		return srcX, false
+	}
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	currentEnd := currentStart + thumbCropW - 1
+	// A face immediately outside a torso-centred crop is the failure mode this
+	// guard exists to repair. Keep the halo small enough that an unrelated
+	// person or warm object elsewhere in the scene cannot pull the crop across
+	// the frame. At 1920 -> 9:16 this is about 150 source pixels.
+	edgeHalo := maxInt(6, thumbCropW/4)
+
+	pixels := normalizedSmartCropRGB(img, w, h)
+	components := warmSubjectComponents(pixels, w, h, thumbCropW, 0, w-1)
+	minScore := 350.0 * float64(w*h) / (320.0 * 180.0)
+	var best warmSubjectComponent
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		// Hands and forearms can be just as warm and connected as a face. The
+		// failure is especially damaging beside a saturated cushion: protecting
+		// the hand at the crop edge can push the actual face out of frame. A
+		// useful reclining-head component is closer to square at this scale;
+		// reject short hand blobs and broad furniture/hair regions here. The
+		// bounds intentionally retain the production reclining-face fixture
+		// (35x38 at 320x180) and both synthetic edge-face regressions.
+		if componentW < maxInt(6, w*11/100) || componentW > w*18/100 ||
+			componentH < maxInt(10, h*15/100) || componentH > h*35/100 ||
+			component.minY < h*30/100 || component.maxY > h*88/100 ||
+			component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo ||
+			component.score < minScore {
+			continue
+		}
+		boxArea := maxInt(1, componentW*componentH)
+		fill := float64(component.area) / float64(boxArea)
+		if fill < 0.15 || fill > 0.78 {
+			continue
+		}
+		if component.score > best.score {
+			best = component
+		}
+	}
+	if best.score == 0 {
+		return srcX, false
+	}
+
+	margin := maxInt(4, thumbCropW/5)
+	newStart := currentStart
+	if best.minX < currentStart+margin {
+		newStart = best.minX - margin
+	} else if best.maxX > currentEnd-margin {
+		newStart = best.maxX + margin - thumbCropW + 1
+	} else {
+		return srcX, false
+	}
+	newStart = clampInt(newStart, 0, w-thumbCropW)
+	x := clampInt(roundEven(int(math.Round(float64(newStart)*float64(srcW)/float64(w)))), 0, srcW-cropW)
+	if x == srcX {
 		return srcX, false
 	}
 	return x, true
@@ -832,6 +923,44 @@ func preprocessSmartCrop(
 		return params
 	}
 	target := smartCropFocus(op, parsed)
+	// V2 uses a bounded sample set. Dense storyboards stay on the cached fast
+	// path; sparse indexes are supplemented with temporary source screenshots.
+	// Source-sampling failures still fall through safely to v1.
+	if op == "extract_reel" && mode == "smart" {
+		if win, path, v2Err := computeSmartCropReelV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {
+			parsed["crop_w"] = win.W
+			parsed["crop_h"] = win.H
+			parsed["crop_x"] = win.X
+			parsed["crop_y"] = win.Y
+			parsed["crop_mode"] = mode
+			parsed["crop_version"] = "v2"
+			if len(path) > 1 {
+				parsed["crop_path"] = path
+			}
+			if out, marshalErr := json.Marshal(parsed); marshalErr == nil {
+				return out
+			}
+		} else {
+			app.Logger().Info("smartcrop v2 fallback to v1",
+				"op", op, "file_id", sources[0], "reason", v2Err.Error())
+		}
+	}
+	if (op == "extract_frame" || op == "crop") && mode == "smart" {
+		if win, v2Err := computeSmartCropStillV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {
+			parsed["crop_w"] = win.W
+			parsed["crop_h"] = win.H
+			parsed["crop_x"] = win.X
+			parsed["crop_y"] = win.Y
+			parsed["crop_mode"] = mode
+			parsed["crop_version"] = "v2"
+			if out, marshalErr := json.Marshal(parsed); marshalErr == nil {
+				return out
+			}
+		} else {
+			app.Logger().Info("smartcrop v2 fallback to v1",
+				"op", op, "file_id", sources[0], "reason", v2Err.Error())
+		}
+	}
 	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, target)
 	if err != nil {
 		// Symbolic filter is fine — log + skip.

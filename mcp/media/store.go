@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -261,7 +260,11 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 // source timestamp in ms for keyframes. The UNIQUE constraint moved
 // to (file_id, kind, position_ms) in 012_keyframes.sql so multiple
 // keyframe rows can coexist for one file.
-func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID int64, w, h int, positionMs int64) error {
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func upsertDerivation(db sqlExecer, projectID, fileID, kind string, storageFileID int64, w, h int, positionMs int64) error {
 	_, err := db.Exec(`
 		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, width, height, position_ms, status, error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'ok', '')
@@ -275,6 +278,35 @@ func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID 
 			generated_at=CURRENT_TIMESTAMP`,
 		fileID, projectID, kind, fmt.Sprintf("%d", storageFileID), nullableInt(w), nullableInt(h), positionMs,
 	)
+	return err
+}
+
+// upsertDerivationFailed records a terminal derivation attempt so
+// completion coordination can distinguish "still running" from
+// "attempted and failed".
+func upsertDerivationFailed(db sqlExecer, projectID, fileID, kind string, positionMs int64, cause error) error {
+	msg := "derivation failed"
+	if cause != nil {
+		msg = cause.Error()
+	}
+	if len(msg) > 1000 {
+		msg = msg[:1000]
+	}
+	_, err := db.Exec(`
+		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, position_ms, status, error)
+		VALUES (?, ?, ?, '', ?, 'failed', ?)
+		ON CONFLICT(file_id, kind, position_ms) DO UPDATE SET
+			project_id=excluded.project_id,
+			storage_file_id='', width=NULL, height=NULL,
+			status='failed', error=excluded.error,
+			generated_at=CURRENT_TIMESTAMP`,
+		fileID, projectID, kind, positionMs, msg,
+	)
+	return err
+}
+
+func clearDerivations(db sqlExecer, projectID, fileID string) error {
+	_, err := db.Exec(`DELETE FROM derivations WHERE project_id=? AND file_id=?`, projectID, fileID)
 	return err
 }
 
@@ -303,7 +335,7 @@ type DescriptionFields struct {
 //
 // UPSERT semantics: when no media row exists for (project_id,
 // file_id) yet, a stub row is inserted with probe_status='pending'
-// + source_sha256=''. The indexer's next sweep treats it like any
+// + source_sha256=”. The indexer's next sweep treats it like any
 // other unprobed row and fills in the metadata via upsertMedia,
 // which leaves the description columns alone. This lets agents
 // attach a description to a file the moment it lands in storage
@@ -404,22 +436,7 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 		derivs, _ := listDerivations(db, projectID, fileID)
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		for _, d := range derivs {
-			storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64)
-			if err != nil || storageID <= 0 {
-				continue
-			}
-			if err := sc.DeleteFile(ctx, projectID, storageID); err != nil {
-				if app != nil {
-					app.Logger().Warn("cascadeDeleteOne: storage delete failed",
-						"file_id", fileID,
-						"derivation_storage_id", storageID,
-						"kind", d.Kind,
-						"err", err)
-				}
-				// Continue — DB cleanup must still happen.
-			}
-		}
+		deleteOwnedDerivationFiles(ctx, app, sc, projectID, derivs)
 	}
 
 	// Step 3: local DB cleanup.
@@ -442,6 +459,24 @@ func cascadeDeleteOne(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID,
 		return fmt.Errorf("delete media: %w", err)
 	}
 	return nil
+}
+
+// deleteDerivationReferencesByStorageID invalidates cached pointers when
+// Storage deletes a hidden derivative directly. A derivative ID is not itself
+// a Media source ID, so the old event handler ignored these events and left a
+// dangling row that could later resolve to a reused legacy Storage ID.
+func deleteDerivationReferencesByStorageID(db *sql.DB, projectID, storageFileID string) (int64, error) {
+	if projectID == "" || storageFileID == "" {
+		return 0, nil
+	}
+	res, err := db.Exec(
+		`DELETE FROM derivations WHERE project_id = ? AND storage_file_id = ?`,
+		projectID, storageFileID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // purgeOrphans removes media rows (and their derivations + transcripts)
@@ -532,18 +567,14 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 	}
 
 	// 3. Compute the orphan set.
-	orphans := make([]any, 0)
 	orphanIDs := make([]string, 0)
-	placeholders := make([]string, 0)
 	for _, fid := range allMediaIDs {
 		if _, ok := present[fid]; ok {
 			continue
 		}
-		orphans = append(orphans, fid)
 		orphanIDs = append(orphanIDs, fid)
-		placeholders = append(placeholders, "?")
 	}
-	if len(orphans) == 0 {
+	if len(orphanIDs) == 0 {
 		return 0, nil
 	}
 
@@ -553,52 +584,51 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 	//    even if storage is unreachable. Without this, the
 	//    derivation bytes accumulate under /.media/* forever.
 	if sc != nil {
-		derivByFile, _ := listDerivationsByFiles(db, projectID, orphanIDs)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		for _, fid := range orphanIDs {
-			for _, d := range derivByFile[fid] {
-				storageID, perr := strconv.ParseInt(d.StorageFileID, 10, 64)
-				if perr != nil || storageID <= 0 {
-					continue
-				}
-				if delErr := sc.DeleteFile(ctx, projectID, storageID); delErr != nil {
-					if app != nil {
-						app.Logger().Warn("purgeOrphans: storage delete failed",
-							"file_id", fid,
-							"derivation_storage_id", storageID,
-							"kind", d.Kind,
-							"err", delErr)
-					}
-				}
+		allDerivs := make([]DerivationRow, 0)
+		for start := 0; start < len(orphanIDs); start += 400 {
+			end := start + 400
+			if end > len(orphanIDs) {
+				end = len(orphanIDs)
+			}
+			chunk := orphanIDs[start:end]
+			derivByFile, _ := listDerivationsByFiles(db, projectID, chunk)
+			for _, fid := range chunk {
+				allDerivs = append(allDerivs, derivByFile[fid]...)
 			}
 		}
+		deleteOwnedDerivationFiles(ctx, app, sc, projectID, allDerivs)
 		cancel()
 	}
 
-	in := strings.Join(placeholders, ",")
-	args := append([]any{projectID}, orphans...)
-
-	if _, err := db.Exec(
-		`DELETE FROM derivations WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	); err != nil {
-		return 0, fmt.Errorf("delete orphan derivations: %w", err)
+	// SQLite commonly limits statements to 999 bind parameters.
+	// Delete in bounded chunks so large catalogs reconcile safely.
+	var deleted int64
+	for start := 0; start < len(orphanIDs); start += 400 {
+		end := start + 400
+		if end > len(orphanIDs) {
+			end = len(orphanIDs)
+		}
+		chunk := orphanIDs[start:end]
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, projectID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		for _, table := range []string{"derivations", "transcripts"} {
+			if _, err := db.Exec(`DELETE FROM `+table+` WHERE project_id=? AND file_id IN (`+marks+`)`, args...); err != nil {
+				return deleted, fmt.Errorf("delete orphan %s: %w", table, err)
+			}
+		}
+		res, err := db.Exec(`DELETE FROM media WHERE project_id=? AND file_id IN (`+marks+`)`, args...)
+		if err != nil {
+			return deleted, fmt.Errorf("delete orphan media: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
 	}
-	if _, err := db.Exec(
-		`DELETE FROM transcripts WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	); err != nil {
-		return 0, fmt.Errorf("delete orphan transcripts: %w", err)
-	}
-	res, err := db.Exec(
-		`DELETE FROM media WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("delete orphan media: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return deleted, nil
 }
 
 // describeCandidates returns media file_ids the auto-describer
@@ -747,6 +777,12 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 
 // SearchFilters drive media_search and the GET /media handler.
 type SearchFilters struct {
+	// Q is a broad, case-insensitive contains search across filename,
+	// title, description, and alt text. Filename and Title are narrower
+	// contains filters for callers that know which field they want.
+	Q             string
+	Filename      string
+	Title         string
 	DurationMinMs int64
 	DurationMaxMs int64
 	// MediaType is the canonical type filter agents and UI should
@@ -806,6 +842,21 @@ type MediaFacetCounts struct {
 func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, error) {
 	clauses := []string{"project_id = ?", "probe_status = 'ok'"}
 	args := []any{projectID}
+	if q := mediaSearchContainsPattern(f.Q); q != "" {
+		clauses = append(clauses, `(LOWER(COALESCE(m.name, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.title, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.description, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.alt_text, '')) LIKE ? ESCAPE '\')`)
+		args = append(args, q, q, q, q)
+	}
+	if filename := mediaSearchContainsPattern(f.Filename); filename != "" {
+		clauses = append(clauses, `LOWER(COALESCE(m.name, '')) LIKE ? ESCAPE '\'`)
+		args = append(args, filename)
+	}
+	if title := mediaSearchContainsPattern(f.Title); title != "" {
+		clauses = append(clauses, `LOWER(COALESCE(m.title, '')) LIKE ? ESCAPE '\'`)
+		args = append(args, title)
+	}
 
 	if f.DurationMinMs > 0 {
 		clauses = append(clauses, "m.duration_ms >= ?")
@@ -907,7 +958,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		order = "created_at DESC"
 	}
 
-	limit := 50
+	limit := mediaSearchDefaultLimit
 	if f.Limit > 0 && f.Limit <= 500 {
 		limit = f.Limit
 	}
@@ -1011,6 +1062,19 @@ func mediaFacetCounts(db *sql.DB, projectID string, f SearchFilters) (MediaFacet
 		&c.Duration.Short, &c.Duration.Medium, &c.Duration.Long, &c.Duration.Extended,
 	)
 	return c, err
+}
+
+func mediaSearchContainsPattern(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	// LIKE wildcards in user text are literals. This makes q="100%" search
+	// for that phrase instead of accidentally matching every 100-prefixed row.
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return "%" + value + "%"
 }
 
 func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, error) {

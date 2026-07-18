@@ -25,13 +25,14 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"golang.org/x/sync/singleflight"
 	_ "modernc.org/sqlite"
 )
 
 const manifestYAML = `schema: apteva-app/v1
 name: stocks
 display_name: Stocks
-version: 0.6.0
+version: 0.7.0
 description: Explore + screen the S&P 1500 backed by Yahoo Finance — filter by yield/payout/P-E/dividend-growth, quote, price chart, dividend history. Read-only.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
@@ -49,13 +50,13 @@ provides:
     - name: search
       description: "Find stocks by symbol or name. Unknown-but-valid tickers are auto-added to the universe. Args: query, limit?."
     - name: list
-      description: "List/screen the S&P 1500 by yield, payout ratio, P/E, and 5yr dividend growth. Args: sector?, min_yield?, max_payout?, max_pe?, min_growth?, sort? (name|price|change|yield|pe|payout|growth), limit?."
+      description: "Paginated stock screen by query, sector, yield, payout, P/E, growth, and market cap. Args: query?, filters?, sort?, limit? (max 200), offset?."
     - name: get
-      description: "One stock's data — name, exchange, price, day + 52-week range, volume, P/E, payout, dividend yield + 5yr growth + frequency, last dividend. Args: symbol."
+      description: "One stock's quote and fundamentals. Args: symbol, refresh?."
     - name: chart
-      description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)."
+      description: "OHLCV price history. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo), refresh?."
     - name: dividends
-      description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol."
+      description: "Dividend history + summary. Args: symbol, refresh?."
     - name: sync_status
       description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health."
     - name: watchlists_list
@@ -67,7 +68,7 @@ provides:
     - name: watchlist_member
       description: "Add/remove a symbol on a watchlist. Args: id, symbol, state (include|exclude|auto)."
     - name: watchlist_get
-      description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes). Args: id, sort?."
+      description: "Resolve a watchlist to paginated current members (rules ∪ pins − excludes). Args: id, sort?, limit?, offset?."
   ui_panels:
     - slot: project.page
       label: Stocks
@@ -105,8 +106,11 @@ type App struct {
 
 	// warmMu/lastWarm gate the background warming worker so overlapping
 	// dispatches don't stack Yahoo traffic. See warmBatch.
-	warmMu   sync.Mutex
-	lastWarm time.Time
+	warmMu     sync.Mutex
+	lastWarm   time.Time
+	warmCancel context.CancelFunc
+
+	refreshGroup singleflight.Group
 }
 
 // globalCtx is stashed in OnMount so HTTP handlers (which the SDK invokes
@@ -137,13 +141,24 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	ctx.Logger().Info("stocks mounted", "cache_ttl", a.ttl.String())
+	_ = a.st.cachePrune(cacheRetention, cacheMaxRows)
 	// Kick an immediate first warm so a fresh install shows prices/yields
 	// without waiting a full worker interval; the worker keeps it fresh.
-	go a.warmBatch(context.Background())
+	warmCtx, warmCancel := context.WithCancel(context.Background())
+	a.warmCancel = warmCancel
+	go a.warmBatch(warmCtx)
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.warmCancel != nil {
+		a.warmCancel()
+	}
+	if a.y != nil {
+		a.y.close()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 
 // Workers — one background warmer that refreshes a paced batch of the
@@ -166,10 +181,6 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // ─── MCP tools ─────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	symbolReq := schemaObject(map[string]any{
-		"symbol": map[string]any{"type": "string", "description": "Ticker, e.g. AAPL"},
-	}, []string{"symbol"})
-
 	return []sdk.Tool{
 		{
 			Name:        "search",
@@ -184,6 +195,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "list",
 			Description: "List/filter/screen the S&P 1500 universe by dividend yield, payout ratio, P/E, and 5-year dividend growth.",
 			InputSchema: schemaObject(map[string]any{
+				"query":      map[string]any{"type": "string", "description": "Symbol prefix or company-name fragment"},
 				"sector":     map[string]any{"type": "string", "description": "Filter by GICS sector (exact, case-insensitive)"},
 				"min_yield":  map[string]any{"type": "number", "description": "Min dividend yield %"},
 				"max_yield":  map[string]any{"type": "number", "description": "Max dividend yield %"},
@@ -196,15 +208,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"min_mcap":   map[string]any{"type": "number", "description": "Min market cap (billions)"},
 				"max_mcap":   map[string]any{"type": "number", "description": "Max market cap (billions)"},
 				"sort":       map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}, "description": "Sort key (default name)"},
-				"limit":      map[string]any{"type": "integer", "description": "Max results (default: whole universe)"},
+				"limit":      map[string]any{"type": "integer", "description": "Page size (default 100, maximum 200)"},
+				"offset":     map[string]any{"type": "integer", "description": "Zero-based page offset"},
 			}, nil),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolList(args) },
 		},
 		{
 			Name:        "get",
 			Description: "One stock's data — quote, day + 52-week range, volume, dividend yield + frequency, last dividend.",
-			InputSchema: symbolReq,
-			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolGet(args) },
+			InputSchema: schemaObject(map[string]any{
+				"symbol":  map[string]any{"type": "string", "description": "Ticker, e.g. AAPL"},
+				"refresh": map[string]any{"type": "boolean", "description": "Bypass the response cache"},
+			}, []string{"symbol"}),
+			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolGet(args) },
 		},
 		{
 			Name:        "chart",
@@ -213,14 +229,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"symbol":   map[string]any{"type": "string", "description": "Ticker, e.g. AAPL"},
 				"range":    map[string]any{"type": "string", "enum": []string{"1mo", "6mo", "1y", "5y", "max"}, "description": "History range (default 1y)"},
 				"interval": map[string]any{"type": "string", "enum": []string{"1d", "1wk", "1mo"}, "description": "Bar interval (default 1d)"},
+				"refresh":  map[string]any{"type": "boolean", "description": "Bypass the response cache"},
 			}, []string{"symbol"}),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolChart(args) },
 		},
 		{
 			Name:        "dividends",
 			Description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock.",
-			InputSchema: symbolReq,
-			Handler:     func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolDividends(args) },
+			InputSchema: schemaObject(map[string]any{
+				"symbol":  map[string]any{"type": "string", "description": "Ticker, e.g. AAPL"},
+				"refresh": map[string]any{"type": "boolean", "description": "Bypass the response cache"},
+			}, []string{"symbol"}),
+			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.toolDividends(args) },
 		},
 		{
 			Name:        "sync_status",
@@ -266,8 +286,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "watchlist_get",
 			Description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes) with full snapshot data. Args: id, sort?.",
 			InputSchema: schemaObject(map[string]any{
-				"id":   map[string]any{"type": "integer"},
-				"sort": map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}},
+				"id":     map[string]any{"type": "integer"},
+				"sort":   map[string]any{"type": "string", "enum": []string{"name", "price", "change", "yield", "pe", "payout", "growth"}},
+				"limit":  map[string]any{"type": "integer", "description": "Page size (default 100, maximum 200)"},
+				"offset": map[string]any{"type": "integer", "description": "Zero-based page offset"},
 			}, []string{"id"}),
 			Handler: a.toolWatchlistGet,
 		},
@@ -319,6 +341,8 @@ func (a *App) handleWatchlistGet(w http.ResponseWriter, r *http.Request) {
 		"project_id": r.URL.Query().Get("project_id"),
 		"id":         id,
 		"sort":       r.URL.Query().Get("sort"),
+		"limit":      r.URL.Query().Get("limit"),
+		"offset":     r.URL.Query().Get("offset"),
 	})
 	respond(w, body, err)
 }
@@ -353,6 +377,9 @@ func readJSONBody(r *http.Request) map[string]any {
 func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	args := map[string]any{}
+	if v := q.Get("q"); v != "" {
+		args["query"] = v
+	}
 	if v := q.Get("sector"); v != "" {
 		args["sector"] = v
 	}
@@ -371,17 +398,22 @@ func (a *App) handleList(w http.ResponseWriter, r *http.Request) {
 			args["limit"] = n
 		}
 	}
+	if v := q.Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			args["offset"] = n
+		}
+	}
 	body, err := a.toolList(args)
 	respond(w, body, err)
 }
 
 func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
-	body, err := a.toolSearch(map[string]any{"query": r.URL.Query().Get("q")})
+	body, err := a.toolSearch(map[string]any{"query": r.URL.Query().Get("q"), "limit": r.URL.Query().Get("limit")})
 	respond(w, body, err)
 }
 
 func (a *App) handleGet(w http.ResponseWriter, r *http.Request) {
-	body, err := a.toolGet(map[string]any{"symbol": r.PathValue("symbol")})
+	body, err := a.toolGet(map[string]any{"symbol": r.PathValue("symbol"), "refresh": r.URL.Query().Get("refresh")})
 	respond(w, body, err)
 }
 
@@ -391,12 +423,13 @@ func (a *App) handleChart(w http.ResponseWriter, r *http.Request) {
 		"symbol":   r.PathValue("symbol"),
 		"range":    q.Get("range"),
 		"interval": q.Get("interval"),
+		"refresh":  q.Get("refresh"),
 	})
 	respond(w, body, err)
 }
 
 func (a *App) handleDividends(w http.ResponseWriter, r *http.Request) {
-	body, err := a.toolDividends(map[string]any{"symbol": r.PathValue("symbol")})
+	body, err := a.toolDividends(map[string]any{"symbol": r.PathValue("symbol"), "refresh": r.URL.Query().Get("refresh")})
 	respond(w, body, err)
 }
 
@@ -458,6 +491,22 @@ func floatArg(args map[string]any, key string) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+func boolArg(args map[string]any, key string) bool {
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		return err == nil && b
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	default:
+		return false
+	}
 }
 
 func orStr(a, b string) string {

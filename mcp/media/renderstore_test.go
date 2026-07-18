@@ -101,6 +101,20 @@ func TestClaimNextPending_EmptyQueue(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedRenders(t *testing.T) {
+	ctx := newTestCtx(t)
+	id, _ := insertRender(ctx.AppDB(), testProj, "trim", []string{"1"}, nil, "", "", "")
+	_, _ = claimNextPending(ctx.AppDB())
+	n, err := recoverInterruptedRenders(ctx.AppDB())
+	if err != nil || n != 1 {
+		t.Fatalf("recover = %d, %v", n, err)
+	}
+	row, _ := getRender(ctx.AppDB(), testProj, id)
+	if row.Status != "pending" || row.ProgressPct != 0 || row.StartedAt != "" {
+		t.Fatalf("recovered row = %+v", row)
+	}
+}
+
 func TestClaimNextPending_AtomicUnderRace(t *testing.T) {
 	// Same row should never be claimed twice. Insert one row, fire N
 	// goroutines each calling claim, count successes.

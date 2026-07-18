@@ -2,29 +2,34 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.4.3
+version: 0.5.0
 description: |
-  Public HTTPS URL for a locally-installed Apteva instance. Two modes:
+  Publish a locally-installed Apteva instance through one of three HTTPS
+  tunnel providers selected explicitly in the Live Link panel:
 
   - quick (default): Cloudflare Quick Tunnel. Anonymous, free, fresh
     *.trycloudflare.com URL on every start. Zero config — install the
     app, click "Go live", copy the URL.
 
-  - named (v0.3): a stable URL on a Cloudflare zone you own (e.g.
+  - cloudflare-named: a stable URL on a Cloudflare zone you own (e.g.
     https://tunnel.example.com). Bind the cloudflare integration at
     install time (one API token), then pick a zone from the dropdown
     and a subdomain in the panel. The app calls the integration's
-    cfd_tunnel + DNS tools through the platform proxy — your token
-    never leaves the platform. Restarts reuse the same URL;
+    cfd_tunnel + DNS tools through the platform proxy — your account API
+    token never leaves the platform. Restarts reuse the same URL;
     expose_destroy reverses everything (CNAME + tunnel) on Cloudflare.
+
+  - ngrok: a random ngrok URL or an optional reserved/custom domain. Bind
+    an ngrok connection once; credentials are injected only into the child
+    process environment and are never stored in the app database.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/live-link/icon.png
-tags: [tunnel, expose, public-url, cloudflared, infrastructure, dev]
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/live-link/icon.svg
+tags: [tunnel, expose, public-url, cloudflared, ngrok, infrastructure, dev]
 
 scopes: [global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.18.0"
 
 requires:
   permissions:
@@ -72,14 +77,14 @@ requires:
       tools: {}
       required: false
       label: "ngrok (alternative provider)"
-      hint: "Bind your ngrok authtoken to use ngrok instead of Cloudflare. Either one works; pick whichever you prefer per install. If both Cloudflare-named and ngrok are bound, Cloudflare-named wins."
+      hint: "Bind your ngrok authtoken, then select ngrok in the Live Link panel. Binding alone does not silently switch providers."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: expose_start
-      description: Start a public tunnel and return its URL. Quick-mode URLs are fresh per start; named-mode URLs are stable.
+      description: Start the explicitly selected public tunnel provider and return its URL.
     - name: expose_stop
       description: Stop the running tunnel, if any. Named tunnels persist on Cloudflare — use expose_destroy to remove them.
     - name: expose_status
@@ -108,12 +113,6 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: provider
-    type: select
-    options: [cloudflared]
-    default: cloudflared
-    label: Tunnel provider
-    description: Cloudflare is the only provider in v0.2; ngrok and tailscale-funnel arrive in v0.3.
   - name: target_url
     type: text
     default: ""
@@ -131,8 +130,8 @@ config_schema:
       Optional path to a cloudflared binary you already manage. Leave empty
       to let the app handle it: it will look on $PATH first, fall back to a
       previously auto-installed copy in the install's data dir, and as a
-      last resort download the latest release from github.com/cloudflare/cloudflared
-      (~30MB, one-time, on the first "Go live" click).
+      last resort download the pinned, SHA-256-verified cloudflared 2026.7.1
+      release (~40MB, one-time, on the first "Go live" click).
   - name: ngrok_path
     type: text
     default: ""
@@ -140,7 +139,7 @@ config_schema:
     description: |
       Optional path to an ngrok agent you already manage. Same fallback
       shape as cloudflared_path: $PATH → previously auto-installed copy
-      → download the latest v3 stable from equinox.io (~20MB). Only
+      → download the pinned, SHA-256-verified ngrok 3.39.9 build (~20MB). Only
       relevant when the ngrok integration is bound.
   - name: ngrok_domain
     type: text
@@ -157,8 +156,8 @@ config_schema:
     default: "true"
     label: Auto-restart on boot
     description: |
-      If a tunnel was up when the sidecar last died (server reboot,
-      crash, redeploy), bring it back automatically. Off if you want
-      to manually start the tunnel after every restart.
+      Persist the operator's live/off intent separately from subprocess
+      state. When live, bring the selected provider back after clean server
+      restarts, crashes, or redeploys. Off requires a manual start.
 
 upgrade_policy: auto-patch

@@ -688,24 +688,11 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "screenshot":
 		return c.Screenshot()
 
-	case "navigate":
-		fmt.Fprintf(os.Stderr, "[BROWSER] navigate to %s\n", action.URL)
-		navCtx, navCancel := context.WithTimeout(c.ctx, 30*time.Second)
-		err := chromedp.Run(navCtx, chromedp.Navigate(action.URL))
-		navCancel()
-		if err != nil {
-			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
-				fmt.Fprintf(os.Stderr, "[BROWSER] navigate load timeout recovered at %s\n", current)
-			} else {
-				fmt.Fprintf(os.Stderr, "[BROWSER] navigate ERROR: %v\n", err)
-				return nil, fmt.Errorf("navigate: %w", err)
-			}
+	case "navigate", "back", "reload":
+		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
+			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		var url, title string
-		chromedp.Run(c.ctx, chromedp.Location(&url))
-		chromedp.Run(c.ctx, chromedp.Title(&title))
-		fmt.Fprintf(os.Stderr, "[BROWSER] navigate done: URL=%s title=%q\n", url, title)
 		return c.Screenshot()
 
 	case "click":

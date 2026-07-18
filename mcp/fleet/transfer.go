@@ -94,33 +94,32 @@ func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) error {
 	return nil
 }
 
-func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
-	return a.startTenantOnHostMode(ctx, h, tenantID, slug, dir, version, port, prevStatus, false)
+func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenant *Tenant, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
+	return a.startTenantOnHostMode(ctx, h, tenant, dir, version, port, prevStatus, false)
 }
 
-func (a *App) startTenantOnHostMode(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string, quarantine bool) (baseURL, newStatus string, err error) {
+func (a *App) startTenantOnHostMode(ctx *sdk.AppCtx, h fleetHost, tenant *Tenant, dir, version string, port int, prevStatus string, quarantine bool) (baseURL, newStatus string, err error) {
+	if tenant == nil {
+		return "", "", errors.New("tenant required")
+	}
 	newStatus = statusAfterRestart(prevStatus)
 	if h.IsLocal() {
 		spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_, proc, err := a.spawnTenantWithMode(spawnCtx, tenantID, slug, dir, tenantAptevaBin(version), port, false, quarantine)
+		_, proc, err := a.spawnTenantWithMode(spawnCtx, tenant.ID, tenant.Slug, dir, tenantAptevaBin(version), port, false, quarantine)
 		if err != nil {
 			return "", "", err
 		}
 		a.procMu.Lock()
-		a.procs[slug] = proc
+		a.procs[tenant.Slug] = proc
 		a.procMu.Unlock()
 		return fmt.Sprintf("http://localhost:%d", port), newStatus, nil
 	}
-	_, baseURL, err = a.spawnHostedTenant(ctx, hostedSpawnSpec{
-		InstanceID: h.InstanceID,
-		InstanceIP: h.Info.PublicIPv4,
-		Slug:       slug,
-		Port:       port,
-		AptevaVer:  version,
-		FreshSetup: false,
-		Quarantine: quarantine,
-	})
+	spec := hostedSpawnSpecForTenant(tenant, h.Info.PublicIPv4, port)
+	spec.InstanceID = h.InstanceID
+	spec.AptevaVer = version
+	spec.Quarantine = quarantine
+	_, baseURL, err = a.spawnHostedTenant(ctx, spec)
 	if err != nil {
 		return "", "", err
 	}

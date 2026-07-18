@@ -2,13 +2,17 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.3.2
+version: 0.7.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
   organizations, grants Entitlements, stores live usage gauges from
-  existing app tools, and applies subscription lifecycle state. It does
-  not install apps, run containers, or own invoices/payments directly.
+  existing app tools, orchestrates Catalog discounts, and applies
+  subscription lifecycle state, and orchestrates same-product plan changes
+  with durable proration and payment continuation. Catalog products remain
+  the explicit boundary between independently sold SaaS products. It does not install apps,
+  run containers, or own catalog eligibility, subscriptions, invoices, or
+  payments directly.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -25,6 +29,8 @@ requires:
     - platform.apps.call
   apps:
     - name: catalog
+      version: ">=0.2.0"
+      reason: price resolution plus generic discount reservation and redemption
       optional: false
     - name: billing
       version: ">=0.8.17"
@@ -36,8 +42,8 @@ requires:
         - invoice.refunded
         - payment_method.attached
     - name: subscriptions
-      version: ">=0.3.1"
-      reason: durable trial expiration, generic invoice preparation, cycle updates, and cycle_due events
+      version: ">=0.6.0"
+      reason: durable trial expiration, cycle-aware discounts, invoice preparation, and cycle-safe subscription item changes
       optional: false
       events:
         - subscription.active
@@ -47,7 +53,9 @@ requires:
         - subscription.cancelled
         - subscription.ended
         - subscription.cycle_due
+        - subscription.change.applied
     - name: entitlements
+      version: ">=0.2.0"
       optional: false
     - name: auth
       optional: false
@@ -91,15 +99,24 @@ provides:
     - name: saas.quota.recovered
       description: Account usage moved down from its previous quota state.
       payload: *quota_event_payload
+    - name: saas.account.plan_changed
+      description: A durable same-product upgrade, downgrade, or lateral plan change completed.
+      payload:
+        plan_change_id: string
+        account_id: string
+        customer_id: integer
+        from_plan_key: string
+        target_plan_key: string
+        change_kind: string
   mcp_tools:
     - name: saas_plan_list
-      description: List SaaS plans and their features, limits, and usage sources.
+      description: List SaaS plans with their Catalog product identity, features, limits, and usage sources.
       requires: saas.read
     - name: saas_plan_get
-      description: Fetch one SaaS plan.
+      description: Fetch one SaaS plan with its Catalog product identity.
       requires: saas.read
     - name: saas_plan_upsert
-      description: Create or update a SaaS plan linked to Catalog/Billing metadata.
+      description: Create or update a SaaS plan linked to Catalog pricing and an optional automatic Catalog discount.
       requires: saas.admin
     - name: saas_plan_feature_add
       description: Add a feature grant to a SaaS plan.
@@ -126,7 +143,7 @@ provides:
       description: Run or retry configured fulfillment actions for a SaaS account lifecycle event.
       requires: saas.admin
     - name: saas_checkout_create
-      description: Orchestrate free activation, no-card trials, or paid Billing/Subscription checkout for a SaaS account.
+      description: Orchestrate free activation, Catalog discounts, no-card trials, or paid Billing/Subscription checkout for a SaaS account.
       requires: saas.checkout
     - name: saas_checkout_get
       description: Fetch durable checkout status and any payment or setup URL.
@@ -140,8 +157,17 @@ provides:
     - name: saas_account_get
       description: Fetch one SaaS account.
       requires: saas.read
+    - name: saas_account_reconcile
+      description: Repair Subscription metadata and Entitlements projections from the account's authoritative SaaS plan.
+      requires: saas.admin
+    - name: saas_account_change_plan
+      description: Upgrade or downgrade an active account within one Catalog product, including proration and payment orchestration.
+      requires: saas.admin
+    - name: saas_plan_change_get
+      description: Fetch durable plan-change state and any payment URL.
+      requires: saas.read
     - name: saas_account_list
-      description: List SaaS accounts with customer and Billing summaries; filter by account age and payment dates.
+      description: List SaaS accounts with Catalog product, customer, account age, payment date, and Billing filters and summaries.
       requires: saas.read
     - name: saas_billing_sync
       description: Refresh SaaS Billing projections from linked Billing invoices for backfill or repair.

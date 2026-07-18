@@ -127,6 +127,7 @@ var handlers = map[string]kindHandler{
 	KindAudioTTS: {
 		Role:              "audio_provider",
 		ResolveCapability: constCap("audio.tts"),
+		ResolveTool:       audioToolForSlug,
 		BuildArgs:         buildAudioTTSArgs,
 		Normalize:         normalizeAudioResponse,
 		StorageDir:        "audio",
@@ -228,7 +229,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	args["_storage_folder"] = storageFolder
 	if kind == KindVideo && bound.AppSlug == "venice-ai" {
-		normalizeVeniceVideoDurationForModel(ctx, args, capability)
+		normalizeVeniceVideoArgsForModel(ctx, args, capability)
 		estimatedSeconds = estimatedDurationSeconds(kind, args)
 	}
 	if err := validateProviderPrompt(ctx, bound, kind, capability, args); err != nil {
@@ -502,7 +503,7 @@ func normalizeAudioProviderArgs(args map[string]any) (string, error) {
 	for _, key := range []string{"model", "voice", "voice_id"} {
 		value := strArg(args, key, "")
 		parsed, stripped, ok := splitProviderModel(value)
-		if !ok || (parsed != "elevenlabs" && parsed != "fish-audio") {
+		if !ok || (parsed != "elevenlabs" && parsed != "fish-audio" && parsed != "deepgram") {
 			continue
 		}
 		if provider != "" && provider != parsed {
@@ -526,7 +527,7 @@ func splitProviderModel(model string) (string, string, bool) {
 			continue
 		}
 		switch parts[0] {
-		case "openai-api", "openai-codex", "venice-ai", "gemini", "elevenlabs", "fish-audio":
+		case "openai-api", "openai-codex", "venice-ai", "gemini", "elevenlabs", "fish-audio", "deepgram":
 			return parts[0], parts[1], true
 		}
 	}
@@ -542,7 +543,9 @@ func providerSupportsCapability(provider, capability string) bool {
 
 func audioProviderSupports(provider, capability string) bool {
 	switch capability {
-	case "audio.tts", "voice.create":
+	case "audio.tts":
+		return provider == "elevenlabs" || provider == "fish-audio" || provider == "deepgram"
+	case "voice.create":
 		return provider == "elevenlabs" || provider == "fish-audio"
 	case "audio.sfx":
 		return provider == "elevenlabs"
@@ -801,6 +804,7 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 			"cache_key":                  strAny(row["cache_key"]),
 			"estimated_duration_seconds": estimatedSeconds,
 			"actual_duration_seconds":    actualSeconds,
+			"chat_component":             generationChatComponent(int64Any(row["id"]), 0),
 		},
 	}
 }
@@ -838,6 +842,7 @@ func queryPendingJobByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 			"cache_hit":                  true,
 			"cache_key":                  cacheKey,
 			"estimated_duration_seconds": estimatedSeconds,
+			"chat_component":             generationChatComponent(0, id),
 		},
 	}, true
 }

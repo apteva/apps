@@ -307,6 +307,17 @@ func TestPlanConcat_RequiresOutputName(t *testing.T) {
 	}
 }
 
+func TestValidateOutputNameRejectsPaths(t *testing.T) {
+	for _, name := range []string{"../escape.mp4", "subdir/out.mp4", `subdir\out.mp4`, ".", ".."} {
+		if err := validateOutputName(name); err == nil {
+			t.Errorf("validateOutputName(%q) accepted a path", name)
+		}
+	}
+	if err := validateOutputName("safe-output.mp4"); err != nil {
+		t.Fatalf("safe filename rejected: %v", err)
+	}
+}
+
 func TestBuildPlan_UnknownOperation(t *testing.T) {
 	_, err := buildPlan("explode", []string{"42"}, raw(t, map[string]any{}), "", "")
 	if err == nil {
@@ -529,6 +540,33 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 		if !strings.Contains(vf, want) {
 			t.Errorf("vf chain missing %q: %s", want, vf)
 		}
+	}
+}
+
+func TestPlanExtractReel_DynamicCropPathAccountsForPreroll(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"}, raw(t, map[string]any{
+		"start_ms": 60_000, "end_ms": 70_000,
+		"target_ratio": "9:16", "output_width": 404,
+		"crop_w": 404, "crop_h": 720,
+		"crop_path": []map[string]any{
+			{"at_ms": 60_000, "x": 100},
+			{"at_ms": 65_000, "x": 300},
+		},
+	}), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vf string
+	for i, arg := range plan.Args {
+		if arg == "-vf" && i+1 < len(plan.Args) {
+			vf = plan.Args[i+1]
+			break
+		}
+	}
+	// Filter t=2 is the first emitted frame because of the preroll, so the
+	// sample five seconds into the reel is t=7 on the filter timeline.
+	if !strings.Contains(vf, `lt(t\,7.000)`) {
+		t.Fatalf("dynamic path is not aligned with preroll: %s", vf)
 	}
 }
 

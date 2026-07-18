@@ -11,12 +11,13 @@ package main
 // generates first; keyframes follow.
 //
 // Defaults (per-install configurable via app.Config()):
-//   keyframe_interval_seconds  30
-//   keyframe_max_count         60   (caps storage on very long videos)
+//   keyframe_interval_seconds  5
+//   keyframe_max_count         120  (caps storage on very long videos)
 //   keyframes_enabled          true
 //
-// For a 10-minute video: 20 keyframes. For an hour-long video:
-// 60 keyframes (capped, spaced every minute instead of every 30s).
+// For a 10-minute video: 120 keyframes. For an hour-long video:
+// 120 keyframes (capped, spaced roughly every 30s). The denser default
+// is the bounded input to Smart Crop v2; each JPEG is only 320px wide.
 // The first keyframe always sits ~1s in to skip splash / black opens.
 
 import (
@@ -24,8 +25,8 @@ import (
 )
 
 const (
-	defaultKeyframeIntervalSeconds = 30
-	defaultKeyframeMaxCount        = 60
+	defaultKeyframeIntervalSeconds = 5
+	defaultKeyframeMaxCount        = 120
 	// First keyframe sits ~1s in — same reason the canonical thumbnail
 	// defaults seek to 1s, just to skip splash/black at t=0.
 	firstKeyframeOffsetMs = 1000
@@ -57,8 +58,8 @@ func keyframesEnabled(app *sdk.AppCtx) bool {
 // Spacing rule: ideal spacing is keyframe_interval_seconds, but if
 // that would produce more than keyframe_max_count keyframes we
 // stretch the interval so total stays under the cap. For an hour
-// video with default 30s interval + 60-frame cap, the effective
-// interval becomes 60s.
+// video with the default 5s interval + 120-frame cap, the effective
+// interval becomes roughly 30s.
 func keyframePositions(durationMs int64, app *sdk.AppCtx) []int64 {
 	if durationMs <= 0 {
 		return nil

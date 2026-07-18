@@ -4,9 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -142,12 +145,16 @@ func updateGenerationStatus(ctx *sdk.AppCtx, pid string, id int64, status string
 // toolMediaHistory is the MCP read tool — kind-aware, paginated.
 func (a *App) toolMediaHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid := projectScopeFromArgs(ctx, args)
-	limit := intArg(args, "limit", 50)
-	if limit > 200 {
-		limit = 200
+	query, err := newHistoryQuery(
+		strArg(args, "kind", ""),
+		intArg(args, "limit", 50),
+		strArg(args, "cursor", ""),
+		strArg(args, "since", ""),
+	)
+	if err != nil {
+		return nil, err
 	}
-	kindFilter := strArg(args, "kind", "")
-	return queryHistory(ctx, pid, kindFilter, limit)
+	return queryHistory(ctx, pid, query)
 }
 
 func (a *App) toolMediaGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -163,20 +170,64 @@ func (a *App) toolMediaGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"generation": row}, nil
 }
 
-// queryHistory pages over generations rows, optionally filtered by
-// kind. The SQL predicate avoids two near-identical
-// query branches; sqlite plans it identically to a bare equality.
-func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[string]any, error) {
-	rows, err := ctx.AppDB().Query(
-		`SELECT id, kind, prompt, revised_prompt, provider, model, size,
+type historyQuery struct {
+	Kind     string
+	Limit    int
+	BeforeID int64
+	Since    string
+}
+
+func newHistoryQuery(kind string, limit int, cursor, since string) (historyQuery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	query := historyQuery{Kind: kind, Limit: limit}
+	if cursor = strings.TrimSpace(cursor); cursor != "" {
+		beforeID, err := strconv.ParseInt(cursor, 10, 64)
+		if err != nil || beforeID <= 0 {
+			return historyQuery{}, errors.New("cursor must be a positive generation id returned by media_history")
+		}
+		query.BeforeID = beforeID
+	}
+	if since = strings.TrimSpace(since); since != "" {
+		parsed, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			return historyQuery{}, fmt.Errorf("since must be RFC3339: %w", err)
+		}
+		query.Since = parsed.UTC().Format("2006-01-02 15:04:05")
+	}
+	return query, nil
+}
+
+// queryHistory uses id-based keyset pagination so later pages remain fast
+// even when a project has accumulated a large generation history.
+func queryHistory(ctx *sdk.AppCtx, pid string, query historyQuery) (map[string]any, error) {
+	statement := `SELECT id, kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
 		        extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
 		        actual_duration_seconds, status, request_json, created_at
 		 FROM generations
-		 WHERE project_id = ? AND (? = '' OR kind = ?)
-		 ORDER BY id DESC LIMIT ?`,
-		pid, kindFilter, kindFilter, limit,
-	)
+		 WHERE project_id = ?`
+	params := []any{pid}
+	if query.Kind != "" {
+		statement += ` AND kind = ?`
+		params = append(params, query.Kind)
+	}
+	if query.BeforeID > 0 {
+		statement += ` AND id < ?`
+		params = append(params, query.BeforeID)
+	}
+	if query.Since != "" {
+		statement += ` AND created_at >= ?`
+		params = append(params, query.Since)
+	}
+	statement += ` ORDER BY id DESC LIMIT ?`
+	params = append(params, query.Limit+1)
+
+	rows, err := ctx.AppDB().Query(statement, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +252,22 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
 			extraJSON, cacheKey, status, requestJSON, createdAt, costUSD, estimatedDuration, actualDuration))
 	}
-	return map[string]any{"generations": out}, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	hasMore := len(out) > query.Limit
+	if hasMore {
+		out = out[:query.Limit]
+	}
+	nextCursor := ""
+	if hasMore && len(out) > 0 {
+		nextCursor = strconv.FormatInt(out[len(out)-1]["id"].(int64), 10)
+	}
+	return map[string]any{
+		"generations": out,
+		"has_more":    hasMore,
+		"next_cursor": nextCursor,
+	}, nil
 }
 
 func queryGenerationByID(ctx *sdk.AppCtx, pid string, id int64) (map[string]any, error) {
@@ -302,24 +368,69 @@ func (a *App) handleListGenerations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	limit := 50
+	limit := 24
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
-	if limit > 200 {
-		limit = 200
+	query, err := newHistoryQuery(
+		r.URL.Query().Get("kind"),
+		limit,
+		r.URL.Query().Get("cursor"),
+		r.URL.Query().Get("since"),
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	kindFilter := r.URL.Query().Get("kind")
 
-	out, err := queryHistory(globalCtx, pid, kindFilter, limit)
+	out, err := queryHistory(globalCtx, pid, query)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// HTTP /generations/<id> supplies one project-scoped generation to chat
+// components without loading or scanning a gallery page.
+func (a *App) handleGetGeneration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	id, err := pathID(r.URL.Path, "/generations/")
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	ctx, pid, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	row, err := queryGenerationByID(ctx, pid, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"generation": row})
+}
+
+func pathID(path, prefix string) (int64, error) {
+	raw := strings.SplitN(strings.TrimPrefix(path, prefix), "/", 2)[0]
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, errors.New("invalid id")
+	}
+	return id, nil
 }
 
 func resolveProjectFromRequest(r *http.Request) (string, error) {

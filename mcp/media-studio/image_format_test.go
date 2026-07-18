@@ -18,7 +18,7 @@ func TestRequestedImageOutputFormat(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		{name: "unset", args: map[string]any{}, want: ""},
+		{name: "unset defaults to jpeg", args: map[string]any{}, want: "jpeg"},
 		{name: "jpeg", args: map[string]any{"options": map[string]any{"output_format": "jpeg"}}, want: "jpeg"},
 		{name: "jpg alias", args: map[string]any{"options": map[string]any{"output_format": "JPG"}}, want: "jpeg"},
 		{name: "legacy Venice format", args: map[string]any{"options": map[string]any{"format": "webp"}}, want: "webp"},
@@ -125,6 +125,55 @@ func TestEnforceImageOutputFormat_AlreadyJPEGUnchanged(t *testing.T) {
 	}
 	if gotMedia.MimeType != "image/jpeg" || gotMedia.Ext != "jpg" {
 		t.Fatalf("sniffed metadata = %+v", gotMedia)
+	}
+}
+
+func TestEnforceImageOutputFormat_OversizedJPEGReencodedBelowLimit(t *testing.T) {
+	input := append(append([]byte(nil), fakeJPEG()...), make([]byte, maxGeneratedImageBytes)...)
+	media, converted, err := enforceImageOutputFormat(generatedMedia{
+		B64: base64.StdEncoding.EncodeToString(input), MimeType: "image/jpeg", Ext: "jpg",
+	}, input, "jpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted) >= maxGeneratedImageBytes {
+		t.Fatalf("converted JPEG is %d bytes, want less than %d", len(converted), maxGeneratedImageBytes)
+	}
+	if bytes.Equal(converted, input) || media.MimeType != "image/jpeg" || media.Ext != "jpg" {
+		t.Fatalf("oversized JPEG was not normalized: media=%+v bytes=%d", media, len(converted))
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(converted)); err != nil {
+		t.Fatalf("converted JPEG: %v", err)
+	}
+}
+
+func TestEncodeJPEGUnderLimit_DownscalesWhenQualityFloorIsInsufficient(t *testing.T) {
+	src := image.NewNRGBA(image.Rect(0, 0, 1024, 1024))
+	seed := uint32(1)
+	for i := 0; i < len(src.Pix); i += 4 {
+		seed = seed*1664525 + 1013904223
+		src.Pix[i] = byte(seed >> 24)
+		seed = seed*1664525 + 1013904223
+		src.Pix[i+1] = byte(seed >> 24)
+		seed = seed*1664525 + 1013904223
+		src.Pix[i+2] = byte(seed >> 24)
+		src.Pix[i+3] = 255
+	}
+
+	const testLimit = 100_000
+	converted, err := encodeJPEGUnderLimit(src, testLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(converted) >= testLimit {
+		t.Fatalf("converted JPEG is %d bytes, want less than %d", len(converted), testLimit)
+	}
+	decoded, err := jpeg.Decode(bytes.NewReader(converted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Bounds().Dx() >= src.Bounds().Dx() || decoded.Bounds().Dy() >= src.Bounds().Dy() {
+		t.Fatalf("expected downscale from %v, got %v", src.Bounds(), decoded.Bounds())
 	}
 }
 

@@ -113,6 +113,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"storage_folder":             a.StorageFolder,
 		"estimated_duration_seconds": a.EstimatedDurationSeconds,
 		"actual_duration_seconds":    a.ActualDurationSeconds,
+		"chat_component":             generationChatComponent(a.GenerationID, 0),
 	}
 	return map[string]any{
 		"content": content,
@@ -120,10 +121,26 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	}
 }
 
+func generationChatComponent(generationID, jobID int64) map[string]any {
+	props := map[string]any{}
+	if generationID > 0 {
+		props["generation_id"] = generationID
+	}
+	if jobID > 0 {
+		props["job_id"] = jobID
+	}
+	if len(props) == 0 {
+		return nil
+	}
+	return map[string]any{
+		"app": "media-studio", "name": "generation-card", "props": props,
+	}
+}
+
 func defaultMime(kind string) string {
 	switch kind {
 	case KindImage:
-		return "image/png"
+		return "image/jpeg"
 	case KindVideo:
 		return "video/mp4"
 	case KindAudioTTS, KindAudioSFX:

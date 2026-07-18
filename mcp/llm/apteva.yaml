@@ -2,17 +2,17 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.3.0
+version: 0.5.4
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
-  OpenAI-compatible tenant-safe gateway that routes requests to configured
-  model providers, enforces project policy and spend caps, tracks usage, and
-  exposes usage records for orchestration apps to consume.
+  OpenAI-compatible tenant-safe gateway that routes text and image requests to configured
+  model providers, enforces project and subject policy, and records raw token,
+  request, and upstream provider-cost usage for orchestration apps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
-tags: [llm, ai, gateway, openai-compatible, usage]
+tags: [llm, ai, gateway, openai-compatible, multimodal, vision, usage]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -22,6 +22,7 @@ requires:
     - db.write.app
     - platform.connections.read
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -43,6 +44,16 @@ requires:
       compatible_slugs: [openrouter]
       required: false
       label: "OpenRouter provider"
+    - role: opencode_go_provider
+      kind: integration
+      compatible_slugs: [opencode-go]
+      required: false
+      label: "OpenCode Go provider"
+    - role: openai_codex_provider
+      kind: integration
+      compatible_slugs: [openai-codex]
+      required: false
+      label: "OpenAI Codex provider"
 
 provides:
   http_routes:
@@ -51,21 +62,35 @@ provides:
       no_auth: true
   mcp_tools:
     - name: llm_chat_complete
-      description: OpenAI-compatible chat completion through the configured LLM gateway.
+      description: OpenAI-compatible text or image chat completion through the configured LLM gateway.
     - name: llm_models_list
       description: List models allowed by the current policy.
+    - name: llm_models_sync
+      description: Refresh discovered models from configured and bound providers.
+    - name: llm_embeddings_create
+      description: Create embeddings through an OpenAI-compatible configured provider.
     - name: llm_usage_get
       description: Return usage for a project, subject, or model in a monthly period.
     - name: llm_provider_configs_list
       description: List configured provider routes.
     - name: llm_provider_configs_upsert
       description: Create or update a provider route.
+    - name: llm_provider_rates_list
+      description: List provider-native model rates used for upstream cost calculation.
+    - name: llm_provider_rates_upsert
+      description: Create a manual provider rate override.
+    - name: llm_provider_rates_delete
+      description: Close an active provider rate while retaining history.
+    - name: llm_provider_rates_refresh
+      description: Refresh rates from provider model metadata and the built-in catalog.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
       description: Replace the project or subject policy.
     - name: llm_tokens_create
       description: Issue an OpenAI-compatible bearer token for app, agent, project, or system access.
+    - name: llm_tokens_list
+      description: List issued LLM tokens without exposing token secrets.
     - name: llm_tokens_revoke
       description: Revoke an issued LLM token by token id, token value, or subject.
     - name: llm_subject_suspend
@@ -84,8 +109,8 @@ provides:
       description: An LLM request failed before or during provider execution.
     - name: llm.usage.recorded
       description: LLM usage was recorded.
-    - name: llm.spend_cap.exceeded
-      description: A request was denied because a policy spend cap was exceeded.
+    - name: llm.policy.limit_exceeded
+      description: A request was denied because a project or subject usage limit was exceeded.
     - name: llm.provider.failed
       description: A provider route returned a retryable or terminal failure.
 

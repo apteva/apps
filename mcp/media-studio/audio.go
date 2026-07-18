@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Audio (TTS + SFX) is synchronous. Provider integrations buffer upstream
@@ -15,8 +16,55 @@ func buildAudioTTSArgs(args map[string]any, providerSlug, capability string) (ma
 		return buildElevenLabsTTSArgs(args)
 	case "fish-audio":
 		return buildFishAudioTTSArgs(args)
+	case "deepgram":
+		return buildDeepgramTTSArgs(args)
 	}
 	return nil, fmt.Errorf("unsupported audio TTS provider slug: %q", providerSlug)
+}
+
+func audioToolForSlug(slug, capability string) string {
+	if slug == "deepgram" && capability == "audio.tts" {
+		return "speak"
+	}
+	return ""
+}
+
+func buildDeepgramTTSArgs(args map[string]any) (map[string]any, error) {
+	text := strArg(args, "prompt", "")
+	if count := utf8.RuneCountInString(text); count > 2000 {
+		return nil, fmt.Errorf("%d characters exceeds Deepgram's 2000-character TTS limit", count)
+	}
+	out := map[string]any{
+		"text":  text,
+		"model": strArg(args, "model", "aura-2-thalia-en"),
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		for _, key := range []string{"encoding", "container", "sample_rate", "bit_rate"} {
+			if value, exists := opts[key]; exists {
+				out[key] = value
+			}
+		}
+		if value, exists := opts["output_format"]; exists {
+			applyDeepgramOutputFormat(out, fmt.Sprint(value))
+		}
+	}
+	return out, nil
+}
+
+func applyDeepgramOutputFormat(out map[string]any, format string) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "wav":
+		out["encoding"] = "linear16"
+		out["container"] = "wav"
+	case "pcm", "linear16":
+		out["encoding"] = "linear16"
+		out["container"] = "none"
+	case "opus":
+		out["encoding"] = "opus"
+		out["container"] = "ogg"
+	case "flac", "aac", "mp3":
+		out["encoding"] = strings.ToLower(strings.TrimSpace(format))
+	}
 }
 
 func buildFishAudioTTSArgs(args map[string]any) (map[string]any, error) {
@@ -146,7 +194,7 @@ func buildElevenLabsSFXArgs(args map[string]any) (map[string]any, error) {
 
 func normalizeAudioResponse(slug, capability string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
 	switch slug {
-	case "elevenlabs", "fish-audio":
+	case "elevenlabs", "fish-audio", "deepgram":
 		return normalizeBinaryAudioResponse(raw)
 	}
 	return nil, "", "", fmt.Errorf("unsupported audio provider slug: %q", slug)

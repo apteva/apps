@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.10.17
+version: 0.10.21
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -56,6 +56,8 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /public/files/
+      no_auth: true
   # Folder is the only resource shape storage exposes. Glob matcher +
   # tree picker means the dashboard renders a folder tree; navigable
   # listing makes ancestor folders visible so an agent scoped to
@@ -83,7 +85,7 @@ provides:
     # (requires + resource_from). The SDK's MCP handler 403s before
     # the tool's handler runs.
     - name: files_upload
-      description: Upload bytes from base64 + filename + folder. Returns the file id, signed URL, and sha256.
+      description: Upload bytes from base64 + filename + folder. Returns was_existing=true only for the same bytes at the same name and folder; a different destination creates a distinct file.
       requires: files.write
       resource_from: "folder/{arg.folder?}"
     - name: files_move
@@ -125,7 +127,7 @@ provides:
     - name: files_delete
       description: Delete a file. Default is hard delete — row removed AND bytes removed from disk. Pass keep_record=true for soft-delete (audit history; bytes stay).
     - name: storage_upload_init
-      description: Start an agent multipart upload session. Args - name, size_bytes, folder?, content_type?, sha256?, tags?, visibility?, source?. Returns upload_id/part_size or was_existing=true when sha256 dedup hits.
+      description: Start an agent multipart upload session. Returns was_existing=true only when sha256, name, and folder all match; identical bytes at a different destination create a distinct file.
       requires: files.write
       resource_from: "folder/{arg.folder?}"
     - name: storage_upload_status
@@ -149,6 +151,13 @@ provides:
       label: Files
       icon: folder
       entry: /ui/StoragePanel.mjs
+  ui_surfaces:
+    - id: files
+      label: Files
+      icon: folder
+      schema: apteva-native-surface/v1
+      entry: /ui/surfaces/files.json
+      slots: [mobile.project_app]
   ui_components:
     # Inline file tile the agent can attach to chat messages via
     # respond(components=[{app:"storage", name:"file-card", props:{file_id:N}}]).

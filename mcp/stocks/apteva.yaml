@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.6.0
+version: 0.7.0
 description: |
   Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
   universe (every Dividend Aristocrat and King included) by dividend
@@ -34,16 +34,16 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: search,    description: "Find stocks by symbol or name. Unknown-but-valid tickers are auto-added to the universe. Args: query, limit?." }
-    - { name: list,      description: "List/screen the S&P 1500 by yield, payout ratio, P/E, and 5yr dividend growth. Args: sector?, min_yield?, max_payout?, max_pe?, min_growth?, sort? (name|price|change|yield|pe|payout|growth), limit?." }
-    - { name: get,       description: "One stock's data — name, exchange, price, day + 52-week range, volume, P/E, payout, dividend yield + 5yr growth + frequency, last dividend. Args: symbol." }
-    - { name: chart,     description: "OHLCV price history for a stock. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo)." }
-    - { name: dividends, description: "Dividend history + summary (trailing-12mo total, yield, frequency, growth) for a stock. Args: symbol." }
+    - { name: list,      description: "Paginated stock screen by query, sector, yield, payout, P/E, growth, and market cap. Args: query?, filters?, sort?, limit? (max 200), offset?." }
+    - { name: get,       description: "One stock's quote and fundamentals. Args: symbol, refresh?." }
+    - { name: chart,     description: "OHLCV price history. Args: symbol, range? (1mo|6mo|1y|5y|max), interval? (1d|1wk|1mo), refresh?." }
+    - { name: dividends, description: "Dividend history + summary. Args: symbol, refresh?." }
     - { name: sync_status, description: "Background-warming progress (universe coverage of prices/yield/P-E) and fundamentals feed health." }
     - { name: watchlists_list, description: "List saved watchlists (dynamic = rule-driven, manual = pinned)." }
     - { name: watchlist_save,   description: "Create/update a watchlist (rules and/or pinned symbols). Args: name, rules?, id?." }
     - { name: watchlist_delete, description: "Delete a watchlist. Args: id." }
     - { name: watchlist_member, description: "Add/remove a symbol on a watchlist. Args: id, symbol, state (include|exclude|auto)." }
-    - { name: watchlist_get,    description: "Resolve a watchlist to its current member stocks (rules ∪ pins − excludes). Args: id, sort?." }
+    - { name: watchlist_get,    description: "Resolve a watchlist to paginated current members (rules ∪ pins − excludes). Args: id, sort?, limit?, offset?." }
   ui_panels:
     - slot: project.page
       label: Stocks

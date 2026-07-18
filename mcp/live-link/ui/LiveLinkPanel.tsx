@@ -119,6 +119,8 @@ interface StatusResp {
   // ngrok reserved domain (paid plans), set via the app's ngrok_domain
   // config. Surfaced for display when active provider is ngrok.
   ngrok_domain?: string;
+  named_configured?: boolean;
+  desired_live?: boolean;
 }
 
 interface CFZone {
@@ -172,7 +174,11 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   });
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"start" | "stop" | "install" | "configure" | null>(null);
+  const [busy, setBusy] = useState<"start" | "stop" | "install" | "configure" | "provider" | "destroy" | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [exposureAck, setExposureAck] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const refreshSeq = useRef(0);
 
   // Named-mode form state. zones lazy-loads when the operator opens
   // the configure form; selectedZone + subdomain are the inputs.
@@ -194,21 +200,39 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         headers: body ? { "Content-Type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,
       });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let message = text;
+        try { message = (JSON.parse(text) as { error?: string }).error || text; } catch {}
+        throw new Error(`${res.status}: ${message}`);
+      }
       return res.json();
     },
     [qs],
   );
 
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current;
     try {
       const [s, r] = await Promise.all([
         api<StatusResp>("GET", "/status"),
         api<{ runs: RunRow[] }>("GET", "/runs"),
       ]);
-      setStatus(s);
-      setRuns(r.runs || []);
-      setError("");
+      if (seq === refreshSeq.current) {
+        setStatus(s);
+        setRuns(r.runs || []);
+        setError("");
+      }
+    } catch (e: unknown) {
+      if (seq === refreshSeq.current) setError("Error: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      if (seq === refreshSeq.current) setLoading(false);
+    }
+  }, [api]);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await api<StatusResp>("GET", "/status"));
     } catch (e: unknown) {
       setError("Error: " + (e instanceof Error ? e.message : String(e)));
     }
@@ -221,9 +245,9 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   // stale "starting…" pill forever.
   useEffect(() => {
     if (status.status !== "running" || status.public_url) return;
-    const t = window.setInterval(refresh, 2000);
+    const t = window.setInterval(refreshStatus, 2000);
     return () => window.clearInterval(t);
-  }, [status.status, status.public_url, refresh]);
+  }, [status.status, status.public_url, refreshStatus]);
 
   useAppEvents("live-link", projectId, refresh);
 
@@ -240,7 +264,8 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     finally { setBusy(null); }
   };
   const onReinstall = async () => {
-    if (!window.confirm("Download the latest cloudflared release? The current binary will be replaced.")) return;
+    const label = status.provider === "ngrok" ? "ngrok" : "cloudflared";
+    if (!window.confirm(`Download and verify the pinned ${label} release? The managed binary will be replaced.`)) return;
     setBusy("install"); setError("");
     try { await api("POST", "/install", {}); }
     catch (e: unknown) { setError("Reinstall failed: " + (e instanceof Error ? e.message : String(e))); }
@@ -248,28 +273,34 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   };
   const copyURL = async () => {
     if (!status.public_url) return;
-    try { await navigator.clipboard.writeText(status.public_url); } catch {}
+    try {
+      await navigator.clipboard.writeText(status.public_url);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch { setError("Could not copy the URL to the clipboard."); }
   };
 
   // Lazy-load zones the first time the operator opens the configure
   // form. Cheap (1 API call) but needs the cloudflare integration to
   // be bound — which we surface as a clean error if it isn't.
-  const loadZones = useCallback(async () => {
+  const loadZones = useCallback(async (): Promise<CFZone[]> => {
     try {
       const r = await api<{ zones: CFZone[] }>("GET", "/named/zones");
       setZones(r.zones || []);
       setError("");
+      return r.zones || [];
     } catch (e: unknown) {
       setError("Could not load zones: " + (e instanceof Error ? e.message : String(e)));
+      return [];
     }
   }, [api]);
 
   const openConfigure = async () => {
     setShowConfigure(true);
-    if (zones === null) await loadZones();
+    const availableZones = zones === null ? await loadZones() : zones;
     // Pre-fill from existing config if any.
-    if (status.hostname && zones && zones.length > 0) {
-      const zone = zones.find((z) => status.hostname!.endsWith("." + z.name));
+    if (status.hostname && availableZones.length > 0) {
+      const zone = availableZones.find((z) => status.hostname === z.name || status.hostname!.endsWith("." + z.name));
       if (zone) {
         setSelectedZoneID(zone.id);
         setSubdomain(status.hostname!.slice(0, -(zone.name.length + 1)));
@@ -299,20 +330,22 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     } finally { setBusy(null); }
   };
 
-  // "Switch to temporary URL" — destroys the named tunnel on Cloudflare
-  // (CNAME + tunnel) and drops the local row, demoting the install
-  // back to quick mode. Restartable: panel refresh picks up the new mode.
-  const switchToQuick = async () => {
-    if (!window.confirm(
-      `Delete the named tunnel for ${status.hostname} on Cloudflare and switch to temporary URLs?`
-    )) return;
-    setBusy("configure"); setError("");
+  const selectProvider = async (next: "cloudflare-quick" | "cloudflare-named" | "ngrok") => {
+    setBusy("provider"); setError("");
     try {
-      await api("POST", "/destroy", {});
+      await api("POST", "/provider", { provider: next });
       await refresh();
     } catch (e: unknown) {
-      setError("Switch failed: " + (e instanceof Error ? e.message : String(e)));
+      setError("Provider change failed: " + (e instanceof Error ? e.message : String(e)));
     } finally { setBusy(null); }
+  };
+
+  const destroyNamed = async () => {
+    if (!window.confirm(`Delete the Cloudflare tunnel and DNS record for ${status.hostname}?`)) return;
+    setBusy("destroy"); setError("");
+    try { await api("POST", "/destroy", {}); await refresh(); }
+    catch (e: unknown) { setError("Delete failed: " + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(null); }
   };
 
   const isRunning = status.status === "running";
@@ -325,7 +358,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   const isNamed = provider === "cloudflare-named" || status.mode === "named";
   const cfBound = !!status.cloudflare_bound;
   const ngrokBound = !!status.ngrok_bound;
-  const hasNamedHostname = isNamed && !!status.hostname;
+  const hasNamedHostname = !!status.hostname && !!status.named_configured;
   // Human-friendly provider label for the header badge.
   const providerLabel =
     isNgrok ? "ngrok"
@@ -343,7 +376,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   }, [status.public_url]);
 
   return (
-    <div className="h-full flex flex-col p-6 gap-4 min-w-0 overflow-y-auto">
+    <div className="h-full flex flex-col p-6 gap-4 min-w-0 overflow-y-auto" aria-busy={loading}>
       <header className="flex items-baseline justify-between gap-3 flex-wrap">
         <div>
           <h2 className="text-text text-base font-bold">Live Link</h2>
@@ -367,10 +400,40 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
       </header>
 
       {error && (
-        <div className="text-error text-xs border border-error/40 bg-error/10 rounded px-3 py-2">
+        <div role="alert" aria-live="assertive" className="text-error text-xs border border-error/40 bg-error/10 rounded px-3 py-2">
           {error}
         </div>
       )}
+
+      <section aria-labelledby="provider-heading" className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
+        <div>
+          <h3 id="provider-heading" className="text-text font-bold text-sm">Tunnel provider</h3>
+          <p className="text-text-muted text-xs mt-1">Choose explicitly. Binding an integration never switches providers by itself.</p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          {([
+            ["cloudflare-quick", "Cloudflare Quick", "Temporary URL · no account", true],
+            ["cloudflare-named", "Cloudflare Named", "Stable URL · your domain", cfBound && hasNamedHostname],
+            ["ngrok", "ngrok", status.ngrok_domain ? `Reserved · ${status.ngrok_domain}` : "Temporary or reserved URL", ngrokBound],
+          ] as const).map(([value, label, hint, available]) => {
+            const selected = provider === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={selected}
+                disabled={isRunning || busy !== null || !available}
+                onClick={() => selectProvider(value)}
+                className={`text-left rounded border p-3 transition-colors disabled:opacity-50 ${selected ? "border-accent bg-accent/10" : "border-border hover:bg-bg-hover"}`}
+              >
+                <span className="block text-text text-sm font-bold">{label}</span>
+                <span className="block text-text-muted text-xs mt-1">{available ? hint : value === "ngrok" ? "Bind ngrok first" : "Configure a hostname first"}</span>
+              </button>
+            );
+          })}
+        </div>
+        {isRunning && <p className="text-text-dim text-xs">Stop the tunnel before changing providers.</p>}
+      </section>
 
       {/* ─── ngrok section ──────────────────────────────────────────
           Shows when ngrok is the active provider. ngrok has no panel-
@@ -393,13 +456,6 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
               URL on each "Go live". Paid plans can pin a hostname via the
               <code className="font-mono text-text"> ngrok_domain </code>
               setting (Settings tab).
-            </div>
-          )}
-          {cfBound && hasNamedHostname && (
-            <div className="text-yellow text-xs leading-snug">
-              Note: a Cloudflare-named tunnel is also configured. It takes
-              precedence over ngrok — destroy it (Cloudflare section below)
-              if you want ngrok to be the active provider.
             </div>
           )}
         </section>
@@ -505,12 +561,20 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                   Change
                 </button>
                 <button
-                  onClick={switchToQuick}
+                  onClick={() => selectProvider("cloudflare-quick")}
                   disabled={isRunning || busy !== null}
-                  title={isRunning ? "Stop the tunnel before switching" : "Delete the CF tunnel and revert to temporary trycloudflare.com URLs"}
+                  title={isRunning ? "Stop the tunnel before switching" : "Keep this hostname configured and use a temporary Cloudflare URL"}
                   className="text-text-muted text-xs underline hover:text-text disabled:opacity-50"
                 >
-                  {busy === "configure" ? "Switching…" : "Switch to temporary URL"}
+                  {busy === "provider" ? "Switching…" : "Use Quick instead"}
+                </button>
+                <button
+                  onClick={destroyNamed}
+                  disabled={isRunning || busy !== null}
+                  title={isRunning ? "Stop the tunnel before deleting it" : "Delete the Cloudflare tunnel and DNS record"}
+                  className="text-error text-xs underline disabled:opacity-50"
+                >
+                  {busy === "destroy" ? "Deleting…" : "Delete hostname"}
                 </button>
               </div>
             </div>
@@ -520,9 +584,20 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
 
       {/* ─── Main toggle / URL display ──────────────────────────── */}
       <section className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
+        {!isRunning && (
+          <label className="flex items-start gap-2 rounded border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-text-muted">
+            <input
+              type="checkbox"
+              checked={exposureAck}
+              onChange={(e) => setExposureAck(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span><strong className="text-text">Public exposure:</strong> anyone on the internet can reach the selected target URL. Confirm that the target has appropriate authentication before going live.</span>
+          </label>
+        )}
         <div className="flex items-center gap-3">
-          <span className={`inline-block w-2 h-2 rounded-full ${statusColor(status.status === "idle" ? "stopped" : status.status)}`} />
-          <strong className="text-text">
+          <span aria-hidden="true" className={`inline-block w-2 h-2 rounded-full ${statusColor(status.status === "idle" ? "stopped" : status.status)}`} />
+          <strong className="text-text" role="status" aria-live="polite">
             {isStarting ? "Starting tunnel…" :
              isRunning  ? "Live" :
              status.status === "failed"   ? "Failed" :
@@ -533,11 +608,13 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           {!isRunning && (
             <button
               onClick={onStart}
-              disabled={busy !== null || (isNamed && !hasNamedHostname)}
+              disabled={loading || busy !== null || !exposureAck || (isNamed && !hasNamedHostname)}
               title={
                 isNamed && !hasNamedHostname
                   ? "Configure a hostname first (named mode)"
-                  : "First click may download cloudflared (~30MB)."
+                  : !exposureAck
+                    ? "Acknowledge public exposure first"
+                    : `First click may download the verified ${isNgrok ? "ngrok" : "cloudflared"} binary.`
               }
               className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
             >
@@ -568,9 +645,10 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
             </a>
             <button
               onClick={copyURL}
+              aria-live="polite"
               className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover"
             >
-              Copy
+              {copied ? "Copied" : "Copy"}
             </button>
           </div>
         )}
@@ -578,8 +656,9 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
         {/* QR code — scan with a phone camera to open. White wrapper
             so the SVG (transparent light cells) reads on dark themes. */}
         {isRunning && qr && (
-          <div className="flex items-center gap-4 px-3 py-3 bg-bg-input border border-border rounded">
+          <div className="flex flex-col sm:flex-row items-center gap-4 px-3 py-3 bg-bg-input border border-border rounded">
             <div
+              role="img"
               aria-label="QR code for the tunnel URL"
               className="w-44 h-44 shrink-0 bg-white rounded p-2"
               dangerouslySetInnerHTML={{ __html: qr }}
@@ -596,7 +675,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
 
         {isStarting && (
           <div className="text-text-dim text-xs">
-            Cloudflared usually assigns a URL within a few seconds.
+            {isNgrok ? "ngrok" : "Cloudflared"} usually assigns a URL within a few seconds.
           </div>
         )}
 
@@ -617,7 +696,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
               disabled={busy !== null}
               className="text-text-muted underline hover:text-text disabled:opacity-50"
             >
-              {busy === "install" ? "Downloading…" : "Reinstall cloudflared"}
+              {busy === "install" ? "Downloading and verifying…" : `Reinstall ${isNgrok ? "ngrok" : "cloudflared"}`}
             </button>
           )}
         </div>
@@ -635,7 +714,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                 key={r.id}
                 className="flex items-start gap-3 px-3 py-2 border-b border-border last:border-b-0 text-sm"
               >
-                <span className={`inline-block w-2 h-2 rounded-full mt-1.5 shrink-0 ${statusColor(r.status)}`} />
+                <span aria-hidden="true" className={`inline-block w-2 h-2 rounded-full mt-1.5 shrink-0 ${statusColor(r.status)}`} />
                 <div className="min-w-0 flex-1">
                   <div className="text-text-muted text-xs">
                     {fmtTime(r.started_at)}
@@ -647,6 +726,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                         {r.mode}
                       </span>
                     )}
+                    <span className="sr-only"> Status: {r.status}.</span>
                   </div>
                   {r.public_url && (
                     <div className="font-mono text-xs text-text-muted truncate mt-0.5">

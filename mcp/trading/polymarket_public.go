@@ -25,6 +25,12 @@ type polymarketPublic struct {
 	client *http.Client
 }
 
+type polymarketMarketNotFoundError struct{ slug string }
+
+func (e *polymarketMarketNotFoundError) Error() string {
+	return fmt.Sprintf("polymarketPublic: no active market for slug %q", e.slug)
+}
+
 func newPolymarketPublic() *polymarketPublic {
 	return &polymarketPublic{
 		base:   polymarketGammaBase,
@@ -50,39 +56,40 @@ func (p *polymarketPublic) Quote(symbol string) (*Mark, error) {
 		return nil, fmt.Errorf("polymarketPublic: decode market: %w", err)
 	}
 	if len(rows) == 0 {
-		return nil, fmt.Errorf("polymarketPublic: no market for slug %q", slug)
+		return nil, &polymarketMarketNotFoundError{slug: slug}
 	}
 	return rows[0].toMark(symbol)
 }
 
-// UniverseBatch fetches up to N markets in one call. The gamma-api
-// supports comma-separated `slugs[]` style queries via repeated `slug`
-// params — we issue them in parallel-friendly batches of 50 to stay
-// polite. v0.1 watchlists are small so we batch all in one call.
-func (p *polymarketPublic) UniverseBatch(symbols []string) ([]*Mark, error) {
-	if len(symbols) == 0 {
-		return nil, nil
+// ActiveMarkets discovers current liquid markets instead of relying on
+// expiring slugs compiled into the app.
+func (p *polymarketPublic) ActiveMarkets(limit int) ([]*Mark, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 25
 	}
 	q := url.Values{}
-	q.Set("limit", strconv.Itoa(max2(len(symbols)*2, 50)))
-	for _, s := range symbols {
-		q.Add("slug", stripPolyPrefix(s))
-	}
+	q.Set("active", "true")
+	q.Set("closed", "false")
+	q.Set("order", "volume_24hr")
+	q.Set("ascending", "false")
+	q.Set("limit", strconv.Itoa(limit))
 	raw, err := p.fetch(p.base + "/markets?" + q.Encode())
 	if err != nil {
 		return nil, err
 	}
 	var rows []gammaMarket
 	if err := json.Unmarshal(raw, &rows); err != nil {
-		return nil, fmt.Errorf("polymarketPublic: decode batch: %w", err)
+		return nil, fmt.Errorf("polymarketPublic: decode active markets: %w", err)
 	}
 	out := make([]*Mark, 0, len(rows))
-	for _, m := range rows {
-		mk, err := m.toMark("POLY:" + m.Slug)
-		if err != nil {
+	for _, market := range rows {
+		if market.Closed {
 			continue
 		}
-		out = append(out, mk)
+		mark, err := market.toMark("POLY:" + market.Slug)
+		if err == nil {
+			out = append(out, mark)
+		}
 	}
 	return out, nil
 }
@@ -110,13 +117,14 @@ func (p *polymarketPublic) fetch(u string) ([]byte, error) {
 // inside the response (the gamma-api is opinionated that way), so we
 // parse them at our boundary.
 type gammaMarket struct {
-	Slug           string `json:"slug"`
-	Question       string `json:"question"`
-	Outcomes       string `json:"outcomes"`        // e.g. "[\"Yes\",\"No\"]"
-	OutcomePrices  string `json:"outcomePrices"`   // e.g. "[\"0.78\",\"0.22\"]"
-	Volume24Hr     string `json:"volume24hr"`
-	Closed         bool   `json:"closed"`
-	EndDate        string `json:"endDate"`
+	Slug          string          `json:"slug"`
+	Question      string          `json:"question"`
+	Outcomes      string          `json:"outcomes"`      // e.g. "[\"Yes\",\"No\"]"
+	OutcomePrices string          `json:"outcomePrices"` // e.g. "[\"0.78\",\"0.22\"]"
+	Volume24Hr    json.RawMessage `json:"volume24hr"`
+	Active        bool            `json:"active"`
+	Closed        bool            `json:"closed"`
+	EndDate       string          `json:"endDate"`
 }
 
 func (m gammaMarket) toMark(internalSymbol string) (*Mark, error) {
@@ -147,10 +155,25 @@ func (m gammaMarket) toMark(internalSymbol string) (*Mark, error) {
 		NoPrice:    &no,
 		MarkedAt:   time.Now().UTC().Format(time.RFC3339),
 	}
-	if v, err := strconv.ParseFloat(m.Volume24Hr, 64); err == nil && v > 0 {
+	if v, err := parseGammaNumber(m.Volume24Hr); err == nil && v > 0 {
 		mk.Volume24h = &v
 	}
 	return mk, nil
+}
+
+func parseGammaNumber(raw json.RawMessage) (float64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, nil
+	}
+	var number float64
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number, nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return 0, err
+	}
+	return strconv.ParseFloat(text, 64)
 }
 
 func indexOfCaseFold(xs []string, needle string) int {
@@ -160,11 +183,4 @@ func indexOfCaseFold(xs []string, needle string) int {
 		}
 	}
 	return -1
-}
-
-func max2(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

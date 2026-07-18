@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"embed"
@@ -53,10 +54,24 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "creator-lifecycle",
+		Schedule: "@every 1m",
+		Run: func(context.Context, *sdk.AppCtx) error {
+			return runCreatorLifecycle(globalCtx)
+		},
+	}}
+}
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "invoice.paid", Handler: a.handleInvoicePaid},
+		{Event: "invoice.refunded", Handler: a.handleInvoiceInvalidated},
+		{Event: "invoice.voided", Handler: a.handleInvoiceInvalidated},
+	}
+}
 
 // HTTPRoutes exposes the dashboard/admin API plus public/member portal
 // reads. Public routes still go through apteva-server's app proxy; NoAuth
@@ -74,6 +89,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/attachments/", Handler: a.handleAttachmentItem},
 		{Pattern: "/activity", Handler: a.handleEvents},
+		{Pattern: "/metrics", Handler: a.handleMetrics},
 		{Pattern: "/public/", Handler: a.handlePublic, NoAuth: true},
 		{Pattern: "/member/", Handler: a.handleMemberPortal, NoAuth: true},
 	}
@@ -85,24 +101,25 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "creators_space_list", Description: "List creator spaces for this project.", InputSchema: schemaObject(nil, nil), Handler: a.toolSpaceList},
 		{Name: "creators_space_get", Description: "Fetch creator space settings. Args: space_id? or space_slug?; defaults to the project's first space.", InputSchema: schemaObject(map[string]any{"space_id": sInteger(), "space_slug": sString()}, nil), Handler: a.toolSpaceGet},
 		{Name: "creators_space_update", Description: "Update creator space branding, slug, and defaults. Args: space_id? or space_slug?, name?, slug?, description?, default_currency?, metadata?.", InputSchema: schemaObject(map[string]any{"space_id": sInteger(), "space_slug": sString(), "name": sString(), "slug": sString(), "description": sString(), "default_currency": sString(), "metadata": sObject()}, nil), Handler: a.toolSpaceUpdate},
-		{Name: "creators_tier_create", Description: "Create a membership tier. Args: name, price_cents?, currency?, interval? (month|year|one_time), description?, benefits? [string], sort_order?.", InputSchema: schemaObject(map[string]any{"name": sString(), "price_cents": sInteger(), "currency": sString(), "interval": sString(), "description": sString(), "benefits": sArray("string"), "sort_order": sInteger()}, []string{"name"}), Handler: a.toolTierCreate},
-		{Name: "creators_tier_list", Description: "List tiers. Args: archived? (default false).", InputSchema: schemaObject(map[string]any{"archived": sBool()}, nil), Handler: a.toolTierList},
-		{Name: "creators_tier_update", Description: "Update a tier. Args: id, patch {name, slug, description, price_cents, currency, interval, benefits, sort_order, archived}.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolTierUpdate},
-		{Name: "creators_member_upsert", Description: "Find or create a member by email. Args: email, display_name?, tier_id?, status?, sync_crm?, sync_billing?.", InputSchema: schemaObject(map[string]any{"email": sString(), "display_name": sString(), "tier_id": sInteger(), "status": sString(), "sync_crm": sBool(), "sync_billing": sBool()}, []string{"email"}), Handler: a.toolMemberUpsert},
-		{Name: "creators_member_list", Description: "List members. Args: status?, tier_id?, q?, limit?.", InputSchema: schemaObject(map[string]any{"status": sString(), "tier_id": sInteger(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolMemberList},
-		{Name: "creators_member_set_tier", Description: "Assign a member to a tier. Args: member_id, tier_id (0 clears), status? (defaults active when tier_id is set).", InputSchema: schemaObject(map[string]any{"member_id": sInteger(), "tier_id": sInteger(), "status": sString()}, []string{"member_id"}), Handler: a.toolMemberSetTier},
-		{Name: "creators_member_set_status", Description: "Set member status. Args: member_id, status (lead|active|past_due|paused|cancelled|comped), current_period_end?.", InputSchema: schemaObject(map[string]any{"member_id": sInteger(), "status": sString(), "current_period_end": sString()}, []string{"member_id", "status"}), Handler: a.toolMemberSetStatus},
-		{Name: "creators_post_create", Description: "Create a creator post. Args: title, body?, slug?, visibility? (public|members|tier|private), tier_ids? [int], status? (draft|published|scheduled), scheduled_at?.", InputSchema: schemaObject(map[string]any{"title": sString(), "body": sString(), "slug": sString(), "visibility": sString(), "tier_ids": sArray("integer"), "status": sString(), "scheduled_at": sString()}, []string{"title"}), Handler: a.toolPostCreate},
-		{Name: "creators_post_update", Description: "Update a post. Args: id, patch {title, slug, body, status, visibility, tier_ids, scheduled_at}.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolPostUpdate},
-		{Name: "creators_post_publish", Description: "Publish a post now or schedule it. Args: id, scheduled_at?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "scheduled_at": sString()}, []string{"id"}), Handler: a.toolPostPublish},
-		{Name: "creators_post_list", Description: "List posts. Args: status?, visibility?, q?, limit?.", InputSchema: schemaObject(map[string]any{"status": sString(), "visibility": sString(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolPostList},
-		{Name: "creators_post_get", Description: "Fetch one post with attachments. Args: id OR slug.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "slug": sString()}, nil), Handler: a.toolPostGet},
-		{Name: "creators_attachment_upload", Description: "Upload bytes to storage and attach them to a post. Args: post_id, filename, content_base64, content_type?, visibility?, tier_ids?.", InputSchema: schemaObject(map[string]any{"post_id": sInteger(), "filename": sString(), "content_base64": sString(), "content_type": sString(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "filename", "content_base64"}), Handler: a.toolAttachmentUpload},
-		{Name: "creators_attachment_add_from_storage", Description: "Attach an existing storage file to a post. Args: post_id, storage_file_id, filename?, content_type?, size_bytes?, visibility?, tier_ids?.", InputSchema: schemaObject(map[string]any{"post_id": sInteger(), "storage_file_id": sInteger(), "filename": sString(), "content_type": sString(), "size_bytes": sInteger(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "storage_file_id"}), Handler: a.toolAttachmentAddFromStorage},
-		{Name: "creators_file_get_download_link", Description: "Mint a storage signed URL after checking access. Args: attachment_id, member_id OR portal_token, ttl_seconds?.", InputSchema: schemaObject(map[string]any{"attachment_id": sInteger(), "member_id": sInteger(), "portal_token": sString(), "ttl_seconds": sInteger()}, []string{"attachment_id"}), Handler: a.toolFileGetDownloadLink},
-		{Name: "creators_payment_link_create", Description: "Create a billing invoice and payment link for a member/tier period. Args: member_id, tier_id?, months?, success_url?, cancel_url?.", InputSchema: schemaObject(map[string]any{"member_id": sInteger(), "tier_id": sInteger(), "months": sInteger(), "success_url": sString(), "cancel_url": sString()}, []string{"member_id"}), Handler: a.toolPaymentLinkCreate},
-		{Name: "creators_send_post_update", Description: "Send a post announcement to eligible members through messaging. Args: post_id, subject?, intro?, dry_run?.", InputSchema: schemaObject(map[string]any{"post_id": sInteger(), "subject": sString(), "intro": sString(), "dry_run": sBool()}, []string{"post_id"}), Handler: a.toolSendPostUpdate},
-		{Name: "creators_events_list", Description: "List recent creator activity. Args: limit?.", InputSchema: schemaObject(map[string]any{"limit": sInteger()}, nil), Handler: a.toolEventsList},
+		{Name: "creators_tier_create", Description: "Create a membership tier. Args: space_id? or space_slug?, name, price_cents?, currency?, interval? (month|year|one_time), description?, benefits? [string], sort_order?.", InputSchema: spaceSchema(map[string]any{"name": sString(), "price_cents": sInteger(), "currency": sString(), "interval": sString(), "description": sString(), "benefits": sArray("string"), "sort_order": sInteger()}, []string{"name"}), Handler: a.toolTierCreate},
+		{Name: "creators_tier_list", Description: "List tiers in a creator space. Args: space_id? or space_slug?, archived? (default false).", InputSchema: spaceSchema(map[string]any{"archived": sBool()}, nil), Handler: a.toolTierList},
+		{Name: "creators_tier_update", Description: "Update a tier. Args: space_id? or space_slug?, id, patch {name, slug, description, price_cents, currency, interval, benefits, sort_order, archived}.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolTierUpdate},
+		{Name: "creators_member_upsert", Description: "Find or create a member by email. Args: space_id? or space_slug?, email, display_name?, tier_id?, status?, sync_crm?, sync_billing?.", InputSchema: spaceSchema(map[string]any{"email": sString(), "display_name": sString(), "tier_id": sInteger(), "status": sString(), "sync_crm": sBool(), "sync_billing": sBool()}, []string{"email"}), Handler: a.toolMemberUpsert},
+		{Name: "creators_member_list", Description: "List members. Args: space_id? or space_slug?, status?, tier_id?, q?, limit?.", InputSchema: spaceSchema(map[string]any{"status": sString(), "tier_id": sInteger(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolMemberList},
+		{Name: "creators_member_set_tier", Description: "Assign a member to a tier. Args: space_id? or space_slug?, member_id, tier_id (0 clears), status?.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger(), "tier_id": sInteger(), "status": sString()}, []string{"member_id"}), Handler: a.toolMemberSetTier},
+		{Name: "creators_member_set_status", Description: "Set member status. Args: space_id? or space_slug?, member_id, status, current_period_end?.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger(), "status": sString(), "current_period_end": sString()}, []string{"member_id", "status"}), Handler: a.toolMemberSetStatus},
+		{Name: "creators_member_rotate_portal_token", Description: "Revoke the current member portal token and issue a new 90-day token. Args: space_id? or space_slug?, member_id.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger()}, []string{"member_id"}), Handler: a.toolMemberRotatePortalToken},
+		{Name: "creators_post_create", Description: "Create a creator post. Args: space_id? or space_slug?, title, body?, slug?, visibility?, tier_ids?, status?, scheduled_at?.", InputSchema: spaceSchema(map[string]any{"title": sString(), "body": sString(), "slug": sString(), "visibility": sString(), "tier_ids": sArray("integer"), "status": sString(), "scheduled_at": sString()}, []string{"title"}), Handler: a.toolPostCreate},
+		{Name: "creators_post_update", Description: "Update a post. Args: space_id? or space_slug?, id, patch.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolPostUpdate},
+		{Name: "creators_post_publish", Description: "Publish a post now or schedule it. Args: space_id? or space_slug?, id, scheduled_at?.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "scheduled_at": sString()}, []string{"id"}), Handler: a.toolPostPublish},
+		{Name: "creators_post_list", Description: "List posts. Args: space_id? or space_slug?, status?, visibility?, q?, limit?.", InputSchema: spaceSchema(map[string]any{"status": sString(), "visibility": sString(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolPostList},
+		{Name: "creators_post_get", Description: "Fetch one post with attachments. Args: space_id? or space_slug?, id OR slug.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "slug": sString()}, nil), Handler: a.toolPostGet},
+		{Name: "creators_attachment_upload", Description: "Upload bytes to storage and attach them to a post. Args: space_id? or space_slug?, post_id, filename, content_base64, content_type?, visibility?, tier_ids?.", InputSchema: spaceSchema(map[string]any{"post_id": sInteger(), "filename": sString(), "content_base64": sString(), "content_type": sString(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "filename", "content_base64"}), Handler: a.toolAttachmentUpload},
+		{Name: "creators_attachment_add_from_storage", Description: "Attach an existing storage file to a creator post. Args: space_id? or space_slug?, post_id, storage_file_id, filename?, content_type?, size_bytes?, visibility?, tier_ids?.", InputSchema: spaceSchema(map[string]any{"post_id": sInteger(), "storage_file_id": sInteger(), "filename": sString(), "content_type": sString(), "size_bytes": sInteger(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "storage_file_id"}), Handler: a.toolAttachmentAddFromStorage},
+		{Name: "creators_file_get_download_link", Description: "Mint a storage signed URL after checking access. Args: space_id? or space_slug?, attachment_id, member_id OR portal_token, ttl_seconds?.", InputSchema: spaceSchema(map[string]any{"attachment_id": sInteger(), "member_id": sInteger(), "portal_token": sString(), "ttl_seconds": sInteger()}, []string{"attachment_id"}), Handler: a.toolFileGetDownloadLink},
+		{Name: "creators_payment_link_create", Description: "Create or resume an idempotent billing invoice for a membership period. Args: space_id? or space_slug?, member_id, tier_id?, periods?, idempotency_key?, success_url?, cancel_url?.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger(), "tier_id": sInteger(), "periods": sInteger(), "idempotency_key": sString(), "success_url": sString(), "cancel_url": sString()}, []string{"member_id"}), Handler: a.toolPaymentLinkCreate},
+		{Name: "creators_send_post_update", Description: "Send a post announcement to eligible members through messaging. Args: space_id? or space_slug?, post_id, subject?, intro?, dry_run?.", InputSchema: spaceSchema(map[string]any{"post_id": sInteger(), "subject": sString(), "intro": sString(), "dry_run": sBool()}, []string{"post_id"}), Handler: a.toolSendPostUpdate},
+		{Name: "creators_events_list", Description: "List recent creator activity. Args: space_id? or space_slug?, limit?.", InputSchema: spaceSchema(map[string]any{"limit": sInteger()}, nil), Handler: a.toolEventsList},
 	}
 }
 
@@ -149,12 +166,32 @@ type Member struct {
 	TierID             *int64          `json:"tier_id,omitempty"`
 	CRMContactID       *int64          `json:"crm_contact_id,omitempty"`
 	BillingCustomerID  *int64          `json:"billing_customer_id,omitempty"`
-	PortalToken        string          `json:"portal_token,omitempty"`
+	PortalToken        string          `json:"-"`
 	CurrentPeriodStart string          `json:"current_period_start,omitempty"`
 	CurrentPeriodEnd   string          `json:"current_period_end,omitempty"`
+	PortalTokenExpires string          `json:"portal_token_expires_at,omitempty"`
+	PortalTokenRevoked string          `json:"portal_token_revoked_at,omitempty"`
 	Metadata           json.RawMessage `json:"metadata"`
 	CreatedAt          string          `json:"created_at"`
 	UpdatedAt          string          `json:"updated_at"`
+}
+
+type MembershipPayment struct {
+	ID               int64
+	ProjectID        string
+	SpaceID          int64
+	MemberID         int64
+	TierID           int64
+	BillingInvoiceID sql.NullInt64
+	IdempotencyKey   string
+	Status           string
+	PeriodCount      int
+	AmountCents      int64
+	Currency         string
+	PeriodStart      string
+	PeriodEnd        string
+	PaidAt           string
+	UpdatedAt        string
 }
 
 type Post struct {
@@ -186,6 +223,13 @@ type Attachment struct {
 	Visibility    string          `json:"visibility"`
 	TierIDs       json.RawMessage `json:"tier_ids"`
 	CreatedAt     string          `json:"created_at"`
+}
+
+type storageFileMetadata struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
 }
 
 // ─── HTTP handlers ────────────────────────────────────────────────
@@ -330,7 +374,7 @@ func (a *App) handleMembers(w http.ResponseWriter, r *http.Request) {
 			tierID: parseInt64(r.URL.Query().Get("tier_id")),
 			limit:  parseInt(r.URL.Query().Get("limit"), 100),
 		})
-		writeOrErr(w, members, err)
+		writeOrErr(w, redactMembers(members), err)
 	case http.MethodPost:
 		var args map[string]any
 		if err := readJSON(r, &args); err != nil {
@@ -338,7 +382,11 @@ func (a *App) handleMembers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		member, created, extras, err := upsertMember(ctx, pid, space.ID, args)
-		out := map[string]any{"member": member, "was_created": created}
+		out := map[string]any{"member": redactMember(member), "was_created": created}
+		if created && member != nil {
+			out["portal_token"] = member.PortalToken
+			out["portal_token_expires_at"] = member.PortalTokenExpires
+		}
 		for k, v := range extras {
 			out[k] = v
 		}
@@ -370,7 +418,7 @@ func (a *App) handleMemberItem(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		member, err := getMember(ctx.AppDB(), pid, space.ID, id)
-		writeOrErr(w, map[string]any{"member": member, "found": member != nil}, err)
+		writeOrErr(w, map[string]any{"member": redactMember(member), "found": member != nil}, err)
 	case len(parts) == 1 && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		var patch map[string]any
 		if err := readJSON(r, &patch); err != nil {
@@ -378,7 +426,10 @@ func (a *App) handleMemberItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		member, err := updateMember(ctx, pid, space.ID, id, patch)
-		writeOrErr(w, map[string]any{"member": member}, err)
+		writeOrErr(w, map[string]any{"member": redactMember(member)}, err)
+	case len(parts) == 2 && parts[1] == "portal-token" && r.Method == http.MethodPost:
+		member, token, err := rotatePortalToken(ctx, pid, space.ID, id)
+		writeOrErr(w, map[string]any{"member": redactMember(member), "portal_token": token, "portal_token_expires_at": memberExpiry(member)}, err)
 	default:
 		httpErr(w, 405, "method not allowed")
 	}
@@ -530,16 +581,51 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeOrErr(w, events, err)
 }
 
-func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	ctx := contextForRequest(r)
+	pid, err := projectFromRequest(ctx, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	space, err := spaceFromRequest(ctx, pid, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	metrics, err := membershipMetrics(ctx.AppDB(), pid, space.ID)
+	writeOrErr(w, metrics, err)
+}
+
+func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+		return
+	}
+	ctx := contextForRequest(r)
+	pid, err := projectFromRequest(ctx, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/public/"), "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		httpErr(w, 404, "space not found")
 		return
 	}
-	space, err := getAnySpaceBySlug(ctx.AppDB(), parts[0])
+	space, err := getSpaceBySlug(ctx.AppDB(), pid, parts[0])
 	if err != nil || space == nil {
 		httpErr(w, 404, "space not found")
+		return
+	}
+	if len(parts) == 4 && parts[1] == "files" && parts[3] == "download" {
+		id, _ := strconv.ParseInt(parts[2], 10, 64)
+		link, err := getDownloadLink(ctx, space.ProjectID, space.ID, map[string]any{"attachment_id": id})
+		writeOrErr(w, link, err)
 		return
 	}
 	if len(parts) >= 3 && parts[1] == "posts" {
@@ -548,14 +634,26 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 404, "post not found")
 			return
 		}
+		post.Attachments = accessibleAttachments(nil, post, post.Attachments)
 		writeJSON(w, map[string]any{"space": space, "post": post})
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), space.ProjectID, space.ID, postFilters{status: "published", visibility: "public", limit: 20})
+	posts, err := listPosts(ctx.AppDB(), space.ProjectID, space.ID, postFilters{status: "published", visibility: "public", limit: 20})
+	if err == nil {
+		err = hydrateAccessibleAttachments(ctx.AppDB(), space.ProjectID, space.ID, posts, nil)
+	}
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, map[string]any{"space": space, "posts": posts})
 }
 
 func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+		return
+	}
 	ctx := contextForRequest(r)
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/member/"), "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -567,7 +665,7 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "member not found")
 		return
 	}
-	if len(parts) >= 4 && parts[1] == "files" && parts[3] == "download" {
+	if len(parts) == 4 && parts[1] == "files" && parts[3] == "download" {
 		id, _ := strconv.ParseInt(parts[2], 10, 64)
 		link, err := getDownloadLink(ctx, member.ProjectID, member.SpaceID, map[string]any{
 			"attachment_id": id,
@@ -576,12 +674,20 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, link, err)
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
+	posts, err := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	visible := make([]Post, 0, len(posts))
 	for _, p := range posts {
 		if memberCanAccessPost(member, &p) {
 			visible = append(visible, p)
 		}
+	}
+	if err := hydrateAccessibleAttachments(ctx.AppDB(), member.ProjectID, member.SpaceID, visible, member); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	writeJSON(w, map[string]any{"member": redactMember(member), "posts": visible})
 }
@@ -674,7 +780,11 @@ func (a *App) toolMemberUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	member, created, extras, err := upsertMember(ctx, pid, space.ID, args)
-	out := map[string]any{"member": member, "was_created": created}
+	out := map[string]any{"member": redactMember(member), "was_created": created}
+	if created && member != nil {
+		out["portal_token"] = member.PortalToken
+		out["portal_token_expires_at"] = member.PortalTokenExpires
+	}
 	for k, v := range extras {
 		out[k] = v
 	}
@@ -708,15 +818,11 @@ func (a *App) toolMemberSetTier(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	status := strArg(args, "status")
-	if status == "" && int64Arg(args, "tier_id") > 0 {
-		status = "active"
-	}
 	member, err := updateMember(ctx, pid, space.ID, int64Arg(args, "member_id"), map[string]any{
 		"tier_id": int64Arg(args, "tier_id"),
-		"status":  status,
+		"status":  strArg(args, "status"),
 	})
-	return map[string]any{"member": member}, err
+	return map[string]any{"member": redactMember(member)}, err
 }
 
 func (a *App) toolMemberSetStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -728,11 +834,25 @@ func (a *App) toolMemberSetStatus(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	member, err := updateMember(ctx, pid, space.ID, int64Arg(args, "member_id"), map[string]any{
-		"status":             strArg(args, "status"),
-		"current_period_end": strArg(args, "current_period_end"),
-	})
-	return map[string]any{"member": member}, err
+	patch := map[string]any{"status": strArg(args, "status")}
+	if _, ok := args["current_period_end"]; ok {
+		patch["current_period_end"] = strArg(args, "current_period_end")
+	}
+	member, err := updateMember(ctx, pid, space.ID, int64Arg(args, "member_id"), patch)
+	return map[string]any{"member": redactMember(member)}, err
+}
+
+func (a *App) toolMemberRotatePortalToken(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	space, err := spaceFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	member, token, err := rotatePortalToken(ctx, pid, space.ID, int64Arg(args, "member_id"))
+	return map[string]any{"member": redactMember(member), "portal_token": token, "portal_token_expires_at": memberExpiry(member)}, err
 }
 
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -896,6 +1016,9 @@ func ensureSpace(ctx *sdk.AppCtx, pid string) (*Space, error) {
 	if currency == "" {
 		currency = "USD"
 	}
+	if !validCurrency(currency) {
+		return nil, fmt.Errorf("invalid default currency %q", currency)
+	}
 	_, err := ctx.AppDB().Exec(
 		`INSERT INTO creator_spaces (project_id, name, slug, default_currency) VALUES (?, ?, ?, ?)`,
 		pid, "Creator Space", "creator", currency,
@@ -921,6 +1044,9 @@ func createSpace(ctx *sdk.AppCtx, pid string, args map[string]any) (*Space, erro
 	}
 	if currency == "" {
 		currency = "USD"
+	}
+	if !validCurrency(currency) {
+		return nil, fmt.Errorf("invalid default currency %q", currency)
 	}
 	meta := json.RawMessage("{}")
 	if md, ok := args["metadata"].(map[string]any); ok {
@@ -973,11 +1099,6 @@ func getSpaceBySlug(db *sql.DB, pid, slug string) (*Space, error) {
 	return scanSpace(row)
 }
 
-func getAnySpaceBySlug(db *sql.DB, slug string) (*Space, error) {
-	row := db.QueryRow(`SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at FROM creator_spaces WHERE slug=? LIMIT 1`, slug)
-	return scanSpace(row)
-}
-
 func scanSpace(row interface{ Scan(...any) error }) (*Space, error) {
 	var s Space
 	var avatar, banner sql.NullInt64
@@ -1015,6 +1136,9 @@ func updateSpace(ctx *sdk.AppCtx, pid string, patch map[string]any) (*Space, err
 		sets, args = append(sets, "description=?"), append(args, v)
 	}
 	if v := strings.ToUpper(cleanString(patch["default_currency"])); v != "" {
+		if !validCurrency(v) {
+			return nil, fmt.Errorf("invalid default currency %q", v)
+		}
 		sets, args = append(sets, "default_currency=?"), append(args, v)
 	}
 	if md, ok := patch["metadata"].(map[string]any); ok {
@@ -1050,6 +1174,13 @@ func createTier(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 	if currency == "" {
 		currency = "USD"
 	}
+	if !validCurrency(currency) {
+		return nil, fmt.Errorf("invalid currency %q", currency)
+	}
+	price := int64Arg(args, "price_cents")
+	if price < 0 || price > 1_000_000_000_000 {
+		return nil, errors.New("price_cents must be between 0 and 1000000000000")
+	}
 	interval := strArg(args, "interval")
 	if interval == "" {
 		interval = "month"
@@ -1065,7 +1196,7 @@ func createTier(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO tiers (project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, spaceID, name, slug, strArg(args, "description"), int64Arg(args, "price_cents"), currency, interval, string(benefits), intArg(args, "sort_order", 0),
+		pid, spaceID, name, slug, strArg(args, "description"), price, currency, interval, string(benefits), intArg(args, "sort_order", 0),
 	)
 	if err != nil {
 		return nil, err
@@ -1137,9 +1268,16 @@ func updateTier(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string
 		sets, args = append(sets, "description=?"), append(args, v)
 	}
 	if _, ok := patch["price_cents"]; ok {
-		sets, args = append(sets, "price_cents=?"), append(args, int64Arg(patch, "price_cents"))
+		price := int64Arg(patch, "price_cents")
+		if price < 0 || price > 1_000_000_000_000 {
+			return nil, errors.New("price_cents must be between 0 and 1000000000000")
+		}
+		sets, args = append(sets, "price_cents=?"), append(args, price)
 	}
 	if v := strings.ToUpper(cleanString(patch["currency"])); v != "" {
+		if !validCurrency(v) {
+			return nil, fmt.Errorf("invalid currency %q", v)
+		}
 		sets, args = append(sets, "currency=?"), append(args, v)
 	}
 	if v := cleanString(patch["interval"]); v != "" {
@@ -1192,7 +1330,8 @@ func upsertMember(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]an
 		return nil, false, nil, errors.New("valid email required")
 	}
 	display := strings.TrimSpace(strArg(args, "display_name"))
-	status := strArg(args, "status")
+	status, statusProvided := args["status"].(string)
+	status = strings.TrimSpace(status)
 	if status == "" {
 		status = "lead"
 	}
@@ -1200,11 +1339,23 @@ func upsertMember(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]an
 		return nil, false, nil, fmt.Errorf("invalid member status %q", status)
 	}
 	tierID := int64Arg(args, "tier_id")
-	token, _ := randomToken()
+	if tierID > 0 {
+		if tier, err := getTier(ctx.AppDB(), pid, spaceID, tierID); err != nil || tier == nil {
+			if err != nil {
+				return nil, false, nil, err
+			}
+			return nil, false, nil, fmt.Errorf("tier %d not found", tierID)
+		}
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, false, nil, fmt.Errorf("generate portal token: %w", err)
+	}
+	expiresAt := time.Now().UTC().Add(90 * 24 * time.Hour).Format(time.RFC3339)
 	res, err := ctx.AppDB().Exec(
-		`INSERT OR IGNORE INTO members (project_id, space_id, email, display_name, status, tier_id, portal_token)
-		 VALUES (?, ?, ?, ?, ?, NULLIF(?,0), ?)`,
-		pid, spaceID, email, display, status, tierID, token,
+		`INSERT OR IGNORE INTO members (project_id, space_id, email, display_name, status, tier_id, portal_token, portal_token_expires_at)
+		 VALUES (?, ?, ?, ?, ?, NULLIF(?,0), ?, ?)`,
+		pid, spaceID, email, display, status, tierID, token, expiresAt,
 	)
 	if err != nil {
 		return nil, false, nil, err
@@ -1216,7 +1367,7 @@ func upsertMember(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]an
 		if display != "" {
 			patch["display_name"] = display
 		}
-		if status != "" {
+		if statusProvided {
 			patch["status"] = status
 		}
 		if tierID > 0 {
@@ -1301,19 +1452,48 @@ func getMemberByEmail(db *sql.DB, pid string, spaceID int64, email string) (*Mem
 }
 
 func getMemberByToken(db *sql.DB, token string) (*Member, error) {
-	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members WHERE portal_token=?`, token)
+	row := db.QueryRow(`SELECT `+memberColumns()+` FROM members
+		WHERE portal_token=? AND portal_token_revoked_at IS NULL
+		AND portal_token_expires_at IS NOT NULL AND datetime(portal_token_expires_at) > datetime('now')`, token)
 	return scanMember(row)
 }
 
+func rotatePortalToken(ctx *sdk.AppCtx, pid string, spaceID, memberID int64) (*Member, string, error) {
+	if memberID <= 0 {
+		return nil, "", errors.New("member_id required")
+	}
+	if member, err := getMember(ctx.AppDB(), pid, spaceID, memberID); err != nil || member == nil {
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", errors.New("member not found")
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("generate portal token: %w", err)
+	}
+	expires := time.Now().UTC().Add(90 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(`UPDATE members
+		SET portal_token=?, portal_token_expires_at=?, portal_token_revoked_at=NULL, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND space_id=? AND id=?`, token, expires, pid, spaceID, memberID); err != nil {
+		return nil, "", err
+	}
+	member, err := getMember(ctx.AppDB(), pid, spaceID, memberID)
+	if err == nil {
+		_ = logEvent(ctx, pid, spaceID, "member.portal_token_rotated", "agent", "member", memberID, nil)
+	}
+	return member, token, err
+}
+
 func memberColumns() string {
-	return `id, project_id, space_id, email, display_name, status, tier_id, crm_contact_id, billing_customer_id, portal_token, COALESCE(current_period_start,''), COALESCE(current_period_end,''), metadata, created_at, updated_at`
+	return `id, project_id, space_id, email, display_name, status, tier_id, crm_contact_id, billing_customer_id, portal_token, COALESCE(current_period_start,''), COALESCE(current_period_end,''), COALESCE(portal_token_expires_at,''), COALESCE(portal_token_revoked_at,''), metadata, created_at, updated_at`
 }
 
 func scanMember(row interface{ Scan(...any) error }) (*Member, error) {
 	var m Member
 	var tier, crm, billing sql.NullInt64
 	var meta string
-	if err := row.Scan(&m.ID, &m.ProjectID, &m.SpaceID, &m.Email, &m.DisplayName, &m.Status, &tier, &crm, &billing, &m.PortalToken, &m.CurrentPeriodStart, &m.CurrentPeriodEnd, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
+	if err := row.Scan(&m.ID, &m.ProjectID, &m.SpaceID, &m.Email, &m.DisplayName, &m.Status, &tier, &crm, &billing, &m.PortalToken, &m.CurrentPeriodStart, &m.CurrentPeriodEnd, &m.PortalTokenExpires, &m.PortalTokenRevoked, &meta, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1330,6 +1510,13 @@ func scanMember(row interface{ Scan(...any) error }) (*Member, error) {
 	}
 	m.Metadata = rawJSON(meta, "{}")
 	return &m, nil
+}
+
+func memberExpiry(member *Member) string {
+	if member == nil {
+		return ""
+	}
+	return member.PortalTokenExpires
 }
 
 func updateMember(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string]any) (*Member, error) {
@@ -1366,6 +1553,9 @@ func updateMember(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[stri
 			if v == "" {
 				sets = append(sets, field+"=NULL")
 			} else {
+				if _, err := parseTimestamp(v); err != nil {
+					return nil, fmt.Errorf("invalid %s: %w", field, err)
+				}
 				sets, args = append(sets, field+"=?"), append(args, v)
 			}
 		}
@@ -1388,6 +1578,11 @@ func updateMember(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[stri
 	}
 	if err == nil {
 		_ = logEvent(ctx, pid, spaceID, "member.updated", "agent", "member", id, patch)
+		if _, statusChanged := patch["status"]; statusChanged {
+			_ = syncCRMState(ctx, pid, m)
+		} else if _, tierChanged := patch["tier_id"]; tierChanged {
+			_ = syncCRMState(ctx, pid, m)
+		}
 	}
 	return m, err
 }
@@ -1440,6 +1635,18 @@ func createPost(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 		slug = slugify(title)
 	}
 	tierIDs := jsonIntArray(args["tier_ids"])
+	if err := validateTierIDs(ctx.AppDB(), pid, spaceID, tierIDs); err != nil {
+		return nil, err
+	}
+	scheduledAt := strArg(args, "scheduled_at")
+	if status == "scheduled" {
+		if scheduledAt == "" {
+			return nil, errors.New("scheduled_at required when status is scheduled")
+		}
+		if _, err := parseTimestamp(scheduledAt); err != nil {
+			return nil, fmt.Errorf("invalid scheduled_at: %w", err)
+		}
+	}
 	var publishedAt any
 	if status == "published" {
 		publishedAt = time.Now().UTC().Format(time.RFC3339)
@@ -1447,7 +1654,7 @@ func createPost(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO posts (project_id, space_id, title, slug, body, status, visibility, tier_ids_json, published_at, scheduled_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?,''))`,
-		pid, spaceID, title, slug, strArg(args, "body"), status, visibility, string(tierIDs), publishedAt, strArg(args, "scheduled_at"),
+		pid, spaceID, title, slug, strArg(args, "body"), status, visibility, string(tierIDs), publishedAt, scheduledAt,
 	)
 	if err != nil {
 		return nil, err
@@ -1561,12 +1768,19 @@ func updatePost(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string
 		sets, args = append(sets, "visibility=?"), append(args, v)
 	}
 	if _, ok := patch["tier_ids"]; ok {
-		sets, args = append(sets, "tier_ids_json=?"), append(args, string(jsonIntArray(patch["tier_ids"])))
+		tierIDs := jsonIntArray(patch["tier_ids"])
+		if err := validateTierIDs(ctx.AppDB(), pid, spaceID, tierIDs); err != nil {
+			return nil, err
+		}
+		sets, args = append(sets, "tier_ids_json=?"), append(args, string(tierIDs))
 	}
 	if v, ok := patch["scheduled_at"].(string); ok {
 		if v == "" {
 			sets = append(sets, "scheduled_at=NULL")
 		} else {
+			if _, err := parseTimestamp(v); err != nil {
+				return nil, fmt.Errorf("invalid scheduled_at: %w", err)
+			}
 			sets, args = append(sets, "scheduled_at=?"), append(args, v)
 		}
 	}
@@ -1591,6 +1805,13 @@ func updatePost(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string
 func publishPost(ctx *sdk.AppCtx, pid string, spaceID, id int64, scheduledAt string) (*Post, error) {
 	patch := map[string]any{}
 	if scheduledAt != "" {
+		when, err := parseTimestamp(scheduledAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid scheduled_at: %w", err)
+		}
+		if !when.After(time.Now().UTC()) {
+			return nil, errors.New("scheduled_at must be in the future")
+		}
 		patch["status"] = "scheduled"
 		patch["scheduled_at"] = scheduledAt
 	} else {
@@ -1619,10 +1840,14 @@ func uploadAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[strin
 	if content == "" {
 		return nil, errors.New("content_base64 required")
 	}
-	size := int64(0)
-	if raw, err := base64.StdEncoding.DecodeString(content); err == nil {
-		size = int64(len(raw))
+	if base64.StdEncoding.DecodedLen(len(content)) > 25*1024*1024 {
+		return nil, errors.New("attachment exceeds the 25 MiB upload limit")
 	}
+	raw, err := base64.StdEncoding.DecodeString(content)
+	if err != nil {
+		return nil, errors.New("content_base64 is invalid")
+	}
+	size := int64(len(raw))
 	space, _ := getSpace(ctx.AppDB(), pid, spaceID)
 	folder := fmt.Sprintf("/creators/%s/posts/%s", space.Slug, post.Slug)
 	var out struct {
@@ -1664,6 +1889,18 @@ func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]a
 		}
 		return nil, fmt.Errorf("post %d not found", postID)
 	}
+	var file storageFileMetadata
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
+		"id": fileID, "_project_id": pid,
+	}, &file); err != nil {
+		return nil, fmt.Errorf("storage.files_get: %w", err)
+	}
+	if file.ID != fileID {
+		return nil, fmt.Errorf("storage file %d not found", fileID)
+	}
+	args["filename"] = file.Name
+	args["content_type"] = file.ContentType
+	args["size_bytes"] = file.SizeBytes
 	vis := strArg(args, "visibility")
 	if vis == "" {
 		vis = "inherit"
@@ -1671,10 +1908,14 @@ func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]a
 	if !validAttachmentVisibility(vis) {
 		return nil, fmt.Errorf("invalid attachment visibility %q", vis)
 	}
+	tierIDs := jsonIntArray(args["tier_ids"])
+	if err := validateTierIDs(ctx.AppDB(), pid, spaceID, tierIDs); err != nil {
+		return nil, err
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, spaceID, postID, fileID, strArg(args, "filename"), strArg(args, "content_type"), int64Arg(args, "size_bytes"), vis, string(jsonIntArray(args["tier_ids"])),
+		pid, spaceID, postID, fileID, strArg(args, "filename"), strArg(args, "content_type"), int64Arg(args, "size_bytes"), vis, string(tierIDs),
 	)
 	if err != nil {
 		return nil, err
@@ -1702,6 +1943,27 @@ func listAttachments(db *sql.DB, pid string, spaceID, postID int64) ([]Attachmen
 		out = append(out, *a)
 	}
 	return out, rows.Err()
+}
+
+func hydrateAccessibleAttachments(db *sql.DB, pid string, spaceID int64, posts []Post, member *Member) error {
+	for i := range posts {
+		attachments, err := listAttachments(db, pid, spaceID, posts[i].ID)
+		if err != nil {
+			return err
+		}
+		posts[i].Attachments = accessibleAttachments(member, &posts[i], attachments)
+	}
+	return nil
+}
+
+func accessibleAttachments(member *Member, post *Post, attachments []Attachment) []Attachment {
+	visible := make([]Attachment, 0, len(attachments))
+	for i := range attachments {
+		if memberCanAccessAttachment(member, post, &attachments[i]) {
+			visible = append(visible, attachments[i])
+		}
+	}
+	return visible
 }
 
 func getAttachment(db *sql.DB, pid string, spaceID, id int64) (*Attachment, error) {
@@ -1750,6 +2012,9 @@ func getDownloadLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string
 	if err != nil {
 		return nil, err
 	}
+	if member != nil && (member.ProjectID != pid || member.SpaceID != spaceID) {
+		return nil, errors.New("member credential does not belong to this creator space")
+	}
 	if !memberCanAccessAttachment(member, post, att) {
 		return nil, errors.New("member is not entitled to this file")
 	}
@@ -1789,7 +2054,7 @@ func memberCanAccessAttachment(member *Member, post *Post, att *Attachment) bool
 	if !memberCanAccessPost(member, post) {
 		return false
 	}
-	if vis == "members" || vis == "inherit" {
+	if vis == "public" || vis == "members" || vis == "inherit" {
 		return true
 	}
 	if vis == "tier" {
@@ -1815,7 +2080,20 @@ func memberCanAccessPost(member *Member, post *Post) bool {
 }
 
 func memberCanAccessStatus(member *Member) bool {
-	return member != nil && (member.Status == "active" || member.Status == "comped")
+	if member == nil {
+		return false
+	}
+	if member.Status == "comped" {
+		return true
+	}
+	if member.Status != "active" {
+		return false
+	}
+	if member.CurrentPeriodEnd == "" {
+		return true
+	}
+	end, err := parseTimestamp(member.CurrentPeriodEnd)
+	return err == nil && end.After(time.Now().UTC())
 }
 
 func memberTierIn(member *Member, raw json.RawMessage) bool {
@@ -1853,6 +2131,15 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[stri
 		}
 		return nil, errors.New("tier not found")
 	}
+	if tier.ArchivedAt != "" {
+		return nil, errors.New("cannot create a payment for an archived tier")
+	}
+	if tier.PriceCents <= 0 {
+		return nil, errors.New("payment links require a tier with a positive price")
+	}
+	if !validCurrency(tier.Currency) {
+		return nil, fmt.Errorf("invalid tier currency %q", tier.Currency)
+	}
 	customerID := int64(0)
 	if member.BillingCustomerID != nil {
 		customerID = *member.BillingCustomerID
@@ -1864,34 +2151,67 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[stri
 		}
 		_ = setMemberExternalIDs(ctx.AppDB(), pid, spaceID, member.ID, 0, customerID)
 	}
-	months := intArg(args, "months", 1)
-	if months <= 0 {
-		months = 1
+	periods := intArg(args, "periods", 0)
+	if periods == 0 {
+		periods = intArg(args, "months", 1) // compatibility with v0.1.x callers
 	}
-	desc := fmt.Sprintf("%s membership — %s", tier.Name, strings.Title(tier.Interval))
-	if months > 1 {
-		desc = fmt.Sprintf("%s membership — %d months", tier.Name, months)
+	if periods <= 0 || periods > 120 {
+		return nil, errors.New("periods must be between 1 and 120")
 	}
+	if tier.Interval == "one_time" && periods != 1 {
+		return nil, errors.New("one-time tiers require periods=1")
+	}
+	idem := strings.TrimSpace(strArg(args, "idempotency_key"))
+	if idem == "" {
+		anchor := member.CurrentPeriodEnd
+		if anchor == "" {
+			anchor = "initial"
+		}
+		idem = fmt.Sprintf("member:%d:tier:%d:period:%s", member.ID, tier.ID, anchor)
+	}
+	if len(idem) > 200 {
+		return nil, errors.New("idempotency_key must be 200 characters or fewer")
+	}
+	amount := tier.PriceCents * int64(periods)
+	payment, created, err := reserveMembershipPayment(ctx.AppDB(), pid, spaceID, member.ID, tier.ID, idem, periods, amount, tier.Currency)
+	if err != nil {
+		return nil, err
+	}
+	if payment.Status == "paid" {
+		return map[string]any{"member": redactMember(member), "tier": tier, "payment": paymentView(payment), "already_paid": true}, nil
+	}
+	if !created && !payment.BillingInvoiceID.Valid && payment.Status == "creating" {
+		return nil, errors.New("payment creation is already in progress; retry shortly with the same idempotency_key")
+	}
+	desc := fmt.Sprintf("%s membership - %d %s period(s)", tier.Name, periods, tier.Interval)
 	var invResp struct {
 		Invoice struct {
 			ID     int64  `json:"id"`
 			Number string `json:"number"`
 		} `json:"invoice"`
 	}
-	err = ctx.WithProject(pid).PlatformAPI().CallAppResult("billing", "invoices_create", map[string]any{
-		"customer_id": customerID,
-		"currency":    tier.Currency,
-		"line_items": []any{map[string]any{
-			"description":      desc,
-			"quantity":         1,
-			"unit_price_cents": tier.PriceCents * int64(months),
-			"metadata":         map[string]any{"creators_member_id": member.ID, "creators_tier_id": tier.ID},
-		}},
-		"metadata":    map[string]any{"source_app": "creators", "member_id": member.ID, "tier_id": tier.ID},
-		"_project_id": pid,
-	}, &invResp)
-	if err != nil {
-		return nil, fmt.Errorf("billing.invoices_create: %w", err)
+	if payment.BillingInvoiceID.Valid {
+		invResp.Invoice.ID = payment.BillingInvoiceID.Int64
+	} else {
+		err = ctx.WithProject(pid).PlatformAPI().CallAppResult("billing", "invoices_create", map[string]any{
+			"customer_id": customerID,
+			"currency":    tier.Currency,
+			"line_items": []any{map[string]any{
+				"description":      desc,
+				"quantity":         1,
+				"unit_price_cents": amount,
+				"metadata":         map[string]any{"creators_member_id": member.ID, "creators_tier_id": tier.ID, "creators_payment_id": payment.ID},
+			}},
+			"metadata":    map[string]any{"source_app": "creators", "member_id": member.ID, "tier_id": tier.ID, "creators_payment_id": payment.ID},
+			"_project_id": pid,
+		}, &invResp)
+		if err != nil {
+			_ = markMembershipPaymentFailed(ctx.AppDB(), payment.ID)
+			return nil, fmt.Errorf("billing.invoices_create: %w", err)
+		}
+		if err := attachMembershipInvoice(ctx.AppDB(), payment.ID, invResp.Invoice.ID); err != nil {
+			return nil, fmt.Errorf("persist billing invoice mapping: %w", err)
+		}
 	}
 	var finalResp struct {
 		Invoice struct {
@@ -1914,7 +2234,302 @@ func createPaymentLink(ctx *sdk.AppCtx, pid string, spaceID int64, args map[stri
 		return nil, fmt.Errorf("billing.invoices_send_payment_link: %w", err)
 	}
 	_ = logEvent(ctx, pid, spaceID, "payment_link.created", "agent", "member", member.ID, map[string]any{"invoice_id": finalResp.Invoice.ID, "tier_id": tier.ID})
-	return map[string]any{"member": member, "tier": tier, "invoice": finalResp.Invoice, "payment_link": link}, nil
+	payment, _ = getMembershipPaymentByID(ctx.AppDB(), payment.ID)
+	return map[string]any{"member": redactMember(member), "tier": tier, "invoice": finalResp.Invoice, "payment": paymentView(payment), "payment_link": link}, nil
+}
+
+func reserveMembershipPayment(db *sql.DB, pid string, spaceID, memberID, tierID int64, key string, periods int, amount int64, currency string) (*MembershipPayment, bool, error) {
+	res, err := db.Exec(`INSERT OR IGNORE INTO membership_payments
+		(project_id, space_id, member_id, tier_id, idempotency_key, period_count, amount_cents, currency)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, pid, spaceID, memberID, tierID, key, periods, amount, currency)
+	if err != nil {
+		return nil, false, err
+	}
+	affected, _ := res.RowsAffected()
+	p, err := getMembershipPaymentByKey(db, pid, spaceID, key)
+	if err == nil && p != nil && (p.MemberID != memberID || p.TierID != tierID || p.PeriodCount != periods || p.AmountCents != amount || p.Currency != currency) {
+		return nil, false, errors.New("idempotency_key was already used with different payment parameters")
+	}
+	return p, affected > 0, err
+}
+
+func getMembershipPaymentByKey(db *sql.DB, pid string, spaceID int64, key string) (*MembershipPayment, error) {
+	return scanMembershipPayment(db.QueryRow(membershipPaymentSelect()+` WHERE project_id=? AND space_id=? AND idempotency_key=?`, pid, spaceID, key))
+}
+
+func getMembershipPaymentByID(db *sql.DB, id int64) (*MembershipPayment, error) {
+	return scanMembershipPayment(db.QueryRow(membershipPaymentSelect()+` WHERE id=?`, id))
+}
+
+func getMembershipPaymentByInvoice(db *sql.DB, pid string, invoiceID int64) (*MembershipPayment, error) {
+	return scanMembershipPayment(db.QueryRow(membershipPaymentSelect()+` WHERE project_id=? AND billing_invoice_id=?`, pid, invoiceID))
+}
+
+func membershipPaymentSelect() string {
+	return `SELECT id, project_id, space_id, member_id, tier_id, billing_invoice_id, idempotency_key,
+		status, period_count, amount_cents, currency, COALESCE(period_start,''), COALESCE(period_end,''),
+		COALESCE(paid_at,''), updated_at FROM membership_payments`
+}
+
+func scanMembershipPayment(row interface{ Scan(...any) error }) (*MembershipPayment, error) {
+	var p MembershipPayment
+	if err := row.Scan(&p.ID, &p.ProjectID, &p.SpaceID, &p.MemberID, &p.TierID, &p.BillingInvoiceID,
+		&p.IdempotencyKey, &p.Status, &p.PeriodCount, &p.AmountCents, &p.Currency,
+		&p.PeriodStart, &p.PeriodEnd, &p.PaidAt, &p.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &p, nil
+}
+
+func attachMembershipInvoice(db *sql.DB, paymentID, invoiceID int64) error {
+	_, err := db.Exec(`UPDATE membership_payments SET billing_invoice_id=?, status='open', updated_at=CURRENT_TIMESTAMP WHERE id=?`, invoiceID, paymentID)
+	return err
+}
+
+func markMembershipPaymentFailed(db *sql.DB, paymentID int64) error {
+	_, err := db.Exec(`UPDATE membership_payments SET status='failed', updated_at=CURRENT_TIMESTAMP WHERE id=? AND billing_invoice_id IS NULL`, paymentID)
+	return err
+}
+
+func paymentView(p *MembershipPayment) map[string]any {
+	if p == nil {
+		return nil
+	}
+	return map[string]any{
+		"id": p.ID, "billing_invoice_id": nullableInt64(p.BillingInvoiceID), "status": p.Status,
+		"periods": p.PeriodCount, "amount_cents": p.AmountCents, "currency": p.Currency,
+		"period_start": p.PeriodStart, "period_end": p.PeriodEnd, "paid_at": p.PaidAt,
+	}
+}
+
+func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "billing" {
+		return nil
+	}
+	if status := strings.ToLower(cleanString(event.Data["status"])); status != "paid" {
+		return nil
+	}
+	invoiceID := int64FromAny(event.Data["id"])
+	if invoiceID <= 0 || event.ProjectID == "" {
+		return nil
+	}
+	payment, err := getMembershipPaymentByInvoice(ctx.AppDB(), event.ProjectID, invoiceID)
+	if err != nil || payment == nil || payment.Status == "paid" {
+		return err
+	}
+	member, err := getMember(ctx.AppDB(), payment.ProjectID, payment.SpaceID, payment.MemberID)
+	if err != nil || member == nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("membership payment references a missing member")
+	}
+	tier, err := getTier(ctx.AppDB(), payment.ProjectID, payment.SpaceID, payment.TierID)
+	if err != nil || tier == nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("membership payment references a missing tier")
+	}
+	start, end := membershipPeriod(member, tier.Interval, payment.PeriodCount, time.Now().UTC())
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE membership_payments SET status='paid', period_start=?, period_end=NULLIF(?,''), paid_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND status<>'paid'`, start, end, payment.ID)
+	if err != nil {
+		return err
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`UPDATE members SET tier_id=?, status='active', current_period_start=?, current_period_end=NULLIF(?,''), updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND space_id=? AND id=?`, tier.ID, start, end, payment.ProjectID, payment.SpaceID, member.ID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	member, _ = getMember(ctx.AppDB(), payment.ProjectID, payment.SpaceID, member.ID)
+	_ = syncCRMState(ctx, payment.ProjectID, member)
+	_ = logEvent(ctx, payment.ProjectID, payment.SpaceID, "membership.paid", "billing", "member", member.ID, map[string]any{"invoice_id": invoiceID, "tier_id": tier.ID, "period_end": end})
+	return nil
+}
+
+func (a *App) handleInvoiceInvalidated(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "billing" {
+		return nil
+	}
+	if event.Name() == "invoice.refunded" && strings.EqualFold(cleanString(event.Data["status"]), "paid") {
+		return nil // partial refund; the invoice remains fully settled
+	}
+	invoiceID := int64FromAny(event.Data["id"])
+	if invoiceID <= 0 || event.ProjectID == "" {
+		return nil
+	}
+	payment, err := getMembershipPaymentByInvoice(ctx.AppDB(), event.ProjectID, invoiceID)
+	if err != nil || payment == nil {
+		return err
+	}
+	wasPaid := payment.Status == "paid"
+	if _, err := ctx.AppDB().Exec(`UPDATE membership_payments SET status='void', updated_at=CURRENT_TIMESTAMP WHERE id=?`, payment.ID); err != nil {
+		return err
+	}
+	if !wasPaid {
+		return nil
+	}
+	var newer int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM membership_payments WHERE project_id=? AND space_id=? AND member_id=? AND status='paid' AND id>?`, payment.ProjectID, payment.SpaceID, payment.MemberID, payment.ID).Scan(&newer); err != nil {
+		return err
+	}
+	if newer > 0 {
+		return nil
+	}
+	member, err := getMember(ctx.AppDB(), payment.ProjectID, payment.SpaceID, payment.MemberID)
+	if err != nil || member == nil || member.TierID == nil || *member.TierID != payment.TierID {
+		return err
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE members SET status='past_due', updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND space_id=?`, member.ID, payment.ProjectID, payment.SpaceID); err != nil {
+		return err
+	}
+	member, _ = getMember(ctx.AppDB(), payment.ProjectID, payment.SpaceID, member.ID)
+	_ = syncCRMState(ctx, payment.ProjectID, member)
+	_ = logEvent(ctx, payment.ProjectID, payment.SpaceID, "membership.payment_reversed", "billing", "member", member.ID, map[string]any{"invoice_id": invoiceID})
+	return nil
+}
+
+func membershipPeriod(member *Member, interval string, periods int, paidAt time.Time) (string, string) {
+	start := paidAt.UTC()
+	if member != nil && member.CurrentPeriodEnd != "" {
+		if currentEnd, err := parseTimestamp(member.CurrentPeriodEnd); err == nil && currentEnd.After(start) {
+			start = currentEnd
+		}
+	}
+	if interval == "one_time" {
+		return start.Format(time.RFC3339), ""
+	}
+	end := start
+	if interval == "year" {
+		end = end.AddDate(periods, 0, 0)
+	} else {
+		end = end.AddDate(0, periods, 0)
+	}
+	return start.Format(time.RFC3339), end.Format(time.RFC3339)
+}
+
+func runCreatorLifecycle(ctx *sdk.AppCtx) error {
+	if ctx == nil || ctx.AppDB() == nil {
+		return errors.New("creators lifecycle worker has no app context")
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE membership_payments SET status='failed', updated_at=CURRENT_TIMESTAMP
+		WHERE status='creating' AND billing_invoice_id IS NULL AND datetime(updated_at) <= datetime('now', '-10 minutes')`); err != nil {
+		return err
+	}
+	type postRef struct {
+		id, spaceID int64
+		pid         string
+	}
+	rows, err := ctx.AppDB().Query(`SELECT id, project_id, space_id FROM posts
+		WHERE status='scheduled' AND scheduled_at IS NOT NULL AND datetime(scheduled_at) <= datetime('now')`)
+	if err != nil {
+		return err
+	}
+	var posts []postRef
+	for rows.Next() {
+		var p postRef
+		if err := rows.Scan(&p.id, &p.pid, &p.spaceID); err != nil {
+			rows.Close()
+			return err
+		}
+		posts = append(posts, p)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, p := range posts {
+		res, err := ctx.AppDB().Exec(`UPDATE posts SET status='published', published_at=CURRENT_TIMESTAMP, scheduled_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND space_id=? AND status='scheduled'`, p.id, p.pid, p.spaceID)
+		if err != nil {
+			ctx.Logger().Warn("scheduled creator post failed", "post_id", p.id, "err", err.Error())
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			_ = logEvent(ctx, p.pid, p.spaceID, "post.published", "scheduler", "post", p.id, nil)
+		}
+	}
+
+	type memberRef struct {
+		id, spaceID int64
+		pid         string
+	}
+	rows, err = ctx.AppDB().Query(`SELECT id, project_id, space_id FROM members
+		WHERE status='active' AND current_period_end IS NOT NULL AND datetime(current_period_end) <= datetime('now')`)
+	if err != nil {
+		return err
+	}
+	var members []memberRef
+	for rows.Next() {
+		var m memberRef
+		if err := rows.Scan(&m.id, &m.pid, &m.spaceID); err != nil {
+			rows.Close()
+			return err
+		}
+		members = append(members, m)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, ref := range members {
+		res, err := ctx.AppDB().Exec(`UPDATE members SET status='past_due', updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND space_id=? AND status='active'`, ref.id, ref.pid, ref.spaceID)
+		if err != nil {
+			ctx.Logger().Warn("membership expiration failed", "member_id", ref.id, "err", err.Error())
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			member, _ := getMember(ctx.AppDB(), ref.pid, ref.spaceID, ref.id)
+			_ = syncCRMState(ctx, ref.pid, member)
+			_ = logEvent(ctx, ref.pid, ref.spaceID, "membership.expired", "scheduler", "member", ref.id, nil)
+		}
+	}
+	return nil
+}
+
+func membershipMetrics(db *sql.DB, pid string, spaceID int64) (map[string]any, error) {
+	rows, err := db.Query(`SELECT t.currency, t.price_cents, t.interval
+		FROM members m JOIN tiers t ON t.id=m.tier_id AND t.space_id=m.space_id
+		WHERE m.project_id=? AND m.space_id=? AND m.status='active'
+		AND (m.current_period_end IS NULL OR datetime(m.current_period_end) > datetime('now'))
+		AND EXISTS (SELECT 1 FROM membership_payments p
+			WHERE p.project_id=m.project_id AND p.space_id=m.space_id
+			AND p.member_id=m.id AND p.tier_id=t.id AND p.status='paid')`, pid, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byCurrency := map[string]int64{}
+	paidMembers := 0
+	for rows.Next() {
+		var currency, interval string
+		var price int64
+		if err := rows.Scan(&currency, &price, &interval); err != nil {
+			return nil, err
+		}
+		switch interval {
+		case "month":
+			byCurrency[currency] += price
+			paidMembers++
+		case "year":
+			byCurrency[currency] += (price + 6) / 12
+			paidMembers++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"paid_recurring_members": paidMembers, "mrr_by_currency": byCurrency}, nil
 }
 
 func syncBillingCustomer(ctx *sdk.AppCtx, pid string, member *Member) (int64, error) {
@@ -1945,9 +2560,9 @@ func syncCRMContact(ctx *sdk.AppCtx, pid string, member *Member) (int64, error) 
 		} `json:"contact"`
 		WasCreated bool `json:"was_created"`
 	}
-	defaults := map[string]any{"tags": []string{"creator-member", "status:" + member.Status}}
+	defaults := map[string]any{}
 	if member.DisplayName != "" {
-		defaults["name"] = member.DisplayName
+		defaults["display_name"] = member.DisplayName
 	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_upsert_by_channel", map[string]any{
 		"kind":        "email",
@@ -1958,7 +2573,63 @@ func syncCRMContact(ctx *sdk.AppCtx, pid string, member *Member) (int64, error) 
 	}, &out); err != nil {
 		return 0, err
 	}
+	copy := *member
+	copy.CRMContactID = &out.Contact.ID
+	if err := syncCRMState(ctx, pid, &copy); err != nil {
+		return 0, err
+	}
 	return out.Contact.ID, nil
+}
+
+func syncCRMState(ctx *sdk.AppCtx, pid string, member *Member) error {
+	if ctx == nil || member == nil || member.CRMContactID == nil || *member.CRMContactID <= 0 {
+		return nil
+	}
+	if err := ensureCRMStateAttributes(ctx, pid, member.SpaceID); err != nil {
+		return err
+	}
+	var out map[string]any
+	return ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_update", map[string]any{
+		"id":          *member.CRMContactID,
+		"patch":       map[string]any{"attributes": crmStateAttributes(member)},
+		"source":      "creators",
+		"_project_id": pid,
+	}, &out)
+}
+
+func ensureCRMStateAttributes(ctx *sdk.AppCtx, pid string, spaceID int64) error {
+	prefix := fmt.Sprintf("creators_space_%d_", spaceID)
+	definitions := []struct {
+		key   string
+		label string
+	}{
+		{prefix + "status", fmt.Sprintf("Creators space %d status", spaceID)},
+		{prefix + "tier_id", fmt.Sprintf("Creators space %d tier ID", spaceID)},
+		{prefix + "period_end", fmt.Sprintf("Creators space %d period end", spaceID)},
+	}
+	for i, definition := range definitions {
+		var out map[string]any
+		if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_define_attribute", map[string]any{
+			"key": definition.key, "label": definition.label, "type": "text",
+			"sort_order": 1000 + i, "_project_id": pid,
+		}, &out); err != nil {
+			return fmt.Errorf("crm.contacts_define_attribute %s: %w", definition.key, err)
+		}
+	}
+	return nil
+}
+
+func crmStateAttributes(member *Member) []any {
+	tierID := ""
+	if member.TierID != nil {
+		tierID = strconv.FormatInt(*member.TierID, 10)
+	}
+	prefix := fmt.Sprintf("creators_space_%d_", member.SpaceID)
+	return []any{
+		map[string]any{"key": prefix + "status", "value": member.Status, "source": "creators"},
+		map[string]any{"key": prefix + "tier_id", "value": tierID, "source": "creators"},
+		map[string]any{"key": prefix + "period_end", "value": member.CurrentPeriodEnd, "source": "creators"},
+	}
 }
 
 func sendPostUpdate(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (map[string]any, error) {
@@ -1994,7 +2665,7 @@ func sendPostUpdate(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]
 			"subject":         subject,
 			"body":            body,
 			"from":            configString(ctx, "sender", ""),
-			"idempotency_key": fmt.Sprintf("creators-post-%d-member-%d", post.ID, m.ID),
+			"idempotency_key": fmt.Sprintf("creators-post-%d-member-%d-version-%s", post.ID, m.ID, compactKey(post.UpdatedAt)),
 			"_project_id":     pid,
 		}, &out)
 		if err != nil {
@@ -2008,22 +2679,23 @@ func sendPostUpdate(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]
 }
 
 func eligibleMembersForPost(db *sql.DB, pid string, spaceID int64, post *Post) ([]Member, error) {
-	members, err := listMembers(db, pid, spaceID, memberFilters{status: "active", limit: 500})
+	rows, err := db.Query(`SELECT `+memberColumns()+` FROM members
+		WHERE project_id=? AND space_id=? AND status IN ('active','comped') ORDER BY id`, pid, spaceID)
 	if err != nil {
 		return nil, err
 	}
-	comped, err := listMembers(db, pid, spaceID, memberFilters{status: "comped", limit: 500})
-	if err != nil {
-		return nil, err
-	}
-	members = append(members, comped...)
-	out := make([]Member, 0, len(members))
-	for i := range members {
-		if memberCanAccessPost(&members[i], post) {
-			out = append(out, members[i])
+	defer rows.Close()
+	var out []Member
+	for rows.Next() {
+		member, err := scanMember(rows)
+		if err != nil {
+			return nil, err
+		}
+		if memberCanAccessPost(member, post) {
+			out = append(out, *member)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func logEvent(ctx *sdk.AppCtx, pid string, spaceID int64, kind, actor, subjectType string, subjectID int64, data any) error {
@@ -2137,6 +2809,7 @@ func readJSON(r *http.Request, out any) error {
 		return nil
 	}
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(nil, r.Body, 36<<20)
 	return json.NewDecoder(r.Body).Decode(out)
 }
 
@@ -2181,6 +2854,15 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		out["required"] = required
 	}
 	return out
+}
+
+func spaceSchema(props map[string]any, required []string) map[string]any {
+	if props == nil {
+		props = map[string]any{}
+	}
+	props["space_id"] = sInteger()
+	props["space_slug"] = sString()
+	return schemaObject(props, required)
 }
 
 func sString() map[string]any  { return map[string]any{"type": "string"} }
@@ -2375,6 +3057,72 @@ func validInterval(s string) bool {
 	default:
 		return false
 	}
+}
+
+func validCurrency(s string) bool {
+	return regexp.MustCompile(`^[A-Z]{3}$`).MatchString(s)
+}
+
+func parseTimestamp(value string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), nil
+		}
+	}
+	return time.Time{}, errors.New("timestamp must be RFC3339")
+}
+
+func validateTierIDs(db *sql.DB, pid string, spaceID int64, raw json.RawMessage) error {
+	var ids []int64
+	if err := json.Unmarshal(raw, &ids); err != nil {
+		return errors.New("tier_ids must be an array of integers")
+	}
+	seen := map[int64]bool{}
+	for _, id := range ids {
+		if id <= 0 || seen[id] {
+			return errors.New("tier_ids must contain unique positive IDs")
+		}
+		seen[id] = true
+		tier, err := getTier(db, pid, spaceID, id)
+		if err != nil {
+			return err
+		}
+		if tier == nil {
+			return fmt.Errorf("tier %d does not belong to this creator space", id)
+		}
+	}
+	return nil
+}
+
+func int64FromAny(v any) int64 {
+	switch n := v.(type) {
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case float64:
+		return int64(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	default:
+		return 0
+	}
+}
+
+func nullableInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
+}
+
+func compactKey(value string) string {
+	value = regexp.MustCompile(`[^A-Za-z0-9]+`).ReplaceAllString(value, "")
+	if value == "" {
+		return "initial"
+	}
+	return value
 }
 
 func validMemberStatus(s string) bool {

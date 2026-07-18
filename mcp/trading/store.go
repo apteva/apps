@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -37,6 +38,10 @@ type Portfolio struct {
 	DayPnLPct   float64  `json:"day_pnl_pct,omitempty"`
 	OpenPnL     float64  `json:"open_pnl,omitempty"`
 	OpenPnLPct  float64  `json:"open_pnl_pct,omitempty"`
+	RealizedPnL float64  `json:"realized_pnl,omitempty"`
+	FeesPaid    float64  `json:"fees_paid,omitempty"`
+	TotalPnL    float64  `json:"total_pnl,omitempty"`
+	TotalPnLPct float64  `json:"total_pnl_pct,omitempty"`
 	BuyingPower float64  `json:"buying_power,omitempty"`
 	Watchlist   []string `json:"watchlist,omitempty"`
 }
@@ -125,31 +130,42 @@ type PortfolioExecutionSettings struct {
 }
 
 type Strategy struct {
-	ID               int64          `json:"id"`
-	ProjectID        string         `json:"project_id,omitempty"`
-	Name             string         `json:"name"`
-	Description      string         `json:"description"`
-	Status           string         `json:"status"`
-	Definition       map[string]any `json:"definition"`
-	Version          int            `json:"version"`
-	CreatedByAgentID int64          `json:"created_by_agent_id,omitempty"`
-	CreatedAt        string         `json:"created_at"`
-	UpdatedAt        string         `json:"updated_at"`
+	ID               int64                 `json:"id"`
+	ProjectID        string                `json:"project_id,omitempty"`
+	Name             string                `json:"name"`
+	Description      string                `json:"description"`
+	Status           string                `json:"status"`
+	Definition       map[string]any        `json:"definition"`
+	Version          int                   `json:"version"`
+	CreatedByAgentID int64                 `json:"created_by_agent_id,omitempty"`
+	CreatedAt        string                `json:"created_at"`
+	UpdatedAt        string                `json:"updated_at"`
+	AssignmentStatus string                `json:"assignment_status,omitempty"`
+	Assignments      []*StrategyAssignment `json:"assignments,omitempty"`
 }
 
 type StrategyAssignment struct {
-	ID              int64  `json:"id"`
-	ProjectID       string `json:"project_id,omitempty"`
-	PortfolioID     int64  `json:"portfolio_id"`
-	StrategyID      int64  `json:"strategy_id"`
-	StrategyVersion int    `json:"strategy_version"`
-	ControlMode     string `json:"control_mode"`
-	Status          string `json:"status"`
-	AssignedAgentID int64  `json:"assigned_agent_id,omitempty"`
-	Cadence         string `json:"cadence"`
-	LastEvaluatedAt string `json:"last_evaluated_at,omitempty"`
-	CreatedAt       string `json:"created_at"`
-	UpdatedAt       string `json:"updated_at"`
+	ID                int64  `json:"id"`
+	ProjectID         string `json:"project_id,omitempty"`
+	PortfolioID       int64  `json:"portfolio_id"`
+	StrategyID        int64  `json:"strategy_id"`
+	StrategyVersion   int    `json:"strategy_version"`
+	ControlMode       string `json:"control_mode"`
+	Status            string `json:"status"`
+	AssignedAgentID   int64  `json:"assigned_agent_id,omitempty"`
+	Cadence           string `json:"cadence"`
+	LastEvaluatedAt   string `json:"last_evaluated_at,omitempty"`
+	LastMarketBarAt   string `json:"last_market_bar_at,omitempty"`
+	LastSeenBarAt     string `json:"last_seen_bar_at,omitempty"`
+	LastCheckedAt     string `json:"last_checked_at,omitempty"`
+	PortfolioName     string `json:"portfolio_name,omitempty"`
+	Eligibility       string `json:"eligibility,omitempty"`
+	EligibilityReason string `json:"eligibility_reason,omitempty"`
+	NextEligibleAt    string `json:"next_eligible_at,omitempty"`
+	SessionOpenAt     string `json:"session_open_at,omitempty"`
+	SessionCloseAt    string `json:"session_close_at,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 type BacktestRun struct {
@@ -459,9 +475,15 @@ func dbAddCash(db *sql.DB, id int64, delta float64) error {
 
 func dbListPositions(db *sql.DB, portfolioID int64) ([]*Position, error) {
 	rows, err := db.Query(`
-		SELECT symbol, asset_class, COALESCE(outcome, ''), qty, avg_cost, realized_pnl
-		FROM positions WHERE portfolio_id = ? AND qty != 0
-		ORDER BY ABS(qty * avg_cost) DESC`, portfolioID)
+		SELECT p.symbol, p.asset_class, COALESCE(p.outcome, ''), p.qty, p.avg_cost,
+		       COALESCE(a.gross_realized_pnl - a.fees_paid, p.realized_pnl)
+		FROM positions p
+		LEFT JOIN position_accounting a
+		  ON a.portfolio_id = p.portfolio_id
+		 AND a.symbol = p.symbol
+		 AND a.outcome = COALESCE(p.outcome, '')
+		WHERE p.portfolio_id = ? AND p.qty != 0
+		ORDER BY ABS(p.qty * p.avg_cost) DESC`, portfolioID)
 	if err != nil {
 		return nil, err
 	}
@@ -497,8 +519,14 @@ func dbInsertPositionRaw(db *sql.DB, projectID string, portfolioID int64, symbol
 
 func dbGetPosition(db *sql.DB, portfolioID int64, symbol, outcome string) (*Position, error) {
 	row := db.QueryRow(`
-		SELECT symbol, asset_class, COALESCE(outcome, ''), qty, avg_cost, realized_pnl
-		FROM positions WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ?`,
+		SELECT p.symbol, p.asset_class, COALESCE(p.outcome, ''), p.qty, p.avg_cost,
+		       COALESCE(a.gross_realized_pnl - a.fees_paid, p.realized_pnl)
+		FROM positions p
+		LEFT JOIN position_accounting a
+		  ON a.portfolio_id = p.portfolio_id
+		 AND a.symbol = p.symbol
+		 AND a.outcome = COALESCE(p.outcome, '')
+		WHERE p.portfolio_id = ? AND p.symbol = ? AND COALESCE(p.outcome, '') = ?`,
 		portfolioID, symbol, outcome)
 	var p Position
 	err := row.Scan(&p.Symbol, &p.AssetClass, &p.Outcome, &p.Qty, &p.AvgCost, &p.RealizedPnL)
@@ -545,6 +573,9 @@ func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty,
 			return fmt.Errorf("cannot sell %v %s — only %v available", qty, o.Symbol, curQty)
 		}
 		realized := (price - curAvgCost) * qty
+		if err := dbAccruePositionAccountingTx(tx, portfolioID, o.Symbol, outcome, realized, 0); err != nil {
+			return err
+		}
 		newQty := curQty - qty
 		if newQty < 1e-9 {
 			// Close it.
@@ -592,6 +623,127 @@ func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty,
 		return err
 	}
 	return nil
+}
+
+// dbAccruePositionAccountingTx records gross closed-lot P&L and execution
+// fees independently from the open position row. The row therefore survives
+// a full close and a later re-entry into the same symbol.
+func dbAccruePositionAccountingTx(tx *sql.Tx, portfolioID int64, symbol, outcome string, grossRealized, fee float64) error {
+	_, err := tx.Exec(`
+		INSERT INTO position_accounting (portfolio_id, symbol, outcome, gross_realized_pnl, fees_paid)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(portfolio_id, symbol, outcome) DO UPDATE SET
+			gross_realized_pnl = gross_realized_pnl + excluded.gross_realized_pnl,
+			fees_paid = fees_paid + excluded.fees_paid,
+			updated_at = CURRENT_TIMESTAMP`,
+		portfolioID, symbol, outcome, grossRealized, fee)
+	return err
+}
+
+func dbPortfolioAccounting(db *sql.DB, portfolioID int64) (realized, fees float64, err error) {
+	err = db.QueryRow(`
+		SELECT COALESCE(SUM(gross_realized_pnl - fees_paid), 0), COALESCE(SUM(fees_paid), 0)
+		FROM position_accounting WHERE portfolio_id = ?`, portfolioID).Scan(&realized, &fees)
+	return
+}
+
+// dbRebuildPositionAccounting reconstructs average-cost lots from the
+// append-only fills ledger. It is idempotent and runs before workers start,
+// repairing existing installs whose closed position rows lost realized P&L.
+func dbRebuildPositionAccounting(db *sql.DB) error {
+	type fillRow struct {
+		portfolioID int64
+		symbol      string
+		side        string
+		outcome     string
+		qty         float64
+		price       float64
+		fee         float64
+	}
+	rows, err := db.Query(`
+		SELECT f.portfolio_id, o.symbol, o.side,
+		       CASE
+		         WHEN o.asset_class = 'polymarket' THEN COALESCE(NULLIF(o.outcome, ''), UPPER(o.side))
+		         ELSE ''
+		       END,
+		       f.qty, f.price, f.fee
+		FROM fills f
+		JOIN orders o ON o.id = f.order_id
+		ORDER BY f.portfolio_id, f.filled_at, f.id`)
+	if err != nil {
+		return err
+	}
+	var fills []fillRow
+	for rows.Next() {
+		var f fillRow
+		if err := rows.Scan(&f.portfolioID, &f.symbol, &f.side, &f.outcome, &f.qty, &f.price, &f.fee); err != nil {
+			rows.Close()
+			return err
+		}
+		fills = append(fills, f)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	type lot struct{ qty, avg, gross, fees float64 }
+	lots := map[string]*lot{}
+	keyFor := func(f fillRow) string {
+		return fmt.Sprintf("%d\x00%s\x00%s", f.portfolioID, f.symbol, f.outcome)
+	}
+	for _, f := range fills {
+		key := keyFor(f)
+		l := lots[key]
+		if l == nil {
+			l = &lot{}
+			lots[key] = l
+		}
+		l.fees += f.fee
+		if f.side == "buy" || f.side == "yes" || f.side == "no" {
+			newQty := l.qty + f.qty
+			if newQty > 0 {
+				l.avg = (l.qty*l.avg + f.qty*f.price) / newQty
+				l.qty = newQty
+			}
+			continue
+		}
+		if l.qty <= 0 {
+			continue // imported broker history may begin after the opening buy
+		}
+		closedQty := f.qty
+		if closedQty > l.qty {
+			closedQty = l.qty
+		}
+		l.gross += (f.price - l.avg) * closedQty
+		l.qty -= closedQty
+		if l.qty < 1e-9 {
+			l.qty = 0
+			l.avg = 0
+		}
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM position_accounting`); err != nil {
+		return err
+	}
+	for key, l := range lots {
+		parts := strings.Split(key, "\x00")
+		portfolioID, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO position_accounting
+				(portfolio_id, symbol, outcome, gross_realized_pnl, fees_paid)
+			VALUES (?, ?, ?, ?, ?)`, portfolioID, parts[1], parts[2], l.gross, l.fees); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ─── Orders ────────────────────────────────────────────────────────
@@ -828,7 +980,10 @@ func dbInsertBackfilledFill(
 		INSERT INTO fills (project_id, order_id, portfolio_id, qty, price, fee, filled_at)
 		VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
 		projectID, orderID, portfolioID, qty, price, fee, at)
-	return err
+	if err != nil {
+		return err
+	}
+	return dbRebuildPositionAccounting(db)
 }
 
 // dbBrokerOrderIDFor — pulls the broker's order id out of the rationale
@@ -1000,6 +1155,34 @@ func dbListMarks(db *sql.DB) ([]*Mark, error) {
 			m.Volume24h = ptr(vol.Float64)
 		}
 		out = append(out, &m)
+	}
+	return out, rows.Err()
+}
+
+// dbListRefreshSymbols returns only symbols that can affect executable state.
+// Historical/orphaned marks are intentionally excluded so a removed watchlist
+// item cannot cause a permanent provider retry loop.
+func dbListRefreshSymbols(db *sql.DB) ([]string, error) {
+	rows, err := db.Query(`
+		SELECT symbol FROM watchlist
+		UNION
+		SELECT symbol FROM positions WHERE qty != 0
+		UNION
+		SELECT symbol FROM orders WHERE status = 'working'
+		UNION
+		SELECT symbol FROM alerts WHERE status = 'active'
+		ORDER BY symbol`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, err
+		}
+		out = append(out, symbol)
 	}
 	return out, rows.Err()
 }
@@ -1215,13 +1398,15 @@ func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64)
 	row := db.QueryRow(`
 		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       COALESCE(last_market_bar_at, ''), COALESCE(last_seen_bar_at, ''), COALESCE(last_checked_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
 		WHERE project_id = ? AND portfolio_id = ? AND status = 'active'
 		ORDER BY id DESC LIMIT 1`, projectID, portfolioID)
 	var a StrategyAssignment
 	if err := row.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
-		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt,
+		&a.LastMarketBarAt, &a.LastSeenBarAt, &a.LastCheckedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -1231,6 +1416,7 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       COALESCE(last_market_bar_at, ''), COALESCE(last_seen_bar_at, ''), COALESCE(last_checked_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
 		WHERE status = 'active'
@@ -1243,7 +1429,8 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	for rows.Next() {
 		var a StrategyAssignment
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
-			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt,
+			&a.LastMarketBarAt, &a.LastSeenBarAt, &a.LastCheckedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &a)
@@ -1251,11 +1438,56 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	return out, rows.Err()
 }
 
-func dbSetStrategyAssignmentEvaluated(db *sql.DB, id int64, at time.Time) error {
+func dbActiveStrategyAssignmentsForProject(db *sql.DB, projectID string) ([]*StrategyAssignment, error) {
+	rows, err := db.Query(`
+		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
+		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       COALESCE(last_market_bar_at, ''), COALESCE(last_seen_bar_at, ''), COALESCE(last_checked_at, ''),
+		       created_at, updated_at
+		FROM portfolio_strategy_assignments
+		WHERE project_id = ? AND status = 'active'
+		ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*StrategyAssignment
+	for rows.Next() {
+		var a StrategyAssignment
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
+			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt,
+			&a.LastMarketBarAt, &a.LastSeenBarAt, &a.LastCheckedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+func dbSetStrategyAssignmentObserved(db *sql.DB, id int64, marketBarAt, checkedAt time.Time) error {
 	_, err := db.Exec(`
 		UPDATE portfolio_strategy_assignments
-		   SET last_evaluated_at = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
+		   SET last_seen_bar_at = ?, last_checked_at = ?
+		 WHERE id = ?`, marketBarAt.UTC().Format(time.RFC3339), checkedAt.UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func dbInitializeStrategyAssignmentMarketBar(db *sql.DB, id int64, marketBarAt, checkedAt time.Time) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET last_market_bar_at = ?, last_seen_bar_at = ?, last_checked_at = ?
+		 WHERE id = ?`, marketBarAt.UTC().Format(time.RFC3339), marketBarAt.UTC().Format(time.RFC3339),
+		checkedAt.UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func dbSetStrategyAssignmentEvaluated(db *sql.DB, id int64, evaluatedAt, marketBarAt, checkedAt time.Time) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET last_evaluated_at = ?, last_market_bar_at = ?, last_seen_bar_at = ?, last_checked_at = ?,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, evaluatedAt.UTC().Format(time.RFC3339), marketBarAt.UTC().Format(time.RFC3339),
+		marketBarAt.UTC().Format(time.RFC3339), checkedAt.UTC().Format(time.RFC3339), id)
 	return err
 }
 
@@ -1828,6 +2060,18 @@ func snapshotPortfolioWithMarks(db *sql.DB, p *Portfolio, marks map[string]*Mark
 	p.OpenPnL = openValue - openCost
 	if openCost > 0 {
 		p.OpenPnLPct = p.OpenPnL / openCost * 100
+	}
+	p.RealizedPnL, p.FeesPaid, _ = dbPortfolioAccounting(db, p.ID)
+	p.TotalPnL = p.RealizedPnL + p.OpenPnL
+	returnBasis := p.StartingCash
+	if p.Mode == "live" {
+		// Live portfolios are seeded with broker cash plus pre-existing
+		// holdings. Their starting_cash is therefore not starting equity;
+		// current cost basis is the defensible denominator.
+		returnBasis = equity - p.TotalPnL
+	}
+	if returnBasis > 0 {
+		p.TotalPnLPct = p.TotalPnL / returnBasis * 100
 	}
 	p.BuyingPower = p.Cash
 	if p.Mode == "live" && p.AvailableCash != nil {

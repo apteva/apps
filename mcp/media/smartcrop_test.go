@@ -150,16 +150,34 @@ func TestSubjectAwareNarrowSmartCropX_DoesNotPullAwayFromRawSmartCrop(t *testing
 	}
 }
 
-func TestSubjectAwareNarrowSmartCropX_EdgeSmartCropFallsBackToCenter(t *testing.T) {
+func TestSubjectAwareNarrowSmartCropX_ConcentratedSubjectOverridesCenter(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{R: 228, G: 228, B: 226, A: 255})
+		}
+	}
+	for y := 18; y < 170; y++ {
+		for x := 28; x < 104; x++ {
+			if (x-66)*(x-66)+(y-50)*(y-50) < 30*30 || (x > 38 && x < 94 && y > 58) {
+				img.Set(x, y, color.RGBA{R: 208, G: 138, B: 101, A: 255})
+			}
+		}
+	}
+	x, ok := subjectAwareNarrowSmartCropX(img, 656, 656, 1920, 1080, 606, 1080, 100)
+	if !ok || x >= 400 {
+		t.Fatalf("concentrated left subject should override center crop, got x=%d ok=%v", x, ok)
+	}
+}
+
+func TestSubjectAwareNarrowSmartCropX_EdgeSmartCropRecoversSubject(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 174))
 	for y := 0; y < 174; y++ {
 		for x := 0; x < 320; x++ {
 			img.Set(x, y, color.RGBA{R: 86, G: 92, B: 104, A: 255})
 		}
 	}
-	// Foreground subject is far from the raw left-edge smartcrop.
-	// A full jump to the subject maximum would crop too far right, so
-	// the safer recovery is the geometric center.
+	// A strong subject should win over an implausible edge saliency crop.
 	for y := 20; y < 166; y++ {
 		for x := 175; x < 300; x++ {
 			if (x-226)*(x-226)+(y-70)*(y-70) < 34*34 || (x > 170 && x < 285 && y > 75) {
@@ -172,8 +190,8 @@ func TestSubjectAwareNarrowSmartCropX_EdgeSmartCropFallsBackToCenter(t *testing.
 	if !ok {
 		t.Fatal("expected edge smartcrop recovery")
 	}
-	if x != 396 {
-		t.Fatalf("expected center recovery x=396, got x=%d", x)
+	if x < 650 {
+		t.Fatalf("expected recovery toward the right-side subject, got x=%d", x)
 	}
 }
 

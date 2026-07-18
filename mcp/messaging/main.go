@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.37
+version: 0.13.39
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -133,6 +133,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { prefix: /webhooks/ses-bounces, method: POST, no_auth: true }
+    - { prefix: /webhooks/ses-inbound, method: POST, no_auth: true }
+    - { prefix: /webhooks/twilio-inbound, method: POST, no_auth: true }
+    - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     - { name: send_message,           description: "Send a message. Channel is an explicit arg (email|sms|whatsapp). Email replies may include in_reply_to + references for threading." }
     - { name: send_message_template,  description: "Render a saved template + send." }
@@ -279,10 +283,10 @@ func (a *App) pollVerifications(ctx *sdk.AppCtx) error {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/webhooks/ses-bounces", Handler: a.handleBounceWebhook},
-		{Pattern: "/webhooks/ses-inbound", Handler: a.handleInboundWebhook},
-		{Pattern: "/webhooks/twilio-inbound", Handler: a.handleTwilioInboundWebhook},
-		{Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook},
+		{Method: http.MethodPost, Pattern: "/webhooks/ses-bounces", Handler: a.handleBounceWebhook, NoAuth: true},
+		{Method: http.MethodPost, Pattern: "/webhooks/ses-inbound", Handler: a.handleInboundWebhook, NoAuth: true},
+		{Method: http.MethodPost, Pattern: "/webhooks/twilio-inbound", Handler: a.handleTwilioInboundWebhook, NoAuth: true},
+		{Method: http.MethodPost, Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook, NoAuth: true},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
@@ -3940,7 +3944,8 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if strings.TrimSpace(pid) != "" {
 		callCtx = ctx.WithProject(pid)
 	}
-	_, callErr := callCtx.PlatformAPI().CallApp(winner.route.TargetApp, targetTool, payload)
+	var targetResult any
+	callErr := callCtx.PlatformAPI().CallAppResult(winner.route.TargetApp, targetTool, payload, &targetResult)
 	status := "ok"
 	errMsg := ""
 	if callErr != nil {

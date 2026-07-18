@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.4
+version: 0.1.5
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -23,7 +23,6 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
-    - platform.connections.manage
     - platform.oauth.start
     - platform.apps.call
   integrations:

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -15,6 +16,7 @@ import (
 
 const (
 	carrierCodecPCMU8  = "pcmu8"
+	carrierCodecL16_16 = "l16_16"
 	carrierCodecL16_24 = "l16_24"
 )
 
@@ -33,10 +35,12 @@ type carrierMediaFrame struct {
 	StreamID       string `json:"stream_id,omitempty"`
 	SequenceNumber any    `json:"sequenceNumber,omitempty"`
 	Start          *struct {
-		CallSID   string `json:"callSid,omitempty"`
-		CallID    string `json:"callId,omitempty"`
-		StreamSID string `json:"streamSid,omitempty"`
-		StreamID  string `json:"streamId,omitempty"`
+		CallSID       string `json:"callSid,omitempty"`
+		CallID        string `json:"callId,omitempty"`
+		CallUUID      string `json:"callUuid,omitempty"`
+		CallControlID string `json:"call_control_id,omitempty"`
+		StreamSID     string `json:"streamSid,omitempty"`
+		StreamID      string `json:"streamId,omitempty"`
 	} `json:"start,omitempty"`
 	Media *struct {
 		Payload string `json:"payload"`
@@ -68,9 +72,9 @@ func (a *App) handlePlivoMediaStream(w http.ResponseWriter, r *http.Request) {
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
 		Provider:      "plivo",
 		PathPrefix:    "/media/plivo/",
-		InputCodec:    carrierCodecL16_24,
-		OutputCodec:   carrierCodecL16_24,
-		OutboundShape: "plivo",
+		InputCodec:    carrierCodecL16_16,
+		OutputCodec:   carrierCodecL16_16,
+		OutboundShape: "plivo16",
 	})
 }
 
@@ -85,8 +89,27 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
-	if row.AudioBridgeURL == "" {
+	if err := a.authorizeCallRequest(r, row); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if row.CarrierSlug != cfg.Provider || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
+		return
+	}
+	claimed, err := a.db().claimMedia(callID)
+	if err != nil {
+		http.Error(w, "claim media", http.StatusInternalServerError)
+		return
+	}
+	if !claimed {
+		http.Error(w, "media bridge already active", http.StatusConflict)
+		return
+	}
+	defer a.db().releaseMedia(callID)
+	bridgeURL, err := a.mediaBridgeURL(row)
+	if err != nil {
+		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -96,34 +119,47 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 	defer carrier.Close()
-	defer a.finishMediaBridge(callID, "completed")
+	defer a.finishMediaBridge(callID, "media-disconnected")
 
-	coreURL, err := url.Parse(row.AudioBridgeURL)
+	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
-		globalCtx.Logger().Warn("parse audio bridge url", "provider", cfg.Provider, "err", err, "url", row.AudioBridgeURL)
+		globalCtx.Logger().Warn("parse audio bridge url", "provider", cfg.Provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
-		globalCtx.Logger().Warn("dial core audio bridge", "provider", cfg.Provider, "err", err, "url", coreURL.String())
+		globalCtx.Logger().Warn("dial core audio bridge", "provider", cfg.Provider, "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
 	defer core.Close()
 
 	globalCtx.Logger().Info("bridge up", "provider", cfg.Provider, "call", callID, "thread", row.ThreadID)
-	_ = a.db().updateStatus(callID, "in-progress", "")
+	if err := a.db().updateStatus(callID, "in-progress", ""); err != nil {
+		globalCtx.Logger().Warn("mark media in progress", "provider", cfg.Provider, "call", callID, "err", err)
+	}
+	_ = a.db().clearStateExpiry(callID)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	go func() {
+		<-ctx.Done()
+		_ = carrier.Close()
+		_ = core.Close()
+	}()
 
 	streamSidCh := make(chan string, 1)
+	inputResampler := carrierInputResampler(cfg.InputCodec)
+	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 
 	go func() {
 		defer cancel()
 		for {
 			data, op, err := wsutil.ReadClientData(carrier)
 			if err != nil {
+				return
+			}
+			if len(data) > maxCarrierFrameBytes {
 				return
 			}
 			if op != ws.OpText || len(data) == 0 {
@@ -135,6 +171,14 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			}
 			switch f.Event {
 			case "start":
+				if providerCallID := frameCallID(f); providerCallID != "" {
+					if row.CarrierSID != "" && row.CarrierSID != providerCallID {
+						return
+					}
+					if row.CarrierSID == "" {
+						_ = a.db().updateCarrierIdentity(callID, providerCallID, row.CarrierRequestID)
+					}
+				}
 				if sid := frameStreamID(f); sid != "" {
 					select {
 					case streamSidCh <- sid:
@@ -145,7 +189,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
 				}
-				pcm24, err := decodeCarrierPayload(f.Media.Payload, cfg.InputCodec)
+				pcm24, err := decodeCarrierPayload(f.Media.Payload, cfg.InputCodec, inputResampler)
 				if err != nil {
 					continue
 				}
@@ -177,10 +221,19 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		if err != nil {
 			return
 		}
+		if op == ws.OpText && realtimeInterruptControl(data) {
+			if clearFrame := buildCarrierClear(cfg.OutboundShape, streamSID); clearFrame != nil {
+				buf, _ := json.Marshal(clearFrame)
+				if err := wsutil.WriteServerText(carrier, buf); err != nil {
+					return
+				}
+			}
+			continue
+		}
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		payload, err := encodeCarrierPayload(data, cfg.OutputCodec)
+		payload, err := encodeCarrierPayload(data, cfg.OutputCodec, outputResampler)
 		if err != nil {
 			continue
 		}
@@ -203,8 +256,27 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
-	if row.AudioBridgeURL == "" {
+	if err := a.authorizeCallRequest(r, row); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if row.CarrierSlug != "vonage" || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
+		return
+	}
+	claimed, err := a.db().claimMedia(callID)
+	if err != nil {
+		http.Error(w, "claim media", http.StatusInternalServerError)
+		return
+	}
+	if !claimed {
+		http.Error(w, "media bridge already active", http.StatusConflict)
+		return
+	}
+	defer a.db().releaseMedia(callID)
+	bridgeURL, err := a.mediaBridgeURL(row)
+	if err != nil {
+		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -214,45 +286,55 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer vonage.Close()
-	defer a.finishMediaBridge(callID, "completed")
+	defer a.finishMediaBridge(callID, "media-disconnected")
 
-	coreURL, err := url.Parse(row.AudioBridgeURL)
+	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
-		globalCtx.Logger().Warn("parse audio bridge url", "provider", "vonage", "err", err, "url", row.AudioBridgeURL)
+		globalCtx.Logger().Warn("parse audio bridge url", "provider", "vonage", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
-		globalCtx.Logger().Warn("dial core audio bridge", "provider", "vonage", "err", err, "url", coreURL.String())
+		globalCtx.Logger().Warn("dial core audio bridge", "provider", "vonage", "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
 	defer core.Close()
 
 	globalCtx.Logger().Info("bridge up", "provider", "vonage", "call", callID, "thread", row.ThreadID)
 	_ = a.db().updateStatus(callID, "in-progress", "")
+	_ = a.db().clearStateExpiry(callID)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	go func() {
+		<-ctx.Done()
+		_ = vonage.Close()
+		_ = core.Close()
+	}()
 
 	go func() {
 		defer cancel()
+		inputResampler := newPCMResampler(16000, 24000)
 		for {
 			data, op, err := wsutil.ReadClientData(vonage)
 			if err != nil {
 				return
 			}
+			if len(data) > maxCarrierFrameBytes {
+				return
+			}
 			if op != ws.OpBinary || len(data) == 0 {
 				continue
 			}
-			pcm16 := bytesToPCM16(data)
-			pcm24 := upsample16to24(pcm16)
+			pcm24 := inputResampler.Process(bytesToPCM16(data))
 			if err := wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24)); err != nil {
 				return
 			}
 		}
 	}()
 
+	outputResampler := newPCMResampler(24000, 16000)
 	for {
 		select {
 		case <-ctx.Done():
@@ -266,8 +348,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
 		}
-		pcm24 := bytesToPCM16(data)
-		pcm16 := downsample24to16(pcm24)
+		pcm16 := outputResampler.Process(bytesToPCM16(data))
 		if err := writeVonageFrames(vonage, pcm16ToBytes(pcm16)); err != nil {
 			return
 		}
@@ -275,8 +356,22 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func callIDFromMediaPath(path, prefix string) string {
-	callID := strings.TrimPrefix(path, prefix)
-	return strings.TrimSuffix(callID, "/")
+	if !strings.HasPrefix(path, prefix) {
+		return ""
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, prefix), "/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return parts[0]
+}
+
+func mediaTokenFromPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 4 || parts[0] != "media" {
+		return ""
+	}
+	return parts[3]
 }
 
 func frameStreamID(f carrierMediaFrame) string {
@@ -295,14 +390,53 @@ func frameStreamID(f carrierMediaFrame) string {
 	return ""
 }
 
-func decodeCarrierPayload(payload, codec string) ([]byte, error) {
+func frameCallID(f carrierMediaFrame) string {
+	if f.Start == nil {
+		return ""
+	}
+	return firstNonEmpty(f.Start.CallSID, f.Start.CallID, f.Start.CallUUID, f.Start.CallControlID)
+}
+
+func carrierInputResampler(codec string) *pcmResampler {
+	switch codec {
+	case carrierCodecPCMU8:
+		return newPCMResampler(8000, 24000)
+	case carrierCodecL16_16:
+		return newPCMResampler(16000, 24000)
+	default:
+		return nil
+	}
+}
+
+func carrierOutputResampler(codec string) *pcmResampler {
+	switch codec {
+	case carrierCodecPCMU8:
+		return newPCMResampler(24000, 8000)
+	case carrierCodecL16_16:
+		return newPCMResampler(24000, 16000)
+	default:
+		return nil
+	}
+}
+
+func decodeCarrierPayload(payload, codec string, streaming ...*pcmResampler) ([]byte, error) {
 	raw, err := base64.StdEncoding.DecodeString(payload)
 	if err != nil {
 		return nil, err
 	}
 	switch codec {
 	case carrierCodecPCMU8:
-		return pcm16ToBytes(upsample8to24(ulawToPCM16(raw))), nil
+		pcm := ulawToPCM16(raw)
+		if len(streaming) > 0 && streaming[0] != nil {
+			return pcm16ToBytes(streaming[0].Process(pcm)), nil
+		}
+		return pcm16ToBytes(resamplePCM(pcm, 8000, 24000)), nil
+	case carrierCodecL16_16:
+		pcm := bytesToPCM16(raw)
+		if len(streaming) > 0 && streaming[0] != nil {
+			return pcm16ToBytes(streaming[0].Process(pcm)), nil
+		}
+		return pcm16ToBytes(resamplePCM(pcm, 16000, 24000)), nil
 	case carrierCodecL16_24:
 		return raw, nil
 	default:
@@ -310,12 +444,23 @@ func decodeCarrierPayload(payload, codec string) ([]byte, error) {
 	}
 }
 
-func encodeCarrierPayload(pcm24Bytes []byte, codec string) (string, error) {
+func encodeCarrierPayload(pcm24Bytes []byte, codec string, streaming ...*pcmResampler) (string, error) {
 	switch codec {
 	case carrierCodecPCMU8:
 		pcm24 := bytesToPCM16(pcm24Bytes)
-		raw := pcm16ToUlaw(downsample24to8(pcm24))
+		pcm8 := resamplePCM(pcm24, 24000, 8000)
+		if len(streaming) > 0 && streaming[0] != nil {
+			pcm8 = streaming[0].Process(pcm24)
+		}
+		raw := pcm16ToUlaw(pcm8)
 		return base64.StdEncoding.EncodeToString(raw), nil
+	case carrierCodecL16_16:
+		pcm24 := bytesToPCM16(pcm24Bytes)
+		pcm16 := resamplePCM(pcm24, 24000, 16000)
+		if len(streaming) > 0 && streaming[0] != nil {
+			pcm16 = streaming[0].Process(pcm24)
+		}
+		return base64.StdEncoding.EncodeToString(pcm16ToBytes(pcm16)), nil
 	case carrierCodecL16_24:
 		return base64.StdEncoding.EncodeToString(pcm24Bytes), nil
 	default:
@@ -325,12 +470,12 @@ func encodeCarrierPayload(pcm24Bytes []byte, codec string) (string, error) {
 
 func buildCarrierOutbound(shape, streamSID, payload string) any {
 	switch shape {
-	case "plivo":
+	case "plivo16":
 		return map[string]any{
 			"event": "playAudio",
 			"media": map[string]string{
 				"contentType": "audio/x-l16",
-				"sampleRate":  "24000",
+				"sampleRate":  "16000",
 				"payload":     payload,
 			},
 		}
@@ -352,46 +497,33 @@ func buildCarrierOutbound(shape, streamSID, payload string) any {
 	}
 }
 
+func buildCarrierClear(shape, streamSID string) any {
+	switch shape {
+	case "signalwire":
+		return map[string]string{"event": "clear", "streamSid": streamSID}
+	case "plivo16":
+		return map[string]string{"event": "clearAudio"}
+	case "telnyx":
+		return map[string]string{"event": "clear"}
+	default:
+		return nil
+	}
+}
+
 func (a *App) finishMediaBridge(callID, status string) {
 	if status == "" {
 		status = "completed"
 	}
-	_ = a.db().updateStatus(callID, status, "")
-	row, _ := a.db().findCall(callID)
-	if row != nil && row.ThreadID != "" && globalCtx != nil {
-		_ = a.killCallThread(globalCtx, row)
-	}
+	_ = a.db().updateStatus(callID, status, "media stream disconnected")
+	_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(20*time.Second))
 }
 
 func upsample16to24(pcm16 []int16) []int16 {
-	if len(pcm16) == 0 {
-		return nil
-	}
-	out := make([]int16, 0, len(pcm16)*3/2+2)
-	for i := 0; i < len(pcm16)-1; i += 2 {
-		a := pcm16[i]
-		b := pcm16[i+1]
-		out = append(out, a, int16((int(a)+int(b))/2), b)
-	}
-	if len(pcm16)%2 == 1 {
-		last := pcm16[len(pcm16)-1]
-		out = append(out, last, last)
-	}
-	return out
+	return resamplePCM(pcm16, 16000, 24000)
 }
 
 func downsample24to16(pcm24 []int16) []int16 {
-	if len(pcm24) == 0 {
-		return nil
-	}
-	out := make([]int16, 0, len(pcm24)*2/3+1)
-	for i := 0; i < len(pcm24); i += 3 {
-		out = append(out, pcm24[i])
-		if i+2 < len(pcm24) {
-			out = append(out, pcm24[i+2])
-		}
-	}
-	return out
+	return resamplePCM(pcm24, 24000, 16000)
 }
 
 func writeVonageFrames(conn net.Conn, data []byte) error {

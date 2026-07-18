@@ -1,17 +1,27 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampDuration,
+  DEFAULT_IMAGE_FORMAT,
+  formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
+  mergeHistoryPage,
   projectScopedStorageContentURL,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldSendVideoAspect,
+  ttsOutputFormats,
+  ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
+  test("defaults image generation to JPEG", () => {
+    expect(DEFAULT_IMAGE_FORMAT).toBe("jpeg");
+  });
+
   test("uses the selected model provider instead of an aggregate provider label", () => {
     expect(selectedModelProvider("venice-ai", "venice-ai:gpt-image-2", "openai-api,venice-ai"))
       .toBe("venice-ai");
@@ -43,10 +53,42 @@ describe("Media Panel logic", () => {
     expect(videoSourceRequired("text-to-video", "model")).toBe(false);
   });
 
+  test("only sends video aspect when live model metadata supports it", () => {
+    expect(shouldSendVideoAspect(["16:9", "9:16"], true)).toBe(true);
+    expect(shouldSendVideoAspect(undefined, true)).toBe(false);
+    expect(shouldSendVideoAspect(undefined, false)).toBe(true);
+  });
+
+  test("treats Deepgram Aura models as voices", () => {
+    expect(ttsProviderUsesSeparateVoice("deepgram")).toBe(false);
+    expect(ttsProviderUsesSeparateVoice("elevenlabs")).toBe(true);
+    expect(ttsProviderUsesSeparateVoice("fish-audio")).toBe(true);
+  });
+
+  test("exposes only provider-supported TTS output formats", () => {
+    expect(ttsOutputFormats("deepgram")).toEqual(["mp3", "wav", "opus", "flac", "aac"]);
+    expect(ttsOutputFormats("fish-audio")).toEqual(["mp3", "wav", "opus", "pcm"]);
+    expect(ttsOutputFormats("elevenlabs")).toEqual([]);
+  });
+
+  test("formats player time without invalid or shifting values", () => {
+    expect(formatMediaTime(Number.NaN)).toBe("0:00");
+    expect(formatMediaTime(0)).toBe("0:00");
+    expect(formatMediaTime(65.9)).toBe("1:05");
+    expect(formatMediaTime(3661)).toBe("1:01:01");
+  });
+
   test("rejects stale tab responses and preserves newer prompts", () => {
     expect(shouldCommitScopedResponse("image", "video")).toBe(false);
     expect(shouldClearSubmittedPrompt("image", "image", "old", "new")).toBe(false);
     expect(shouldClearSubmittedPrompt("image", "image", "same", "same")).toBe(true);
+  });
+
+  test("appends cursor pages without reordering or duplicating generations", () => {
+    const first = [{ id: 5 }, { id: 4 }, { id: 3 }];
+    const next = [{ id: 3 }, { id: 2 }, { id: 1 }];
+    expect(mergeHistoryPage(first, next, true).map((item) => item.id)).toEqual([5, 4, 3, 2, 1]);
+    expect(mergeHistoryPage(first, next, false).map((item) => item.id)).toEqual([3, 2, 1]);
   });
 
   test("only persists durable source references in drafts", () => {

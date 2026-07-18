@@ -23,11 +23,24 @@ interface UsageSource {
   feature_prefix?: string;
 }
 
+interface CatalogProduct {
+  id: number;
+  name: string;
+  slug?: string;
+  type?: string;
+  category?: string;
+  color?: string;
+}
+
 interface Plan {
   key: string;
   name: string;
   billing_mode: string;
   subscription_required: boolean;
+  catalog_product_id?: number;
+  catalog_product?: CatalogProduct;
+  catalog_price_id?: number;
+  catalog_discount_id?: number;
   features?: PlanFeature[];
   limits?: PlanLimit[];
   usage_sources?: UsageSource[];
@@ -64,6 +77,17 @@ interface CheckoutResponse {
   status: string;
   requires_payment: boolean;
   url?: string;
+  discount?: {
+    status: string;
+    discount_code?: string;
+    catalog_discount_id: number;
+  };
+  pricing?: {
+    currency: string;
+    subtotal_cents: number;
+    discount_cents: number;
+    total_cents: number;
+  };
 }
 
 interface UsageTotal {
@@ -85,6 +109,25 @@ interface AccessResult {
   usage: UsageTotal[];
 }
 
+interface PlanChangeResponse {
+  plan_change: {
+    id: string;
+    status: string;
+    change_kind: string;
+    target_plan_key: string;
+    proration?: {
+      currency?: string;
+      charge_cents?: number;
+      credit_cents?: number;
+    };
+    last_error?: string;
+  };
+  account?: Account;
+  status: string;
+  requires_payment: boolean;
+  url?: string;
+}
+
 const API = "/api/apps/saas";
 const CONTROL = "w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm text-text";
 
@@ -94,7 +137,10 @@ function tone(status: string): string {
     case "allowed":
       return "bg-green/15 text-green";
     case "provisioning":
+    case "applying":
       return "bg-accent/15 text-accent";
+    case "scheduled":
+    case "awaiting_payment":
     case "past_due":
     case "suspended":
       return "bg-warn/15 text-warn";
@@ -119,6 +165,10 @@ function compactNumber(n: number | undefined): string {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
 }
 
+function fmtMoney(cents: number, currency: string): string {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(cents / 100);
+}
+
 function featureOptions(plan: Plan | null, usage: UsageTotal[]): string[] {
   const out = new Set<string>();
   for (const f of plan?.features || []) out.add(f.feature_key);
@@ -127,23 +177,44 @@ function featureOptions(plan: Plan | null, usage: UsageTotal[]): string[] {
   return Array.from(out).sort();
 }
 
+const UNLINKED_PRODUCT = "unlinked";
+
+function productKey(plan: Plan | null | undefined): string {
+  return plan?.catalog_product_id ? String(plan.catalog_product_id) : UNLINKED_PRODUCT;
+}
+
+function productName(plan: Plan | null | undefined): string {
+  if (plan?.catalog_product?.name) return plan.catalog_product.name;
+  if (plan?.catalog_product_id) return `Product #${plan.catalog_product_id}`;
+  return "No Catalog product";
+}
+
 export default function SaaSPanel({ projectId }: NativePanelProps) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [usage, setUsage] = useState<UsageTotal[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
   const [busy, setBusy] = useState("");
   const [status, setStatus] = useState("Loading SaaS...");
   const [error, setError] = useState("");
   const [accessFeature, setAccessFeature] = useState("");
   const [accessResult, setAccessResult] = useState<AccessResult | null>(null);
   const [checkout, setCheckout] = useState<CheckoutResponse | null>(null);
+  const [planChange, setPlanChange] = useState<PlanChangeResponse | null>(null);
+  const [planChangeForm, setPlanChangeForm] = useState({
+    target_plan_key: "",
+    effective_at: "immediate",
+    proration_policy: "prorate",
+    discount_policy: "preserve",
+  });
   const [form, setForm] = useState({
     owner_email: "",
     customer_name: "",
     slug: "",
-    plan_key: "free",
+    plan_key: "",
+    discount_code: "",
     create_owner_user: true,
   });
 
@@ -180,9 +251,31 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     return text ? JSON.parse(text) as T : body.result as T;
   }, [projectId]);
 
+  const productOptions = useMemo(() => {
+    const products = new Map<string, { key: string; name: string }>();
+    for (const plan of plans) {
+      const key = productKey(plan);
+      if (!products.has(key)) products.set(key, { key, name: productName(plan) });
+    }
+    return Array.from(products.values()).sort((a, b) => {
+      if (a.key === UNLINKED_PRODUCT) return 1;
+      if (b.key === UNLINKED_PRODUCT) return -1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [plans]);
+
+  const planByKey = useMemo(() => new Map(plans.map((plan) => [plan.key, plan])), [plans]);
+
+  const visibleAccounts = useMemo(
+    () => productFilter
+      ? accounts.filter((account) => productKey(planByKey.get(account.plan_key)) === productFilter)
+      : accounts,
+    [accounts, planByKey, productFilter],
+  );
+
   const selected = useMemo(
-    () => accounts.find((a) => a.id === selectedId) || accounts[0] || null,
-    [accounts, selectedId],
+    () => visibleAccounts.find((a) => a.id === selectedId) || visibleAccounts[0] || null,
+    [visibleAccounts, selectedId],
   );
 
   const selectedPlan = useMemo(
@@ -195,20 +288,35 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     [plans, form.plan_key],
   );
 
+  const createProductKey = productKey(createPlan);
+
+  const createProductPlans = useMemo(
+    () => plans.filter((plan) => productKey(plan) === createProductKey),
+    [createProductKey, plans],
+  );
+
+  const compatiblePlans = useMemo(
+    () => plans.filter((p) => p.key !== selectedPlan?.key && Boolean(p.catalog_product_id) && p.catalog_product_id === selectedPlan?.catalog_product_id),
+    [plans, selectedPlan],
+  );
+
   const features = useMemo(() => featureOptions(selectedPlan, usage), [selectedPlan, usage]);
 
   const summary = useMemo(() => {
-    const active = accounts.filter((a) => a.status === "active").length;
-    const pastDue = accounts.filter((a) => a.status === "past_due").length;
+    const active = visibleAccounts.filter((a) => a.status === "active").length;
+    const pastDue = visibleAccounts.filter((a) => a.status === "past_due").length;
     const over = usage.filter((u) => u.over_limit).length;
     return { active, pastDue, over };
-  }, [accounts, usage]);
+  }, [usage, visibleAccounts]);
 
   const load = useCallback(async () => {
     try {
+      const accountParams: Record<string, string> = {};
+      if (statusFilter) accountParams.status = statusFilter;
+      if (productFilter) accountParams.catalog_product_id = productFilter === UNLINKED_PRODUCT ? "0" : productFilter;
       const [p, a] = await Promise.all([
         getJSON<{ plans: Plan[] }>("/plans"),
-        getJSON<{ accounts: Account[] }>("/accounts", statusFilter ? { status: statusFilter } : {}),
+        getJSON<{ accounts: Account[] }>("/accounts", accountParams),
       ]);
       const planRows = p.plans || [];
       const accountRows = a.accounts || [];
@@ -216,13 +324,14 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
       setAccounts(accountRows);
       if (!form.plan_key && planRows[0]) setForm((f) => ({ ...f, plan_key: planRows[0].key }));
       if (!selectedId && accountRows[0]) setSelectedId(accountRows[0].id);
-      setStatus(`${accountRows.length} account${accountRows.length === 1 ? "" : "s"}`);
+      const productCount = new Set(planRows.filter((plan) => plan.catalog_product_id).map(productKey)).size;
+      setStatus(`${productCount} product${productCount === 1 ? "" : "s"} · ${accountRows.length} account${accountRows.length === 1 ? "" : "s"}`);
       setError("");
     } catch (e) {
       setError((e as Error).message);
       setStatus("Load failed");
     }
-  }, [form.plan_key, getJSON, selectedId, statusFilter]);
+  }, [form.plan_key, getJSON, productFilter, selectedId, statusFilter]);
 
   const loadUsage = useCallback(async (account: Account | null) => {
     if (!account) {
@@ -253,6 +362,19 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   }, [accessFeature, features]);
 
   useEffect(() => {
+    setPlanChange(null);
+  }, [selected?.id]);
+
+  useEffect(() => {
+    setPlanChangeForm((current) => {
+      const target = compatiblePlans.some((p) => p.key === current.target_plan_key)
+        ? current.target_plan_key
+        : (compatiblePlans[0]?.key || "");
+      return target === current.target_plan_key ? current : { ...current, target_plan_key: target };
+    });
+  }, [compatiblePlans]);
+
+  useEffect(() => {
     if (!checkout?.checkout.id || !["processing", "awaiting_payment", "awaiting_payment_method"].includes(checkout.status)) return;
     const timer = window.setInterval(async () => {
       try {
@@ -267,6 +389,21 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     return () => window.clearInterval(timer);
   }, [callTool, checkout?.checkout.id, checkout?.status, load]);
 
+  useEffect(() => {
+    const id = planChange?.plan_change.id;
+    if (!id || !["pending", "scheduled", "awaiting_payment", "applying", "failed"].includes(planChange.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await callTool<PlanChangeResponse>("saas_plan_change_get", { change_id: id });
+        setPlanChange(next);
+        if (next.status === "applied") await load();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [callTool, load, planChange?.plan_change.id, planChange?.status]);
+
   const createAccount = useCallback(async () => {
     setBusy("create");
     setError("");
@@ -279,12 +416,13 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
         customer_name: form.customer_name.trim(),
         slug,
         plan_key: form.plan_key,
+        discount_code: form.discount_code.trim(),
         create_owner_user: form.create_owner_user,
         idempotency_key: `panel:${slug}`,
       });
       setCheckout(out);
       if (out.account?.id) setSelectedId(out.account.id);
-      setForm((f) => ({ ...f, slug: "" }));
+      setForm((f) => ({ ...f, slug: "", discount_code: "" }));
       setStatus(out.status);
       await load();
     } catch (e) {
@@ -332,6 +470,29 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     }
   }, [accessFeature, callTool, selected]);
 
+  const changePlan = useCallback(async () => {
+    if (!selected || !planChangeForm.target_plan_key) return;
+    setBusy(`plan:${selected.id}`);
+    setError("");
+    try {
+      const out = await callTool<PlanChangeResponse>("saas_account_change_plan", {
+        account_id: selected.id,
+        target_plan_key: planChangeForm.target_plan_key,
+        effective_at: planChangeForm.effective_at,
+        proration_policy: planChangeForm.effective_at === "next_cycle" ? "none" : planChangeForm.proration_policy,
+        discount_policy: planChangeForm.discount_policy,
+        idempotency_key: `panel:${selected.id}:${planChangeForm.target_plan_key}:${crypto.randomUUID()}`,
+      });
+      setPlanChange(out);
+      setStatus(`plan change ${out.status}`);
+      if (out.status === "applied") await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [callTool, load, planChangeForm, selected]);
+
   return (
     <div className="h-full min-h-0 bg-bg text-text grid grid-cols-[340px_minmax(0,1fr)]">
       <aside className="min-h-0 border-r border-border flex flex-col">
@@ -363,7 +524,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 placeholder="Acme Inc"
               />
             </Field>
-            <Field label="Slug">
+            <Field label="Slug" className="col-span-2">
               <input
                 value={form.slug}
                 onChange={(e) => setForm((f) => ({ ...f, slug: e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "-") }))}
@@ -371,14 +532,38 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 placeholder="acme"
               />
             </Field>
+            <Field label="Product">
+              <select
+                value={createProductKey}
+                onChange={(e) => {
+                  const nextPlan = plans.find((plan) => productKey(plan) === e.target.value);
+                  if (nextPlan) setForm((f) => ({ ...f, plan_key: nextPlan.key, discount_code: "" }));
+                }}
+                className={CONTROL}
+                disabled={productOptions.length === 0}
+              >
+                {productOptions.map((product) => (
+                  <option key={product.key} value={product.key}>{product.name}</option>
+                ))}
+              </select>
+            </Field>
             <Field label="Plan">
               <select
                 value={form.plan_key}
-                onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value }))}
+                onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value, discount_code: "" }))}
                 className={CONTROL}
               >
-                {plans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
+                {createProductPlans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
               </select>
+            </Field>
+            <Field label="Discount code" className="col-span-2">
+              <input
+                value={form.discount_code}
+                onChange={(e) => setForm((f) => ({ ...f, discount_code: e.target.value.toUpperCase().replace(/\s/g, "") }))}
+                className={`${CONTROL} font-mono`}
+                placeholder={createPlan?.catalog_discount_id ? "Automatic plan discount" : "PROMO"}
+                disabled={Boolean(createPlan?.catalog_discount_id)}
+              />
             </Field>
           </div>
           <label className="flex items-center gap-2 text-xs text-text-dim">
@@ -399,26 +584,48 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           )}
           <button
             type="button"
-            disabled={busy === "create"}
+            disabled={busy === "create" || !createPlan}
             onClick={createAccount}
             className="w-full px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
           >
             {busy === "create" ? "Starting..." : "Start Checkout"}
           </button>
           {checkout && (
-            <div className="border-t border-border pt-2 flex items-center gap-2">
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(checkout.status)}`}>{checkout.status}</span>
-              {checkout.url && (
-                <button type="button" onClick={() => window.open(checkout.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
-                  Continue
-                </button>
+            <div className="border-t border-border pt-2 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(checkout.status)}`}>{checkout.status}</span>
+                {checkout.discount && <span className="text-[11px] font-mono text-text-dim">{checkout.discount.discount_code || `discount #${checkout.discount.catalog_discount_id}`}</span>}
+                {checkout.url && (
+                  <button type="button" onClick={() => window.open(checkout.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
+                    Continue
+                  </button>
+                )}
+              </div>
+              {checkout.pricing && (
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <Metric label="Subtotal" value={fmtMoney(checkout.pricing.subtotal_cents, checkout.pricing.currency)} />
+                  <Metric label="Discount" value={`-${fmtMoney(checkout.pricing.discount_cents, checkout.pricing.currency)}`} />
+                  <Metric label="Total" value={fmtMoney(checkout.pricing.total_cents, checkout.pricing.currency)} />
+                </div>
               )}
             </div>
           )}
         </section>
 
-        <section className="p-3 border-b border-border">
+        <section className="p-3 border-b border-border grid grid-cols-2 gap-2">
           <select
+            aria-label="Filter accounts by product"
+            value={productFilter}
+            onChange={(e) => setProductFilter(e.target.value)}
+            className={`${CONTROL} text-xs`}
+          >
+            <option value="">all products</option>
+            {productOptions.map((product) => (
+              <option key={product.key} value={product.key}>{product.name}</option>
+            ))}
+          </select>
+          <select
+            aria-label="Filter accounts by status"
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             className={`${CONTROL} text-xs`}
@@ -433,9 +640,11 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
         </section>
 
         <div className="flex-1 min-h-0 overflow-auto">
-          {accounts.length === 0 ? (
+          {visibleAccounts.length === 0 ? (
             <div className="p-4 text-sm text-text-dim">No accounts match this view.</div>
-          ) : accounts.map((account) => (
+          ) : visibleAccounts.map((account) => {
+            const accountPlan = planByKey.get(account.plan_key);
+            return (
             <button
               key={account.id}
               type="button"
@@ -447,9 +656,12 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(account.status)}`}>{account.status}</span>
               </div>
               <div className="text-xs text-text-dim truncate mt-0.5">{account.owner_email}</div>
-              <div className="text-[11px] text-text-dim mt-1">{account.plan_key} · {fmtDate(account.created_at)}</div>
+              <div className="text-[11px] text-text-dim mt-1 truncate">
+                {productName(accountPlan)} / {accountPlan?.name || account.plan_key} · {fmtDate(account.created_at)}
+              </div>
             </button>
-          ))}
+            );
+          })}
         </div>
       </aside>
 
@@ -467,7 +679,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 </div>
                 <div className="text-sm text-text-dim truncate">{selected.owner_email}</div>
                 <div className="text-xs text-text-dim mt-1">
-                  customer #{selected.customer_id} · account {selected.id} · plan {selected.plan_key}
+                  {productName(selectedPlan)} / {selectedPlan?.name || selected.plan_key} · customer #{selected.customer_id} · account {selected.id}
                 </div>
               </div>
               <div className="flex items-center justify-end gap-2 flex-wrap">
@@ -486,9 +698,72 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             <section className="grid grid-cols-4 gap-3 p-4 border-b border-border">
               <Metric label="Active" value={String(summary.active)} />
               <Metric label="Past due" value={String(summary.pastDue)} />
-              <Metric label="Plans" value={String(plans.length)} />
+              <Metric label="Products / plans" value={`${productOptions.filter((product) => product.key !== UNLINKED_PRODUCT).length} / ${plans.length}`} />
               <Metric label="Over limit" value={String(summary.over)} tone={summary.over > 0 ? "warn" : "normal"} />
             </section>
+
+            {selected.subscription_id && (
+              <section className="p-4 border-b border-border grid grid-cols-[minmax(180px,1fr)_150px_150px_150px_auto] gap-2 items-end">
+                <Field label={`Change ${productName(selectedPlan)} plan`}>
+                  <select
+                    value={planChangeForm.target_plan_key}
+                    onChange={(e) => setPlanChangeForm((f) => ({ ...f, target_plan_key: e.target.value }))}
+                    className={CONTROL}
+                    disabled={compatiblePlans.length === 0}
+                  >
+                    {compatiblePlans.length === 0 && <option value="">No compatible plans</option>}
+                    {compatiblePlans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Effective">
+                  <select value={planChangeForm.effective_at} onChange={(e) => setPlanChangeForm((f) => ({ ...f, effective_at: e.target.value }))} className={CONTROL}>
+                    <option value="immediate">Immediately</option>
+                    <option value="next_cycle">Next cycle</option>
+                  </select>
+                </Field>
+                <Field label="Proration">
+                  <select
+                    value={planChangeForm.effective_at === "next_cycle" ? "none" : planChangeForm.proration_policy}
+                    onChange={(e) => setPlanChangeForm((f) => ({ ...f, proration_policy: e.target.value }))}
+                    className={CONTROL}
+                    disabled={planChangeForm.effective_at === "next_cycle"}
+                  >
+                    <option value="prorate">Prorate</option>
+                    <option value="charge_full">Charge full</option>
+                    <option value="none">No adjustment</option>
+                  </select>
+                </Field>
+                <Field label="Discount">
+                  <select value={planChangeForm.discount_policy} onChange={(e) => setPlanChangeForm((f) => ({ ...f, discount_policy: e.target.value }))} className={CONTROL}>
+                    <option value="preserve">Preserve</option>
+                    <option value="drop">Remove</option>
+                  </select>
+                </Field>
+                <button
+                  type="button"
+                  disabled={selected.status !== "active" || !planChangeForm.target_plan_key || busy === `plan:${selected.id}`}
+                  onClick={changePlan}
+                  className="px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
+                >
+                  {busy === `plan:${selected.id}` ? "Starting..." : "Change Plan"}
+                </button>
+                {planChange && (
+                  <div className="col-span-5 flex items-center gap-2 min-w-0 text-xs">
+                    <span className={`px-1.5 py-0.5 rounded font-medium ${tone(planChange.status)}`}>{planChange.status}</span>
+                    <span className="text-text-dim truncate">{planChange.plan_change.change_kind} to {planChange.plan_change.target_plan_key}</span>
+                    {planChange.plan_change.proration?.charge_cents ? (
+                      <span className="font-mono">{fmtMoney(planChange.plan_change.proration.charge_cents, planChange.plan_change.proration.currency || "USD")}</span>
+                    ) : null}
+                    {planChange.url && (
+                      <button type="button" onClick={() => window.open(planChange.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input hover:bg-bg-hover">
+                        Pay
+                      </button>
+                    )}
+                    {planChange.plan_change.last_error && <span className="text-red truncate">{planChange.plan_change.last_error}</span>}
+                  </div>
+                )}
+              </section>
+            )}
 
             <section className="p-4 border-b border-border grid grid-cols-[minmax(0,1fr)_240px_auto] gap-2 items-end">
               <Field label="Feature">

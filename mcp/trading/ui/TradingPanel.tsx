@@ -204,6 +204,10 @@ interface Portfolio {
   day_pnl_pct?: number;
   open_pnl?: number;
   open_pnl_pct?: number;
+  realized_pnl?: number;
+  fees_paid?: number;
+  total_pnl?: number;
+  total_pnl_pct?: number;
   buying_power?: number;
   watchlist?: string[];
 }
@@ -326,6 +330,21 @@ interface Strategy {
   version: number;
   created_at: string;
   updated_at: string;
+  assignment_status?: "assigned" | "unassigned";
+  assignments?: StrategyAssignment[];
+}
+interface StrategyAssignment {
+  id: number;
+  portfolio_id: number;
+  portfolio_name?: string;
+  strategy_version: number;
+  cadence: string;
+  status: string;
+  eligibility?: "eligible" | "waiting";
+  eligibility_reason?: string;
+  next_eligible_at?: string;
+  session_open_at?: string;
+  session_close_at?: string;
 }
 interface StrategyEvaluation {
   strategy_id: number;
@@ -1283,6 +1302,8 @@ function PortfoliosTab({ portfolios, selectedId, onSelect, api, onChanged, setBu
                   <Stat label="Cash" value={formatUSD(p.cash)} />
                   <Stat label="Day P&L" value={formatUSD(p.day_pnl)} sub={formatPct(p.day_pnl_pct)} colorClass={pnlClass(p.day_pnl)} />
                   <Stat label="Open P&L" value={formatUSD(p.open_pnl)} sub={formatPct(p.open_pnl_pct)} colorClass={pnlClass(p.open_pnl)} />
+                  <Stat label="Realized P&L" value={formatUSD(p.realized_pnl)} colorClass={pnlClass(p.realized_pnl)} />
+                  <Stat label="Total P&L" value={formatUSD(p.total_pnl)} sub={formatPct(p.total_pnl_pct)} colorClass={pnlClass(p.total_pnl)} />
                 </div>
                 <div className="flex gap-1 mt-2 flex-wrap items-center">
                   {p.allowed_classes.map((c) => (
@@ -1513,6 +1534,9 @@ function StatsCard({ portfolio }: { portfolio: Portfolio }) {
     { label: "Buying power", value: formatUSD(portfolio.buying_power) },
     { label: "Day P&L", value: formatUSD(portfolio.day_pnl), sub: formatPct(portfolio.day_pnl_pct), colorClass: pnlClass(portfolio.day_pnl) },
     { label: "Open P&L", value: formatUSD(portfolio.open_pnl), sub: formatPct(portfolio.open_pnl_pct), colorClass: pnlClass(portfolio.open_pnl) },
+    { label: "Realized P&L", value: formatUSD(portfolio.realized_pnl), colorClass: pnlClass(portfolio.realized_pnl) },
+    { label: "Total P&L", value: formatUSD(portfolio.total_pnl), sub: formatPct(portfolio.total_pnl_pct), colorClass: pnlClass(portfolio.total_pnl) },
+    { label: "Fees paid", value: formatUSD(portfolio.fees_paid) },
   ];
   return (
     <div className="grid gap-2 mb-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
@@ -2044,7 +2068,7 @@ function PositionsTab({ portfolio, api, setError }: {
         <table className="w-full text-xs border-collapse">
           <thead className="bg-bg-input text-text-dim">
             <tr>
-              {["Symbol","Class","Qty","Avg cost","Mark","Market value","Unrealized","Weight","1D"].map((h) => (
+              {["Symbol","Class","Qty","Avg cost","Mark","Market value","Unrealized","Realized","Weight","1D"].map((h) => (
                 <th key={h} className="px-3 py-2 text-left font-semibold uppercase tracking-wide">{h}</th>
               ))}
             </tr>
@@ -2069,6 +2093,7 @@ function PositionsTab({ portfolio, api, setError }: {
                   <td className={`px-3 py-2 ${pnlClass(p.unrealized_pnl)}`}>
                     {formatUSD(p.unrealized_pnl)} <span className="opacity-70 text-xs">({formatPct(p.unrealized_pnl_pct)})</span>
                   </td>
+                  <td className={`px-3 py-2 ${pnlClass(p.realized_pnl)}`}>{formatUSD(p.realized_pnl)}</td>
                   <td className="px-3 py-2">{formatPct(p.weight_pct, 1)}</td>
                   <td className="px-3 py-2"><Sparkline values={spark} up={sparkUp} /></td>
                 </tr>
@@ -2615,6 +2640,7 @@ function StrategiesTab({ portfolio, api, setError }: {
         control_mode: "strategy",
         cadence: strategy.definition?.cadence || "1d",
       });
+      await load();
       setError(null);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -2680,6 +2706,9 @@ function StrategiesTab({ portfolio, api, setError }: {
               >
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-sm truncate">{strategy.name}</span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded font-semibold ${strategy.assignment_status === "assigned" ? "bg-green/10 text-green" : "bg-bg-input text-text-dim"}`}>
+                    {strategy.assignment_status === "assigned" ? "assigned" : "unassigned"}
+                  </span>
                   <span className="ml-auto text-xs text-text-dim">v{strategy.version}</span>
                 </div>
                 <div className="mt-1 text-xs text-text-dim truncate">
@@ -2690,7 +2719,8 @@ function StrategiesTab({ portfolio, api, setError }: {
           </div>
         )}
         {selected && (
-          <div className="mt-3 flex flex-wrap gap-2">
+          <div className="mt-3">
+            <div className="flex flex-wrap gap-2">
             <button disabled={busy} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
               Evaluate
             </button>
@@ -2703,6 +2733,27 @@ function StrategiesTab({ portfolio, api, setError }: {
             <button disabled={busy} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Validate
             </button>
+            </div>
+            {(selected.assignments || []).length > 0 && (
+              <div className="mt-3 border border-border rounded overflow-hidden">
+                {(selected.assignments || []).map((assignment) => (
+                  <div key={assignment.id} className="px-3 py-2 text-xs border-t first:border-t-0 border-border bg-bg-card">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-text truncate">{assignment.portfolio_name || `Portfolio #${assignment.portfolio_id}`}</span>
+                      <span className={`ml-auto px-1.5 py-0.5 rounded font-semibold ${assignment.eligibility === "eligible" ? "bg-green/10 text-green" : "bg-amber/10 text-amber"}`}>
+                        {assignment.eligibility || "waiting"}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-text-dim">
+                      v{assignment.strategy_version} · {assignment.cadence} · {(assignment.eligibility_reason || "schedule pending").replace(/_/g, " ")}
+                    </div>
+                    {assignment.next_eligible_at && (
+                      <div className="mt-0.5 text-text-muted">Next eligible {new Date(assignment.next_eligible_at).toLocaleString()}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Section>

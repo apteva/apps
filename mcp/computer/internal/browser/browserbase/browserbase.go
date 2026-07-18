@@ -342,16 +342,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "screenshot":
 		return c.Screenshot()
 
-	case "navigate":
-		ctx, cancel := c.actionContext("navigate")
-		err := chromedp.Run(ctx, chromedp.Navigate(action.URL))
-		cancel()
-		if err != nil {
-			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
-				fmt.Fprintf(os.Stderr, "[BROWSERBASE] navigate load timeout recovered at %s\n", current)
-			} else {
-				return nil, fmt.Errorf("navigate: %w", err)
-			}
+	case "navigate", "back", "reload":
+		if err := navigation.Run(c.ctx, action.Type, action.URL, navigateActionTimeout); err != nil {
+			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
@@ -844,7 +837,7 @@ func actionTimeout(action string) time.Duration {
 		return scrollActionTimeout
 	case "wait":
 		return waitActionTimeout
-	case "navigate":
+	case "navigate", "back", "reload":
 		return navigateActionTimeout
 	case "upload_file":
 		return 30 * time.Second

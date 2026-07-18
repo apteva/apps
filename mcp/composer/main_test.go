@@ -9,8 +9,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -447,6 +450,68 @@ func TestBuildLocalFFmpegArgs_TextOverlay(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "fontsize=40") {
 		t.Errorf("font_size should plumb through: %s", cmd)
+	}
+	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+		t.Errorf("text overlay should use the bundled font token: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_RichTextIgnoresUnavailableFontFamily(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"overlay","clips":[{"asset":{"type":"text","text":"Remote-safe","font":{"family":"Courier New","size":42}},"start":0,"length":2}]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "font='Courier New'") {
+		t.Fatalf("font family must not require host Fontconfig: %s", cmd)
+	}
+	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+		t.Fatalf("rich text should use the bundled font token: %s", cmd)
+	}
+	materialized := strings.Join(materializeComposerFontArgs(args, "./"+composerFontFilename), " ")
+	if strings.Contains(materialized, composerFontToken) || !strings.Contains(materialized, "fontfile='./"+composerFontFilename+"'") {
+		t.Fatalf("font token was not materialized: %s", materialized)
+	}
+}
+
+func TestRenderFontEndpointServesBundledTTF(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/render-font", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handleRenderFont(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "font/ttf" {
+		t.Fatalf("status=%d content-type=%q", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	body := rec.Body.Bytes()
+	if len(body) < 4 || body[0] != 0 || body[1] != 1 || body[2] != 0 || body[3] != 0 {
+		t.Fatalf("response is not a TrueType font: len=%d prefix=%v", len(body), body[:min(4, len(body))])
+	}
+}
+
+func TestBundledFontRendersWithFFmpeg(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	dir := t.TempDir()
+	fontPath, err := writeComposerFont(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := materializeComposerFontArgs([]string{buildDrawText(&TextOver{
+		Body: "Remote-safe text", FontSize: 32, Color: "white", Position: "center",
+	}, 320, 180)}, fontPath)[0]
+	cmd := exec.Command(ffmpeg,
+		"-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.1",
+		"-vf", filter, "-frames:v", "1", "-f", "null", "-",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg rejected bundled font filter: %v\n%s\nfilter=%s", err, output, filter)
 	}
 }
 
@@ -1237,6 +1302,100 @@ printf '6.75\n'
 	}
 }
 
+func TestAsyncRenderCreatesDurableQueuedRow(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-live")
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"uid":"hero","asset":{"type":"image","src":"https://example.test/hero.jpg"},"start":0,"length":5}]}]}}`
+	output := `{"format":"mp4","resolution":"hd","aspect":"16:9","fps":30}`
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,?)`,
+		"project-live", "Live card test", edit, output, 5,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+
+	got, err := (&App{}).toolCompositionRender(ctx, map[string]any{"id": compositionID, "wait": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := got.(map[string]any)
+	renderID, _ := row["render_id"].(int64)
+	if renderID == 0 || row["status"] != "queued" {
+		t.Fatalf("unexpected result: %#v", row)
+	}
+
+	var status, phase, editSnapshot, outputSnapshot string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status,phase,edit_snapshot,output_snapshot FROM renders WHERE id=?`, renderID,
+	).Scan(&status, &phase, &editSnapshot, &outputSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || phase != "queued" || editSnapshot != edit || outputSnapshot != output {
+		t.Fatalf("durable row mismatch: status=%s phase=%s edit=%q output=%q", status, phase, editSnapshot, outputSnapshot)
+	}
+}
+
+func TestCompositionAndRenderCardDataAreProjectScoped(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-card")
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"uid":"hero","asset":{"type":"image","src":"storage:1"},"start":0,"length":5,"ai":{"media_kind":"image","prompt":"hero","status":"ready","storage_id":1}}]},{"type":"audio","clips":[{"uid":"pause","asset":{"type":"silence","src":""},"start":1,"length":2}]}]}}`
+	output := `{"format":"mp4","resolution":"hd","aspect":"16:9","fps":30}`
+	res, err := ctx.AppDB().Exec(`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,?)`, "project-card", "Card test", edit, output, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+	renderID, err := createRenderRow(ctx, compositionID, "project-card", "auto", edit, output, "queued", "queued")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	composition, err := compositionCardData(ctx, compositionID, "project-card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := composition["counts"].(map[string]int)
+	if counts["visual"] != 1 || counts["silence"] != 1 || counts["ai"] != 1 {
+		t.Fatalf("bad counts: %#v", counts)
+	}
+	if _, err := compositionCardData(ctx, compositionID, "other-project"); err == nil {
+		t.Fatal("cross-project composition lookup succeeded")
+	}
+	render, err := renderCardData(ctx, renderID, "project-card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if render["composition_name"] != "Card test" || render["status"] != "queued" {
+		t.Fatalf("bad render card: %#v", render)
+	}
+	if _, err := renderCardData(ctx, renderID, "other-project"); err == nil {
+		t.Fatal("cross-project render lookup succeeded")
+	}
+}
+
+func TestRecoverInterruptedComposerRenders(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-recovery")
+	res, err := ctx.AppDB().Exec(`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,0)`, "project-recovery", "Recovery", `{"timeline":{"tracks":[]}}`, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+	renderID, err := createRenderRow(ctx, compositionID, "project-recovery", "auto", `{}`, `{}`, "rendering", "uploading")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := recoverInterruptedComposerRenders(ctx.AppDB()); err != nil || n != 1 {
+		t.Fatalf("recover = %d, %v", n, err)
+	}
+	var status, phase string
+	if err := ctx.AppDB().QueryRow(`SELECT status,phase FROM renders WHERE id=?`, renderID).Scan(&status, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || phase != "queued" {
+		t.Fatalf("status=%s phase=%s", status, phase)
+	}
+}
+
 func TestStorageLocalPathForKey_FindsSiblingStorageBlob(t *testing.T) {
 	root := t.TempDir()
 	appData := filepath.Join(root, "apps", "composer", "data", "60")
@@ -1892,23 +2051,42 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"token-redacted",
 		"composition.mp4",
 		"video/mp4",
+		"https://agents.example.com/api/apps/composer/render-font?project_id=project-1",
 	)
 	for _, want := range []string{
+		`export STORAGE_BASE="https://agents.example.com/api/apps/callback/apps/storage/proxy"`,
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID",
 		"composer-render",
+		"Authorization: Bearer token-redacted",
+		"-o ./composer-go-mono.ttf",
+		"/api/apps/composer/render-font?project_id=project-1",
 		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
+		"STORAGE_INIT_FAILED code=$INIT_CODE",
+		"STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("remote script missing %q\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, `export STORAGE_BASE="https://agents.example.com/api/apps/storage"`) {
+		t.Fatal("remote script uses the direct cross-install Storage route")
 	}
 	oneShot := "$STORAGE_BASE/files?project_id=$PROJECT_ID"
 	if first := strings.Index(script, "$STORAGE_BASE/files/init?project_id=$PROJECT_ID"); first < 0 {
 		t.Fatalf("missing direct upload init")
 	} else if last := strings.LastIndex(script, oneShot); last < first {
 		t.Fatalf("legacy one-shot upload should only appear after upload ladder")
+	}
+}
+
+func TestRemoteExecFailurePreservesRemoteOutput(t *testing.T) {
+	err := remoteExecFailure(errors.New("remote exit_code=22"), "curl: HTTP 403\nstorage upload rejected")
+	for _, want := range []string{"remote exit_code=22", "HTTP 403", "storage upload rejected"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
 	}
 }

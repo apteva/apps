@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.35
+version: 0.4.39
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -189,6 +189,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// write through one queue. WAL still gives concurrent reads.
 	ctx.AppDB().SetMaxOpenConns(1)
 	globalCtx = ctx
+	if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
+		return fmt.Errorf("rebuild realized P&L: %w", err)
+	}
 
 	// Engine bootstrap — pricing provider, then the shared engine
 	// pointer the workers read.
@@ -555,6 +558,8 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
+			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+			"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 			"watchlist": snap.Watchlist, "buying_power": snap.BuyingPower,
 		})
 	}

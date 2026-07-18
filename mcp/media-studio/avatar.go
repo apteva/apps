@@ -578,7 +578,7 @@ func listAudioVoicesForAllProviders(ctx *sdk.AppCtx) ([]voiceEntry, []string, ma
 	bounds := boundIntegrationsFor(ctx, "audio_provider")
 	supported := make([]*sdk.BoundIntegration, 0, len(bounds))
 	for _, bound := range bounds {
-		if bound != nil && audioProviderSupports(bound.AppSlug, "audio.tts") {
+		if bound != nil && audioProviderSupports(bound.AppSlug, "voice.create") {
 			supported = append(supported, bound)
 		}
 	}
@@ -719,6 +719,9 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 			})
 		}
 		return out, nil
+	case "deepgram":
+		// Aura voices are model IDs and are exposed through media_models.
+		return []voiceEntry{}, nil
 	case "tavus":
 		// Voice is part of the Tavus replica — no separate voice list.
 		return []voiceEntry{}, nil

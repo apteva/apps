@@ -118,8 +118,9 @@ Three flavours. Pick the right one.
 - **Content URL** (`/api/apps/storage/files/<id>/content`) — raw
   bytes, dashboard-cookie auth. Good for chat attachments and
   in-dashboard previews. Doesn't work for external recipients.
-- **Signed URL** (from `files_get_url`) — same bytes, HMAC-signed
-  query, expires after the TTL. Hand to external recipients.
+- **Signed URL** (from `files_get_url`, under
+  `/api/apps/storage/public/files/<id>/content`) — same bytes,
+  HMAC-signed query, expires after the TTL. Hand to external recipients.
 - **Dashboard URL** (`/storage/files/<id>`) — metadata page. Use
   when the recipient is an apteva user and you want them to see
   the file in context.

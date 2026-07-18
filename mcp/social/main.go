@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -27,6 +28,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,7 +48,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.64
+version: 0.14.78
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -101,6 +105,7 @@ provides:
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry. Pass top-level body or per-target body values." }
     - { name: post_list,                  description: "List recent posts." }
     - { name: post_retry,                 description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post." }
+    - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
     - { name: inbox_get,                  description: "Fetch one inbox item, optionally with the surrounding thread." }
     - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
@@ -118,6 +123,32 @@ provides:
       label: Social
       icon: megaphone
       entry: /ui/SocialPanel.mjs
+  ui_components:
+    - name: calendar-card
+      entry: /ui/SocialCalendarCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          profile_id: { type: integer }
+          social_account_id: { type: integer }
+          view: { type: string, enum: [week, month] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft] }
+          anchor_date: { type: string }
+      preview_props:
+        preview: true
+        view: week
+    - name: post-card
+      entry: /ui/SocialPostCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [post_id]
+        properties:
+          post_id: { type: integer }
+      preview_props:
+        preview: true
+        post_id: 1
 runtime:
   kind: source
   source:
@@ -769,6 +800,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPostRetry,
 		},
 		{
+			Name:        "post_publish_scheduled",
+			Description: "Internal Jobs callback. Publishes one scheduled post and returns status=published only after every downstream target succeeds; failures remain retryable for Jobs. Args: post_id.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id": map[string]any{"type": "integer"},
+			}, []string{"post_id"}),
+			Handler: a.toolPostPublishScheduled,
+		},
+		{
 			Name:        "post_reschedule",
 			Description: "Change a scheduled post's run time. Cancels the existing jobs row and creates a fresh one — only valid while status='scheduled' (already-published or in-flight posts are immutable). Args: post_id, schedule_at (RFC3339 or datetime-local).",
 			InputSchema: schemaObject(map[string]any{
@@ -789,8 +828,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_metrics",
 			Description: "Fetch fresh per-target performance metrics for a post by fanning out to each platform's analytics tool. Returns a per-target array of {status: ok|unsupported|skipped|failed, metrics?: {views, likes, comments, shares, raw}, reason?, error?}. " +
-				"Wired today: Twitter, YouTube, TikTok. Other platforms return status=unsupported until their analytics tools are wired. " +
-				"Direct calls — no caching, no DB writes. Be mindful of upstream rate limits when looping over many posts. Args: post_id.",
+				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn through Zernio. " +
+				"Fresh normalized snapshots are stored for history. Be mindful of upstream rate limits when looping over many posts. Args: post_id.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
 			}, []string{"post_id"}),
@@ -799,11 +838,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "account_metrics",
 			Description: "Fetch account-level totals (followers, total likes/videos where available) for one connected social account. " +
-				"Wired today: X/Twitter (followers, following, post count), YouTube (subscriberCount, videoCount), TikTok (follower_count, following_count, likes_count, video_count), Facebook and Instagram where their insights APIs expose compatible metrics. " +
-				"Args: social_account_id, period? (reserved for time-windowed metrics; ignored today).",
+				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn and other Zernio-backed platforms. " +
+				"Returns normalized totals and stored history for period (default 30d, maximum 730d). Raw provider JSON is omitted by default; set include_raw=true only for explicit debugging or provider-specific detail. " +
+				"Args: social_account_id, period?, include_raw?.",
 			InputSchema: schemaObject(map[string]any{
 				"social_account_id": map[string]any{"type": "integer"},
-				"period":            map[string]any{"type": "string", "description": "Optional time window like \"7d\" or \"30d\". Reserved for future use; ignored today."},
+				"period":            map[string]any{"type": "string", "description": "Stored history window to return, formatted as Nd (for example 7d, 30d, or 365d). Defaults to 30d; maximum 730d."},
+				"include_raw":       map[string]any{"type": "boolean", "description": "Include the sanitized raw provider response for explicit debugging. Defaults to false."},
 			}, []string{"social_account_id"}),
 			Handler: a.toolAccountMetrics,
 		},
@@ -1048,7 +1089,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
 				 VALUES (?, ?, ?, ?, 'ready', ?, ?)`,
 				pid, def.Platform, def.IntegrationSlug, existingConnID,
-				time.Now().UTC().Add(10*time.Minute), profileID,
+				pendingExpiry(time.Now().UTC().Add(10*time.Minute)), profileID,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("create pending account (reuse path): %w", err)
@@ -1084,7 +1125,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id)
 		 VALUES (?, ?, ?, 'pending_oauth', ?, ?)`,
-		pid, def.Platform, def.IntegrationSlug, now.Add(10*time.Minute), profileID,
+		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create pending account: %w", err)
@@ -1279,7 +1320,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	defer tx.Rollback()
 	claim, err := tx.Exec(
 		`UPDATE pending_accounts SET status='finalizing'
-		  WHERE id=? AND project_id=? AND status='ready' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+		  WHERE id=? AND project_id=? AND status='ready'`,
 		pendingID, pid,
 	)
 	if err != nil {
@@ -3241,11 +3282,6 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if err != nil {
 		return "", "", err
 	}
-	if thumbnail != nil {
-		if err := validateYouTubeThumbnail(*thumbnail); err != nil {
-			return "", "", err
-		}
-	}
 
 	// Step 1: init the upload session.
 	//
@@ -3890,7 +3926,11 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 	return out, nil
 }
 
-const youtubeThumbnailMaxBytes int64 = 2 * 1024 * 1024
+const (
+	youtubeThumbnailMaxBytes       int64 = 2 * 1024 * 1024
+	youtubeThumbnailSourceMaxBytes int64 = 10 * 1024 * 1024
+	youtubeThumbnailMaxPixels            = 40_000_000
+)
 
 func thumbnailStorageID(opts map[string]any) int64 {
 	if opts == nil {
@@ -3932,19 +3972,48 @@ func (a *App) resolveThumbnailOption(ctx *sdk.AppCtx, opts map[string]any, defau
 	return &items[0], nil
 }
 
-func validateYouTubeThumbnail(m mediaItem) error {
-	if m.Bytes > youtubeThumbnailMaxBytes {
-		return fmt.Errorf("youtube thumbnail too large: %d bytes (max 2 MB)", m.Bytes)
-	}
-	switch m.Mime {
+func validateYouTubeThumbnailMime(mime string) error {
+	switch mime {
 	case "", "image/jpeg", "image/jpg", "image/png", "application/octet-stream":
 		return nil
 	default:
-		return fmt.Errorf("youtube thumbnail must be JPEG or PNG, got %q", m.Mime)
+		return fmt.Errorf("youtube thumbnail must be JPEG or PNG, got %q", mime)
 	}
 }
 
-func fetchBinaryEnvelope(url, mime string, limit int64) (map[string]any, error) {
+func prepareYouTubeThumbnail(body []byte, mime string) ([]byte, string, error) {
+	if err := validateYouTubeThumbnailMime(mime); err != nil {
+		return nil, "", err
+	}
+	if int64(len(body)) <= youtubeThumbnailMaxBytes {
+		if mime == "" {
+			mime = "image/jpeg"
+		}
+		return body, mime, nil
+	}
+
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("decode oversized youtube thumbnail: %w", err)
+	}
+	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > youtubeThumbnailMaxPixels {
+		return nil, "", fmt.Errorf("youtube thumbnail dimensions are too large: %dx%d", config.Width, config.Height)
+	}
+	img, _, err := image.Decode(bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("decode oversized youtube thumbnail: %w", err)
+	}
+	var optimized bytes.Buffer
+	if err := jpeg.Encode(&optimized, img, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, "", fmt.Errorf("optimize youtube thumbnail: %w", err)
+	}
+	if int64(optimized.Len()) > youtubeThumbnailMaxBytes {
+		return nil, "", fmt.Errorf("youtube thumbnail remains too large after optimization: %d bytes (max 2 MB)", optimized.Len())
+	}
+	return optimized.Bytes(), "image/jpeg", nil
+}
+
+func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -3957,15 +4026,16 @@ func fetchBinaryEnvelope(url, mime string, limit int64) (map[string]any, error) 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch thumbnail: storage returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, youtubeThumbnailSourceMaxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("thumbnail exceeds %d bytes", limit)
+	if int64(len(body)) > youtubeThumbnailSourceMaxBytes {
+		return nil, fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
 	}
-	if mime == "" {
-		mime = "image/jpeg"
+	body, mime, err = prepareYouTubeThumbnail(body, mime)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"_binary":  true,
@@ -3981,8 +4051,11 @@ func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64,
 	if platformPostID == "" {
 		return errors.New("platform post id required to set thumbnail")
 	}
-	if err := validateYouTubeThumbnail(thumb); err != nil {
+	if err := validateYouTubeThumbnailMime(thumb.Mime); err != nil {
 		return err
+	}
+	if thumb.Bytes > youtubeThumbnailSourceMaxBytes {
+		return fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
 	}
 	binaryField := def.ThumbnailBinaryField
 	if binaryField == "" {
@@ -3992,7 +4065,7 @@ func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64,
 	if idField == "" {
 		idField = "videoId"
 	}
-	envelope, err := fetchBinaryEnvelope(thumb.URL, thumb.Mime, youtubeThumbnailMaxBytes)
+	envelope, err := fetchYouTubeThumbnailEnvelope(thumb.URL, thumb.Mime)
 	if err != nil {
 		return err
 	}
@@ -4053,9 +4126,8 @@ func upstreamError(out *sdk.ExecuteResult) error {
 	return fmt.Errorf("upstream %d: %s", out.Status, body)
 }
 
-// scheduleJob hands off to the jobs app: register an event-style job
-// that POSTs back into /api/apps/social/jobs/publish_post when its
-// scheduled time arrives. Returns the job id so the caller can
+// scheduleJob hands off to the jobs app through its brokered app_tool
+// target. Returns the job id so the caller can
 // persist it on the post row — post_reschedule / post_delete need
 // it to cancel the right job later.
 func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int64, error) {
@@ -4079,11 +4151,10 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 			"run_at": rfc3339,
 		},
 		"target": map[string]any{
-			"kind":   "http",
-			"app":    "social",
-			"path":   "/jobs/publish_post",
-			"method": "POST",
-			"body":   map[string]any{"post_id": postID},
+			"kind":  "app_tool",
+			"app":   "social",
+			"tool":  "post_publish_scheduled",
+			"input": map[string]any{"post_id": postID},
 		},
 		"idempotency_key": fmt.Sprintf("social.post.%d", postID),
 		"max_retries":     3,
@@ -4158,12 +4229,33 @@ func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 // ─── post_list ────────────────────────────────────────────────────
 
 func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.listPosts(ctx, args, 200)
+}
+
+// listPosts backs both the MCP tool and the panel HTTP route. The MCP surface
+// keeps its established 200-row ceiling; the panel can request a bounded
+// calendar window with a larger cap without changing the agent-facing schema.
+func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any, error) {
 	pid := projectScope(ctx, args)
 	limit := intArg(args, "limit", 50)
-	if limit > 200 {
-		limit = 200
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxLimit {
+		limit = maxLimit
 	}
 	statusFilter, _ := args["status"].(string)
+	from, fromErr := postListTimeBound(args, "from")
+	if fromErr != nil {
+		return mcpError(fromErr.Error()), nil
+	}
+	to, toErr := postListTimeBound(args, "to")
+	if toErr != nil {
+		return mcpError(toErr.Error()), nil
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		return mcpError("from must be before to"), nil
+	}
 	profileID := resolveProfileArg(ctx, pid, args)
 	if profileID < 0 {
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
@@ -4172,6 +4264,11 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
+	effectiveTime := `CASE
+		WHEN status IN ('published','partial') AND COALESCE(published_at,'') != '' THEN published_at
+		WHEN COALESCE(schedule_at,'') != '' THEN schedule_at
+		ELSE created_at
+	END`
 	if statusFilter != "" {
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
@@ -4179,6 +4276,14 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if profileID > 0 {
 		q += " AND profile_id=?"
 		qArgs = append(qArgs, profileID)
+	}
+	if from != nil {
+		q += " AND datetime(" + effectiveTime + ") >= datetime(?)"
+		qArgs = append(qArgs, from.UTC().Format(time.RFC3339))
+	}
+	if to != nil {
+		q += " AND datetime(" + effectiveTime + ") < datetime(?)"
+		qArgs = append(qArgs, to.UTC().Format(time.RFC3339))
 	}
 	q += " ORDER BY id DESC LIMIT ?"
 	qArgs = append(qArgs, limit)
@@ -4240,6 +4345,51 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		})
 	}
 	return map[string]any{"posts": out}, nil
+}
+
+func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map[string]any, error) {
+	var (
+		id, profileID                                                             int64
+		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt string
+	)
+	err := ctx.AppDB().QueryRow(
+		`SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
+		        status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
+		   FROM posts WHERE id=? AND project_id=?`,
+		postID, projectID,
+	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &profileID)
+	if err != nil {
+		return nil, err
+	}
+	var mediaIDs []int64
+	_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
+	var externalURLs []string
+	_ = json.Unmarshal([]byte(externalJSON), &externalURLs)
+	return map[string]any{
+		"id":                  id,
+		"body":                body,
+		"media_storage_ids":   mediaIDs,
+		"external_media_urls": externalURLs,
+		"profile_id":          profileID,
+		"schedule_at":         scheduleAt,
+		"status":              status,
+		"created_at":          createdAt,
+		"published_at":        publishedAt,
+		"targets":             a.loadTargets(ctx, id),
+	}, nil
+}
+
+func postListTimeBound(args map[string]any, name string) (*time.Time, error) {
+	raw, _ := args[name].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: expected RFC3339 timestamp", name)
+	}
+	return &parsed, nil
 }
 
 func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
@@ -4461,10 +4611,9 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── metrics ──────────────────────────────────────────────────────
 //
 // post_metrics(post_id) and account_metrics(social_account_id) fan out
-// to per-platform analytics tools and return fresh numbers. No DB
-// writes, no caching — every call hits the upstream. Suitable for
-// agent-driven one-off queries; agents looping through 100 posts will
-// burn rate limits (mitigation: add a metrics cache later with a TTL).
+// to per-platform analytics tools, persist normalized points, and return
+// fresh numbers plus bounded stored history. Every refresh still hits the
+// upstream, so callers should avoid tight loops across many accounts.
 //
 // Per-target outcome envelope mirrors post_delete's vocabulary:
 //   ok          — upstream returned numbers; metrics populated
@@ -4507,6 +4656,9 @@ type metricsTarget struct {
 	TargetID, SocialAccountID, ConnID int64
 	Platform, ExtPostID, ExtURL       string
 	PageCreds                         string
+	ProviderSlug                      string
+	ProviderAccountID                 string
+	ProviderPostID                    string
 }
 
 // getPostMetrics dispatches to the per-platform fetcher for one
@@ -4520,10 +4672,13 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		PlatformPostID:  target.ExtPostID,
 		PlatformURL:     target.ExtURL,
 	}
-	if target.ExtPostID == "" {
+	if target.ExtPostID == "" && target.ProviderPostID == "" {
 		out.Status = "skipped"
-		out.Reason = "target was never published — no platform_post_id"
+		out.Reason = "target was never published — no platform or provider post id"
 		return out
+	}
+	if target.ProviderSlug != "" && target.ProviderSlug != "native" {
+		return a.getProviderPostMetrics(ctx, out, target)
 	}
 	switch target.Platform {
 	case "twitter":
@@ -4542,6 +4697,17 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		// that don't resolve. Surface as unsupported.
 		out.Status = "unsupported"
 		out.Reason = "no analytics tool wired for this platform yet"
+		return out
+	}
+}
+
+func (a *App) getProviderPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, target metricsTarget) targetMetricsOutcome {
+	switch target.ProviderSlug {
+	case zernioProviderSlug:
+		return a.getZernioPostMetrics(ctx, out, target)
+	default:
+		out.Status = "unsupported"
+		out.Reason = "analytics not wired for provider " + target.ProviderSlug
 		return out
 	}
 }
@@ -4912,8 +5078,16 @@ type accountMetricsResult struct {
 	Impressions     int64           `json:"impressions,omitempty"`
 	Engagements     int64           `json:"engagements,omitempty"`
 	Views           int64           `json:"views,omitempty"`
+	Likes           int64           `json:"likes,omitempty"`
+	Comments        int64           `json:"comments,omitempty"`
+	Shares          int64           `json:"shares,omitempty"`
+	Saves           int64           `json:"saves,omitempty"`
+	Sends           int64           `json:"sends,omitempty"`
+	Clicks          int64           `json:"clicks,omitempty"`
+	EngagementRate  float64         `json:"engagement_rate,omitempty"`
 	Insights        insightSeries   `json:"insights,omitempty"`
 	HistorySource   string          `json:"history_source,omitempty"`
+	UpdatedAt       string          `json:"updated_at,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
 }
 
@@ -4947,8 +5121,8 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
-	if providerSlug == zernioProviderSlug {
-		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID)
+	if providerSlug != "" && providerSlug != "native" {
+		return a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform)
 	}
 	switch platform {
 	case "twitter":
@@ -4964,6 +5138,17 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 	default:
 		out.Status = "unsupported"
 		out.Reason = "account-level metrics not wired for this platform yet"
+		return out
+	}
+}
+
+func (a *App) getProviderAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerSlug, providerAccountID, platform string) accountMetricsResult {
+	switch providerSlug {
+	case zernioProviderSlug:
+		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID, platform)
+	default:
+		out.Status = "unsupported"
+		out.Reason = "analytics not wired for provider " + providerSlug
 		return out
 	}
 }
@@ -5387,12 +5572,51 @@ func mergeInsightSeries(dst, src insightSeries) {
 
 const analyticsSnapshotMinInterval = 4 * time.Hour
 
+const (
+	defaultAccountMetricsHistoryDays = 30
+	maxAccountMetricsHistoryDays     = 730
+)
+
 func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error {
-	pid := projectScope(app)
-	if pid == "" {
-		app.Logger().Info("analytics_collector: no project scope; skipping")
-		return nil
+	projects, err := analyticsProjectScopes(app)
+	if err != nil {
+		return err
 	}
+	for _, pid := range projects {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err := a.collectProjectAccountMetrics(ctx, app, pid); err != nil {
+			app.Logger().Warn("analytics_collector: project failed", "project", pid, "err", err)
+		}
+	}
+	return nil
+}
+
+func analyticsProjectScopes(ctx *sdk.AppCtx) ([]string, error) {
+	if pid := projectScope(ctx); pid != "" {
+		return []string{pid}, nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT DISTINCT project_id FROM social_accounts
+		  WHERE project_id<>'' AND status='active'
+		  ORDER BY project_id`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var projects []string
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err == nil && strings.TrimSpace(pid) != "" {
+			projects = append(projects, pid)
+		}
+	}
+	return projects, rows.Err()
+}
+
+func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppCtx, pid string) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id FROM social_accounts
 		  WHERE project_id=? AND status='active'
@@ -5402,7 +5626,6 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 	var ids []int64
 	for rows.Next() {
 		var id int64
@@ -5410,9 +5633,16 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 			ids = append(ids, id)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		if runCtx.Err() != nil {
+			return runCtx.Err()
 		}
 		due, err := accountAnalyticsDue(app, pid, id, analyticsSnapshotMinInterval)
 		if err != nil {
@@ -5422,7 +5652,7 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 		if !due {
 			continue
 		}
-		res := a.collectAndStoreAccountMetrics(app, pid, id, "day")
+		res := a.collectAndStoreAccountMetrics(app, pid, id, defaultAccountMetricsHistoryDays)
 		if res.Status == "failed" {
 			app.Logger().Warn("analytics_collector: account metrics failed",
 				"project", pid, "account", id, "platform", res.Platform, "err", res.Error)
@@ -5432,13 +5662,7 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 }
 
 func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterval time.Duration) (bool, error) {
-	var latest string
-	err := ctx.AppDB().QueryRow(
-		`SELECT COALESCE(MAX(point_time),'')
-		   FROM social_metric_points
-		  WHERE project_id=? AND social_account_id=? AND scope='account' AND period='snapshot'`,
-		pid, accountID,
-	).Scan(&latest)
+	latest, err := latestAccountMetricsRefresh(ctx, pid, accountID)
 	if err != nil {
 		return true, err
 	}
@@ -5452,21 +5676,33 @@ func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterv
 	return time.Since(t) >= minInterval, nil
 }
 
-func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, period string) accountMetricsResult {
-	res := a.getAccountMetrics(ctx, pid, accountID, period)
+func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
+	// Provider insight endpoints use daily granularity. historyDays only
+	// controls how much persisted history is returned to the caller.
+	res := a.getAccountMetrics(ctx, pid, accountID, "day")
 	res.Raw = sanitizeRawJSON(res.Raw)
+	persisted := true
 	if err := a.persistAccountMetrics(ctx, pid, res); err != nil {
+		persisted = false
 		ctx.Logger().Warn("account_metrics: persist failed",
 			"project", pid, "account", accountID, "platform", res.Platform, "err", err)
 	}
-	if history := loadAccountMetricHistory(ctx, pid, accountID, 730); len(history) > 0 {
+	res.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
+	if history := loadAccountMetricHistory(ctx, pid, accountID, historyDays); len(history) > 0 {
 		res.Insights = history
 		res.HistorySource = "social_metric_points"
+	}
+	if res.Status != "failed" && persisted {
+		ctx.EmitWithProject("metrics.updated", pid, map[string]any{
+			"social_account_id": accountID,
+			"status":            res.Status,
+			"updated_at":        res.UpdatedAt,
+		})
 	}
 	return res
 }
 
-func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64) accountMetricsResult {
+func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
 	var platform, displayName string
 	var profileID int64
 	err := ctx.AppDB().QueryRow(
@@ -5487,10 +5723,11 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64)
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
-	history := loadAccountMetricHistory(ctx, pid, accountID, 730)
+	out.UpdatedAt, _ = latestAccountMetricsRefresh(ctx, pid, accountID)
+	history := loadAccountMetricHistory(ctx, pid, accountID, historyDays)
 	if len(history) == 0 {
 		out.Status = "unsupported"
-		out.Reason = "No stored analytics yet. Click Refresh metrics to collect fresh metrics."
+		out.Reason = "No stored analytics yet. A refresh will run automatically."
 		return out
 	}
 	out.Status = "ok"
@@ -5533,6 +5770,12 @@ func applyLatestAccountHistory(out *accountMetricsResult, history insightSeries)
 	} else {
 		out.Engagements = latest("page_post_engagements")
 	}
+	out.Likes = latest("likes_total")
+	out.Comments = latest("comments_total")
+	out.Shares = latest("shares_total")
+	out.Saves = latest("saves_total")
+	out.Sends = latest("sends_total")
+	out.Clicks = latest("clicks_total")
 }
 
 func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetricsResult) error {
@@ -5548,6 +5791,9 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		).Scan(&profileID)
 	}
 	source := accountMetricSource(res.Platform, "snapshot")
+	if err := insertSocialMetricPoint(ctx, pid, profileID, res.SocialAccountID, 0, 0, res.Platform, "account", "_refresh", "heartbeat", now, 1, source, "ok", ""); err != nil {
+		return err
+	}
 	totals := []struct {
 		name  string
 		value int64
@@ -5561,6 +5807,12 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 		{"impressions", res.Impressions},
 		{"engagements", res.Engagements},
 		{"views", res.Views},
+		{"likes", res.Likes},
+		{"comments", res.Comments},
+		{"shares", res.Shares},
+		{"saves", res.Saves},
+		{"sends", res.Sends},
+		{"clicks", res.Clicks},
 	}
 	for _, item := range totals {
 		if item.value <= 0 {
@@ -5649,7 +5901,7 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 		`SELECT metric, period, point_time, value
 		   FROM social_metric_points
 		  WHERE project_id=? AND social_account_id=? AND scope='account'
-		    AND status='ok' AND point_time >= ?
+		    AND status='ok' AND metric<>'_refresh' AND point_time >= ?
 		  ORDER BY point_time ASC, id ASC`,
 		pid, accountID, since,
 	)
@@ -5665,7 +5917,8 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 			continue
 		}
 		label := metric
-		if period == "snapshot" && (metric == "views" || metric == "reach" || metric == "impressions" || metric == "engagements") {
+		if period == "snapshot" && (metric == "views" || metric == "reach" || metric == "impressions" || metric == "engagements" ||
+			metric == "likes" || metric == "comments" || metric == "shares" || metric == "saves" || metric == "sends" || metric == "clicks") {
 			label = metric + "_total"
 		}
 		out[label] = append(out[label], insightPoint{Time: pointTime, Value: value})
@@ -5674,6 +5927,18 @@ func loadAccountMetricHistory(ctx *sdk.AppCtx, pid string, accountID int64, days
 		return nil
 	}
 	return out
+}
+
+func latestAccountMetricsRefresh(ctx *sdk.AppCtx, pid string, accountID int64) (string, error) {
+	var latest string
+	err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(MAX(point_time),'')
+		   FROM social_metric_points
+		  WHERE project_id=? AND social_account_id=? AND scope='account'
+		    AND (metric='_refresh' OR period='snapshot')`,
+		pid, accountID,
+	).Scan(&latest)
+	return latest, err
 }
 
 func accountMetricSource(platform, kind string) string {
@@ -5817,7 +6082,8 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
 		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
-		        COALESCE(a.page_credentials,'')
+		        COALESCE(a.page_credentials,''), COALESCE(a.provider_slug,'native'),
+		        COALESCE(a.provider_account_id,''), COALESCE(t.provider_post_id,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=?`,
@@ -5832,7 +6098,10 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		var r metricsTarget
 		var connID sql.NullInt64
 		var platform sql.NullString
-		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID, &r.PageCreds); err == nil {
+		if err := rows.Scan(
+			&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID,
+			&r.PageCreds, &r.ProviderSlug, &r.ProviderAccountID, &r.ProviderPostID,
+		); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String
 			}
@@ -5876,10 +6145,30 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id <= 0 {
 		return mcpError("social_account_id required"), nil
 	}
-	period, _ := args["period"].(string) // currently unused; reserved for future
-	_ = period
-	res := a.collectAndStoreAccountMetrics(ctx, projectScope(ctx, args), id, period)
+	historyDays, err := accountMetricsHistoryDays(toString(args["period"]), defaultAccountMetricsHistoryDays)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	res := a.collectAndStoreAccountMetrics(ctx, projectScope(ctx, args), id, historyDays)
+	if !boolArg(args, "include_raw", false) {
+		res.Raw = nil
+	}
 	return res, nil
+}
+
+func accountMetricsHistoryDays(period string, defaultDays int) (int, error) {
+	period = strings.ToLower(strings.TrimSpace(period))
+	if period == "" {
+		return defaultDays, nil
+	}
+	if !strings.HasSuffix(period, "d") {
+		return 0, fmt.Errorf("invalid period: expected Nd, for example 7d or 30d")
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(period, "d"))
+	if err != nil || days < 1 || days > maxAccountMetricsHistoryDays {
+		return 0, fmt.Errorf("invalid period: days must be between 1 and %d", maxAccountMetricsHistoryDays)
+	}
+	return days, nil
 }
 
 // ─── import ───────────────────────────────────────────────────────
@@ -7543,7 +7832,7 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 			} else if connID > 0 && status == "ok" && a.pendingConnectionAllowed(globalCtx, row, connID) {
 				res, err := globalCtx.AppDB().Exec(
 					`UPDATE pending_accounts SET connection_id=?, status='ready'
-					  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+					  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 					connID, pendingID, row.projectID,
 				)
 				if err == nil {
@@ -7655,10 +7944,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		args := scopedQueryArgs(r, "period", "refresh")
+		args := scopedQueryArgs(r, "period", "refresh", "include_raw")
+		if strings.TrimSpace(toString(args["period"])) == "" {
+			// The panel charts the complete stored history. MCP callers use
+			// the smaller account_metrics default unless they opt in.
+			args["period"] = fmt.Sprintf("%dd", maxAccountMetricsHistoryDays)
+		}
 		refresh := strings.TrimSpace(strings.ToLower(toString(args["refresh"])))
 		if refresh == "0" || refresh == "false" || refresh == "stored" {
-			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id)
+			historyDays, err := accountMetricsHistoryDays(toString(args["period"]), maxAccountMetricsHistoryDays)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, historyDays)
 			writeJSON(w, out)
 			return
 		}
@@ -7712,7 +8011,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolPostList(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit"))
+		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "from", "to"), 1000)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -7750,9 +8049,20 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 {
-		// /posts/:id — only DELETE for now (no GET on a single
-		// post; post_list is granular enough).
 		switch r.Method {
+		case http.MethodGet:
+			args := projectArgsFromRequest(r)
+			post, err := a.loadPostByID(globalCtx, projectScope(globalCtx, args), id)
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "post not found", http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"post": post})
+			return
 		case http.MethodDelete:
 			args := projectArgsFromRequest(r)
 			args["post_id"] = id
@@ -7764,7 +8074,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, out)
 			return
 		default:
-			http.Error(w, "DELETE only at this path", http.StatusMethodNotAllowed)
+			http.Error(w, "GET or DELETE only at this path", http.StatusMethodNotAllowed)
 			return
 		}
 	}
@@ -7831,10 +8141,90 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-// handleJobPublishPost is the callback the jobs app fires when a
-// scheduled post's run_at arrives. Idempotent: re-running on an
-// already-published post is a no-op (publishPostTargets only touches
-// status='pending' targets).
+func (a *App) toolPostPublishScheduled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	if postID <= 0 {
+		return map[string]any{"status": "failed", "error": "post_id required"}, nil
+	}
+	pid := projectScope(ctx, args)
+	if pid == "" {
+		return map[string]any{"status": "failed", "error": "project required"}, nil
+	}
+	return a.publishScheduledPost(ctx, pid, postID), nil
+}
+
+// publishScheduledPost is shared by the brokered app_tool callback and the
+// legacy HTTP route. It is idempotent: published targets are never claimed
+// again, and a post is acknowledged only when every target was published.
+func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) map[string]any {
+	var postStatus string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&postStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return map[string]any{"status": "failed", "error": "post not found"}
+		}
+		return map[string]any{"status": "error", "error": "load post: " + err.Error()}
+	}
+	if postStatus == "published" {
+		return map[string]any{"status": "published", "post_id": postID, "idempotent": true}
+	}
+	if postStatus != "scheduled" && postStatus != "publishing" && postStatus != "failed" {
+		return map[string]any{"status": "failed", "error": "post is not publishable from its current status: " + postStatus}
+	}
+
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE posts SET status='publishing' WHERE id=? AND project_id=? AND status IN ('scheduled','failed')`,
+		postID, pid,
+	)
+	a.publishPostTargets(ctx, postID)
+
+	res, err := ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='pending'
+		  WHERE post_id=? AND status='failed' AND attempts < 4
+		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
+		postID, pid,
+	)
+	if err != nil {
+		return map[string]any{"status": "error", "error": "prepare retry: " + err.Error()}
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=? AND project_id=?`, postID, pid)
+		return map[string]any{"status": "error", "error": "publish failed; retry queued", "post_id": postID}
+	}
+
+	var active, failed, published int
+	var lastError string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT
+		    COALESCE(SUM(CASE WHEN status IN ('pending','publishing') THEN 1 ELSE 0 END),0),
+		    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
+		    COALESCE(SUM(CASE WHEN status='published' THEN 1 ELSE 0 END),0),
+		    COALESCE(MAX(CASE WHEN status='failed' THEN last_error END),'')
+		 FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&active, &failed, &published, &lastError); err != nil {
+		return map[string]any{"status": "error", "error": "check publish state: " + err.Error()}
+	}
+	if active > 0 {
+		return map[string]any{"status": "error", "error": "publish still in progress", "post_id": postID}
+	}
+	if failed > 0 {
+		if lastError == "" {
+			lastError = "one or more social targets failed"
+		}
+		return map[string]any{"status": "failed", "error": lastError, "post_id": postID, "failed_targets": failed}
+	}
+	if published == 0 {
+		return map[string]any{"status": "failed", "error": "post has no published targets", "post_id": postID}
+	}
+	return map[string]any{"status": "published", "post_id": postID, "published_targets": published}
+}
+
+// handleJobPublishPost preserves compatibility with legacy Jobs rows. New
+// schedules use post_publish_scheduled through the platform app-call broker.
 func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -7860,45 +8250,17 @@ func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "post not found", http.StatusNotFound)
 		return
 	}
-	// Move from 'scheduled' → 'publishing' before fanning out.
-	_, _ = globalCtx.AppDB().Exec(
-		`UPDATE posts SET status='publishing' WHERE id=? AND status='scheduled'`,
-		body.PostID,
-	)
-	a.publishPostTargets(globalCtx, body.PostID)
-	// Requeue failed targets that have attempts left, then return a
-	// non-2xx response so Jobs applies its configured backoff. The target
-	// claim is conditional, so an overlapping callback cannot publish it
-	// twice. After four attempts failures remain terminal and the callback
-	// acknowledges completion.
-	res, err := globalCtx.AppDB().Exec(
-		`UPDATE post_targets
-		    SET status='pending'
-		  WHERE post_id=? AND status='failed' AND attempts < 4`,
-		body.PostID,
-	)
-	if err != nil {
-		http.Error(w, "prepare retry: "+err.Error(), http.StatusInternalServerError)
+	result := a.publishScheduledPost(globalCtx, postProject, body.PostID)
+	status := toString(result["status"])
+	if status != "published" {
+		code := http.StatusBadGateway
+		if status == "error" && toString(result["error"]) == "publish still in progress" {
+			code = http.StatusConflict
+		}
+		http.Error(w, toString(result["error"]), code)
 		return
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		_, _ = globalCtx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=?`, body.PostID)
-		http.Error(w, "publish failed; retry queued", http.StatusBadGateway)
-		return
-	}
-	var active int
-	if err := globalCtx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND status IN ('pending','publishing')`,
-		body.PostID,
-	).Scan(&active); err != nil {
-		http.Error(w, "check publish state: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if active > 0 {
-		http.Error(w, "publish still in progress", http.StatusConflict)
-		return
-	}
-	writeJSON(w, map[string]any{"published": body.PostID})
+	writeJSON(w, result)
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
@@ -7989,17 +8351,41 @@ type pendingRow struct {
 
 func (a *App) getPending(id int64) (*pendingRow, error) {
 	var row pendingRow
+	var expiresAt string
 	err := globalCtx.AppDB().QueryRow(
 		`SELECT id, project_id, platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0), COALESCE(provider_slug,''), COALESCE(provider_profile_id,''),
-		        COALESCE(provider_state,''), COALESCE(provider_data,''),
-		        CASE WHEN datetime(expires_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END
+		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(expires_at,'')
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &row.expired)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &expiresAt)
 	if err != nil {
 		return nil, err
 	}
+	row.expired = pendingAccountExpired(expiresAt, time.Now().UTC())
 	return &row, nil
+}
+
+func pendingExpiry(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func pendingAccountExpired(raw string, now time.Time) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return true
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	} {
+		if expiresAt, err := time.Parse(layout, raw); err == nil {
+			return !expiresAt.After(now)
+		}
+	}
+	// Invalid expiry data must never make an authorization request live forever.
+	return true
 }
 
 func (a *App) getPendingScoped(ctx *sdk.AppCtx, args map[string]any, id int64) (*pendingRow, error) {

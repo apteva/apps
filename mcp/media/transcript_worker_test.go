@@ -124,8 +124,8 @@ func noBindings() *stubPlatform {
 func mockStorageURL(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Match POST /api/apps/storage/files/{id}/url
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/storage/files/") &&
+		// Match POST through the binding-gated Storage proxy.
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/storage/proxy/files/") &&
 			strings.HasSuffix(r.URL.Path, "/url") {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			id := "42"
@@ -136,7 +136,7 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 			fmt.Fprintf(w, `{"url":"/files/%s/content?sig=stub&exp=999","expires_at":999}`, id)
 			return
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/storage/files" {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/apps/storage/proxy/files" {
 			ids := strings.Split(r.URL.Query().Get("ids"), ",")
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"files":[`)
@@ -156,7 +156,7 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 			return
 		}
 		// MCP fallback for files_get_url
-		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/mcp" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/callback/apps/storage/proxy/mcp" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"text":"{\"url\":\"/files/42/content?sig=stub&exp=999\"}"}]}}`)
 			return
@@ -186,12 +186,11 @@ func newTestCtxWithPlatform(t *testing.T, p sdk.PlatformClient) *sdk.AppCtx {
 
 // ─── Sweep gating tests ────────────────────────────────────────────
 
-func TestTranscriberSweep_NoIntegrationBound_QueueAndSkip(t *testing.T) {
-	// With no transcripts integration bound, sweep should still queue
-	// candidates (insertPendingTranscript), then immediately flip them
-	// to skipped with a clear reason. That way the queue doesn't grow
-	// unbounded, and reconnecting Deepgram later requires explicit
-	// requeue (media_transcribe with force=true).
+func TestTranscriberSweep_NoIntegrationBound_DoesNotChurnQueue(t *testing.T) {
+	// With no transcripts integration bound, leave candidates alone.
+	// Repeatedly inserting and skipping the same rows every minute
+	// creates needless writes; once Deepgram is connected the normal
+	// missing-row candidate query will discover them.
 	ctx := newTestCtxWithPlatform(t, noBindings())
 	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(5000), "sha", "", "")
 	upsertMedia(ctx.AppDB(), testProj, "2", sampleAVProbe(5000), "sha", "", "")
@@ -199,15 +198,8 @@ func TestTranscriberSweep_NoIntegrationBound_QueueAndSkip(t *testing.T) {
 	transcriberSweep(ctx)
 
 	for _, fid := range []string{"1", "2"} {
-		tr, err := getTranscript(ctx.AppDB(), testProj, fid)
-		if err != nil {
-			t.Fatalf("missing row for %s: %v", fid, err)
-		}
-		if tr.Status != "skipped" {
-			t.Errorf("file_id %s status=%q want skipped", fid, tr.Status)
-		}
-		if !strings.Contains(tr.Error, "no transcripts integration") {
-			t.Errorf("file_id %s skip reason missing: %q", fid, tr.Error)
+		if tr, err := getTranscript(ctx.AppDB(), testProj, fid); err == nil || tr != nil {
+			t.Fatalf("unexpected transcript row for %s: %+v, %v", fid, tr, err)
 		}
 	}
 }
