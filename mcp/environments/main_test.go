@@ -278,10 +278,14 @@ func TestFixtureStatusBlocksActions(t *testing.T) {
 
 func TestPatreonCreatorOperations(t *testing.T) {
 	legacy := normalizePatreonState(WebFixtureSpec{Pack: "patreon"}, map[string]any{
-		"posts": []any{map[string]any{"id": "legacy", "excerpt": "Old snapshot", "locked": true}},
+		"posts": []any{
+			map[string]any{"id": "legacy", "excerpt": "Old snapshot", "locked": true},
+			map[string]any{"id": "post-2", "excerpt": "Unlocked by a membership snapshot", "locked": false},
+		},
 	})
 	legacyPost := legacy["posts"].([]any)[0].(map[string]any)
-	if legacy["payouts"] == nil || legacy["members"] == nil || legacyPost["status"] != "published" || legacyPost["audience"] != "members" {
+	legacyKnownPost := legacy["posts"].([]any)[1].(map[string]any)
+	if legacy["payouts"] == nil || legacy["members"] == nil || legacyPost["status"] != "published" || legacyPost["audience"] != "members" || legacyKnownPost["audience"] != "members" || legacyKnownPost["video_url"] != "https://vimeo.com/915402741" {
 		t.Fatalf("legacy state was not normalized: %#v", legacy)
 	}
 

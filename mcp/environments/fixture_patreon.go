@@ -78,6 +78,7 @@ func normalizePatreonState(spec WebFixtureSpec, state map[string]any) map[string
 			state[key] = defaults[key]
 		}
 	}
+	defaultPosts, _ := defaults["posts"].([]any)
 	posts, _ := state["posts"].([]any)
 	for _, value := range posts {
 		post, _ := value.(map[string]any)
@@ -87,8 +88,18 @@ func normalizePatreonState(spec WebFixtureSpec, state map[string]any) map[string
 		if post["status"] == nil {
 			post["status"] = "published"
 		}
+		var defaultPost map[string]any
+		for _, candidate := range defaultPosts {
+			item, _ := candidate.(map[string]any)
+			if item["id"] == post["id"] {
+				defaultPost = item
+				break
+			}
+		}
 		if post["audience"] == nil {
-			if locked, _ := post["locked"].(bool); locked {
+			if defaultPost != nil {
+				post["audience"] = defaultPost["audience"]
+			} else if locked, _ := post["locked"].(bool); locked {
 				post["audience"] = "members"
 			} else {
 				post["audience"] = "public"
@@ -98,7 +109,11 @@ func normalizePatreonState(spec WebFixtureSpec, state map[string]any) map[string
 			post["body"] = post["excerpt"]
 		}
 		if post["video_url"] == nil {
-			post["video_url"] = ""
+			if defaultPost != nil {
+				post["video_url"] = defaultPost["video_url"]
+			} else {
+				post["video_url"] = ""
+			}
 		}
 		if post["scheduled_at"] == nil {
 			post["scheduled_at"] = ""
