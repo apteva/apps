@@ -282,6 +282,210 @@ func smartCropFaceTrackNeedsSourceSamples(samples []smartCropV2Sample, cropW int
 	return false
 }
 
+// filterSmartCropWeakFaceAnchors rejects low-confidence rotated-cascade hits
+// that disagree with the subject path established by generic saliency,
+// foreground, and motion analysis. These weak hits are useful for profile and
+// reclining faces, but knees and a bent torso can produce similar votes. A
+// reel path has already incorporated foreground/motion evidence at this stage,
+// so a weak face center must lie inside that subject window. Strong detections
+// remain authoritative regardless of position.
+func filterSmartCropWeakFaceAnchors(samples []smartCropV2Sample, cropW int) int {
+	if len(samples) == 0 || cropW <= 0 {
+		return 0
+	}
+	filtered := 0
+	for i := range samples {
+		face := samples[i].face
+		if face == nil || face.Quality >= 20 {
+			continue
+		}
+		if face.CenterX < samples[i].point.X ||
+			face.CenterX > samples[i].point.X+cropW {
+			samples[i].face = nil
+			filtered++
+		}
+	}
+	return filtered
+}
+
+// filterSmartCropWeakFaceDirectionClusters resolves the ambiguous interval
+// after a strong upright face turns sideways. The rotated cascade may then
+// alternate between the real head and a knee/torso. When the last two strong
+// anchors establish a direction, retain a repeated weak cluster at that outer
+// extent and discard weak candidates that reverse back toward the torso.
+func filterSmartCropWeakFaceDirectionClusters(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 4 || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	filtered := 0
+	for sceneStart := 0; sceneStart < len(samples); {
+		sceneEnd := sceneStart + 1
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		strong := make([]int, 0, sceneEnd-sceneStart)
+		for i := sceneStart; i < sceneEnd; i++ {
+			if samples[i].face != nil && samples[i].face.Quality >= 20 {
+				strong = append(strong, i)
+			}
+		}
+		for s := 1; s < len(strong); s++ {
+			previous, anchor := strong[s-1], strong[s]
+			delta := samples[anchor].face.CenterX - samples[previous].face.CenterX
+			if absInt(delta) < cropW/10 {
+				continue
+			}
+			end := sceneEnd
+			if s+1 < len(strong) {
+				end = strong[s+1]
+			}
+			type weakCandidate struct {
+				index int
+				x     int
+			}
+			weak := make([]weakCandidate, 0, end-anchor-1)
+			for i := anchor + 1; i < end; i++ {
+				if samples[i].face == nil || samples[i].face.Quality >= 20 {
+					continue
+				}
+				x := containSmartCropFaceX(samples[i].point.X, *samples[i].face, srcW, cropW)
+				weak = append(weak, weakCandidate{index: i, x: x})
+			}
+			if len(weak) < 2 {
+				continue
+			}
+			radius := maxInt(24, cropW/8)
+			bestX, bestCount, bestSet := 0, 0, false
+			for _, candidate := range weak {
+				count := 0
+				for _, other := range weak {
+					if absInt(other.x-candidate.x) <= radius {
+						count++
+					}
+				}
+				if count < 2 {
+					continue
+				}
+				outer := !bestSet || (delta < 0 && candidate.x < bestX) || (delta > 0 && candidate.x > bestX)
+				if outer || (candidate.x == bestX && count > bestCount) {
+					bestX, bestCount, bestSet = candidate.x, count, true
+				}
+			}
+			if !bestSet {
+				continue
+			}
+			for _, candidate := range weak {
+				if absInt(candidate.x-bestX) <= radius {
+					continue
+				}
+				samples[candidate.index].face = nil
+				filtered++
+			}
+		}
+		sceneStart = sceneEnd
+	}
+	return filtered
+}
+
+// promoteSmartCropDetailedFaces introduces the higher-resolution detector only
+// after generic temporal/motion analysis has established the subject window.
+// Keeping these weak rotated detections out of earlier consensus prevents a
+// knee-shaped false positive from changing which tracking branch executes.
+func promoteSmartCropDetailedFaces(samples []smartCropV2Sample, cropW int, allowEdgeHalo bool) int {
+	if len(samples) == 0 || cropW <= 0 {
+		return 0
+	}
+	promoted := 0
+	for i := range samples {
+		if samples[i].detailedFace == nil {
+			continue
+		}
+		candidate := samples[i].detailedFace
+		halo := 0
+		if allowEdgeHalo {
+			halo = cropW / 3
+		}
+		if candidate.CenterX < samples[i].point.X-halo ||
+			candidate.CenterX > samples[i].point.X+cropW+halo {
+			continue
+		}
+		if samples[i].face == nil || candidate.Quality > samples[i].face.Quality {
+			copy := *candidate
+			samples[i].face = &copy
+			promoted++
+		}
+	}
+	return promoted
+}
+
+// correctSmartCropHeadTracks joins repeated conservative head/reclining edge
+// guards across a stationary detector gap. Two anchors are required and their
+// positions must agree; this is intentionally narrower than generic motion
+// tracking and cannot create a new cross-frame traversal.
+func correctSmartCropHeadTracks(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 2 || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	corrected := 0
+	for sceneStart := 0; sceneStart < len(samples); {
+		sceneEnd := sceneStart + 1
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		anchors := make([]int, 0, sceneEnd-sceneStart)
+		for i := sceneStart; i < sceneEnd; i++ {
+			if samples[i].headTracked {
+				anchors = append(anchors, i)
+			}
+		}
+		for a := 0; a+1 < len(anchors); a++ {
+			left, right := anchors[a], anchors[a+1]
+			if samples[right].point.AtMs-samples[left].point.AtMs > smartCropV2MaxGapMs ||
+				absInt(samples[left].headTrackX-samples[right].headTrackX) > cropW/4 {
+				continue
+			}
+			leftPoint := cropPathPoint{AtMs: samples[left].point.AtMs, X: samples[left].headTrackX}
+			rightPoint := cropPathPoint{AtMs: samples[right].point.AtMs, X: samples[right].headTrackX}
+			for i := left; i <= right; i++ {
+				x := interpolateSmartCropStillX(leftPoint, rightPoint, samples[i].point.AtMs)
+				x = clampInt(roundEven(x), 0, srcW-cropW)
+				if samples[i].point.X != x {
+					samples[i].point.X = x
+					corrected++
+				}
+				samples[i].headTracked = true
+				samples[i].headTrackX = x
+			}
+		}
+		if len(anchors) >= 2 {
+			first, second := anchors[0], anchors[1]
+			if absInt(samples[first].headTrackX-samples[second].headTrackX) <= cropW/4 {
+				for i := first - 1; i >= sceneStart && samples[first].point.AtMs-samples[i].point.AtMs <= 2500; i-- {
+					x := clampInt(roundEven(samples[first].headTrackX), 0, srcW-cropW)
+					if samples[i].point.X != x {
+						samples[i].point.X = x
+						corrected++
+					}
+					samples[i].headTracked, samples[i].headTrackX = true, x
+				}
+			}
+			last, previous := anchors[len(anchors)-1], anchors[len(anchors)-2]
+			if absInt(samples[last].headTrackX-samples[previous].headTrackX) <= cropW/4 {
+				for i := last + 1; i < sceneEnd && samples[i].point.AtMs-samples[last].point.AtMs <= smartCropV2MaxGapMs; i++ {
+					x := clampInt(roundEven(samples[last].headTrackX), 0, srcW-cropW)
+					if samples[i].point.X != x {
+						samples[i].point.X = x
+						corrected++
+					}
+					samples[i].headTracked, samples[i].headTrackX = true, x
+				}
+			}
+		}
+		sceneStart = sceneEnd
+	}
+	return corrected
+}
+
 // correctSmartCropFaceTracks treats ML detections as anchors, not a complete
 // track. Misses inside a scene are interpolated; the latest edge anchor is
 // carried for at most one bounded storyboard gap. This keeps profiles,
@@ -313,11 +517,34 @@ func correctSmartCropFaceTracks(samples []smartCropV2Sample, srcW, cropW int) in
 			if samples[right].point.AtMs-samples[left].point.AtMs > smartCropV2MaxGapMs {
 				continue
 			}
+			latePoseRelease := samples[left].face != nil && samples[left].face.Quality < 20 &&
+				samples[right].face != nil && samples[right].face.Quality >= 20 &&
+				samples[right].point.AtMs-samples[left].point.AtMs > 2500 &&
+				absInt(samples[right].point.X-samples[left].point.X) > cropW/3
+			earlyPoseEntry := samples[left].face != nil && samples[left].face.Quality >= 20 &&
+				samples[right].face != nil && samples[right].face.Quality < 20 &&
+				samples[right].point.AtMs-samples[left].point.AtMs > 2500 &&
+				absInt(samples[right].point.X-samples[left].point.X) > cropW/3
+			handoffAt := samples[right].point.AtMs - 2500
 			for i := left + 1; i < right; i++ {
 				if samples[i].face != nil {
 					continue
 				}
-				x := interpolateSmartCropStillX(samples[left].point, samples[right].point, samples[i].point.AtMs)
+				x := 0
+				if latePoseRelease && samples[i].point.AtMs <= handoffAt {
+					x = samples[left].point.X
+				} else if latePoseRelease {
+					x = interpolateSmartCropStillX(
+						cropPathPoint{AtMs: handoffAt, X: samples[left].point.X},
+						samples[right].point, samples[i].point.AtMs)
+				} else if earlyPoseEntry {
+					span := float64(samples[right].point.AtMs - samples[left].point.AtMs)
+					progress := float64(samples[i].point.AtMs-samples[left].point.AtMs) / span
+					eased := 1 - (1-progress)*(1-progress)
+					x = samples[left].point.X + int(math.Round(eased*float64(samples[right].point.X-samples[left].point.X)))
+				} else {
+					x = interpolateSmartCropStillX(samples[left].point, samples[right].point, samples[i].point.AtMs)
+				}
 				x = clampInt(roundEven(x), 0, srcW-cropW)
 				if absInt(samples[i].point.X-x) > maxInt(20, cropW/10) {
 					samples[i].point.X = x
@@ -377,6 +604,55 @@ func correctSmartCropFaceTracks(samples []smartCropV2Sample, srcW, cropW int) in
 		sceneStart = sceneEnd
 	}
 	return corrected
+}
+
+// constrainSmartCropPathToFaceTracks reapplies only the safety constraints
+// that temporal smoothing is not allowed to violate. Smoothing remains free to
+// remove detector jitter, but it cannot pull a confirmed face back across an
+// edge or move an interpolated dropout track more than a small dead zone.
+func constrainSmartCropPathToFaceTracks(path []cropPathPoint, samples []smartCropV2Sample, srcW, cropW int) []cropPathPoint {
+	if len(path) < 2 || len(samples) == 0 || srcW <= cropW || cropW <= 0 {
+		return path
+	}
+	byTime := make(map[int64]int, len(path))
+	for i := range path {
+		byTime[path[i].AtMs] = i
+	}
+	pathXAt := func(atMs int64) int {
+		if atMs <= path[0].AtMs {
+			return path[0].X
+		}
+		for i := 1; i < len(path); i++ {
+			if atMs <= path[i].AtMs {
+				return interpolateSmartCropStillX(path[i-1], path[i], atMs)
+			}
+		}
+		return path[len(path)-1].X
+	}
+	for _, sample := range samples {
+		if sample.face == nil && !sample.faceTracked && !sample.headTracked {
+			continue
+		}
+		current := pathXAt(sample.point.AtMs)
+		desired := current
+		if sample.face != nil {
+			desired = containSmartCropFaceX(current, *sample.face, srcW, cropW)
+		} else {
+			maxDrift := maxInt(16, cropW/20)
+			desired = clampInt(current, sample.point.X-maxDrift, sample.point.X+maxDrift)
+			desired = clampInt(roundEven(desired), 0, srcW-cropW)
+		}
+		if desired == current {
+			continue
+		}
+		if i, ok := byTime[sample.point.AtMs]; ok {
+			path[i].X = desired
+			continue
+		}
+		path = append(path, cropPathPoint{AtMs: sample.point.AtMs, X: desired, Cut: sample.point.Cut})
+	}
+	sort.SliceStable(path, func(i, j int) bool { return path[i].AtMs < path[j].AtMs })
+	return path
 }
 
 func smartCropFaceTrackXAt(samples []smartCropV2Sample, focusMs int64, cropW, srcW int) (int, bool) {

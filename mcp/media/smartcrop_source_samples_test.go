@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -77,8 +78,12 @@ func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
 	for _, want := range []string{
 		"FFMPEG=" + shellQuote("/opt/apteva/ffmpeg"),
 		"SIGNED_URL=" + shellQuote(url),
-		"scale=320:-2",
+		"scale=320:-2[analysis]",
+		"scale=640:-2",
+		"-q:v 3",
+		"-q:v 7",
 		remoteSmartCropMarker,
+		remoteSmartCropDetailMarker,
 		"for POS_MS in 162495 174000 187410",
 		"ACTIVE=0",
 	} {
@@ -109,6 +114,26 @@ func TestBuildRemoteSmartCropSampleScriptKeepsTrackingCadence(t *testing.T) {
 	}
 }
 
+func TestSmartCropRemotePositionBatchesNeverLeaveSingleton(t *testing.T) {
+	for count := 2; count <= smartCropTrackingMaxExtraFrames; count++ {
+		positions := make([]int64, count)
+		for i := range positions {
+			positions[i] = int64(i + 1)
+		}
+		batches := smartCropRemotePositionBatches(positions)
+		flattened := make([]int64, 0, count)
+		for _, batch := range batches {
+			if len(batch) < 2 || len(batch) > remoteSmartCropBatchSize+1 {
+				t.Fatalf("count=%d invalid batch size=%d: %v", count, len(batch), batches)
+			}
+			flattened = append(flattened, batch...)
+		}
+		if !reflect.DeepEqual(flattened, positions) {
+			t.Fatalf("count=%d positions changed: got=%v want=%v", count, flattened, positions)
+		}
+	}
+}
+
 func TestParseRemoteSmartCropSamples(t *testing.T) {
 	positions := []int64{1_000, 2_000, 3_000}
 	frame := func(subjectX int) string {
@@ -132,9 +157,12 @@ func TestParseRemoteSmartCropSamples(t *testing.T) {
 	out := strings.Join([]string{
 		"unrelated remote output",
 		remoteSmartCropMarker + "3000:" + frame(180),
+		remoteSmartCropDetailMarker + "3000:" + frame(180),
 		remoteSmartCropMarker + "not-a-time:AAAA",
 		remoteSmartCropMarker + "1000:" + frame(20),
+		remoteSmartCropDetailMarker + "1000:" + frame(20),
 		remoteSmartCropMarker + "9000:" + frame(100),
+		remoteSmartCropDetailMarker + "9000:" + frame(100),
 	}, "\n")
 	samples, err := parseRemoteSmartCropSamples(out, positions, 1280, 720, 9, 16)
 	if err != nil {

@@ -100,6 +100,135 @@ func TestSmartCropSyntheticLongVideoFaceDropouts(t *testing.T) {
 	}
 }
 
+func TestSmartCropSyntheticUprightToHorizontalMatrix(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	for _, direction := range []int{-1, 1} {
+		name := "falls-left"
+		if direction > 0 {
+			name = "falls-right"
+		}
+		t.Run(name, func(t *testing.T) {
+			samples := make([]smartCropV2Sample, 31)
+			uprightCenter := 900
+			if direction < 0 {
+				uprightCenter = 1100
+			}
+			horizontalCenter := 550
+			horizontalBaseX := 400
+			falseCenter := 800
+			if direction > 0 {
+				horizontalCenter = 1370
+				horizontalBaseX = 914
+				falseCenter = 1120
+			}
+			for i := range samples {
+				center := uprightCenter + direction*i*40
+				baseX := clampInt(center-cropW/2, 0, srcW-cropW)
+				pose := syntheticStanding
+				if i >= 10 && i < 28 {
+					baseX = horizontalBaseX
+					pose = syntheticReclined
+				}
+				if i >= 28 {
+					center = 960
+					baseX = center - cropW/2
+				}
+				samples[i] = smartCropV2Sample{
+					point: cropPathPoint{AtMs: int64(i) * 1000, X: roundEven(baseX)},
+					img:   syntheticAdversarialSmartCropFrame(320, 180, 160, pose, 900+i, false),
+				}
+				if i <= 5 || i >= 28 {
+					strongCenter := center
+					if i == 4 {
+						strongCenter = 960 - direction*50
+					}
+					if i == 5 {
+						strongCenter = 960 + direction*50
+					}
+					samples[i].face = syntheticSmartCropFace(strongCenter, 170)
+					samples[i].face.Quality = 100
+				}
+			}
+			// Two real sideways anchors compete with more frequent torso-shaped
+			// cascade votes. Direction + repetition must select the head cluster.
+			for _, i := range []int{10, 17} {
+				samples[i].face = syntheticSmartCropFace(horizontalCenter, 360)
+				samples[i].face.Quality = 6
+			}
+			for _, i := range []int{11, 13, 15} {
+				samples[i].face = syntheticSmartCropFace(falseCenter, 180)
+				samples[i].face.Quality = 7
+			}
+
+			filterSmartCropWeakFaceAnchors(samples, cropW)
+			if filtered := filterSmartCropWeakFaceDirectionClusters(samples, srcW, cropW); filtered < 3 {
+				t.Fatalf("torso cluster survived: filtered=%d", filtered)
+			}
+			correctSmartCropFaceTracks(samples, srcW, cropW)
+			path := make([]cropPathPoint, len(samples))
+			for i := range samples {
+				path[i] = samples[i].point
+			}
+			path = stabilizeSmartCropPath(path, cropW, srcW)
+			path = constrainSmartCropPathToFaceTracks(path, samples, srcW, cropW)
+			for _, at := range []int64{12_000, 18_000, 24_000} {
+				x := syntheticSmartCropPathXAt(path, at)
+				faceMin, faceMax := horizontalCenter-180, horizontalCenter+180
+				if faceMin < x || faceMax > x+cropW {
+					t.Fatalf("at=%d horizontal face clipped: face=[%d,%d] crop=[%d,%d] path=%v",
+						at, faceMin, faceMax, x, x+cropW, path)
+				}
+			}
+			// Do not start panning back to the upright pose several seconds early.
+			x25 := syntheticSmartCropPathXAt(path, 25_000)
+			if direction < 0 && x25 > 360 {
+				t.Fatalf("left horizontal hold released early: x=%d path=%v", x25, path)
+			}
+			if direction > 0 && x25 < 960 {
+				t.Fatalf("right horizontal hold released early: x=%d path=%v", x25, path)
+			}
+		})
+	}
+}
+
+func TestSmartCropSyntheticPostSmoothingFaceConstraints(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	for seed := int64(0); seed < 250; seed++ {
+		rng := rand.New(rand.NewSource(seed + 0xface))
+		center := 180 + rng.Intn(srcW-360)
+		face := syntheticSmartCropFace(center, 80+rng.Intn(180))
+		face.Quality = 25
+		desired := containSmartCropFaceX(rng.Intn(srcW-cropW+1), *face, srcW, cropW)
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: desired}},
+			{point: cropPathPoint{AtMs: 1000, X: desired}, face: face},
+			{point: cropPathPoint{AtMs: 2000, X: desired}},
+		}
+		// Deliberately model a smoothed path pulled away from the face anchor.
+		path := []cropPathPoint{{AtMs: 0, X: rng.Intn(srcW - cropW + 1)}, {AtMs: 2000, X: rng.Intn(srcW - cropW + 1)}}
+		path = constrainSmartCropPathToFaceTracks(path, samples, srcW, cropW)
+		x := syntheticSmartCropPathXAt(path, 1000)
+		if face.CenterX < x || face.CenterX > x+cropW {
+			t.Fatalf("seed=%d face center clipped after constraint: face=%+v x=%d path=%v", seed, face, x, path)
+		}
+	}
+}
+
+func syntheticSmartCropPathXAt(path []cropPathPoint, atMs int64) int {
+	if len(path) == 0 {
+		return 0
+	}
+	if atMs <= path[0].AtMs {
+		return path[0].X
+	}
+	for i := 1; i < len(path); i++ {
+		if atMs <= path[i].AtMs {
+			return interpolateSmartCropStillX(path[i-1], path[i], atMs)
+		}
+	}
+	return path[len(path)-1].X
+}
+
 func TestSmartCropSyntheticPathStress(t *testing.T) {
 	const srcW, cropW = 1920, 606
 	for seed := int64(0); seed < 200; seed++ {

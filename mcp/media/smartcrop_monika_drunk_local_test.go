@@ -152,7 +152,8 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 	for i := range samples {
 		path[i] = samples[i].point
 	}
-	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+	path = stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+	return constrainSmartCropPathToFaceTracks(path, samples, srcW, cropW)
 }
 
 func monikaDrunkRemoteScriptSamples(t *testing.T, video string, positions []int64, srcW, srcH int) []smartCropV2Sample {
@@ -252,6 +253,7 @@ func localSmartCropStillX(t *testing.T, video string, duration, focus int64, src
 	if err != nil {
 		t.Fatal(err)
 	}
+	promoteSmartCropDetailedFaces(samples, cropW, true)
 	for _, sample := range samples {
 		face := "none"
 		if sample.face != nil {
@@ -268,6 +270,7 @@ func localSmartCropStillX(t *testing.T, video string, duration, focus int64, src
 		if err != nil {
 			t.Fatal(err)
 		}
+		promoteSmartCropDetailedFaces(samples, cropW, true)
 		markSmartCropSceneCuts(samples)
 		refineSmartCropMotionSamples(samples, srcW, cropW)
 		refineSmartCropHeadSamples(samples, srcW, cropW)
@@ -373,12 +376,17 @@ func localSmartCropReelPath(t *testing.T, video string, duration, start, end int
 	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
 	correctSmartCropStationarySubjectTails(samples, srcW, cropW)
 	refineSmartCropHeadSamples(samples, srcW, cropW)
+	correctSmartCropHeadTracks(samples, srcW, cropW)
+	promoteSmartCropDetailedFaces(samples, cropW, false)
+	filterSmartCropWeakFaceAnchors(samples, cropW)
+	filterSmartCropWeakFaceDirectionClusters(samples, srcW, cropW)
 	correctSmartCropFaceTracks(samples, srcW, cropW)
 	path := make([]cropPathPoint, len(samples))
 	for i := range samples {
 		path[i] = samples[i].point
 	}
-	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+	path = stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+	return constrainSmartCropPathToFaceTracks(path, samples, srcW, cropW)
 }
 
 func localSmartCropBackgroundImages(t *testing.T, video string, duration int64, srcW, srcH int) []image.Image {

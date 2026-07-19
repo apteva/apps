@@ -49,7 +49,10 @@ type smartCropV2Sample struct {
 	point             cropPathPoint
 	img               image.Image
 	face              *smartCropFace
+	detailedFace      *smartCropFace
 	faceTracked       bool
+	headTracked       bool
+	headTrackX        int
 	backgroundTracked bool
 	motionTracked     bool
 	temporalTrack     bool
@@ -117,6 +120,7 @@ func computeSmartCropStillV2(
 	if len(samples) == 0 {
 		return nil, fmt.Errorf("smartcrop v2: no decodable frame derivation")
 	}
+	promoteSmartCropDetailedFaces(samples, cw, true)
 
 	// Resolve the broader storyboard evidence before an exact tracking pass.
 	// If the exact +/-500ms frames contain too little motion, this context is a
@@ -138,6 +142,7 @@ func computeSmartCropStillV2(
 			positions, row.Width, row.Height, targetW, targetH)
 		if sampleErr == nil && len(tracked) >= 2 {
 			samples = tracked
+			promoteSmartCropDetailedFaces(samples, cw, true)
 			sampleSource = "source-tracking"
 			markSmartCropSceneCuts(samples)
 			refineSmartCropMotionSamples(samples, row.Width, cw)
@@ -488,6 +493,10 @@ func computeSmartCropReelV2(
 	temporalCorrections := correctSmartCropReelTemporalOutliers(samples, row.Width, cw)
 	stationaryCorrections += correctSmartCropStationarySubjectTails(samples, row.Width, cw)
 	headCorrections := refineSmartCropHeadSamples(samples, row.Width, cw)
+	headTrackCorrections := correctSmartCropHeadTracks(samples, row.Width, cw)
+	promoteSmartCropDetailedFaces(samples, cw, false)
+	faceFalsePositives := filterSmartCropWeakFaceAnchors(samples, cw)
+	faceFalsePositives += filterSmartCropWeakFaceDirectionClusters(samples, row.Width, cw)
 	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
@@ -496,6 +505,7 @@ func computeSmartCropReelV2(
 	}
 	path = anchorSmartCropPath(path, target.StartMs, target.EndMs)
 	path = stabilizeSmartCropPath(path, cw, row.Width)
+	path = constrainSmartCropPathToFaceTracks(path, samples, row.Width, cw)
 	if len(path) == 0 {
 		return nil, nil, fmt.Errorf("smartcrop v2: empty crop path")
 	}
@@ -508,7 +518,9 @@ func computeSmartCropReelV2(
 			"temporal_corrections", temporalCorrections,
 			"stationary_corrections", stationaryCorrections,
 			"head_corrections", headCorrections,
+			"head_track_corrections", headTrackCorrections,
 			"face_corrections", faceCorrections,
+			"face_false_positives", faceFalsePositives,
 			"background_corrections", backgroundCorrections,
 			"tracking_frames", trackingFrames)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
@@ -521,7 +533,9 @@ func computeSmartCropReelV2(
 		"temporal_corrections", temporalCorrections,
 		"stationary_corrections", stationaryCorrections,
 		"head_corrections", headCorrections,
+		"head_track_corrections", headTrackCorrections,
 		"face_corrections", faceCorrections,
+		"face_false_positives", faceFalsePositives,
 		"background_corrections", backgroundCorrections,
 		"tracking_frames", trackingFrames)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
@@ -900,10 +914,14 @@ func refineSmartCropHeadSamples(samples []smartCropV2Sample, srcW, cropW int) in
 		}
 		if x, ok := headAwareNarrowSmartCropX(samples[i].img, samples[i].point.X, srcW, cropW); ok {
 			samples[i].point.X = x
+			samples[i].headTracked = true
+			samples[i].headTrackX = x
 			refined++
 		}
 		if x, ok := recliningSubjectAwareNarrowSmartCropX(samples[i].img, samples[i].point.X, srcW, cropW); ok {
 			samples[i].point.X = x
+			samples[i].headTracked = true
+			samples[i].headTrackX = x
 			refined++
 		}
 	}
