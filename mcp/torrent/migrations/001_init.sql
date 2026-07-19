@@ -1,8 +1,7 @@
 -- torrent v0.1: local torrent registry + saved searches + indexers.
 --
--- The bittorrent engine has its own session/state files under
--- working_dir/.engine/ — these tables don't try to mirror them
--- byte-for-byte. They store the metadata we want to query
+-- The bittorrent engine rechecks bytes in working_dir after the app
+-- restores torrent definitions from these tables. They store the metadata we want to query
 -- efficiently (state, target folder, what storage rows the
 -- completion-mover has produced) and the agent-facing config (saved
 -- searches, indexer credentials).

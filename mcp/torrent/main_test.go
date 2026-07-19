@@ -4,9 +4,8 @@
 // invariants — pinning them so a future change can't silently
 // resurrect any of them:
 //
-//   * listIndexers + NULL last_ok_at  — broke search and
-//     seedDefaultIndexer simultaneously (v0.1.10 fix).
-//   * apibay JSON parsing             — zero-config indexer correctness.
+//   * listIndexers + NULL last_ok_at  — broke fresh indexer rows.
+//   * apibay JSON parsing             — explicitly enabled source correctness.
 //   * panel-state contract            — every state snapshot() emits
 //     must show up in TorrentPanel.tsx, otherwise newly-added
 //     torrents go invisible (v0.1.11 fix).
@@ -75,8 +74,7 @@ func openTestDB(t *testing.T) *sql.DB {
 
 // TestListIndexers_NullLastOkAt — last_ok_at is NULL until first
 // successful indexer query. v0.1.7's listIndexers scanned the column
-// into a plain string and panicked, breaking torrent_search AND
-// silently aborting seedDefaultIndexer's pre-flight check. Pin the
+// into a plain string and panicked, breaking torrent_search. Pin the
 // behavior: a freshly-inserted row scans cleanly with LastOKAt = "".
 func TestListIndexers_NullLastOkAt(t *testing.T) {
 	db := openTestDB(t)
@@ -103,8 +101,8 @@ func TestListIndexers_NullLastOkAt(t *testing.T) {
 // TestApibayParser — feed queryApibay the raw shape apibay.org
 // returns and assert the SearchResult has the fields the panel
 // expects. Catches:
-//   * the "no results" sentinel row leaking through
-//   * infohash → magnet construction (the click handler reads
+//   - the "no results" sentinel row leaking through
+//   - infohash → magnet construction (the click handler reads
 //     r.magnet, so an empty magnet means clicks do nothing)
 func TestApibayParser_ValidResults(t *testing.T) {
 	const fixture = `[
@@ -125,7 +123,7 @@ func TestApibayParser_ValidResults(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	httpc := &http.Client{Timeout: 2 * time.Second}
-	results, err := queryApibay(context.Background(), httpc, srv.URL, "test", "apibay")
+	results, err := queryApibay(context.Background(), httpc, srv.URL, "test", "", "apibay")
 	if err != nil {
 		t.Fatalf("queryApibay: %v", err)
 	}
@@ -133,7 +131,7 @@ func TestApibayParser_ValidResults(t *testing.T) {
 		t.Fatalf("want 2 results, got %d", len(results))
 	}
 	r := results[0]
-	if r.Infohash != "DEADBEEFDEADBEEFDEADBEEFDEADBEEFDEADBEEF" {
+	if r.Infohash != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
 		t.Errorf("infohash = %q", r.Infohash)
 	}
 	if r.Seeders != 42 {
@@ -142,10 +140,10 @@ func TestApibayParser_ValidResults(t *testing.T) {
 	if r.SizeBytes != 1500000000 {
 		t.Errorf("size = %d", r.SizeBytes)
 	}
-	if r.Category != "video" {
-		t.Errorf("category = %q, want video (cat 2xx)", r.Category)
+	if r.Category != "movie" {
+		t.Errorf("category = %q, want movie (cat 2xx)", r.Category)
 	}
-	if !strings.HasPrefix(r.Magnet, "magnet:?xt=urn:btih:DEADBEEF") {
+	if !strings.HasPrefix(r.Magnet, "magnet:?xt=urn:btih:deadbeef") {
 		t.Errorf("magnet missing or wrong: %q", r.Magnet)
 	}
 	if !strings.Contains(r.Magnet, "tr=") {
@@ -169,7 +167,7 @@ func TestApibayParser_NoResults(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	results, err := queryApibay(context.Background(), &http.Client{Timeout: time.Second}, srv.URL, "asdfasdfsdf", "apibay")
+	results, err := queryApibay(context.Background(), &http.Client{Timeout: time.Second}, srv.URL, "asdfasdfsdf", "", "apibay")
 	if err != nil {
 		t.Fatalf("queryApibay: %v", err)
 	}
@@ -409,7 +407,7 @@ func TestChunkedUpload_EndToEnd(t *testing.T) {
 	}
 
 	app := &App{}
-	id, err := app.uploadOneFile(nil, "/downloads", FileSnapshot{
+	id, err := app.uploadOneFile(context.Background(), nil, "/downloads", FileSnapshot{
 		Path:           "big.bin",
 		Length:         total,
 		BytesCompleted: total,
@@ -439,5 +437,152 @@ func TestChunkedUpload_EndToEnd(t *testing.T) {
 	}
 	if completeSHA != wantSHAHex {
 		t.Errorf("complete sha256 = %s, want %s", completeSHA, wantSHAHex)
+	}
+}
+
+func TestHTTPPayloadsDecodeSnakeCase(t *testing.T) {
+	var torrentReq addTorrentRequest
+	if err := json.Unmarshal([]byte(`{"torrent_url":"https://example.test/a.torrent","target_folder":"/shows","paused":true}`), &torrentReq); err != nil {
+		t.Fatal(err)
+	}
+	if torrentReq.TorrentURL == "" || torrentReq.TargetFolder != "/shows" || !torrentReq.Paused {
+		t.Fatalf("torrent request did not decode: %+v", torrentReq)
+	}
+
+	var indexerReq addIndexerRequest
+	if err := json.Unmarshal([]byte(`{"name":"local","kind":"jackett","base_url":"http://jackett:9117","api_key":"secret"}`), &indexerReq); err != nil {
+		t.Fatal(err)
+	}
+	if indexerReq.BaseURL == "" || indexerReq.APIKey != "secret" {
+		t.Fatalf("indexer request did not decode: %+v", indexerReq)
+	}
+}
+
+func TestSafeChildPathRejectsTraversal(t *testing.T) {
+	root := t.TempDir()
+	for _, child := range []string{"..", "../outside", "nested/../../outside"} {
+		if got, err := safeChildPath(root, child); err == nil {
+			t.Errorf("safeChildPath(%q) = %q, want error", child, got)
+		}
+	}
+	got, err := safeChildPath(root, "Show.S01/E01.mkv")
+	if err != nil || !strings.HasPrefix(got, root+string(os.PathSeparator)) {
+		t.Fatalf("valid child rejected: path=%q err=%v", got, err)
+	}
+}
+
+func TestAddInfohashRejectsInvalidWithoutPanic(t *testing.T) {
+	engine := &Engine{}
+	if _, err := engine.AddInfohash("not-a-hash"); err == nil {
+		t.Fatal("invalid infohash accepted")
+	}
+}
+
+func TestAggregateStatsJSONContract(t *testing.T) {
+	b, err := json.Marshal(AggregateStats{ActiveCount: 2, GlobalDownBPS: 42})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(b)
+	if !strings.Contains(got, `"active_count":2`) || !strings.Contains(got, `"global_down_bps":42`) {
+		t.Fatalf("aggregate stats are not snake_case: %s", got)
+	}
+}
+
+func TestProjectResolutionForGlobalInstall(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	req := httptest.NewRequest(http.MethodGet, "/torrents?project_id=project-a", nil)
+	pid, err := resolveProjectFromRequest(req)
+	if err != nil || pid != "project-a" {
+		t.Fatalf("pid=%q err=%v", pid, err)
+	}
+	missing := httptest.NewRequest(http.MethodGet, "/torrents", nil)
+	if _, err := resolveProjectFromRequest(missing); err == nil {
+		t.Fatal("global request without project_id was accepted")
+	}
+}
+
+func TestDedupeNormalizesAndPreservesAddableSource(t *testing.T) {
+	hashUpper := "0123456789ABCDEF0123456789ABCDEF01234567"
+	hashLower := strings.ToLower(hashUpper)
+	results := dedupe([]SearchResult{
+		{Infohash: hashUpper, Magnet: "magnet:?xt=urn:btih:" + hashUpper, Seeders: 2},
+		{Infohash: hashLower, TorrentURL: "https://example.test/a.torrent", Seeders: 10},
+	})
+	if len(results) != 1 || results[0].Infohash != hashLower || results[0].Magnet == "" || results[0].TorrentURL == "" {
+		t.Fatalf("dedupe lost canonical identity or add source: %+v", results)
+	}
+	if normalizeInfohash("not-a-hash") != "" {
+		t.Fatal("invalid infohash was accepted")
+	}
+}
+
+func TestCleanStorageFolder(t *testing.T) {
+	if _, err := cleanStorageFolder("/downloads/../private"); err == nil {
+		t.Fatal("target folder traversal accepted")
+	}
+	got, err := cleanStorageFolder("downloads/shows")
+	if err != nil || got != "/downloads/shows" {
+		t.Fatalf("got %q, err %v", got, err)
+	}
+}
+
+func TestEffectivePrioritiesAcrossProjects(t *testing.T) {
+	rows := []TorrentRow{
+		{FilePrioritiesJSON: `{"0":"skip","1":"high"}`},
+		{FilePrioritiesJSON: `{"0":"normal","1":"skip"}`},
+	}
+	got := effectivePriorities(rows)
+	if got[0] != "normal" {
+		t.Fatalf("file 0 = %q; one project still needs it", got[0])
+	}
+	if got[1] != "high" {
+		t.Fatalf("file 1 = %q; highest requested priority should win", got[1])
+	}
+	allSkip := effectivePriorities([]TorrentRow{
+		{FilePrioritiesJSON: `{"2":"skip"}`},
+		{FilePrioritiesJSON: `{"2":"skip"}`},
+	})
+	if allSkip[2] != "skip" {
+		t.Fatalf("file 2 = %q; every project skipped it", allSkip[2])
+	}
+}
+
+func TestManifestAndMigrations(t *testing.T) {
+	_ = (&App{}).Manifest()
+	if _, err := os.Stat("icon.svg"); err != nil {
+		t.Fatalf("manifest icon missing: %v", err)
+	}
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, name := range []string{
+		"migrations/001_init.sql",
+		"migrations/002_apibay_indexer_kind.sql",
+		"migrations/003_lifecycle_state.sql",
+	} {
+		body, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+	}
+	if _, err := db.Exec(
+		`INSERT INTO torrents (project_id, infohash, added_at) VALUES ('p','0123456789012345678901234567890123456789','now')`,
+	); err != nil {
+		t.Fatalf("migrated torrents insert: %v", err)
+	}
+	var progress, priorities string
+	if err := db.QueryRow(
+		`SELECT upload_progress_json, file_priorities_json FROM torrents LIMIT 1`,
+	).Scan(&progress, &priorities); err != nil {
+		t.Fatal(err)
+	}
+	if progress != "{}" || priorities != "{}" {
+		t.Fatalf("migration defaults progress=%q priorities=%q", progress, priorities)
 	}
 }
