@@ -46,10 +46,13 @@ type cropPathPoint struct {
 }
 
 type smartCropV2Sample struct {
-	point         cropPathPoint
-	img           image.Image
-	motionTracked bool
-	temporalTrack bool
+	point             cropPathPoint
+	img               image.Image
+	face              *smartCropFace
+	faceTracked       bool
+	backgroundTracked bool
+	motionTracked     bool
+	temporalTrack     bool
 }
 
 // computeSmartCropStillV2 reframes both ordinary images and exact video
@@ -128,7 +131,8 @@ func computeSmartCropStillV2(
 	// primary crop and its close neighbours provide motion evidence. Stable
 	// images and video frames remain on the existing cached fast path.
 	trackingStill := false
-	if target.PreferKeyframe && smartCropStillNeedsTracking(samples, target.FocusMs, cw) {
+	if target.PreferKeyframe && (smartCropStillNeedsTracking(samples, target.FocusMs, cw) ||
+		smartCropFaceTrackNeedsSourceSamples(contextSamples, cw)) {
 		positions := smartCropStillTrackingPositions(target.FocusMs, row.DurationMs)
 		tracked, sampleErr := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
 			positions, row.Width, row.Height, targetW, targetH)
@@ -227,6 +231,42 @@ func computeSmartCropStillV2(
 			}
 		}
 	}
+	if trackingStill {
+		if handoffX, changed := stabilizeSmartCropStillMotionHandoff(x, samples, contextSamples, target.FocusMs, cw, row.Width); changed {
+			x = handoffX
+			method += "+motion-handoff"
+		}
+	}
+	faceTrackX, faceTrackOK := smartCropFaceTrackXAt(contextSamples, target.FocusMs, cw, row.Width)
+	if faceTrackOK &&
+		(!trackingStill || !smartCropStillHasMotionEvidence(samples, target.FocusMs)) {
+		if absInt(x-faceTrackX) > maxInt(20, cw/12) {
+			x = faceTrackX
+			method += "+face-track"
+		}
+	}
+	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil && sample.face == nil {
+		backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
+			target.FocusMs-30_000, target.FocusMs+30_000, 12)
+		backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
+		if backgroundX, backgroundResult, ok := backgroundAwareNarrowSmartCropX(sample.img, backgroundImages, x, row.Width, cw); ok {
+			motionHandoff := trackingStill && smartCropStillHasMotionEvidence(samples, target.FocusMs)
+			if !faceTrackOK || motionHandoff || absInt(backgroundX-faceTrackX) < absInt(x-faceTrackX) {
+				x = backgroundX
+				method += "+background"
+				app.Logger().Info("smartcrop v2 background still correction",
+					"file_id", sourceFileID, "focus_ms", target.FocusMs,
+					"references", backgroundResult.References,
+					"concentration", backgroundResult.Concentration,
+					"improvement", backgroundResult.Improvement,
+					"row_coverage", backgroundResult.RowCoverage,
+					"crop_x", x)
+			}
+		}
+	}
+	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil && sample.face != nil {
+		x = containSmartCropFaceX(x, *sample.face, row.Width, cw)
+	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
 	app.Logger().Info("smartcrop v2 resolved still",
 		"file_id", sourceFileID,
@@ -299,13 +339,14 @@ func analyzeSmartCropV2Derivations(
 			if err != nil {
 				return
 			}
-			win, err := analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH, img)
+			win, face, err := analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH, img)
 			if err != nil {
 				return
 			}
 			results[i] = &smartCropV2Sample{
 				point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
 				img:   img,
+				face:  face,
 			}
 		}()
 	}
@@ -413,9 +454,13 @@ func computeSmartCropReelV2(
 		}
 	}
 	markSmartCropSceneCuts(samples)
+	backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
+		target.StartMs-10_000, target.EndMs+10_000, 12)
+	backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
+	backgroundCorrections := correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 	trackingFrames := 0
 	stationaryCorrections := 0
-	if smartCropReelNeedsTracking(samples, row.Width, cw) {
+	if smartCropReelNeedsTracking(samples, row.Width, cw) || smartCropFaceTrackNeedsSourceSamples(samples, cw) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
 		if len(positions) >= 2 {
 			extra, sampleErr := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
@@ -425,6 +470,7 @@ func computeSmartCropReelV2(
 				samples = mergeSmartCropSamples(samples, extra)
 				sampleSource += "+tracking"
 				markSmartCropSceneCuts(samples)
+				backgroundCorrections += correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 				refineSmartCropMotionSamples(samples, row.Width, cw)
 				stationaryCorrections = correctSmartCropIsolatedMotionBoundaryScenes(samples, row.Width, cw)
 				fillSmartCropMotionGaps(samples, row.Width, cw)
@@ -442,6 +488,7 @@ func computeSmartCropReelV2(
 	temporalCorrections := correctSmartCropReelTemporalOutliers(samples, row.Width, cw)
 	stationaryCorrections += correctSmartCropStationarySubjectTails(samples, row.Width, cw)
 	headCorrections := refineSmartCropHeadSamples(samples, row.Width, cw)
+	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
@@ -461,6 +508,8 @@ func computeSmartCropReelV2(
 			"temporal_corrections", temporalCorrections,
 			"stationary_corrections", stationaryCorrections,
 			"head_corrections", headCorrections,
+			"face_corrections", faceCorrections,
+			"background_corrections", backgroundCorrections,
 			"tracking_frames", trackingFrames)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
 	}
@@ -472,6 +521,8 @@ func computeSmartCropReelV2(
 		"temporal_corrections", temporalCorrections,
 		"stationary_corrections", stationaryCorrections,
 		"head_corrections", headCorrections,
+		"face_corrections", faceCorrections,
+		"background_corrections", backgroundCorrections,
 		"tracking_frames", trackingFrames)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
 }
@@ -481,8 +532,13 @@ func computeSmartCropReelV2(
 // warm-subject guard to narrow social crops. The difference is that v2
 // runs it for every relevant storyboard frame instead of only one.
 func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) (*cropWindow, error) {
+	window, _, err := analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH, img)
+	return window, err
+}
+
+func analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH int, img image.Image) (*cropWindow, *smartCropFace, error) {
 	if img == nil || srcW <= 0 || srcH <= 0 {
-		return nil, fmt.Errorf("invalid smartcrop v2 frame")
+		return nil, nil, fmt.Errorf("invalid smartcrop v2 frame")
 	}
 	cw, ch := cropDimsForRatio(srcW, srcH, targetW, targetH)
 	centerX := roundEven((srcW - cw) / 2)
@@ -490,13 +546,13 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 	b := img.Bounds()
 	tw, th := b.Dx(), b.Dy()
 	if tw <= 0 || th <= 0 || cw == srcW && ch == srcH {
-		return &cropWindow{W: cw, H: ch, X: centerX, Y: centerY}, nil
+		return &cropWindow{W: cw, H: ch, X: centerX, Y: centerY}, nil, nil
 	}
 	tcw, tch := cropDimsForRatio(tw, th, targetW, targetH)
 	analyzer := smartcrop.NewAnalyzer(nfnt.NewDefaultResizer())
 	rect, err := analyzer.FindBestCrop(img, tcw, tch)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rawX := clampInt(int(float64(rect.Min.X)*float64(srcW)/float64(tw)), 0, srcW-cw)
 	rawY := clampInt(int(float64(rect.Min.Y)*float64(srcH)/float64(th)), 0, srcH-ch)
@@ -518,7 +574,12 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 	if recliningX, ok := recliningSubjectAwareNarrowSmartCropX(img, x, srcW, cw); ok {
 		x = recliningX
 	}
-	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, nil
+	var face *smartCropFace
+	if faceX, detected, ok := faceAwareNarrowSmartCropX(img, x, srcW, cw); ok {
+		x = faceX
+		face = &detected
+	}
+	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, face, nil
 }
 
 func smartCropStillHasMotionEvidence(samples []smartCropV2Sample, focusMs int64) bool {

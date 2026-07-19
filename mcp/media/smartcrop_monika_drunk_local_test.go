@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -131,7 +132,7 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 		t.Logf("storyboard at=%d x=%d cut=%v", sample.point.AtMs, sample.point.X, sample.point.Cut)
 	}
 	target := smartCropTarget{StartMs: start, EndMs: end}
-	if smartCropReelNeedsTracking(samples, srcW, cropW) {
+	if smartCropReelNeedsTracking(samples, srcW, cropW) || smartCropFaceTrackNeedsSourceSamples(samples, cropW) {
 		trackingPositions := smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW)
 		extra := monikaDrunkRemoteScriptSamples(t, video,
 			trackingPositions,
@@ -146,6 +147,7 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 	}
 	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
 	refineSmartCropHeadSamples(samples, srcW, cropW)
+	correctSmartCropFaceTracks(samples, srcW, cropW)
 	path := make([]cropPathPoint, len(samples))
 	for i := range samples {
 		path[i] = samples[i].point
@@ -239,16 +241,28 @@ func monikaDrunkStoryboardSamples(t *testing.T, video string, positions []int64,
 
 func monikaDrunkStillX(t *testing.T, video string, duration, focus int64) int {
 	t.Helper()
-	const srcW, srcH, cropW = 1280, 720, 404
+	return localSmartCropStillX(t, video, duration, focus, 1280, 720)
+}
+
+func localSmartCropStillX(t *testing.T, video string, duration, focus int64, srcW, srcH int) int {
+	t.Helper()
+	cropW, _ := cropDimsForRatio(srcW, srcH, 9, 16)
 	samples, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
 		monikaContainmentNearestPositions(focus, duration, 9), srcW, srcH, 9, 16)
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, sample := range samples {
+		face := "none"
+		if sample.face != nil {
+			face = fmt.Sprintf("x=%d q=%.1f", sample.face.CenterX, sample.face.Quality)
+		}
+		t.Logf("storyboard at=%d crop=%d face=%s", sample.point.AtMs, sample.point.X, face)
+	}
 	contextSamples := smartCropSceneSamples(samples, focus)
 	contextResult, contextOK := bestSmartCropTemporalConsensus(contextSamples, srcW, cropW)
 	tracking := false
-	if smartCropStillNeedsTracking(samples, focus, cropW) {
+	if smartCropStillNeedsTracking(samples, focus, cropW) || smartCropFaceTrackNeedsSourceSamples(contextSamples, cropW) {
 		samples, err = analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
 			smartCropStillTrackingPositions(focus, duration), srcW, srcH, 9, 16)
 		if err != nil {
@@ -258,6 +272,13 @@ func monikaDrunkStillX(t *testing.T, video string, duration, focus int64) int {
 		refineSmartCropMotionSamples(samples, srcW, cropW)
 		refineSmartCropHeadSamples(samples, srcW, cropW)
 		tracking = true
+		for _, sample := range samples {
+			face := "none"
+			if sample.face != nil {
+				face = fmt.Sprintf("x=%d q=%.1f", sample.face.CenterX, sample.face.Quality)
+			}
+			t.Logf("tracking at=%d crop=%d motion=%v face=%s", sample.point.AtMs, sample.point.X, sample.motionTracked, face)
+		}
 	}
 	x, _, err := resolveSmartCropStillBase(samples, focus)
 	if err != nil {
@@ -278,7 +299,8 @@ func monikaDrunkStillX(t *testing.T, video string, duration, focus int64) int {
 		x = clampInt(roundEven(clampInt(x, contextResult.X-cropW/2, contextResult.X+cropW/2)), 0, srcW-cropW)
 	}
 	if sample := nearestSmartCropSample(samples, focus); sample != nil {
-		if corrected, changed := silhouetteAwareNarrowSmartCropX(sample.img, x, srcW, cropW, 101); changed {
+		thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(sample.img.Bounds().Dx())/float64(srcW))), 1, sample.img.Bounds().Dx())
+		if corrected, changed := silhouetteAwareNarrowSmartCropX(sample.img, x, srcW, cropW, thumbCropW); changed {
 			x = corrected
 		}
 		if corrected, changed := headAwareNarrowSmartCropX(sample.img, x, srcW, cropW); changed {
@@ -288,12 +310,40 @@ func monikaDrunkStillX(t *testing.T, video string, duration, focus int64) int {
 			x = corrected
 		}
 	}
+	if tracking {
+		if handoffX, changed := stabilizeSmartCropStillMotionHandoff(x, samples, contextSamples, focus, cropW, srcW); changed {
+			x = handoffX
+		}
+	}
+	faceTrackX, faceTrackOK := smartCropFaceTrackXAt(contextSamples, focus, cropW, srcW)
+	if faceTrackOK &&
+		(!tracking || !smartCropStillHasMotionEvidence(samples, focus)) &&
+		absInt(x-faceTrackX) > maxInt(20, cropW/12) {
+		x = faceTrackX
+	}
+	if sample := nearestSmartCropSample(samples, focus); sample != nil && sample.face == nil {
+		backgroundImages := localSmartCropBackgroundImages(t, video, duration, srcW, srcH)
+		if backgroundX, _, ok := backgroundAwareNarrowSmartCropX(sample.img, backgroundImages, x, srcW, cropW); ok {
+			motionHandoff := tracking && smartCropStillHasMotionEvidence(samples, focus)
+			if !faceTrackOK || motionHandoff || absInt(backgroundX-faceTrackX) < absInt(x-faceTrackX) {
+				x = backgroundX
+			}
+		}
+	}
+	if sample := nearestSmartCropSample(samples, focus); sample != nil && sample.face != nil {
+		x = containSmartCropFaceX(x, *sample.face, srcW, cropW)
+	}
 	return clampInt(roundEven(x), 0, srcW-cropW)
 }
 
 func monikaDrunkReelPath(t *testing.T, video string, duration, start, end int64) []cropPathPoint {
 	t.Helper()
-	const srcW, srcH, cropW = 1280, 720, 404
+	return localSmartCropReelPath(t, video, duration, start, end, 1280, 720)
+}
+
+func localSmartCropReelPath(t *testing.T, video string, duration, start, end int64, srcW, srcH int) []cropPathPoint {
+	t.Helper()
+	cropW, _ := cropDimsForRatio(srcW, srcH, 9, 16)
 	positions := monikaContainmentRangePositions(start, end, duration)
 	samples, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
 		positions, srcW, srcH, 9, 16)
@@ -301,8 +351,10 @@ func monikaDrunkReelPath(t *testing.T, video string, duration, start, end int64)
 		t.Fatal(err)
 	}
 	markSmartCropSceneCuts(samples)
+	backgroundImages := localSmartCropBackgroundImages(t, video, duration, srcW, srcH)
+	correctSmartCropBackgroundSamples(samples, backgroundImages, srcW, cropW)
 	target := smartCropTarget{StartMs: start, EndMs: end}
-	if smartCropReelNeedsTracking(samples, srcW, cropW) {
+	if smartCropReelNeedsTracking(samples, srcW, cropW) || smartCropFaceTrackNeedsSourceSamples(samples, cropW) {
 		extra, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
 			smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW),
 			srcW, srcH, 9, 16)
@@ -311,6 +363,7 @@ func monikaDrunkReelPath(t *testing.T, video string, duration, start, end int64)
 		}
 		samples = mergeSmartCropSamples(samples, extra)
 		markSmartCropSceneCuts(samples)
+		correctSmartCropBackgroundSamples(samples, backgroundImages, srcW, cropW)
 		refineSmartCropMotionSamples(samples, srcW, cropW)
 		correctSmartCropIsolatedMotionBoundaryScenes(samples, srcW, cropW)
 		fillSmartCropMotionGaps(samples, srcW, cropW)
@@ -318,10 +371,29 @@ func monikaDrunkReelPath(t *testing.T, video string, duration, start, end int64)
 		refineSmartCropHeadSamples(samples, srcW, cropW)
 	}
 	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
+	correctSmartCropStationarySubjectTails(samples, srcW, cropW)
 	refineSmartCropHeadSamples(samples, srcW, cropW)
+	correctSmartCropFaceTracks(samples, srcW, cropW)
 	path := make([]cropPathPoint, len(samples))
 	for i := range samples {
 		path[i] = samples[i].point
 	}
 	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+}
+
+func localSmartCropBackgroundImages(t *testing.T, video string, duration int64, srcW, srcH int) []image.Image {
+	t.Helper()
+	positions := make([]int64, 0, 12)
+	for i := 0; i < 12; i++ {
+		positions = append(positions, 1_000+int64(i)*(duration-2_000)/11)
+	}
+	samples, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video, positions, srcW, srcH, 9, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	images := make([]image.Image, 0, len(samples))
+	for _, sample := range samples {
+		images = append(images, sample.img)
+	}
+	return images
 }

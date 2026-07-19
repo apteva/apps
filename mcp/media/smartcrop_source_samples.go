@@ -297,13 +297,14 @@ func parseRemoteSmartCropSamples(
 		if err != nil {
 			continue
 		}
-		win, err := analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH, img)
+		win, face, err := analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH, img)
 		if err != nil {
 			continue
 		}
 		byTime[position] = smartCropV2Sample{
 			point: cropPathPoint{AtMs: position, X: win.X},
 			img:   img,
+			face:  face,
 		}
 	}
 	minimum := maxInt(2, (len(allowed)+1)/2)
@@ -362,12 +363,12 @@ func analyzeSmartCropV2Input(
 				errs[i] = err
 				return
 			}
-			win, err := analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH, img)
+			win, face, err := analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH, img)
 			if err != nil {
 				errs[i] = err
 				return
 			}
-			results[i] = &smartCropV2Sample{point: cropPathPoint{AtMs: pos, X: win.X}, img: img}
+			results[i] = &smartCropV2Sample{point: cropPathPoint{AtMs: pos, X: win.X}, img: img, face: face}
 		}()
 	}
 	wg.Wait()

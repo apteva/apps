@@ -586,6 +586,15 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			end++
 		}
 		scene := samples[start:end]
+		if smartCropSceneHasBackgroundSubjectState(scene, cropW) {
+			// A distributed fixed-camera model has independently located a
+			// repeated foreground state. Scene-wide temporal activity is broader
+			// and can center the movement (torso/arm) instead of the final person,
+			// flattening a valid upright-to-reclined transition. Preserve the
+			// background-anchored state; face and motion anchors still run later.
+			start = end
+			continue
+		}
 		if result, ok := temporalSubjectConsensus(scene, srcW, cropW); ok {
 			if n := correctSmartCropAbruptStaticClusters(scene, result, srcW, cropW); n > 0 {
 				corrected += n
@@ -605,6 +614,16 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		result, ok := bestSmartCropTemporalConsensus(samples[start:end], srcW, cropW)
 		if ok {
 			if !smartCropTemporalResultConfident(result) {
+				start = end
+				continue
+			}
+			if result.StaticAnchored && !result.AnchorAligned &&
+				!smartCropStaticCandidateTouchesSceneSubject(result, samples[start:end], cropW) {
+				// A repeated warm lamp, cushion, or chair may satisfy the strict
+				// static-person score while sitting across the room. Static colour
+				// evidence is only allowed to rescue a subject already stranded at
+				// the edge of most saliency crops; it cannot replace a stable crop
+				// with a disconnected candidate. This mirrors the still-image gate.
 				start = end
 				continue
 			}
@@ -651,6 +670,58 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		start = end
 	}
 	return corrected
+}
+
+func smartCropSceneHasBackgroundSubjectState(samples []smartCropV2Sample, cropW int) bool {
+	if len(samples) < 4 || cropW <= 0 {
+		return false
+	}
+	xs := make([]int, 0, len(samples))
+	for _, sample := range samples {
+		if sample.backgroundTracked {
+			xs = append(xs, sample.point.X)
+		}
+	}
+	if len(xs) < 4 {
+		return false
+	}
+	sort.Ints(xs)
+	if xs[len(xs)-1]-xs[0] > cropW/3 {
+		return false
+	}
+	backgroundX := xs[len(xs)/2]
+	for _, sample := range samples {
+		if sample.face != nil {
+			faceX := sample.face.CenterX - cropW/2
+			if absInt(backgroundX-faceX) > cropW/3 {
+				return true
+			}
+		}
+		if sample.motionTracked && !sample.backgroundTracked &&
+			absInt(backgroundX-sample.point.X) > cropW/3 {
+			return true
+		}
+	}
+	return false
+}
+
+func smartCropStaticCandidateTouchesSceneSubject(result smartCropTemporalResult, samples []smartCropV2Sample, cropW int) bool {
+	if len(samples) == 0 || cropW <= 0 {
+		return false
+	}
+	center := result.X + cropW/2
+	edgeBand := maxInt(16, cropW/5)
+	touches := 0
+	for _, sample := range samples {
+		left, right := sample.point.X, sample.point.X+cropW
+		if center < left || center > right {
+			continue
+		}
+		if center-left <= edgeBand || right-center <= edgeBand {
+			touches++
+		}
+	}
+	return touches >= maxInt(3, (len(samples)+1)/2)
 }
 
 // correctSmartCropIsolatedMotionBoundaryScenes rejects a single-frame motion
