@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"image"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,17 +212,6 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 			return "", fmt.Errorf("remote smartcrop position must be non-negative: %d", position)
 		}
 	}
-	if len(positions) > smartCropV2MaxSamples {
-		capped := make([]int64, 0, smartCropV2MaxSamples)
-		for i := 0; i < smartCropV2MaxSamples; i++ {
-			index := int(math.Round(float64(i) * float64(len(positions)-1) / float64(smartCropV2MaxSamples-1)))
-			if len(capped) == 0 || capped[len(capped)-1] != positions[index] {
-				capped = append(capped, positions[index])
-			}
-		}
-		positions = capped
-	}
-
 	var b strings.Builder
 	b.WriteString("set -u\n")
 	b.WriteString("WORK=$(mktemp -d /tmp/apteva-smartcrop-samples-XXXXXX)\n")

@@ -945,6 +945,15 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 			i = end
 			continue
 		}
+		// Even when the foreground activity falls just below the dense-motion
+		// threshold, preserve a repeatedly observed one-sided person extent.
+		// Encoding and decoder revisions can move that activity score slightly;
+		// the clustered position evidence below is the more stable signal.
+		if end-i >= 4 {
+			corrected += correctSmartCropDenseRun(samples[i:end], result.X, srcW, cropW)
+			i = end
+			continue
+		}
 		x := clampInt(roundEven(result.X), 0, srcW-cropW)
 		for j := i; j < end; j++ {
 			if samples[j].point.X != x {
@@ -972,7 +981,13 @@ func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cro
 	}
 	threshold := maxInt(48, cropW/6)
 	clusterRadius := maxInt(32, cropW/6)
-	const maxGapMs = 4 * smartCropTrackingIntervalMs
+	// Reclining faces are intermittently recognized when a hand, hair, or a
+	// patterned cushion merges with the warm-subject component. Keep the
+	// existing requirement for three tightly clustered positions, but allow
+	// those observations to be sparse across one capped-storyboard interval.
+	// Scene cuts already split callers' runs, and the later reclining-extent
+	// certification bounds an unrelated repeated background candidate.
+	const maxEvidenceGapMs = smartCropV2MaxGapMs
 	type extentEvent struct {
 		index int
 		x     int
@@ -984,7 +999,7 @@ func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cro
 		if i <= lastEventEnd {
 			continue
 		}
-		for j := i + 2; j < len(samples) && samples[j].point.AtMs-samples[i].point.AtMs <= maxGapMs; j++ {
+		for j := i + 2; j < len(samples) && samples[j].point.AtMs-samples[i].point.AtMs <= maxEvidenceGapMs; j++ {
 			left, right := make([]int, 0, 3), make([]int, 0, 3)
 			for k := i; k <= j; k++ {
 				delta := samples[k].point.X - consensusX
@@ -994,15 +1009,13 @@ func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cro
 					right = append(right, samples[k].point.X)
 				}
 			}
+			left = tightSmartCropExtentCluster(left, clusterRadius)
+			right = tightSmartCropExtentCluster(right, clusterRadius)
 			values, dir := left, -1
 			if len(right) > len(left) {
 				values, dir = right, 1
 			}
 			if len(values) < 3 {
-				continue
-			}
-			sort.Ints(values)
-			if values[len(values)-1]-values[0] > clusterRadius {
 				continue
 			}
 			events = append(events, extentEvent{
@@ -1018,10 +1031,11 @@ func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cro
 	// on the opposite side are enough to release it. Requiring three again
 	// would hold the old crop one or two seconds into a clear reversal.
 	if len(events) > 0 {
+		const maxReversalGapMs = 4 * smartCropTrackingIntervalMs
 		last := events[len(events)-1]
 		for i := last.index + 1; i+1 < len(samples); i++ {
 			a, b := samples[i], samples[i+1]
-			if b.point.AtMs-a.point.AtMs > maxGapMs || absInt(b.point.X-a.point.X) > clusterRadius {
+			if b.point.AtMs-a.point.AtMs > maxReversalGapMs || absInt(b.point.X-a.point.X) > clusterRadius {
 				continue
 			}
 			da, db := a.point.X-consensusX, b.point.X-consensusX
@@ -1079,6 +1093,28 @@ func correctSmartCropDenseRun(samples []smartCropV2Sample, consensusX, srcW, cro
 		samples[i].temporalTrack = true
 	}
 	return corrected
+}
+
+// tightSmartCropExtentCluster returns the densest subset whose complete
+// horizontal range fits inside radius. A single threshold-sensitive saliency
+// result must not discard three otherwise consistent observations of the
+// same head/body extent.
+func tightSmartCropExtentCluster(values []int, radius int) []int {
+	if len(values) == 0 || radius < 0 {
+		return nil
+	}
+	values = append([]int(nil), values...)
+	sort.Ints(values)
+	bestStart, bestEnd := 0, 0
+	for start, end := 0, 0; end < len(values); end++ {
+		for values[end]-values[start] > radius {
+			start++
+		}
+		if end-start > bestEnd-bestStart {
+			bestStart, bestEnd = start, end
+		}
+	}
+	return values[bestStart : bestEnd+1]
 }
 
 // correctSmartCropStationaryRunFromMotionContinuity handles the case where a

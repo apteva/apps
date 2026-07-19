@@ -1094,6 +1094,31 @@ func TestDenseRunReversalReleasesPreviousExtent(t *testing.T) {
 	}
 }
 
+func TestDenseRunPreservesSparseClusteredExtent(t *testing.T) {
+	xs := []int{464, 464, 304, 464, 464, 272, 382, 300, 300}
+	times := []int64{0, 1_000, 2_000, 3_000, 4_000, 8_000, 9_000, 10_000, 11_000}
+	samples := make([]smartCropV2Sample, len(xs))
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: times[i], X: xs[i]}
+	}
+	correctSmartCropDenseRun(samples, 464, 1280, 404)
+	if samples[len(samples)-1].point.X >= 400 {
+		t.Fatalf("sparse reclining extent was discarded: %+v", samples)
+	}
+	for i := range samples {
+		if !samples[i].temporalTrack {
+			t.Fatalf("sample %d was not stabilized: %+v", i, samples[i])
+		}
+	}
+}
+
+func TestTightSmartCropExtentClusterIgnoresOutlier(t *testing.T) {
+	got := tightSmartCropExtentCluster([]int{304, 272, 382, 300, 300}, 67)
+	if len(got) != 4 || got[0] != 272 || got[len(got)-1] != 304 {
+		t.Fatalf("cluster=%v want [272 300 300 304]", got)
+	}
+}
+
 func TestReelStationaryContinuityRejectsOpposingOrDistantAnchors(t *testing.T) {
 	makeSamples := func() []smartCropV2Sample {
 		samples := make([]smartCropV2Sample, 7)

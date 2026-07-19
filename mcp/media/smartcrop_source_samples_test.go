@@ -94,6 +94,21 @@ func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
 	}
 }
 
+func TestBuildRemoteSmartCropSampleScriptKeepsTrackingCadence(t *testing.T) {
+	positions := make([]int64, 27)
+	for i := range positions {
+		positions[i] = int64(i+1) * 1_000
+	}
+	script, err := buildRemoteSmartCropSampleScript("ffmpeg", "https://storage.example/video.mp4", positions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "for POS_MS in 1000 2000 3000 4000 5000") ||
+		!strings.Contains(script, " 25000 26000 27000; do") {
+		t.Fatalf("remote script dropped requested tracking frames:\n%s", script)
+	}
+}
+
 func TestParseRemoteSmartCropSamples(t *testing.T) {
 	positions := []int64{1_000, 2_000, 3_000}
 	frame := func(subjectX int) string {

@@ -132,8 +132,9 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 	}
 	target := smartCropTarget{StartMs: start, EndMs: end}
 	if smartCropReelNeedsTracking(samples, srcW, cropW) {
+		trackingPositions := smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW)
 		extra := monikaDrunkRemoteScriptSamples(t, video,
-			smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW),
+			trackingPositions,
 			srcW, srcH)
 		samples = mergeSmartCropSamples(samples, extra)
 		markSmartCropSceneCuts(samples)
@@ -154,6 +155,38 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 
 func monikaDrunkRemoteScriptSamples(t *testing.T, video string, positions []int64, srcW, srcH int) []smartCropV2Sample {
 	t.Helper()
+	if fixtureDir := os.Getenv("MONIKA_DRUNK_11788_REMOTE_SAMPLES_DIR"); fixtureDir != "" {
+		samples := make([]smartCropV2Sample, 0, len(positions))
+		for _, position := range uniqueSortedSmartCropPositions(append([]int64(nil), positions...)) {
+			frame := filepath.Join(fixtureDir, fmt.Sprintf("%d.jpg", position))
+			f, err := os.Open(frame)
+			if os.IsNotExist(err) {
+				frame = filepath.Join(fixtureDir, fmt.Sprintf("%d.png", position))
+				f, err = os.Open(frame)
+				if os.IsNotExist(err) {
+					continue
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			img, _, err := image.Decode(f)
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			win, err := analyzeSmartCropV2Frame(srcW, srcH, 9, 16, img)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("remote fixture at=%d x=%d", position, win.X)
+			samples = append(samples, smartCropV2Sample{
+				point: cropPathPoint{AtMs: position, X: win.X},
+				img:   img,
+			})
+		}
+		return samples
+	}
 	script, err := buildRemoteSmartCropSampleScript("ffmpeg", video, positions)
 	if err != nil {
 		t.Fatal(err)
