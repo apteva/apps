@@ -202,6 +202,32 @@ func TestHeadAwareNarrowCropProtectsRecliningFace(t *testing.T) {
 	}
 }
 
+func TestHeadAwareNarrowCropAcceptsSmallTallFace(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	// A frontal face at 1280px can shrink to only 6-7% of the 320px analysis
+	// frame while retaining a distinctly taller-than-wide head shape.
+	fillSmartCropTestEllipse(img, 100, 112, 10, 15, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+	if x, changed := headAwareNarrowSmartCropX(img, 448, 1280, 404); !changed || x >= 448 {
+		t.Fatalf("small tall face was not contained: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestTallSubjectExtentCropProtectsConnectedLeaningPerson(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	skin := color.RGBA{R: 205, G: 150, B: 125, A: 255}
+	fillSmartCropTestRect(img, image.Rect(203, 54, 228, 154), skin)
+	fillSmartCropTestEllipse(img, 202, 53, 14, 22, skin)
+	x, changed := tallSubjectExtentAwareNarrowSmartCropX(img, 400, 1280, 404)
+	if !changed {
+		t.Fatal("connected leaning subject extent was not protected")
+	}
+	if x < 560 || x > 700 {
+		t.Fatalf("extent-safe crop x=%d want [560,700]", x)
+	}
+}
+
 func TestHeadAwareNarrowCropRecoversRecliningFaceJustOutsideCrop(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})
@@ -1033,6 +1059,63 @@ func TestReelStationaryRunsRejectLowConfidenceBackground(t *testing.T) {
 		if sample.point.X != 740 || sample.temporalTrack {
 			t.Fatalf("low-confidence point %d changed: %+v", i, sample)
 		}
+	}
+}
+
+func TestReelStationarySubjectTailFollowsClusteredHandoff(t *testing.T) {
+	samples := make([]smartCropV2Sample, 11)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 504}
+	}
+	samples[0].point.X = 584
+	samples[0].motionTracked = true
+	candidates := []int{564, 568, 576, 632, 640, 684, 680, 676}
+	if corrected := correctSmartCropStationarySubjectRun(samples, 1, len(samples), candidates, 8, 1280, 404); corrected != 10 {
+		t.Fatalf("corrected=%d want 10", corrected)
+	}
+	for i := 1; i < len(samples); i++ {
+		if samples[i].point.X != 640 || !samples[i].temporalTrack || samples[i].motionTracked {
+			t.Fatalf("tail sample %d was not stabilized: %+v", i, samples[i])
+		}
+	}
+	if samples[0].point.X != 584 || !samples[0].motionTracked {
+		t.Fatalf("motion anchor changed: %+v", samples[0])
+	}
+}
+
+func TestReelStationarySubjectTailRejectsUnsafeEvidence(t *testing.T) {
+	fixture := func() []smartCropV2Sample {
+		samples := make([]smartCropV2Sample, 7)
+		for i := range samples {
+			samples[i].point = cropPathPoint{AtMs: int64(i) * smartCropTrackingIntervalMs, X: 500}
+		}
+		samples[0].point.X = 580
+		samples[0].motionTracked = true
+		return samples
+	}
+
+	noAnchor := fixture()
+	noAnchor[0].motionTracked = false
+	if got := correctSmartCropStationarySubjectRun(noAnchor, 1, len(noAnchor), []int{620, 624, 628, 632}, 4, 1280, 404); got != 0 {
+		t.Fatalf("unanchored run changed %d samples", got)
+	}
+
+	dispersed := fixture()
+	if got := correctSmartCropStationarySubjectRun(dispersed, 1, len(dispersed), []int{300, 420, 620, 760}, 4, 1280, 404); got != 0 {
+		t.Fatalf("dispersed candidates changed %d samples", got)
+	}
+
+	traversal := fixture()
+	for i := 1; i < len(traversal); i++ {
+		traversal[i].point.X += i * 30
+	}
+	if got := correctSmartCropStationarySubjectRun(traversal, 1, len(traversal), []int{620, 624, 628, 632}, 4, 1280, 404); got != 0 {
+		t.Fatalf("moving run changed %d samples", got)
+	}
+
+	distant := fixture()
+	if got := correctSmartCropStationarySubjectRun(distant, 1, len(distant), []int{800, 804, 808, 812}, 4, 1280, 404); got != 0 {
+		t.Fatalf("distant candidates changed %d samples", got)
 	}
 }
 

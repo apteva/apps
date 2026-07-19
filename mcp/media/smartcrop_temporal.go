@@ -967,6 +967,158 @@ func correctSmartCropStationaryRuns(samples []smartCropV2Sample, srcW, cropW int
 	return corrected
 }
 
+// correctSmartCropStationarySubjectTails handles the final hand-off from
+// motion tracking to a nearly motionless pose. Pairwise motion can correctly
+// follow a person into a crouch or recline and then disappear once the pose is
+// held. Generic saliency may leave the crop at a nearby but no longer
+// containing position. A rolling multi-frame foreground consensus still sees
+// the subject for several frames during that hand-off.
+//
+// This is intentionally a tail/bridge correction rather than another global
+// tracker: a run must touch a motion-certified sample, remain spatially
+// stationary itself, and provide at least four tightly clustered rolling
+// subject candidates. Static-room anchors are excluded. The resulting move is
+// bounded to half a crop from the trusted motion position, so a couch, window,
+// or codec noise cannot make the crop cross the room.
+func correctSmartCropStationarySubjectTails(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 6 || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	corrected := 0
+	for start := 0; start < len(samples); {
+		if samples[start].motionTracked {
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(samples) && !samples[end].point.Cut && !samples[end].motionTracked {
+			end++
+		}
+		if end-start < 5 {
+			start = end
+			continue
+		}
+
+		prev := start - 1
+		next := end
+		prevOK := prev >= 0 && !samples[start].point.Cut && samples[prev].motionTracked
+		nextOK := next < len(samples) && !samples[next].point.Cut && samples[next].motionTracked
+		if !prevOK && !nextOK {
+			start = end
+			continue
+		}
+
+		sceneStart := start
+		for sceneStart > 0 && !samples[sceneStart].point.Cut {
+			sceneStart--
+		}
+		sceneEnd := end
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		// Inspect only a bounded hand-off band next to each trusted motion
+		// anchor. This keeps the cost independent of a long stationary pose and
+		// avoids letting late codec noise outvote the actual transition.
+		indices := make([]int, 0, 12)
+		seen := make(map[int]bool, 12)
+		appendIndex := func(i int) {
+			if i >= start && i < end && !seen[i] {
+				seen[i] = true
+				indices = append(indices, i)
+			}
+		}
+		if prevOK {
+			for i, limit := start, minInt(end, start+12); i < limit; i += 2 {
+				appendIndex(i)
+			}
+		}
+		if nextOK {
+			for i, limit := end-1, maxInt(start, end-12); i >= limit; i -= 2 {
+				appendIndex(i)
+			}
+		}
+		candidates := make([]int, 0, len(indices))
+		for _, i := range indices {
+			left, right := maxInt(sceneStart, i-4), minInt(sceneEnd, i+5)
+			if right-left < 5 {
+				continue
+			}
+			result, ok := bestSmartCropTemporalConsensus(samples[left:right], srcW, cropW)
+			if !ok || result.StaticAnchored || result.Concentration < 0.70 {
+				continue
+			}
+			strong := smartCropTemporalResultConfident(result) &&
+				(result.SubjectAnchored || (result.MeanActivity >= smartCropTemporalDenseMinMeanActivity &&
+					result.ActiveFraction >= smartCropTemporalDenseMinActiveFraction))
+			weakHandoff := result.MeanActivity >= 0.0005 && result.ActiveFraction >= 0.00002
+			if !strong && !weakHandoff {
+				continue
+			}
+			candidates = append(candidates, clampInt(roundEven(result.X), 0, srcW-cropW))
+		}
+		corrected += correctSmartCropStationarySubjectRun(samples, start, end, candidates, len(indices), srcW, cropW)
+		start = end
+	}
+	return corrected
+}
+
+func correctSmartCropStationarySubjectRun(samples []smartCropV2Sample, start, end int, candidates []int, observations, srcW, cropW int) int {
+	if start < 0 || end > len(samples) || end-start < 5 || srcW <= cropW || cropW <= 0 ||
+		observations < 4 || len(candidates) < 4 || len(candidates)*2 < observations {
+		return 0
+	}
+	prev := start - 1
+	next := end
+	prevOK := prev >= 0 && !samples[start].point.Cut && samples[prev].motionTracked
+	nextOK := next < len(samples) && !samples[next].point.Cut && samples[next].motionTracked
+	if !prevOK && !nextOK {
+		return 0
+	}
+	minX, maxX := samples[start].point.X, samples[start].point.X
+	for i := start + 1; i < end; i++ {
+		minX = minInt(minX, samples[i].point.X)
+		maxX = maxInt(maxX, samples[i].point.X)
+	}
+	if maxX-minX > cropW/4 {
+		return 0
+	}
+
+	candidates = append([]int(nil), candidates...)
+	sort.Ints(candidates)
+	lo := candidates[(len(candidates)-1)/5]
+	hi := candidates[(len(candidates)-1)*4/5]
+	if hi-lo > cropW/3 {
+		return 0
+	}
+	candidateX := roundEven(candidates[len(candidates)/2])
+	anchorX := candidateX
+	if prevOK && nextOK {
+		if absInt(samples[prev].point.X-samples[next].point.X) > cropW/2 {
+			return 0
+		}
+		anchorX = roundEven((samples[prev].point.X + samples[next].point.X) / 2)
+	} else if prevOK {
+		anchorX = samples[prev].point.X
+	} else {
+		anchorX = samples[next].point.X
+	}
+	if absInt(candidateX-anchorX) > cropW/2 {
+		return 0
+	}
+
+	candidateX = clampInt(candidateX, anchorX-cropW/2, anchorX+cropW/2)
+	candidateX = clampInt(roundEven(candidateX), 0, srcW-cropW)
+	corrected := 0
+	for i := start; i < end; i++ {
+		if samples[i].point.X != candidateX {
+			samples[i].point.X = candidateX
+			corrected++
+		}
+		samples[i].temporalTrack = true
+	}
+	return corrected
+}
+
 // correctSmartCropDenseRun uses the local temporal consensus as the stable
 // baseline, but keeps a repeated one-sided extent as a new state. This matters
 // when a person lies down or reverses direction: the inexpensive per-frame
