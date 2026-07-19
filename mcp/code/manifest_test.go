@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
 
 // Tier 1 — the embedded manifest must always parse and round-trip
 // the surface the binary actually exposes. If this drifts the binary
@@ -17,6 +22,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if len(m.Provides.MCPTools) != 37 {
 		t.Errorf("expected 37 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
+	if len(m.Provides.UIComponents) != 3 {
+		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
+	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
@@ -27,6 +35,54 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, want := range []string{"project", "global"} {
 		if !gotScopes[want] {
 			t.Errorf("manifest missing scope %q", want)
+		}
+	}
+}
+
+func TestUIComponents_CompleteAndDiskManifestMatches(t *testing.T) {
+	embedded := (&App{}).Manifest()
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if disk.Version != embedded.Version {
+		t.Fatalf("disk version %q does not match embedded version %q", disk.Version, embedded.Version)
+	}
+
+	want := map[string]string{
+		"repository-card":  "/ui/RepositoryCard.mjs",
+		"source-file-card": "/ui/SourceFileCard.mjs",
+		"issue-card":       "/ui/IssueCard.mjs",
+	}
+	for _, manifest := range []sdk.Manifest{embedded, *disk} {
+		if len(manifest.Provides.UIComponents) != len(want) {
+			t.Fatalf("manifest has %d components, want %d", len(manifest.Provides.UIComponents), len(want))
+		}
+		for _, component := range manifest.Provides.UIComponents {
+			entry, ok := want[component.Name]
+			if !ok {
+				t.Errorf("unexpected component %q", component.Name)
+				continue
+			}
+			if component.Entry != entry {
+				t.Errorf("component %q entry=%q, want %q", component.Name, component.Entry, entry)
+			}
+			if _, err := os.Stat("." + component.Entry); err != nil {
+				t.Errorf("component %q bundle is missing: %v", component.Name, err)
+			}
+			if len(component.Slots) != 1 || component.Slots[0] != "chat.message_attachment" {
+				t.Errorf("component %q has invalid slots: %v", component.Name, component.Slots)
+			}
+			if len(component.PropsSchema) == 0 || component.PropsSchema["required"] == nil {
+				t.Errorf("component %q has no required props schema", component.Name)
+			}
+			if component.PreviewProps["preview"] != true {
+				t.Errorf("component %q has no live preview props", component.Name)
+			}
 		}
 	}
 }

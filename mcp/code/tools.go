@@ -487,6 +487,7 @@ func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	emitDevEvent(ctx, repo, dr)
 	// Optional public exposure via server-native ingress. Best-effort: a
 	// failure here doesn't roll back the dev run — the user can fix
 	// DNS/config and call again. Cert issuance is handled by the
@@ -519,6 +520,8 @@ func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.dev.stopDevRun(ctx, pid, repo.ID); err != nil {
 		return nil, err
 	}
+	dr, _ := dbGetDevRun(ctx.AppDB(), pid, repo.ID)
+	emitDevEvent(ctx, repo, dr)
 	// Best-effort route cleanup — if the user passed expose=true on
 	// start, we registered <slug>.<dev_base_hostname>. Drop it now
 	// regardless of whether expose was requested; UnexposeIngress is
@@ -1202,6 +1205,11 @@ func (a *App) toolReposSetDeployHints(ctx *sdk.AppCtx, args map[string]any) (any
 	r, err := dbSetDeployHints(ctx.AppDB(), pid, slug, h)
 	if err != nil {
 		return nil, err
+	}
+	if ctx != nil {
+		ctx.Emit("repo.updated", map[string]any{
+			"id": r.ID, "slug": r.Slug, "name": r.Name, "framework": r.Framework,
+		})
 	}
 	return map[string]any{"repository": r}, nil
 }

@@ -56,6 +56,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case tail == "":
 		a.httpRepoMeta(w, r, slug)
+	case tail == "summary":
+		a.httpRepoSummary(w, r, slug)
 	case tail == "tree":
 		a.httpRepoTree(w, r, slug)
 	case strings.HasPrefix(tail, "files/"):
@@ -209,6 +211,11 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 			}
 		}
 		repo, _ := dbGetRepoBySlug(globalCtx.AppDB(), pid, slug)
+		if globalCtx != nil && repo != nil {
+			globalCtx.Emit("repo.updated", map[string]any{
+				"id": repo.ID, "slug": repo.Slug, "name": repo.Name, "framework": repo.Framework,
+			})
+		}
 		httpJSON(w, map[string]any{"repository": repo})
 	case http.MethodDelete:
 		repo, err := requireRepoSlug(globalCtx, pid, slug)
@@ -285,11 +292,6 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 	repoStore := a.storeFor(repo)
 	switch r.Method {
 	case http.MethodGet:
-		body, err := repoStore.Read(slug, rel)
-		if err != nil {
-			httpErr(w, http.StatusNotFound, err.Error())
-			return
-		}
 		// Lines + line numbers if ?annotated=1, else raw bytes.
 		if r.URL.Query().Get("annotated") == "1" {
 			res, err := readWithLineNumbers(repoStore, slug, rel,
@@ -300,6 +302,11 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 				return
 			}
 			httpJSON(w, res)
+			return
+		}
+		body, err := repoStore.Read(slug, rel)
+		if err != nil {
+			httpErr(w, http.StatusNotFound, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -760,6 +767,10 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 	case "":
 		switch r.Method {
 		case http.MethodGet:
+			if r.URL.Query().Get("summary") == "1" {
+				httpJSON(w, map[string]any{"issue": issueCardData(iss)})
+				return
+			}
 			detail, err := dbGetIssueDetail(globalCtx.AppDB(), pid, repo.ID, n)
 			if err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1171,6 +1182,7 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		emitDevEvent(globalCtx, repo, dr)
 		httpJSON(w, map[string]any{"dev_run": dr})
 	case "stop":
 		if r.Method != http.MethodPost {
@@ -1180,6 +1192,8 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 		if a.dev != nil {
 			_ = a.dev.stopDevRun(globalCtx, pid, repo.ID)
 		}
+		dr, _ := dbGetDevRun(globalCtx.AppDB(), pid, repo.ID)
+		emitDevEvent(globalCtx, repo, dr)
 		httpJSON(w, map[string]any{"stopped": true})
 	case "status", "":
 		if r.Method != http.MethodGet {
