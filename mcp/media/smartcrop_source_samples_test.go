@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"strings"
+	"testing"
+)
 
 func TestSmartCropSupplementPositionsLongSourceStill(t *testing.T) {
 	const fourHours = int64(4 * 60 * 60 * 1000)
@@ -56,5 +64,82 @@ func TestSmartCropSupplementPositionsClampAtSourceEdges(t *testing.T) {
 		if got[i] <= got[i-1] {
 			t.Fatalf("positions are not unique and sorted: %v", got)
 		}
+	}
+}
+
+func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
+	url := "https://storage.example/video.mp4?signature=it's-safe&part=1"
+	script, err := buildRemoteSmartCropSampleScript("/opt/apteva/ffmpeg", url,
+		[]int64{187_410, 162_495, 174_000, 174_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"FFMPEG=" + shellQuote("/opt/apteva/ffmpeg"),
+		"SIGNED_URL=" + shellQuote(url),
+		"scale=320:-2",
+		remoteSmartCropMarker,
+		"for POS_MS in 162495 174000 187410",
+		"ACTIVE=0",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("remote sample script missing %q:\n%s", want, script)
+		}
+	}
+	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{1}); err == nil {
+		t.Fatal("one remote sample position should be rejected")
+	}
+	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{-1, 2}); err == nil {
+		t.Fatal("negative remote sample position should be rejected")
+	}
+}
+
+func TestParseRemoteSmartCropSamples(t *testing.T) {
+	positions := []int64{1_000, 2_000, 3_000}
+	frame := func(subjectX int) string {
+		img := image.NewRGBA(image.Rect(0, 0, 256, 144))
+		for y := 0; y < 144; y++ {
+			for x := 0; x < 256; x++ {
+				img.Set(x, y, color.RGBA{R: 90, G: 100, B: 110, A: 255})
+			}
+		}
+		for y := 24; y < 140; y++ {
+			for x := subjectX; x < minInt(256, subjectX+45); x++ {
+				img.Set(x, y, color.RGBA{R: 220, G: 130, B: 85, A: 255})
+			}
+		}
+		var encoded bytes.Buffer
+		if err := jpeg.Encode(&encoded, img, &jpeg.Options{Quality: 70}); err != nil {
+			t.Fatal(err)
+		}
+		return base64.StdEncoding.EncodeToString(encoded.Bytes())
+	}
+	out := strings.Join([]string{
+		"unrelated remote output",
+		remoteSmartCropMarker + "3000:" + frame(180),
+		remoteSmartCropMarker + "not-a-time:AAAA",
+		remoteSmartCropMarker + "1000:" + frame(20),
+		remoteSmartCropMarker + "9000:" + frame(100),
+	}, "\n")
+	samples, err := parseRemoteSmartCropSamples(out, positions, 1280, 720, 9, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("samples=%d want=2", len(samples))
+	}
+	if samples[0].point.AtMs != 1_000 || samples[1].point.AtMs != 3_000 {
+		t.Fatalf("samples are not sorted or allowed: %+v", samples)
+	}
+	if _, err := parseRemoteSmartCropSamples(remoteSmartCropMarker+"1000:invalid", positions,
+		1280, 720, 9, 16); err == nil {
+		t.Fatal("insufficient decodable remote samples should fail")
+	}
+}
+
+func TestParseRemoteSmartCropSamplesRejectsOversizedOutput(t *testing.T) {
+	out := strings.Repeat("x", remoteSmartCropMaxOutputBytes+1)
+	if _, err := parseRemoteSmartCropSamples(out, []int64{1, 2}, 1280, 720, 9, 16); err == nil {
+		t.Fatal("oversized remote sample output should fail")
 	}
 }

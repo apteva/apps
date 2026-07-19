@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"image"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +20,12 @@ import (
 )
 
 const smartCropSupplementIntervalMs = int64(5000)
+
+const (
+	remoteSmartCropMarker         = "APTEVA_SMARTCROP_FRAME:"
+	remoteSmartCropSampleWidth    = 320
+	remoteSmartCropMaxOutputBytes = 900 * 1024
+)
 
 // smartCropSupplementPositions creates a dense, bounded local storyboard
 // around the requested output. Source duration does not affect the amount of
@@ -103,9 +112,30 @@ func analyzeSmartCropV2Source(
 	if ffmpegPath == "" {
 		ffmpegPath = "ffmpeg"
 	}
+	var directFailed, remoteFailed bool
 	if signedURL, signedErr := sc.GetSignedURL(ctx, projectID, fileID, 900); signedErr == nil {
 		if samples, sampleErr := analyzeSmartCropV2Input(ctx, ffmpegPath, signedURL, positions, srcW, srcH, targetW, targetH); sampleErr == nil {
 			return samples, nil
+		} else {
+			directFailed = true
+		}
+
+		// A remote render installation can be perfectly healthy while the
+		// Media sidecar itself cannot decode the signed source (missing local
+		// codecs, constrained networking, or temporary disk pressure). In that
+		// case, run the same bounded low-resolution sampling pass on the FFmpeg
+		// host that will perform the final render. Returning the JPEGs inline is
+		// cheap (at most 32 x 320px frames) and avoids both a full source download
+		// and permanently storing a denser storyboard.
+		if hostID := remoteIndexerHostID(app); hostID > 0 {
+			if samples, sampleErr := analyzeSmartCropV2Remote(ctx, app, hostID, signedURL,
+				positions, srcW, srcH, targetW, targetH); sampleErr == nil {
+				app.Logger().Info("smartcrop v2 using remote source samples",
+					"file_id", sourceFileID, "host_id", hostID, "samples", len(samples))
+				return samples, nil
+			} else {
+				remoteFailed = true
+			}
 		}
 	}
 
@@ -132,7 +162,172 @@ func analyzeSmartCropV2Source(
 	if closeErr != nil {
 		return nil, fmt.Errorf("close downloaded source: %w", closeErr)
 	}
-	return analyzeSmartCropV2Input(ctx, ffmpegPath, localPath, positions, srcW, srcH, targetW, targetH)
+	samples, sampleErr := analyzeSmartCropV2Input(ctx, ffmpegPath, localPath, positions, srcW, srcH, targetW, targetH)
+	if sampleErr == nil {
+		return samples, nil
+	}
+	return nil, fmt.Errorf("source sampling failed (signed_url_failed=%t remote_failed=%t): %w",
+		directFailed, remoteFailed, sampleErr)
+}
+
+func analyzeSmartCropV2Remote(
+	ctx context.Context,
+	app *sdk.AppCtx,
+	hostID int64,
+	signedURL string,
+	positions []int64,
+	srcW, srcH, targetW, targetH int,
+) ([]smartCropV2Sample, error) {
+	paths, err := sharedRemoteInstaller().Ensure(ctx, app, hostID)
+	if err != nil {
+		return nil, fmt.Errorf("remote ffmpeg unavailable on host_id=%d: %w", hostID, err)
+	}
+	script, err := buildRemoteSmartCropSampleScript(paths.FFmpeg, signedURL, positions)
+	if err != nil {
+		return nil, err
+	}
+	timeoutS := maxInt(90, len(positions)*15)
+	if timeoutS > 600 {
+		timeoutS = 600
+	}
+	out, exit, runErr := runRemote(ctx, app, hostID, script, timeoutS)
+	if runErr != nil {
+		return nil, fmt.Errorf("remote smartcrop samples: %w (output: %s)", runErr, truncate(out, 600))
+	}
+	if exit != 0 {
+		return nil, fmt.Errorf("remote smartcrop samples exit=%d: %s", exit, truncate(out, 600))
+	}
+	return parseRemoteSmartCropSamples(out, positions, srcW, srcH, targetW, targetH)
+}
+
+func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []int64) (string, error) {
+	if strings.TrimSpace(ffmpegPath) == "" || strings.TrimSpace(signedURL) == "" {
+		return "", fmt.Errorf("remote smartcrop sampling requires ffmpeg and a signed URL")
+	}
+	positions = uniqueSortedSmartCropPositions(append([]int64(nil), positions...))
+	if len(positions) < 2 || len(positions) > smartCropTrackingMaxExtraFrames {
+		return "", fmt.Errorf("remote smartcrop sampling needs 2..%d positions, got %d", smartCropTrackingMaxExtraFrames, len(positions))
+	}
+	for _, position := range positions {
+		if position < 0 {
+			return "", fmt.Errorf("remote smartcrop position must be non-negative: %d", position)
+		}
+	}
+	if len(positions) > smartCropV2MaxSamples {
+		capped := make([]int64, 0, smartCropV2MaxSamples)
+		for i := 0; i < smartCropV2MaxSamples; i++ {
+			index := int(math.Round(float64(i) * float64(len(positions)-1) / float64(smartCropV2MaxSamples-1)))
+			if len(capped) == 0 || capped[len(capped)-1] != positions[index] {
+				capped = append(capped, positions[index])
+			}
+		}
+		positions = capped
+	}
+
+	var b strings.Builder
+	b.WriteString("set -u\n")
+	b.WriteString("WORK=$(mktemp -d /tmp/apteva-smartcrop-samples-XXXXXX)\n")
+	b.WriteString("trap 'rm -rf \"$WORK\"' EXIT\n")
+	fmt.Fprintf(&b, "FFMPEG=%s\n", shellQuote(ffmpegPath))
+	fmt.Fprintf(&b, "SIGNED_URL=%s\n", shellQuote(signedURL))
+	b.WriteString("extract_one() {\n")
+	b.WriteString("  POS_MS=$1\n")
+	b.WriteString("  POS_SEC=$(awk -v p=\"$POS_MS\" 'BEGIN{printf \"%.3f\", p/1000}')\n")
+	fmt.Fprintf(&b, "  \"$FFMPEG\" -nostdin -y -loglevel error -ss \"$POS_SEC\" -i \"$SIGNED_URL\" -vf scale=%d:-2 -frames:v 1 -q:v 3 \"$WORK/$POS_MS.jpg\" >/dev/null 2>&1 || true\n", remoteSmartCropSampleWidth)
+	b.WriteString("}\n")
+	b.WriteString("ACTIVE=0\n")
+	b.WriteString("for POS_MS in")
+	for _, position := range positions {
+		fmt.Fprintf(&b, " %d", position)
+	}
+	b.WriteString("; do\n")
+	b.WriteString("  extract_one \"$POS_MS\" &\n")
+	b.WriteString("  ACTIVE=$((ACTIVE+1))\n")
+	b.WriteString("  if [ \"$ACTIVE\" -ge 4 ]; then wait || true; ACTIVE=0; fi\n")
+	b.WriteString("done\n")
+	b.WriteString("wait || true\n")
+	// Instances caps command output at roughly 1 MiB. Preserve the 320px/q3
+	// frames used by the detector whenever they fit; only unusually detailed
+	// batches are recompressed before base64 expansion can cross that cap.
+	b.WriteString("TOTAL_BYTES=$(wc -c \"$WORK\"/*.jpg 2>/dev/null | tail -1 | awk '{print $1}')\n")
+	b.WriteString("if [ \"${TOTAL_BYTES:-0}\" -gt 620000 ]; then\n")
+	b.WriteString("  for SOURCE in \"$WORK\"/*.jpg; do\n")
+	b.WriteString("    [ -s \"$SOURCE\" ] || continue\n")
+	b.WriteString("    SMALL=\"$SOURCE.small.jpg\"\n")
+	b.WriteString("    \"$FFMPEG\" -nostdin -y -loglevel error -i \"$SOURCE\" -vf scale=280:-2 -frames:v 1 -q:v 5 \"$SMALL\" >/dev/null 2>&1 && mv \"$SMALL\" \"$SOURCE\"\n")
+	b.WriteString("  done\n")
+	b.WriteString("fi\n")
+	b.WriteString("COUNT=0\n")
+	b.WriteString("for POS_MS in")
+	for _, position := range positions {
+		fmt.Fprintf(&b, " %d", position)
+	}
+	b.WriteString("; do\n")
+	b.WriteString("  [ -s \"$WORK/$POS_MS.jpg\" ] || continue\n")
+	fmt.Fprintf(&b, "  printf '%s%%s:' \"$POS_MS\"\n", remoteSmartCropMarker)
+	b.WriteString("  base64 < \"$WORK/$POS_MS.jpg\" | tr -d '\\r\\n'\n")
+	b.WriteString("  printf '\\n'\n")
+	b.WriteString("  COUNT=$((COUNT+1))\n")
+	b.WriteString("done\n")
+	b.WriteString("[ \"$COUNT\" -ge 2 ]\n")
+	return b.String(), nil
+}
+
+func parseRemoteSmartCropSamples(
+	out string,
+	positions []int64,
+	srcW, srcH, targetW, targetH int,
+) ([]smartCropV2Sample, error) {
+	if len(out) > remoteSmartCropMaxOutputBytes {
+		return nil, fmt.Errorf("remote smartcrop output exceeds %d bytes", remoteSmartCropMaxOutputBytes)
+	}
+	allowed := make(map[int64]struct{}, len(positions))
+	for _, position := range positions {
+		allowed[position] = struct{}{}
+	}
+	byTime := make(map[int64]smartCropV2Sample, len(positions))
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, remoteSmartCropMarker) {
+			continue
+		}
+		fields := strings.SplitN(strings.TrimPrefix(line, remoteSmartCropMarker), ":", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		position, err := strconv.ParseInt(fields[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if _, ok := allowed[position]; !ok {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(fields[1])
+		if err != nil || len(raw) == 0 || len(raw) > 256*1024 {
+			continue
+		}
+		img, _, err := image.Decode(bytes.NewReader(raw))
+		if err != nil {
+			continue
+		}
+		win, err := analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH, img)
+		if err != nil {
+			continue
+		}
+		byTime[position] = smartCropV2Sample{
+			point: cropPathPoint{AtMs: position, X: win.X},
+			img:   img,
+		}
+	}
+	minimum := maxInt(2, (len(allowed)+1)/2)
+	if len(byTime) < minimum {
+		return nil, fmt.Errorf("remote smartcrop decoded %d/%d frames; need at least %d", len(byTime), len(allowed), minimum)
+	}
+	samples := make([]smartCropV2Sample, 0, len(byTime))
+	for _, sample := range byTime {
+		samples = append(samples, sample)
+	}
+	sort.Slice(samples, func(i, j int) bool { return samples[i].point.AtMs < samples[j].point.AtMs })
+	return samples, nil
 }
 
 func analyzeSmartCropV2Input(

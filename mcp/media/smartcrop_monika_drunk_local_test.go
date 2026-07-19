@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"image"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -88,6 +90,118 @@ func TestMonikaDrunk11788LocalRegression(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("production-storyboard-reclining-reel", func(t *testing.T) {
+		path := monikaDrunkProductionCadenceReelPath(t, video, duration, 162_495, 187_410)
+		t.Logf("production cadence crop path: %v", path)
+		for _, at := range []int64{174_495, 180_495, 187_000} {
+			x, ok := mariaInterpolatedPathX(path, at)
+			if !ok {
+				t.Fatalf("no crop path at %dms: %v", at, path)
+			}
+			if x > 320 {
+				t.Errorf("reclining face leaves frame at %dms: crop x=%d want <=320; path=%v", at, x, path)
+			}
+		}
+		if outputDir := os.Getenv("MONIKA_DRUNK_11788_OUTPUT_DIR"); outputDir != "" {
+			if err := os.MkdirAll(outputDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			filter := "setpts=PTS-STARTPTS," + cropFilterForPath(404, 718, 0, 162_495, path) +
+				",scale=1080:1920,setsar=1"
+			runFFmpeg(t, "-ss", secondsString(162_495), "-i", video,
+				"-t", secondsString(187_410-162_495), "-vf", filter, "-an",
+				"-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-movflags", "+faststart", "-y",
+				filepath.Join(outputDir, "production-storyboard-reclining-reel.mp4"))
+		}
+	})
+}
+
+// monikaDrunkProductionCadenceReelPath mirrors resolveSmartCropReelV2's
+// storyboard-first execution path for the production five-second keyframes.
+// The older exact-source regression skipped this branch and therefore missed
+// a crop that stayed on the upright torso after the subject reclined.
+func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, start, end int64) []cropPathPoint {
+	t.Helper()
+	const srcW, srcH, cropW = 1280, 720, 404
+	positions := []int64{161_000, 166_000, 171_000, 176_000, 181_000, 186_000, 191_000}
+	samples := monikaDrunkStoryboardSamples(t, video, positions, srcW, srcH)
+	markSmartCropSceneCuts(samples)
+	for _, sample := range samples {
+		t.Logf("storyboard at=%d x=%d cut=%v", sample.point.AtMs, sample.point.X, sample.point.Cut)
+	}
+	target := smartCropTarget{StartMs: start, EndMs: end}
+	if smartCropReelNeedsTracking(samples, srcW, cropW) {
+		extra := monikaDrunkRemoteScriptSamples(t, video,
+			smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW),
+			srcW, srcH)
+		samples = mergeSmartCropSamples(samples, extra)
+		markSmartCropSceneCuts(samples)
+		refineSmartCropMotionSamples(samples, srcW, cropW)
+		correctSmartCropIsolatedMotionBoundaryScenes(samples, srcW, cropW)
+		fillSmartCropMotionGaps(samples, srcW, cropW)
+		correctSmartCropStationaryRuns(samples, srcW, cropW)
+		refineSmartCropHeadSamples(samples, srcW, cropW)
+	}
+	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
+	refineSmartCropHeadSamples(samples, srcW, cropW)
+	path := make([]cropPathPoint, len(samples))
+	for i := range samples {
+		path[i] = samples[i].point
+	}
+	return stabilizeSmartCropPath(anchorSmartCropPath(path, start, end), cropW, srcW)
+}
+
+func monikaDrunkRemoteScriptSamples(t *testing.T, video string, positions []int64, srcW, srcH int) []smartCropV2Sample {
+	t.Helper()
+	script, err := buildRemoteSmartCropSampleScript("ffmpeg", video, positions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.CommandContext(t.Context(), "bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("remote sample script emulation: %v: %s", err, out)
+	}
+	t.Logf("remote sample payload bytes=%d", len(out))
+	samples, err := parseRemoteSmartCropSamples(string(out), positions, srcW, srcH, 9, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return samples
+}
+
+func monikaDrunkStoryboardSamples(t *testing.T, video string, positions []int64, srcW, srcH int) []smartCropV2Sample {
+	t.Helper()
+	dir := t.TempDir()
+	fixtureDir := os.Getenv("MONIKA_DRUNK_11788_STORYBOARD_DIR")
+	samples := make([]smartCropV2Sample, 0, len(positions))
+	for i, position := range positions {
+		frame := filepath.Join(dir, fmt.Sprintf("%02d.jpg", i))
+		if fixtureDir != "" {
+			frame = filepath.Join(fixtureDir, fmt.Sprintf("%d.jpg", position))
+		} else {
+			runFFmpeg(t, "-ss", secondsString(position), "-i", video,
+				"-vf", "thumbnail=30,scale=320:-2", "-frames:v", "1", "-q:v", "3", "-y", frame)
+		}
+		f, err := os.Open(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, _, err := image.Decode(f)
+		f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		win, err := analyzeSmartCropV2Frame(srcW, srcH, 9, 16, img)
+		if err != nil {
+			t.Fatal(err)
+		}
+		samples = append(samples, smartCropV2Sample{
+			point: cropPathPoint{AtMs: position, X: win.X},
+			img:   img,
+		})
+	}
+	return samples
 }
 
 func monikaDrunkStillX(t *testing.T, video string, duration, focus int64) int {
