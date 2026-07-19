@@ -8,7 +8,11 @@ import (
 	"sync"
 )
 
-const smartCropBackgroundMaxSceneDifference = 0.20
+const (
+	smartCropBackgroundMaxSceneDifference = 0.20
+	smartCropBackgroundPixelDifference    = 14
+	smartCropBackgroundMinActivity        = 0.65
+)
 
 type smartCropBackgroundResult struct {
 	X             int
@@ -74,10 +78,10 @@ func backgroundAwareNarrowSmartCropX(current image.Image, references []image.Ima
 			// clothing revisiting the same pixel), while allowing a stable room
 			// pixel to match only a minority after gradual exposure changes.
 			diff := values[len(values)/3]
-			if diff <= 20 {
+			if diff <= smartCropBackgroundPixelDifference {
 				continue
 			}
-			weight := float64(minInt(diff-20, 80))
+			weight := float64(minInt(diff-smartCropBackgroundPixelDifference, 80))
 			// The couch and floor often contain compression shimmer. Requiring a
 			// little local structure favors an actual foreground boundary.
 			gray := gray8(int(currentRGB[idx]), int(currentRGB[idx+1]), int(currentRGB[idx+2]))
@@ -97,7 +101,7 @@ func backgroundAwareNarrowSmartCropX(current image.Image, references []image.Ima
 	}
 	cols = smoothColumns(cols, 7)
 	bestStart, bestScore, currentScore, total, ok := bestColumnWindow(cols, thumbCropW, currentX, srcW)
-	if !ok || total < float64(w*h)*0.9 {
+	if !ok || total < float64(w*h)*smartCropBackgroundMinActivity {
 		return currentX, smartCropBackgroundResult{}, false
 	}
 	coveredRows := 0

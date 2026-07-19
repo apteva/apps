@@ -21,8 +21,9 @@ import (
 var smartCropFaceCascade []byte
 
 const (
-	smartCropFaceMinQuality = float32(5.0)
-	smartCropFaceSafeMargin = 0.16
+	smartCropFaceMinQuality     = float32(5.0)
+	smartCropFaceMinClusterVote = float32(1.0)
+	smartCropFaceSafeMargin     = 0.16
 )
 
 type smartCropFace struct {
@@ -92,13 +93,19 @@ func detectSmartCropFaces(img image.Image) []smartCropFace {
 	// 320x180 and deterministic serialization avoids a detector data race.
 	smartCropFaces.mu.Lock()
 	run := func(cascade pigo.CascadeParams) []pigo.Detection {
-		var detections []pigo.Detection
-		for _, detection := range classifier.RunCascade(cascade, 0) {
-			if detection.Q >= smartCropFaceMinQuality {
-				detections = append(detections, detection)
+		// Cluster the weak overlapping cascade votes before applying the final
+		// quality threshold. A profile or reclining face can be composed of
+		// several individually weak votes whose cluster is strong. Filtering the
+		// raw votes first silently removed those real faces, while filtering the
+		// combined result below retains the same public acceptance threshold.
+		raw := classifier.RunCascade(cascade, 0)
+		votes := raw[:0]
+		for _, detection := range raw {
+			if detection.Q >= smartCropFaceMinClusterVote {
+				votes = append(votes, detection)
 			}
 		}
-		return classifier.ClusterDetections(detections, 0.18)
+		return classifier.ClusterDetections(votes, 0.18)
 	}
 	raw := run(params)
 	type rotatedDetection struct {
@@ -215,7 +222,27 @@ func containSmartCropFaceX(currentX int, face smartCropFace, srcW, cropW int) in
 	if maxWanted > x+cropW {
 		x = maxWanted - cropW
 	}
-	x = clampInt(roundEven(x), 0, srcW-cropW)
+	// Clamp before enforcing chroma-safe even coordinates. If the minimally
+	// moved coordinate is odd, choose the adjacent even coordinate that loses
+	// the least requested face margin. Always rounding downward can clip the
+	// right margin; clamping after rounding can reintroduce an odd coordinate
+	// when srcW-cropW itself is odd.
+	maxX := srcW - cropW
+	x = clampInt(x, 0, maxX)
+	if x%2 != 0 {
+		down, up := x-1, x+1
+		violation := func(candidate int) int {
+			if candidate < 0 || candidate > maxX {
+				return math.MaxInt
+			}
+			return maxInt(0, candidate-minWanted) + maxInt(0, maxWanted-(candidate+cropW))
+		}
+		if violation(up) < violation(down) {
+			x = up
+		} else {
+			x = down
+		}
+	}
 	return x
 }
 
