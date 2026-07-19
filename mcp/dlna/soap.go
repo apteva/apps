@@ -9,16 +9,16 @@
 //
 // Object ID grammar (we own this; clients treat it as opaque):
 //
-//   "0"                        — root
-//   "0/audio"                  — audio top-level virtual container
-//   "0/video"                  — video top-level virtual container
-//   "0/photos"                 — image top-level virtual container
-//   "0/recent"                 — newest-first across all kinds
-//   "0/folders"                — list of published folders
-//   "f:<id>"                   — published folder root (id from DB)
-//   "f:<id>/<rel-b64>"         — recursive subfolder, rel-b64 = url-safe
-//                                base64 of the path inside the published root
-//   "i:<file_id>"              — a leaf item (storage file_id)
+//	"0"                        — root
+//	"0/audio"                  — audio top-level virtual container
+//	"0/video"                  — video top-level virtual container
+//	"0/photos"                 — image top-level virtual container
+//	"0/recent"                 — newest-first across all kinds
+//	"0/folders"                — list of published folders
+//	"f:<id>"                   — published folder root (id from DB)
+//	"f:<id>/<rel-b64>"         — recursive subfolder, rel-b64 = url-safe
+//	                             base64 of the path inside the published root
+//	"i:<file_id>"              — a leaf item (storage file_id)
 //
 // The "-1" ParentID convention is preserved on root.
 package main
@@ -27,6 +27,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -35,6 +36,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+)
+
+const (
+	contentDirectoryURN  = "urn:schemas-upnp-org:service:ContentDirectory:1"
+	connectionManagerURN = "urn:schemas-upnp-org:service:ConnectionManager:1"
+	maxSOAPBodyBytes     = 1 << 20
 )
 
 // browseRequest is what the TV sends.
@@ -67,7 +74,7 @@ type didlContainer struct {
 	ParentID string
 	Title    string
 	Class    string // object.container or object.container.storageFolder
-	Count    int    // childCount; 0 for unknown (clients tolerate)
+	Count    int    // childCount; -1 omits the attribute when unknown
 }
 
 type didlItem struct {
@@ -101,9 +108,9 @@ func (a *App) handleControlContentDirectory(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "POST", 405)
 		return
 	}
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxSOAPBodyBytes))
 	if err != nil {
-		http.Error(w, err.Error(), 400)
+		soapFault(w, "402", "Invalid Args")
 		return
 	}
 	a.logClient(r)
@@ -121,7 +128,7 @@ func (a *App) handleControlContentDirectory(w http.ResponseWriter, r *http.Reque
 			soapFault(w, "501", err.Error())
 			return
 		}
-		writeSOAP(w, "BrowseResponse", browseResponseBody(res))
+		writeSOAP(w, contentDirectoryURN, "BrowseResponse", browseResponseBody(res))
 	case strings.HasSuffix(action, "#Search"):
 		req, err := parseSearch(body)
 		if err != nil {
@@ -133,15 +140,16 @@ func (a *App) handleControlContentDirectory(w http.ResponseWriter, r *http.Reque
 			soapFault(w, "501", err.Error())
 			return
 		}
-		writeSOAP(w, "SearchResponse", browseResponseBody(res))
+		writeSOAP(w, contentDirectoryURN, "SearchResponse", browseResponseBody(res))
 	case strings.HasSuffix(action, "#GetSortCapabilities"):
-		writeSOAP(w, "GetSortCapabilitiesResponse",
+		writeSOAP(w, contentDirectoryURN, "GetSortCapabilitiesResponse",
 			`<SortCaps>dc:title,dc:date</SortCaps>`)
 	case strings.HasSuffix(action, "#GetSearchCapabilities"):
-		writeSOAP(w, "GetSearchCapabilitiesResponse",
+		writeSOAP(w, contentDirectoryURN, "GetSearchCapabilitiesResponse",
 			`<SearchCaps>dc:title,upnp:class</SearchCaps>`)
 	case strings.HasSuffix(action, "#GetSystemUpdateID"):
-		writeSOAP(w, "GetSystemUpdateIDResponse", `<Id>1</Id>`)
+		writeSOAP(w, contentDirectoryURN, "GetSystemUpdateIDResponse",
+			fmt.Sprintf(`<Id>%d</Id>`, a.updateID.Load()))
 	default:
 		soapFault(w, "401", "Invalid Action")
 	}
@@ -159,13 +167,13 @@ func (a *App) handleControlConnectionManager(w http.ResponseWriter, r *http.Requ
 	action := soapAction(r)
 	switch {
 	case strings.HasSuffix(action, "#GetProtocolInfo"):
-		writeSOAP(w, "GetProtocolInfoResponse",
+		writeSOAP(w, connectionManagerURN, "GetProtocolInfoResponse",
 			`<Source>`+protocolInfoSourceList()+`</Source><Sink></Sink>`)
 	case strings.HasSuffix(action, "#GetCurrentConnectionIDs"):
-		writeSOAP(w, "GetCurrentConnectionIDsResponse", `<ConnectionIDs>0</ConnectionIDs>`)
+		writeSOAP(w, connectionManagerURN, "GetCurrentConnectionIDsResponse", `<ConnectionIDs>0</ConnectionIDs>`)
 	case strings.HasSuffix(action, "#GetCurrentConnectionInfo"):
 		// Single virtual connection 0.
-		writeSOAP(w, "GetCurrentConnectionInfoResponse", strings.Join([]string{
+		writeSOAP(w, connectionManagerURN, "GetCurrentConnectionInfoResponse", strings.Join([]string{
 			`<RcsID>-1</RcsID>`,
 			`<AVTransportID>-1</AVTransportID>`,
 			`<ProtocolInfo></ProtocolInfo>`,
@@ -182,11 +190,19 @@ func (a *App) handleControlConnectionManager(w http.ResponseWriter, r *http.Requ
 // ─── ContentDirectory action: Browse ───────────────────────────────
 
 func (a *App) contentDirectoryBrowse(ctx context.Context, req *browseRequest) (*browseResult, error) {
-	if req.RequestedCount <= 0 || req.RequestedCount > 1000 {
-		req.RequestedCount = 200
+	if req.StartingIndex < 0 {
+		return nil, errors.New("StartingIndex must not be negative")
+	}
+	if req.RequestedCount < 0 {
+		return nil, errors.New("RequestedCount must not be negative")
+	}
+	if req.RequestedCount == 0 || req.RequestedCount > 1000 {
+		// UPnP defines zero as "all remaining". Keep the response
+		// bounded while returning far more than the old 200-item cap.
+		req.RequestedCount = 1000
 	}
 	if req.BrowseFlag == "BrowseMetadata" {
-		c, i, err := a.resolveOne(req.ObjectID)
+		c, i, err := a.resolveOne(ctx, req.ObjectID)
 		if err != nil {
 			return nil, err
 		}
@@ -196,7 +212,10 @@ func (a *App) contentDirectoryBrowse(ctx context.Context, req *browseRequest) (*
 		} else {
 			didl = renderDIDL(nil, []didlItem{*i})
 		}
-		return &browseResult{DIDL: didl, NumberReturned: 1, TotalMatches: 1, UpdateID: 1}, nil
+		return &browseResult{DIDL: didl, NumberReturned: 1, TotalMatches: 1, UpdateID: int(a.updateID.Load())}, nil
+	}
+	if req.BrowseFlag != "BrowseDirectChildren" {
+		return nil, errors.New("unsupported BrowseFlag")
 	}
 
 	containers, items, total, err := a.listChildren(ctx, req.ObjectID, req.StartingIndex, req.RequestedCount, req.SortCriteria)
@@ -208,7 +227,7 @@ func (a *App) contentDirectoryBrowse(ctx context.Context, req *browseRequest) (*
 		DIDL:           didl,
 		NumberReturned: len(containers) + len(items),
 		TotalMatches:   total,
-		UpdateID:       1,
+		UpdateID:       int(a.updateID.Load()),
 	}, nil
 }
 
@@ -222,26 +241,26 @@ func (a *App) listChildren(ctx context.Context, objectID string, start, count in
 	case objectID == "" || objectID == "0":
 		// Root — five fixed children.
 		all := []didlContainer{
-			{ID: "0/audio", ParentID: "0", Title: "Audio", Class: "object.container"},
-			{ID: "0/video", ParentID: "0", Title: "Video", Class: "object.container"},
-			{ID: "0/photos", ParentID: "0", Title: "Photos", Class: "object.container"},
-			{ID: "0/recent", ParentID: "0", Title: "Recent", Class: "object.container"},
-			{ID: "0/folders", ParentID: "0", Title: "Folders", Class: "object.container"},
+			{ID: "0/audio", ParentID: "0", Title: "Audio", Class: "object.container", Count: -1},
+			{ID: "0/video", ParentID: "0", Title: "Video", Class: "object.container", Count: -1},
+			{ID: "0/photos", ParentID: "0", Title: "Photos", Class: "object.container", Count: -1},
+			{ID: "0/recent", ParentID: "0", Title: "Recent", Class: "object.container", Count: -1},
+			{ID: "0/folders", ParentID: "0", Title: "Folders", Class: "object.container", Count: -1},
 		}
 		return paginateContainers(all, start, count), nil, len(all), nil
 
 	case objectID == "0/audio":
-		items, err := a.searchByContentTypePrefix(ctx, "audio/", start, count, sort)
-		return nil, items, len(items) + start, err
+		items, total, err := a.searchByContentTypePrefix(ctx, "audio/", start, count, sort)
+		return nil, items, total, err
 	case objectID == "0/video":
-		items, err := a.searchByContentTypePrefix(ctx, "video/", start, count, sort)
-		return nil, items, len(items) + start, err
+		items, total, err := a.searchByContentTypePrefix(ctx, "video/", start, count, sort)
+		return nil, items, total, err
 	case objectID == "0/photos":
-		items, err := a.searchByContentTypePrefix(ctx, "image/", start, count, sort)
-		return nil, items, len(items) + start, err
+		items, total, err := a.searchByContentTypePrefix(ctx, "image/", start, count, sort)
+		return nil, items, total, err
 	case objectID == "0/recent":
-		items, err := a.recentItems(ctx, start, count)
-		return nil, items, len(items) + start, err
+		items, total, err := a.recentItems(ctx, start, count)
+		return nil, items, total, err
 
 	case objectID == "0/folders":
 		folders, err := a.publishedFoldersAsContainers()
@@ -261,7 +280,10 @@ func (a *App) listChildren(ctx context.Context, objectID string, start, count in
 		if err != nil {
 			return nil, nil, 0, err
 		}
-		full := joinFolder(root, rel)
+		full, err := secureJoinPublished(root, rel)
+		if err != nil {
+			return nil, nil, 0, err
+		}
 		return a.listStorageFolder(ctx, objectID, full, pubID, rel, start, count)
 	}
 
@@ -283,7 +305,10 @@ func (a *App) listStorageFolder(ctx context.Context, objectID, full string, pubI
 
 	containers := make([]didlContainer, 0, len(subs))
 	for _, sub := range subs {
-		childRel := childRelative(rel, sub.Name)
+		childRel, err := secureRelativePath(childRelative(rel, sub.Name))
+		if err != nil {
+			continue
+		}
 		childID := encodeFolderID(pubID, childRel)
 		containers = append(containers, didlContainer{
 			ID:       childID,
@@ -293,10 +318,14 @@ func (a *App) listStorageFolder(ctx context.Context, objectID, full string, pubI
 			Count:    sub.Count,
 		})
 	}
-	items := make([]didlItem, 0, len(files))
-	for _, f := range files {
-		items = append(items, a.fileToDIDL(ctx, f, objectID))
+	safeFiles := make([]storageFile, 0, len(files))
+	for _, file := range files {
+		folder, err := normalisePublishedPath(file.Folder)
+		if err == nil && folder == full {
+			safeFiles = append(safeFiles, file)
+		}
 	}
+	items := a.filesToDIDL(ctx, safeFiles, objectID)
 
 	all := append([]any{}, containersToAny(containers)...)
 	all = append(all, itemsToAny(items)...)
@@ -318,33 +347,36 @@ func (a *App) listStorageFolder(ctx context.Context, objectID, full string, pubI
 // resolveOne handles BrowseMetadata: produce a single container/item
 // description for the given id. Used when a TV "drills in" — it asks
 // for metadata on the container before listing its children.
-func (a *App) resolveOne(objectID string) (*didlContainer, *didlItem, error) {
+func (a *App) resolveOne(ctx context.Context, objectID string) (*didlContainer, *didlItem, error) {
 	switch objectID {
 	case "", "0":
-		return &didlContainer{ID: "0", ParentID: "-1", Title: a.friendlyName(), Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0", ParentID: "-1", Title: a.friendlyName(), Class: "object.container", Count: 5}, nil, nil
 	case "0/audio":
-		return &didlContainer{ID: "0/audio", ParentID: "0", Title: "Audio", Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0/audio", ParentID: "0", Title: "Audio", Class: "object.container", Count: -1}, nil, nil
 	case "0/video":
-		return &didlContainer{ID: "0/video", ParentID: "0", Title: "Video", Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0/video", ParentID: "0", Title: "Video", Class: "object.container", Count: -1}, nil, nil
 	case "0/photos":
-		return &didlContainer{ID: "0/photos", ParentID: "0", Title: "Photos", Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0/photos", ParentID: "0", Title: "Photos", Class: "object.container", Count: -1}, nil, nil
 	case "0/recent":
-		return &didlContainer{ID: "0/recent", ParentID: "0", Title: "Recent", Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0/recent", ParentID: "0", Title: "Recent", Class: "object.container", Count: -1}, nil, nil
 	case "0/folders":
-		return &didlContainer{ID: "0/folders", ParentID: "0", Title: "Folders", Class: "object.container"}, nil, nil
+		return &didlContainer{ID: "0/folders", ParentID: "0", Title: "Folders", Class: "object.container", Count: -1}, nil, nil
 	}
 	if strings.HasPrefix(objectID, "f:") {
 		pubID, rel, err := decodeFolderID(objectID)
 		if err != nil {
 			return nil, nil, err
 		}
+		pub, err := a.publishedFolderRow(pubID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, err := secureJoinPublished(pub.Folder, rel); err != nil {
+			return nil, nil, err
+		}
 		title := rel
 		parent := "0/folders"
 		if rel == "" {
-			pub, err := a.publishedFolderRow(pubID)
-			if err != nil {
-				return nil, nil, err
-			}
 			title = pub.Display()
 		} else {
 			parent = encodeFolderID(pubID, parentRel(rel))
@@ -353,18 +385,22 @@ func (a *App) resolveOne(objectID string) (*didlContainer, *didlItem, error) {
 			}
 			title = path.Base(rel)
 		}
-		return &didlContainer{ID: objectID, ParentID: parent, Title: title, Class: "object.container.storageFolder"}, nil, nil
+		return &didlContainer{ID: objectID, ParentID: parent, Title: title, Class: "object.container.storageFolder", Count: -1}, nil, nil
 	}
 	if strings.HasPrefix(objectID, "i:") {
 		fileID, err := strconv.ParseInt(strings.TrimPrefix(objectID, "i:"), 10, 64)
 		if err != nil {
 			return nil, nil, err
 		}
-		f, err := a.storageGetFile(context.Background(), fileID)
+		f, err := a.storageGetFile(ctx, fileID)
 		if err != nil {
 			return nil, nil, err
 		}
-		it := a.fileToDIDL(context.Background(), *f, "0")
+		if !a.isFilePublished(*f) {
+			return nil, nil, errors.New("object not found")
+		}
+		items := a.filesToDIDL(ctx, []storageFile{*f}, "0")
+		it := items[0]
 		return nil, &it, nil
 	}
 	return nil, nil, fmt.Errorf("unknown object id: %q", objectID)
@@ -375,14 +411,20 @@ func (a *App) resolveOne(objectID string) (*didlContainer, *didlItem, error) {
 // contentDirectorySearch implements a small useful subset of UPnP
 // search criteria. Real-world TVs send predicates like:
 //
-//   upnp:class derivedfrom "object.item.audioItem"
-//   dc:title contains "summer"
+//	upnp:class derivedfrom "object.item.audioItem"
+//	dc:title contains "summer"
 //
 // We pull out the class hint and the title-contains needle, and
 // otherwise treat Search as a flat scan filtered by content_type.
 func (a *App) contentDirectorySearch(ctx context.Context, req *searchRequest) (*browseResult, error) {
-	if req.RequestedCount <= 0 || req.RequestedCount > 1000 {
-		req.RequestedCount = 200
+	if req.StartingIndex < 0 {
+		return nil, errors.New("StartingIndex must not be negative")
+	}
+	if req.RequestedCount < 0 {
+		return nil, errors.New("RequestedCount must not be negative")
+	}
+	if req.RequestedCount == 0 || req.RequestedCount > 1000 {
+		req.RequestedCount = 1000
 	}
 	contentPrefix := ""
 	switch {
@@ -393,18 +435,51 @@ func (a *App) contentDirectorySearch(ctx context.Context, req *searchRequest) (*
 	case strings.Contains(req.SearchCriteria, "imageItem"):
 		contentPrefix = "image/"
 	}
+	if contentPrefix == "" {
+		switch req.ContainerID {
+		case "0/audio":
+			contentPrefix = "audio/"
+		case "0/video":
+			contentPrefix = "video/"
+		case "0/photos":
+			contentPrefix = "image/"
+		}
+	}
 	query := extractSearchTerm(req.SearchCriteria)
 
-	items, err := a.searchStorage(ctx, contentPrefix, query, req.StartingIndex, req.RequestedCount)
+	folder := ""
+	if strings.HasPrefix(req.ContainerID, "f:") {
+		pubID, rel, err := decodeFolderID(req.ContainerID)
+		if err != nil {
+			return nil, err
+		}
+		root, err := a.publishedFolderPath(pubID)
+		if err != nil {
+			return nil, err
+		}
+		folder, err = secureJoinPublished(root, rel)
+		if err != nil {
+			return nil, err
+		}
+	} else if req.ContainerID != "" && req.ContainerID != "0" && req.ContainerID != "0/audio" && req.ContainerID != "0/video" && req.ContainerID != "0/photos" && req.ContainerID != "0/recent" && req.ContainerID != "0/folders" {
+		return nil, errors.New("unknown container id")
+	}
+
+	items, total, err := a.searchStorage(ctx, contentPrefix, query, folder, req.StartingIndex, req.RequestedCount, req.SortCriteria)
 	if err != nil {
 		return nil, err
+	}
+	if folder != "" {
+		for i := range items {
+			items[i].ParentID = req.ContainerID
+		}
 	}
 	didl := renderDIDL(nil, items)
 	return &browseResult{
 		DIDL:           didl,
 		NumberReturned: len(items),
-		TotalMatches:   len(items) + req.StartingIndex, // approximate
-		UpdateID:       1,
+		TotalMatches:   total,
+		UpdateID:       int(a.updateID.Load()),
 	}, nil
 }
 
@@ -435,13 +510,11 @@ func renderDIDL(containers []didlContainer, items []didlItem) string {
 	var b strings.Builder
 	b.WriteString(didlHeader)
 	for _, c := range containers {
-		fmt.Fprintf(&b,
-			`<container id="%s" parentID="%s" restricted="1" childCount="%d">`+
-				`<dc:title>%s</dc:title>`+
-				`<upnp:class>%s</upnp:class>`+
-				`</container>`,
-			xmlAttr(c.ID), xmlAttr(c.ParentID), c.Count, xmlText(c.Title), xmlText(c.Class),
-		)
+		fmt.Fprintf(&b, `<container id="%s" parentID="%s" restricted="1"`, xmlAttr(c.ID), xmlAttr(c.ParentID))
+		if c.Count >= 0 {
+			fmt.Fprintf(&b, ` childCount="%d"`, c.Count)
+		}
+		fmt.Fprintf(&b, `><dc:title>%s</dc:title><upnp:class>%s</upnp:class></container>`, xmlText(c.Title), xmlText(c.Class))
 	}
 	for _, it := range items {
 		fmt.Fprintf(&b,
@@ -490,7 +563,7 @@ func browseResponseBody(r *browseResult) string {
 // writeSOAP emits a complete SOAP envelope for an action response.
 // All UPnP responses share the same envelope shape — only the inner
 // action element name and body vary.
-func writeSOAP(w http.ResponseWriter, action, body string) {
+func writeSOAP(w http.ResponseWriter, serviceURN, action, body string) {
 	w.Header().Set("Content-Type", `text/xml; charset="utf-8"`)
 	w.Header().Set("EXT", "")
 	w.Header().Set("SERVER", "Apteva/1.0 UPnP/1.0 dlna/0.1")
@@ -498,11 +571,11 @@ func writeSOAP(w http.ResponseWriter, action, body string) {
 		`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" `+
 		`s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">`+
 		`<s:Body>`+
-		`<u:%s xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">`+
+		`<u:%s xmlns:u="%s">`+
 		`%s`+
 		`</u:%s>`+
 		`</s:Body></s:Envelope>`,
-		action, body, action)
+		action, xmlAttr(serviceURN), body, action)
 }
 
 func soapFault(w http.ResponseWriter, code, msg string) {
@@ -565,11 +638,24 @@ func parseSearch(body []byte) (*searchRequest, error) {
 
 // ─── helpers ────────────────────────────────────────────────────────
 
-func xmlAttr(s string) string { return strings.NewReplacer(`"`, "&quot;", `&`, "&amp;", `<`, "&lt;").Replace(s) }
-func xmlText(s string) string { return strings.NewReplacer(`&`, "&amp;", `<`, "&lt;", `>`, "&gt;").Replace(s) }
+func xmlAttr(s string) string {
+	return strings.NewReplacer(`"`, "&quot;", `&`, "&amp;", `<`, "&lt;").Replace(validXMLText(s))
+}
+func xmlText(s string) string {
+	return strings.NewReplacer(`&`, "&amp;", `<`, "&lt;", `>`, "&gt;").Replace(validXMLText(s))
+}
+
+func validXMLText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' || r >= 0x20 && r <= 0xD7FF || r >= 0xE000 && r <= 0xFFFD || r >= 0x10000 && r <= 0x10FFFF {
+			return r
+		}
+		return '\uFFFD'
+	}, s)
+}
 
 func paginateContainers(in []didlContainer, start, count int) []didlContainer {
-	if start >= len(in) {
+	if start < 0 || start >= len(in) {
 		return nil
 	}
 	end := start + count
@@ -580,7 +666,7 @@ func paginateContainers(in []didlContainer, start, count int) []didlContainer {
 }
 
 func paginateAny(in []any, start, count int) []any {
-	if start >= len(in) {
+	if start < 0 || start >= len(in) {
 		return nil
 	}
 	end := start + count
@@ -616,11 +702,17 @@ func encodeFolderID(pubID int64, rel string) string {
 }
 
 func decodeFolderID(id string) (int64, string, error) {
+	if !strings.HasPrefix(id, "f:") {
+		return 0, "", errors.New("invalid folder id")
+	}
 	body := strings.TrimPrefix(id, "f:")
 	parts := strings.SplitN(body, "/", 2)
 	pubID, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		return 0, "", err
+	}
+	if pubID <= 0 {
+		return 0, "", errors.New("invalid published folder id")
 	}
 	if len(parts) == 1 {
 		return pubID, "", nil
@@ -629,7 +721,11 @@ func decodeFolderID(id string) (int64, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	return pubID, string(relB), nil
+	rel := string(relB)
+	if _, err := secureRelativePath(rel); err != nil {
+		return 0, "", err
+	}
+	return pubID, rel, nil
 }
 
 func childRelative(parentRel, childName string) string {
@@ -649,14 +745,42 @@ func parentRel(rel string) string {
 	return ""
 }
 
-func joinFolder(root, rel string) string {
+func secureRelativePath(rel string) (string, error) {
+	if strings.ContainsRune(rel, '\x00') || strings.HasPrefix(rel, "/") {
+		return "", errors.New("invalid relative folder path")
+	}
 	if rel == "" {
-		return root
+		return "", nil
 	}
-	if strings.HasSuffix(root, "/") {
-		return root + rel
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", errors.New("invalid relative folder path")
+		}
 	}
-	return root + "/" + rel
+	clean := path.Clean(rel)
+	if clean != rel || clean == "." || strings.HasPrefix(clean, "../") {
+		return "", errors.New("invalid relative folder path")
+	}
+	return clean, nil
+}
+
+func secureJoinPublished(root, rel string) (string, error) {
+	root, err := normalisePublishedPath(root)
+	if err != nil {
+		return "", err
+	}
+	rel, err = secureRelativePath(rel)
+	if err != nil {
+		return "", err
+	}
+	if rel == "" {
+		return root, nil
+	}
+	joined := path.Join(root, rel)
+	if !folderWithin(root, joined) {
+		return "", errors.New("folder escapes published root")
+	}
+	return joined, nil
 }
 
 // protocolInfoSourceList — the comma-joined list of protocols we'll

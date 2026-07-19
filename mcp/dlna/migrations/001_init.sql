@@ -1,8 +1,8 @@
 -- dlna v0.1: configuration + a rolling client-access log.
 --
--- The bulk of "what's in the library" is computed live from the
--- storage app on every Browse SOAP call — no caching here. The two
--- tables below are:
+-- The bulk of "what's in the library" is computed from the storage
+-- app and held only in a short-lived in-memory cache. The two tables
+-- below are:
 --
 --   published_folders  — allowlist of storage paths exposed to LAN
 --                        clients. A folder not in this table (and
