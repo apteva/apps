@@ -2,15 +2,17 @@
 
 Local BitTorrent client + indexer-search frontend for Apteva.
 Powered by [anacrolix/torrent](https://github.com/anacrolix/torrent).
-Search comes from user-supplied Jackett / Prowlarr / RSS sources;
-finished downloads land in the `storage` app and get probed by
-`media`.
+Search comes from user-supplied Jackett / Prowlarr / Torznab RSS or
+explicitly enabled ApiBay sources. Finished downloads are streamed to
+the `storage` app with a restart-safe chunked handoff. If installed,
+`media` indexes the resulting storage events independently.
 
 ## What this app does and doesn't ship
 
 - ✅ A BitTorrent engine that runs as a long-lived sidecar.
 - ✅ An aggregator over Jackett-compatible search APIs.
-- ✅ Cross-app handoff to `storage` and `media` on completion.
+- ✅ Chunked, resumable cross-app handoff to `storage` on completion.
+- ✅ Project-scoped rows, searches, indexers, events, and API calls.
 - ❌ No indexers preconfigured. The user supplies them.
 - ❌ No recommended sources, lists, or curation. None.
 
@@ -26,7 +28,9 @@ you download is entirely up to you, and entirely your responsibility.
    [Jackett](https://github.com/Jackett/Jackett) on the same LAN and
    point this app at `https://<host>:9117/api/v2.0/indexers/all`
    with the Jackett API key. Each indexer is a row in the `indexers`
-   table; add via the panel's *Indexers* tab or `indexers_add` route.
+   table; add it from the panel's *Indexers* tab. A public ApiBay
+   source is available as an explicit opt-in and is never seeded by
+   the app.
 
 3. Set `default_target_folder` (default `/downloads`) — that's where
    completed torrents go in `storage`.
@@ -56,8 +60,9 @@ agent ─MCP─→ torrent ─search→ {indexers}                  (Jackett agg
                      │
                      ├─bittorrent→ peers/trackers           (active downloads)
                      │
-                     └─CallApp───→ storage.files_upload    (final files)
-                              └──→ media.probe_file        (best-effort)
+                     └─HTTP chunks→ storage uploads        (final files)
+                                      │
+                                      └─storage events→ media (optional)
 ```
 
 The `dlna` app picks up new arrivals indirectly: storage emits
@@ -78,10 +83,9 @@ Three apps composing without any direct knowledge of each other.
    chooses what to download. We don't ship indexers, lists, or
    recommendations.
 
-2. **NAT / port forwarding.** The default 6881 inbound port works
-   much better when forwarded on the LAN router. UPnP-IGD port
-   mapping is on by default; manual forwarding is more reliable
-   long-term.
+2. **NAT / port forwarding.** The default listen port is
+   kernel-assigned. Configure a fixed `listen_port` and forward that
+   same port when stable inbound connectivity matters.
 
 3. **VPN routing.** Set `bind_interface=tun0` (or whatever your VPN
    interface is named) to pin outbound traffic. Without it, the OS
@@ -94,14 +98,13 @@ Three apps composing without any direct knowledge of each other.
    `keep_working_copy=false` (default) the working copy is deleted
    after upload, freeing the space again.
 
-5. **Streaming-while-downloading.** Tempting but punted to v0.2 —
-   would require `storage` to learn about partial / growing files.
+5. **Streaming-while-downloading.** Files are handed to storage only
+   after their selected torrent data is complete.
 
-6. **Resume across restarts.** On boot, the engine reloads its state
-   from `working_dir/.engine/`, the `torrents` table is reconciled
-   against actual completion, and any torrent with
-   `state=completed && storage_file_ids_json IS NULL` is re-handed
-   to the completion-mover. Restart-safe by design.
+6. **Resume across restarts.** On boot, torrent definitions and user
+   intent are restored from the app DB. Existing bytes in
+   `working_dir` are rechecked by the engine, and partial storage
+   handoffs resume from `upload_progress_json`.
 
 ## Why this is an app, not an integration
 

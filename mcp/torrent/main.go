@@ -1,11 +1,11 @@
 // Apteva torrent app — local BitTorrent client + indexer search
-// frontend, backed by storage + media.
+// frontend, with completed files handed off to storage.
 //
 // Three workers:
-//   1. engine        — the bittorrent client (Engine.Run loop)
-//   2. scheduler     — runs saved searches on their cadence
-//   3. boot-reconcile — one-shot on startup: re-add tracked torrents
-//                       to the engine and run any deferred completion.
+//  1. engine        — the bittorrent client (Engine.Run loop)
+//  2. scheduler     — runs saved searches on their cadence
+//  3. boot-reconcile — one-shot on startup: re-add tracked torrents
+//     to the engine and run any deferred completion.
 //
 // State source-of-truth split:
 //   - The torrent engine's session state lives in working_dir, owned
@@ -23,13 +23,16 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -40,54 +43,36 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: torrent
-display_name: Torrent
-version: 0.1.16
-description: BitTorrent client + indexer-search frontend.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions: [db.write.app, net.egress]
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: torrent_search,             description: "Multi-indexer search." }
-    - { name: torrent_search_save,        description: "Save a recurring search." }
-    - { name: torrent_search_save_list,   description: "List saved searches." }
-    - { name: torrent_search_save_delete, description: "Delete a saved search." }
-    - { name: torrent_add,                description: "Start a download." }
-    - { name: torrent_list,                description: "List downloads." }
-    - { name: torrent_get,                 description: "Read one download." }
-    - { name: torrent_pause,               description: "Pause a download." }
-    - { name: torrent_resume,              description: "Resume a download." }
-    - { name: torrent_remove,              description: "Remove a download." }
-    - { name: torrent_set_priority,        description: "Set per-file priority." }
-    - { name: torrent_stats,               description: "Global stats." }
-    - { name: torrent_indexers_test,       description: "Health-check indexers." }
-  ui_panels:
-    - slot: project.page
-      label: Torrent
-      icon: download
-      entry: /ui/TorrentPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/torrent
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/torrent.db
-  migrations: migrations/
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 type App struct {
 	ctx    *sdk.AppCtx
 	engine *Engine
+	runCtx context.Context
+	cancel context.CancelFunc
+
+	statsMu        sync.Mutex
+	statsScannedAt time.Time
+	statsDirBytes  int64
+	bootOnce       sync.Once
+}
+
+type addTorrentRequest struct {
+	Magnet       string `json:"magnet"`
+	Infohash     string `json:"infohash"`
+	TorrentURL   string `json:"torrent_url"`
+	TargetFolder string `json:"target_folder"`
+	Paused       bool   `json:"paused"`
+}
+
+type addIndexerRequest struct {
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"`
+	BaseURL    string   `json:"base_url"`
+	APIKey     string   `json:"api_key"`
+	Categories []string `json:"categories"`
+	Priority   int      `json:"priority"`
 }
 
 var globalApp *App
@@ -96,7 +81,7 @@ var globalAppOnce sync.Once
 // ─── lifecycle ──────────────────────────────────────────────────────
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("torrent: invalid manifest: " + err.Error())
 	}
@@ -109,51 +94,39 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.ctx = ctx
 	globalApp = a
+	a.runCtx, a.cancel = context.WithCancel(context.Background())
 
 	cfg := EngineConfig{
-		WorkingDir:       resolveWorkingDir(ctx),
-		ListenPort:       configInt(ctx, "listen_port", 0),
-		BindInterface:    configString(ctx, "bind_interface", ""),
-		DHTEnabled:       configFlag(ctx, "dht_enabled", true),
-		EncryptionForced: configFlag(ctx, "peer_encryption_required", true),
-		GlobalDownKiBps:  configInt(ctx, "max_global_down_kibps", 0),
-		GlobalUpKiBps:    configInt(ctx, "max_global_up_kibps", 0),
+		WorkingDir:            resolveWorkingDir(ctx),
+		ListenPort:            configInt(ctx, "listen_port", 0),
+		BindInterface:         configString(ctx, "bind_interface", ""),
+		DHTEnabled:            configFlag(ctx, "dht_enabled", true),
+		EncryptionForced:      configFlag(ctx, "peer_encryption_required", true),
+		GlobalDownKiBps:       configInt(ctx, "max_global_down_kibps", 0),
+		GlobalUpKiBps:         configInt(ctx, "max_global_up_kibps", 0),
+		MaxConcurrent:         configInt(ctx, "max_concurrent_downloads", 3),
+		FreeDiskSafetyPercent: configInt(ctx, "free_disk_safety_pct", 20),
+		SeedRatioTarget:       configFloat(ctx, "seed_ratio_target", 1),
+		SeedTimeTarget:        time.Duration(configInt(ctx, "seed_time_target_minutes", 60)) * time.Minute,
 	}
 	eng, err := NewEngine(cfg, func(scope, msg string) {
 		ctx.Logger().Info(scope, "msg", msg)
 	})
 	if err != nil {
+		a.cancel()
 		return fmt.Errorf("engine: %w", err)
 	}
 	eng.SetTransitionHandler(a.onTransition)
 	a.engine = eng
-	a.seedDefaultIndexer()
 	ctx.Logger().Info("torrent mounted",
 		"working_dir", cfg.WorkingDir, "port", cfg.ListenPort)
 	return nil
 }
 
-// seedDefaultIndexer adds an apibay indexer row on first mount so a
-// fresh install can search out of the box. addIndexer's ON CONFLICT
-// makes this idempotent — running it every mount is fine and lets
-// the row come back if someone deletes it but reinstalls.
-func (a *App) seedDefaultIndexer() {
-	existing, err := listIndexers(a.ctx.AppDB(), projectScope(), false)
-	if err != nil {
-		return
-	}
-	for _, ix := range existing {
-		if ix.Kind == "apibay" {
-			return
-		}
-	}
-	if _, err := addIndexer(a.ctx.AppDB(), projectScope(),
-		"apibay", "apibay", "https://apibay.org", "", nil, 50); err != nil {
-		a.ctx.Logger().Warn("seed apibay indexer", "err", err.Error())
-	}
-}
-
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.cancel != nil {
+		a.cancel()
+	}
 	if a.engine != nil {
 		a.engine.Close()
 	}
@@ -174,8 +147,14 @@ func (a *App) Workers() []sdk.Worker {
 		{
 			Name: "boot-reconcile",
 			Run: func(ctx context.Context, _ *sdk.AppCtx) error {
-				time.Sleep(2 * time.Second) // let engine settle
-				a.reconcileOnBoot()
+				a.bootOnce.Do(func() {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(2 * time.Second):
+					}
+					a.reconcileOnBoot(ctx)
+				})
 				return nil // one-shot
 			},
 		},
@@ -194,6 +173,21 @@ func (a *App) Workers() []sdk.Worker {
 				}
 			},
 		},
+		{
+			Name: "completion-retry",
+			Run: func(ctx context.Context, _ *sdk.AppCtx) error {
+				t := time.NewTicker(time.Minute)
+				defer t.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return nil
+					case <-t.C:
+						a.retryPendingCompletions()
+					}
+				}
+			},
+		},
 	}
 }
 
@@ -202,29 +196,54 @@ func (a *App) Workers() []sdk.Worker {
 // The engine deduplicates by infohash, so re-adding completed-but-not-
 // yet-uploaded torrents triggers the completion-mover via the next
 // poll-transition.
-func (a *App) reconcileOnBoot() {
-	rows, err := listTorrentRows(a.ctx.AppDB(), projectScope(), "")
+func (a *App) reconcileOnBoot(ctx context.Context) {
+	rows, err := listAllTorrentRows(a.ctx.AppDB())
 	if err != nil {
 		a.ctx.Logger().Warn("reconcile", "err", err.Error())
 		return
 	}
+	restored := map[string][]TorrentRow{}
 	for _, r := range rows {
-		// Always re-add — the engine will pick up existing on-disk
-		// data from working_dir/.engine/ and short-circuit to the
-		// right state. Skip rows in final states only when storage
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		// Always re-add — the engine will recheck existing bytes in
+		// working_dir and short-circuit to the right state. Skip rows
+		// in final states only when storage
 		// already has the file_ids.
-		if r.State == "completed" && r.StorageFileIDsJSON != "[]" {
+		if r.State == "completed" && r.CompletedAt != "" &&
+			!configFlag(a.ctx, "keep_working_copy", false) {
 			continue
 		}
+		restored[r.Infohash] = append(restored[r.Infohash], r)
+		if a.engine.Snapshot(r.Infohash) != nil {
+			continue
+		}
+		var snap *TorrentSnapshot
 		if r.Magnet != "" {
-			if _, err := a.engine.AddMagnet(r.Magnet); err != nil {
+			snap, err = a.engine.AddMagnet(r.Magnet)
+			if err != nil {
 				a.ctx.Logger().Warn("re-add magnet", "ih", r.Infohash, "err", err.Error())
 			}
 		} else if r.Infohash != "" {
-			if _, err := a.engine.AddInfohash(r.Infohash); err != nil {
+			snap, err = a.engine.AddInfohash(r.Infohash)
+			if err != nil {
 				a.ctx.Logger().Warn("re-add infohash", "ih", r.Infohash, "err", err.Error())
 			}
 		}
+		_ = snap
+	}
+	for infohash, projectRows := range restored {
+		allPaused := len(projectRows) > 0
+		for _, row := range projectRows {
+			if row.State != "paused" {
+				allPaused = false
+				break
+			}
+		}
+		a.engine.RestoreState(infohash, allPaused, effectivePriorities(projectRows))
 	}
 }
 
@@ -237,6 +256,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/searches", Handler: a.handleSearches},
 		{Pattern: "/searches/", Handler: a.handleSearchItem},
 		{Pattern: "/indexers", Handler: a.handleIndexers},
+		{Pattern: "/indexers/test", Handler: a.handleIndexersTest},
 		{Pattern: "/indexers/", Handler: a.handleIndexerItem},
 		{Pattern: "/stats", Handler: a.handleStatsHTTP},
 		{Pattern: "/search", Handler: a.handleSearchHTTP},
@@ -244,43 +264,55 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) handleTorrents(w http.ResponseWriter, r *http.Request) {
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		state := r.URL.Query().Get("state")
-		out, err := a.combinedTorrentList(state)
+		out, err := a.combinedTorrentList(appCtx, state)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		writeJSON(w, out)
 	case http.MethodPost:
-		var body struct {
-			Magnet, Infohash, TorrentURL, TargetFolder string
-			Paused                                     bool
+		var body addTorrentRequest
+		if err := decodeJSONBody(r, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		json.NewDecoder(r.Body).Decode(&body)
-		out, err := a.addTorrent(body.Magnet, body.Infohash, body.TorrentURL, body.TargetFolder, body.Paused)
+		out, err := a.addTorrent(appCtx, body.Magnet, body.Infohash, body.TorrentURL, body.TargetFolder, body.Paused)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, out)
+		writeJSONStatus(w, http.StatusCreated, out)
 	default:
 		http.Error(w, "GET or POST", 405)
 	}
 }
 
 func (a *App) handleTorrentItem(w http.ResponseWriter, r *http.Request) {
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
 	rest := strings.TrimPrefix(r.URL.Path, "/torrents/")
 	parts := strings.SplitN(rest, "/", 2)
-	id, _ := strconv.ParseInt(parts[0], 10, 64)
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid torrent id", http.StatusBadRequest)
+		return
+	}
 	action := ""
 	if len(parts) > 1 {
 		action = parts[1]
 	}
 	switch {
 	case action == "" && r.Method == http.MethodGet:
-		out, err := a.getTorrentDetail(id)
+		out, err := a.getTorrentDetail(appCtx, id)
 		if err != nil {
 			http.Error(w, err.Error(), 404)
 			return
@@ -288,24 +320,33 @@ func (a *App) handleTorrentItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 	case action == "" && r.Method == http.MethodDelete:
 		del := r.URL.Query().Get("delete_files") == "true"
-		if err := a.removeTorrent(id, del); err != nil {
+		if err := a.removeTorrent(appCtx, id, del); err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
 		w.WriteHeader(204)
 	case action == "pause" && r.Method == http.MethodPost:
-		_ = a.pauseTorrent(id)
+		if err := a.pauseTorrent(appCtx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		w.WriteHeader(204)
 	case action == "resume" && r.Method == http.MethodPost:
-		_ = a.resumeTorrent(id)
+		if err := a.resumeTorrent(appCtx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
 		w.WriteHeader(204)
 	case action == "priority" && r.Method == http.MethodPost:
 		var body struct {
 			FileIndex int    `json:"file_index"`
 			Priority  string `json:"priority"`
 		}
-		json.NewDecoder(r.Body).Decode(&body)
-		if err := a.setPriority(id, body.FileIndex, body.Priority); err != nil {
+		if err := decodeJSONBody(r, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := a.setPriority(appCtx, id, body.FileIndex, body.Priority); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
@@ -316,7 +357,11 @@ func (a *App) handleTorrentItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSearches(w http.ResponseWriter, r *http.Request) {
-	pid := projectScope()
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
+	pid := projectScope(appCtx)
 	switch r.Method {
 	case http.MethodGet:
 		out, err := listSavedSearches(a.ctx.AppDB(), pid)
@@ -327,31 +372,49 @@ func (a *App) handleSearches(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 	case http.MethodPost:
 		var body SavedSearch
-		json.NewDecoder(r.Body).Decode(&body)
+		if err := decodeJSONBody(r, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		out, err := addSavedSearch(a.ctx.AppDB(), pid, body)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, out)
+		writeJSONStatus(w, http.StatusCreated, out)
 	default:
 		http.Error(w, "GET or POST", 405)
 	}
 }
 
 func (a *App) handleSearchItem(w http.ResponseWriter, r *http.Request) {
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE", 405)
 		return
 	}
-	id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/searches/"), 10, 64)
-	_, _ = a.ctx.AppDB().Exec(`DELETE FROM saved_searches WHERE id = ? AND project_id = ?`,
-		id, projectScope())
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/searches/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid saved-search id", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.ctx.AppDB().Exec(`DELETE FROM saved_searches WHERE id = ? AND project_id = ?`,
+		id, projectScope(appCtx)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(204)
 }
 
 func (a *App) handleIndexers(w http.ResponseWriter, r *http.Request) {
-	pid := projectScope()
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
+	pid := projectScope(appCtx)
 	switch r.Method {
 	case http.MethodGet:
 		out, err := listIndexers(a.ctx.AppDB(), pid, false)
@@ -361,45 +424,92 @@ func (a *App) handleIndexers(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, out)
 	case http.MethodPost:
-		var body struct {
-			Name, Kind, BaseURL, APIKey string
-			Categories                  []string
-			Priority                    int
+		var body addIndexerRequest
+		if err := decodeJSONBody(r, &body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
 		}
-		json.NewDecoder(r.Body).Decode(&body)
 		out, err := addIndexer(a.ctx.AppDB(), pid, body.Name, body.Kind, body.BaseURL, body.APIKey, body.Categories, body.Priority)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		writeJSON(w, out)
+		writeJSONStatus(w, http.StatusCreated, out)
 	default:
 		http.Error(w, "GET or POST", 405)
 	}
 }
 
+func (a *App) handleIndexersTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST", http.StatusMethodNotAllowed)
+		return
+	}
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
+	out, err := a.testIndexers(r.Context(), appCtx)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
 func (a *App) handleIndexerItem(w http.ResponseWriter, r *http.Request) {
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodDelete {
 		http.Error(w, "DELETE", 405)
 		return
 	}
-	id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/indexers/"), 10, 64)
-	_, _ = a.ctx.AppDB().Exec(`DELETE FROM indexers WHERE id = ? AND project_id = ?`,
-		id, projectScope())
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/indexers/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid indexer id", http.StatusBadRequest)
+		return
+	}
+	if _, err := a.ctx.AppDB().Exec(`DELETE FROM indexers WHERE id = ? AND project_id = ?`,
+		id, projectScope(appCtx)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(204)
 }
 
 func (a *App) handleStatsHTTP(w http.ResponseWriter, r *http.Request) {
-	out := a.globalStats()
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
+	out := a.globalStats(appCtx)
 	writeJSON(w, out)
 }
 
 func (a *App) handleSearchHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	appCtx, ok := a.requestContext(w, r)
+	if !ok {
+		return
+	}
 	q := r.URL.Query().Get("q")
+	if strings.TrimSpace(q) == "" {
+		http.Error(w, "query required", http.StatusBadRequest)
+		return
+	}
 	cat := r.URL.Query().Get("category")
 	min, _ := strconv.Atoi(r.URL.Query().Get("min_seeders"))
 	sortBy := r.URL.Query().Get("sort")
-	out, err := a.searchIndexers(r.Context(), q, cat, min, sortBy)
+	out, err := a.searchIndexers(r.Context(), appCtx, q, cat, min, sortBy)
 	if err != nil {
 		http.Error(w, err.Error(), 500)
 		return
@@ -447,11 +557,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "torrent_add",
 			Description: "Start a download. Provide one of: magnet | infohash (40-char hex) | torrent_url (.torrent file URL). target_folder is a storage path; defaults to default_target_folder config. paused=true queues without starting.",
 			InputSchema: obj(map[string]any{
-				"magnet":       str,
-				"infohash":     str,
-				"torrent_url":  str,
+				"magnet":        str,
+				"infohash":      str,
+				"torrent_url":   str,
 				"target_folder": str,
-				"paused":       boo,
+				"paused":        boo,
 			}, nil),
 			Handler: a.toolAdd},
 		{Name: "torrent_list",
@@ -503,10 +613,14 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cat, _ := args["category"].(string)
 	min := int(toInt64(args["min_seeders"]))
 	sortBy, _ := args["sort"].(string)
-	return a.searchIndexers(context.Background(), q, cat, min, sortBy)
+	return a.searchIndexers(a.operationContext(), ctx, q, cat, min, sortBy)
 }
 
 func (a *App) toolSearchSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx)
+	if err != nil {
+		return nil, err
+	}
 	q, _ := args["query"].(string)
 	if strings.TrimSpace(q) == "" {
 		return nil, errors.New("query required")
@@ -530,17 +644,24 @@ func (a *App) toolSearchSave(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if s.Name == "" {
 		s.Name = q
 	}
-	return addSavedSearch(ctx.AppDB(), projectScope(), s)
+	return addSavedSearch(ctx.AppDB(), pid, s)
 }
 
 func (a *App) toolSearchSaveList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listSavedSearches(ctx.AppDB(), projectScope())
+	pid, err := requireProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return listSavedSearches(ctx.AppDB(), pid)
 }
 
 func (a *App) toolSearchSaveDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx)
+	if err != nil {
+		return nil, err
+	}
 	id := toInt64(args["id"])
-	_, err := ctx.AppDB().Exec(`DELETE FROM saved_searches WHERE id = ? AND project_id = ?`,
-		id, projectScope())
+	_, err = ctx.AppDB().Exec(`DELETE FROM saved_searches WHERE id = ? AND project_id = ?`, id, pid)
 	return map[string]any{"removed": id}, err
 }
 
@@ -550,59 +671,78 @@ func (a *App) toolAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	url, _ := args["torrent_url"].(string)
 	folder, _ := args["target_folder"].(string)
 	paused, _ := args["paused"].(bool)
-	return a.addTorrent(mag, ih, url, folder, paused)
+	return a.addTorrent(ctx, mag, ih, url, folder, paused)
 }
 
 func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	state, _ := args["state"].(string)
-	return a.combinedTorrentList(state)
+	return a.combinedTorrentList(ctx, state)
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := toInt64(args["id"])
-	return a.getTorrentDetail(id)
+	return a.getTorrentDetail(ctx, id)
 }
 
 func (a *App) toolPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return nil, a.pauseTorrent(toInt64(args["id"]))
+	return nil, a.pauseTorrent(ctx, toInt64(args["id"]))
 }
 
 func (a *App) toolResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return nil, a.resumeTorrent(toInt64(args["id"]))
+	return nil, a.resumeTorrent(ctx, toInt64(args["id"]))
 }
 
 func (a *App) toolRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := toInt64(args["id"])
 	del, _ := args["delete_files"].(bool)
-	return nil, a.removeTorrent(id, del)
+	return nil, a.removeTorrent(ctx, id, del)
 }
 
 func (a *App) toolSetPriority(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return nil, a.setPriority(toInt64(args["id"]),
+	return nil, a.setPriority(ctx, toInt64(args["id"]),
 		int(toInt64(args["file_index"])),
 		strArg(args, "priority"))
 }
 
 func (a *App) toolStats(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return a.globalStats(), nil
+	if _, err := requireProject(ctx); err != nil {
+		return nil, err
+	}
+	return a.globalStats(ctx), nil
 }
 
 func (a *App) toolIndexersTest(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return a.testIndexers(context.Background())
+	return a.testIndexers(a.operationContext(), ctx)
 }
 
 // ─── add / lifecycle ────────────────────────────────────────────────
 
-func (a *App) addTorrent(magnet, infohash, torrentURL, targetFolder string, paused bool) (*combinedView, error) {
-	if magnet == "" && infohash == "" && torrentURL == "" {
-		return nil, errors.New("one of magnet, infohash, or torrent_url is required")
+func (a *App) addTorrent(ctx *sdk.AppCtx, magnet, infohash, torrentURL, targetFolder string, paused bool) (*combinedView, error) {
+	pid, err := requireProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	magnet = strings.TrimSpace(magnet)
+	infohash = strings.TrimSpace(infohash)
+	torrentURL = strings.TrimSpace(torrentURL)
+	sources := 0
+	for _, source := range []string{magnet, infohash, torrentURL} {
+		if source != "" {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, errors.New("exactly one of magnet, infohash, or torrent_url is required")
 	}
 	if targetFolder == "" {
 		targetFolder = configString(a.ctx, "default_target_folder", "/downloads")
 	}
+	targetFolder, err = cleanStorageFolder(targetFolder)
+	if err != nil {
+		return nil, err
+	}
 
 	var snap *TorrentSnapshot
-	var err error
 	switch {
 	case magnet != "":
 		snap, err = a.engine.AddMagnet(magnet)
@@ -614,7 +754,7 @@ func (a *App) addTorrent(magnet, infohash, torrentURL, targetFolder string, paus
 	if err != nil {
 		return nil, err
 	}
-	row, err := upsertTorrentRow(a.ctx.AppDB(), projectScope(), TorrentRow{
+	row, err := upsertTorrentRow(a.ctx.AppDB(), pid, TorrentRow{
 		Infohash:     snap.Infohash,
 		Name:         snap.Name,
 		Magnet:       magnet,
@@ -627,58 +767,186 @@ func (a *App) addTorrent(magnet, infohash, torrentURL, targetFolder string, paus
 		return nil, err
 	}
 	if paused {
-		_ = a.engine.Pause(snap.Infohash)
+		if err := a.pauseTorrent(ctx, row.ID); err != nil {
+			return nil, err
+		}
+		row.State = "paused"
+		snap.State = "paused"
+		snap.IsPaused = true
+	} else if err := a.engine.Resume(snap.Infohash); err != nil {
+		return nil, err
 	}
-	a.ctx.Emit("torrent.added", map[string]any{
+	emitCtx := ctx
+	if emitCtx == nil {
+		emitCtx = a.ctx.WithProject(projectScope())
+	}
+	emitCtx.Emit("torrent.added", map[string]any{
 		"id": row.ID, "infohash": snap.Infohash, "name": snap.Name, "magnet": magnet,
 	})
 	return &combinedView{TorrentRow: *row, Snap: *snap}, nil
 }
 
-func (a *App) pauseTorrent(id int64) error {
-	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(), id)
+func (a *App) pauseTorrent(ctx *sdk.AppCtx, id int64) error {
+	pid := projectScope(ctx)
+	row, err := getTorrentRowByID(a.ctx.AppDB(), pid, id)
 	if err != nil {
 		return err
 	}
-	return a.engine.Pause(row.Infohash)
+	if _, err = a.ctx.AppDB().Exec(`UPDATE torrents SET state = 'paused' WHERE id = ? AND project_id = ?`, id, pid); err != nil {
+		return err
+	}
+	// A global install can expose the same swarm to multiple projects.
+	// Pausing one project must not stop another project's active row.
+	var otherActive int
+	if err := a.ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM torrents
+		  WHERE infohash = ? AND id <> ? AND state <> 'paused'`,
+		row.Infohash, id,
+	).Scan(&otherActive); err != nil {
+		return err
+	}
+	if otherActive == 0 {
+		return a.engine.Pause(row.Infohash)
+	}
+	return nil
 }
 
-func (a *App) resumeTorrent(id int64) error {
-	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(), id)
+func (a *App) resumeTorrent(ctx *sdk.AppCtx, id int64) error {
+	pid := projectScope(ctx)
+	row, err := getTorrentRowByID(a.ctx.AppDB(), pid, id)
 	if err != nil {
 		return err
 	}
-	return a.engine.Resume(row.Infohash)
-}
-
-func (a *App) removeTorrent(id int64, deleteFiles bool) error {
-	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(), id)
-	if err != nil {
+	if err := a.engine.Resume(row.Infohash); err != nil {
 		return err
 	}
-	if err := a.engine.Remove(row.Infohash, deleteFiles); err != nil && !errors.Is(err, errNotFound) {
-		return err
+	state := "queued"
+	if snap := a.engine.Snapshot(row.Infohash); snap != nil {
+		state = snap.State
 	}
-	if deleteFiles {
-		// drop storage rows we created.
-		var ids []int64
-		_ = json.Unmarshal([]byte(row.StorageFileIDsJSON), &ids)
-		for _, fid := range ids {
-			_, _ = a.ctx.PlatformAPI().CallApp("storage", "files_delete",
-				map[string]any{"id": fid, "keep_record": false})
-		}
-	}
-	_, err = a.ctx.AppDB().Exec(
-		`DELETE FROM torrents WHERE id = ? AND project_id = ?`, id, projectScope())
+	_, err = a.ctx.AppDB().Exec(`UPDATE torrents SET state = ? WHERE id = ? AND project_id = ?`, state, id, pid)
 	return err
 }
 
-func (a *App) setPriority(id int64, fileIndex int, priority string) error {
-	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(), id)
+func (a *App) removeTorrent(ctx *sdk.AppCtx, id int64, deleteFiles bool) error {
+	pid := projectScope(ctx)
+	row, err := getTorrentRowByID(a.ctx.AppDB(), pid, id)
 	if err != nil {
 		return err
 	}
-	return a.engine.SetFilePriority(row.Infohash, fileIndex, priority)
+	if deleteFiles {
+		for _, fid := range storageIDsForRow(row) {
+			var out map[string]any
+			if err := ctx.PlatformAPI().CallAppResult("storage", "files_delete",
+				map[string]any{"id": fid, "keep_record": false}, &out); err != nil {
+				return fmt.Errorf("delete storage file %d: %w", fid, err)
+			}
+		}
+	}
+	if _, err = a.ctx.AppDB().Exec(
+		`DELETE FROM torrents WHERE id = ? AND project_id = ?`, id, pid); err != nil {
+		return err
+	}
+	var refs int
+	if err := a.ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM torrents WHERE infohash = ?`, row.Infohash).Scan(&refs); err != nil {
+		return err
+	}
+	if refs == 0 {
+		if err := a.engine.Remove(row.Infohash, deleteFiles); err != nil && !errors.Is(err, errNotFound) {
+			return err
+		}
+	} else if err := a.syncSharedEngineIntent(row.Infohash); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *App) syncSharedEngineIntent(infohash string) error {
+	rows, err := torrentRowsForInfohash(a.ctx.AppDB(), infohash)
+	if err != nil {
+		return err
+	}
+	allPaused := len(rows) > 0
+	for _, row := range rows {
+		if row.State != "paused" {
+			allPaused = false
+			break
+		}
+	}
+	if allPaused {
+		if err := a.engine.Pause(infohash); err != nil {
+			return err
+		}
+	} else if err := a.engine.Resume(infohash); err != nil {
+		return err
+	}
+	for index, priority := range effectivePriorities(rows) {
+		if err := a.engine.SetFilePriority(infohash, index, priority); err != nil && !strings.Contains(err.Error(), "metadata not available") {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) setPriority(ctx *sdk.AppCtx, id int64, fileIndex int, priority string) error {
+	pid := projectScope(ctx)
+	row, err := getTorrentRowByID(a.ctx.AppDB(), pid, id)
+	if err != nil {
+		return err
+	}
+	if _, err := parsePriority(priority); err != nil {
+		return err
+	}
+	files, err := a.engine.FileSnapshots(row.Infohash)
+	if err != nil {
+		return err
+	}
+	if fileIndex < 0 || fileIndex >= len(files) {
+		return fmt.Errorf("file_index %d out of range", fileIndex)
+	}
+	priorities := decodePriorities(row.FilePrioritiesJSON)
+	priorities[fileIndex] = priority
+	b, _ := json.Marshal(priorities)
+	if _, err = a.ctx.AppDB().Exec(`UPDATE torrents SET file_priorities_json = ? WHERE id = ? AND project_id = ?`, string(b), id, pid); err != nil {
+		return err
+	}
+	rows, err := torrentRowsForInfohash(a.ctx.AppDB(), row.Infohash)
+	if err != nil {
+		return err
+	}
+	effective := effectivePriorities(rows)
+	return a.engine.SetFilePriority(row.Infohash, fileIndex, effective[fileIndex])
+}
+
+// effectivePriorities merges per-project intent for one shared swarm.
+// A file is skipped physically only when every project explicitly skips
+// it; otherwise the highest requested priority wins. Each project's
+// completion handoff still uses its own persisted selection.
+func effectivePriorities(rows []TorrentRow) map[int]string {
+	keys := map[int]struct{}{}
+	decoded := make([]map[int]string, len(rows))
+	for i, row := range rows {
+		decoded[i] = decodePriorities(row.FilePrioritiesJSON)
+		for index := range decoded[i] {
+			keys[index] = struct{}{}
+		}
+	}
+	out := map[int]string{}
+	for index := range keys {
+		value := "skip"
+		for _, priorities := range decoded {
+			requested, ok := priorities[index]
+			if !ok || requested == "normal" || requested == "low" {
+				value = "normal"
+			}
+			if requested == "high" {
+				value = "high"
+				break
+			}
+		}
+		out[index] = value
+	}
+	return out
 }
 
 // ─── views ──────────────────────────────────────────────────────────
@@ -689,8 +957,14 @@ type combinedView struct {
 	Files []FileSnapshot  `json:"files,omitempty"`
 }
 
-func (a *App) combinedTorrentList(stateFilter string) ([]combinedView, error) {
-	rows, err := listTorrentRows(a.ctx.AppDB(), projectScope(), stateFilter)
+func (a *App) combinedTorrentList(ctx *sdk.AppCtx, stateFilter string) ([]combinedView, error) {
+	stateFilter = strings.ToLower(strings.TrimSpace(stateFilter))
+	switch stateFilter {
+	case "", "all", "queued", "downloading", "seeding", "paused", "completed", "error":
+	default:
+		return nil, fmt.Errorf("unsupported state %q", stateFilter)
+	}
+	rows, err := listTorrentRows(a.ctx.AppDB(), projectScope(ctx), stateFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -706,6 +980,13 @@ func (a *App) combinedTorrentList(stateFilter string) ([]combinedView, error) {
 				Length: r.TotalBytes, BytesCompleted: r.DownloadedBytes,
 				LastError: r.LastError}
 		}
+		if r.State == "error" && r.LastError != "" {
+			s.State = "error"
+			s.LastError = r.LastError
+		} else if r.State == "paused" {
+			s.State = "paused"
+			s.IsPaused = true
+		}
 		if stateFilter != "" && stateFilter != "all" && s.State != stateFilter {
 			continue
 		}
@@ -714,8 +995,8 @@ func (a *App) combinedTorrentList(stateFilter string) ([]combinedView, error) {
 	return out, nil
 }
 
-func (a *App) getTorrentDetail(id int64) (*combinedView, error) {
-	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(), id)
+func (a *App) getTorrentDetail(ctx *sdk.AppCtx, id int64) (*combinedView, error) {
+	row, err := getTorrentRowByID(a.ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -723,23 +1004,49 @@ func (a *App) getTorrentDetail(id int64) (*combinedView, error) {
 	if snap == nil {
 		snap = &TorrentSnapshot{Infohash: row.Infohash, Name: row.Name, State: row.State}
 	}
+	if row.State == "error" && row.LastError != "" {
+		snap.State = "error"
+		snap.LastError = row.LastError
+	} else if row.State == "paused" {
+		snap.State = "paused"
+		snap.IsPaused = true
+	}
 	files, _ := a.engine.FileSnapshots(row.Infohash)
+	priorities := decodePriorities(row.FilePrioritiesJSON)
+	for i := range files {
+		if priority, ok := priorities[files[i].Index]; ok {
+			files[i].Priority = priority
+		}
+	}
 	return &combinedView{TorrentRow: *row, Snap: *snap, Files: files}, nil
 }
 
 type GlobalStats struct {
-	Aggregate         AggregateStats `json:"aggregate"`
-	WorkingDirBytes   int64          `json:"working_dir_bytes"`
-	WorkingDirFreeMB  int64          `json:"working_dir_free_mb"`
+	Aggregate          AggregateStats `json:"aggregate"`
+	WorkingDirBytes    int64          `json:"working_dir_bytes"`
+	WorkingDirFreeMB   int64          `json:"working_dir_free_mb"`
 	IndexersConfigured int            `json:"indexers_configured"`
 }
 
-func (a *App) globalStats() *GlobalStats {
-	agg := a.engine.AggregateStats()
+func (a *App) globalStats(ctx *sdk.AppCtx) *GlobalStats {
+	projectRows, _ := listTorrentRows(a.ctx.AppDB(), projectScope(ctx), "all")
+	infohashes := make(map[string]struct{}, len(projectRows))
+	for _, row := range projectRows {
+		infohashes[row.Infohash] = struct{}{}
+	}
+	agg := a.engine.AggregateStatsFor(infohashes)
 	wd := resolveWorkingDir(a.ctx)
-	used, _ := dirSize(wd)
+	a.statsMu.Lock()
+	if a.statsScannedAt.IsZero() || time.Since(a.statsScannedAt) >= 30*time.Second {
+		if used, err := dirSize(wd); err == nil {
+			a.statsDirBytes = used
+			a.statsScannedAt = time.Now()
+		}
+	}
+	used := a.statsDirBytes
+	a.statsMu.Unlock()
 	free := freeDiskMB(wd)
-	ix, _ := listIndexers(a.ctx.AppDB(), projectScope(), false)
+	ix, _ := listIndexers(a.ctx.AppDB(), projectScope(ctx), false)
 	return &GlobalStats{
 		Aggregate:          agg,
 		WorkingDirBytes:    used,
@@ -749,37 +1056,44 @@ func (a *App) globalStats() *GlobalStats {
 }
 
 type IndexerProbe struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	OK         bool   `json:"ok"`
-	LatencyMS  int64  `json:"latency_ms"`
-	Error      string `json:"error,omitempty"`
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms"`
+	Error     string `json:"error,omitempty"`
 }
 
-func (a *App) testIndexers(ctx context.Context) ([]IndexerProbe, error) {
-	indexers, err := listIndexers(a.ctx.AppDB(), projectScope(), false)
+func (a *App) testIndexers(ctx context.Context, appCtx *sdk.AppCtx) ([]IndexerProbe, error) {
+	pid, err := requireProject(appCtx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]IndexerProbe, 0, len(indexers))
-	timeout := time.Duration(configInt(a.ctx, "indexer_query_timeout_seconds", 8)) * time.Second
-	for _, ix := range indexers {
-		t0 := time.Now()
-		_, err := a.queryIndexer(ctx, ix, "test", "", timeout)
-		probe := IndexerProbe{
-			ID:        ix.ID,
-			Name:      ix.Name,
-			Kind:      ix.Kind,
-			LatencyMS: time.Since(t0).Milliseconds(),
-		}
-		if err != nil {
-			probe.Error = err.Error()
-		} else {
-			probe.OK = true
-		}
-		out = append(out, probe)
+	indexers, err := listIndexers(a.ctx.AppDB(), pid, true)
+	if err != nil {
+		return nil, err
 	}
+	out := make([]IndexerProbe, len(indexers))
+	timeout := time.Duration(configInt(a.ctx, "indexer_query_timeout_seconds", 8)) * time.Second
+	var wg sync.WaitGroup
+	for i, ix := range indexers {
+		wg.Add(1)
+		go func(i int, ix Indexer) {
+			defer wg.Done()
+			t0 := time.Now()
+			_, err := a.queryIndexer(ctx, ix, "test", "", timeout)
+			probe := IndexerProbe{ID: ix.ID, Name: ix.Name, Kind: ix.Kind, LatencyMS: time.Since(t0).Milliseconds()}
+			if err != nil {
+				probe.Error = err.Error()
+				a.markIndexerError(ix.ID, err.Error())
+			} else {
+				probe.OK = true
+				a.markIndexerOK(ix.ID)
+			}
+			out[i] = probe
+		}(i, ix)
+	}
+	wg.Wait()
 	return out, nil
 }
 
@@ -801,8 +1115,28 @@ type SavedSearch struct {
 }
 
 func addSavedSearch(db *sql.DB, pid string, s SavedSearch) (*SavedSearch, error) {
+	s.Name = strings.TrimSpace(s.Name)
+	s.Query = strings.TrimSpace(s.Query)
+	s.Category = strings.ToLower(strings.TrimSpace(s.Category))
+	if s.Query == "" {
+		return nil, errors.New("saved search query required")
+	}
+	if s.Name == "" {
+		s.Name = s.Query
+	}
+	switch s.Category {
+	case "", "movie", "tv", "music", "book", "software":
+	default:
+		return nil, fmt.Errorf("unsupported category %q", s.Category)
+	}
 	if s.MinSeeders < 0 {
 		s.MinSeeders = 0
+	}
+	if s.MaxSizeBytes < 0 {
+		s.MaxSizeBytes = 0
+	}
+	if s.AutoAddTopN < 0 {
+		s.AutoAddTopN = 0
 	}
 	if s.RunIntervalMinutes < 5 {
 		s.RunIntervalMinutes = 5 // floor — don't spam indexers
@@ -848,7 +1182,7 @@ func listSavedSearches(db *sql.DB, pid string) ([]SavedSearch, error) {
 		s.NextRunAt = nextRun.String
 		out = append(out, s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // runDueSearches walks saved_searches whose next_run_at is in the
@@ -857,29 +1191,33 @@ func listSavedSearches(db *sql.DB, pid string) ([]SavedSearch, error) {
 // matches are auto-added; otherwise a torrent.search_match event is
 // emitted with the result list.
 func (a *App) runDueSearches(ctx context.Context) {
-	pid := projectScope()
 	now := time.Now().UTC()
 	rows, err := a.ctx.AppDB().Query(
-		`SELECT id, name, query, category, min_seeders, max_size_bytes,
+		`SELECT id, project_id, name, query, category, min_seeders, max_size_bytes,
 		        exclude_terms, auto_add_top_n, run_interval_minutes
 		   FROM saved_searches
-		  WHERE project_id = ? AND (next_run_at IS NULL OR next_run_at <= ?)`,
-		pid, now.Format(time.RFC3339))
+		  WHERE next_run_at IS NULL OR next_run_at <= ?`,
+		now.Format(time.RFC3339))
 	if err != nil {
 		a.ctx.Logger().Warn("scheduler", "err", err.Error())
 		return
 	}
 	type job struct {
-		ID                                                                int64
-		Name, Query, Category, ExcludeTerms                               string
-		MinSeeders, AutoAddTopN, RunIntervalMinutes                       int
-		MaxSizeBytes                                                      int64
+		ID                                             int64
+		ProjectID, Name, Query, Category, ExcludeTerms string
+		MinSeeders, AutoAddTopN, RunIntervalMinutes    int
+		MaxSizeBytes                                   int64
 	}
 	var jobs []job
 	for rows.Next() {
 		var j job
-		_ = rows.Scan(&j.ID, &j.Name, &j.Query, &j.Category, &j.MinSeeders,
-			&j.MaxSizeBytes, &j.ExcludeTerms, &j.AutoAddTopN, &j.RunIntervalMinutes)
+		if err := rows.Scan(
+			&j.ID, &j.ProjectID, &j.Name, &j.Query, &j.Category, &j.MinSeeders,
+			&j.MaxSizeBytes, &j.ExcludeTerms, &j.AutoAddTopN, &j.RunIntervalMinutes,
+		); err != nil {
+			a.ctx.Logger().Warn("scheduler scan", "err", err.Error())
+			continue
+		}
 		jobs = append(jobs, j)
 	}
 	rows.Close()
@@ -896,7 +1234,8 @@ func (a *App) runDueSearches(ctx context.Context) {
 	}
 
 	for _, j := range jobs {
-		results, err := a.searchIndexers(ctx, j.Query, j.Category, j.MinSeeders, "seeders")
+		scoped := a.ctx.WithProject(j.ProjectID)
+		results, err := a.searchIndexers(ctx, scoped, j.Query, j.Category, j.MinSeeders, "seeders")
 		if err != nil {
 			a.ctx.Logger().Warn("saved search", "name", j.Name, "err", err.Error())
 			continue
@@ -910,7 +1249,7 @@ func (a *App) runDueSearches(ctx context.Context) {
 			if matchesAny(strings.ToLower(r.Name), ex) {
 				continue
 			}
-			if a.alreadyHave(r.Infohash) {
+			if a.alreadyHave(j.ProjectID, r.Infohash) {
 				continue
 			}
 			filtered = append(filtered, r)
@@ -923,13 +1262,13 @@ func (a *App) runDueSearches(ctx context.Context) {
 				n = len(filtered)
 			}
 			for _, r := range filtered[:n] {
-				_, err := a.addTorrent(r.Magnet, r.Infohash, r.TorrentURL, "", false)
+				_, err := a.addTorrent(scoped, r.Magnet, r.Infohash, r.TorrentURL, "", false)
 				if err != nil {
 					a.ctx.Logger().Warn("auto-add", "name", r.Name, "err", err.Error())
 				}
 			}
 		} else {
-			a.ctx.Emit("torrent.search_match", map[string]any{
+			scoped.Emit("torrent.search_match", map[string]any{
 				"search_id": j.ID,
 				"query":     j.Query,
 				"results":   filtered,
@@ -939,19 +1278,19 @@ func (a *App) runDueSearches(ctx context.Context) {
 		next := now.Add(time.Duration(j.RunIntervalMinutes) * time.Minute).Format(time.RFC3339)
 		_, _ = a.ctx.AppDB().Exec(
 			`UPDATE saved_searches SET last_run_at = ?, next_run_at = ?
-			  WHERE id = ?`,
-			now.Format(time.RFC3339), next, j.ID)
+			  WHERE id = ? AND project_id = ?`,
+			now.Format(time.RFC3339), next, j.ID, j.ProjectID)
 	}
 }
 
-func (a *App) alreadyHave(infohash string) bool {
+func (a *App) alreadyHave(projectID, infohash string) bool {
 	if infohash == "" {
 		return false
 	}
 	var n int
 	_ = a.ctx.AppDB().QueryRow(
 		`SELECT COUNT(*) FROM torrents WHERE project_id = ? AND infohash = ?`,
-		projectScope(), infohash).Scan(&n)
+		projectID, infohash).Scan(&n)
 	return n > 0
 }
 
@@ -977,6 +1316,8 @@ type TorrentRow struct {
 	DownloadedBytes    int64  `json:"downloaded_bytes"`
 	State              string `json:"state"`
 	StorageFileIDsJSON string `json:"storage_file_ids_json"`
+	UploadProgressJSON string `json:"upload_progress_json,omitempty"`
+	FilePrioritiesJSON string `json:"file_priorities_json,omitempty"`
 	LastError          string `json:"last_error,omitempty"`
 	AddedAt            string `json:"added_at"`
 	CompletedAt        string `json:"completed_at,omitempty"`
@@ -1004,6 +1345,7 @@ func getTorrentRow(db *sql.DB, pid, infohash string) (*TorrentRow, error) {
 	return scanTorrentRow(db.QueryRow(
 		`SELECT id, project_id, infohash, name, magnet, target_folder,
 		        total_bytes, downloaded_bytes, state, storage_file_ids_json,
+		        upload_progress_json, file_priorities_json,
 		        last_error, added_at, completed_at
 		   FROM torrents WHERE project_id = ? AND infohash = ?`, pid, infohash))
 }
@@ -1012,6 +1354,7 @@ func getTorrentRowByID(db *sql.DB, pid string, id int64) (*TorrentRow, error) {
 	return scanTorrentRow(db.QueryRow(
 		`SELECT id, project_id, infohash, name, magnet, target_folder,
 		        total_bytes, downloaded_bytes, state, storage_file_ids_json,
+		        upload_progress_json, file_priorities_json,
 		        last_error, added_at, completed_at
 		   FROM torrents WHERE project_id = ? AND id = ?`, pid, id))
 }
@@ -1021,6 +1364,7 @@ func scanTorrentRow(row *sql.Row) (*TorrentRow, error) {
 	var completed sql.NullString
 	err := row.Scan(&r.ID, &r.ProjectID, &r.Infohash, &r.Name, &r.Magnet, &r.TargetFolder,
 		&r.TotalBytes, &r.DownloadedBytes, &r.State, &r.StorageFileIDsJSON,
+		&r.UploadProgressJSON, &r.FilePrioritiesJSON,
 		&r.LastError, &r.AddedAt, &completed)
 	if err != nil {
 		return nil, err
@@ -1032,6 +1376,7 @@ func scanTorrentRow(row *sql.Row) (*TorrentRow, error) {
 func listTorrentRows(db *sql.DB, pid, stateFilter string) ([]TorrentRow, error) {
 	q := `SELECT id, project_id, infohash, name, magnet, target_folder,
 	             total_bytes, downloaded_bytes, state, storage_file_ids_json,
+	             upload_progress_json, file_priorities_json,
 	             last_error, added_at, completed_at
 	        FROM torrents WHERE project_id = ?`
 	args := []any{pid}
@@ -1051,27 +1396,108 @@ func listTorrentRows(db *sql.DB, pid, stateFilter string) ([]TorrentRow, error) 
 		var completed sql.NullString
 		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Infohash, &r.Name, &r.Magnet,
 			&r.TargetFolder, &r.TotalBytes, &r.DownloadedBytes, &r.State,
-			&r.StorageFileIDsJSON, &r.LastError, &r.AddedAt, &completed); err != nil {
+			&r.StorageFileIDsJSON, &r.UploadProgressJSON, &r.FilePrioritiesJSON,
+			&r.LastError, &r.AddedAt, &completed); err != nil {
 			return nil, err
 		}
 		r.CompletedAt = completed.String
 		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
+}
+
+func listAllTorrentRows(db *sql.DB) ([]TorrentRow, error) {
+	rows, err := db.Query(
+		`SELECT id, project_id, infohash, name, magnet, target_folder,
+		        total_bytes, downloaded_bytes, state, storage_file_ids_json,
+		        upload_progress_json, file_priorities_json,
+		        last_error, added_at, completed_at
+		   FROM torrents ORDER BY added_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TorrentRow{}
+	for rows.Next() {
+		var r TorrentRow
+		var completed sql.NullString
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Infohash, &r.Name, &r.Magnet,
+			&r.TargetFolder, &r.TotalBytes, &r.DownloadedBytes, &r.State,
+			&r.StorageFileIDsJSON, &r.UploadProgressJSON, &r.FilePrioritiesJSON,
+			&r.LastError, &r.AddedAt, &completed); err != nil {
+			return nil, err
+		}
+		r.CompletedAt = completed.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func decodePriorities(raw string) map[int]string {
+	out := map[int]string{}
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	var wire map[string]string
+	if json.Unmarshal([]byte(raw), &wire) != nil {
+		return out
+	}
+	for k, v := range wire {
+		if i, err := strconv.Atoi(k); err == nil && i >= 0 {
+			out[i] = v
+		}
+	}
+	return out
+}
+
+func storageIDsForRow(row *TorrentRow) []int64 {
+	seen := map[int64]bool{}
+	out := []int64{}
+	var final []int64
+	_ = json.Unmarshal([]byte(row.StorageFileIDsJSON), &final)
+	for _, id := range final {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	var partial map[string]int64
+	_ = json.Unmarshal([]byte(row.UploadProgressJSON), &partial)
+	for _, id := range partial {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // ─── DB layer: indexers ─────────────────────────────────────────────
 
 func addIndexer(db *sql.DB, pid, name, kind, baseURL, apiKey string, categories []string, priority int) (*Indexer, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("indexer name required")
+	}
 	if kind == "" {
 		kind = "jackett"
 	}
+	switch kind {
+	case "jackett", "prowlarr", "rss", "apibay":
+	default:
+		return nil, fmt.Errorf("unsupported indexer kind %q", kind)
+	}
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("base_url must be an absolute http(s) URL")
+	}
+	baseURL = u.String()
 	enc, err := encryptSecret(apiKey)
 	if err != nil {
 		return nil, err
 	}
 	cats, _ := json.Marshal(categories)
-	res, err := db.Exec(
+	_, err = db.Exec(
 		`INSERT INTO indexers
 		   (project_id, name, kind, base_url, api_key_enc, categories_json, priority, enabled)
 		 VALUES (?,?,?,?,?,?,?,1)
@@ -1084,7 +1510,12 @@ func addIndexer(db *sql.DB, pid, name, kind, baseURL, apiKey string, categories 
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	var id int64
+	if err := db.QueryRow(
+		`SELECT id FROM indexers WHERE project_id = ? AND name = ?`, pid, name,
+	).Scan(&id); err != nil {
+		return nil, err
+	}
 	out := &Indexer{
 		ID: id, ProjectID: pid, Name: name, Kind: kind,
 		BaseURL: baseURL, APIKeyEnc: enc, Categories: categories,
@@ -1095,34 +1526,22 @@ func addIndexer(db *sql.DB, pid, name, kind, baseURL, apiKey string, categories 
 
 // ─── secret crypto (AES-GCM, plaintext fallback) ───────────────────
 
-var (
-	secretKeyCache []byte
-	secretKeyOnce  sync.Once
-	secretKeyErr   error
-)
-
 func secretKey() ([]byte, error) {
-	secretKeyOnce.Do(func() {
-		raw := os.Getenv("APTEVA_SECRET")
-		if raw == "" && globalApp != nil && globalApp.ctx != nil {
-			raw = configString(globalApp.ctx, "shared_secret", "")
-		}
-		if raw == "" {
-			secretKeyErr = errors.New("no secret")
-			return
-		}
-		k, err := base64.StdEncoding.DecodeString(raw)
-		if err != nil {
-			secretKeyErr = fmt.Errorf("APTEVA_SECRET not base64: %w", err)
-			return
-		}
-		if len(k) != 32 {
-			secretKeyErr = fmt.Errorf("APTEVA_SECRET must decode to 32 bytes, got %d", len(k))
-			return
-		}
-		secretKeyCache = k
-	})
-	return secretKeyCache, secretKeyErr
+	raw := os.Getenv("APTEVA_SECRET")
+	if raw == "" && globalApp != nil && globalApp.ctx != nil {
+		raw = configString(globalApp.ctx, "shared_secret", "")
+	}
+	if raw == "" {
+		return nil, errors.New("no secret")
+	}
+	k, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("APTEVA_SECRET not base64: %w", err)
+	}
+	if len(k) != 32 {
+		return nil, fmt.Errorf("APTEVA_SECRET must decode to 32 bytes, got %d", len(k))
+	}
+	return k, nil
 }
 
 func encryptSecret(s string) (string, error) {
@@ -1183,15 +1602,71 @@ func decryptSecret(stored string) (string, error) {
 // ─── small helpers ──────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func projectScope() string {
-	if pid := os.Getenv("APTEVA_PROJECT_ID"); pid != "" {
+func decodeJSONBody(r *http.Request, dst any) error {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if dec.Decode(&struct{}{}) != io.EOF {
+		return errors.New("invalid JSON body: multiple values")
+	}
+	return nil
+}
+
+func (a *App) requestContext(w http.ResponseWriter, r *http.Request) (*sdk.AppCtx, bool) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return a.ctx.WithProject(pid), true
+}
+
+func resolveProjectFromRequest(r *http.Request) (string, error) {
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+		return pid, nil
+	}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		return pid, nil
+	}
+	return "", errors.New("project_id required for a global torrent install")
+}
+
+func projectScope(ctxs ...*sdk.AppCtx) string {
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
 		return pid
 	}
-	return "default"
+	return ""
+}
+
+func requireProject(ctx *sdk.AppCtx) (string, error) {
+	pid := projectScope(ctx)
+	if pid == "" {
+		return "", errors.New("torrent: missing project context")
+	}
+	return pid, nil
+}
+
+func (a *App) operationContext() context.Context {
+	if a.runCtx != nil {
+		return a.runCtx
+	}
+	return context.Background()
 }
 
 func strArg(args map[string]any, k string) string {
@@ -1253,6 +1728,18 @@ func configInt(ctx *sdk.AppCtx, key string, def int) int {
 	return n
 }
 
+func configFloat(ctx *sdk.AppCtx, key string, def float64) float64 {
+	s := configString(ctx, key, "")
+	if s == "" {
+		return def
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
 func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 	s := strings.ToLower(configString(ctx, key, ""))
 	switch s {
@@ -1264,35 +1751,56 @@ func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 	return def
 }
 
+func cleanStorageFolder(folder string) (string, error) {
+	folder = strings.TrimSpace(strings.ReplaceAll(folder, "\\", "/"))
+	if folder == "" {
+		return "/", nil
+	}
+	for _, component := range strings.Split(folder, "/") {
+		if component == ".." {
+			return "", errors.New("target_folder must not contain '..'")
+		}
+	}
+	cleaned := path.Clean("/" + strings.TrimPrefix(folder, "/"))
+	return cleaned, nil
+}
+
 func dirSize(path string) (int64, error) {
 	var total int64
-	st, err := os.Stat(path)
+	st, err := os.Lstat(path)
 	if err != nil {
 		return 0, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		return 0, nil
 	}
 	if !st.IsDir() {
 		return st.Size(), nil
 	}
-	entries, _ := os.ReadDir(path)
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return 0, err
+	}
 	for _, e := range entries {
-		sub := path + "/" + e.Name()
-		s, _ := dirSize(sub)
+		sub := filepath.Join(path, e.Name())
+		s, err := dirSize(sub)
+		if err != nil {
+			return 0, err
+		}
 		total += s
 	}
 	return total, nil
 }
 
 // freeDiskMB returns the available disk space at `path` in MiB.
-// Pure-Go portable approximation: read os.Stat info on the parent
-// filesystem. Without syscall.Statfs we'd need cgo; v0.1 returns -1
-// when the call isn't available so the panel shows "—".
+// Returns -1 when the filesystem does not expose free-space stats so
+// the panel can render an unavailable value instead of a false zero.
 func freeDiskMB(path string) int64 {
-	// Best-effort: shell out to `df` would require running a process,
-	// which the orchestrator may sandbox. Return -1 — the panel
-	// renders "—" in that case. v0.2 should add a Go-syscall path on
-	// linux (unix.Statfs).
-	_ = path
-	return -1
+	free, err := availableDiskBytes(path)
+	if err != nil {
+		return -1
+	}
+	return free / (1024 * 1024)
 }
 
 // ─── main ───────────────────────────────────────────────────────────

@@ -2,26 +2,20 @@
 //
 // On every transition into "completed" or "seeding", walk the
 // torrent's files in working_dir and upload each one to the storage
-// app. Stamp the resulting file_ids on the torrents row. Best-effort
-// fire `media.probe_file` for video/audio files. Emit
-// `torrent.completed` on the platform bus.
+// app with its chunked upload protocol. Stamp the resulting file IDs
+// on the torrents row and emit `torrent.completed` on the platform
+// bus. The media app discovers new files from storage events.
 //
-// The mover is idempotent: a row with `storage_file_ids_json != '[]'`
-// is skipped on subsequent transitions. This is what makes
-// resume-on-restart safe — a torrent that completed while we were
-// down gets re-detected on the next poll, and the mover walks it
-// once.
-//
-// Memory pressure: storage's files_upload takes bytes_base64 inline.
-// For multi-GB files this is bad. v0.1 caps single-file uploads at
-// uploadInlineMax; anything larger is logged and skipped (with a
-// note in last_error so the panel can show why). v0.2 should switch
-// to a chunked / multipart upload tool on storage's side.
+// The mover is restart-safe and idempotent. It records every uploaded
+// path in upload_progress_json, resumes after partial failure, and
+// marks completed_at only after every selected file is in storage.
 package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -31,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -69,17 +64,22 @@ func (a *App) onTransition(infohash, prev, next string, snap TorrentSnapshot) {
 	a.ctx.Logger().Info("torrent transition",
 		"name", snap.Name, "prev", prev, "next", next, "ih", infohash)
 
-	// Persist state changes to the row so torrent_list / panel
-	// reflect them without waiting for the next sync.
-	a.persistSnapshot(infohash, snap)
-
-	switch next {
-	case "completed", "seeding":
-		go a.handleCompletion(infohash, snap)
-	case "error":
-		a.ctx.Emit("torrent.error", map[string]any{
-			"infohash": infohash, "error": snap.LastError, "name": snap.Name,
-		})
+	rows, err := torrentRowsForInfohash(a.ctx.AppDB(), infohash)
+	if err != nil {
+		a.ctx.Logger().Warn("transition rows", "ih", infohash, "err", err.Error())
+		return
+	}
+	for _, row := range rows {
+		a.persistSnapshot(row.ProjectID, infohash, snap)
+		scoped := a.ctx.WithProject(row.ProjectID)
+		switch next {
+		case "completed", "seeding":
+			go a.handleCompletion(row.ProjectID, infohash, snap)
+		case "error":
+			scoped.Emit("torrent.error", map[string]any{
+				"id": row.ID, "infohash": infohash, "error": snap.LastError, "name": snap.Name,
+			})
+		}
 	}
 }
 
@@ -87,17 +87,25 @@ func (a *App) onTransition(infohash, prev, next string, snap TorrentSnapshot) {
 // don't try to capture every byte tick (the engine has that already);
 // we just keep the DB consistent with the in-memory engine state on
 // transitions.
-func (a *App) persistSnapshot(infohash string, s TorrentSnapshot) {
+func (a *App) persistSnapshot(projectID, infohash string, s TorrentSnapshot) {
 	_, err := a.ctx.AppDB().Exec(
 		`UPDATE torrents
 		    SET name = COALESCE(NULLIF(?, ''), name),
 		        total_bytes = ?,
 		        downloaded_bytes = ?,
-		        state = ?,
-		        last_error = ?
+		        state = CASE
+		          WHEN state = 'error' AND last_error <> '' AND ? = '' THEN state
+		          WHEN state = 'paused' AND ? <> 'error' THEN state
+		          ELSE ?
+		        END,
+		        last_error = CASE
+		          WHEN state = 'error' AND last_error <> '' AND ? = '' THEN last_error
+		          ELSE ?
+		        END
 		  WHERE project_id = ? AND infohash = ?`,
-		s.Name, s.Length, s.BytesCompleted, s.State, s.LastError,
-		projectScope(), infohash,
+		s.Name, s.Length, s.BytesCompleted,
+		s.LastError, s.State, s.State, s.LastError, s.LastError,
+		projectID, infohash,
 	)
 	if err != nil {
 		a.ctx.Logger().Warn("persist snapshot", "err", err.Error())
@@ -117,23 +125,27 @@ func (a *App) persistSnapshot(infohash string, s TorrentSnapshot) {
 //     storage_file_ids_json: if a previous run already populated it,
 //     just emit the redundant "completed" event so subscribers can
 //     rely on at-least-once delivery.
-func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
-	if _, loaded := completionInFlight.LoadOrStore(infohash, struct{}{}); loaded {
+func (a *App) handleCompletion(projectID, infohash string, snap TorrentSnapshot) {
+	flightKey := projectID + ":" + infohash
+	if _, loaded := completionInFlight.LoadOrStore(flightKey, struct{}{}); loaded {
 		a.ctx.Logger().Info("completion already in flight, skipping",
 			"name", snap.Name, "ih", infohash)
 		return
 	}
-	defer completionInFlight.Delete(infohash)
+	defer completionInFlight.Delete(flightKey)
 
-	row, err := getTorrentRow(a.ctx.AppDB(), projectScope(), infohash)
+	row, err := getTorrentRow(a.ctx.AppDB(), projectID, infohash)
 	if err != nil {
 		a.ctx.Logger().Warn("completion: row lookup", "err", err.Error())
 		return
 	}
 	var existing []int64
 	_ = json.Unmarshal([]byte(row.StorageFileIDsJSON), &existing)
-	if len(existing) > 0 {
-		a.ctx.Emit("torrent.completed", map[string]any{
+	if row.CompletedAt != "" {
+		if snap.State == "completed" && !configFlag(a.ctx, "keep_working_copy", false) {
+			a.maybeCleanupWorkingCopy(infohash, snap.Name)
+		}
+		a.ctx.WithProject(projectID).Emit("torrent.completed", map[string]any{
 			"id": row.ID, "infohash": infohash, "name": snap.Name, "file_ids": existing,
 		})
 		return
@@ -141,7 +153,11 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 
 	files, err := a.engine.FileSnapshots(infohash)
 	if err != nil {
-		a.markError(infohash, "completion: "+err.Error())
+		a.markCompletionError(projectID, infohash, "completion: "+err.Error())
+		return
+	}
+	if len(files) == 0 {
+		a.markCompletionError(projectID, infohash, "completion: torrent metadata contains no files")
 		return
 	}
 
@@ -150,6 +166,9 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 		target = configString(a.ctx, "default_target_folder", "/downloads")
 	}
 	target = strings.TrimRight(target, "/")
+	if target == "" {
+		target = "/"
+	}
 	// Choose the per-torrent root carefully. anacrolix's File.Path()
 	// returns the BEP-3 path verbatim, which for any multi-file
 	// torrent that declares a top-level "name" already starts with
@@ -164,30 +183,54 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 	// subdir) so those don't all collide in /downloads/ root.
 	root := target
 	if len(files) > 1 && !filesShareWrapperDir(files) {
-		root = target + "/" + sanitiseName(snap.Name)
+		root = path.Join(target, sanitiseName(snap.Name))
 	}
 
-	uploaded := []int64{}
+	progress := map[string]int64{}
+	_ = json.Unmarshal([]byte(row.UploadProgressJSON), &progress)
+	projectPriorities := decodePriorities(row.FilePrioritiesJSON)
+	uploaded := make([]int64, 0, len(files))
 	uploadErrors := []string{}
+	hasIncompleteSelectedFile := false
+	parentCtx := a.runCtx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	uploadCtx, cancel := context.WithTimeout(parentCtx, 2*time.Hour)
+	defer cancel()
+	scoped := a.ctx.WithProject(projectID)
 	for _, f := range files {
-		if f.Priority == "skip" {
+		if priority, ok := projectPriorities[f.Index]; (ok && priority == "skip") || (!ok && f.Priority == "skip") {
 			continue
 		}
 		// Skip files that didn't fully download (selective-skip case).
 		if f.BytesCompleted < f.Length {
+			hasIncompleteSelectedFile = true
 			continue
 		}
-		fileID, err := a.uploadOneFile(a.ctx, root, f)
+		if fileID := progress[f.Path]; fileID > 0 {
+			uploaded = append(uploaded, fileID)
+			continue
+		}
+		fileID, err := a.uploadOneFile(uploadCtx, scoped, root, f)
 		if err != nil {
 			uploadErrors = append(uploadErrors, f.Path+": "+err.Error())
 			a.ctx.Logger().Warn("completion upload", "path", f.Path, "err", err.Error())
 			continue
 		}
 		uploaded = append(uploaded, fileID)
+		progress[f.Path] = fileID
+		progressJSON, _ := json.Marshal(progress)
+		_, _ = a.ctx.AppDB().Exec(
+			`UPDATE torrents SET upload_progress_json = ? WHERE project_id = ? AND infohash = ?`,
+			string(progressJSON), projectID, infohash)
 		// Media indexing happens automatically via the media app's
 		// storage.file.added subscription — no MCP round-trip needed
 		// from here. (Earlier versions called a non-existent
 		// "media.probe_file" tool that errored silently.)
+	}
+	if hasIncompleteSelectedFile {
+		return
 	}
 
 	// Bail-out path. If any file failed to upload, leave the working
@@ -199,8 +242,8 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 	// "Fetching metadata".
 	if len(uploadErrors) > 0 {
 		msg := "upload to storage failed: " + strings.Join(uploadErrors, "; ")
-		a.markError(infohash, msg)
-		a.ctx.Emit("torrent.error", map[string]any{
+		a.markCompletionError(projectID, infohash, msg)
+		scoped.Emit("torrent.error", map[string]any{
 			"id": row.ID, "infohash": infohash, "name": snap.Name,
 			"error": msg, "phase": "completion-upload",
 		})
@@ -209,18 +252,22 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 
 	idsJSON, _ := json.Marshal(uploaded)
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = a.ctx.AppDB().Exec(
+	if _, err := a.ctx.AppDB().Exec(
 		`UPDATE torrents
-		    SET storage_file_ids_json = ?, completed_at = ?, last_error = ''
-		  WHERE project_id = ? AND infohash = ?`,
-		string(idsJSON), now, projectScope(), infohash,
-	)
-
-	if !configFlag(a.ctx, "keep_working_copy", false) {
-		a.cleanupWorkingCopy(snap.Name)
+			    SET storage_file_ids_json = ?, upload_progress_json = '{}',
+			        completed_at = ?, state = ?, last_error = ''
+			  WHERE project_id = ? AND infohash = ?`,
+		string(idsJSON), now, snap.State, projectID, infohash,
+	); err != nil {
+		a.markCompletionError(projectID, infohash, "persist completed upload: "+err.Error())
+		return
 	}
 
-	a.ctx.Emit("torrent.completed", map[string]any{
+	if snap.State == "completed" && !configFlag(a.ctx, "keep_working_copy", false) {
+		a.maybeCleanupWorkingCopy(infohash, snap.Name)
+	}
+
+	scoped.Emit("torrent.completed", map[string]any{
 		"id":       row.ID,
 		"infohash": infohash,
 		"name":     snap.Name,
@@ -228,18 +275,11 @@ func (a *App) handleCompletion(infohash string, snap TorrentSnapshot) {
 	})
 }
 
-func (a *App) markError(infohash, msg string) {
+func (a *App) markCompletionError(projectID, infohash, msg string) {
 	_, _ = a.ctx.AppDB().Exec(
 		`UPDATE torrents SET state = 'error', last_error = ?
 		  WHERE project_id = ? AND infohash = ?`,
-		msg, projectScope(), infohash)
-	// Mirror onto the engine's in-memory record so its next snapshot()
-	// call returns state="error" too. Without this the engine could
-	// re-overwrite our DB state on the next poll (it wins because
-	// onTransition runs after our UPDATE).
-	if a.engine != nil {
-		a.engine.MarkError(infohash, msg)
-	}
+		msg, projectID, infohash)
 }
 
 // uploadOneFile streams one local file into storage via the chunked
@@ -252,16 +292,19 @@ func (a *App) markError(infohash, msg string) {
 //
 // Wire (cross-app HTTP, sidecar→sidecar via the platform gateway):
 //
-//   POST   {gateway}/api/apps/storage/uploads
-//   PUT    {gateway}/api/apps/storage/uploads/{id}/parts/{N}     (×many)
-//   POST   {gateway}/api/apps/storage/uploads/{id}/complete
+//	POST   {gateway}/api/apps/storage/uploads
+//	PUT    {gateway}/api/apps/storage/uploads/{id}/parts/{N}     (×many)
+//	POST   {gateway}/api/apps/storage/uploads/{id}/complete
 //
 // Auth: APTEVA_APP_TOKEN. Project: APTEVA_PROJECT_ID query param so
 // storage's resolveProjectFromRequest is unambiguous even on
 // global-scoped storage installs.
-func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64, error) {
+func (a *App) uploadOneFile(requestCtx context.Context, ctx *sdk.AppCtx, root string, f FileSnapshot) (int64, error) {
 	working := resolveWorkingDir(a.ctx)
-	abs := filepath.Join(working, f.Path)
+	abs, err := safeChildPath(working, f.Path)
+	if err != nil {
+		return 0, err
+	}
 
 	file, err := os.Open(abs)
 	if err != nil {
@@ -277,7 +320,7 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 	relDir, name := filepath.Split(f.Path)
 	folder := root
 	if relDir != "" && relDir != "./" {
-		folder = root + "/" + strings.Trim(relDir, "/")
+		folder = path.Join(root, strings.Trim(relDir, "/"))
 	}
 	contentType := guessContentType(f.Path)
 
@@ -286,15 +329,11 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 	if gateway == "" || token == "" {
 		return 0, errors.New("APTEVA_GATEWAY_URL / APTEVA_APP_TOKEN not set in env")
 	}
-	pid := projectScope()
+	pid := projectScope(ctx)
 	base := gateway + "/api/apps/storage"
 	q := "?project_id=" + url.QueryEscape(pid)
 
-	// No per-request timeout — multi-GB uploads take minutes. The
-	// engine's polling loop will keep tickling the row's progress in
-	// the meantime, and onTransition runs in its own goroutine so the
-	// poll loop doesn't block here.
-	httpc := &http.Client{}
+	httpc := &http.Client{Timeout: 15 * time.Minute}
 
 	// 1. init session.
 	initBody, _ := json.Marshal(map[string]any{
@@ -303,7 +342,10 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 		"content_type": contentType,
 		"folder":       folder,
 	})
-	req, _ := http.NewRequest("POST", base+"/uploads"+q, bytes.NewReader(initBody))
+	req, err := http.NewRequestWithContext(requestCtx, "POST", base+"/uploads"+q, bytes.NewReader(initBody))
+	if err != nil {
+		return 0, err
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpc.Do(req)
@@ -330,10 +372,17 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 	if initOut.File != nil && initOut.File.ID != 0 {
 		return initOut.File.ID, nil
 	}
+	if initOut.UploadID == "" {
+		return 0, errors.New("upload init returned no upload id")
+	}
 
 	partSize := initOut.PartSize
 	if partSize <= 0 {
 		partSize = chunkSize
+	}
+	if partSize > 64*1024*1024 {
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
+		return 0, fmt.Errorf("upload part size %d exceeds 64 MiB safety limit", partSize)
 	}
 
 	// 2. parts — stream one chunk at a time, hash incrementally so
@@ -347,19 +396,23 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 			chunk := buf[:n]
 			hasher.Write(chunk)
 			partURL := fmt.Sprintf("%s/uploads/%s/parts/%d%s", base, initOut.UploadID, partNum, q)
-			preq, _ := http.NewRequest("PUT", partURL, bytes.NewReader(chunk))
+			preq, err := http.NewRequestWithContext(requestCtx, "PUT", partURL, bytes.NewReader(chunk))
+			if err != nil {
+				abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
+				return 0, err
+			}
 			preq.Header.Set("Authorization", "Bearer "+token)
 			preq.Header.Set("Content-Type", "application/octet-stream")
 			preq.ContentLength = int64(n)
 			presp, perr := httpc.Do(preq)
 			if perr != nil {
-				abortUpload(httpc, base, q, token, initOut.UploadID)
+				abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 				return 0, fmt.Errorf("upload part %d: %w", partNum, perr)
 			}
 			if presp.StatusCode/100 != 2 {
 				body, _ := io.ReadAll(io.LimitReader(presp.Body, 2048))
 				presp.Body.Close()
-				abortUpload(httpc, base, q, token, initOut.UploadID)
+				abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 				return 0, fmt.Errorf("upload part %d: HTTP %d: %s", partNum, presp.StatusCode, strings.TrimSpace(string(body)))
 			}
 			presp.Body.Close()
@@ -369,7 +422,7 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 			break
 		}
 		if rerr != nil {
-			abortUpload(httpc, base, q, token, initOut.UploadID)
+			abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 			return 0, fmt.Errorf("read %s: %w", abs, rerr)
 		}
 	}
@@ -377,16 +430,22 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 
 	// 3. complete.
 	compBody, _ := json.Marshal(map[string]any{"sha256": sha})
-	creq, _ := http.NewRequest("POST", base+"/uploads/"+initOut.UploadID+"/complete"+q, bytes.NewReader(compBody))
+	creq, err := http.NewRequestWithContext(requestCtx, "POST", base+"/uploads/"+initOut.UploadID+"/complete"+q, bytes.NewReader(compBody))
+	if err != nil {
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
+		return 0, err
+	}
 	creq.Header.Set("Authorization", "Bearer "+token)
 	creq.Header.Set("Content-Type", "application/json")
 	cresp, err := httpc.Do(creq)
 	if err != nil {
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 		return 0, fmt.Errorf("upload complete: %w", err)
 	}
 	defer cresp.Body.Close()
 	if cresp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(cresp.Body, 2048))
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 		return 0, fmt.Errorf("upload complete: HTTP %d: %s", cresp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var compOut struct {
@@ -395,9 +454,11 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 		} `json:"file"`
 	}
 	if err := json.NewDecoder(cresp.Body).Decode(&compOut); err != nil {
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 		return 0, fmt.Errorf("upload complete decode: %w", err)
 	}
 	if compOut.File.ID == 0 {
+		abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 		return 0, errors.New("upload complete returned no file id")
 	}
 	return compOut.File.ID, nil
@@ -406,8 +467,13 @@ func (a *App) uploadOneFile(ctx *sdk.AppCtx, root string, f FileSnapshot) (int64
 // abortUpload best-effort releases the partial session on storage's
 // side after a part error. Don't return its error — we already have
 // one to surface; abort is housekeeping.
-func abortUpload(httpc *http.Client, base, q, token, uploadID string) {
-	req, _ := http.NewRequest("DELETE", base+"/uploads/"+uploadID+q, nil)
+func abortUpload(_ context.Context, httpc *http.Client, base, q, token, uploadID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "DELETE", base+"/uploads/"+uploadID+q, nil)
+	if err != nil {
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if resp, err := httpc.Do(req); err == nil {
 		resp.Body.Close()
@@ -428,40 +494,75 @@ func filesShareWrapperDir(files []FileSnapshot) bool {
 	return true
 }
 
-// maybeProbeMedia is unused as of v0.1.16 — media's
-// storage.file.added subscription handles indexing automatically
-// via SSE. Kept temporarily so removed-callsite reverts surface as
-// "this is unused" rather than build errors. Will be deleted in
-// v0.2 along with the rest of the post-completion hooks.
-func (a *App) maybeProbeMedia(fileID int64, path string) {
-	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v",
-		".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav":
-		// proceed
-	default:
-		return
-	}
-	go func() {
-		_, err := a.ctx.PlatformAPI().CallApp("media", "probe_file",
-			map[string]any{"file_id": fileID})
-		if err != nil {
-			a.ctx.Logger().Info("media.probe skipped", "file_id", fileID, "err", err.Error())
-		}
-	}()
-}
-
 // cleanupWorkingCopy removes the local copy under working_dir. Best
 // effort — if removal fails (file in use, permission), we log and
 // move on; the next poll will retry on the next state change.
-func (a *App) cleanupWorkingCopy(torrentName string) {
-	working := configString(a.ctx, "working_dir", "/data/torrents")
-	target := filepath.Join(working, torrentName)
-	if target == working || target == "/" {
-		return // refuse to remove the root
+func (a *App) cleanupWorkingCopy(torrentName string) error {
+	working := resolveWorkingDir(a.ctx)
+	target, err := safeChildPath(working, torrentName)
+	if err != nil {
+		return err
 	}
 	if err := os.RemoveAll(target); err != nil {
 		a.ctx.Logger().Warn("cleanup working copy", "path", target, "err", err.Error())
+		return err
+	}
+	return nil
+}
+
+func (a *App) maybeCleanupWorkingCopy(infohash, torrentName string) {
+	var pending int
+	if err := a.ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM torrents WHERE infohash = ? AND completed_at IS NULL`, infohash).Scan(&pending); err != nil || pending > 0 {
+		return
+	}
+	if err := a.cleanupWorkingCopy(torrentName); err != nil {
+		a.ctx.Logger().Warn("cleanup working copy", "ih", infohash, "err", err.Error())
+	}
+}
+
+func torrentRowsForInfohash(db *sql.DB, infohash string) ([]TorrentRow, error) {
+	rows, err := db.Query(
+		`SELECT id, project_id, infohash, name, magnet, target_folder,
+		        total_bytes, downloaded_bytes, state, storage_file_ids_json,
+		        upload_progress_json, file_priorities_json,
+		        last_error, added_at, completed_at
+		   FROM torrents WHERE infohash = ? ORDER BY added_at DESC`, infohash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TorrentRow{}
+	for rows.Next() {
+		var row TorrentRow
+		var completed sql.NullString
+		if err := rows.Scan(&row.ID, &row.ProjectID, &row.Infohash, &row.Name, &row.Magnet,
+			&row.TargetFolder, &row.TotalBytes, &row.DownloadedBytes, &row.State,
+			&row.StorageFileIDsJSON, &row.UploadProgressJSON, &row.FilePrioritiesJSON,
+			&row.LastError, &row.AddedAt, &completed); err != nil {
+			return nil, err
+		}
+		row.CompletedAt = completed.String
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (a *App) retryPendingCompletions() {
+	rows, err := listAllTorrentRows(a.ctx.AppDB())
+	if err != nil {
+		a.ctx.Logger().Warn("completion retry list", "err", err.Error())
+		return
+	}
+	for _, row := range rows {
+		if row.CompletedAt != "" {
+			continue
+		}
+		snap := a.engine.Snapshot(row.Infohash)
+		if snap == nil || !snap.HasInfo || snap.BytesMissing != 0 {
+			continue
+		}
+		go a.handleCompletion(row.ProjectID, row.Infohash, *snap)
 	}
 }
 
