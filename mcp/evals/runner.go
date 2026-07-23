@@ -97,6 +97,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		run.VoiceCall = &call
 		run.Execution = call.Execution
 		run.Assertions = append(run.Assertions, voiceAssertionResults(voice, &call)...)
+		if issues := voiceSimulationIssues(&call); len(issues) > 0 {
+			return s.finishInvalidSimulation(run, issues)
+		}
 	} else {
 		if err = s.setRunStage(run, "sending_task"); err != nil {
 			return err
@@ -256,13 +259,19 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []AssertionResult {
 	if call == nil {
 		return []AssertionResult{
-			{Name: "Voice conversation completed", Passed: false, Message: "no voice call result"},
-			{Name: "No realtime audio errors", Passed: false, Message: "no voice call result"},
+			{Name: "Valid two-sided voice simulation", Passed: false, Message: "no voice call result", Gating: true},
+			{Name: "Call ended normally", Passed: false, Message: "no voice call result", Gating: true},
+			{Name: "Both participants produced audio", Passed: false, Message: "no voice call result", Gating: true},
+			{Name: "No realtime audio errors", Passed: false, Message: "no voice call result", Gating: true},
 		}
 	}
+	validityIssues := voiceSimulationIssues(call)
+	receptionistTurns, callerTurns, transitions := voiceTranscriptCounts(call.Transcript)
 	results := []AssertionResult{
-		{Name: "Voice conversation completed", Passed: len(call.Transcript) > 0, Actual: len(call.Transcript)},
-		{Name: "No realtime audio errors", Passed: call.Metrics.RealtimeErrors == 0, Actual: call.Metrics.RealtimeErrors},
+		{Name: "Valid two-sided voice simulation", Passed: len(validityIssues) == 0, Actual: map[string]any{"receptionist_turns": receptionistTurns, "caller_turns": callerTurns, "speaker_transitions": transitions}, Message: strings.Join(validityIssues, "; "), Gating: true},
+		{Name: "Call ended normally", Passed: call.Metrics.EndedBy == "caller_done", Actual: call.Metrics.EndedBy, Gating: true},
+		{Name: "Both participants produced audio", Passed: call.Metrics.ReceptionistAudioS > 0 && call.Metrics.CallerAudioS > 0, Actual: map[string]float64{"receptionist_seconds": call.Metrics.ReceptionistAudioS, "caller_seconds": call.Metrics.CallerAudioS}, Gating: true},
+		{Name: "No realtime audio errors", Passed: call.Metrics.RealtimeErrors == 0, Actual: call.Metrics.RealtimeErrors, Gating: true},
 	}
 	if spec != nil && spec.MaxFirstResponseMS > 0 {
 		actual := call.Metrics.FirstResponseMS
@@ -273,6 +282,96 @@ func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []Assert
 		results = append(results, AssertionResult{Name: "Average response latency", Passed: actual > 0 && actual <= spec.MaxAverageResponseMS, Actual: actual, Message: fmt.Sprintf("maximum %d ms", spec.MaxAverageResponseMS)})
 	}
 	return results
+}
+
+func voiceSimulationIssues(call *EnvironmentVoiceCall) []string {
+	if call == nil {
+		return []string{"voice call result is missing"}
+	}
+	if call.Validity.Status == "invalid" {
+		if len(call.Validity.Reasons) > 0 {
+			return append([]string(nil), call.Validity.Reasons...)
+		}
+		return []string{"environment marked the voice simulation invalid"}
+	}
+	if call.Validity.Status == "valid" {
+		return nil
+	}
+
+	issues := []string{}
+	if call.Status != "completed" {
+		issues = append(issues, "voice call status is "+fallbackString(call.Status, "unknown"))
+	}
+	if call.Metrics.EndedBy != "caller_done" {
+		issues = append(issues, "call ended unexpectedly: "+fallbackString(call.Metrics.EndedBy, "unknown"))
+	}
+	if call.Metrics.ReceptionistAudioS <= 0 {
+		issues = append(issues, "receptionist produced no audio")
+	}
+	if call.Metrics.CallerAudioS <= 0 {
+		issues = append(issues, "caller produced no audio")
+	}
+	receptionistTurns, callerTurns, transitions := voiceTranscriptCounts(call.Transcript)
+	if receptionistTurns == 0 {
+		issues = append(issues, "transcript has no receptionist turn")
+	}
+	if callerTurns == 0 {
+		issues = append(issues, "transcript has no caller turn")
+	}
+	if transitions == 0 {
+		issues = append(issues, "conversation has no speaker turn-taking")
+	}
+	if call.Metrics.RealtimeErrors > 0 {
+		issues = append(issues, fmt.Sprintf("realtime participants reported %d errors", call.Metrics.RealtimeErrors))
+	}
+	return issues
+}
+
+func fallbackString(value, fallback string) string {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func voiceTranscriptCounts(transcript []VoiceTranscriptTurn) (receptionist, caller, transitions int) {
+	previous := ""
+	for _, turn := range transcript {
+		speaker := strings.TrimSpace(turn.Speaker)
+		switch speaker {
+		case "receptionist":
+			receptionist++
+		case "caller":
+			caller++
+		default:
+			continue
+		}
+		if previous != "" && previous != speaker {
+			transitions++
+		}
+		previous = speaker
+	}
+	return receptionist, caller, transitions
+}
+
+func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
+	run.Status = "error"
+	run.Stage = "invalid_simulation"
+	run.Error = "Voice simulation invalid: " + strings.Join(issues, "; ")
+	run.CorrectnessScore = nil
+	run.JudgeScore = nil
+	run.OverallScore = nil
+	finished := time.Now().UTC()
+	run.FinishedAt = &finished
+	if err := s.db.finishRun(run); err != nil {
+		return err
+	}
+	s.ctx.Emit("eval.run.invalid", map[string]any{
+		"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage,
+		"error": run.Error, "issues": issues,
+	})
+	s.emitExperimentCompleted(run.ExperimentID)
+	return nil
 }
 
 func judgeRequest(model string, payload map[string]any) map[string]any {
@@ -375,16 +474,23 @@ func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float
 	passed := true
 	var correctness *float64
 	if len(assertions) > 0 {
-		count := 0
+		count, total := 0, 0
 		for _, result := range assertions {
-			if result.Passed {
-				count++
-			} else {
+			if !result.Passed {
 				passed = false
 			}
+			if result.Gating {
+				continue
+			}
+			total++
+			if result.Passed {
+				count++
+			}
 		}
-		value := 100 * float64(count) / float64(len(assertions))
-		correctness = &value
+		if total > 0 {
+			value := 100 * float64(count) / float64(total)
+			correctness = &value
+		}
 	}
 	var judgeScore *float64
 	if judge != nil {

@@ -78,6 +78,7 @@ type AssertionResult struct {
 	Passed  bool   `json:"passed"`
 	Actual  any    `json:"actual,omitempty"`
 	Message string `json:"message,omitempty"`
+	Gating  bool   `json:"gating,omitempty"`
 }
 
 type Target struct {
@@ -138,11 +139,17 @@ type EnvironmentVoiceCall struct {
 	ID              string                     `json:"id"`
 	Status          string                     `json:"status"`
 	Error           string                     `json:"error,omitempty"`
+	Validity        VoiceCallValidity          `json:"validity"`
 	Transcript      []VoiceTranscriptTurn      `json:"transcript"`
 	Metrics         VoiceCallMetrics           `json:"metrics"`
 	TargetRecording string                     `json:"target_recording,omitempty"`
 	CallerRecording string                     `json:"caller_recording,omitempty"`
 	Execution       *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+}
+
+type VoiceCallValidity struct {
+	Status  string   `json:"status"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 type VoiceTranscriptTurn struct {
@@ -153,16 +160,18 @@ type VoiceTranscriptTurn struct {
 }
 
 type VoiceCallMetrics struct {
-	DurationMS         int64   `json:"duration_ms"`
-	FirstResponseMS    int64   `json:"first_response_ms,omitempty"`
-	AverageResponseMS  int64   `json:"average_response_ms,omitempty"`
-	ReceptionistAudioS float64 `json:"receptionist_audio_seconds"`
-	CallerAudioS       float64 `json:"caller_audio_seconds"`
-	Interruptions      int     `json:"interruptions"`
-	ToolCalls          int     `json:"tool_calls"`
-	RealtimeErrors     int     `json:"realtime_errors"`
-	DroppedAudioEvents int     `json:"dropped_audio_events"`
-	EndedBy            string  `json:"ended_by"`
+	DurationMS                 int64   `json:"duration_ms"`
+	FirstResponseMS            int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64 `json:"caller_audio_seconds"`
+	Interruptions              int     `json:"interruptions"`
+	ToolCalls                  int     `json:"tool_calls"`
+	RealtimeErrors             int     `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int     `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int     `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int     `json:"dropped_audio_events"`
+	EndedBy                    string  `json:"ended_by"`
 }
 
 type JudgeVerdict struct {

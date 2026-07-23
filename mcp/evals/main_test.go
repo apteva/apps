@@ -113,6 +113,56 @@ func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	}
 }
 
+func TestScoreRunDoesNotCountVoiceValidityAsCorrectness(t *testing.T) {
+	status, correctness, judgeScore, overall := scoreRun(
+		[]AssertionResult{
+			{Name: "Valid two-sided voice simulation", Passed: true, Gating: true},
+			{Name: "No realtime audio errors", Passed: true, Gating: true},
+		},
+		&JudgeVerdict{Passed: false, Score: 36.875},
+	)
+	if status != "fail" || correctness != nil || judgeScore == nil || *judgeScore != 36.875 || overall == nil || *overall != 36.875 {
+		t.Fatalf("status=%s correctness=%v judge=%v overall=%v", status, correctness, judgeScore, overall)
+	}
+}
+
+func TestVoiceSimulationIssuesRejectsOneSidedCall(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:     "invalid_simulation",
+		Validity:   VoiceCallValidity{Status: "invalid", Reasons: []string{"caller produced no audio", "transcript has no caller turn"}},
+		Transcript: []VoiceTranscriptTurn{{Speaker: "receptionist", Text: "Hello"}},
+		Metrics:    VoiceCallMetrics{EndedBy: "audio_disconnected", ReceptionistAudioS: 1},
+	}
+	issues := voiceSimulationIssues(call)
+	if len(issues) != 2 || !strings.Contains(strings.Join(issues, " "), "caller produced no audio") {
+		t.Fatalf("issues=%v", issues)
+	}
+	results := voiceAssertionResults(&VoiceCase{}, call)
+	if len(results) < 4 || results[0].Passed || !results[0].Gating {
+		t.Fatalf("results=%#v", results)
+	}
+}
+
+func TestVoiceSimulationIssuesAcceptsValidConversation(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:   "completed",
+		Validity: VoiceCallValidity{Status: "valid"},
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Hello"},
+			{Speaker: "caller", Text: "Please call me tomorrow"},
+		},
+		Metrics: VoiceCallMetrics{EndedBy: "caller_done", ReceptionistAudioS: 1, CallerAudioS: 1},
+	}
+	if issues := voiceSimulationIssues(call); len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+	for _, result := range voiceAssertionResults(&VoiceCase{}, call) {
+		if result.Gating && !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
+	}
+}
+
 func TestEnvironmentTaskMessageIncludesFixtureContext(t *testing.T) {
 	task := "Join the creator's most affordable paid membership."
 	message := environmentTaskMessage(task, []EnvironmentWebFixture{{ID: "patreon", Pack: "patreon", TestURL: "http://gateway.test/fixture"}})
@@ -230,7 +280,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.3.1" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.3.2" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 }
