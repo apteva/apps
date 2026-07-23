@@ -29,6 +29,8 @@ type Case struct {
 	SuiteID        string      `json:"suite_id"`
 	Name           string      `json:"name"`
 	Prompt         string      `json:"prompt"`
+	Mode           string      `json:"mode,omitempty"`
+	Voice          *VoiceCase  `json:"voice,omitempty"`
 	Goals          []string    `json:"goals"`
 	Assertions     []Assertion `json:"assertions"`
 	EnvironmentID  string      `json:"environment_id,omitempty"`
@@ -39,6 +41,20 @@ type Case struct {
 	Revision       int         `json:"revision"`
 	CreatedAt      time.Time   `json:"created_at"`
 	UpdatedAt      time.Time   `json:"updated_at"`
+}
+
+type VoiceCase struct {
+	CallerName           string `json:"caller_name,omitempty"`
+	CallerPersona        string `json:"caller_persona,omitempty"`
+	CallerGoal           string `json:"caller_goal"`
+	CallerBehavior       string `json:"caller_behavior,omitempty"`
+	Provider             string `json:"provider,omitempty"`
+	Voice                string `json:"voice,omitempty"`
+	CallerProvider       string `json:"caller_provider,omitempty"`
+	CallerVoice          string `json:"caller_voice,omitempty"`
+	Greeting             string `json:"greeting,omitempty"`
+	MaxFirstResponseMS   int64  `json:"max_first_response_ms,omitempty"`
+	MaxAverageResponseMS int64  `json:"max_average_response_ms,omitempty"`
 }
 
 type Assertion struct {
@@ -104,6 +120,7 @@ type Run struct {
 	TargetSnapshot   Target                     `json:"target"`
 	EnvironmentRunID string                     `json:"environment_run_id,omitempty"`
 	Execution        *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	VoiceCall        *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
 	Assertions       []AssertionResult          `json:"assertions"`
 	Judge            *JudgeVerdict              `json:"judge,omitempty"`
 	CorrectnessScore *float64                   `json:"correctness_score,omitempty"`
@@ -114,6 +131,37 @@ type Run struct {
 	Error            string                     `json:"error,omitempty"`
 	CreatedAt        time.Time                  `json:"created_at"`
 	Suggestions      []Suggestion               `json:"suggestions,omitempty"`
+}
+
+type EnvironmentVoiceCall struct {
+	ID              string                     `json:"id"`
+	Status          string                     `json:"status"`
+	Error           string                     `json:"error,omitempty"`
+	Transcript      []VoiceTranscriptTurn      `json:"transcript"`
+	Metrics         VoiceCallMetrics           `json:"metrics"`
+	TargetRecording string                     `json:"target_recording,omitempty"`
+	CallerRecording string                     `json:"caller_recording,omitempty"`
+	Execution       *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+}
+
+type VoiceTranscriptTurn struct {
+	Speaker string    `json:"speaker"`
+	Text    string    `json:"text"`
+	Time    time.Time `json:"time"`
+	AtMS    int64     `json:"at_ms"`
+}
+
+type VoiceCallMetrics struct {
+	DurationMS         int64   `json:"duration_ms"`
+	FirstResponseMS    int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS  int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS       float64 `json:"caller_audio_seconds"`
+	Interruptions      int     `json:"interruptions"`
+	ToolCalls          int     `json:"tool_calls"`
+	RealtimeErrors     int     `json:"realtime_errors"`
+	DroppedAudioEvents int     `json:"dropped_audio_events"`
+	EndedBy            string  `json:"ended_by"`
 }
 
 type JudgeVerdict struct {

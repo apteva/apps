@@ -209,6 +209,64 @@ func (s store) setSetting(key, value string) error {
 	return err
 }
 
+func (s store) saveVoiceCall(call *VoiceCall) error {
+	spec, err := json.Marshal(call.Spec)
+	if err != nil {
+		return err
+	}
+	result, err := json.Marshal(call)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	created := call.StartedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	_, err = s.db.Exec(`INSERT INTO environment_voice_calls(id,run_id,status,spec_json,result_json,error,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at`,
+		call.ID, call.RunID, call.Status, string(spec), string(result), call.Error, created.Format(time.RFC3339Nano), now)
+	return err
+}
+
+func (s store) getVoiceCall(id string) (*VoiceCall, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT result_json FROM environment_voice_calls WHERE id=?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var call VoiceCall
+	if err := json.Unmarshal([]byte(raw), &call); err != nil {
+		return nil, err
+	}
+	return &call, nil
+}
+
+func (s store) listVoiceCalls(runID string) ([]VoiceCall, error) {
+	rows, err := s.db.Query(`SELECT result_json FROM environment_voice_calls WHERE run_id=? ORDER BY created_at DESC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VoiceCall{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var call VoiceCall
+		if err := json.Unmarshal([]byte(raw), &call); err != nil {
+			return nil, err
+		}
+		out = append(out, call)
+	}
+	return out, rows.Err()
+}
+
 func (s store) createWebFixture(x *WebFixtureInstance) error {
 	seed, err := json.Marshal(x.Seed)
 	if err != nil {

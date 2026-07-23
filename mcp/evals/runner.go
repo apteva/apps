@@ -57,22 +57,54 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
 		return fmt.Errorf("spawn agent: %w", err)
 	}
-	var accepted map[string]any
-	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": environmentTaskMessage(run.CaseSnapshot.Prompt, created.WebFixtures)}, &accepted); err != nil {
-		return fmt.Errorf("send task: %w", err)
-	}
-	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_control", map[string]any{"run_id": created.ID, "agent": "main", "action": "run"}, &accepted); err != nil {
-		return fmt.Errorf("start agent: %w", err)
-	}
+	if run.CaseSnapshot.Mode == "voice" {
+		if run.CaseSnapshot.Voice == nil {
+			return errors.New("voice case has no caller settings")
+		}
+		voice := run.CaseSnapshot.Voice
+		input := map[string]any{
+			"run_id": created.ID,
+			"voice": map[string]any{
+				"target_agent":       "main",
+				"target_directive":   run.TargetSnapshot.Directive,
+				"caller_name":        voice.CallerName,
+				"caller_persona":     voice.CallerPersona,
+				"caller_goal":        voice.CallerGoal,
+				"caller_behavior":    voice.CallerBehavior,
+				"provider":           voice.Provider,
+				"voice":              voice.Voice,
+				"caller_provider":    voice.CallerProvider,
+				"caller_voice":       voice.CallerVoice,
+				"greeting":           voice.Greeting,
+				"timeout_seconds":    run.CaseSnapshot.TimeoutSeconds,
+				"disconnect_on_done": true,
+			},
+		}
+		var call EnvironmentVoiceCall
+		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_voice_call", input, &call); err != nil {
+			return fmt.Errorf("run voice call: %w", err)
+		}
+		run.VoiceCall = &call
+		run.Execution = call.Execution
+		run.Assertions = append(run.Assertions, voiceAssertionResults(voice, &call)...)
+	} else {
+		var accepted map[string]any
+		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": environmentTaskMessage(run.CaseSnapshot.Prompt, created.WebFixtures)}, &accepted); err != nil {
+			return fmt.Errorf("send task: %w", err)
+		}
+		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_control", map[string]any{"run_id": created.ID, "agent": "main", "action": "run"}, &accepted); err != nil {
+			return fmt.Errorf("start agent: %w", err)
+		}
 
-	var execution sdk.RuntimeAgentExecution
-	wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
-	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
-		return fmt.Errorf("wait for agent: %w", err)
-	}
-	run.Execution = &execution
-	if execution.Status == "failed" || execution.Status == "timeout" {
-		return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
+		var execution sdk.RuntimeAgentExecution
+		wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
+		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
+			return fmt.Errorf("wait for agent: %w", err)
+		}
+		run.Execution = &execution
+		if execution.Status == "failed" || execution.Status == "timeout" {
+			return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
+		}
 	}
 
 	for _, assertion := range run.CaseSnapshot.Assertions {
@@ -146,8 +178,12 @@ func environmentTaskMessage(task string, fixtures []EnvironmentWebFixture) strin
 }
 
 func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerdict, error) {
-	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": run.Execution.Trace, "deterministic_assertions": run.Assertions}
-	request := map[string]any{"model": model, "temperature": 0, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
+	var trace []sdk.RuntimeTraceEvent
+	if run.Execution != nil {
+		trace = run.Execution.Trace
+	}
+	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": trace, "voice_call": run.VoiceCall, "deterministic_assertions": run.Assertions}
+	request := judgeRequest(model, payload)
 	var response struct {
 		Model   string `json:"model"`
 		Choices []struct {
@@ -169,6 +205,36 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	}
 	verdict.Model, verdict.Usage = response.Model, response.Usage
 	return verdict, nil
+}
+
+func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []AssertionResult {
+	if call == nil {
+		return []AssertionResult{
+			{Name: "Voice conversation completed", Passed: false, Message: "no voice call result"},
+			{Name: "No realtime audio errors", Passed: false, Message: "no voice call result"},
+		}
+	}
+	results := []AssertionResult{
+		{Name: "Voice conversation completed", Passed: len(call.Transcript) > 0, Actual: len(call.Transcript)},
+		{Name: "No realtime audio errors", Passed: call.Metrics.RealtimeErrors == 0, Actual: call.Metrics.RealtimeErrors},
+	}
+	if spec != nil && spec.MaxFirstResponseMS > 0 {
+		actual := call.Metrics.FirstResponseMS
+		results = append(results, AssertionResult{Name: "First response latency", Passed: actual > 0 && actual <= spec.MaxFirstResponseMS, Actual: actual, Message: fmt.Sprintf("maximum %d ms", spec.MaxFirstResponseMS)})
+	}
+	if spec != nil && spec.MaxAverageResponseMS > 0 {
+		actual := call.Metrics.AverageResponseMS
+		results = append(results, AssertionResult{Name: "Average response latency", Passed: actual > 0 && actual <= spec.MaxAverageResponseMS, Actual: actual, Message: fmt.Sprintf("maximum %d ms", spec.MaxAverageResponseMS)})
+	}
+	return results
+}
+
+func judgeRequest(model string, payload map[string]any) map[string]any {
+	request := map[string]any{"model": model, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
+	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "openai-codex/") {
+		request["temperature"] = 0
+	}
+	return request
 }
 
 const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade each goal independently. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,passed,why}]), and directive_suggestion (null or {directive,reason}). A pass requires every goal and deterministic assertion to pass. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`

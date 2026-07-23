@@ -15,13 +15,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.3.2
-description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, interactive web fixtures, edge policies, and snapshots.
+version: 0.4.0
+description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, interactive web and voice fixtures, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 tags: [environments, testing, agents, evals, mocks]
 scopes: [project]
-min_apteva_version: "0.18.0"
+min_apteva_version: "0.26.1"
 requires:
   permissions: [db.write.app, platform.runtimes.read, platform.runtimes.call, platform.runtimes.manage, platform.runtime_catalog.read, platform.connections.read]
 provides:
@@ -49,6 +49,9 @@ provides:
     - { name: environment_agent_send, description: "Send a message to a runtime agent." }
     - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
     - { name: environment_agent_wait, description: "Wait for a runtime agent and return its normalized trace and metrics." }
+    - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent." }
+    - { name: environment_voice_call_get, description: "Get a simulated voice call, transcript, metrics, and recording handles." }
+    - { name: environment_voice_recording_get, description: "Get one WAV recording from a simulated voice call." }
   publishes:
     - { name: environment.created, description: "An environment definition was created." }
     - { name: environment.started, description: "An environment runtime is running." }
@@ -60,7 +63,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.3.2, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.4.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
@@ -94,7 +97,7 @@ func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{Name: "reconcile", Schedule: "@every 15s", Run: func(ctx context.Context, app *sdk.AppCtx) error { a.svc.ctx = app; return a.svc.reconcile(ctx) }}}
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/fixtures/", Handler: a.handleFixture, NoAuth: true}, {Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environments/", Handler: a.handleEnvironment}, {Pattern: "/api/runs", Handler: a.handleRuns}, {Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/catalog", Handler: a.handleCatalog}, {Pattern: "/api/catalog/", Handler: a.handleCatalogItem}, {Pattern: "/api/snapshots", Handler: a.handleSnapshots}, {Pattern: "/api/snapshots/", Handler: a.handleSnapshot}, {Pattern: "/api/import/legacy", Handler: a.handleLegacyImport}}
+	return []sdk.Route{{Pattern: "/fixtures/", Handler: a.handleFixture, NoAuth: true}, {Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environments/", Handler: a.handleEnvironment}, {Pattern: "/api/runs", Handler: a.handleRuns}, {Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/voice-recordings/", Handler: a.handleVoiceRecording}, {Pattern: "/api/catalog", Handler: a.handleCatalog}, {Pattern: "/api/catalog/", Handler: a.handleCatalogItem}, {Pattern: "/api/snapshots", Handler: a.handleSnapshots}, {Pattern: "/api/snapshots/", Handler: a.handleSnapshot}, {Pattern: "/api/import/legacy", Handler: a.handleLegacyImport}}
 }
 func main() { sdk.Run(&App{}) }
 

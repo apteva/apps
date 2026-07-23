@@ -23,6 +23,7 @@ type EnvironmentSpec struct {
 	Agents              []AgentSpec                     `json:"agents,omitempty"`
 	SnapshotID          string                          `json:"snapshot_id,omitempty"`
 	WebFixtures         []WebFixtureSpec                `json:"web_fixtures,omitempty"`
+	VoiceFixtures       []VoiceFixtureSpec              `json:"voice_fixtures,omitempty"`
 }
 
 type WebFixtureSpec struct {
@@ -81,6 +82,63 @@ type WebFixtureEvent struct {
 	Type      string         `json:"type"`
 	Data      map[string]any `json:"data,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
+}
+
+type VoiceFixtureSpec struct {
+	ID               string `json:"id,omitempty"`
+	Name             string `json:"name,omitempty"`
+	CallerName       string `json:"caller_name,omitempty"`
+	CallerPersona    string `json:"caller_persona,omitempty"`
+	CallerGoal       string `json:"caller_goal"`
+	CallerBehavior   string `json:"caller_behavior,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Voice            string `json:"voice,omitempty"`
+	CallerProvider   string `json:"caller_provider,omitempty"`
+	CallerVoice      string `json:"caller_voice,omitempty"`
+	TimeoutSeconds   int    `json:"timeout_seconds,omitempty"`
+	Greeting         string `json:"greeting,omitempty"`
+	TargetAgent      string `json:"target_agent,omitempty"`
+	TargetDirective  string `json:"target_directive,omitempty"`
+	DisconnectOnDone bool   `json:"disconnect_on_done,omitempty"`
+}
+
+type VoiceCall struct {
+	ID               string                      `json:"id"`
+	RunID            string                      `json:"run_id"`
+	Status           string                      `json:"status"`
+	Error            string                      `json:"error,omitempty"`
+	Spec             VoiceFixtureSpec            `json:"spec"`
+	TargetThreadID   string                      `json:"target_thread_id"`
+	CallerThreadID   string                      `json:"caller_thread_id"`
+	CallerAgentAlias string                      `json:"caller_agent_alias"`
+	Transcript       []VoiceTranscriptTurn       `json:"transcript"`
+	Metrics          VoiceCallMetrics            `json:"metrics"`
+	TargetRecording  string                      `json:"target_recording,omitempty"`
+	CallerRecording  string                      `json:"caller_recording,omitempty"`
+	StartedAt        time.Time                   `json:"started_at"`
+	FinishedAt       *time.Time                  `json:"finished_at,omitempty"`
+	TargetTelemetry  []sdk.RuntimeTelemetryEvent `json:"target_telemetry,omitempty"`
+	Execution        *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
+}
+
+type VoiceTranscriptTurn struct {
+	Speaker string    `json:"speaker"`
+	Text    string    `json:"text"`
+	Time    time.Time `json:"time"`
+	AtMS    int64     `json:"at_ms"`
+}
+
+type VoiceCallMetrics struct {
+	DurationMS         int64   `json:"duration_ms"`
+	FirstResponseMS    int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS  int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS       float64 `json:"caller_audio_seconds"`
+	Interruptions      int     `json:"interruptions"`
+	ToolCalls          int     `json:"tool_calls"`
+	RealtimeErrors     int     `json:"realtime_errors"`
+	DroppedAudioEvents int     `json:"dropped_audio_events"`
+	EndedBy            string  `json:"ended_by"`
 }
 
 type SeedStep struct {

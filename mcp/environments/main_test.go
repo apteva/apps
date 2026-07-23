@@ -24,7 +24,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql"} {
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -34,6 +34,34 @@ func testStore(t *testing.T) store {
 		}
 	}
 	return store{db: db}
+}
+
+func TestVoiceCallPersistenceAndValidation(t *testing.T) {
+	s := testStore(t)
+	started := time.Now().UTC()
+	call := &VoiceCall{
+		ID: "call-one", RunID: "run-one", Status: "completed",
+		Spec:       VoiceFixtureSpec{CallerGoal: "Book an appointment", TargetAgent: "main", TimeoutSeconds: 90},
+		Transcript: []VoiceTranscriptTurn{{Speaker: "caller", Text: "I need an appointment.", Time: started, AtMS: 250}},
+		Metrics:    VoiceCallMetrics{DurationMS: 3200, FirstResponseMS: 850, ToolCalls: 1, EndedBy: "caller"},
+		StartedAt:  started,
+	}
+	if err := s.saveVoiceCall(call); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.getVoiceCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Spec.CallerGoal != call.Spec.CallerGoal || len(got.Transcript) != 1 || got.Metrics.FirstResponseMS != 850 {
+		t.Fatalf("voice call=%#v", got)
+	}
+	if err := validateVoiceSpec(VoiceFixtureSpec{CallerGoal: "Help me", TimeoutSeconds: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateVoiceSpec(VoiceFixtureSpec{TimeoutSeconds: 90}); err == nil {
+		t.Fatal("accepted voice call without caller goal")
+	}
 }
 
 func TestDefinitionAndRunPersistence(t *testing.T) {

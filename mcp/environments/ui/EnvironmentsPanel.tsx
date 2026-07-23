@@ -12,10 +12,19 @@ interface SeedField { name: string; label: string; description?: string; default
 interface WebFixtureCatalog { id: string; name: string; description: string; version: string; scenarios: WebScenario[]; seed_fields?: SeedField[] }
 interface WebFixtureSpec { id: string; pack: string; version: string; scenario: string; strict: boolean; seed: Record<string, any> }
 interface WebFixtureRun { run_id: string; id: string; pack: string; version: string; scenario: string; status: string; preview_path: string; test_url: string; state?: Record<string, any> }
+interface RealtimeProvider { name: string; models?: Record<string, string>; default_voice?: string }
+interface VoiceCall {
+  id: string;
+  status: string;
+  error?: string;
+  spec: { caller_goal: string; target_agent?: string };
+  transcript: { speaker: string; text: string; at_ms: number }[];
+  metrics: { duration_ms: number; first_response_ms?: number; average_response_ms?: number; tool_calls: number; interruptions: number; realtime_errors: number; ended_by: string };
+}
 interface Spec { version: number; ttl_seconds: number; app_install_ids: number[]; connection_ids: number[]; network_mode: string; integration_mode: string; integration_bindings: any[]; seeds: Seed[]; web_fixtures: WebFixtureSpec[]; snapshot_id?: string }
 interface Run { id: string; runtime_id: string; status: string; started_at: string; error?: string; web_fixtures?: WebFixtureRun[] }
 interface Environment { id: string; name: string; description?: string; desired_state: string; spec: Spec; active_run?: Run; runtime?: { status: string; apps: any[]; agents: any[]; expires_at: string } }
-interface Catalog { apps: CatalogApp[]; connections: Connection[]; integrations: Integration[]; web_fixtures: WebFixtureCatalog[]; agents: any[]; snapshots: any[] }
+interface Catalog { apps: CatalogApp[]; connections: Connection[]; integrations: Integration[]; web_fixtures: WebFixtureCatalog[]; realtime_providers: RealtimeProvider[]; agents: any[]; snapshots: any[] }
 
 const API = "/api/apps/environments/api";
 let activeInstallId = 0;
@@ -33,6 +42,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body.error || response.statusText);
   }
   return response.json();
+}
+
+function appURL(path: string) {
+  const url = new URL(API + path, window.location.origin);
+  if (activeInstallId) url.searchParams.set("install_id", String(activeInstallId));
+  if (activeProjectId) url.searchParams.set("project_id", activeProjectId);
+  return url.pathname + url.search;
 }
 
 function SearchPicker<T>({ label, placeholder, items, selected, keyOf, titleOf, detailOf, onToggle }: { label: string; placeholder: string; items: T[]; selected: Set<string>; keyOf: (item: T) => string; titleOf: (item: T) => string; detailOf: (item: T) => string; onToggle: (item: T) => void }) {
@@ -153,8 +169,58 @@ function WebsiteInspector({ run, fixtures }: { run: Run; fixtures: WebFixtureRun
   </div>;
 }
 
-function Detail({ environment, onEdit, onRefresh }: { environment: Environment; onEdit: () => void; onRefresh: () => void }) {
-  const tabs = ["Overview", "Websites", "Apps", "Agents", "Activity", "Network", "Snapshots"];
+function VoiceInspector({ run, agents, providers }: { run: Run; agents: any[]; providers: RealtimeProvider[] }) {
+  const [calls, setCalls] = useState<VoiceCall[]>([]);
+  const [selected, setSelected] = useState("");
+  const [agent, setAgent] = useState(agents[0]?.alias || "");
+  const [goal, setGoal] = useState("");
+  const [provider, setProvider] = useState(providers[0]?.name || "");
+  const [voice, setVoice] = useState(providers[0]?.default_voice || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const load = useCallback(async () => { try { const rows = await request<VoiceCall[]>(`/runs/${run.id}/voice-calls`); setCalls(rows); setSelected(current => current || rows[0]?.id || ""); setError("") } catch (caught: any) { setError(caught.message) } }, [run.id]);
+  useEffect(() => { load() }, [load]);
+  useEffect(() => { if (!agents.some(item => item.alias === agent)) setAgent(agents[0]?.alias || "") }, [agents, agent]);
+  const start = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const call = await request<VoiceCall>(`/runs/${run.id}/voice-calls`, { method: "POST", body: JSON.stringify({ caller_goal: goal.trim(), caller_persona: "A natural, concise customer", caller_behavior: "Ask follow-up questions when needed. End the call once the goal is resolved or clearly cannot be resolved.", target_agent: agent, provider, caller_provider: provider, voice, caller_voice: voice, timeout_seconds: 90 }) });
+      setCalls(current => [call, ...current.filter(item => item.id !== call.id)]);
+      setSelected(call.id);
+      setGoal("");
+    } catch (caught: any) {
+      setError(caught.message);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+  const call = calls.find(item => item.id === selected);
+  if (agents.length === 0) return <p className="py-8 text-center text-xs text-text-dim">This runtime has no agents. Add an agent to the environment or launch the call from Evals.</p>;
+  return <div className="grid gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+    <div className="space-y-3">
+      <div className="space-y-3 rounded-md border border-border bg-surface p-3">
+        <label className="block space-y-1"><span className="text-[11px] font-semibold uppercase text-text-dim">Receptionist</span><select value={agent} onChange={event => setAgent(event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-2 text-sm">{agents.map(item => <option key={item.alias} value={item.alias}>{item.alias || item.name}</option>)}</select></label>
+        <label className="block space-y-1"><span className="text-[11px] font-semibold uppercase text-text-dim">What does the caller need?</span><textarea rows={4} value={goal} onChange={event => setGoal(event.target.value)} placeholder="Book an appointment for tomorrow afternoon." className="w-full resize-y rounded border border-border bg-bg p-2 text-sm outline-none focus:border-accent" /></label>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2"><label className="space-y-1"><span className="text-[11px] text-text-dim">Provider</span><select value={provider} onChange={event => { const next = providers.find(item => item.name === event.target.value); setProvider(event.target.value); setVoice(next?.default_voice || "") }} className="w-full rounded border border-border bg-bg px-2 py-2 text-xs">{providers.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}</select></label><label className="space-y-1"><span className="text-[11px] text-text-dim">Voice</span><input value={voice} onChange={event => setVoice(event.target.value)} placeholder="Default" className="w-full rounded border border-border bg-bg px-2 py-2 text-xs" /></label></div>
+        {providers.length === 0 && <p className="text-xs text-red">No realtime voice provider is configured.</p>}
+        <button disabled={busy || !goal.trim() || !agent || !provider} onClick={start} className="w-full rounded bg-accent px-3 py-2 text-sm font-semibold text-bg disabled:opacity-40">{busy ? "Call in progress..." : "Start simulated call"}</button>
+        {error && <p className="text-xs text-red">{error}</p>}
+      </div>
+      <div className="overflow-hidden rounded-md border border-border">{calls.length === 0 ? <p className="p-4 text-center text-xs text-text-dim">No calls yet</p> : calls.map(item => <button key={item.id} onClick={() => setSelected(item.id)} className={`block w-full border-b border-border p-3 text-left last:border-0 ${selected === item.id ? "bg-surface" : "hover:bg-surface/50"}`}><span className="block truncate text-xs font-medium">{item.spec.caller_goal}</span><span className="mt-1 block text-[11px] text-text-dim">{item.status} - {(item.metrics.duration_ms / 1000).toFixed(1)}s</span></button>)}</div>
+    </div>
+    <div className="min-w-0">{call ? <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-6"><Metric label="Status" value={call.status} /><Metric label="Duration" value={`${(call.metrics.duration_ms / 1000).toFixed(1)}s`} /><Metric label="First response" value={call.metrics.first_response_ms ? `${call.metrics.first_response_ms}ms` : "-"} /><Metric label="Average response" value={call.metrics.average_response_ms ? `${call.metrics.average_response_ms}ms` : "-"} /><Metric label="Tool calls" value={String(call.metrics.tool_calls)} /><Metric label="Audio errors" value={String(call.metrics.realtime_errors)} /></div>
+      {call.error && <p className="rounded border border-red/40 bg-red/10 p-2 text-xs text-red">{call.error}</p>}
+      <div className="grid gap-3 sm:grid-cols-2"><label><span className="mb-1 block text-[11px] uppercase text-text-dim">Receptionist recording</span><audio controls preload="none" src={appURL(`/voice-recordings/${call.id}/receptionist.wav`)} className="h-9 w-full" /></label><label><span className="mb-1 block text-[11px] uppercase text-text-dim">Caller recording</span><audio controls preload="none" src={appURL(`/voice-recordings/${call.id}/caller.wav`)} className="h-9 w-full" /></label></div>
+      <div className="overflow-hidden rounded-md border border-border">{call.transcript.length === 0 ? <p className="p-6 text-center text-xs text-text-dim">No transcript recorded</p> : call.transcript.map((turn, index) => <div key={`${turn.at_ms}-${index}`} className="border-b border-border p-3 last:border-0"><div className="text-[10px] font-semibold uppercase text-text-dim">{turn.speaker} - {(turn.at_ms / 1000).toFixed(1)}s</div><p className="mt-1 whitespace-pre-wrap text-sm text-text">{turn.text}</p></div>)}</div>
+    </div> : <p className="py-8 text-center text-xs text-text-dim">Start or select a call to inspect it.</p>}</div>
+  </div>;
+}
+
+function Detail({ environment, catalog, onEdit, onRefresh }: { environment: Environment; catalog: Catalog; onEdit: () => void; onRefresh: () => void }) {
+  const tabs = ["Overview", "Websites", "Voice calls", "Apps", "Agents", "Activity", "Network", "Snapshots"];
   const [tab, setTab] = useState("Overview");
   const [inspect, setInspect] = useState<any>(null);
   const [error, setError] = useState("");
@@ -173,6 +239,7 @@ function Detail({ environment, onEdit, onRefresh }: { environment: Environment; 
     <div className="min-h-44 p-4">
       {tab === "Overview" && <div className="grid gap-3 sm:grid-cols-5"><Metric label="Status" value={run?.status || "stopped"} /><Metric label="Apps" value={String(runtime?.apps?.length || 0)} /><Metric label="Websites" value={String(fixtures.length)} /><Metric label="Agents" value={String(runtime?.agents?.length || 0)} /><Metric label="Edge calls" value={String(edge.length)} /><div className="grid gap-2 text-xs text-text-dim sm:col-span-5 sm:grid-cols-3"><span>Network: <b className="text-text">{environment.spec.network_mode}</b></span><span>Integrations: <b className="text-text">{environment.spec.integration_mode}</b></span><span>Expires: <b className="text-text">{runtime?.expires_at ? new Date(runtime.expires_at).toLocaleString() : "-"}</b></span></div></div>}
       {tab === "Websites" && (run ? <WebsiteInspector run={run} fixtures={fixtures} /> : <p className="py-8 text-center text-xs text-text-dim">Start the environment to open its websites</p>)}
+      {tab === "Voice calls" && (run ? <VoiceInspector run={run} agents={runtime?.agents || []} providers={catalog.realtime_providers || []} /> : <p className="py-8 text-center text-xs text-text-dim">Start the environment to run a voice call</p>)}
       {tab === "Apps" && <CompactList empty="No apps" rows={(runtime?.apps || []).map((item: any) => ({ title: item.name, detail: `${item.status || "running"} - ${item.kind || "app"}` }))} />}
       {tab === "Agents" && <CompactList empty="No agents" rows={(runtime?.agents || []).map((item: any) => ({ title: item.alias || item.name, detail: `${item.status || "unknown"}${item.model ? ` - ${item.model}` : ""}` }))} />}
       {tab === "Activity" && <CompactList empty="No telemetry" rows={telemetry.slice().reverse().map((item: any) => ({ title: item.type, detail: item.time ? new Date(item.time).toLocaleString() : "", code: JSON.stringify(item.data, null, 2) }))} />}
@@ -186,7 +253,7 @@ export default function EnvironmentsPanel({ installId, projectId }: NativePanelP
   activeInstallId = installId;
   activeProjectId = projectId;
   const [rows, setRows] = useState<Environment[]>([]);
-  const [catalog, setCatalog] = useState<Catalog>({ apps: [], connections: [], integrations: [], web_fixtures: [], agents: [], snapshots: [] });
+  const [catalog, setCatalog] = useState<Catalog>({ apps: [], connections: [], integrations: [], web_fixtures: [], realtime_providers: [], agents: [], snapshots: [] });
   const [builder, setBuilder] = useState<Environment | true | null>(null);
   const [selectedID, setSelectedID] = useState("");
   const [busy, setBusy] = useState("");
@@ -199,6 +266,6 @@ export default function EnvironmentsPanel({ installId, projectId }: NativePanelP
     <header className="mb-5 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h1 className="text-xl font-semibold">Environments</h1><p className="text-sm text-text-dim">Apps, connections, agents, and simulated websites in isolated runtimes.</p></div><button onClick={() => setBuilder(true)} className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-bg hover:bg-accent-hover">New environment</button></header>
     {error && <div className="mb-4 flex items-center justify-between rounded-md border border-red/40 bg-red/10 px-3 py-2 text-xs text-red"><span>{error}</span><button onClick={() => setError("")} title="Dismiss">x</button></div>}
     <div className="overflow-hidden rounded-md border border-border"><div className="hidden grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] gap-3 border-b border-border bg-surface px-4 py-2 text-[11px] font-semibold uppercase text-text-dim sm:grid"><span>Environment</span><span>Status</span><span>Resources</span><span className="text-right">Actions</span></div>{rows.length === 0 ? <div className="p-10 text-center"><p className="text-sm text-text-muted">No environments yet</p><p className="mt-1 text-xs text-text-dim">Create one from this project.</p></div> : rows.map(row => { const running = !!row.active_run && row.active_run.status === "running"; return <div key={row.id} className={`grid grid-cols-1 items-center gap-2 border-b border-border px-4 py-3 last:border-0 hover:bg-surface/50 sm:grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] sm:gap-3 ${selectedID === row.id ? "bg-surface" : ""}`}><button onClick={() => setSelectedID(row.id)} className="min-w-0 text-left"><span className="block truncate text-sm font-medium">{row.name}</span><span className="block truncate text-xs text-text-dim">{row.description || row.id}</span></button><span className={`text-xs font-medium ${running ? "text-green" : row.active_run?.status === "failed" ? "text-red" : "text-text-dim"}`}>{row.active_run?.status || "stopped"}</span><div className="flex min-w-0 flex-wrap gap-2 text-xs text-text-dim"><span>{row.spec.app_install_ids?.length || 0} apps</span><span>{(row.spec.connection_ids?.length || 0) + (row.spec.integration_bindings?.length || 0)} connections</span><span>{row.spec.web_fixtures?.length || 0} websites</span></div><div className="flex justify-start gap-1 sm:justify-end">{running ? <><button onClick={() => act(row.id, "snapshot")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:bg-surface" title="Create snapshot">Snapshot</button><button onClick={() => act(row.id, "stop")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:border-red hover:text-red">Stop</button></> : <button onClick={() => act(row.id, "start")} disabled={!!busy} className="rounded bg-accent px-3 py-1 text-xs font-semibold text-bg">Start</button>}</div></div> })}</div>
-    {selected && <Detail environment={selected} onEdit={() => setBuilder(selected)} onRefresh={load} />}
+    {selected && <Detail environment={selected} catalog={catalog} onEdit={() => setBuilder(selected)} onRefresh={load} />}
   </div>{builder && <Builder initial={builder === true ? undefined : builder} catalog={catalog} onClose={() => setBuilder(null)} onSaved={load} />}</div>;
 }

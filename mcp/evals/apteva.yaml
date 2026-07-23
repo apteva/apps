@@ -1,13 +1,13 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.1.3
-description: Behavioral and continuous evaluation of agents inside isolated Environments.
+version: 0.2.0
+description: Behavioral, voice, and continuous evaluation of agents inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 tags: [evals, testing, agents, quality, regression]
 scopes: [project]
-min_apteva_version: "0.18.0"
+min_apteva_version: "0.26.1"
 requires:
   permissions:
     - db.write.app
@@ -15,7 +15,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.2.0" }
+    - { name: environments, version: ">=0.4.0" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -52,7 +52,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.1.3
+    ref: evals/v0.2.0
     entry: mcp/evals
   port: 8080
   health_check: /health

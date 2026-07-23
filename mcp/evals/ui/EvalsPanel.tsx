@@ -25,6 +25,12 @@ interface Model {
   model_id?: string;
 }
 
+interface RealtimeProvider {
+  name: string;
+  models?: Record<string, string>;
+  default_voice?: string;
+}
+
 interface Environment {
   id: string;
   name: string;
@@ -118,6 +124,8 @@ interface EvalCase {
   suite_id: string;
   name: string;
   prompt: string;
+  mode?: "text" | "voice";
+  voice?: VoiceCase;
   goals: string[];
   assertions: Assertion[];
   environment_id?: string;
@@ -125,6 +133,39 @@ interface EvalCase {
   max_turns: number;
   enabled: boolean;
   revision: number;
+}
+
+interface VoiceCase {
+  caller_name?: string;
+  caller_persona?: string;
+  caller_goal: string;
+  caller_behavior?: string;
+  provider?: string;
+  voice?: string;
+  caller_provider?: string;
+  caller_voice?: string;
+  greeting?: string;
+  max_first_response_ms?: number;
+  max_average_response_ms?: number;
+}
+
+interface VoiceCall {
+  id: string;
+  status: string;
+  error?: string;
+  transcript: { speaker: string; text: string; time: string; at_ms: number }[];
+  metrics: {
+    duration_ms: number;
+    first_response_ms?: number;
+    average_response_ms?: number;
+    receptionist_audio_seconds: number;
+    caller_audio_seconds: number;
+    interruptions: number;
+    tool_calls: number;
+    realtime_errors: number;
+    dropped_audio_events: number;
+    ended_by: string;
+  };
 }
 
 interface Suite {
@@ -178,6 +219,7 @@ interface EvalRun {
   error?: string;
   assertions: any[];
   suggestions?: { id: string; directive: string; reason: string; status: string }[];
+  voice_call?: VoiceCall;
   execution?: {
     status: string;
     reason: string;
@@ -239,6 +281,7 @@ interface Catalog {
   connections: Connection[];
   integrations: Integration[];
   snapshots: any[];
+  realtime_providers: RealtimeProvider[];
 }
 
 const API = "/api/apps/evals/api";
@@ -258,6 +301,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body.error || response.statusText);
   }
   return response.json();
+}
+
+function appURL(path: string) {
+  const url = new URL(API + path, window.location.origin);
+  if (installID) url.searchParams.set("install_id", String(installID));
+  if (projectID) url.searchParams.set("project_id", projectID);
+  return url.pathname + url.search;
 }
 
 const modelID = (model: Model) =>
@@ -435,6 +485,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   onCreated: (experiment: Experiment) => void;
 }) {
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [mode, setMode] = useState<"text" | "voice">("text");
   const [name, setName] = useState("");
   const [tasks, setTasks] = useState<TaskDraft[]>([newTask(1)]);
   const [environmentMode, setEnvironmentMode] = useState<"clone" | "saved">("clone");
@@ -448,12 +499,27 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const [judgeModel, setJudgeModel] = useState("");
   const [maxTurns, setMaxTurns] = useState(10);
   const [timeoutSeconds, setTimeoutSeconds] = useState(600);
+  const [realtimeProvider, setRealtimeProvider] = useState("");
+  const [receptionistVoice, setReceptionistVoice] = useState("");
+  const [callerVoice, setCallerVoice] = useState("");
+  const [callerPersona, setCallerPersona] = useState("A natural, concise customer");
+  const [callerBehavior, setCallerBehavior] = useState("Ask follow-up questions when needed. End the call once the goal is resolved or clearly cannot be resolved.");
+  const [greeting, setGreeting] = useState("");
+  const [maxFirstResponseMS, setMaxFirstResponseMS] = useState(2000);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!judgeModel && catalog.models.length > 0) setJudgeModel(modelID(catalog.models[0]));
   }, [catalog.models, judgeModel]);
+
+  useEffect(() => {
+    if (realtimeProvider || catalog.realtime_providers.length === 0) return;
+    const provider = catalog.realtime_providers[0];
+    setRealtimeProvider(provider.name);
+    setReceptionistVoice(provider.default_voice || "");
+    setCallerVoice(provider.default_voice || "");
+  }, [catalog.realtime_providers, realtimeProvider]);
 
   useEffect(() => {
     if (!agent) return;
@@ -482,6 +548,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const selectedIntegrations = catalog.integrations.filter((item) => fakeSlugs.includes(item.slug));
   const tasksValid = tasks.length > 0 && tasks.every((item) => item.prompt.trim() && goalsFromText(item.success).length > 0);
   const environmentValid = environmentMode === "clone" ? Boolean(environmentName.trim()) : Boolean(savedEnvironmentID);
+  const voiceValid = mode === "text" || Boolean(realtimeProvider);
 
   const toggleApp = (item: CatalogApp) => {
     if (selectedAppIDs.includes(item.install_id)) {
@@ -510,7 +577,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   };
 
   const run = async () => {
-    if (!agent || !tasksValid || !environmentValid || !judgeModel) return;
+    if (!agent || !tasksValid || !environmentValid || !judgeModel || !voiceValid) return;
     setBusy(true);
     setError("");
     let suite: Suite | null = null;
@@ -559,9 +626,21 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             suite_id: suite.id,
             name: task.name.trim() || `Task ${index + 1}`,
             prompt: task.prompt.trim(),
+            mode,
+            voice: mode === "voice" ? {
+              caller_goal: task.prompt.trim(),
+              caller_persona: callerPersona.trim(),
+              caller_behavior: callerBehavior.trim(),
+              provider: realtimeProvider,
+              voice: receptionistVoice.trim(),
+              caller_provider: realtimeProvider,
+              caller_voice: callerVoice.trim(),
+              greeting: greeting.trim(),
+              max_first_response_ms: maxFirstResponseMS,
+            } satisfies VoiceCase : undefined,
             goals: goalsFromText(task.success),
             assertions: [],
-            timeout_seconds: timeoutSeconds,
+            timeout_seconds: mode === "voice" ? Math.min(timeoutSeconds, 300) : timeoutSeconds,
             max_turns: maxTurns,
             enabled: true,
           }),
@@ -589,13 +668,26 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   return <Drawer
     title="Validate an agent"
     onClose={onClose}
-    footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !agent || !tasksValid || !environmentValid || !judgeModel} onClick={run} className="ev-primary">{busy ? "Starting..." : `Run ${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`}</button></>}
+    footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !agent || !tasksValid || !environmentValid || !judgeModel || !voiceValid} onClick={run} className="ev-primary">{busy ? "Starting..." : `Run ${tasks.length} ${mode === "voice" ? (tasks.length === 1 ? "call" : "calls") : (tasks.length === 1 ? "task" : "tasks")}`}</button></>}
   >
     <div className="ev-form">
       <label>
         <span className="ev-label">1. Production agent</span>
         {agent ? <div className="ev-selected"><div><div className="ev-selected-name">{agent.name}</div><div className="ev-selected-meta">Current production directive snapshot · {agent.status}</div></div><div className="ev-actions"><a href={`/agents/${agent.id}`} className="ev-button">Edit production directive</a><button type="button" onClick={() => setAgent(null)} className="ev-button">Change</button></div></div> : <SearchSelect placeholder="Search agents" items={catalog.agents} label={(item) => `${item.name} · ${item.status}`} onSelect={setAgent} />}
       </label>
+      <section>
+        <span className="ev-label">Test type</span>
+        <div className="ev-segment"><button type="button" data-active={mode === "text"} onClick={() => { setMode("text"); setTimeoutSeconds(600); }}>Text task</button><button type="button" data-active={mode === "voice"} onClick={() => { setMode("voice"); setTimeoutSeconds(90); }}>Voice call</button></div>
+        {mode === "voice" && <div className="ev-setup" style={{ marginTop: 10 }}>
+          {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
+            <label><span className="ev-label">Realtime provider</span><select value={realtimeProvider} onChange={(event) => { const provider = catalog.realtime_providers.find((item) => item.name === event.target.value); setRealtimeProvider(event.target.value); setReceptionistVoice(provider?.default_voice || ""); setCallerVoice(provider?.default_voice || ""); }} className="ev-field">{catalog.realtime_providers.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></label>
+            <label><span className="ev-label">Receptionist voice</span><input value={receptionistVoice} onChange={(event) => setReceptionistVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
+            <label><span className="ev-label">Caller voice</span><input value={callerVoice} onChange={(event) => setCallerVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
+            <label><span className="ev-label">Maximum first response</span><div style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="number" min={250} max={10000} step={250} value={maxFirstResponseMS} onChange={(event) => setMaxFirstResponseMS(Number(event.target.value))} className="ev-field" /><span className="ev-muted">ms</span></div></label>
+          </div>}
+          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={callerPersona} onChange={(event) => setCallerPersona(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={callerBehavior} onChange={(event) => setCallerBehavior(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Receptionist greeting</span><input value={greeting} onChange={(event) => setGreeting(event.target.value)} placeholder="Let the receptionist greet naturally" className="ev-field" /></label></div></details>
+        </div>}
+      </section>
       <section>
         <span className="ev-label">2. Environment</span>
         <div className="ev-segment"><button type="button" data-active={environmentMode === "clone"} onClick={() => setEnvironmentMode("clone")}>Clone this project</button><button type="button" data-active={environmentMode === "saved"} onClick={() => setEnvironmentMode("saved")}>Select environment</button></div>
@@ -611,15 +703,15 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
         </div> : <div className="ev-setup" style={{ marginTop: 10 }}><label><span className="ev-label">Saved environment</span><select value={savedEnvironmentID} onChange={(event) => setSavedEnvironmentID(event.target.value)} className="ev-field"><option value="">Choose an environment</option>{catalog.environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{catalog.environments.length === 0 && <div className="ev-help">No saved environments yet. Use Clone this project to create one here.</div>}</div>}
       </section>
       <section>
-        <div className="ev-section-heading"><span className="ev-label" style={{ margin: 0 }}>3. Tasks to verify</span><button type="button" onClick={addTask} className="ev-button">Add task</button></div>
-        <div className="ev-task-list">{tasks.map((task, index) => <div className="ev-task-card" key={task.id}><div className="ev-task-header"><span className="ev-task-number">Task {index + 1}</span>{tasks.length > 1 && <button type="button" onClick={() => removeTask(task.id)} title="Remove task" className="ev-icon-button">×</button>}</div><label><span className="ev-label">Name</span><input value={task.name} onChange={(event) => updateTask(task.id, { name: event.target.value })} placeholder={`Task ${index + 1}`} className="ev-field" /></label><div className="ev-task-fields" style={{ marginTop: 10 }}><label><span className="ev-label">What should the agent do?</span><textarea value={task.prompt} onChange={(event) => updateTask(task.id, { prompt: event.target.value })} placeholder="Describe the task exactly as the agent should receive it." className="ev-field" /></label><label><span className="ev-label">Pass when</span><textarea value={task.success} onChange={(event) => updateTask(task.id, { success: event.target.value })} placeholder={"One requirement per line\nExpected state or outcome\nActions that must not happen"} className="ev-field" /></label></div></div>)}</div>
-        <span className="ev-help">Each task runs independently in the selected environment. The evaluation model grades every success criterion using the agent trace.</span>
+        <div className="ev-section-heading"><span className="ev-label" style={{ margin: 0 }}>3. {mode === "voice" ? "Calls" : "Tasks"} to verify</span><button type="button" onClick={addTask} className="ev-button">Add {mode === "voice" ? "call" : "task"}</button></div>
+        <div className="ev-task-list">{tasks.map((task, index) => <div className="ev-task-card" key={task.id}><div className="ev-task-header"><span className="ev-task-number">{mode === "voice" ? "Call" : "Task"} {index + 1}</span>{tasks.length > 1 && <button type="button" onClick={() => removeTask(task.id)} title={`Remove ${mode === "voice" ? "call" : "task"}`} className="ev-icon-button">×</button>}</div><label><span className="ev-label">Name</span><input value={task.name} onChange={(event) => updateTask(task.id, { name: event.target.value })} placeholder={`${mode === "voice" ? "Call" : "Task"} ${index + 1}`} className="ev-field" /></label><div className="ev-task-fields" style={{ marginTop: 10 }}><label><span className="ev-label">{mode === "voice" ? "What does the caller need?" : "What should the agent do?"}</span><textarea value={task.prompt} onChange={(event) => updateTask(task.id, { prompt: event.target.value })} placeholder={mode === "voice" ? "Describe the caller's goal in ordinary language." : "Describe the task exactly as the agent should receive it."} className="ev-field" /></label><label><span className="ev-label">Pass when</span><textarea value={task.success} onChange={(event) => updateTask(task.id, { success: event.target.value })} placeholder={"One requirement per line\nExpected state or outcome\nActions that must not happen"} className="ev-field" /></label></div></div>)}</div>
+        <span className="ev-help">{mode === "voice" ? "Each simulated caller has a real realtime conversation with the isolated agent. The evaluation model grades the transcript, tool trace, and resulting environment state." : "Each task runs independently in the selected environment. The evaluation model grades every success criterion using the agent trace."}</span>
       </section>
       <div className="ev-grid-2">
         <label><span className="ev-label">Test plan name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={agent ? `${agent.name} validation` : "Agent validation"} className="ev-field" /></label>
         <label><span className="ev-label">Evaluation model</span><select value={judgeModel} onChange={(event) => setJudgeModel(event.target.value)} className="ev-field"><option value="">Choose a model</option>{catalog.models.map((item) => <option key={modelID(item)} value={modelID(item)}>{modelLabel(item)}</option>)}</select></label>
       </div>
-      <details className="ev-advanced"><summary>Execution limits</summary><div className="ev-advanced-body ev-grid-2"><label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value))} className="ev-field" /></label><label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={1800} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} className="ev-field" /></label></div></details>
+      <details className="ev-advanced"><summary>Execution limits</summary><div className="ev-advanced-body ev-grid-2">{mode === "text" && <label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value))} className="ev-field" /></label>}<label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={mode === "voice" ? 300 : 1800} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} className="ev-field" /></label></div></details>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
   </Drawer>;
@@ -712,13 +804,15 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   </Drawer>;
 }
 
-function ScenarioEditor({ suite, initial, onClose, onSaved }: {
+function ScenarioEditor({ suite, initial, catalog, onClose, onSaved }: {
   suite: Suite;
   initial?: EvalCase;
+  catalog: Catalog;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [item, setItem] = useState<Partial<EvalCase>>(initial || { suite_id: suite.id, name: "", prompt: "", goals: [""], assertions: [], timeout_seconds: 600, max_turns: 10, enabled: true });
+  const defaultProvider = catalog.realtime_providers[0];
+  const [item, setItem] = useState<Partial<EvalCase>>(initial || { suite_id: suite.id, name: "", prompt: "", mode: "text", goals: [""], assertions: [], timeout_seconds: 600, max_turns: 10, enabled: true });
   const [assertionRaw, setAssertionRaw] = useState(JSON.stringify(initial?.assertions || [], null, 2));
   const [error, setError] = useState("");
   const save = async () => {
@@ -733,12 +827,22 @@ function ScenarioEditor({ suite, initial, onClose, onSaved }: {
     }
   };
 
-  return <Drawer title={initial ? "Edit scenario" : "New scenario"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" onClick={save} disabled={!item.name || !item.prompt} className="ev-primary">Save scenario</button></>}>
+  return <Drawer title={initial ? "Edit scenario" : "New scenario"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" onClick={save} disabled={!item.name || !item.prompt || (item.mode === "voice" && catalog.realtime_providers.length === 0)} className="ev-primary">Save scenario</button></>}>
     <div className="ev-form">
       <label><span className="ev-label">Scenario name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
-      <label><span className="ev-label">Task to perform</span><textarea rows={5} value={item.prompt || ""} onChange={(event) => setItem({ ...item, prompt: event.target.value })} className="ev-field" /></label>
+      <div><span className="ev-label">Scenario type</span><div className="ev-segment"><button type="button" data-active={(item.mode || "text") === "text"} onClick={() => setItem({ ...item, mode: "text", voice: undefined, timeout_seconds: 600 })}>Text task</button><button type="button" data-active={item.mode === "voice"} onClick={() => setItem({ ...item, mode: "voice", timeout_seconds: 90, voice: item.voice || { caller_goal: item.prompt || "", provider: defaultProvider?.name, caller_provider: defaultProvider?.name, voice: defaultProvider?.default_voice, caller_voice: defaultProvider?.default_voice, max_first_response_ms: 2000 } })}>Voice call</button></div></div>
+      <label><span className="ev-label">{item.mode === "voice" ? "What does the caller need?" : "Task to perform"}</span><textarea rows={5} value={item.prompt || ""} onChange={(event) => setItem({ ...item, prompt: event.target.value, voice: item.mode === "voice" ? { ...(item.voice || { caller_goal: "" }), caller_goal: event.target.value } : item.voice })} className="ev-field" /></label>
+      {item.mode === "voice" && <div className="ev-setup">
+        {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
+          <label><span className="ev-label">Realtime provider</span><select value={item.voice?.provider || defaultProvider?.name || ""} onChange={(event) => { const provider = catalog.realtime_providers.find((value) => value.name === event.target.value); setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), provider: event.target.value, caller_provider: event.target.value, voice: provider?.default_voice, caller_voice: provider?.default_voice } }); }} className="ev-field">{catalog.realtime_providers.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></label>
+          <label><span className="ev-label">Receptionist voice</span><input value={item.voice?.voice || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), voice: event.target.value } })} placeholder="Provider default" className="ev-field" /></label>
+          <label><span className="ev-label">Caller voice</span><input value={item.voice?.caller_voice || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_voice: event.target.value } })} placeholder="Provider default" className="ev-field" /></label>
+          <label><span className="ev-label">Maximum first response (ms)</span><input type="number" min={250} max={10000} step={250} value={item.voice?.max_first_response_ms || 2000} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), max_first_response_ms: Number(event.target.value) } })} className="ev-field" /></label>
+        </div>}
+        <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={item.voice?.caller_persona || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_persona: event.target.value } })} placeholder="A natural, concise customer" className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={item.voice?.caller_behavior || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_behavior: event.target.value } })} className="ev-field" /></label><label><span className="ev-label">Receptionist greeting</span><input value={item.voice?.greeting || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), greeting: event.target.value } })} placeholder="Let the receptionist greet naturally" className="ev-field" /></label></div></details>
+      </div>}
       <label><span className="ev-label">Success criteria</span><textarea rows={5} value={(item.goals || []).join("\n")} onChange={(event) => setItem({ ...item, goals: event.target.value.split("\n") })} placeholder="One requirement per line" className="ev-field" /></label>
-      <details className="ev-advanced"><summary>Deterministic checks and execution limits</summary><div className="ev-advanced-body"><label><span className="ev-label">Deterministic checks (JSON)</span><textarea rows={9} value={assertionRaw} onChange={(event) => setAssertionRaw(event.target.value)} spellCheck={false} className="ev-field" style={{ fontFamily: "monospace", fontSize: 11 }} /></label><div className="ev-grid-2"><label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={item.max_turns || 10} onChange={(event) => setItem({ ...item, max_turns: Number(event.target.value) })} className="ev-field" /></label><label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={1800} value={item.timeout_seconds || 600} onChange={(event) => setItem({ ...item, timeout_seconds: Number(event.target.value) })} className="ev-field" /></label></div></div></details>
+      <details className="ev-advanced"><summary>Deterministic checks and execution limits</summary><div className="ev-advanced-body"><label><span className="ev-label">Deterministic checks (JSON)</span><textarea rows={9} value={assertionRaw} onChange={(event) => setAssertionRaw(event.target.value)} spellCheck={false} className="ev-field" style={{ fontFamily: "monospace", fontSize: 11 }} /></label><div className="ev-grid-2">{item.mode !== "voice" && <label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={item.max_turns || 10} onChange={(event) => setItem({ ...item, max_turns: Number(event.target.value) })} className="ev-field" /></label>}<label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={item.mode === "voice" ? 300 : 1800} value={item.timeout_seconds || (item.mode === "voice" ? 90 : 600)} onChange={(event) => setItem({ ...item, timeout_seconds: Number(event.target.value) })} className="ev-field" /></label></div></div></details>
       <label className="ev-check"><input type="checkbox" checked={item.enabled !== false} onChange={(event) => setItem({ ...item, enabled: event.target.checked })} /> Enabled</label>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
@@ -760,6 +864,12 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   return <Drawer title={`${run.case.name} · ${run.target.agent_name || run.target.agent_id}`} onClose={onClose} footer={<button type="button" onClick={onClose} className="ev-button">Close</button>}>
     <div className="ev-inspector-summary"><Metric label="Result" value={run.status} /><Metric label="Score" value={score(run.overall_score)} /><Metric label="Turns" value={String(run.execution?.turns || 0)} /></div>
     {(run.error || error) && <div className="ev-error" style={{ marginTop: 16 }}><span>{run.error || error}</span></div>}
+    {run.voice_call && <section className="ev-inspector-section">
+      <div className="ev-section-title" style={{ marginBottom: 8 }}>Voice call</div>
+      <div className="ev-inspector-summary"><Metric label="Duration" value={`${(run.voice_call.metrics.duration_ms / 1000).toFixed(1)}s`} /><Metric label="First response" value={run.voice_call.metrics.first_response_ms ? `${run.voice_call.metrics.first_response_ms}ms` : "-"} /><Metric label="Average response" value={run.voice_call.metrics.average_response_ms ? `${run.voice_call.metrics.average_response_ms}ms` : "-"} /><Metric label="Tool calls" value={String(run.voice_call.metrics.tool_calls)} /><Metric label="Interruptions" value={String(run.voice_call.metrics.interruptions)} /><Metric label="Audio errors" value={String(run.voice_call.metrics.realtime_errors)} /></div>
+      <div className="ev-grid-2" style={{ marginTop: 10 }}><label><span className="ev-label">Receptionist recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/receptionist`)} style={{ width: "100%", height: 36 }} /></label><label><span className="ev-label">Caller recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller`)} style={{ width: "100%", height: 36 }} /></label></div>
+      <div className="ev-result-list" style={{ marginTop: 10 }}>{run.voice_call.transcript.length === 0 ? <Empty title="No transcript recorded" /> : run.voice_call.transcript.map((turn, index) => <div className="ev-result-row" key={`${turn.at_ms}-${index}`}><div style={{ width: "100%" }}><div className="ev-trace-role">{turn.speaker} · {(turn.at_ms / 1000).toFixed(1)}s</div><div className="ev-trace-text">{turn.text}</div></div></div>)}</div>
+    </section>}
     <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Success checks</div>{run.assertions?.length ? <div className="ev-result-list">{run.assertions.map((result: any, index) => <div className="ev-result-row" key={index}><span style={{ color: result.passed ? "var(--color-success)" : "var(--color-error)" }}>{result.passed ? "✓" : "×"}</span><div><div style={{ fontSize: 12 }}>{result.name || `Check ${index + 1}`}</div><div className="ev-muted">{result.message}</div></div></div>)}</div> : <div className="ev-muted">No deterministic checks</div>}</section>
     {run.judge && <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Evaluation</div><div className="ev-suggestion"><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><Status value={run.judge.passed ? "pass" : "fail"} /><strong>{score(run.judge.score)}</strong></div><div style={{ fontSize: 12, lineHeight: 1.5 }}>{run.judge.reasoning}</div></div></section>}
     {suggestions.map((item) => <section className="ev-inspector-section" key={item.id}><div className="ev-section-title" style={{ marginBottom: 8 }}>Production directive change</div><div className="ev-suggestion"><div className="ev-muted" style={{ marginBottom: 8 }}>{item.reason}</div><pre className="ev-code">{item.directive}</pre><div className="ev-suggestion-actions"><button type="button" disabled={item.status !== "proposed"} onClick={() => apply(item.id)} className="ev-primary">{item.status === "applied" ? "Applied to production" : "Apply to production"}</button></div></div></section>)}
@@ -802,7 +912,7 @@ function PlansView({ suites, catalog, onNew, onEdit, onScenario, onRun }: {
   onRun: (suite: Suite) => void;
 }) {
   if (suites.length === 0) return <div className="ev-plan-list"><Empty title="No test plans yet" detail="A test plan groups reusable scenarios and success criteria." action={<button type="button" onClick={onNew} className="ev-primary">New test plan</button>} /></div>;
-  return <div className="ev-plan-list">{suites.map((suite) => <section className="ev-plan" key={suite.id}><header className="ev-plan-header"><div><div className="ev-plan-name">{suite.name}</div><div className="ev-plan-meta">{suite.cases.length} scenarios · {catalog.environments.find((item) => item.id === suite.environment_id)?.name || "fresh environment"}{suite.schedule_minutes > 0 ? ` · every ${suite.schedule_minutes} minutes` : ""}</div></div><div className="ev-actions"><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run</button></div></header>{suite.cases.length > 0 && <div className="ev-scenarios">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.goals.length} criteria · {item.assertions.length} checks</span></button>)}</div>}</section>)}</div>;
+  return <div className="ev-plan-list">{suites.map((suite) => <section className="ev-plan" key={suite.id}><header className="ev-plan-header"><div><div className="ev-plan-name">{suite.name}</div><div className="ev-plan-meta">{suite.cases.length} scenarios · {catalog.environments.find((item) => item.id === suite.environment_id)?.name || "fresh environment"}{suite.schedule_minutes > 0 ? ` · every ${suite.schedule_minutes} minutes` : ""}</div></div><div className="ev-actions"><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run</button></div></header>{suite.cases.length > 0 && <div className="ev-scenarios">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.goals.length} criteria · {item.assertions.length} checks</span></button>)}</div>}</section>)}</div>;
 }
 
 export default function EvalsPanel(props: NativePanelProps) {
@@ -811,7 +921,7 @@ export default function EvalsPanel(props: NativePanelProps) {
   const [tab, setTab] = useState<"runs" | "plans">("runs");
   const [suites, setSuites] = useState<Suite[]>([]);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
-  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], snapshots: [] });
+  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], snapshots: [], realtime_providers: [] });
   const [selected, setSelected] = useState("");
   const [detail, setDetail] = useState<Experiment | null>(null);
   const [quickRun, setQuickRun] = useState(false);
@@ -871,7 +981,7 @@ export default function EvalsPanel(props: NativePanelProps) {
     {quickRun && <QuickRunBuilder catalog={catalog} onClose={() => setQuickRun(false)} onCreated={created} />}
     {planRun !== null && <PlanRunBuilder initialSuiteID={planRun} suites={suites} catalog={catalog} onClose={() => setPlanRun(null)} onCreated={created} />}
     {planEditor && <PlanEditor initial={planEditor === true ? undefined : planEditor} catalog={catalog} onClose={() => setPlanEditor(null)} onSaved={load} />}
-    {scenarioEditor && <ScenarioEditor suite={scenarioEditor.suite} initial={scenarioEditor.item} onClose={() => setScenarioEditor(null)} onSaved={load} />}
+    {scenarioEditor && <ScenarioEditor suite={scenarioEditor.suite} initial={scenarioEditor.item} catalog={catalog} onClose={() => setScenarioEditor(null)} onSaved={load} />}
     {inspected && <RunInspector run={inspected} onClose={() => setInspected(null)} />}
   </div>;
 }
