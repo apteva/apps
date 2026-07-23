@@ -132,7 +132,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className="w-full max-w-md rounded border border-border bg-bg-card shadow-xl"
+        className="w-full max-w-lg rounded border border-border bg-bg-card shadow-xl"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -618,7 +618,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
             {platforms.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-text-muted">Checking providers...</p>
             ) : platforms.map((platform) => (
-              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3.5">
+              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3">
                 <ProviderMark platform={platform.platform} />
                 <div className="min-w-0 flex-1">
                   <span className="block text-sm font-medium">
@@ -639,7 +639,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     href={platform.setup_url || "/integrations"}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 min-w-20 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
+                    className="inline-flex h-8 w-20 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
                   >
                     Set up
                   </a>
@@ -648,7 +648,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     type="button"
                     disabled={!platform.can_add || startingPlatform === platform.platform}
                     onClick={() => startPlatform(platform)}
-                    className="h-8 min-w-20 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
+                    className="h-8 w-20 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
                   >
                     {startingPlatform === platform.platform
                       ? "Starting..."
