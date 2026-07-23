@@ -126,6 +126,84 @@ func TestVoiceCallValidityAcceptsCompletedExchange(t *testing.T) {
 	}
 }
 
+func TestVoiceCallValidityAcceptsSettledConversation(t *testing.T) {
+	call := &VoiceCall{
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Hello"},
+			{Speaker: "caller", Text: "Please call me tomorrow"},
+			{Speaker: "receptionist", Text: "Certainly, goodbye"},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "conversation_idle", ReceptionistAudioS: 1.2, CallerAudioS: 1,
+		},
+	}
+
+	validity := assessVoiceCall(call)
+	if validity.Status != "valid" || len(validity.Reasons) != 0 {
+		t.Fatalf("validity=%#v", validity)
+	}
+}
+
+func TestVoiceConversationIdleRequiresSettledTwoSidedExchange(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 16, 0, 0, 0, time.UTC)
+	quietAt := now.Add(-voiceConversationIdle - time.Second)
+	activity := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   quietAt,
+	}
+	transcript := []VoiceTranscriptTurn{
+		{Speaker: "receptionist", Text: "When should we call?"},
+		{Speaker: "caller", Text: "Monday at four."},
+		{Speaker: "receptionist", Text: "Your callback is booked. Goodbye."},
+	}
+	listening := func(threadID string) []sdk.RuntimeTelemetryEvent {
+		return []sdk.RuntimeTelemetryEvent{{
+			ThreadID: threadID, Type: "realtime.state", Time: quietAt,
+			Data: json.RawMessage(`{"state":"listening"}`),
+		}}
+	}
+
+	if !voiceConversationIsIdle(
+		now, activity, transcript,
+		listening("target"), "target", listening("caller"), "caller",
+	) {
+		t.Fatal("settled conversation was not detected as idle")
+	}
+
+	recent := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   now.Add(-time.Second),
+	}
+	if voiceConversationIsIdle(
+		now, recent, transcript,
+		listening("target"), "target", listening("caller"), "caller",
+	) {
+		t.Fatal("recent media activity was detected as idle")
+	}
+
+	speaking := []sdk.RuntimeTelemetryEvent{{
+		ThreadID: "caller", Type: "realtime.state", Time: quietAt,
+		Data: json.RawMessage(`{"state":"speaking"}`),
+	}}
+	if voiceConversationIsIdle(
+		now, activity, transcript,
+		listening("target"), "target", speaking, "caller",
+	) {
+		t.Fatal("active caller was detected as idle")
+	}
+
+	pendingTool := append(listening("target"), sdk.RuntimeTelemetryEvent{
+		ThreadID: "target", Type: "tool.call", Time: quietAt,
+		Data: json.RawMessage(`{"id":"call-one","name":"calendar_commit"}`),
+	})
+	if voiceConversationIsIdle(
+		now, activity, transcript,
+		pendingTool, "target", listening("caller"), "caller",
+	) {
+		t.Fatal("pending tool call was detected as idle")
+	}
+}
+
 func TestVoiceCallerCompletedAcceptsDoneEvidence(t *testing.T) {
 	threadID := "caller-one"
 	if !voiceCallerCompleted([]sdk.RuntimeTelemetryEvent{{

@@ -27,6 +27,7 @@ const (
 	voiceSilenceTail      = time.Second
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
 	voiceCompletionGrace  = 2 * time.Second
+	voiceConversationIdle = 8 * time.Second
 	maxVoiceRelayBuffer   = 5 * voiceBytesPerSecond
 	maxVoiceRecordingSize = 32 << 20
 )
@@ -169,6 +170,39 @@ type voiceRelayEvent struct {
 	err       error
 }
 
+type voiceMediaActivity struct {
+	mu     sync.Mutex
+	active map[string]bool
+	last   time.Time
+}
+
+func newVoiceMediaActivity(started time.Time) *voiceMediaActivity {
+	return &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   started,
+	}
+}
+
+func (a *voiceMediaActivity) update(speaker string, active bool, at time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.active[speaker] = active
+	if at.After(a.last) {
+		a.last = at
+	}
+}
+
+func (a *voiceMediaActivity) snapshot() (active bool, last time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, value := range a.active {
+		if value {
+			return true, a.last
+		}
+	}
+	return false, a.last
+}
+
 func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureSpec) (call *VoiceCall, err error) {
 	if run == nil || run.RuntimeID == "" {
 		return nil, errors.New("running environment required")
@@ -249,7 +283,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	caller, err := s.runtime().SpawnRuntimeRealtimeThread(run.RuntimeID, call.CallerAgentAlias, sdk.RuntimeRealtimeSpawnRequest{
 		ThreadID: call.CallerThreadID, Directive: callerDirective,
 		Provider: firstNonEmpty(spec.CallerProvider, spec.Provider), Voice: spec.CallerVoice,
-		Ephemeral: true, BridgeDisconnectTTLSeconds: 15,
+		Tools: []string{"done"}, Ephemeral: true, BridgeDisconnectTTLSeconds: 15,
 	})
 	if err != nil {
 		return call, fmt.Errorf("spawn caller voice: %w", err)
@@ -279,8 +313,9 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	defer cancel()
 	var receptionistAudio, callerAudio cappedAudio
 	bridgeErrors := make(chan error, 2)
-	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, &receptionistAudio, bridgeErrors)
-	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, &callerAudio, bridgeErrors)
+	mediaActivity := newVoiceMediaActivity(call.StartedAt)
+	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, "receptionist", mediaActivity, &receptionistAudio, bridgeErrors)
+	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, "caller", mediaActivity, &callerAudio, bridgeErrors)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
 	defer timeout.Stop()
@@ -318,6 +353,12 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 					call.TargetTelemetry = targetEvents
 					_ = s.db.saveVoiceCall(call)
 					s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
+				}
+				if listErr == nil && voiceConversationIsIdle(
+					time.Now(), mediaActivity, transcript,
+					targetEvents, call.TargetThreadID, events, call.CallerThreadID,
+				) {
+					endedBy = "conversation_idle"
 				}
 			}
 		}
@@ -424,7 +465,14 @@ func voiceCallerDirective(spec VoiceFixtureSpec) string {
 	return strings.Join(lines, "\n")
 }
 
-func pumpVoiceAudio(ctx context.Context, source, destination *voiceSocket, capture *cappedAudio, result chan<- error) {
+func pumpVoiceAudio(
+	ctx context.Context,
+	source, destination *voiceSocket,
+	speaker string,
+	activity *voiceMediaActivity,
+	capture *cappedAudio,
+	result chan<- error,
+) {
 	incoming := make(chan voiceRelayEvent, 128)
 	go readVoiceAudio(ctx, source, capture, incoming)
 
@@ -446,14 +494,18 @@ func pumpVoiceAudio(ctx context.Context, source, destination *voiceSocket, captu
 				return
 			case event.interrupt:
 				relay.interrupt()
+				activity.update(speaker, false, time.Now())
 			case event.chunk != nil:
 				relay.append(*event.chunk)
+				activity.update(speaker, true, time.Now())
 			}
 		case <-ticker.C:
 			frame, speechStarted, acks, ok := relay.nextFrame()
 			if !ok {
+				activity.update(speaker, false, time.Time{})
 				continue
 			}
+			activity.update(speaker, true, time.Now())
 			if speechStarted {
 				if err := destination.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
 					sendVoiceRelayResult(ctx, result, err)
@@ -475,6 +527,95 @@ func pumpVoiceAudio(ctx context.Context, source, destination *voiceSocket, captu
 			}
 		}
 	}
+}
+
+type voiceTelemetryState struct {
+	state        string
+	pendingTools int
+	lastActivity time.Time
+}
+
+func voiceRealtimeTelemetryState(events []sdk.RuntimeTelemetryEvent, threadID string) voiceTelemetryState {
+	filtered := make([]sdk.RuntimeTelemetryEvent, 0, len(events))
+	for _, event := range events {
+		if event.ThreadID == threadID {
+			filtered = append(filtered, event)
+		}
+	}
+	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].Time.Before(filtered[j].Time) })
+
+	state := voiceTelemetryState{}
+	pending := map[string]bool{}
+	anonymousPending := 0
+	for _, event := range filtered {
+		switch event.Type {
+		case "realtime.user", "realtime.assistant", "realtime.state", "tool.call", "tool.result":
+			if event.Time.After(state.lastActivity) {
+				state.lastActivity = event.Time
+			}
+		}
+		switch event.Type {
+		case "realtime.state":
+			var data struct {
+				State string `json:"state"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil {
+				state.state = strings.TrimSpace(data.State)
+			}
+		case "tool.call":
+			var data struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.ID != "" {
+				pending[data.ID] = true
+			} else {
+				anonymousPending++
+			}
+		case "tool.result":
+			var data struct {
+				ID string `json:"id"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.ID != "" && pending[data.ID] {
+				delete(pending, data.ID)
+			} else if anonymousPending > 0 {
+				anonymousPending--
+			}
+		}
+	}
+	state.pendingTools = len(pending) + anonymousPending
+	return state
+}
+
+func voiceConversationIsIdle(
+	now time.Time,
+	media *voiceMediaActivity,
+	transcript []VoiceTranscriptTurn,
+	targetEvents []sdk.RuntimeTelemetryEvent,
+	targetThreadID string,
+	callerEvents []sdk.RuntimeTelemetryEvent,
+	callerThreadID string,
+) bool {
+	receptionistTurns, callerTurns, transitions := voiceTurnCounts(transcript)
+	if receptionistTurns < 2 || callerTurns < 1 || transitions < 2 ||
+		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
+		return false
+	}
+	mediaActive, lastActivity := media.snapshot()
+	if mediaActive {
+		return false
+	}
+	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
+	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
+	if target.state != "listening" || caller.state != "listening" ||
+		target.pendingTools > 0 || caller.pendingTools > 0 {
+		return false
+	}
+	for _, candidate := range []time.Time{target.lastActivity, caller.lastActivity} {
+		if candidate.After(lastActivity) {
+			lastActivity = candidate
+		}
+	}
+	return !lastActivity.IsZero() && now.Sub(lastActivity) >= voiceConversationIdle
 }
 
 func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
@@ -662,7 +803,7 @@ func assessVoiceCall(call *VoiceCall) VoiceCallValidity {
 		return VoiceCallValidity{Status: "invalid", Reasons: []string{"voice call result is missing"}}
 	}
 	reasons := []string{}
-	if call.Metrics.EndedBy != "caller_done" {
+	if call.Metrics.EndedBy != "caller_done" && call.Metrics.EndedBy != "conversation_idle" {
 		reasons = append(reasons, "call ended unexpectedly: "+firstNonEmpty(call.Metrics.EndedBy, "unknown"))
 	}
 	if call.Metrics.ReceptionistAudioS <= 0 {
