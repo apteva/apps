@@ -269,7 +269,7 @@ func voiceAssertionResults(spec *VoiceCase, call *EnvironmentVoiceCall) []Assert
 	receptionistTurns, callerTurns, transitions := voiceTranscriptCounts(call.Transcript)
 	results := []AssertionResult{
 		{Name: "Valid two-sided voice simulation", Passed: len(validityIssues) == 0, Actual: map[string]any{"receptionist_turns": receptionistTurns, "caller_turns": callerTurns, "speaker_transitions": transitions}, Message: strings.Join(validityIssues, "; "), Gating: true},
-		{Name: "Call ended normally", Passed: call.Metrics.EndedBy == "caller_done", Actual: call.Metrics.EndedBy, Gating: true},
+		{Name: "Call ended normally", Passed: voiceCallEndedNormally(call.Metrics.EndedBy), Actual: call.Metrics.EndedBy, Gating: true},
 		{Name: "Both participants produced audio", Passed: call.Metrics.ReceptionistAudioS > 0 && call.Metrics.CallerAudioS > 0, Actual: map[string]float64{"receptionist_seconds": call.Metrics.ReceptionistAudioS, "caller_seconds": call.Metrics.CallerAudioS}, Gating: true},
 		{Name: "No realtime audio errors", Passed: call.Metrics.RealtimeErrors == 0, Actual: call.Metrics.RealtimeErrors, Gating: true},
 	}
@@ -302,7 +302,7 @@ func voiceSimulationIssues(call *EnvironmentVoiceCall) []string {
 	if call.Status != "completed" {
 		issues = append(issues, "voice call status is "+fallbackString(call.Status, "unknown"))
 	}
-	if call.Metrics.EndedBy != "caller_done" {
+	if !voiceCallEndedNormally(call.Metrics.EndedBy) {
 		issues = append(issues, "call ended unexpectedly: "+fallbackString(call.Metrics.EndedBy, "unknown"))
 	}
 	if call.Metrics.ReceptionistAudioS <= 0 {
@@ -325,6 +325,10 @@ func voiceSimulationIssues(call *EnvironmentVoiceCall) []string {
 		issues = append(issues, fmt.Sprintf("realtime participants reported %d errors", call.Metrics.RealtimeErrors))
 	}
 	return issues
+}
+
+func voiceCallEndedNormally(reason string) bool {
+	return reason == "caller_done" || reason == "conversation_idle"
 }
 
 func fallbackString(value, fallback string) string {
