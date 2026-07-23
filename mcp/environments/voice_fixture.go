@@ -22,6 +22,11 @@ import (
 const (
 	voiceSampleRate       = 24000
 	voiceBytesPerSecond   = voiceSampleRate * 2
+	voiceFrameDuration    = 20 * time.Millisecond
+	voiceFrameBytes       = voiceBytesPerSecond / (int(time.Second / voiceFrameDuration))
+	voiceSilenceTail      = time.Second
+	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
+	maxVoiceRelayBuffer   = 5 * voiceBytesPerSecond
 	maxVoiceRecordingSize = 32 << 20
 )
 
@@ -68,6 +73,99 @@ func (c *cappedAudio) bytes() []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]byte(nil), c.data.Bytes()...)
+}
+
+type voicePlaybackAck struct {
+	itemID     string
+	audioEndMS int
+}
+
+type voiceAudioChunk struct {
+	audio      []byte
+	offset     int
+	itemID     string
+	audioEndMS int
+}
+
+type voiceMediaQueue struct {
+	chunks []voiceAudioChunk
+	bytes  int
+}
+
+func (q *voiceMediaQueue) append(chunk voiceAudioChunk) {
+	if len(chunk.audio) == 0 {
+		return
+	}
+	q.chunks = append(q.chunks, chunk)
+	q.bytes += len(chunk.audio)
+}
+
+func (q *voiceMediaQueue) clear() {
+	q.chunks = nil
+	q.bytes = 0
+}
+
+func (q *voiceMediaQueue) nextFrame() ([]byte, int, []voicePlaybackAck) {
+	if q.bytes == 0 {
+		return nil, 0, nil
+	}
+	frame := make([]byte, voiceFrameBytes)
+	written := 0
+	acks := []voicePlaybackAck{}
+	for written < len(frame) && len(q.chunks) > 0 {
+		chunk := &q.chunks[0]
+		n := copy(frame[written:], chunk.audio[chunk.offset:])
+		written += n
+		chunk.offset += n
+		q.bytes -= n
+		if chunk.offset == len(chunk.audio) {
+			if chunk.itemID != "" {
+				acks = append(acks, voicePlaybackAck{itemID: chunk.itemID, audioEndMS: chunk.audioEndMS})
+			}
+			q.chunks = q.chunks[1:]
+		}
+	}
+	return frame, written, acks
+}
+
+type voiceMediaRelay struct {
+	queue           voiceMediaQueue
+	silenceFrames   int
+	utteranceActive bool
+}
+
+func (r *voiceMediaRelay) append(chunk voiceAudioChunk) {
+	r.queue.append(chunk)
+}
+
+func (r *voiceMediaRelay) interrupt() {
+	r.queue.clear()
+	r.silenceFrames = 0
+	r.utteranceActive = false
+}
+
+func (r *voiceMediaRelay) nextFrame() (frame []byte, speechStarted bool, acks []voicePlaybackAck, ok bool) {
+	frame, speechBytes, acks := r.queue.nextFrame()
+	if speechBytes > 0 {
+		speechStarted = !r.utteranceActive
+		r.utteranceActive = true
+		r.silenceFrames = voiceSilenceFrames
+		return frame, speechStarted, acks, true
+	}
+	if r.silenceFrames == 0 {
+		return nil, false, nil, false
+	}
+	r.silenceFrames--
+	if r.silenceFrames == 0 {
+		r.utteranceActive = false
+	}
+	return make([]byte, voiceFrameBytes), false, nil, true
+}
+
+type voiceRelayEvent struct {
+	chunk     *voiceAudioChunk
+	interrupt bool
+	err       error
 }
 
 func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureSpec) (call *VoiceCall, err error) {
@@ -281,17 +379,66 @@ func voiceCallerDirective(spec VoiceFixtureSpec) string {
 }
 
 func pumpVoiceAudio(ctx context.Context, source, destination *voiceSocket, capture *cappedAudio, result chan<- error) {
+	incoming := make(chan voiceRelayEvent, 128)
+	go readVoiceAudio(ctx, source, capture, incoming)
+
+	ticker := time.NewTicker(voiceFrameDuration)
+	defer ticker.Stop()
+	var relay voiceMediaRelay
+	for {
+		input := (<-chan voiceRelayEvent)(incoming)
+		if relay.queue.bytes >= maxVoiceRelayBuffer {
+			input = nil
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-input:
+			switch {
+			case event.err != nil:
+				sendVoiceRelayResult(ctx, result, event.err)
+				return
+			case event.interrupt:
+				relay.interrupt()
+			case event.chunk != nil:
+				relay.append(*event.chunk)
+			}
+		case <-ticker.C:
+			frame, speechStarted, acks, ok := relay.nextFrame()
+			if !ok {
+				continue
+			}
+			if speechStarted {
+				if err := destination.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
+					sendVoiceRelayResult(ctx, result, err)
+					return
+				}
+			}
+			if err := destination.write(websocket.BinaryMessage, frame); err != nil {
+				sendVoiceRelayResult(ctx, result, err)
+				return
+			}
+			for _, playback := range acks {
+				ack, _ := json.Marshal(map[string]any{
+					"type": "playback.progress", "item_id": playback.itemID, "audio_end_ms": playback.audioEndMS,
+				})
+				if err := source.write(websocket.TextMessage, ack); err != nil {
+					sendVoiceRelayResult(ctx, result, err)
+					return
+				}
+			}
+		}
+	}
+}
+
+func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
 	var itemID string
 	var audioEndMS int
-	lastFrame := time.Time{}
 	for {
 		_ = source.conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		messageType, payload, err := source.conn.ReadMessage()
 		if err != nil {
-			select {
-			case result <- err:
-			case <-ctx.Done():
-			}
+			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{err: err})
 			return
 		}
 		if messageType == websocket.TextMessage {
@@ -300,37 +447,44 @@ func pumpVoiceAudio(ctx context.Context, source, destination *voiceSocket, captu
 				ItemID     string `json:"item_id"`
 				AudioEndMS int    `json:"audio_end_ms"`
 			}
-			if json.Unmarshal(payload, &event) == nil && event.Type == "audio.frame" {
+			if json.Unmarshal(payload, &event) != nil {
+				continue
+			}
+			switch event.Type {
+			case "audio.frame":
 				itemID, audioEndMS = event.ItemID, event.AudioEndMS
+			case "interrupt":
+				sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{interrupt: true})
 			}
 			continue
 		}
 		if messageType != websocket.BinaryMessage || len(payload) == 0 {
 			continue
 		}
-		now := time.Now()
-		if lastFrame.IsZero() || now.Sub(lastFrame) > 350*time.Millisecond {
-			_ = destination.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`))
-		}
-		lastFrame = now
 		capture.append(payload)
-		if err := destination.write(websocket.BinaryMessage, payload); err != nil {
-			select {
-			case result <- err:
-			case <-ctx.Done():
-			}
+		chunk := &voiceAudioChunk{
+			audio: append([]byte(nil), payload...), itemID: itemID, audioEndMS: audioEndMS,
+		}
+		itemID, audioEndMS = "", 0
+		if !sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{chunk: chunk}) {
 			return
 		}
-		if itemID != "" {
-			ack, _ := json.Marshal(map[string]any{"type": "playback.progress", "item_id": itemID, "audio_end_ms": audioEndMS})
-			if err := source.write(websocket.TextMessage, ack); err != nil {
-				select {
-				case result <- err:
-				case <-ctx.Done():
-				}
-				return
-			}
-		}
+	}
+}
+
+func sendVoiceRelayEvent(ctx context.Context, incoming chan<- voiceRelayEvent, event voiceRelayEvent) bool {
+	select {
+	case incoming <- event:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func sendVoiceRelayResult(ctx context.Context, result chan<- error, err error) {
+	select {
+	case result <- err:
+	case <-ctx.Done():
 	}
 }
 
