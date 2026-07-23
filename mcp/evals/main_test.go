@@ -123,6 +123,79 @@ func TestParseJudgeToleratesSurroundingTextAndBoundsScore(t *testing.T) {
 	}
 }
 
+func TestParseJudgeDerivesScenarioResultFromGoalScores(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": true,
+		"score": 100,
+		"reasoning": "one requirement was only partially met",
+		"per_goal": [
+			{"goal": "Greet the caller clearly", "score": 100, "passed": false, "why": "Clear greeting"},
+			{"goal": "Confirm the requested callback", "score": 60, "passed": true, "why": "Time was repeated but not confirmed"}
+		]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Passed || verdict.Score != 79 {
+		t.Fatalf("scenario verdict=%#v", verdict)
+	}
+	if !verdict.PerGoal[0].Passed || verdict.PerGoal[1].Passed {
+		t.Fatalf("goal verdicts=%#v", verdict.PerGoal)
+	}
+	if verdict.PerGoal[0].Score == nil || *verdict.PerGoal[0].Score != 100 || verdict.PerGoal[1].Score == nil || *verdict.PerGoal[1].Score != 60 {
+		t.Fatalf("goal scores=%#v", verdict.PerGoal)
+	}
+}
+
+func TestParseJudgePreservesLegacyGoalVerdicts(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": false,
+		"score": 72,
+		"reasoning": "legacy verdict",
+		"per_goal": [{"goal": "Complete the task", "passed": false, "why": "Incomplete"}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Passed || verdict.Score != 72 || verdict.PerGoal[0].Score != nil || verdict.PerGoal[0].Passed {
+		t.Fatalf("legacy verdict=%#v", verdict)
+	}
+}
+
+func TestParseJudgeClampsGoalScores(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": true,
+		"score": 100,
+		"reasoning": "out of bounds",
+		"per_goal": [
+			{"goal": "First", "score": -5, "passed": true, "why": "Missed"},
+			{"goal": "Second", "score": 120, "passed": false, "why": "Met"}
+		]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Score != 49 || verdict.Passed || *verdict.PerGoal[0].Score != 0 || *verdict.PerGoal[1].Score != 100 {
+		t.Fatalf("verdict=%#v", verdict)
+	}
+}
+
+func TestAlignJudgeGoalsUsesConfiguredGoalsAndFailsMissingResults(t *testing.T) {
+	first := 90.0
+	verdict := &JudgeVerdict{
+		Passed:  true,
+		Score:   90,
+		PerGoal: []GoalVerdict{{Goal: "paraphrased goal", Score: &first, Passed: true, Why: "Met"}},
+	}
+	alignJudgeGoals(verdict, []string{"Greet the caller", "Confirm the callback"})
+	if verdict.Passed || verdict.Score != 45 || len(verdict.PerGoal) != 2 {
+		t.Fatalf("verdict=%#v", verdict)
+	}
+	if verdict.PerGoal[0].Goal != "Greet the caller" || verdict.PerGoal[1].Goal != "Confirm the callback" || *verdict.PerGoal[1].Score != 0 {
+		t.Fatalf("goals=%#v", verdict.PerGoal)
+	}
+}
+
 func TestJudgeRequestOmitsUnsupportedCodexTemperature(t *testing.T) {
 	codex := judgeRequest("openai-codex/gpt-5.6-terra", map[string]any{"task": "test"})
 	if _, ok := codex["temperature"]; ok {
@@ -146,7 +219,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.2.1" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.2.2" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 }

@@ -175,9 +175,10 @@ type JudgeVerdict struct {
 }
 
 type GoalVerdict struct {
-	Goal   string `json:"goal"`
-	Passed bool   `json:"passed"`
-	Why    string `json:"why"`
+	Goal   string   `json:"goal"`
+	Score  *float64 `json:"score,omitempty"`
+	Passed bool     `json:"passed"`
+	Why    string   `json:"why"`
 }
 
 type DirectiveSuggestion struct {

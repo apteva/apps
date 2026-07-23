@@ -203,6 +203,7 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	if err != nil {
 		return nil, err
 	}
+	alignJudgeGoals(verdict, run.CaseSnapshot.Goals)
 	verdict.Model, verdict.Usage = response.Model, response.Usage
 	return verdict, nil
 }
@@ -237,7 +238,7 @@ func judgeRequest(model string, payload map[string]any) map[string]any {
 	return request
 }
 
-const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade each goal independently. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,passed,why}]), and directive_suggestion (null or {directive,reason}). A pass requires every goal and deterministic assertion to pass. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
 
 func parseJudge(raw string) (*JudgeVerdict, error) {
 	raw = strings.TrimSpace(raw)
@@ -249,8 +250,80 @@ func parseJudge(raw string) (*JudgeVerdict, error) {
 	if err := json.Unmarshal([]byte(raw[start:end+1]), &verdict); err != nil {
 		return nil, err
 	}
-	verdict.Score = math.Max(0, math.Min(100, verdict.Score))
+	normalizeJudgeVerdict(&verdict)
 	return &verdict, nil
+}
+
+const goalPassScore = 80.0
+
+func normalizeJudgeVerdict(verdict *JudgeVerdict) {
+	verdict.Score = clampScore(verdict.Score)
+	if len(verdict.PerGoal) == 0 {
+		return
+	}
+
+	total := 0.0
+	allScored, allPassed := true, true
+	lowest := 100.0
+	for i := range verdict.PerGoal {
+		goal := &verdict.PerGoal[i]
+		if goal.Score == nil {
+			allScored = false
+			if !goal.Passed {
+				allPassed = false
+			}
+			continue
+		}
+		value := clampScore(*goal.Score)
+		goal.Score = &value
+		goal.Passed = value >= goalPassScore
+		total += value
+		lowest = math.Min(lowest, value)
+		if !goal.Passed {
+			allPassed = false
+		}
+	}
+	if !allScored {
+		return
+	}
+
+	verdict.Score = total / float64(len(verdict.PerGoal))
+	verdict.Passed = allPassed
+	// Required goals gate the scenario into the same visual band as its weakest goal.
+	if lowest < 50 && verdict.Score >= 50 {
+		verdict.Score = 49
+	} else if lowest < goalPassScore && verdict.Score >= goalPassScore {
+		verdict.Score = goalPassScore - 1
+	}
+}
+
+func alignJudgeGoals(verdict *JudgeVerdict, expected []string) {
+	if len(expected) == 0 {
+		return
+	}
+	returned := verdict.PerGoal
+	aligned := make([]GoalVerdict, 0, len(expected))
+	for i, goal := range expected {
+		if i < len(returned) {
+			item := returned[i]
+			item.Goal = goal
+			aligned = append(aligned, item)
+			continue
+		}
+		value := 0.0
+		aligned = append(aligned, GoalVerdict{
+			Goal:   goal,
+			Score:  &value,
+			Passed: false,
+			Why:    "The judge did not return a result for this goal.",
+		})
+	}
+	verdict.PerGoal = aligned
+	normalizeJudgeVerdict(verdict)
+}
+
+func clampScore(value float64) float64 {
+	return math.Max(0, math.Min(100, value))
 }
 
 func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float64, *float64, *float64) {
