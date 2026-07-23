@@ -219,8 +219,22 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.2.2" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.2.3" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
+	}
+}
+
+func TestPanelUsesProductionJSXRuntime(t *testing.T) {
+	panel, err := os.ReadFile("ui/EvalsPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(panel)
+	if strings.Contains(source, "react/jsx-dev-runtime") || strings.Contains(source, "jsxDEV") {
+		t.Fatal("EvalsPanel.mjs uses React's development JSX runtime")
+	}
+	if !strings.Contains(source, "react/jsx-runtime") {
+		t.Fatal("EvalsPanel.mjs does not import React's production JSX runtime")
 	}
 }
 
