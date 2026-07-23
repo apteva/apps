@@ -31,12 +31,31 @@ type runOptions struct {
 // land on the run row's Status/Error fields. Only setup errors
 // (definition parse, DB write fail) come back here.
 func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, input any, opts runOptions) (*Run, error) {
-	if w.Definition == nil {
-		def, err := ParseDefinition([]byte(w.Source))
+	if w == nil {
+		return nil, errors.New("workflow required")
+	}
+	if w.Status != "" && w.Status != "active" {
+		return nil, fmt.Errorf("workflow %q is %s", w.Name, w.Status)
+	}
+
+	// Event lanes share Workflow pointers across concurrent deliveries.
+	// Keep the parsed definition on a per-run copy to avoid racing on
+	// w.Definition, and resolve repo-backed sources before parsing.
+	runWorkflow := *w
+	if runWorkflow.Definition == nil {
+		source, err := resolveWorkflowSource(app, &runWorkflow)
+		if err != nil {
+			return nil, fmt.Errorf("resolve definition: %w", err)
+		}
+		def, err := ParseDefinition(source)
 		if err != nil {
 			return nil, fmt.Errorf("parse definition: %w", err)
 		}
-		w.Definition = def
+		runWorkflow.Definition = def
+	}
+	w = &runWorkflow
+	if opts.fromStep != "" && w.Definition.stepIndex(opts.fromStep) < 0 {
+		return nil, fmt.Errorf("from_step %q not found", opts.fromStep)
 	}
 
 	// Per-workflow concurrency cap. Stops a runaway trigger from
@@ -66,6 +85,12 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
+	runCtx, cancelRun := context.WithCancel(ctx)
+	registerActiveRun(runID, cancelRun)
+	defer func() {
+		unregisterActiveRun(runID)
+		cancelRun()
+	}()
 
 	tctx := TemplateContext{
 		Input: input,
@@ -99,9 +124,9 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 	finalErr := ""
 
 	for idx < len(w.Definition.Steps) {
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			finalStatus = "cancelled"
-			finalErr = ctx.Err().Error()
+			finalErr = runCtx.Err().Error()
 			break
 		}
 		step := &w.Definition.Steps[idx]
@@ -155,9 +180,9 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 		var lastAttempt int
 		for attempt := 1; attempt <= max+1; attempt++ {
 			lastAttempt = attempt
-			res = runStep(ctx, app, step, rendered)
+			res = runStep(runCtx, app, step, rendered)
 			recordStep(app, runID, step, attempt, rendered, res)
-			if res.Status == "ok" || ctx.Err() != nil {
+			if res.Status == "ok" || runCtx.Err() != nil {
 				break
 			}
 			if attempt > max {
@@ -170,11 +195,16 @@ func RunWorkflow(ctx context.Context, app *sdk.AppCtx, pid string, w *Workflow, 
 			if delay > 0 {
 				select {
 				case <-time.After(delay):
-				case <-ctx.Done():
+				case <-runCtx.Done():
 				}
 			}
 		}
 		emitStepLifecycle(app, "workflow.step.completed", runID, w, step, lastAttempt, res.Status, res.Error)
+		if runCtx.Err() != nil {
+			finalStatus = "cancelled"
+			finalErr = runCtx.Err().Error()
+			break
+		}
 
 		if res.Status != "ok" {
 			// step.OnError tells us where to jump (or whether to fail
@@ -397,9 +427,31 @@ func readEnv() map[string]string {
 		if i <= 0 {
 			continue
 		}
-		out[kv[:i]] = kv[i+1:]
+		key := kv[:i]
+		if sensitiveWorkflowEnv(key) {
+			continue
+		}
+		out[key] = kv[i+1:]
 	}
 	return out
+}
+
+// Workflow source is user-authored and can send rendered values to arbitrary
+// HTTP targets. Never expose process credentials to its template context.
+func sensitiveWorkflowEnv(key string) bool {
+	upper := strings.ToUpper(key)
+	if upper == "APTEVA_APP_CONFIG" || upper == "DATABASE_URL" {
+		return true
+	}
+	for _, marker := range []string{
+		"TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY",
+		"PRIVATE_KEY", "CREDENTIAL", "COOKIE", "AUTHORIZATION",
+	} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── Per-workflow concurrency ──────────────────────────────────────
@@ -407,8 +459,10 @@ func readEnv() map[string]string {
 const wfDefaultConcur = 8
 
 var (
-	wfSemsMu sync.Mutex
-	wfSems   = map[int64]chan struct{}{}
+	wfSemsMu     sync.Mutex
+	wfSems       = map[int64]chan struct{}{}
+	activeRunsMu sync.Mutex
+	activeRuns   = map[int64]context.CancelFunc{}
 )
 
 func semForWorkflow(id int64) chan struct{} {
@@ -420,6 +474,29 @@ func semForWorkflow(id int64) chan struct{} {
 	s := make(chan struct{}, wfDefaultConcur)
 	wfSems[id] = s
 	return s
+}
+
+func registerActiveRun(id int64, cancel context.CancelFunc) {
+	activeRunsMu.Lock()
+	activeRuns[id] = cancel
+	activeRunsMu.Unlock()
+}
+
+func unregisterActiveRun(id int64) {
+	activeRunsMu.Lock()
+	delete(activeRuns, id)
+	activeRunsMu.Unlock()
+}
+
+func cancelActiveRun(id int64) bool {
+	activeRunsMu.Lock()
+	cancel := activeRuns[id]
+	activeRunsMu.Unlock()
+	if cancel == nil {
+		return false
+	}
+	cancel()
+	return true
 }
 
 // ─── Source resolution (inline / repo) ─────────────────────────────

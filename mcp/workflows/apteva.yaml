@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: workflows
 display_name: Workflows
-version: 0.4.5
+version: 0.4.6
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
-  graph of steps (http, function, app, emit, branch). Triggered by
-  HTTP or manual invocation in v0.1; pair with the Jobs app for
-  cron schedules. Every run records a per-step audit log so you
-  can inspect, retry, and replay.
+  graph of steps (http, function, app, integration, emit, branch).
+  Triggered manually, through HTTP, or by another app's event stream;
+  pair with the Jobs app for cron schedules. Every run records a
+  per-step audit log so you can inspect, retry, and replay.
 
   Strict separation from agents: workflows never call LLMs. If a
   step needs judgment, it sends an event to an agent and the
@@ -18,7 +18,7 @@ homepage: https://github.com/apteva/apps/tree/main/mcp/workflows
 tags: [workflows, automation, pipelines, deterministic, agent]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.18.0"
 
 requires:
   permissions:
@@ -58,6 +58,14 @@ provides:
       description: "Re-run a workflow against the same input. Args: run_id, from_step? (skip ahead to this step id)."
     - name: workflows_cancel
       description: "Cancel an in-flight run. Args: run_id."
+  publishes:
+    - { name: workflow.created, description: "A workflow was created." }
+    - { name: workflow.updated, description: "A workflow was updated." }
+    - { name: workflow.deleted, description: "A workflow was deleted." }
+    - { name: workflow.step.started, description: "A workflow step started." }
+    - { name: workflow.step.completed, description: "A workflow step completed." }
+    - { name: workflow.run.finished, description: "A workflow run reached a terminal state." }
+    - { name: workflow.run.cancelled, description: "Cancellation was requested for a workflow run." }
   ui_panels:
     - slot: project.page
       label: Workflows
@@ -71,11 +79,27 @@ runtime:
     ref: main
     entry: mcp/workflows
   port: 8080
-  health_check: /health
+  health_check: /subscriber/health
+  resources:
+    cpu: 0.1
+    memory: 96
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
 
 db:
   driver: sqlite
   path: /data/workflows.db
   migrations: migrations/
+
+config_schema: []
 
 upgrade_policy: auto-patch

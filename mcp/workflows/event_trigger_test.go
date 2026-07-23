@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,6 +193,171 @@ steps:
 	if len(runs) != 0 {
 		t.Errorf("non-matching topic ran the workflow: %d runs", len(runs))
 	}
+}
+
+func TestEventTrigger_MissingConfigurationIsDegraded(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "")
+	t.Setenv("APTEVA_APP_TOKEN", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconcile()
+	status := mgr.Status()
+	if status.Healthy || status.State != "degraded" {
+		t.Fatalf("status = %+v, want degraded and unhealthy", status)
+	}
+	if status.Configured {
+		t.Fatal("subscriber unexpectedly configured")
+	}
+	if got := strings.Join(status.MissingConfig, ","); !strings.Contains(got, "APTEVA_GATEWAY_URL") ||
+		!strings.Contains(got, "APTEVA_APP_TOKEN") {
+		t.Fatalf("missing config = %q", got)
+	}
+
+	previous := globalEventTrigger
+	globalEventTrigger = mgr
+	defer func() { globalEventTrigger = previous }()
+	rec := httptest.NewRecorder()
+	(&App{}).handleSubscriberHealth(rec, httptest.NewRequest(http.MethodGet, "/subscriber/health", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEventTrigger_ConfiguredIdleIsHealthy(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "http://gateway.invalid")
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	mgr := newEventTrigger(ctx)
+	mgr.reconcile()
+	status := mgr.Status()
+	if !status.Healthy || status.State != "idle" {
+		t.Fatalf("status = %+v, want healthy idle", status)
+	}
+}
+
+func TestEventTrigger_AuthenticationFailureIsDiagnosable(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "invalid app token", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "bad-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	mustCreateEventWorkflow(t, ctx, `name: auth-failure
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`)
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconnectDelay = 10 * time.Millisecond
+	mgr.Start()
+	defer mgr.Stop()
+
+	waitForEventStatus(t, mgr, func(status eventSubscriberStatus) bool {
+		return len(status.Lanes) == 1 &&
+			strings.Contains(status.Lanes[0].LastError, "status 401") &&
+			status.Lanes[0].ReconnectCount > 0
+	})
+	status := mgr.Status()
+	if status.Healthy || status.State != "reconnecting" {
+		t.Fatalf("status = %+v, want reconnecting and unhealthy", status)
+	}
+	if requests.Load() == 0 {
+		t.Fatal("subscriber never attempted authentication")
+	}
+}
+
+func TestEventTrigger_ReconnectsWithCursorAndDelivers(t *testing.T) {
+	var connections atomic.Int32
+	secondDelivered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := connections.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		switch n {
+		case 1:
+			fmt.Fprintf(w,
+				"id: 1\ndata: {\"topic\":\"row.inserted\",\"app\":\"tables\","+
+					"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"id\":1}}\n\n",
+				testProj)
+			flusher.Flush()
+		case 2:
+			if got := r.URL.Query().Get("since"); got != "1" {
+				http.Error(w, "missing reconnect cursor: "+got, http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintf(w,
+				"id: 2\ndata: {\"topic\":\"row.inserted\",\"app\":\"tables\","+
+					"\"project_id\":\"%s\",\"seq\":2,\"data\":{\"id\":2}}\n\n",
+				testProj)
+			flusher.Flush()
+			close(secondDelivered)
+			<-r.Context().Done()
+		default:
+			<-r.Context().Done()
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	wf := mustCreateEventWorkflow(t, ctx, `name: reconnect
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`)
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconnectDelay = 10 * time.Millisecond
+	mgr.Start()
+	defer mgr.Stop()
+
+	select {
+	case <-secondDelivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscriber did not reconnect and deliver the second event")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(runs) == 2 {
+			status := mgr.Status()
+			if len(status.Lanes) != 1 || status.Lanes[0].LastEventSeq != 2 {
+				t.Fatalf("cursor diagnostics = %+v, want seq 2", status)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("both reconnected events were not delivered as workflow runs")
+}
+
+func waitForEventStatus(t *testing.T, mgr *eventTrigger, predicate func(eventSubscriberStatus) bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if predicate(mgr.Status()) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("subscriber status condition not reached: %+v", mgr.Status())
 }
 
 // TestTopicMatches: cheap unit coverage on the pattern matcher.

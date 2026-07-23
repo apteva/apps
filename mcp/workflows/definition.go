@@ -28,9 +28,9 @@ type WorkflowDef struct {
 // required; the other fields are kind-specific and validated at
 // parse time.
 //
-// v0.1 supports kind=http and kind=manual only. event/schedule are
-// reserved for v0.2 — parser accepts them so YAML written today
-// stays valid after the upgrade.
+// Manual, HTTP, and event triggers are executable. Schedule remains
+// parseable for backward compatibility, but new scheduled automation
+// should be driven by the Jobs app.
 type TriggerDef struct {
 	Kind   string `yaml:"kind" json:"kind"`
 	Topic  string `yaml:"topic,omitempty" json:"topic,omitempty"`
@@ -150,6 +150,17 @@ func (d *WorkflowDef) Validate() error {
 	if !validTriggerKinds[d.Trigger.Kind] {
 		return fmt.Errorf("trigger.kind %q must be http|manual|event|schedule", d.Trigger.Kind)
 	}
+	if d.Trigger.Kind == "event" {
+		if strings.TrimSpace(d.Trigger.Source) == "" {
+			return errors.New("event trigger.source required")
+		}
+		if strings.TrimSpace(d.Trigger.Topic) == "" {
+			return errors.New("event trigger.topic required")
+		}
+	}
+	if d.Trigger.Kind == "schedule" && strings.TrimSpace(d.Trigger.Cron) == "" {
+		return errors.New("schedule trigger.cron required")
+	}
 	if len(d.Steps) == 0 {
 		return errors.New("workflow has no steps")
 	}
@@ -165,7 +176,7 @@ func (d *WorkflowDef) Validate() error {
 		}
 		seen[s.ID] = true
 		if !validKinds[s.Kind] {
-			return fmt.Errorf("step %q: kind %q must be http|function|app|emit|branch", s.ID, s.Kind)
+			return fmt.Errorf("step %q: kind %q must be http|function|app|integration|emit|branch", s.ID, s.Kind)
 		}
 		if err := validateKind(s); err != nil {
 			return fmt.Errorf("step %q: %w", s.ID, err)
