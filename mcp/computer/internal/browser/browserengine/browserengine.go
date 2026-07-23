@@ -22,6 +22,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -774,7 +775,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
@@ -783,6 +784,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
 			}
+		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		if err := c.dispatchClick(x, y, 1); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
@@ -797,7 +801,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "double_click":
@@ -807,31 +811,35 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 				x, y = e.Center()
 			}
 		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
+		}
 		if err := c.dispatchClick(x, y, 2); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "type":
-		if err := textinput.Type(c.ctx, action.Text, "[BROWSER_ENGINE]"); err != nil {
+		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
+		if err := textinput.TypeWithDelay(c.ctx, action.Text, "[BROWSER_ENGINE]", delay); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
 		if err := keyinput.Dispatch(c.ctx, action.Key, "[BROWSER_ENGINE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "wait":
@@ -846,7 +854,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if _, err := c.selectOption(action); err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	default:

@@ -78,6 +78,36 @@ Treat browser sessions like resources you open and close.
 - Local, Browser Engine, and service sessions currently return
   `status="unsupported"` for recordings.
 
+## Presentation mode for recordings
+
+Open a session with `presentation_mode="demo"` when the browser is performing
+a user-facing walkthrough or recording:
+
+```
+browser_session(
+  action="open",
+  backend="browserbase",
+  presentation_mode="demo",
+  url="https://example.com"
+)
+```
+
+- The default `fast` mode preserves normal automation timing and behavior.
+- On local, Browserbase, Steel, and Browser Engine backends, demo mode adds an
+  in-page cursor and click pulse, types short `computer_use(action="type")`
+  text character by character, and holds each completed action long enough to
+  read in a live view or recording.
+- Browserbase and Steel provider recordings capture the in-page presentation
+  layer. Local and Browser Engine expose it in their live browser views but do
+  not currently produce recordings.
+- Service backends get the paced typing and holds without an in-page cursor,
+  because their wire protocol does not expose a browser DOM connection.
+- For visible short-form entry in a demo, click the field and use `type`. Keep
+  using `set_text` for long content, rich editors, or exact bulk replacement;
+  those actions remain atomic.
+- Presentation rendering is best-effort. If a restricted page prevents the
+  cursor overlay from being injected, the underlying click still runs.
+
 ## Web-browsing patterns
 
 ## Structured controls first

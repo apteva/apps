@@ -11,6 +11,7 @@ import (
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 )
 
 type Computer struct {
@@ -44,26 +45,44 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 	}
 
+	if action.Type == "type" && action.Presentation.Enabled() && action.Presentation.TypingDelayMS > 0 {
+		for _, char := range []rune(action.Text) {
+			part := action
+			part.Text = string(char)
+			if err := c.dispatch(part); err != nil {
+				return nil, err
+			}
+			time.Sleep(time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond)
+		}
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
+		return c.Screenshot()
+	}
+	if err := c.dispatch(action); err != nil {
+		return nil, err
+	}
+	presentation.AfterAction(action.Presentation, 200*time.Millisecond)
+	return c.Screenshot()
+}
+
+func (c *Computer) dispatch(action computer.Action) error {
 	data, _ := json.Marshal(action)
 	req, err := http.NewRequest("POST", c.url+"/action", bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("action %s failed: %w", action.Type, err)
+		return fmt.Errorf("action %s failed: %w", action.Type, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("action %s: HTTP %d: %s", action.Type, resp.StatusCode, string(respBody))
+		return fmt.Errorf("action %s: HTTP %d: %s", action.Type, resp.StatusCode, string(respBody))
 	}
-
-	time.Sleep(200 * time.Millisecond)
-	return c.Screenshot()
+	return nil
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {

@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.53
+version: 0.7.54
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.53 adds compact action
-  deltas, aggregate extraction limits, and reliable navigation actions.
+  Watch, steer, and replay hosted browser sessions. v0.7.54 adds opt-in demo
+  presentation mode for visible cursor, click, and typing actions in recordings.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -43,7 +43,10 @@ provides:
         Open a fresh app-owned browser session, inspect it, close it, or switch
         its tabs. Args: action, session_id?, tab_id?, backend?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for
+        proxy?, proxy_country?, viewport?, presentation_mode?. Use
+        presentation_mode=demo for a visible cursor, click feedback, human-paced
+        typing, and longer holds in user-facing walkthroughs; fast is the
+        default and preserves normal automation speed. session_id is the app-owned live br_* handle for
         status/close/computer_use only. Usually omit viewport to use Computer's
         default desktop viewport, 1600x800. Pass viewport when a specific
         resolution is needed, for example mobile/tablet testing or a
@@ -141,7 +144,8 @@ provides:
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open). Browserbase
-        honors timeout as max session lifetime.
+        honors timeout as max session lifetime. Pass presentation_mode=demo
+        for visible, human-paced actions in live views and recordings.
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,

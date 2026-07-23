@@ -307,6 +307,101 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionDemoPresentationPropagatesToActions(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":            "open",
+		"backend":           "browserbase",
+		"url":               "https://example.com",
+		"presentation_mode": "demo",
+	})
+	if err != nil {
+		t.Fatalf("browser_session demo open: %v", err)
+	}
+	openMap := openOut.(map[string]any)
+	if openMap["presentation_mode"] != "demo" || openMap["presentation_cursor_supported"] != true {
+		t.Fatalf("demo presentation metadata: %#v", openMap)
+	}
+	sessionID := openMap["session_id"].(string)
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "type",
+		"text":       "demo",
+	}); err != nil {
+		t.Fatalf("computer_use demo type: %v", err)
+	}
+	got := fake.lastAction.Presentation
+	if !got.Enabled() || !got.ShowCursor || got.TypingDelayMS <= 0 ||
+		got.PointerDurationMS <= 0 || got.ClickEffectMS <= 0 || got.PostActionDelayMS <= 0 {
+		t.Fatalf("demo presentation not propagated: %+v", got)
+	}
+
+	if _, err := app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID}); err != nil {
+		t.Fatalf("close demo session: %v", err)
+	}
+}
+
+func TestBrowserSessionPresentationDefaultsToFastAndRejectsUnknown(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 800, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "open",
+		"backend": "local",
+	})
+	if err != nil {
+		t.Fatalf("browser_session fast open: %v", err)
+	}
+	openMap := openOut.(map[string]any)
+	if openMap["presentation_mode"] != "fast" {
+		t.Fatalf("default presentation mode: %#v", openMap)
+	}
+	sessionID := openMap["session_id"].(string)
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "type",
+		"text":       "fast",
+	}); err != nil {
+		t.Fatalf("computer_use fast type: %v", err)
+	}
+	if fake.lastAction.Presentation.Enabled() || fake.lastAction.Presentation.TypingDelayMS != 0 {
+		t.Fatalf("default action behavior changed: %+v", fake.lastAction.Presentation)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID})
+
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":            "open",
+		"backend":           "local",
+		"presentation_mode": "cinematic",
+	}); err == nil || !strings.Contains(err.Error(), "presentation_mode") {
+		t.Fatalf("unknown presentation mode should fail validation: %v", err)
+	}
+}
+
 func TestComputerUseReliableNavigationActions(t *testing.T) {
 	fake := &fakeComp{
 		display: backends.DisplaySize{Width: 1024, Height: 768},
@@ -701,6 +796,14 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	}
 	if _, ok := props["backend_session_id"]; ok {
 		t.Fatal("browser_session must not advertise provider-session attachment")
+	}
+	presentationMode, ok := props["presentation_mode"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session presentation_mode schema missing: %#v", props["presentation_mode"])
+	}
+	modes, ok := presentationMode["enum"].([]string)
+	if !ok || len(modes) != 2 || modes[0] != "fast" || modes[1] != "demo" {
+		t.Fatalf("browser_session presentation_mode enum: %#v", presentationMode["enum"])
 	}
 	action, ok := props["action"].(map[string]any)
 	if !ok {
