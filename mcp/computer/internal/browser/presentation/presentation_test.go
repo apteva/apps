@@ -38,7 +38,7 @@ func TestPointerScriptIsNonInteractiveAndUsesCoordinates(t *testing.T) {
 	for _, want := range []string{
 		`"__apteva_demo_cursor"`,
 		`pointerEvents = "none"`,
-		`})("",321,654,true,"",360,520)`,
+		`})("",321,654,true,"",360,520,true)`,
 		`pulse.animate`,
 		`data-apteva-presentation`,
 	} {
@@ -67,6 +67,7 @@ func TestTargetCueUsesResolvedSelectorAndEscapesCaption(t *testing.T) {
 		`Text "updated"`,
 		360,
 		520,
+		true,
 	)
 	for _, want := range []string{
 		`document.querySelector(selector)`,
@@ -90,5 +91,8 @@ func TestCueTargetFastModeIsStrictNoOp(t *testing.T) {
 	}
 	if err := CueTarget(ctx, "#control", 10, 20, true, "Updated", options); err != nil {
 		t.Fatalf("fast presentation unexpectedly touched browser context: %v", err)
+	}
+	if err := MoveToTarget(ctx, "#control", 10, 20, true, options); err != nil {
+		t.Fatalf("fast presentation move unexpectedly touched browser context: %v", err)
 	}
 }

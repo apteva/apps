@@ -53,10 +53,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.56
+version: 0.7.57
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.56 keeps demo
-  presentation cues attached to the exact structured-action control.
+  Watch, steer, and replay hosted browser sessions. v0.7.57 moves the demo
+  cursor onto structured controls before their visible state changes.
 scopes: [project, global]
 requires:
   permissions:

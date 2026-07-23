@@ -407,6 +407,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "upload_file":
+		c.moveToTarget(c.ctx, action)
 		res, err := c.uploadFile(action)
 		if err != nil {
 			return nil, fmt.Errorf("upload_file: %w", err)
@@ -422,6 +423,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "select_option":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
+		c.moveToTarget(ctx, action)
 		res, err := c.selectOption(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
@@ -433,6 +435,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "set_checked":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
+		c.moveToTarget(ctx, action)
 		res, err := c.setChecked(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("set_checked: %w", err)
@@ -448,6 +451,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "set_temporal":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
+		c.moveToTarget(ctx, action)
 		res, err := c.setTemporal(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("set_temporal: %w", err)
@@ -459,6 +463,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "set_text":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
+		c.moveToTarget(ctx, action)
 		res, err := c.setText(ctx, action)
 		if err != nil {
 			return nil, fmt.Errorf("set_text: %w", err)
@@ -806,6 +811,30 @@ func (c *Computer) cueTarget(
 		action.Presentation,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(ctx context.Context, action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation move unavailable, continuing action: %v\n", err)
 	}
 }
 

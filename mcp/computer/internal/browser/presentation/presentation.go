@@ -80,10 +80,41 @@ func CueTarget(
 	clickMS := positive(options.ClickEffectMS, DemoClickEffectMS)
 	var shown bool
 	if err := chromedp.Run(ctx, chromedp.Evaluate(
-		targetCueScript(selector, fallbackX, fallbackY, hasFallback, caption, moveMS, clickMS),
+		targetCueScript(selector, fallbackX, fallbackY, hasFallback, caption, moveMS, clickMS, true),
 		&shown,
 	)); err != nil {
 		return fmt.Errorf("presentation target cue: %w", err)
+	}
+	return nil
+}
+
+// MoveToTarget lets the recording cursor arrive before a structured action
+// changes the page. It is visual-only and waits only in demo mode; the
+// underlying action still performs all real input and navigation.
+func MoveToTarget(
+	ctx context.Context,
+	selector string,
+	fallbackX, fallbackY int,
+	hasFallback bool,
+	options computer.PresentationOptions,
+) error {
+	if !options.Enabled() || !options.ShowCursor {
+		return nil
+	}
+	moveMS := positive(options.PointerDurationMS, DemoPointerDurationMS)
+	clickMS := positive(options.ClickEffectMS, DemoClickEffectMS)
+	var shown bool
+	if err := chromedp.Run(ctx, chromedp.Evaluate(
+		targetCueScript(selector, fallbackX, fallbackY, hasFallback, "", moveMS, clickMS, false),
+		&shown,
+	)); err != nil {
+		return fmt.Errorf("presentation target move: %w", err)
+	}
+	if !shown {
+		return nil
+	}
+	if err := sleepContext(ctx, time.Duration(moveMS)*time.Millisecond); err != nil {
+		return fmt.Errorf("presentation target move: %w", err)
 	}
 	return nil
 }
@@ -100,7 +131,7 @@ func AfterAction(options computer.PresentationOptions, fastDelay time.Duration) 
 }
 
 func pointerScript(x, y, moveMS, clickMS int) string {
-	return targetCueScript("", x, y, true, "", moveMS, clickMS)
+	return targetCueScript("", x, y, true, "", moveMS, clickMS, true)
 }
 
 func targetCueScript(
@@ -109,10 +140,11 @@ func targetCueScript(
 	hasFallback bool,
 	caption string,
 	moveMS, clickMS int,
+	showEffect bool,
 ) string {
 	selectorJSON, _ := json.Marshal(selector)
 	captionJSON, _ := json.Marshal(caption)
-	return fmt.Sprintf(`(function(selector,fallbackX,fallbackY,hasFallback,caption,moveMs,clickMs){
+	return fmt.Sprintf(`(function(selector,fallbackX,fallbackY,hasFallback,caption,moveMs,clickMs,showEffect){
 		var root = document.documentElement || document.body;
 		if (!root) return false;
 		function visibleRect(element) {
@@ -184,6 +216,7 @@ func targetCueScript(
 		cursor.style.left = x + "px";
 		cursor.style.top = y + "px";
 
+		if (!showEffect) return true;
 		window.setTimeout(function(){
 			var pulse = document.createElement("div");
 			pulse.setAttribute("aria-hidden", "true");
@@ -240,8 +273,8 @@ func targetCueScript(
 			}
 		}, moveMs);
 		return true;
-	})(%s,%d,%d,%t,%s,%d,%d)`,
-		string(selectorJSON), fallbackX, fallbackY, hasFallback, string(captionJSON), moveMS, clickMS)
+	})(%s,%d,%d,%t,%s,%d,%d,%t)`,
+		string(selectorJSON), fallbackX, fallbackY, hasFallback, string(captionJSON), moveMS, clickMS, showEffect)
 }
 
 func positive(value, fallback int) int {

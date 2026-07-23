@@ -823,6 +823,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "upload_file":
+		c.moveToTarget(action)
 		res, err := c.uploadFile(action)
 		if err != nil {
 			return nil, fmt.Errorf("upload_file: %w", err)
@@ -836,6 +837,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "select_option":
+		c.moveToTarget(action)
 		res, err := c.selectOption(action)
 		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
@@ -845,6 +847,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "set_checked":
+		c.moveToTarget(action)
 		res, err := c.setChecked(action)
 		if err != nil {
 			return nil, fmt.Errorf("set_checked: %w", err)
@@ -858,6 +861,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "set_temporal":
+		c.moveToTarget(action)
 		res, err := c.setTemporal(action)
 		if err != nil {
 			return nil, fmt.Errorf("set_temporal: %w", err)
@@ -867,6 +871,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "set_text":
+		c.moveToTarget(action)
 		res, err := c.setText(action)
 		if err != nil {
 			return nil, fmt.Errorf("set_text: %w", err)
@@ -1094,6 +1099,30 @@ func (c *Computer) cueTarget(action computer.Action, selector, caption string) {
 		action.Presentation,
 	); err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSER] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		c.ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER] presentation move unavailable, continuing action: %v\n", err)
 	}
 }
 

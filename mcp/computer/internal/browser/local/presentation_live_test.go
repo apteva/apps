@@ -100,6 +100,22 @@ input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px;
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`(function() {
+		const target = document.querySelector('input[data-control="date"]');
+		target.addEventListener('input', function() {
+			const cursor = document.getElementById('__apteva_demo_cursor');
+			const rect = target.getBoundingClientRect();
+			window.dateCursorFocusState = {
+				hasCursor: !!cursor,
+				cursorX: cursor ? parseFloat(cursor.style.left) : 0,
+				cursorY: cursor ? parseFloat(cursor.style.top) : 0,
+				targetX: rect.left + rect.width / 2,
+				targetY: rect.top + rect.height / 2
+			};
+		}, {once:true});
+	})()`, nil)); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.Execute(computer.Action{
 		Type:         "set_temporal",
 		Selector:     `input[data-control="date"]`,
@@ -123,6 +139,24 @@ input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px;
 	}
 	if !dateCueOnTarget {
 		t.Fatal("presentation cue did not target the repeated id-less date input")
+	}
+	var dateCursorFocusState struct {
+		HasCursor bool    `json:"hasCursor"`
+		CursorX   float64 `json:"cursorX"`
+		CursorY   float64 `json:"cursorY"`
+		TargetX   float64 `json:"targetX"`
+		TargetY   float64 `json:"targetY"`
+	}
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(
+		`window.dateCursorFocusState || {}`,
+		&dateCursorFocusState,
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if !dateCursorFocusState.HasCursor ||
+		absFloat(dateCursorFocusState.CursorX-dateCursorFocusState.TargetX) > 2 ||
+		absFloat(dateCursorFocusState.CursorY-dateCursorFocusState.TargetY) > 2 {
+		t.Fatalf("date control opened before the presentation cursor arrived: %+v", dateCursorFocusState)
 	}
 	upload, err := os.CreateTemp(t.TempDir(), "presentation-*.txt")
 	if err != nil {
@@ -185,4 +219,11 @@ input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px;
 	if current.Path != "/next" {
 		t.Fatalf("presentation layer changed click navigation: url=%q", c.CurrentURL())
 	}
+}
+
+func absFloat(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
