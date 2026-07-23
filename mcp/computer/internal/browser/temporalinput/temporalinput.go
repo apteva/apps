@@ -8,6 +8,8 @@ import (
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+
+	"github.com/apteva/apps/mcp/computer/internal/browser/domselector"
 )
 
 type Target struct {
@@ -40,17 +42,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 	js := fmt.Sprintf(`(async function(target, req) {
   req = { Value: String(req.Value ?? req.value ?? '') };
   function norm(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
-  function cssPath(el) {
-    if (!el || !el.tagName) return '';
-    if (el.id) return '#' + CSS.escape(el.id);
-    var parts = [];
-    for (var cur = el; cur && cur.nodeType === 1 && parts.length < 4; cur = cur.parentElement) {
-      var part = cur.tagName.toLowerCase();
-      if (cur.classList && cur.classList.length) part += '.' + CSS.escape(cur.classList[0]);
-      parts.unshift(part);
-    }
-    return parts.join(' > ');
-  }
+%s
   function labelFor(el) {
     if (!el) return '';
     var aria = norm(el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title')));
@@ -140,7 +132,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
     value: after,
     changed: previous !== after
   };
-})(%s, %s)`, string(targetJSON), string(reqJSON))
+})(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
 	var out struct {
 		Result

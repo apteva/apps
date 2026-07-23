@@ -27,14 +27,14 @@ body { margin: 0; background: #10131a; color: white; font: 19px Georgia, serif; 
 #demo { position: fixed; left: 100px; top: 100px; width: 240px; height: 44px; font: 20px monospace; }
 #choice { position:fixed; left:100px; top:180px; width:240px; height:44px; font:17px fantasy; }
 #agree { position:fixed; left:110px; top:260px; width:28px; height:28px; }
-#date { position:fixed; left:100px; top:330px; width:240px; height:44px; }
+input[data-control="date"] { position:fixed; left:100px; top:330px; width:240px; height:44px; }
 #file { position:fixed; left:100px; top:400px; width:280px; }
 #next-link { position:fixed; left:430px; top:100px; width:180px; height:44px; }
 </style>
 <input id="demo" aria-label="Demo text">
 <select id="choice"><option value="one">One</option><option value="two">Two</option></select>
 <input id="agree" type="checkbox" aria-label="Agree">
-<input id="date" type="date" aria-label="Date">
+<input type="date" data-control="date" aria-label="Date">
 <input id="file" type="file" aria-label="File">
 <a id="next-link" href="/next">Next page</a>`))
 	}))
@@ -102,11 +102,27 @@ body { margin: 0; background: #10131a; color: white; font: 19px Georgia, serif; 
 	}
 	if _, err := c.Execute(computer.Action{
 		Type:         "set_temporal",
-		Selector:     "#date",
+		Selector:     `input[data-control="date"]`,
 		Value:        "2026-07-23",
 		Presentation: options,
 	}); err != nil {
 		t.Fatal(err)
+	}
+	var dateCueOnTarget bool
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`(function() {
+		const cursor = document.getElementById("__apteva_demo_cursor");
+		const target = document.querySelector('input[data-control="date"]');
+		if (!cursor || !target) return false;
+		const cursorX = parseFloat(cursor.style.left);
+		const cursorY = parseFloat(cursor.style.top);
+		const rect = target.getBoundingClientRect();
+		return Math.abs(cursorX - (rect.left + rect.width / 2)) <= 2 &&
+			Math.abs(cursorY - (rect.top + rect.height / 2)) <= 2;
+	})()`, &dateCueOnTarget)); err != nil {
+		t.Fatal(err)
+	}
+	if !dateCueOnTarget {
+		t.Fatal("presentation cue did not target the repeated id-less date input")
 	}
 	upload, err := os.CreateTemp(t.TempDir(), "presentation-*.txt")
 	if err != nil {
@@ -139,7 +155,7 @@ body { margin: 0; background: #10131a; color: white; font: 19px Georgia, serif; 
 		value: document.getElementById("demo").value,
 		choice: document.getElementById("choice").value,
 		checked: document.getElementById("agree").checked,
-		date: document.getElementById("date").value,
+		date: document.querySelector('input[data-control="date"]').value,
 		fileCount: document.getElementById("file").files.length
 	})`, &state)); err != nil {
 		t.Fatal(err)
