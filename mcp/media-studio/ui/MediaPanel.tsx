@@ -16,11 +16,13 @@ import {
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldReplaceVoiceSelection,
   shouldSendVideoAspect,
   ttsOutputFormats,
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  voiceProviderSupportsPrompt,
   type DurationKind,
 } from "./mediaPanelLogic";
 
@@ -331,6 +333,8 @@ function providerLabel(provider: string): string {
   if (provider === "fish-audio") return "Fish Audio";
   if (provider === "elevenlabs") return "ElevenLabs";
   if (provider === "deepgram") return "Deepgram";
+  if (provider === "cartesia") return "Cartesia";
+  if (provider === "minimax-audio") return "MiniMax";
   return provider;
 }
 
@@ -479,6 +483,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [voiceCreateAudio, setVoiceCreateAudio] = useState("");
   const [voiceCreateAudioFilename, setVoiceCreateAudioFilename] = useState("");
   const [voiceCreateTranscript, setVoiceCreateTranscript] = useState("");
+  const [voiceCreateLanguage, setVoiceCreateLanguage] = useState("en");
   const [voiceCreating, setVoiceCreating] = useState(false);
   const [audioFormat, setAudioFormat] = useState("mp3");
   const [audioSpeed, setAudioSpeed] = useState(1);
@@ -943,10 +948,15 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     if (activeKind !== "audio_tts" || !selectedAudioProvider) return;
     const candidates = voices.filter((item) => !item.provider || item.provider === selectedAudioProvider);
-    if (candidates.length > 0 && !candidates.some((item) => item.id === voice)) {
+    const trackedVoiceIDs = voiceIdentities
+      .filter((identity) => identity.status === "ready" && identity.provider === selectedAudioProvider)
+      .map((identity) => audioProviders.length > 1
+        ? `${identity.provider}:${identity.provider_identity_id}`
+        : identity.provider_identity_id);
+    if (shouldReplaceVoiceSelection(voice, candidates.map((item) => item.id), trackedVoiceIDs)) {
       setVoice(candidates[0].id);
     }
-  }, [activeKind, selectedAudioProvider, voices, voice]);
+  }, [activeKind, audioProviders.length, selectedAudioProvider, voiceIdentities, voices, voice]);
   useEffect(() => {
     const formats = ttsOutputFormats(selectedAudioProvider);
     if (formats.length > 0 && !formats.includes(audioFormat)) {
@@ -1119,8 +1129,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
-    const provider = voiceCreateProvider || audioProviders.find((item) => item.slug === "elevenlabs" || item.slug === "fish-audio")?.slug;
-    const sourceType = provider === "fish-audio" ? "audio" : voiceCreateSourceType;
+    const voiceCapableProviders = audioProviders.filter((item) =>
+        item.slug === "elevenlabs" || item.slug === "fish-audio" ||
+        item.slug === "cartesia" || item.slug === "minimax-audio"
+      );
+    const provider = voiceCreateProvider ||
+      voiceCapableProviders.find((item) => item.slug === selectedAudioProvider)?.slug ||
+      voiceCapableProviders[0]?.slug;
+    const sourceType = voiceProviderSupportsPrompt(provider) ? voiceCreateSourceType : "audio";
     if (!name) {
       setStatus("Voice name required.");
       return;
@@ -1141,18 +1157,30 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     setStatus("Creating voice…");
     try {
       const options: Record<string, unknown> = sourceType === "prompt"
-        ? {
-          model_id: voiceCreateModel,
-          auto_generate_text: !voiceCreatePreviewText.trim(),
-          should_enhance: voiceCreateEnhance,
-          quality: 0.9,
-          loudness: 0.5,
-          output_format: "mp3_44100_128",
-        }
+        ? provider === "minimax-audio"
+          ? { preview_text: voiceCreatePreviewText.trim() || "Hello, this is a preview of my new voice." }
+          : {
+            model_id: voiceCreateModel,
+            auto_generate_text: !voiceCreatePreviewText.trim(),
+            should_enhance: voiceCreateEnhance,
+            quality: 0.9,
+            loudness: 0.5,
+            output_format: "mp3_44100_128",
+          }
         : provider === "fish-audio"
           ? { visibility: "private", enhance_audio_quality: voiceCreateEnhance, generate_sample: true }
-          : { remove_background_noise: voiceCreateEnhance };
-      if (sourceType === "prompt" && voiceCreatePreviewText.trim()) options.text = voiceCreatePreviewText.trim();
+          : provider === "minimax-audio"
+            ? {
+              need_noise_reduction: voiceCreateEnhance,
+              need_volume_normalization: voiceCreateEnhance,
+              language_boost: "auto",
+            }
+            : provider === "elevenlabs"
+              ? { remove_background_noise: voiceCreateEnhance }
+              : {};
+      if (sourceType === "prompt" && provider === "elevenlabs" && voiceCreatePreviewText.trim()) {
+        options.text = voiceCreatePreviewText.trim();
+      }
       const request: Record<string, unknown> = {
         project_id: projectId,
         kind: "voice",
@@ -1160,6 +1188,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         name,
         source_type: sourceType,
         voice_description: description,
+        preview_text: voiceCreatePreviewText.trim(),
+        language: voiceCreateLanguage.trim() || "en",
         labels: { created_in: "media-studio" },
         options,
       };
@@ -1197,6 +1227,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       }
       const providerVoiceID = result._meta?.provider_identity_id || result._meta?.identity?.provider_identity_id || "";
       const routedVoiceID = providerVoiceID && audioProviders.length > 1 ? `${provider}:${providerVoiceID}` : providerVoiceID;
+      const providerModel = liveModels.find((item) => item.provider === provider);
+      if (providerModel) setAudioModel(providerModel.id);
       if (routedVoiceID) setVoice(routedVoiceID);
       setVoiceCreateName("");
       setVoiceCreateDescription("");
@@ -1204,6 +1236,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setVoiceCreateAudio("");
       setVoiceCreateAudioFilename("");
       setVoiceCreateTranscript("");
+      setVoiceCreateLanguage("en");
       setVoiceCreateOpen(false);
       commitStatus("Voice created.");
       await loadVoiceIdentities();
@@ -1280,6 +1313,16 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         };
       } else if (selectedAudioProvider === "deepgram") {
         body.options = { output_format: audioFormat };
+      } else if (selectedAudioProvider === "cartesia") {
+        body.options = {
+          output_format: audioFormat,
+          generation_config: { speed: audioSpeed },
+        };
+      } else if (selectedAudioProvider === "minimax-audio") {
+        body.options = {
+          output_format: audioFormat,
+          voice_setting: { speed: audioSpeed },
+        };
       }
     } else if (activeKind === "audio_sfx") {
       if (sfxModel) body.model = sfxModel;
@@ -2053,6 +2096,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setVoiceCreateAudioFilename={setVoiceCreateAudioFilename}
             voiceCreateTranscript={voiceCreateTranscript}
             setVoiceCreateTranscript={setVoiceCreateTranscript}
+            voiceCreateLanguage={voiceCreateLanguage}
+            setVoiceCreateLanguage={setVoiceCreateLanguage}
             voiceCreating={voiceCreating}
             createVoice={createVoice}
             onError={setStatus}
@@ -2387,6 +2432,8 @@ interface ComposerProps {
   setVoiceCreateAudioFilename: (v: string) => void;
   voiceCreateTranscript: string;
   setVoiceCreateTranscript: (v: string) => void;
+  voiceCreateLanguage: string;
+  setVoiceCreateLanguage: (v: string) => void;
   voiceCreating: boolean;
   createVoice: () => void;
   audioProviders: ProviderBinding[];
@@ -2422,11 +2469,15 @@ function Composer(p: ComposerProps) {
   const selectedAvatar = p.avatars.find((av) => av.id === p.selectedAvatar);
   const ttsProvider = p.currentModel?.provider || providerFromQualifiedId(p.audioModel) || p.audioProviders[0]?.slug || "";
   const voiceCreationProviders = p.audioProviders.filter(
-    (item) => item.slug === "elevenlabs" || item.slug === "fish-audio",
+    (item) =>
+      item.slug === "elevenlabs" || item.slug === "fish-audio" ||
+      item.slug === "cartesia" || item.slug === "minimax-audio",
   );
   const voiceCreationProvider = voiceCreationProviders.some((item) => item.slug === p.voiceCreateProvider)
     ? p.voiceCreateProvider
-    : voiceCreationProviders[0]?.slug || "";
+    : voiceCreationProviders.some((item) => item.slug === ttsProvider)
+      ? ttsProvider
+      : voiceCreationProviders[0]?.slug || "";
   const ttsVoices = ttsProvider ? p.voices.filter((item) => !item.provider || item.provider === ttsProvider) : p.voices;
   const avatarVBlocked =
     p.kind === "avatar" &&
@@ -2549,6 +2600,8 @@ function Composer(p: ComposerProps) {
               setAudioFilename={p.setVoiceCreateAudioFilename}
               transcript={p.voiceCreateTranscript}
               setTranscript={p.setVoiceCreateTranscript}
+              language={p.voiceCreateLanguage}
+              setLanguage={p.setVoiceCreateLanguage}
               creating={p.voiceCreating}
               createVoice={p.createVoice}
               onError={p.onError}
@@ -2562,7 +2615,7 @@ function Composer(p: ComposerProps) {
             liveModels={p.liveModels}
             liveProvider={p.liveProvider}
           />
-          {(ttsProvider === "fish-audio" || ttsProvider === "deepgram") && (
+          {ttsOutputFormats(ttsProvider).length > 0 && (
             <>
               <div>
                 <label className="text-text-muted text-xs block">Format</label>
@@ -2572,7 +2625,7 @@ function Composer(p: ComposerProps) {
                   ))}
                 </select>
               </div>
-              {ttsProvider === "fish-audio" && (
+              {(ttsProvider === "fish-audio" || ttsProvider === "cartesia" || ttsProvider === "minimax-audio") && (
                 <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
               )}
             </>
@@ -2748,6 +2801,8 @@ function VoiceCreatePanel({
   setAudioFilename,
   transcript,
   setTranscript,
+  language,
+  setLanguage,
   creating,
   createVoice,
   onError,
@@ -2778,6 +2833,8 @@ function VoiceCreatePanel({
   setAudioFilename: (v: string) => void;
   transcript: string;
   setTranscript: (v: string) => void;
+  language: string;
+  setLanguage: (v: string) => void;
   creating: boolean;
   createVoice: () => void;
   onError: (message: string) => void;
@@ -2786,7 +2843,7 @@ function VoiceCreatePanel({
 }) {
   const activeProvider = provider || providers[0]?.slug || "";
   const activeSourceType =
-    activeProvider === "fish-audio" ? "audio" : sourceType;
+    voiceProviderSupportsPrompt(activeProvider) ? sourceType : "audio";
   const readyVoices = identities.filter(
     (x) =>
       x.status === "ready" &&
@@ -2835,7 +2892,7 @@ function VoiceCreatePanel({
             value={activeProvider}
             onChange={(e) => {
               setProvider(e.target.value);
-              if (e.target.value === "fish-audio") setSourceType("audio");
+              if (!voiceProviderSupportsPrompt(e.target.value)) setSourceType("audio");
             }}
             className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
           >
@@ -2884,7 +2941,7 @@ function VoiceCreatePanel({
               onChange={setName}
               placeholder="Narrator"
             />
-            {activeProvider === "elevenlabs" && (
+            {voiceProviderSupportsPrompt(activeProvider) && (
               <div>
                 <label className="text-text-muted text-xs block">Mode</label>
                 <select
@@ -2899,7 +2956,7 @@ function VoiceCreatePanel({
                 </select>
               </div>
             )}
-            {activeSourceType === "prompt" && (
+            {activeSourceType === "prompt" && activeProvider === "elevenlabs" && (
               <div>
                 <label className="text-text-muted text-xs block">
                   Design model
@@ -2916,6 +2973,7 @@ function VoiceCreatePanel({
                 </select>
               </div>
             )}
+            {activeProvider !== "cartesia" && (
             <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none pb-2">
               <input
                 type="checkbox"
@@ -2926,9 +2984,12 @@ function VoiceCreatePanel({
               {activeSourceType === "audio"
                 ? activeProvider === "elevenlabs"
                   ? "Clean audio"
-                  : "Enhance audio"
+                  : activeProvider === "minimax-audio"
+                    ? "Clean & normalize"
+                    : "Enhance audio"
                 : "Enhance prompt"}
             </label>
+            )}
             <button
               onClick={createVoice}
               disabled={
@@ -2968,6 +3029,14 @@ function VoiceCreatePanel({
                     {audioFilename}
                   </span>
                 )}
+                {activeProvider === "cartesia" && (
+                  <TextField
+                    label="Language"
+                    value={language}
+                    onChange={setLanguage}
+                    placeholder="en"
+                  />
+                )}
               </div>
               <div>
                 <label className="text-text-muted text-xs block">
@@ -3004,7 +3073,11 @@ function VoiceCreatePanel({
               <textarea
                 value={previewText}
                 onChange={(e) => setPreviewText(e.target.value)}
-                placeholder="Optional. Leave empty to let ElevenLabs generate preview text."
+                placeholder={
+                  activeProvider === "minimax-audio"
+                    ? "Text for the MiniMax voice preview."
+                    : "Optional. Leave empty to let ElevenLabs generate preview text."
+                }
                 rows={2}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
               />

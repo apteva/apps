@@ -503,7 +503,8 @@ func normalizeAudioProviderArgs(args map[string]any) (string, error) {
 	for _, key := range []string{"model", "voice", "voice_id"} {
 		value := strArg(args, key, "")
 		parsed, stripped, ok := splitProviderModel(value)
-		if !ok || (parsed != "elevenlabs" && parsed != "fish-audio" && parsed != "deepgram") {
+		if !ok || (parsed != "elevenlabs" && parsed != "fish-audio" && parsed != "deepgram" &&
+			parsed != "cartesia" && parsed != "minimax-audio") {
 			continue
 		}
 		if provider != "" && provider != parsed {
@@ -527,7 +528,8 @@ func splitProviderModel(model string) (string, string, bool) {
 			continue
 		}
 		switch parts[0] {
-		case "openai-api", "openai-codex", "venice-ai", "gemini", "elevenlabs", "fish-audio", "deepgram":
+		case "openai-api", "openai-codex", "venice-ai", "gemini", "elevenlabs", "fish-audio",
+			"deepgram", "cartesia", "minimax-audio":
 			return parts[0], parts[1], true
 		}
 	}
@@ -544,9 +546,11 @@ func providerSupportsCapability(provider, capability string) bool {
 func audioProviderSupports(provider, capability string) bool {
 	switch capability {
 	case "audio.tts":
-		return provider == "elevenlabs" || provider == "fish-audio" || provider == "deepgram"
+		return provider == "elevenlabs" || provider == "fish-audio" || provider == "deepgram" ||
+			provider == "cartesia" || provider == "minimax-audio"
 	case "voice.create":
-		return provider == "elevenlabs" || provider == "fish-audio"
+		return provider == "elevenlabs" || provider == "fish-audio" ||
+			provider == "cartesia" || provider == "minimax-audio"
 	case "audio.sfx":
 		return provider == "elevenlabs"
 	}

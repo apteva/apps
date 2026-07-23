@@ -72,7 +72,23 @@ export function ttsProviderUsesSeparateVoice(provider: string): boolean {
 export function ttsOutputFormats(provider: string): string[] {
   if (provider === "deepgram") return ["mp3", "wav", "opus", "flac", "aac"];
   if (provider === "fish-audio") return ["mp3", "wav", "opus", "pcm"];
+  if (provider === "cartesia") return ["mp3", "wav", "pcm"];
+  if (provider === "minimax-audio") return ["mp3", "wav", "flac", "pcm"];
   return [];
+}
+
+export function voiceProviderSupportsPrompt(provider: string): boolean {
+  return provider === "elevenlabs" || provider === "minimax-audio";
+}
+
+export function shouldReplaceVoiceSelection(
+  currentVoice: string,
+  catalogVoiceIDs: string[],
+  trackedVoiceIDs: string[],
+): boolean {
+  return catalogVoiceIDs.length > 0 &&
+    !catalogVoiceIDs.includes(currentVoice) &&
+    !trackedVoiceIDs.includes(currentVoice);
 }
 
 export function formatMediaTime(seconds: number): string {

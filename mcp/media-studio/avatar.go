@@ -719,6 +719,75 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 			})
 		}
 		return out, nil
+	case "cartesia":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"limit": 100, "expand[]": []string{"preview_file_url"}})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("cartesia list_voices non-2xx")
+		}
+		var body struct {
+			Data []struct {
+				ID             string `json:"id"`
+				Name           string `json:"name"`
+				Language       string `json:"language"`
+				Gender         string `json:"gender"`
+				PreviewFileURL string `json:"preview_file_url"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		out := make([]voiceEntry, 0, len(body.Data))
+		for _, voice := range body.Data {
+			if voice.ID == "" {
+				continue
+			}
+			out = append(out, voiceEntry{
+				ID: voice.ID, Name: firstNonEmpty(voice.Name, voice.ID),
+				Language: voice.Language, Gender: voice.Gender, Preview: voice.PreviewFileURL,
+			})
+		}
+		return out, nil
+	case "minimax-audio":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"voice_type": "all"})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("minimax-audio list_voices non-2xx")
+		}
+		type miniMaxVoice struct {
+			VoiceID     string   `json:"voice_id"`
+			VoiceName   string   `json:"voice_name"`
+			Description []string `json:"description"`
+		}
+		var body struct {
+			SystemVoice     []miniMaxVoice      `json:"system_voice"`
+			VoiceCloning    []miniMaxVoice      `json:"voice_cloning"`
+			VoiceGeneration []miniMaxVoice      `json:"voice_generation"`
+			BaseResp        miniMaxBaseResponse `json:"base_resp"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		if err := body.BaseResp.Err(); err != nil {
+			return nil, err
+		}
+		all := append(append(body.SystemVoice, body.VoiceCloning...), body.VoiceGeneration...)
+		out := make([]voiceEntry, 0, len(all))
+		for _, voice := range all {
+			if voice.VoiceID == "" {
+				continue
+			}
+			out = append(out, voiceEntry{
+				ID: voice.VoiceID, Name: firstNonEmpty(voice.VoiceName, voice.VoiceID),
+			})
+		}
+		return out, nil
 	case "deepgram":
 		// Aura voices are model IDs and are exposed through media_models.
 		return []voiceEntry{}, nil
@@ -726,5 +795,5 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 		// Voice is part of the Tavus replica — no separate voice list.
 		return []voiceEntry{}, nil
 	}
-	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
+	return nil, fmt.Errorf("unsupported voice provider: %s", bound.AppSlug)
 }

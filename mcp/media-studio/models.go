@@ -262,6 +262,18 @@ func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, boun
 		}
 		return []modelEntry{}, nil
 	}
+	if bound.AppSlug == "cartesia" {
+		if kind == KindAudioTTS {
+			return cartesiaDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
+	}
+	if bound.AppSlug == "minimax-audio" {
+		if kind == KindAudioTTS {
+			return miniMaxDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
+	}
 	cacheKind := kind
 	if capability != "" {
 		cacheKind = kind + ":" + capability
@@ -660,6 +672,27 @@ func deepgramDefaultModels() []modelEntry {
 		out = append(out, modelEntry{ID: id, Label: id, PromptCharLimit: 2000})
 	}
 	return out
+}
+
+func cartesiaDefaultModels() []modelEntry {
+	return []modelEntry{
+		{ID: "sonic-3.5", Label: "Sonic 3.5"},
+		{ID: "sonic-3", Label: "Sonic 3"},
+		{ID: "sonic-latest", Label: "Sonic Latest"},
+	}
+}
+
+func miniMaxDefaultModels() []modelEntry {
+	return []modelEntry{
+		{ID: "speech-2.8-hd", Label: "Speech 2.8 HD", PromptCharLimit: 10000},
+		{ID: "speech-2.8-turbo", Label: "Speech 2.8 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-2.6-hd", Label: "Speech 2.6 HD", PromptCharLimit: 10000},
+		{ID: "speech-2.6-turbo", Label: "Speech 2.6 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-02-hd", Label: "Speech 02 HD", PromptCharLimit: 10000},
+		{ID: "speech-02-turbo", Label: "Speech 02 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-01-hd", Label: "Speech 01 HD", PromptCharLimit: 10000},
+		{ID: "speech-01-turbo", Label: "Speech 01 Turbo", PromptCharLimit: 10000},
+	}
 }
 
 // buildModelEntryFromVeniceSpec parses a Venice model object into the

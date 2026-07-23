@@ -10,11 +10,13 @@ import {
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldReplaceVoiceSelection,
   shouldSendVideoAspect,
   ttsOutputFormats,
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  voiceProviderSupportsPrompt,
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
@@ -68,7 +70,29 @@ describe("Media Panel logic", () => {
   test("exposes only provider-supported TTS output formats", () => {
     expect(ttsOutputFormats("deepgram")).toEqual(["mp3", "wav", "opus", "flac", "aac"]);
     expect(ttsOutputFormats("fish-audio")).toEqual(["mp3", "wav", "opus", "pcm"]);
+    expect(ttsOutputFormats("cartesia")).toEqual(["mp3", "wav", "pcm"]);
+    expect(ttsOutputFormats("minimax-audio")).toEqual(["mp3", "wav", "flac", "pcm"]);
     expect(ttsOutputFormats("elevenlabs")).toEqual([]);
+  });
+
+  test("only exposes prompt voice design for providers that support it", () => {
+    expect(voiceProviderSupportsPrompt("elevenlabs")).toBe(true);
+    expect(voiceProviderSupportsPrompt("minimax-audio")).toBe(true);
+    expect(voiceProviderSupportsPrompt("fish-audio")).toBe(false);
+    expect(voiceProviderSupportsPrompt("cartesia")).toBe(false);
+  });
+
+  test("preserves tracked voices that are not active in the provider catalog yet", () => {
+    expect(shouldReplaceVoiceSelection(
+      "minimax-audio:clone-1",
+      ["minimax-audio:system-1"],
+      ["minimax-audio:clone-1"],
+    )).toBe(false);
+    expect(shouldReplaceVoiceSelection(
+      "minimax-audio:missing",
+      ["minimax-audio:system-1"],
+      [],
+    )).toBe(true);
   });
 
   test("formats player time without invalid or shifting values", () => {
