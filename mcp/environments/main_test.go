@@ -195,6 +195,11 @@ func TestEmbeddedAndSourceManifestsExposeSameTools(t *testing.T) {
 	if source.Name != embedded.Name || source.Version != embedded.Version || !reflect.DeepEqual(toolNames(*source), toolNames(embedded)) {
 		t.Fatalf("manifest drift: source=%s@%s embedded=%s@%s", source.Name, source.Version, embedded.Name, embedded.Version)
 	}
+	expectedRef := "environments/v" + source.Version
+	if source.Runtime.Source == nil || embedded.Runtime.Source == nil ||
+		source.Runtime.Source.Ref != expectedRef || embedded.Runtime.Source.Ref != expectedRef {
+		t.Fatalf("manifest runtime ref drift: expected=%s source=%v embedded=%v", expectedRef, source.Runtime.Source, embedded.Runtime.Source)
+	}
 }
 
 func TestSpecValidation(t *testing.T) {
