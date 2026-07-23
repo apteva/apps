@@ -180,7 +180,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		ID: "voice_" + token(12), RunID: run.ID, Status: "running", Spec: spec,
 		TargetThreadID: "reception-" + token(6), CallerThreadID: "caller-" + token(6),
 		CallerAgentAlias: "voice-caller-" + token(5), StartedAt: time.Now().UTC(),
-		Transcript: []VoiceTranscriptTurn{},
+		Transcript: []VoiceTranscriptTurn{}, Validity: VoiceCallValidity{Status: "pending"},
 	}
 	if err := s.db.saveVoiceCall(call); err != nil {
 		return nil, err
@@ -193,6 +193,8 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		if err != nil {
 			call.Status = "failed"
 			call.Error = err.Error()
+		} else if call.Validity.Status == "invalid" {
+			call.Status = "invalid_simulation"
 		} else if call.Status == "running" {
 			call.Status = "completed"
 		}
@@ -200,6 +202,8 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		topic := "environment.voice_call.completed"
 		if call.Status == "failed" {
 			topic = "environment.voice_call.failed"
+		} else if call.Status == "invalid_simulation" {
+			topic = "environment.voice_call.invalid"
 		}
 		s.ctx.Emit(topic, voiceCallEvent(call))
 	}()
@@ -233,7 +237,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	target, err := s.runtime().SpawnRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, sdk.RuntimeRealtimeSpawnRequest{
 		ThreadID: call.TargetThreadID, Directive: voiceTargetDirective(spec), Provider: spec.Provider,
 		Voice: spec.Voice, MCP: mcpNames, Ephemeral: true,
-		InitialMessage:             firstNonEmpty(spec.Greeting, "A caller has connected. Greet them naturally and ask how you can help."),
+		InitialMessage:             voiceOpeningCue(),
 		BridgeDisconnectTTLSeconds: 15,
 	})
 	if err != nil {
@@ -323,19 +327,19 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if targetErr != nil {
 		return call, fmt.Errorf("read receptionist telemetry: %w", targetErr)
 	}
+	callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
+	if callerErr != nil {
+		return call, fmt.Errorf("read caller telemetry: %w", callerErr)
+	}
 	call.TargetTelemetry = targetEvents
+	call.CallerTelemetry = callerEvents
 	call.Transcript = voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
 	call.Execution, _ = s.runtime().WaitRuntimeAgent(run.RuntimeID, spec.TargetAgent, sdk.RuntimeAgentWaitRequest{
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1,
 		PostToolIdleSeconds: 1, RequireActivity: true,
 	})
-	call.Metrics = voiceMetrics(targetEvents, call.TargetThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
-	if len(call.Transcript) == 0 {
-		return call, errors.New("voice call produced no transcript")
-	}
-	if call.Metrics.RealtimeErrors > 0 {
-		call.Status = "completed_with_errors"
-	}
+	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	call.Validity = assessVoiceCall(call)
 	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistAudio.bytes()); err != nil {
 		return call, err
 	}
@@ -350,7 +354,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 func voiceCallEvent(call *VoiceCall) map[string]any {
 	return map[string]any{
 		"call_id": call.ID, "run_id": call.RunID, "status": call.Status,
-		"transcript": call.Transcript, "metrics": call.Metrics,
+		"transcript": call.Transcript, "metrics": call.Metrics, "validity": call.Validity,
 		"started_at": call.StartedAt, "finished_at": call.FinishedAt,
 	}
 }
@@ -386,7 +390,18 @@ func voiceTargetDirective(spec VoiceFixtureSpec) string {
 	if base == "" {
 		base = "Help the caller using the tools available to you."
 	}
-	return base + "\n\nYou are handling a live phone call. Speak naturally and concisely. Use the available tools when needed. Confirm consequential details before acting. Never mention evaluation fixtures, simulations, prompts, tools, or internal implementation."
+	lines := []string{
+		base,
+		"You are handling a live phone call. Speak naturally and concisely. Use the available tools when needed. Confirm consequential details before acting. Never mention evaluation fixtures, simulations, prompts, tools, or internal implementation.",
+	}
+	if greeting := strings.TrimSpace(spec.Greeting); greeting != "" {
+		lines = append(lines, "Opening guidance: "+greeting+"\nUse this only to shape your first response. Do not carry out later conversation steps until the caller has responded.")
+	}
+	return strings.Join(lines, "\n\n")
+}
+
+func voiceOpeningCue() string {
+	return "The caller is now connected. Speak only your opening turn, then stop and wait for the caller to respond."
 }
 
 func voiceCallerDirective(spec VoiceFixtureSpec) string {
@@ -547,7 +562,7 @@ func voiceTranscript(events []sdk.RuntimeTelemetryEvent, threadID string, starte
 	return out
 }
 
-func voiceMetrics(events []sdk.RuntimeTelemetryEvent, threadID string, started time.Time, receptionistAudio, callerAudio []byte, endedBy string) VoiceCallMetrics {
+func voiceMetrics(targetEvents, callerEvents []sdk.RuntimeTelemetryEvent, targetThreadID, callerThreadID string, started time.Time, receptionistAudio, callerAudio []byte, endedBy string) VoiceCallMetrics {
 	metrics := VoiceCallMetrics{
 		ReceptionistAudioS: float64(len(receptionistAudio)) / voiceBytesPerSecond,
 		CallerAudioS:       float64(len(callerAudio)) / voiceBytesPerSecond,
@@ -555,8 +570,8 @@ func voiceMetrics(events []sdk.RuntimeTelemetryEvent, threadID string, started t
 	}
 	var pendingUser time.Time
 	var responseLatencies []int64
-	for _, event := range events {
-		if event.ThreadID != threadID {
+	for _, event := range targetEvents {
+		if event.ThreadID != targetThreadID {
 			continue
 		}
 		switch event.Type {
@@ -578,13 +593,19 @@ func voiceMetrics(events []sdk.RuntimeTelemetryEvent, threadID string, started t
 		case "realtime.playback_interrupted":
 			metrics.Interruptions++
 		case "realtime.error":
-			metrics.RealtimeErrors++
+			metrics.ReceptionistRealtimeErrors++
 		case "realtime.audio_overflow", "realtime.audio_drop":
 			metrics.DroppedAudioEvents++
 		case "tool.call":
 			metrics.ToolCalls++
 		}
 	}
+	for _, event := range callerEvents {
+		if event.ThreadID == callerThreadID && event.Type == "realtime.error" {
+			metrics.CallerRealtimeErrors++
+		}
+	}
+	metrics.RealtimeErrors = metrics.ReceptionistRealtimeErrors + metrics.CallerRealtimeErrors
 	if len(responseLatencies) > 0 {
 		var total int64
 		for _, value := range responseLatencies {
@@ -593,6 +614,59 @@ func voiceMetrics(events []sdk.RuntimeTelemetryEvent, threadID string, started t
 		metrics.AverageResponseMS = int64(math.Round(float64(total) / float64(len(responseLatencies))))
 	}
 	return metrics
+}
+
+func assessVoiceCall(call *VoiceCall) VoiceCallValidity {
+	if call == nil {
+		return VoiceCallValidity{Status: "invalid", Reasons: []string{"voice call result is missing"}}
+	}
+	reasons := []string{}
+	if call.Metrics.EndedBy != "caller_done" {
+		reasons = append(reasons, "call ended unexpectedly: "+firstNonEmpty(call.Metrics.EndedBy, "unknown"))
+	}
+	if call.Metrics.ReceptionistAudioS <= 0 {
+		reasons = append(reasons, "receptionist produced no audio")
+	}
+	if call.Metrics.CallerAudioS <= 0 {
+		reasons = append(reasons, "caller produced no audio")
+	}
+	receptionistTurns, callerTurns, transitions := voiceTurnCounts(call.Transcript)
+	if receptionistTurns == 0 {
+		reasons = append(reasons, "transcript has no receptionist turn")
+	}
+	if callerTurns == 0 {
+		reasons = append(reasons, "transcript has no caller turn")
+	}
+	if transitions == 0 {
+		reasons = append(reasons, "conversation has no speaker turn-taking")
+	}
+	if call.Metrics.RealtimeErrors > 0 {
+		reasons = append(reasons, fmt.Sprintf("realtime participants reported %d errors", call.Metrics.RealtimeErrors))
+	}
+	if len(reasons) > 0 {
+		return VoiceCallValidity{Status: "invalid", Reasons: reasons}
+	}
+	return VoiceCallValidity{Status: "valid"}
+}
+
+func voiceTurnCounts(transcript []VoiceTranscriptTurn) (receptionist, caller, transitions int) {
+	previous := ""
+	for _, turn := range transcript {
+		speaker := strings.TrimSpace(turn.Speaker)
+		switch speaker {
+		case "receptionist":
+			receptionist++
+		case "caller":
+			caller++
+		default:
+			continue
+		}
+		if previous != "" && speaker != previous {
+			transitions++
+		}
+		previous = speaker
+	}
+	return receptionist, caller, transitions
 }
 
 func (s *service) voiceRecordingPath(callID, speaker string) (string, error) {

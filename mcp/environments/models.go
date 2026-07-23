@@ -107,6 +107,7 @@ type VoiceCall struct {
 	RunID            string                      `json:"run_id"`
 	Status           string                      `json:"status"`
 	Error            string                      `json:"error,omitempty"`
+	Validity         VoiceCallValidity           `json:"validity"`
 	Spec             VoiceFixtureSpec            `json:"spec"`
 	TargetThreadID   string                      `json:"target_thread_id"`
 	CallerThreadID   string                      `json:"caller_thread_id"`
@@ -118,7 +119,13 @@ type VoiceCall struct {
 	StartedAt        time.Time                   `json:"started_at"`
 	FinishedAt       *time.Time                  `json:"finished_at,omitempty"`
 	TargetTelemetry  []sdk.RuntimeTelemetryEvent `json:"target_telemetry,omitempty"`
+	CallerTelemetry  []sdk.RuntimeTelemetryEvent `json:"caller_telemetry,omitempty"`
 	Execution        *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
+}
+
+type VoiceCallValidity struct {
+	Status  string   `json:"status"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 type VoiceTranscriptTurn struct {
@@ -129,16 +136,18 @@ type VoiceTranscriptTurn struct {
 }
 
 type VoiceCallMetrics struct {
-	DurationMS         int64   `json:"duration_ms"`
-	FirstResponseMS    int64   `json:"first_response_ms,omitempty"`
-	AverageResponseMS  int64   `json:"average_response_ms,omitempty"`
-	ReceptionistAudioS float64 `json:"receptionist_audio_seconds"`
-	CallerAudioS       float64 `json:"caller_audio_seconds"`
-	Interruptions      int     `json:"interruptions"`
-	ToolCalls          int     `json:"tool_calls"`
-	RealtimeErrors     int     `json:"realtime_errors"`
-	DroppedAudioEvents int     `json:"dropped_audio_events"`
-	EndedBy            string  `json:"ended_by"`
+	DurationMS                 int64   `json:"duration_ms"`
+	FirstResponseMS            int64   `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64   `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64 `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64 `json:"caller_audio_seconds"`
+	Interruptions              int     `json:"interruptions"`
+	ToolCalls                  int     `json:"tool_calls"`
+	RealtimeErrors             int     `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int     `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int     `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int     `json:"dropped_audio_events"`
+	EndedBy                    string  `json:"ended_by"`
 }
 
 type SeedStep struct {

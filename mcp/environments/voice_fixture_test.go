@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,58 @@ func TestVoiceMediaQueueCombinesChunksAndAcknowledgesInOrder(t *testing.T) {
 	if !bytes.Equal(frame[:voiceFrameBytes/2], bytes.Repeat([]byte{0x11}, voiceFrameBytes/2)) ||
 		!bytes.Equal(frame[voiceFrameBytes/2:], bytes.Repeat([]byte{0x22}, voiceFrameBytes/2)) {
 		t.Fatal("combined frame did not preserve chunk order")
+	}
+}
+
+func TestVoiceCallValidityRequiresTwoSidedConversation(t *testing.T) {
+	call := &VoiceCall{
+		Transcript: []VoiceTranscriptTurn{{Speaker: "receptionist", Text: "Hello"}},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "audio_disconnected", ReceptionistAudioS: 1.2,
+		},
+	}
+
+	validity := assessVoiceCall(call)
+	if validity.Status != "invalid" {
+		t.Fatalf("status=%q reasons=%v", validity.Status, validity.Reasons)
+	}
+	joined := strings.Join(validity.Reasons, "\n")
+	for _, expected := range []string{"audio_disconnected", "caller produced no audio", "no caller turn", "no speaker turn-taking"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("missing %q in %q", expected, joined)
+		}
+	}
+}
+
+func TestVoiceCallValidityAcceptsCompletedExchange(t *testing.T) {
+	call := &VoiceCall{
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Hello"},
+			{Speaker: "caller", Text: "Please call me tomorrow"},
+			{Speaker: "receptionist", Text: "Certainly"},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "caller_done", ReceptionistAudioS: 1.2, CallerAudioS: 1,
+		},
+	}
+
+	validity := assessVoiceCall(call)
+	if validity.Status != "valid" || len(validity.Reasons) != 0 {
+		t.Fatalf("validity=%#v", validity)
+	}
+}
+
+func TestVoiceOpeningGuidanceDoesNotBecomeInitialConversationPrompt(t *testing.T) {
+	spec := VoiceFixtureSpec{TargetDirective: "Be a receptionist.", Greeting: "Ask when to call back."}
+	directive := voiceTargetDirective(spec)
+	if !strings.Contains(directive, "Opening guidance: Ask when to call back.") {
+		t.Fatalf("directive=%q", directive)
+	}
+	if strings.Contains(voiceOpeningCue(), spec.Greeting) {
+		t.Fatalf("opening cue contains scenario guidance: %q", voiceOpeningCue())
+	}
+	if !strings.Contains(voiceOpeningCue(), "stop and wait") {
+		t.Fatalf("opening cue=%q", voiceOpeningCue())
 	}
 }
 

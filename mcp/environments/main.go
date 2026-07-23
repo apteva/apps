@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.4.3
+version: 0.4.4
 description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, interactive web and voice fixtures, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
@@ -62,12 +62,13 @@ provides:
     - { name: environment.voice_call.started, description: "A simulated realtime voice call started." }
     - { name: environment.voice_call.progress, description: "A simulated voice call produced additional transcript turns." }
     - { name: environment.voice_call.completed, description: "A simulated realtime voice call completed." }
+    - { name: environment.voice_call.invalid, description: "A simulated voice call did not produce a valid two-sided conversation." }
     - { name: environment.voice_call.failed, description: "A simulated realtime voice call failed." }
   ui_panels: [{ slot: project.page, label: "Environments", icon: boxes, entry: /ui/EnvironmentsPanel.mjs }]
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.4.3, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.4.4, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
