@@ -56,6 +56,10 @@ func TestVoiceCallPersistenceAndValidation(t *testing.T) {
 	if got == nil || got.Spec.CallerGoal != call.Spec.CallerGoal || len(got.Transcript) != 1 || got.Metrics.FirstResponseMS != 850 {
 		t.Fatalf("voice call=%#v", got)
 	}
+	event := voiceCallEvent(got)
+	if event["call_id"] != call.ID || event["run_id"] != call.RunID || len(event["transcript"].([]VoiceTranscriptTurn)) != 1 {
+		t.Fatalf("voice event=%#v", event)
+	}
 	if err := validateVoiceSpec(VoiceFixtureSpec{CallerGoal: "Help me", TimeoutSeconds: 90}); err != nil {
 		t.Fatal(err)
 	}

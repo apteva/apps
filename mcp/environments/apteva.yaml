@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.4.2
+version: 0.4.3
 description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, interactive web and voice fixtures, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
@@ -53,6 +53,10 @@ provides:
     - { name: environment.failed, description: "Environment startup or reconciliation failed." }
     - { name: environment.expired, description: "A runtime disappeared or reached its TTL." }
     - { name: snapshot.created, description: "A reusable environment snapshot was captured." }
+    - { name: environment.voice_call.started, description: "A simulated realtime voice call started." }
+    - { name: environment.voice_call.progress, description: "A simulated voice call produced additional transcript turns." }
+    - { name: environment.voice_call.completed, description: "A simulated realtime voice call completed." }
+    - { name: environment.voice_call.failed, description: "A simulated realtime voice call failed." }
   ui_panels:
     - { slot: project.page, label: "Environments", icon: boxes, entry: /ui/EnvironmentsPanel.mjs }
   workers:
@@ -61,7 +65,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: environments/v0.4.2
+    ref: environments/v0.4.3
     entry: mcp/environments
   port: 8080
   health_check: /health

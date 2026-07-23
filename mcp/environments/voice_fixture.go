@@ -185,6 +185,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if err := s.db.saveVoiceCall(call); err != nil {
 		return nil, err
 	}
+	s.ctx.Emit("environment.voice_call.started", voiceCallEvent(call))
 	defer func() {
 		finished := time.Now().UTC()
 		call.FinishedAt = &finished
@@ -196,6 +197,11 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 			call.Status = "completed"
 		}
 		_ = s.db.saveVoiceCall(call)
+		topic := "environment.voice_call.completed"
+		if call.Status == "failed" {
+			topic = "environment.voice_call.failed"
+		}
+		s.ctx.Emit(topic, voiceCallEvent(call))
 	}()
 
 	runtime, err := s.runtime().GetRuntime(run.RuntimeID)
@@ -276,6 +282,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	endedBy := ""
+	lastTranscript := ""
 	for endedBy == "" {
 		select {
 		case <-ctx.Done():
@@ -292,6 +299,19 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 			events, listErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
 			if listErr == nil && hasThreadEvent(events, call.CallerThreadID, "thread.done") {
 				endedBy = "caller_done"
+			}
+			targetEvents, targetListErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
+			if targetListErr == nil {
+				transcript := voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
+				raw, _ := json.Marshal(transcript)
+				signature := string(raw)
+				if len(transcript) > 0 && signature != lastTranscript {
+					lastTranscript = signature
+					call.Transcript = transcript
+					call.TargetTelemetry = targetEvents
+					_ = s.db.saveVoiceCall(call)
+					s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
+				}
 			}
 		}
 	}
@@ -325,6 +345,14 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
 	return call, nil
+}
+
+func voiceCallEvent(call *VoiceCall) map[string]any {
+	return map[string]any{
+		"call_id": call.ID, "run_id": call.RunID, "status": call.Status,
+		"transcript": call.Transcript, "metrics": call.Metrics,
+		"started_at": call.StartedAt, "finished_at": call.FinishedAt,
+	}
 }
 
 func normalizeVoiceSpec(spec *VoiceFixtureSpec) {
