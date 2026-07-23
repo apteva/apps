@@ -2,13 +2,17 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.52
+version: 0.10.53
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs, Fish Audio, Cartesia, and MiniMax can power
   TTS and reusable voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.52 adds provider-neutral Cartesia and MiniMax TTS,
+  references. v0.10.53 publishes the complete provider-neutral voice
+  stack with Fish Audio, Cartesia, and MiniMax cloning available through
+  the same Media Studio tools and UI.
+
+  v0.10.52 adds provider-neutral Cartesia and MiniMax TTS,
   voice catalogs, cloning, and MiniMax prompt-based Voice Design.
 
   v0.10.51 adds a responsive generation card for chat with image
