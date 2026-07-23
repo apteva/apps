@@ -175,10 +175,11 @@ interface Suite {
   environment_id?: string;
   judge_model?: string;
   continuous_targets?: Target[];
-  schedule_minutes: number;
+  schedule_minutes?: number;
   required_pass_rate: number;
   enabled: boolean;
   revision: number;
+  next_run_at?: string;
   cases: EvalCase[];
 }
 
@@ -343,6 +344,33 @@ const formatDate = (value: string) => new Date(value).toLocaleString([], {
   hour: "2-digit",
   minute: "2-digit",
 });
+const scheduleLabel = (minutes?: number) => {
+  if (!minutes) return "Manual";
+  if (minutes === 60) return "Hourly";
+  if (minutes === 360) return "Every 6 hours";
+  if (minutes === 1440) return "Daily";
+  if (minutes === 10080) return "Weekly";
+  return `Every ${minutes} minutes`;
+};
+const scenarioCountLabel = (count: number) => `${count} ${count === 1 ? "scenario" : "scenarios"}`;
+const experimentOutcome = (experiment: Experiment) => {
+  if (experiment.status !== "completed") return experiment.status;
+  if (!experiment.summary) return "completed";
+  return experiment.summary.failed + experiment.summary.errors > 0 ? "fail" : "pass";
+};
+const suiteHealth = (suite: Suite, experiments: Experiment[]) => {
+  if (!suite.enabled) return { label: "Paused", tone: "muted" };
+  const relevant = suite.schedule_minutes > 0
+    ? experiments.find((experiment) => experiment.trigger_type === "schedule")
+    : experiments[0];
+  if (!relevant) return { label: suite.schedule_minutes > 0 ? "Waiting" : "Not run", tone: "muted" };
+  if (relevant.status === "queued" || relevant.status === "running") {
+    return { label: relevant.status === "queued" ? "Queued" : "Running", tone: "active" };
+  }
+  if (relevant.status !== "completed" || !relevant.summary) return { label: "Error", tone: "bad" };
+  const passing = relevant.summary.pass_rate >= suite.required_pass_rate;
+  return { label: passing ? "Passing" : "Regression", tone: passing ? "good" : "bad" };
+};
 
 const styles = `
 .ev-shell,.ev-shell *{box-sizing:border-box}.ev-shell{height:100%;width:100%;overflow:auto;background:var(--color-bg);color:var(--color-text)}
@@ -352,8 +380,10 @@ const styles = `
 .ev-error{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--color-error) 45%,transparent);border-radius:6px;background:color-mix(in srgb,var(--color-error) 10%,transparent);color:var(--color-error);font-size:12px}
 .ev-workspace{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);min-height:calc(100vh - 126px);border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-run-list{min-width:0;border-right:1px solid var(--color-border);background:var(--color-bg-card)}.ev-pane-heading{display:flex;align-items:center;justify-content:space-between;min-height:44px;padding:0 14px;border-bottom:1px solid var(--color-border);font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
 .ev-run-row{display:block;width:100%;padding:12px 14px;border-bottom:1px solid var(--color-border);text-align:left}.ev-run-row:hover{background:var(--color-bg-hover)}.ev-run-row[data-active=true]{background:var(--color-bg)}.ev-run-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}.ev-run-meta,.ev-muted{color:var(--color-text-dim);font-size:11px}.ev-run-meta{display:flex;justify-content:space-between;gap:10px;margin-top:5px}.ev-run-stat{font-variant-numeric:tabular-nums}
-.ev-detail{min-width:0}.ev-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--color-border)}.ev-detail-title{margin:0;font-size:16px;font-weight:650}.ev-detail-id{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-status{font-size:11px;font-weight:700;text-transform:uppercase}.ev-status[data-tone=good]{color:var(--color-success)}.ev-status[data-tone=bad]{color:var(--color-error)}.ev-status[data-tone=active]{color:var(--color-accent)}.ev-status[data-tone=muted]{color:var(--color-text-dim)}
-.ev-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border-bottom:1px solid var(--color-border)}.ev-metric{min-width:0;padding:13px 18px;border-right:1px solid var(--color-border)}.ev-metric:last-child{border-right:0}.ev-metric-label{display:block;color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-metric-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}.ev-section{padding:17px 18px;border-bottom:1px solid var(--color-border)}.ev-section:last-child{border-bottom:0}.ev-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.ev-section-title{font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
+.ev-eval-row{display:block;width:100%;padding:12px 14px;border-bottom:1px solid var(--color-border);text-align:left}.ev-eval-row:hover{background:var(--color-bg-hover)}.ev-eval-row[data-active=true]{background:var(--color-bg)}.ev-eval-row-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.ev-eval-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:650}.ev-eval-row-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;color:var(--color-text-dim);font-size:11px}.ev-eval-row-score{font-variant-numeric:tabular-nums}
+.ev-detail{min-width:0}.ev-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--color-border)}.ev-detail-title{margin:0;font-size:16px;font-weight:650}.ev-detail-id{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-detail-actions{display:flex;align-items:center;gap:8px}.ev-status{font-size:11px;font-weight:700;text-transform:uppercase}.ev-status[data-tone=good]{color:var(--color-success)}.ev-status[data-tone=bad]{color:var(--color-error)}.ev-status[data-tone=active]{color:var(--color-accent)}.ev-status[data-tone=muted]{color:var(--color-text-dim)}
+.ev-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border-bottom:1px solid var(--color-border)}.ev-eval-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.ev-metric{min-width:0;padding:13px 18px;border-right:1px solid var(--color-border)}.ev-metric:last-child{border-right:0}.ev-metric-label{display:block;color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-metric-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}.ev-section{padding:17px 18px;border-bottom:1px solid var(--color-border)}.ev-section:last-child{border-bottom:0}.ev-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.ev-section-title{font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
+.ev-config{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-config-item{min-width:0;padding:11px 18px;border-right:1px solid var(--color-border)}.ev-config-item:last-child{border-right:0}.ev-config-label{display:block;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-config-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.ev-selected-run-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.ev-selected-run-title{font-size:13px;font-weight:650}.ev-selected-run-meta{margin-top:2px;color:var(--color-text-dim);font-size:11px}.ev-history-grid{display:grid;grid-template-columns:minmax(150px,1.2fr) 100px 88px 72px 78px;gap:12px;align-items:center}.ev-table-row[data-active=true]{background:var(--color-bg-hover)}
 .ev-table{border:1px solid var(--color-border);border-radius:5px;overflow:hidden}.ev-target-grid{display:grid;grid-template-columns:minmax(180px,1fr) 92px 82px 100px 90px;gap:12px;align-items:center}.ev-case-grid{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(160px,1fr) 66px 70px 78px;gap:12px;align-items:center}.ev-table-head{padding:8px 11px;border-bottom:1px solid var(--color-border);background:var(--color-bg-card);color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-table-row{width:100%;padding:9px 11px;border-bottom:1px solid var(--color-border);font-size:12px;text-align:left}.ev-table-row:last-child{border-bottom:0}.ev-table-row:hover{background:var(--color-bg-hover)}.ev-case-result:last-child>.ev-table-row{border-bottom:0}.ev-case-result[data-has-goals=true]>.ev-table-row{border-bottom:1px solid var(--color-border)}.ev-inline-goals{border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-case-result:last-child .ev-inline-goals{border-bottom:0}.ev-inline-goals-head{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-truncate{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ev-empty{display:flex;min-height:220px;align-items:center;justify-content:center;padding:32px;text-align:center;color:var(--color-text-dim);font-size:13px}.ev-empty strong{display:block;margin-bottom:6px;color:var(--color-text);font-size:14px}.ev-empty .ev-primary{margin-top:14px}
 .ev-plan-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-plan{border-bottom:1px solid var(--color-border)}.ev-plan:last-child{border-bottom:0}.ev-plan-header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px 16px}.ev-plan-name{font-size:14px;font-weight:650}.ev-plan-meta{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-scenarios{border-top:1px solid var(--color-border);background:var(--color-bg-card)}.ev-scenario{display:block;width:100%;padding:10px 16px;border-bottom:1px solid var(--color-border);text-align:left}.ev-scenario:last-child{border-bottom:0}.ev-scenario:hover{background:var(--color-bg-hover)}.ev-scenario-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.ev-scenario-name{display:block;font-size:12px;font-weight:600}.ev-scenario-prompt{display:block;max-width:760px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-dim);font-size:11px}.ev-definition-list{display:grid;gap:4px;margin-top:9px;padding-top:8px;border-top:1px solid color-mix(in srgb,var(--color-border) 70%,transparent)}.ev-definition-goal{display:grid;grid-template-columns:7px minmax(0,1fr);align-items:start;gap:8px;color:var(--color-text-dim);font-size:11px;line-height:1.4}.ev-definition-dot{width:5px;height:5px;margin-top:5px;border-radius:50%;background:var(--color-text-dim)}
@@ -365,8 +395,8 @@ const styles = `
 .ev-task-list{display:grid;gap:10px}.ev-task-card{padding:12px;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg-card)}.ev-task-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.ev-task-number{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--color-text-dim)}.ev-task-fields{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:10px}.ev-task-fields textarea{min-height:94px}.ev-seed-card{padding:10px;border:1px solid var(--color-border);border-radius:5px;background:var(--color-bg)}.ev-seed-head{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(160px,1.2fr) 32px;gap:8px;align-items:center}.ev-seed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.ev-seed-fields .ev-label{text-transform:none}
 .ev-inspector-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-inspector-section{margin-top:20px}.ev-result-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-result-row{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;border-bottom:1px solid var(--color-border)}.ev-result-row:last-child{border-bottom:0}.ev-trace-role{margin-bottom:4px;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-trace-text{white-space:pre-wrap;font-size:12px;line-height:1.45}.ev-code{max-height:170px;overflow:auto;white-space:pre-wrap;padding:8px;border-radius:4px;background:var(--color-bg-card);font-family:monospace;font-size:10px}.ev-suggestion{padding:12px;border:1px solid var(--color-border);border-radius:6px}.ev-suggestion-actions{display:flex;justify-content:flex-end;margin-top:10px}
 .ev-evaluation{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-evaluation-head{padding:12px}.ev-evaluation-result{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px}.ev-evaluation-score{font-size:17px;font-variant-numeric:tabular-nums}.ev-evaluation-score[data-tone=good],.ev-goal-row[data-tone=good] .ev-goal-result{color:var(--color-success)}.ev-evaluation-score[data-tone=warn],.ev-goal-row[data-tone=warn] .ev-goal-result{color:#d89a2b}.ev-evaluation-score[data-tone=bad],.ev-goal-row[data-tone=bad] .ev-goal-result{color:var(--color-error)}.ev-evaluation-reason{font-size:12px;line-height:1.5}.ev-goal-list{border-top:1px solid var(--color-border)}.ev-goal-row{display:grid;grid-template-columns:7px minmax(0,1fr) auto auto;align-items:start;column-gap:9px;row-gap:3px;padding:9px 12px;border-bottom:1px solid var(--color-border)}.ev-goal-row:last-child{border-bottom:0}.ev-goal-dot{width:6px;height:6px;margin-top:5px;border-radius:50%;background:var(--color-text-dim)}.ev-goal-row[data-tone=good] .ev-goal-dot{background:var(--color-success)}.ev-goal-row[data-tone=warn] .ev-goal-dot{background:#d89a2b}.ev-goal-row[data-tone=bad] .ev-goal-dot{background:var(--color-error)}.ev-goal-row[data-tone=muted] .ev-goal-result{color:var(--color-text-dim)}.ev-goal-name{min-width:0;font-size:12px;font-weight:600;line-height:1.4}.ev-goal-result{font-size:10px;font-weight:700;text-transform:uppercase}.ev-goal-score{min-width:24px;text-align:right;font-size:12px;font-weight:650;font-variant-numeric:tabular-nums}.ev-goal-why{grid-column:2/-1;color:var(--color-text-dim);font-size:11px;line-height:1.4}
-@media(max-width:900px){.ev-workspace{grid-template-columns:1fr}.ev-run-list{max-height:300px;overflow:auto;border-right:0;border-bottom:1px solid var(--color-border)}.ev-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-metric:nth-child(3){border-right:0}.ev-metric:nth-child(n+4){border-top:1px solid var(--color-border)}}
-@media(max-width:680px){.ev-page{padding:14px}.ev-toolbar{align-items:stretch;flex-direction:column}.ev-actions{display:grid;grid-template-columns:1fr 1fr}.ev-actions>*{width:100%}.ev-grid-2,.ev-task-fields,.ev-seed-fields{grid-template-columns:1fr}.ev-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-plan-header{align-items:flex-start;flex-direction:column}.ev-plan-header .ev-actions{display:flex;width:100%}.ev-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(2n){border-right:0}.ev-metric:nth-child(n+3){border-top:1px solid var(--color-border)}.ev-target-grid,.ev-case-grid{grid-template-columns:minmax(0,1fr) 78px}.ev-table-head{display:none}.ev-table-row>*:nth-child(n+3){display:none}.ev-scenario-top{align-items:flex-start;flex-direction:column}.ev-drawer-body{padding:16px}.ev-seed-head{grid-template-columns:1fr 32px}.ev-seed-head select:nth-child(2){grid-column:1/-1;grid-row:2}.ev-selected{align-items:flex-start;flex-direction:column}.ev-selected .ev-actions{display:flex;width:100%}}
+@media(max-width:900px){.ev-workspace{grid-template-columns:1fr}.ev-run-list{max-height:300px;overflow:auto;border-right:0;border-bottom:1px solid var(--color-border)}.ev-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-eval-metrics,.ev-config{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(3){border-right:0}.ev-metric:nth-child(n+4){border-top:1px solid var(--color-border)}.ev-eval-metrics .ev-metric:nth-child(2){border-right:0}.ev-eval-metrics .ev-metric:nth-child(3){border-top:1px solid var(--color-border);border-right:1px solid var(--color-border)}.ev-config-item:nth-child(2){border-right:0}.ev-config-item:nth-child(n+3){border-top:1px solid var(--color-border)}}
+@media(max-width:680px){.ev-page{padding:14px}.ev-toolbar{align-items:stretch;flex-direction:column}.ev-actions{display:grid;grid-template-columns:1fr 1fr}.ev-actions>*{width:100%}.ev-grid-2,.ev-task-fields,.ev-seed-fields{grid-template-columns:1fr}.ev-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-plan-header,.ev-detail-header{align-items:flex-start;flex-direction:column}.ev-plan-header .ev-actions,.ev-detail-actions{display:flex;width:100%}.ev-detail-actions .ev-button,.ev-detail-actions .ev-primary{flex:1}.ev-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(2n){border-right:0}.ev-metric:nth-child(n+3){border-top:1px solid var(--color-border)}.ev-config{grid-template-columns:1fr}.ev-config-item{border-right:0;border-top:1px solid var(--color-border)}.ev-config-item:first-child{border-top:0}.ev-target-grid,.ev-case-grid,.ev-history-grid{grid-template-columns:minmax(0,1fr) 78px}.ev-table-head{display:none}.ev-table-row>*:nth-child(n+3){display:none}.ev-scenario-top{align-items:flex-start;flex-direction:column}.ev-drawer-body{padding:16px}.ev-seed-head{grid-template-columns:1fr 32px}.ev-seed-head select:nth-child(2){grid-column:1/-1;grid-row:2}.ev-selected{align-items:flex-start;flex-direction:column}.ev-selected .ev-actions{display:flex;width:100%}}
 `;
 
 function Status({ value }: { value: string }) {
@@ -379,6 +409,11 @@ function Status({ value }: { value: string }) {
         : "muted";
   const label = value === "completed" ? "Complete" : value === "queued" ? "Queued" : value;
   return <span className="ev-status" data-tone={tone}>{label}</span>;
+}
+
+function EvalHealth({ suite, experiments }: { suite: Suite; experiments: Experiment[] }) {
+  const health = suiteHealth(suite, experiments);
+  return <span className="ev-status" data-tone={health.tone}>{health.label}</span>;
 }
 
 function Empty({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
@@ -789,7 +824,7 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   initial?: Suite;
   catalog: Catalog;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (suite: Suite) => void;
 }) {
   const [item, setItem] = useState<Partial<Suite>>(initial || { name: "", description: "", environment_id: "", judge_model: "", schedule_minutes: 0, required_pass_rate: 1, enabled: true, continuous_targets: [] });
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -804,8 +839,8 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   const save = async () => {
     setBusy(true);
     try {
-      await request(initial ? `/suites/${initial.id}` : "/suites", { method: initial ? "PUT" : "POST", body: JSON.stringify(item) });
-      onSaved();
+      const saved = await request<Suite>(initial ? `/suites/${initial.id}` : "/suites", { method: initial ? "PUT" : "POST", body: JSON.stringify(item) });
+      onSaved(saved);
       onClose();
     } catch (cause: any) {
       setError(cause.message);
@@ -903,14 +938,11 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   </Drawer>;
 }
 
-function RunDetail({ experiment, onInspect }: { experiment: Experiment; onInspect: (run: EvalRun) => void }) {
-  const summary = experiment.summary;
-  const runs = experiment.runs || [];
-  return <div className="ev-detail">
-    <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Continuous check" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experiment.status} /></header>
-    <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String((summary?.failed || 0) + (summary?.errors || 0))} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
-    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
-    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenarios</span><span className="ev-muted">{runs.length} runs</span></div><div className="ev-table"><div className="ev-table-head ev-case-grid"><span>Scenario</span><span>Agent and model</span><span>Repeat</span><span>Score</span><span>Result</span></div>{runs.map((run) => {
+function RunRows({ runs, onInspect }: { runs: EvalRun[]; onInspect: (run: EvalRun) => void }) {
+  if (runs.length === 0) return <div className="ev-muted">No scenario results in this run.</div>;
+  return <div className="ev-table">
+    <div className="ev-table-head ev-case-grid"><span>Scenario</span><span>Agent and model</span><span>Repeat</span><span>Score</span><span>Result</span></div>
+    {runs.map((run) => {
       const goals = visibleGoals(run);
       return <div className="ev-case-result" data-has-goals={goals.length > 0} key={run.id}>
         <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span><Status value={run.status} /></button>
@@ -919,7 +951,18 @@ function RunDetail({ experiment, onInspect }: { experiment: Experiment; onInspec
           return <div className="ev-goal-row" data-tone={tone} key={`${goal.goal}-${index}`}><span className="ev-goal-dot" aria-hidden="true" /><span className="ev-goal-name">{goal.goal}</span><span className="ev-goal-result">{goal.judged ? resultLabel(goal.score, goal.passed) : "Not judged"}</span><span className="ev-goal-score">{goal.score == null ? "" : score(goal.score)}</span></div>;
         })}</div>}
       </div>;
-    })}</div></section>
+    })}
+  </div>;
+}
+
+function RunDetail({ experiment, onInspect }: { experiment: Experiment; onInspect: (run: EvalRun) => void }) {
+  const summary = experiment.summary;
+  const runs = experiment.runs || [];
+  return <div className="ev-detail">
+    <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Scheduled run" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experimentOutcome(experiment)} /></header>
+    <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String((summary?.failed || 0) + (summary?.errors || 0))} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
+    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
+    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenario results</span><span className="ev-muted">{runs.length} runs</span></div><RunRows runs={runs} onInspect={onInspect} /></section>
   </div>;
 }
 
@@ -933,31 +976,99 @@ function RunsView({ experiments, selected, detail, onSelect, onInspect, onQuickR
 }) {
   if (experiments.length === 0) return <div className="ev-plan-list"><Empty title="No test runs yet" detail="Start with one production agent and one expected behavior." action={<button type="button" onClick={onQuickRun} className="ev-primary">Test an agent</button>} /></div>;
   return <div className="ev-workspace">
-    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Recent runs</span><span>{experiments.length}</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelect(experiment.id)} className="ev-run-row" data-active={selected === experiment.id}><span className="ev-run-name">{experiment.name}</span><span className="ev-run-meta"><Status value={experiment.status} /><span className="ev-run-stat">{pct(experiment.summary?.pass_rate)} · {formatDate(experiment.created_at)}</span></span></button>)}</aside>
+    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Recent runs</span><span>{experiments.length}</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelect(experiment.id)} className="ev-run-row" data-active={selected === experiment.id}><span className="ev-run-name">{experiment.name}</span><span className="ev-run-meta"><Status value={experimentOutcome(experiment)} /><span className="ev-run-stat">{pct(experiment.summary?.pass_rate)} · {formatDate(experiment.created_at)}</span></span></button>)}</aside>
     {detail ? <RunDetail experiment={detail} onInspect={onInspect} /> : <Empty title="Select a run" />}
   </div>;
 }
 
-function PlansView({ suites, catalog, onNew, onEdit, onScenario, onRun }: {
-  suites: Suite[];
+function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, onSelectExperiment, onEdit, onScenario, onRun, onInspect }: {
+  suite: Suite;
+  experiments: Experiment[];
+  selectedExperiment: string;
+  detail: Experiment | null;
   catalog: Catalog;
+  onSelectExperiment: (id: string) => void;
+  onEdit: (suite: Suite) => void;
+  onScenario: (suite: Suite, item?: EvalCase) => void;
+  onRun: (suite: Suite) => void;
+  onInspect: (run: EvalRun) => void;
+}) {
+  const latest = experiments[0];
+  const selected = experiments.find((experiment) => experiment.id === selectedExperiment) || latest;
+  const selectedDetail = detail?.id === selected?.id ? detail : null;
+  const environment = catalog.environments.find((item) => item.id === suite.environment_id);
+  const targets = suite.continuous_targets?.length ? suite.continuous_targets : latest?.targets || [];
+  const targetLabel = targets.length > 0
+    ? targets.map((target) => `${target.agent_name || target.agent_id}${target.model ? ` · ${target.model}` : ""}`).join(", ")
+    : "Chosen when run";
+  const health = suiteHealth(suite, experiments);
+  return <div className="ev-detail">
+    <header className="ev-detail-header">
+      <div><h2 className="ev-detail-title">{suite.name}</h2><div className="ev-detail-id">{suite.schedule_minutes > 0 ? `Continuous · ${scheduleLabel(suite.schedule_minutes)}` : "Manual eval"} · revision {suite.revision}</div></div>
+      <div className="ev-detail-actions"><span className="ev-status" data-tone={health.tone}>{health.label}</span><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run now</button></div>
+    </header>
+    <div className="ev-metrics ev-eval-metrics"><Metric label="Latest score" value={score(latest?.summary?.average_score)} /><Metric label="Latest pass rate" value={latest ? pct(latest.summary?.pass_rate) : "-"} /><Metric label="Last run" value={latest ? formatDate(latest.created_at) : "-"} /><Metric label="Next run" value={suite.schedule_minutes > 0 && suite.next_run_at ? formatDate(suite.next_run_at) : "-"} /></div>
+    <div className="ev-config">
+      <div className="ev-config-item"><span className="ev-config-label">Environment</span><span className="ev-config-value">{environment?.name || "Fresh isolated environment"}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Schedule</span><span className="ev-config-value">{suite.enabled ? scheduleLabel(suite.schedule_minutes) : "Paused"}{suite.schedule_minutes > 0 ? ` · ${Math.round(suite.required_pass_rate * 100)}% required` : ""}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Evaluation model</span><span className="ev-config-value">{suite.judge_model || "Deterministic checks only"}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Targets</span><span className="ev-config-value" title={targetLabel}>{targetLabel}</span></div>
+    </div>
+    <section className="ev-section">
+      <div className="ev-section-heading"><span className="ev-section-title">Scenarios and goals</span><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button></div>
+      {suite.cases.length > 0 ? <div className="ev-table">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span className="ev-scenario-top"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.assertions.length} checks</span></span>{item.goals.length > 0 && <span className="ev-definition-list">{item.goals.map((goal, index) => <span className="ev-definition-goal" key={`${goal}-${index}`}><span className="ev-definition-dot" aria-hidden="true" /><span>{goal}</span></span>)}</span>}</button>)}</div> : <div className="ev-muted">No scenarios configured.</div>}
+    </section>
+    <section className="ev-section">
+      <div className="ev-selected-run-head"><div><div className="ev-selected-run-title">{selected?.id === latest?.id ? "Latest run" : "Selected run"}</div>{selected && <div className="ev-selected-run-meta">{selected.trigger_type === "schedule" ? "Scheduled" : "Manual"} · {formatDate(selected.created_at)}</div>}</div>{selected && <Status value={experimentOutcome(selected)} />}</div>
+      {!selected ? <div className="ev-muted">This eval has not run yet.</div> : !selectedDetail ? <div className="ev-muted">Loading run results...</div> : <>
+        <div className="ev-inspector-summary" style={{ marginBottom: 10 }}><Metric label="Score" value={score(selectedDetail.summary?.average_score)} /><Metric label="Pass rate" value={pct(selectedDetail.summary?.pass_rate)} /><Metric label="Results" value={String(selectedDetail.runs?.length || 0)} /></div>
+        <RunRows runs={selectedDetail.runs || []} onInspect={onInspect} />
+      </>}
+    </section>
+    <section className="ev-section">
+      <div className="ev-section-heading"><span className="ev-section-title">Run history</span><span className="ev-muted">{experiments.length} runs</span></div>
+      {experiments.length > 0 ? <div className="ev-table"><div className="ev-table-head ev-history-grid"><span>Run</span><span>Result</span><span>Trigger</span><span>Pass rate</span><span>Score</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelectExperiment(experiment.id)} className="ev-table-row ev-history-grid" data-active={selected?.id === experiment.id}><span><strong>{formatDate(experiment.created_at)}</strong><span className="ev-muted" style={{ display: "block", marginTop: 2 }}>{experiment.name}</span></span><Status value={experimentOutcome(experiment)} /><span>{experiment.trigger_type === "schedule" ? "Scheduled" : "Manual"}</span><span>{pct(experiment.summary?.pass_rate)}</span><span>{score(experiment.summary?.average_score)}</span></button>)}</div> : <div className="ev-muted">No run history yet.</div>}
+    </section>
+  </div>;
+}
+
+function EvalsView({ suites, experiments, selectedSuite, selectedExperiment, detail, catalog, onSelectSuite, onSelectExperiment, onNew, onEdit, onScenario, onRun, onInspect }: {
+  suites: Suite[];
+  experiments: Experiment[];
+  selectedSuite: string;
+  selectedExperiment: string;
+  detail: Experiment | null;
+  catalog: Catalog;
+  onSelectSuite: (id: string) => void;
+  onSelectExperiment: (id: string) => void;
   onNew: () => void;
   onEdit: (suite: Suite) => void;
   onScenario: (suite: Suite, item?: EvalCase) => void;
   onRun: (suite: Suite) => void;
+  onInspect: (run: EvalRun) => void;
 }) {
   if (suites.length === 0) return <div className="ev-plan-list"><Empty title="No evals yet" detail="An eval groups reusable scenarios and success criteria." action={<button type="button" onClick={onNew} className="ev-primary">New eval</button>} /></div>;
-  return <div className="ev-plan-list">{suites.map((suite) => <section className="ev-plan" key={suite.id}><header className="ev-plan-header"><div><div className="ev-plan-name">{suite.name}</div><div className="ev-plan-meta">{suite.cases.length} scenarios · {catalog.environments.find((item) => item.id === suite.environment_id)?.name || "fresh environment"}{suite.schedule_minutes > 0 ? ` · every ${suite.schedule_minutes} minutes` : ""}</div></div><div className="ev-actions"><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run</button></div></header>{suite.cases.length > 0 && <div className="ev-scenarios">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span className="ev-scenario-top"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.assertions.length} checks</span></span>{item.goals.length > 0 && <span className="ev-definition-list">{item.goals.map((goal, index) => <span className="ev-definition-goal" key={`${goal}-${index}`}><span className="ev-definition-dot" aria-hidden="true" /><span>{goal}</span></span>)}</span>}</button>)}</div>}</section>)}</div>;
+  const selected = suites.find((suite) => suite.id === selectedSuite) || suites[0];
+  const selectedHistory = experiments.filter((experiment) => experiment.suite_id === selected.id);
+  return <div className="ev-workspace">
+    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Evals</span><span>{suites.length}</span></div>{suites.map((suite) => {
+      const history = experiments.filter((experiment) => experiment.suite_id === suite.id);
+      const latest = history[0];
+      return <button type="button" key={suite.id} onClick={() => onSelectSuite(suite.id)} className="ev-eval-row" data-active={selected.id === suite.id}><span className="ev-eval-row-head"><span className="ev-eval-row-name">{suite.name}</span><EvalHealth suite={suite} experiments={history} /></span><span className="ev-eval-row-meta"><span>{scheduleLabel(suite.schedule_minutes)} · {scenarioCountLabel(suite.cases.length)}</span><span className="ev-eval-row-score">{latest ? score(latest.summary?.average_score) : "-"}</span></span></button>;
+    })}</aside>
+    <EvalDetail suite={selected} experiments={selectedHistory} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} onSelectExperiment={onSelectExperiment} onEdit={onEdit} onScenario={onScenario} onRun={onRun} onInspect={onInspect} />
+  </div>;
 }
 
 export default function EvalsPanel(props: NativePanelProps) {
   installID = props.installId;
   projectID = props.projectId;
-  const [tab, setTab] = useState<"runs" | "plans">("runs");
+  const [tab, setTab] = useState<"evals" | "runs">("evals");
   const [suites, setSuites] = useState<Suite[]>([]);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
   const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], snapshots: [], realtime_providers: [] });
-  const [selected, setSelected] = useState("");
+  const [selectedSuite, setSelectedSuite] = useState("");
+  const [selectedExperiment, setSelectedExperiment] = useState("");
   const [detail, setDetail] = useState<Experiment | null>(null);
   const [quickRun, setQuickRun] = useState(false);
   const [planRun, setPlanRun] = useState<string | null>(null);
@@ -976,7 +1087,8 @@ export default function EvalsPanel(props: NativePanelProps) {
       setSuites(suiteRows);
       setExperiments(experimentRows);
       setCatalog(catalogValue);
-      setSelected((current) => current || experimentRows[0]?.id || "");
+      setSelectedSuite((current) => suiteRows.some((suite) => suite.id === current) ? current : suiteRows[0]?.id || "");
+      setSelectedExperiment((current) => experimentRows.some((experiment) => experiment.id === current) ? current : experimentRows[0]?.id || "");
       setError("");
     } catch (cause: any) {
       setError(cause.message);
@@ -989,17 +1101,47 @@ export default function EvalsPanel(props: NativePanelProps) {
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const selectedSummary = experiments.find((item) => item.id === selected);
+  const selectedSuiteHistory = useMemo(
+    () => experiments.filter((experiment) => experiment.suite_id === selectedSuite),
+    [experiments, selectedSuite],
+  );
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    request<Experiment>(`/experiments/${selected}`).then(setDetail).catch((cause) => setError(cause.message));
-  }, [selected, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running]);
+    if (!selectedSuite) return;
+    if (!selectedSuiteHistory.some((experiment) => experiment.id === selectedExperiment)) {
+      setSelectedExperiment(selectedSuiteHistory[0]?.id || "");
+    }
+  }, [selectedSuite, selectedExperiment, selectedSuiteHistory]);
+
+  const selectedSummary = experiments.find((item) => item.id === selectedExperiment);
+  useEffect(() => {
+    if (!selectedExperiment) { setDetail(null); return; }
+    setDetail((current) => current?.id === selectedExperiment ? current : null);
+    request<Experiment>(`/experiments/${selectedExperiment}`).then(setDetail).catch((cause) => setError(cause.message));
+  }, [selectedExperiment, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running]);
+
+  const selectSuite = (id: string) => {
+    setSelectedSuite(id);
+    setSelectedExperiment(experiments.find((experiment) => experiment.suite_id === id)?.id || "");
+  };
+
+  const selectExperiment = (id: string) => {
+    const experiment = experiments.find((item) => item.id === id);
+    if (experiment) setSelectedSuite(experiment.suite_id);
+    setSelectedExperiment(id);
+  };
 
   const created = (experiment: Experiment) => {
     setQuickRun(false);
     setPlanRun(null);
-    setTab("runs");
-    setSelected(experiment.id);
+    setTab("evals");
+    setSelectedSuite(experiment.suite_id);
+    setSelectedExperiment(experiment.id);
+    load();
+  };
+
+  const savedEval = (suite: Suite) => {
+    setSelectedSuite(suite.id);
+    setSelectedExperiment(experiments.find((experiment) => experiment.suite_id === suite.id)?.id || "");
     load();
   };
 
@@ -1007,15 +1149,17 @@ export default function EvalsPanel(props: NativePanelProps) {
     <style>{styles}</style>
     <div className="ev-page">
       <header className="ev-toolbar">
-        <div><h1 className="ev-title">Evals</h1><nav className="ev-tabs"><button type="button" onClick={() => setTab("runs")} className="ev-tab" data-active={tab === "runs"}>Runs</button><button type="button" onClick={() => setTab("plans")} className="ev-tab" data-active={tab === "plans"}>Evals</button></nav></div>
-        <div className="ev-actions">{tab === "runs" && suites.length > 0 && <button type="button" onClick={() => setPlanRun(suites[0].id)} className="ev-button">Run eval</button>}<button type="button" onClick={() => tab === "runs" ? setQuickRun(true) : setPlanEditor(true)} className="ev-primary">{tab === "runs" ? "Test an agent" : "New eval"}</button></div>
+        <div><h1 className="ev-title">Evals</h1><nav className="ev-tabs"><button type="button" onClick={() => setTab("evals")} className="ev-tab" data-active={tab === "evals"}>Evals</button><button type="button" onClick={() => setTab("runs")} className="ev-tab" data-active={tab === "runs"}>All runs</button></nav></div>
+        <div className="ev-actions"><button type="button" onClick={() => setQuickRun(true)} className="ev-button">Test an agent</button><button type="button" onClick={() => setPlanEditor(true)} className="ev-primary">New eval</button></div>
       </header>
       {error && <div className="ev-error"><span>{error}</span><button type="button" onClick={() => setError("")} title="Dismiss" className="ev-icon-button">×</button></div>}
-      {tab === "runs" ? <RunsView experiments={experiments} selected={selected} detail={detail} onSelect={setSelected} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} /> : <PlansView suites={suites} catalog={catalog} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => { setTab("runs"); setPlanRun(suite.id); }} />}
+      {tab === "evals"
+        ? <EvalsView suites={suites} experiments={experiments} selectedSuite={selectedSuite} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} onSelectSuite={selectSuite} onSelectExperiment={selectExperiment} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => setPlanRun(suite.id)} onInspect={setInspected} />
+        : <RunsView experiments={experiments} selected={selectedExperiment} detail={detail} onSelect={selectExperiment} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} />}
     </div>
     {quickRun && <QuickRunBuilder catalog={catalog} onClose={() => setQuickRun(false)} onCreated={created} />}
     {planRun !== null && <PlanRunBuilder initialSuiteID={planRun} suites={suites} catalog={catalog} onClose={() => setPlanRun(null)} onCreated={created} />}
-    {planEditor && <PlanEditor initial={planEditor === true ? undefined : planEditor} catalog={catalog} onClose={() => setPlanEditor(null)} onSaved={load} />}
+    {planEditor && <PlanEditor initial={planEditor === true ? undefined : planEditor} catalog={catalog} onClose={() => setPlanEditor(null)} onSaved={savedEval} />}
     {scenarioEditor && <ScenarioEditor suite={scenarioEditor.suite} initial={scenarioEditor.item} catalog={catalog} onClose={() => setScenarioEditor(null)} onSaved={load} />}
     {inspected && <RunInspector run={inspected} onClose={() => setInspected(null)} />}
   </div>;
