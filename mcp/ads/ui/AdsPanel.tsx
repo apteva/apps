@@ -104,12 +104,14 @@ function formatBudget(value: string | undefined, currency: string): string {
 function Modal({
   title,
   description,
+  actions,
   onClose,
   children,
   labelledBy,
 }: {
   title: string;
   description?: string;
+  actions?: React.ReactNode;
   onClose: () => void;
   children: React.ReactNode;
   labelledBy: string;
@@ -130,7 +132,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className="w-full max-w-lg rounded border border-border bg-bg-card shadow-xl"
+        className="w-full max-w-md rounded border border-border bg-bg-card shadow-xl"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -138,16 +140,19 @@ function Modal({
             <h2 id={labelledBy} className="text-sm font-semibold text-text">{title}</h2>
             {description && <p className="mt-1 text-xs text-text-muted">{description}</p>}
           </div>
-          <button
-            ref={closeRef}
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            title="Close"
-            className="grid h-8 w-8 shrink-0 place-items-center rounded text-lg text-text-muted hover:bg-bg-input hover:text-text"
-          >
-            ×
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {actions}
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              title="Close"
+              className="grid h-8 w-8 place-items-center rounded text-lg text-text-muted hover:bg-bg-input hover:text-text"
+            >
+              ×
+            </button>
+          </div>
         </header>
         {children}
       </section>
@@ -592,33 +597,49 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       </div>
 
       {addOpen && (
-        <Modal title="Add ad account" description="Connect a configured ads provider, or set up its integration first." onClose={() => setAddOpen(false)} labelledBy="ads-add-title">
+        <Modal
+          title="Add ad account"
+          description="Choose a provider to connect an ad account."
+          actions={(
+            <button
+              type="button"
+              onClick={refreshPlatforms}
+              aria-label="Refresh providers"
+              title="Refresh providers"
+              className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+            >
+              ↻
+            </button>
+          )}
+          onClose={() => setAddOpen(false)}
+          labelledBy="ads-add-title"
+        >
           <div className="divide-y divide-border">
             {platforms.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-text-muted">Checking providers...</p>
             ) : platforms.map((platform) => (
-              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3">
+              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3.5">
                 <ProviderMark platform={platform.platform} />
-                <span className="min-w-0 flex-1">
-                  <span className="flex items-center gap-2">
-                    <span className="truncate text-sm font-medium">{platform.display_name}</span>
-                    {platform.active_account && <span className="rounded bg-green/15 px-1.5 py-0.5 text-xs text-green">Added</span>}
-                    {platform.state === "setup_required" && <span className="rounded bg-yellow/15 px-1.5 py-0.5 text-xs text-yellow">Setup required</span>}
+                <div className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">
+                    {platform.platform === "meta" ? "Meta Ads" : platform.display_name}
                   </span>
                   <span className="mt-0.5 block text-xs text-text-muted">
                     {platform.state === "connected"
                       ? `${platform.connection_count} active connection${platform.connection_count === 1 ? "" : "s"}`
                       : platform.state === "ready"
-                        ? "Ready to authorize"
-                        : platform.unavailable_reason || "Integration unavailable"}
+                        ? "Ready to connect"
+                        : platform.state === "setup_required"
+                          ? `${platform.platform === "meta" ? "Facebook & Instagram" : platform.display_name} integration required`
+                          : platform.unavailable_reason || "Integration unavailable"}
                   </span>
-                </span>
+                </div>
                 {platform.state === "setup_required" ? (
                   <a
                     href={platform.setup_url || "/integrations"}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 shrink-0 items-center rounded border border-border px-3 text-xs font-medium text-text hover:bg-bg-input"
+                    className="inline-flex h-8 min-w-20 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
                   >
                     Set up
                   </a>
@@ -627,7 +648,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     type="button"
                     disabled={!platform.can_add || startingPlatform === platform.platform}
                     onClick={() => startPlatform(platform)}
-                    className="h-8 shrink-0 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input disabled:cursor-not-allowed disabled:opacity-50"
+                    className="h-8 min-w-20 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
                   >
                     {startingPlatform === platform.platform
                       ? "Starting..."
@@ -639,11 +660,6 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               </div>
             ))}
           </div>
-          <footer className="flex justify-end border-t border-border px-4 py-3">
-            <button type="button" onClick={refreshPlatforms} className="h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">
-              Refresh providers
-            </button>
-          </footer>
         </Modal>
       )}
 
