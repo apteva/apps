@@ -455,9 +455,11 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "select_option":
-		if _, err := c.selectOption(action); err != nil {
+		res, err := c.selectOption(action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
+		c.cueTarget(action, res.Selector, "Option selected")
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
@@ -490,6 +492,31 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 		c.setLastSelectResult(&res)
 	}
 	return res, err
+}
+
+func (c *Computer) cueTarget(action computer.Action, selector, caption string) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		c.ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[STEEL] presentation cue unavailable, continuing action: %v\n", err)
+	}
 }
 
 func (c *Computer) LastSelectResult() *selectinput.Result {

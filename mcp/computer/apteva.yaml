@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.54
+version: 0.7.55
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.54 adds opt-in demo
-  presentation mode for visible cursor, click, and typing actions in recordings.
+  Watch, steer, and replay hosted browser sessions. v0.7.55 makes opt-in demo
+  presentation cues universal across supported browser controls.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -45,8 +45,10 @@ provides:
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
         proxy?, proxy_country?, viewport?, presentation_mode?. Use
         presentation_mode=demo for a visible cursor, click feedback, human-paced
-        typing, and longer holds in user-facing walkthroughs; fast is the
-        default and preserves normal automation speed. session_id is the app-owned live br_* handle for
+        typing, non-interactive cues for structured control changes, and longer
+        holds in user-facing walkthroughs; fast is the default and preserves
+        normal automation behavior. Presentation overlays never receive pointer
+        events or replace the agent's underlying action. session_id is the app-owned live br_* handle for
         status/close/computer_use only. Usually omit viewport to use Computer's
         default desktop viewport, 1600x800. Pass viewport when a specific
         resolution is needed, for example mobile/tablet testing or a

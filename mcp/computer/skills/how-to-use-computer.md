@@ -92,11 +92,14 @@ browser_session(
 )
 ```
 
-- The default `fast` mode preserves normal automation timing and behavior.
+- The default `fast` mode is a strict presentation no-op and preserves normal
+  automation timing and behavior.
 - On local, Browserbase, Steel, and Browser Engine backends, demo mode adds an
   in-page cursor and click pulse, types short `computer_use(action="type")`
-  text character by character, and holds each completed action long enough to
-  read in a live view or recording.
+  text character by character, shows a brief cue over every supported
+  structured control change (`upload_file`, `select_option`, `set_checked`,
+  `set_temporal`, and `set_text`), and holds each completed action long enough
+  to read in a live view or recording.
 - Browserbase and Steel provider recordings capture the in-page presentation
   layer. Local and Browser Engine expose it in their live browser views but do
   not currently produce recordings.
@@ -104,9 +107,12 @@ browser_session(
   because their wire protocol does not expose a browser DOM connection.
 - For visible short-form entry in a demo, click the field and use `type`. Keep
   using `set_text` for long content, rich editors, or exact bulk replacement;
-  those actions remain atomic.
+  those actions remain atomic and get a post-action visual cue.
+- Presentation elements use `pointer-events: none`, are hidden from
+  accessibility APIs, and never focus, scroll, click, type, or dispatch browser
+  input events. The real agent action and its resolved target stay unchanged.
 - Presentation rendering is best-effort. If a restricted page prevents the
-  cursor overlay from being injected, the underlying click still runs.
+  overlay from being injected, the underlying action still runs.
 
 ## Web-browsing patterns
 

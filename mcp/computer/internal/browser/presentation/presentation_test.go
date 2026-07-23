@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -37,11 +38,57 @@ func TestPointerScriptIsNonInteractiveAndUsesCoordinates(t *testing.T) {
 	for _, want := range []string{
 		`"__apteva_demo_cursor"`,
 		`pointerEvents = "none"`,
-		`})(321,654,360,520)`,
+		`})("",321,654,true,"",360,520)`,
 		`pulse.animate`,
+		`data-apteva-presentation`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("pointer script missing %q", want)
 		}
+	}
+	for _, forbidden := range []string{
+		`.click(`,
+		`.focus(`,
+		`dispatchEvent`,
+		`scrollIntoView`,
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("presentation script must not produce page input; found %q", forbidden)
+		}
+	}
+}
+
+func TestTargetCueUsesResolvedSelectorAndEscapesCaption(t *testing.T) {
+	script := targetCueScript(
+		`input[name="odd'value"]`,
+		12,
+		34,
+		true,
+		`Text "updated"`,
+		360,
+		520,
+	)
+	for _, want := range []string{
+		`document.querySelector(selector)`,
+		`"input[name=\"odd'value\"]"`,
+		`"Text \"updated\""`,
+		`"__apteva_demo_caption"`,
+		`pointerEvents = "none"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("target cue script missing %q", want)
+		}
+	}
+}
+
+func TestCueTargetFastModeIsStrictNoOp(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	options, err := ForMode("fast")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CueTarget(ctx, "#control", 10, 20, true, "Updated", options); err != nil {
+		t.Fatalf("fast presentation unexpectedly touched browser context: %v", err)
 	}
 }

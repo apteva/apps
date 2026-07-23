@@ -407,45 +407,63 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "upload_file":
-		if err := c.uploadFile(action); err != nil {
+		res, err := c.uploadFile(action)
+		if err != nil {
 			return nil, fmt.Errorf("upload_file: %w", err)
 		}
+		cueSelector := action.Selector
+		if cueSelector == "" {
+			cueSelector = res.Selector
+		}
+		c.cueTarget(c.ctx, action, cueSelector, "File uploaded")
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "select_option":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.selectOption(ctx, action); err != nil {
+		res, err := c.selectOption(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
+		c.cueTarget(ctx, action, res.Selector, "Option selected")
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_checked":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setChecked(ctx, action); err != nil {
+		res, err := c.setChecked(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_checked: %w", err)
 		}
+		caption := "Unchecked"
+		if res.Checked {
+			caption = "Checked"
+		}
+		c.cueTarget(ctx, action, res.Selector, caption)
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_temporal":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setTemporal(ctx, action); err != nil {
+		res, err := c.setTemporal(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_temporal: %w", err)
 		}
+		c.cueTarget(ctx, action, res.Selector, "Date/time set")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_text":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setText(ctx, action); err != nil {
+		res, err := c.setText(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_text: %w", err)
 		}
+		c.cueTarget(ctx, action, res.Selector, "Text updated")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
@@ -731,9 +749,9 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	return &clone
 }
 
-func (c *Computer) uploadFile(action computer.Action) error {
+func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
 	if c.sessionID == "" {
-		return fmt.Errorf("browserbase: no active session")
+		return fileupload.Result{}, fmt.Errorf("browserbase: no active session")
 	}
 	target := fileupload.Target{Selector: action.Selector}
 	if action.Label > 0 {
@@ -749,19 +767,46 @@ func (c *Computer) uploadFile(action computer.Action) error {
 	ctx, cancel := c.actionContext("upload_file")
 	defer cancel()
 	if payloads, ok := inlineUploadPayloads(action.Files); ok {
-		_, err := fileupload.SetPayloads(ctx, target, payloads)
-		return err
+		return fileupload.SetPayloads(ctx, target, payloads)
 	}
 	remoteFiles := make([]string, 0, len(action.Files))
 	for _, file := range action.Files {
 		remote, err := c.uploadSessionFile(file)
 		if err != nil {
-			return err
+			return fileupload.Result{}, err
 		}
 		remoteFiles = append(remoteFiles, remote)
 	}
-	_, err := fileupload.SetFiles(ctx, target, remoteFiles)
-	return err
+	return fileupload.SetFiles(ctx, target, remoteFiles)
+}
+
+func (c *Computer) cueTarget(
+	ctx context.Context,
+	action computer.Action,
+	selector, caption string,
+) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cue unavailable, continuing action: %v\n", err)
+	}
 }
 
 func inlineUploadPayloads(paths []string) ([]fileupload.Payload, bool) {
