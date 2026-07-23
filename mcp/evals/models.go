@@ -116,6 +116,7 @@ type Run struct {
 	TargetIndex      int                        `json:"target_index"`
 	Repetition       int                        `json:"repetition"`
 	Status           string                     `json:"status"`
+	Stage            string                     `json:"stage,omitempty"`
 	CaseSnapshot     Case                       `json:"case"`
 	TargetSnapshot   Target                     `json:"target"`
 	EnvironmentRunID string                     `json:"environment_run_id,omitempty"`

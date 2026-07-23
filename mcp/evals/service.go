@@ -245,6 +245,9 @@ func (s *service) runNext(ctx context.Context) error {
 	if err != nil || run == nil {
 		return err
 	}
+	s.ctx.Emit("eval.run.started", map[string]any{
+		"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage,
+	})
 	return s.executeRun(ctx, run)
 }
 

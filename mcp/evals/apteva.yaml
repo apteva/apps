@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.3.0
+version: 0.3.1
 description: Behavioral, voice, and continuous evaluation of agents inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
@@ -15,7 +15,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.4.0" }
+    - { name: environments, version: ">=0.4.3" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -40,8 +40,11 @@ provides:
     - { name: eval_suggestion_apply, description: "Apply an accepted directive suggestion with optimistic concurrency." }
   publishes:
     - { name: eval.experiment.created, description: "An evaluation experiment was queued." }
+    - { name: eval.run.started, description: "An individual evaluation run started." }
+    - { name: eval.run.stage.changed, description: "An evaluation run moved to another execution stage." }
     - { name: eval.run.completed, description: "An individual evaluation run completed." }
     - { name: eval.run.failed, description: "An individual evaluation run failed to execute." }
+    - { name: eval.experiment.completed, description: "Every run in an evaluation experiment finished." }
     - { name: eval.regression.detected, description: "A continuous suite fell below its required pass rate." }
   ui_panels:
     - { slot: project.page, label: "Evals", icon: flask-conical, entry: /ui/EvalsPanel.mjs }
@@ -52,7 +55,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.3.0
+    ref: evals/v0.3.1
     entry: mcp/evals
   port: 8080
   health_check: /health

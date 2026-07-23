@@ -1,8 +1,67 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 interface NativePanelProps {
   installId: number;
   projectId: string;
+}
+
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (event: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (event: AppEventEnvelope<T>) => handlerRef.current(event);
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(app: string, projectId: string, fn: (event: AppEventEnvelope<T>) => void): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) return bridge.subscribe(app, projectId, handler);
+
+    let lastSeq = 0;
+    let source: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url = `/api/app-events/${encodeURIComponent(app)}?project_id=${encodeURIComponent(projectId)}${lastSeq > 0 ? `&since=${lastSeq}` : ""}`;
+      source = new EventSource(url, { withCredentials: true });
+      source.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as AppEventEnvelope<T>;
+          if (event.seq <= lastSeq) return;
+          lastSeq = event.seq;
+          handlerRef.current(event);
+        } catch {}
+      };
+      source.onerror = () => {
+        if (source?.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      source?.close();
+    };
+  }, [app, projectId]);
 }
 
 interface Agent {
@@ -149,11 +208,18 @@ interface VoiceCase {
   max_average_response_ms?: number;
 }
 
+interface VoiceTranscriptTurn {
+  speaker: string;
+  text: string;
+  time: string;
+  at_ms: number;
+}
+
 interface VoiceCall {
   id: string;
   status: string;
   error?: string;
-  transcript: { speaker: string; text: string; time: string; at_ms: number }[];
+  transcript: VoiceTranscriptTurn[];
   metrics: {
     duration_ms: number;
     first_response_ms?: number;
@@ -167,6 +233,15 @@ interface VoiceCall {
     ended_by: string;
   };
 }
+
+interface LiveVoiceCall {
+  call_id: string;
+  run_id: string;
+  status: string;
+  transcript: VoiceTranscriptTurn[];
+}
+
+type LiveVoiceCalls = Record<string, LiveVoiceCall>;
 
 interface Suite {
   id: string;
@@ -210,6 +285,8 @@ interface EvalRun {
   id: string;
   case_id: string;
   status: string;
+  stage?: string;
+  environment_run_id?: string;
   target_index: number;
   repetition: number;
   case: EvalCase;
@@ -353,6 +430,19 @@ const scheduleLabel = (minutes?: number) => {
   return `Every ${minutes} minutes`;
 };
 const scenarioCountLabel = (count: number) => `${count} ${count === 1 ? "scenario" : "scenarios"}`;
+const stageLabel = (stage?: string) => ({
+  starting: "Starting",
+  preparing_environment: "Preparing environment",
+  spawning_agent: "Spawning agent",
+  connecting_voice_call: "Connecting voice call",
+  live_voice_call: "Live voice call",
+  sending_task: "Sending task",
+  agent_running: "Agent working",
+  checking_results: "Checking results",
+  judging: "Judging",
+  completed: "Complete",
+  failed: "Failed",
+}[stage || ""] || "Running");
 const experimentOutcome = (experiment: Experiment) => {
   if (experiment.status !== "completed") return experiment.status;
   if (!experiment.summary) return "completed";
@@ -394,6 +484,7 @@ const styles = `
 .ev-picker{display:grid;gap:8px}.ev-picker-list{max-height:190px;overflow:auto;border:1px solid var(--color-border);border-radius:5px}.ev-picker-row{display:flex;width:100%;align-items:flex-start;gap:9px;padding:8px 9px;border-bottom:1px solid var(--color-border);text-align:left}.ev-picker-row:last-child{border-bottom:0}.ev-picker-row:hover{background:var(--color-bg-hover)}.ev-picker-mark{display:flex;width:16px;height:16px;flex:none;align-items:center;justify-content:center;border:1px solid var(--color-border);border-radius:3px;font-size:10px}.ev-picker-row[data-selected=true] .ev-picker-mark{border-color:var(--color-accent);background:var(--color-accent);color:var(--color-bg)}.ev-picker-name{display:block;font-size:12px;font-weight:600}.ev-picker-detail{display:block;margin-top:2px;color:var(--color-text-dim);font-size:10px}.ev-chip-list{display:flex;flex-wrap:wrap;gap:6px}.ev-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:5px 7px;border:1px solid var(--color-border);border-radius:5px;background:var(--color-bg);font-size:11px}.ev-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ev-chip button{color:var(--color-text-dim)}
 .ev-task-list{display:grid;gap:10px}.ev-task-card{padding:12px;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg-card)}.ev-task-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.ev-task-number{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--color-text-dim)}.ev-task-fields{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:10px}.ev-task-fields textarea{min-height:94px}.ev-seed-card{padding:10px;border:1px solid var(--color-border);border-radius:5px;background:var(--color-bg)}.ev-seed-head{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(160px,1.2fr) 32px;gap:8px;align-items:center}.ev-seed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.ev-seed-fields .ev-label{text-transform:none}
 .ev-inspector-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-inspector-section{margin-top:20px}.ev-result-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-result-row{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;border-bottom:1px solid var(--color-border)}.ev-result-row:last-child{border-bottom:0}.ev-trace-role{margin-bottom:4px;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-trace-text{white-space:pre-wrap;font-size:12px;line-height:1.45}.ev-code{max-height:170px;overflow:auto;white-space:pre-wrap;padding:8px;border-radius:4px;background:var(--color-bg-card);font-family:monospace;font-size:10px}.ev-suggestion{padding:12px;border:1px solid var(--color-border);border-radius:6px}.ev-suggestion-actions{display:flex;justify-content:flex-end;margin-top:10px}
+.ev-live-stage{display:inline-flex;align-items:center;gap:7px;color:var(--color-accent);font-size:10px;font-weight:700;text-transform:uppercase}.ev-live-dot{width:7px;height:7px;border-radius:50%;background:var(--color-accent);animation:ev-live-pulse 1.25s ease-in-out infinite}.ev-live-call{border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-live-call-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--color-border)}.ev-live-turn{display:grid;grid-template-columns:86px minmax(0,1fr);gap:10px;padding:8px 12px;border-bottom:1px solid var(--color-border);font-size:11px;line-height:1.45}.ev-live-turn:last-child{border-bottom:0}.ev-live-speaker{color:var(--color-text-dim);font-size:9px;font-weight:700;text-transform:uppercase}.ev-live-waiting{padding:10px 12px;color:var(--color-text-dim);font-size:11px}@keyframes ev-live-pulse{0%,100%{opacity:.35;transform:scale(.78)}50%{opacity:1;transform:scale(1)}}@media(prefers-reduced-motion:reduce){.ev-live-dot{animation:none}}
 .ev-evaluation{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-evaluation-head{padding:12px}.ev-evaluation-result{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px}.ev-evaluation-score{font-size:17px;font-variant-numeric:tabular-nums}.ev-evaluation-score[data-tone=good],.ev-goal-row[data-tone=good] .ev-goal-result{color:var(--color-success)}.ev-evaluation-score[data-tone=warn],.ev-goal-row[data-tone=warn] .ev-goal-result{color:#d89a2b}.ev-evaluation-score[data-tone=bad],.ev-goal-row[data-tone=bad] .ev-goal-result{color:var(--color-error)}.ev-evaluation-reason{font-size:12px;line-height:1.5}.ev-goal-list{border-top:1px solid var(--color-border)}.ev-goal-row{display:grid;grid-template-columns:7px minmax(0,1fr) auto auto;align-items:start;column-gap:9px;row-gap:3px;padding:9px 12px;border-bottom:1px solid var(--color-border)}.ev-goal-row:last-child{border-bottom:0}.ev-goal-dot{width:6px;height:6px;margin-top:5px;border-radius:50%;background:var(--color-text-dim)}.ev-goal-row[data-tone=good] .ev-goal-dot{background:var(--color-success)}.ev-goal-row[data-tone=warn] .ev-goal-dot{background:#d89a2b}.ev-goal-row[data-tone=bad] .ev-goal-dot{background:var(--color-error)}.ev-goal-row[data-tone=muted] .ev-goal-result{color:var(--color-text-dim)}.ev-goal-name{min-width:0;font-size:12px;font-weight:600;line-height:1.4}.ev-goal-result{font-size:10px;font-weight:700;text-transform:uppercase}.ev-goal-score{min-width:24px;text-align:right;font-size:12px;font-weight:650;font-variant-numeric:tabular-nums}.ev-goal-why{grid-column:2/-1;color:var(--color-text-dim);font-size:11px;line-height:1.4}
 @media(max-width:900px){.ev-workspace{grid-template-columns:1fr}.ev-run-list{max-height:300px;overflow:auto;border-right:0;border-bottom:1px solid var(--color-border)}.ev-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-eval-metrics,.ev-config{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(3){border-right:0}.ev-metric:nth-child(n+4){border-top:1px solid var(--color-border)}.ev-eval-metrics .ev-metric:nth-child(2){border-right:0}.ev-eval-metrics .ev-metric:nth-child(3){border-top:1px solid var(--color-border);border-right:1px solid var(--color-border)}.ev-config-item:nth-child(2){border-right:0}.ev-config-item:nth-child(n+3){border-top:1px solid var(--color-border)}}
 @media(max-width:680px){.ev-page{padding:14px}.ev-toolbar{align-items:stretch;flex-direction:column}.ev-actions{display:grid;grid-template-columns:1fr 1fr}.ev-actions>*{width:100%}.ev-grid-2,.ev-task-fields,.ev-seed-fields{grid-template-columns:1fr}.ev-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-plan-header,.ev-detail-header{align-items:flex-start;flex-direction:column}.ev-plan-header .ev-actions,.ev-detail-actions{display:flex;width:100%}.ev-detail-actions .ev-button,.ev-detail-actions .ev-primary{flex:1}.ev-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(2n){border-right:0}.ev-metric:nth-child(n+3){border-top:1px solid var(--color-border)}.ev-config{grid-template-columns:1fr}.ev-config-item{border-right:0;border-top:1px solid var(--color-border)}.ev-config-item:first-child{border-top:0}.ev-target-grid,.ev-case-grid,.ev-history-grid{grid-template-columns:minmax(0,1fr) 78px}.ev-table-head{display:none}.ev-table-row>*:nth-child(n+3){display:none}.ev-scenario-top{align-items:flex-start;flex-direction:column}.ev-drawer-body{padding:16px}.ev-seed-head{grid-template-columns:1fr 32px}.ev-seed-head select:nth-child(2){grid-column:1/-1;grid-row:2}.ev-selected{align-items:flex-start;flex-direction:column}.ev-selected .ev-actions{display:flex;width:100%}}
@@ -409,6 +500,19 @@ function Status({ value }: { value: string }) {
         : "muted";
   const label = value === "completed" ? "Complete" : value === "queued" ? "Queued" : value;
   return <span className="ev-status" data-tone={tone}>{label}</span>;
+}
+
+function LiveStage({ stage }: { stage?: string }) {
+  return <span className="ev-live-stage"><span className="ev-live-dot" aria-hidden="true" />{stageLabel(stage)}</span>;
+}
+
+function LiveVoiceTranscript({ call }: { call: LiveVoiceCall }) {
+  return <div className="ev-live-call">
+    <div className="ev-live-call-head"><LiveStage stage="live_voice_call" /><span className="ev-muted">{call.transcript?.length || 0} turns</span></div>
+    {call.transcript?.length > 0
+      ? call.transcript.map((turn, index) => <div className="ev-live-turn" key={`${turn.at_ms}-${index}`}><span className="ev-live-speaker">{turn.speaker} · {(turn.at_ms / 1000).toFixed(1)}s</span><span>{turn.text}</span></div>)
+      : <div className="ev-live-waiting">Waiting for the first transcript turn...</div>}
+  </div>;
 }
 
 function EvalHealth({ suite, experiments }: { suite: Suite; experiments: Experiment[] }) {
@@ -938,14 +1042,16 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   </Drawer>;
 }
 
-function RunRows({ runs, onInspect }: { runs: EvalRun[]; onInspect: (run: EvalRun) => void }) {
+function RunRows({ runs, onInspect, liveVoiceCalls }: { runs: EvalRun[]; onInspect: (run: EvalRun) => void; liveVoiceCalls: LiveVoiceCalls }) {
   if (runs.length === 0) return <div className="ev-muted">No scenario results in this run.</div>;
   return <div className="ev-table">
     <div className="ev-table-head ev-case-grid"><span>Scenario</span><span>Agent and model</span><span>Repeat</span><span>Score</span><span>Result</span></div>
     {runs.map((run) => {
       const goals = visibleGoals(run);
+      const liveCall = run.status === "running" && run.environment_run_id ? liveVoiceCalls[run.environment_run_id] : undefined;
       return <div className="ev-case-result" data-has-goals={goals.length > 0} key={run.id}>
-        <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span><Status value={run.status} /></button>
+        <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span>{run.status === "running" ? <LiveStage stage={run.stage} /> : <Status value={run.status} />}</button>
+        {liveCall && <LiveVoiceTranscript call={liveCall} />}
         {goals.length > 0 && <div className="ev-inline-goals"><div className="ev-inline-goals-head"><span>Goal results</span><span>{goals.length}</span></div>{goals.map((goal, index) => {
           const tone = goal.judged ? resultTone(goal.score, goal.passed) : "muted";
           return <div className="ev-goal-row" data-tone={tone} key={`${goal.goal}-${index}`}><span className="ev-goal-dot" aria-hidden="true" /><span className="ev-goal-name">{goal.goal}</span><span className="ev-goal-result">{goal.judged ? resultLabel(goal.score, goal.passed) : "Not judged"}</span><span className="ev-goal-score">{goal.score == null ? "" : score(goal.score)}</span></div>;
@@ -955,21 +1061,22 @@ function RunRows({ runs, onInspect }: { runs: EvalRun[]; onInspect: (run: EvalRu
   </div>;
 }
 
-function RunDetail({ experiment, onInspect }: { experiment: Experiment; onInspect: (run: EvalRun) => void }) {
+function RunDetail({ experiment, onInspect, liveVoiceCalls }: { experiment: Experiment; onInspect: (run: EvalRun) => void; liveVoiceCalls: LiveVoiceCalls }) {
   const summary = experiment.summary;
   const runs = experiment.runs || [];
   return <div className="ev-detail">
     <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Scheduled run" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experimentOutcome(experiment)} /></header>
     <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String((summary?.failed || 0) + (summary?.errors || 0))} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
     {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
-    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenario results</span><span className="ev-muted">{runs.length} runs</span></div><RunRows runs={runs} onInspect={onInspect} /></section>
+    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenario results</span><span className="ev-muted">{runs.length} runs</span></div><RunRows runs={runs} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} /></section>
   </div>;
 }
 
-function RunsView({ experiments, selected, detail, onSelect, onInspect, onQuickRun }: {
+function RunsView({ experiments, selected, detail, liveVoiceCalls, onSelect, onInspect, onQuickRun }: {
   experiments: Experiment[];
   selected: string;
   detail: Experiment | null;
+  liveVoiceCalls: LiveVoiceCalls;
   onSelect: (id: string) => void;
   onInspect: (run: EvalRun) => void;
   onQuickRun: () => void;
@@ -977,16 +1084,17 @@ function RunsView({ experiments, selected, detail, onSelect, onInspect, onQuickR
   if (experiments.length === 0) return <div className="ev-plan-list"><Empty title="No test runs yet" detail="Start with one production agent and one expected behavior." action={<button type="button" onClick={onQuickRun} className="ev-primary">Test an agent</button>} /></div>;
   return <div className="ev-workspace">
     <aside className="ev-run-list"><div className="ev-pane-heading"><span>Recent runs</span><span>{experiments.length}</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelect(experiment.id)} className="ev-run-row" data-active={selected === experiment.id}><span className="ev-run-name">{experiment.name}</span><span className="ev-run-meta"><Status value={experimentOutcome(experiment)} /><span className="ev-run-stat">{pct(experiment.summary?.pass_rate)} · {formatDate(experiment.created_at)}</span></span></button>)}</aside>
-    {detail ? <RunDetail experiment={detail} onInspect={onInspect} /> : <Empty title="Select a run" />}
+    {detail ? <RunDetail experiment={detail} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} /> : <Empty title="Select a run" />}
   </div>;
 }
 
-function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, onSelectExperiment, onEdit, onScenario, onRun, onInspect }: {
+function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, liveVoiceCalls, onSelectExperiment, onEdit, onScenario, onRun, onInspect }: {
   suite: Suite;
   experiments: Experiment[];
   selectedExperiment: string;
   detail: Experiment | null;
   catalog: Catalog;
+  liveVoiceCalls: LiveVoiceCalls;
   onSelectExperiment: (id: string) => void;
   onEdit: (suite: Suite) => void;
   onScenario: (suite: Suite, item?: EvalCase) => void;
@@ -1022,7 +1130,7 @@ function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, o
       <div className="ev-selected-run-head"><div><div className="ev-selected-run-title">{selected?.id === latest?.id ? "Latest run" : "Selected run"}</div>{selected && <div className="ev-selected-run-meta">{selected.trigger_type === "schedule" ? "Scheduled" : "Manual"} · {formatDate(selected.created_at)}</div>}</div>{selected && <Status value={experimentOutcome(selected)} />}</div>
       {!selected ? <div className="ev-muted">This eval has not run yet.</div> : !selectedDetail ? <div className="ev-muted">Loading run results...</div> : <>
         <div className="ev-inspector-summary" style={{ marginBottom: 10 }}><Metric label="Score" value={score(selectedDetail.summary?.average_score)} /><Metric label="Pass rate" value={pct(selectedDetail.summary?.pass_rate)} /><Metric label="Results" value={String(selectedDetail.runs?.length || 0)} /></div>
-        <RunRows runs={selectedDetail.runs || []} onInspect={onInspect} />
+        <RunRows runs={selectedDetail.runs || []} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} />
       </>}
     </section>
     <section className="ev-section">
@@ -1032,13 +1140,14 @@ function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, o
   </div>;
 }
 
-function EvalsView({ suites, experiments, selectedSuite, selectedExperiment, detail, catalog, onSelectSuite, onSelectExperiment, onNew, onEdit, onScenario, onRun, onInspect }: {
+function EvalsView({ suites, experiments, selectedSuite, selectedExperiment, detail, catalog, liveVoiceCalls, onSelectSuite, onSelectExperiment, onNew, onEdit, onScenario, onRun, onInspect }: {
   suites: Suite[];
   experiments: Experiment[];
   selectedSuite: string;
   selectedExperiment: string;
   detail: Experiment | null;
   catalog: Catalog;
+  liveVoiceCalls: LiveVoiceCalls;
   onSelectSuite: (id: string) => void;
   onSelectExperiment: (id: string) => void;
   onNew: () => void;
@@ -1056,7 +1165,7 @@ function EvalsView({ suites, experiments, selectedSuite, selectedExperiment, det
       const latest = history[0];
       return <button type="button" key={suite.id} onClick={() => onSelectSuite(suite.id)} className="ev-eval-row" data-active={selected.id === suite.id}><span className="ev-eval-row-head"><span className="ev-eval-row-name">{suite.name}</span><EvalHealth suite={suite} experiments={history} /></span><span className="ev-eval-row-meta"><span>{scheduleLabel(suite.schedule_minutes)} · {scenarioCountLabel(suite.cases.length)}</span><span className="ev-eval-row-score">{latest ? score(latest.summary?.average_score) : "-"}</span></span></button>;
     })}</aside>
-    <EvalDetail suite={selected} experiments={selectedHistory} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} onSelectExperiment={onSelectExperiment} onEdit={onEdit} onScenario={onScenario} onRun={onRun} onInspect={onInspect} />
+    <EvalDetail suite={selected} experiments={selectedHistory} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} liveVoiceCalls={liveVoiceCalls} onSelectExperiment={onSelectExperiment} onEdit={onEdit} onScenario={onScenario} onRun={onRun} onInspect={onInspect} />
   </div>;
 }
 
@@ -1070,6 +1179,7 @@ export default function EvalsPanel(props: NativePanelProps) {
   const [selectedSuite, setSelectedSuite] = useState("");
   const [selectedExperiment, setSelectedExperiment] = useState("");
   const [detail, setDetail] = useState<Experiment | null>(null);
+  const [liveVoiceCalls, setLiveVoiceCalls] = useState<LiveVoiceCalls>({});
   const [quickRun, setQuickRun] = useState(false);
   const [planRun, setPlanRun] = useState<string | null>(null);
   const [planEditor, setPlanEditor] = useState<Suite | true | null>(null);
@@ -1095,11 +1205,41 @@ export default function EvalsPanel(props: NativePanelProps) {
     }
   }, []);
 
+  const refreshExperiments = useCallback(async () => {
+    try {
+      const rows = await request<Experiment[]>("/experiments");
+      setExperiments(rows);
+      setSelectedExperiment((current) => rows.some((experiment) => experiment.id === current) ? current : rows[0]?.id || "");
+      setError("");
+    } catch (cause: any) {
+      setError(cause.message);
+    }
+  }, []);
+
+  const refreshDetail = useCallback((id: string) => {
+    if (!id) return;
+    request<Experiment>(`/experiments/${id}`).then(setDetail).catch((cause) => setError(cause.message));
+  }, []);
+
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 3000);
+    const timer = window.setInterval(load, 30000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  useAppEvents<{ experiment_id?: string }>("evals", props.projectId, (event) => {
+    if (!event.topic.startsWith("eval.")) return;
+    refreshExperiments();
+    const experimentID = event.data?.experiment_id;
+    if (experimentID && experimentID === selectedExperiment) refreshDetail(experimentID);
+  });
+
+  useAppEvents<LiveVoiceCall>("environments", props.projectId, (event) => {
+    if (!event.topic.startsWith("environment.voice_call.")) return;
+    const call = event.data;
+    if (!call?.run_id || !call.call_id) return;
+    setLiveVoiceCalls((current) => ({ ...current, [call.run_id]: call }));
+  });
 
   const selectedSuiteHistory = useMemo(
     () => experiments.filter((experiment) => experiment.suite_id === selectedSuite),
@@ -1116,8 +1256,8 @@ export default function EvalsPanel(props: NativePanelProps) {
   useEffect(() => {
     if (!selectedExperiment) { setDetail(null); return; }
     setDetail((current) => current?.id === selectedExperiment ? current : null);
-    request<Experiment>(`/experiments/${selectedExperiment}`).then(setDetail).catch((cause) => setError(cause.message));
-  }, [selectedExperiment, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running]);
+    refreshDetail(selectedExperiment);
+  }, [selectedExperiment, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running, refreshDetail]);
 
   const selectSuite = (id: string) => {
     setSelectedSuite(id);
@@ -1154,8 +1294,8 @@ export default function EvalsPanel(props: NativePanelProps) {
       </header>
       {error && <div className="ev-error"><span>{error}</span><button type="button" onClick={() => setError("")} title="Dismiss" className="ev-icon-button">×</button></div>}
       {tab === "evals"
-        ? <EvalsView suites={suites} experiments={experiments} selectedSuite={selectedSuite} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} onSelectSuite={selectSuite} onSelectExperiment={selectExperiment} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => setPlanRun(suite.id)} onInspect={setInspected} />
-        : <RunsView experiments={experiments} selected={selectedExperiment} detail={detail} onSelect={selectExperiment} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} />}
+        ? <EvalsView suites={suites} experiments={experiments} selectedSuite={selectedSuite} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} liveVoiceCalls={liveVoiceCalls} onSelectSuite={selectSuite} onSelectExperiment={selectExperiment} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => setPlanRun(suite.id)} onInspect={setInspected} />
+        : <RunsView experiments={experiments} selected={selectedExperiment} detail={detail} liveVoiceCalls={liveVoiceCalls} onSelect={selectExperiment} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} />}
     </div>
     {quickRun && <QuickRunBuilder catalog={catalog} onClose={() => setQuickRun(false)} onCreated={created} />}
     {planRun !== null && <PlanRunBuilder initialSuiteID={planRun} suites={suites} catalog={catalog} onClose={() => setPlanRun(null)} onCreated={created} />}

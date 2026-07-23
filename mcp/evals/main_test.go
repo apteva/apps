@@ -22,7 +22,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -75,6 +75,17 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("claim=%#v err=%v", claimed, err)
 	}
+	if claimed.Stage != "starting" {
+		t.Fatalf("claimed stage=%q", claimed.Stage)
+	}
+	if err := db.updateRunProgress(claimed.ID, "agent_running", "env-run-one"); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := db.getRun(claimed.ID)
+	if err != nil || progress.Stage != "agent_running" || progress.EnvironmentRunID != "env-run-one" {
+		t.Fatalf("progress=%#v err=%v", progress, err)
+	}
+	claimed.Stage, claimed.EnvironmentRunID = progress.Stage, progress.EnvironmentRunID
 	value := 100.0
 	finished := time.Now().UTC()
 	claimed.Status, claimed.OverallScore, claimed.FinishedAt = "pass", &value, &finished
@@ -219,7 +230,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.3.0" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.3.1" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 }

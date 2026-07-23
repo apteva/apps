@@ -1,0 +1,1 @@
+ALTER TABLE eval_runs ADD COLUMN stage TEXT NOT NULL DEFAULT '';

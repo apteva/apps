@@ -329,14 +329,14 @@ func (s store) getRun(id string) (*Run, error) {
 	return run, err
 }
 
-const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,status,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
+const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
 	var caseRaw, targetRaw, assertionsRaw, created string
 	var executionRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
 	var correctness, judgeScore, overall sql.NullFloat64
-	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.Status, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
+	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -397,7 +397,7 @@ func (s store) claimRun() (*Run, error) {
 		return run, err
 	}
 	now := formatTime(time.Now().UTC())
-	result, err := tx.Exec(`UPDATE eval_runs SET status='running',started_at=? WHERE id=? AND status='queued'`, now, run.ID)
+	result, err := tx.Exec(`UPDATE eval_runs SET status='running',stage='starting',started_at=? WHERE id=? AND status='queued'`, now, run.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -410,8 +410,13 @@ func (s store) claimRun() (*Run, error) {
 		return nil, err
 	}
 	value := parseTime(now)
-	run.Status, run.StartedAt = "running", &value
+	run.Status, run.Stage, run.StartedAt = "running", "starting", &value
 	return run, nil
+}
+
+func (s store) updateRunProgress(id, stage, environmentRunID string) error {
+	_, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=?`, stage, environmentRunID, id)
+	return err
 }
 
 func (s store) finishRun(run *Run) error {
@@ -425,7 +430,7 @@ func (s store) finishRun(run *Run) error {
 	if run.VoiceCall != nil {
 		voiceCallJSON = encodeJSON(run.VoiceCall)
 	}
-	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,environment_run_id=?,execution_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.EnvironmentRunID, executionJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
+	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
 	if err != nil {
 		return err
 	}
@@ -458,6 +463,7 @@ func (s store) retryRun(source *Run) (*Run, error) {
 	run := *source
 	run.ID = "run_" + token(12)
 	run.Status = "queued"
+	run.Stage = ""
 	run.Repetition++
 	run.EnvironmentRunID, run.Execution, run.Judge, run.Error = "", nil, nil, ""
 	run.Assertions, run.CorrectnessScore, run.JudgeScore, run.OverallScore = nil, nil, nil, nil

@@ -25,14 +25,18 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			err = fmt.Errorf("eval runner panic: %v", recovered)
 		}
 		if err != nil {
-			run.Status, run.Error = "error", err.Error()
+			run.Status, run.Stage, run.Error = "error", "failed", err.Error()
 			finished := time.Now().UTC()
 			run.FinishedAt = &finished
 			_ = s.db.finishRun(run)
-			s.ctx.Emit("eval.run.failed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "error": err.Error()})
+			s.ctx.Emit("eval.run.failed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "error": err.Error()})
+			s.emitExperimentCompleted(run.ExperimentID)
 		}
 	}()
 
+	if err = s.setRunStage(run, "preparing_environment"); err != nil {
+		return err
+	}
 	spec := map[string]any{"version": 1, "ttl_seconds": run.CaseSnapshot.TimeoutSeconds + 300, "network_mode": "block", "integration_mode": "mock"}
 	if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
 		var definition EnvironmentDefinition
@@ -52,6 +56,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	environmentRun = &created
 	run.EnvironmentRunID = created.ID
 
+	if err = s.setRunStage(run, "spawning_agent"); err != nil {
+		return err
+	}
 	var spawned sdk.RuntimeAgent
 	spawnArgs := map[string]any{"run_id": created.ID, "agent": map[string]any{"source_agent_id": run.TargetSnapshot.AgentID, "alias": "main", "start_paused": true, "provider": run.TargetSnapshot.Provider, "model": run.TargetSnapshot.Model}}
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
@@ -80,6 +87,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 				"disconnect_on_done": true,
 			},
 		}
+		if err = s.setRunStage(run, "connecting_voice_call"); err != nil {
+			return err
+		}
 		var call EnvironmentVoiceCall
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_voice_call", input, &call); err != nil {
 			return fmt.Errorf("run voice call: %w", err)
@@ -88,6 +98,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		run.Execution = call.Execution
 		run.Assertions = append(run.Assertions, voiceAssertionResults(voice, &call)...)
 	} else {
+		if err = s.setRunStage(run, "sending_task"); err != nil {
+			return err
+		}
 		var accepted map[string]any
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": environmentTaskMessage(run.CaseSnapshot.Prompt, created.WebFixtures)}, &accepted); err != nil {
 			return fmt.Errorf("send task: %w", err)
@@ -96,6 +109,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("start agent: %w", err)
 		}
 
+		if err = s.setRunStage(run, "agent_running"); err != nil {
+			return err
+		}
 		var execution sdk.RuntimeAgentExecution
 		wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
@@ -107,6 +123,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 
+	if err = s.setRunStage(run, "checking_results"); err != nil {
+		return err
+	}
 	for _, assertion := range run.CaseSnapshot.Assertions {
 		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
 		var result AssertionResult
@@ -124,6 +143,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return errors.New("experiment disappeared")
 	}
 	if experiment.JudgeModel != "" && len(run.CaseSnapshot.Goals) > 0 {
+		if err = s.setRunStage(run, "judging"); err != nil {
+			return err
+		}
 		verdict, judgeErr := s.judge(ctx, experiment.JudgeModel, run)
 		if judgeErr != nil {
 			return fmt.Errorf("judge: %w", judgeErr)
@@ -136,13 +158,14 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	}
 
 	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
-	run.Status, run.CorrectnessScore, run.JudgeScore, run.OverallScore = status, correctness, judgeScore, overall
+	run.Status, run.Stage, run.CorrectnessScore, run.JudgeScore, run.OverallScore = status, "completed", correctness, judgeScore, overall
 	finished := time.Now().UTC()
 	run.FinishedAt = &finished
 	if err = s.db.finishRun(run); err != nil {
 		return err
 	}
-	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "status": status, "score": overall})
+	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "status": status, "score": overall})
+	s.emitExperimentCompleted(run.ExperimentID)
 	if experiment.TriggerType == "schedule" {
 		updated, _ := s.db.getExperiment(run.ExperimentID)
 		if updated != nil && updated.Status == "completed" && updated.Summary != nil {
@@ -153,6 +176,28 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 	return nil
+}
+
+func (s *service) setRunStage(run *Run, stage string) error {
+	run.Stage = stage
+	if err := s.db.updateRunProgress(run.ID, stage, run.EnvironmentRunID); err != nil {
+		return err
+	}
+	s.ctx.Emit("eval.run.stage.changed", map[string]any{
+		"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": stage,
+		"environment_run_id": run.EnvironmentRunID,
+	})
+	return nil
+}
+
+func (s *service) emitExperimentCompleted(id string) {
+	experiment, err := s.db.getExperiment(id)
+	if err != nil || experiment == nil || experiment.Status != "completed" {
+		return
+	}
+	s.ctx.Emit("eval.experiment.completed", map[string]any{
+		"experiment_id": experiment.ID, "suite_id": experiment.SuiteID, "summary": experiment.Summary,
+	})
 }
 
 func environmentTaskMessage(task string, fixtures []EnvironmentWebFixture) string {
