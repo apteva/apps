@@ -17,9 +17,9 @@ import (
 
 func seedTaxRules(db *sql.DB) error {
 	rules := []Rule{
-		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "vat", Year: 2026, Version: "es-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/", Rules: map[string]any{"vat_standard_bps": 2100, "reduced_bps": []int{1000, 400, 0}, "authority": "Agencia Tributaria"}},
-		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "income_tax", Year: 2026, Version: "es-autonomo-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/", Rules: map[string]any{"income_tax_bps": 2000, "authority": "Agencia Tributaria", "warning": "Flat estimate; actual IRPF is progressive and depends on personal circumstances."}},
-		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "social_contributions", Year: 2026, Version: "es-autonomo-social-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.seg-social.es/", Rules: map[string]any{"monthly_cents": 30000, "authority": "Tesoreria General de la Seguridad Social", "warning": "Default monthly quota placeholder; configure the actual base/quota per profile."}},
+		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "vat", Year: 2026, Version: "es-2026-v2", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/Sede/iva/presentar-declaracion-iva-modelo-303/plazo-presentacion-modelo-303.html", Rules: map[string]any{"vat_standard_bps": 2100, "reduced_bps": []int{1000, 400, 0}, "authority": "Agencia Tributaria"}},
+		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "income_tax", Year: 2026, Version: "es-autonomo-2026-v2", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/", Rules: map[string]any{"income_tax_bps": 2000, "authority": "Agencia Tributaria", "warning": "Planning estimate only. Actual IRPF is progressive and depends on deductions and personal circumstances."}},
+		{Country: "ES", Structure: "ES_AUTONOMO", TaxType: "social_contributions", Year: 2026, Version: "es-autonomo-social-2026-v2", EffectiveFrom: "2026-01-01", SourceURL: "https://www.seg-social.es/", Rules: map[string]any{"monthly_cents": 0, "authority": "Tesoreria General de la Seguridad Social", "warning": "Set the actual monthly contribution from the profile or estimate input; the contribution depends on the applicable income band and elections."}},
 		{Country: "ES", Structure: "ES_SL", TaxType: "vat", Year: 2026, Version: "es-sl-vat-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/", Rules: map[string]any{"vat_standard_bps": 2100, "reduced_bps": []int{1000, 400, 0}, "authority": "Agencia Tributaria"}},
 		{Country: "ES", Structure: "ES_SL", TaxType: "corporate_tax", Year: 2026, Version: "es-sl-is-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://sede.agenciatributaria.gob.es/", Rules: map[string]any{"corporate_tax_bps": 2500, "authority": "Agencia Tributaria", "warning": "General-rate estimate; reduced rates and special regimes require profile config/adjustments."}},
 		{Country: "FR", Structure: "FR_SAS", TaxType: "vat", Year: 2026, Version: "fr-vat-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"vat_standard_bps": 2000, "reduced_bps": []int{1000, 550, 210}, "authority": "Direction generale des Finances publiques"}},
@@ -28,10 +28,16 @@ func seedTaxRules(db *sql.DB) error {
 		{Country: "FR", Structure: "FR_SASU", TaxType: "corporate_tax", Year: 2026, Version: "fr-sasu-is-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"corporate_tax_bps": 2500, "authority": "Direction generale des Finances publiques"}},
 		{Country: "FR", Structure: "FR_SARL", TaxType: "vat", Year: 2026, Version: "fr-vat-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"vat_standard_bps": 2000, "reduced_bps": []int{1000, 550, 210}, "authority": "Direction generale des Finances publiques"}},
 		{Country: "FR", Structure: "FR_SARL", TaxType: "corporate_tax", Year: 2026, Version: "fr-sarl-is-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"corporate_tax_bps": 2500, "authority": "Direction generale des Finances publiques"}},
+		{Country: "FR", Structure: "FR_EURL", TaxType: "vat", Year: 2026, Version: "fr-eurl-vat-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/professionnel/tva", Rules: map[string]any{"vat_standard_bps": 2000, "reduced_bps": []int{1000, 550, 210}, "authority": "Direction generale des Finances publiques"}},
 		{Country: "FR", Structure: "FR_EURL", TaxType: "income_tax", Year: 2026, Version: "fr-eurl-ir-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"income_tax_bps": 2500, "authority": "Direction generale des Finances publiques", "warning": "Flat estimate; actual French income tax is progressive and household-dependent."}},
+		{Country: "FR", Structure: "FR_EURL", TaxType: "corporate_tax", Year: 2026, Version: "fr-eurl-is-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.impots.gouv.fr/", Rules: map[string]any{"corporate_tax_bps": 2500, "authority": "Direction generale des Finances publiques", "warning": "Used only when the profile config selects the corporate-tax regime."}},
+		{Country: "FR", Structure: "FR_EURL", TaxType: "social_contributions", Year: 2026, Version: "fr-eurl-social-2026-v1", EffectiveFrom: "2026-01-01", SourceURL: "https://www.urssaf.fr/", Rules: map[string]any{"monthly_cents": 0, "authority": "URSSAF", "warning": "Set the actual monthly contribution. Manager contributions depend on remuneration, profit, ownership, and social status."}},
 	}
 	for _, r := range rules {
-		if _, err := db.Exec(`INSERT OR IGNORE INTO tax_rules (country,structure,tax_type,year,version,effective_from,source_url,rules_json,active) VALUES (?,?,?,?,?,?,?,?,1)`,
+		if _, err := db.Exec(`INSERT INTO tax_rules (country,structure,tax_type,year,version,effective_from,source_url,rules_json,active)
+			VALUES (?,?,?,?,?,?,?,?,1)
+			ON CONFLICT(country,structure,tax_type,year,version)
+			DO UPDATE SET effective_from=excluded.effective_from, source_url=excluded.source_url, rules_json=excluded.rules_json, active=1`,
 			r.Country, r.Structure, r.TaxType, r.Year, r.Version, r.EffectiveFrom, r.SourceURL, mustJSON(r.Rules)); err != nil {
 			return err
 		}
@@ -150,30 +156,56 @@ func getPeriod(db *sql.DB, projectID string, id int64) (map[string]any, error) {
 }
 
 type inferredPeriod struct {
-	TaxType     string
-	PeriodStart string
-	PeriodEnd   string
-	DueDate     string
+	TaxType       string
+	PeriodStart   string
+	PeriodEnd     string
+	DueDate       string
+	DeadlineState string
+	SourceURL     string
 }
 
 func generatePeriodsForProfile(db *sql.DB, profile Profile, year int) ([]map[string]any, error) {
 	inferred := inferPeriods(profile, year)
 	out := []map[string]any{}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE tax_periods
+		SET status='superseded', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND profile_id=? AND status='open'
+		  AND period_start>=? AND period_start<?
+		  AND json_extract(metadata_json,'$.generated')=1`,
+		profile.ProjectID, profile.ID, fmt.Sprintf("%04d-01-01", year), fmt.Sprintf("%04d-01-01", year+1)); err != nil {
+		return nil, err
+	}
 	for _, p := range inferred {
-		if _, err := db.Exec(`INSERT INTO tax_periods
+		if _, err := tx.Exec(`INSERT INTO tax_periods
 			(project_id,profile_id,tax_type,period_start,period_end,due_date,metadata_json)
 			VALUES (?,?,?,?,?,?,?)
 			ON CONFLICT(project_id, profile_id, tax_type, period_start, period_end)
-			DO UPDATE SET due_date=excluded.due_date, updated_at=CURRENT_TIMESTAMP`,
+			DO UPDATE SET due_date=excluded.due_date,
+				metadata_json=excluded.metadata_json,
+				status=CASE WHEN tax_periods.status='superseded' THEN 'open' ELSE tax_periods.status END,
+				updated_at=CURRENT_TIMESTAMP`,
 			profile.ProjectID, profile.ID, p.TaxType, p.PeriodStart, p.PeriodEnd, p.DueDate,
-			mustJSON(map[string]any{"generated": true, "source": "tax_profile"})); err != nil {
+			mustJSON(map[string]any{
+				"generated":       true,
+				"source":          "tax_profile",
+				"deadline_state":  p.DeadlineState,
+				"deadline_source": p.SourceURL,
+			})); err != nil {
 			return nil, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	rows, err := db.Query(`SELECT id,project_id,profile_id,tax_type,period_start,period_end,due_date,status,filed_at,filing_ref,metadata_json
 		FROM tax_periods
-		WHERE project_id=? AND profile_id=? AND period_start>=? AND period_end<=?
-		ORDER BY period_start, tax_type`, profile.ProjectID, profile.ID, fmt.Sprintf("%04d-01-01", year), fmt.Sprintf("%04d-12-31", year))
+		WHERE project_id=? AND profile_id=? AND period_start>=? AND period_start<?
+		ORDER BY period_start, tax_type`, profile.ProjectID, profile.ID, fmt.Sprintf("%04d-01-01", year), fmt.Sprintf("%04d-01-01", year+1))
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +228,7 @@ func inferPeriods(profile Profile, year int) []inferredPeriod {
 				out = append(out, annualPeriod(year, taxType, profile.Country))
 			}
 		case "corporate_tax":
-			out = append(out, annualPeriod(year, taxType, profile.Country))
+			out = append(out, annualPeriodForProfile(profile, year, taxType))
 		case "vat":
 			switch strings.ToLower(profile.FilingCadence) {
 			case "monthly":
@@ -208,21 +240,34 @@ func inferPeriods(profile Profile, year int) []inferredPeriod {
 			}
 		}
 	}
+	for i := range out {
+		if configured := configuredDueDate(profile, out[i]); configured != "" {
+			out[i].DueDate = configured
+			out[i].DeadlineState = "profile_configured"
+		}
+	}
 	return out
 }
 
 func inferredTaxTypes(profile Profile) []string {
+	out := []string{}
+	if profile.VATRegistered {
+		out = append(out, "vat")
+	}
 	switch profile.Structure {
 	case "ES_AUTONOMO":
-		return []string{"vat", "income_tax", "social_contributions"}
+		return append(out, "income_tax", "social_contributions")
 	case "ES_SL":
-		return []string{"vat", "corporate_tax"}
+		return append(out, "corporate_tax")
 	case "FR_SAS", "FR_SASU", "FR_SARL":
-		return []string{"vat", "corporate_tax"}
+		return append(out, "corporate_tax")
 	case "FR_EURL":
-		return []string{"vat", "income_tax"}
+		if strings.EqualFold(stringFromAny(profile.Config["tax_regime"]), "corporate_tax") {
+			return append(out, "corporate_tax", "social_contributions")
+		}
+		return append(out, "income_tax", "social_contributions")
 	default:
-		return []string{"vat"}
+		return out
 	}
 }
 
@@ -231,10 +276,12 @@ func quarterlyPeriods(year int, taxType, country string) []inferredPeriod {
 	out := []inferredPeriod{}
 	for i, q := range quarters {
 		out = append(out, inferredPeriod{
-			TaxType:     taxType,
-			PeriodStart: fmt.Sprintf("%04d-%s", year, q[0]),
-			PeriodEnd:   fmt.Sprintf("%04d-%s", year, q[1]),
-			DueDate:     dueDateFor(country, taxType, year, i+1, "quarterly"),
+			TaxType:       taxType,
+			PeriodStart:   fmt.Sprintf("%04d-%s", year, q[0]),
+			PeriodEnd:     fmt.Sprintf("%04d-%s", year, q[1]),
+			DueDate:       dueDateFor(country, taxType, year, i+1, "quarterly"),
+			DeadlineState: deadlineState(country),
+			SourceURL:     deadlineSource(country, taxType),
 		})
 	}
 	return out
@@ -246,10 +293,12 @@ func monthlyPeriods(year int, taxType, country string) []inferredPeriod {
 		start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
 		end := start.AddDate(0, 1, -1)
 		out = append(out, inferredPeriod{
-			TaxType:     taxType,
-			PeriodStart: start.Format("2006-01-02"),
-			PeriodEnd:   end.Format("2006-01-02"),
-			DueDate:     dueDateFor(country, taxType, year, month, "monthly"),
+			TaxType:       taxType,
+			PeriodStart:   start.Format("2006-01-02"),
+			PeriodEnd:     end.Format("2006-01-02"),
+			DueDate:       dueDateFor(country, taxType, year, month, "monthly"),
+			DeadlineState: deadlineState(country),
+			SourceURL:     deadlineSource(country, taxType),
 		})
 	}
 	return out
@@ -257,63 +306,141 @@ func monthlyPeriods(year int, taxType, country string) []inferredPeriod {
 
 func annualPeriod(year int, taxType, country string) inferredPeriod {
 	return inferredPeriod{
-		TaxType:     taxType,
-		PeriodStart: fmt.Sprintf("%04d-01-01", year),
-		PeriodEnd:   fmt.Sprintf("%04d-12-31", year),
-		DueDate:     dueDateFor(country, taxType, year, 0, "annual"),
+		TaxType:       taxType,
+		PeriodStart:   fmt.Sprintf("%04d-01-01", year),
+		PeriodEnd:     fmt.Sprintf("%04d-12-31", year),
+		DueDate:       dueDateFor(country, taxType, year, 0, "annual"),
+		DeadlineState: deadlineState(country),
+		SourceURL:     deadlineSource(country, taxType),
 	}
+}
+
+func annualPeriodForProfile(profile Profile, year int, taxType string) inferredPeriod {
+	startSuffix := normalizeMonthDay(profile.FiscalYearStart, "01-01")
+	endSuffix := normalizeMonthDay(profile.FiscalYearEnd, "12-31")
+	start, _ := time.Parse("2006-01-02", fmt.Sprintf("%04d-%s", year, startSuffix))
+	endYear := year
+	if endSuffix < startSuffix {
+		endYear++
+	}
+	end, _ := time.Parse("2006-01-02", fmt.Sprintf("%04d-%s", endYear, endSuffix))
+	due := ""
+	state := deadlineState(profile.Country)
+	if profile.Country == "ES" && taxType == "corporate_tax" {
+		sixMonthsAfter := addMonthsClamped(end, 6)
+		due = nextWeekday(sixMonthsAfter.AddDate(0, 0, 25)).Format("2006-01-02")
+	}
+	return inferredPeriod{
+		TaxType:       taxType,
+		PeriodStart:   start.Format("2006-01-02"),
+		PeriodEnd:     end.Format("2006-01-02"),
+		DueDate:       due,
+		DeadlineState: state,
+		SourceURL:     deadlineSource(profile.Country, taxType),
+	}
+}
+
+func normalizeMonthDay(v, fallback string) string {
+	v = strings.TrimSpace(v)
+	if _, err := time.Parse("01-02", v); err != nil {
+		return fallback
+	}
+	return v
+}
+
+func configuredDueDate(profile Profile, period inferredPeriod) string {
+	raw, ok := profile.Config["due_dates"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	keys := []string{
+		period.TaxType + ":" + period.PeriodEnd,
+		period.TaxType,
+	}
+	for _, key := range keys {
+		if v := stringFromAny(raw[key]); validISODate(v) {
+			return v
+		}
+	}
+	return ""
+}
+
+func validISODate(v string) bool {
+	_, err := time.Parse("2006-01-02", v)
+	return err == nil
+}
+
+func addMonthsClamped(date time.Time, months int) time.Time {
+	targetMonth := time.Date(date.Year(), date.Month()+time.Month(months), 1, 0, 0, 0, 0, time.UTC)
+	lastDay := targetMonth.AddDate(0, 1, -1).Day()
+	day := date.Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(targetMonth.Year(), targetMonth.Month(), day, 0, 0, 0, 0, time.UTC)
+}
+
+func nextWeekday(date time.Time) time.Time {
+	for date.Weekday() == time.Saturday || date.Weekday() == time.Sunday {
+		date = date.AddDate(0, 0, 1)
+	}
+	return date
 }
 
 func dueDateFor(country, taxType string, year, ordinal int, cadence string) string {
 	switch country {
 	case "ES":
 		if taxType == "corporate_tax" {
-			return fmt.Sprintf("%04d-07-25", year+1)
+			return nextWeekday(time.Date(year+1, time.July, 25, 0, 0, 0, 0, time.UTC)).Format("2006-01-02")
+		}
+		if taxType == "social_contributions" && cadence == "monthly" {
+			return time.Date(year, time.Month(ordinal)+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 		}
 		if cadence == "monthly" {
-			month := ordinal + 1
-			dueYear := year
-			if month == 13 {
-				month = 1
-				dueYear = year + 1
+			next := time.Date(year, time.Month(ordinal)+1, 1, 0, 0, 0, 0, time.UTC)
+			last := next.AddDate(0, 1, -1).Day()
+			day := 30
+			if last < day {
+				day = last
 			}
-			return fmt.Sprintf("%04d-%02d-20", dueYear, month)
+			return nextWeekday(time.Date(next.Year(), next.Month(), day, 0, 0, 0, 0, time.UTC)).Format("2006-01-02")
 		}
 		if cadence == "quarterly" {
-			due := []string{
-				fmt.Sprintf("%04d-04-20", year),
-				fmt.Sprintf("%04d-07-20", year),
-				fmt.Sprintf("%04d-10-20", year),
-				fmt.Sprintf("%04d-01-20", year+1),
+			due := []time.Time{
+				time.Date(year, time.April, 20, 0, 0, 0, 0, time.UTC),
+				time.Date(year, time.July, 20, 0, 0, 0, 0, time.UTC),
+				time.Date(year, time.October, 20, 0, 0, 0, 0, time.UTC),
+				time.Date(year+1, time.January, 30, 0, 0, 0, 0, time.UTC),
 			}
 			if ordinal >= 1 && ordinal <= len(due) {
-				return due[ordinal-1]
+				return nextWeekday(due[ordinal-1]).Format("2006-01-02")
 			}
 		}
 	case "FR":
-		if taxType == "corporate_tax" {
-			return fmt.Sprintf("%04d-05-15", year+1)
-		}
-		if cadence == "monthly" {
-			month := ordinal + 1
-			dueYear := year
-			if month == 13 {
-				month = 1
-				dueYear = year + 1
-			}
-			return fmt.Sprintf("%04d-%02d-24", dueYear, month)
-		}
-		if cadence == "quarterly" {
-			due := []string{
-				fmt.Sprintf("%04d-04-24", year),
-				fmt.Sprintf("%04d-07-24", year),
-				fmt.Sprintf("%04d-10-24", year),
-				fmt.Sprintf("%04d-01-24", year+1),
-			}
-			if ordinal >= 1 && ordinal <= len(due) {
-				return due[ordinal-1]
-			}
-		}
+		// French filing dates vary by regime and the date assigned in the
+		// professional account. A false exact date is worse than an explicit
+		// confirmation requirement.
+		return ""
+	}
+	return ""
+}
+
+func deadlineState(country string) string {
+	if country == "ES" {
+		return "statutory_estimate"
+	}
+	return "requires_confirmation"
+}
+
+func deadlineSource(country, taxType string) string {
+	if country == "ES" && taxType == "social_contributions" {
+		return "https://www.seg-social.es/"
+	}
+	if country == "ES" {
+		return "https://sede.agenciatributaria.gob.es/Sede/ayuda/calendario-contribuyente/calendario-contribuyente-2026.html"
+	}
+	if country == "FR" {
+		return "https://www.impots.gouv.fr/professionnel/calendrier-fiscal"
 	}
 	return ""
 }
@@ -323,8 +450,8 @@ func calculateOutputs(taxType string, rule Rule, inputs map[string]any, start, e
 	expenses := int64FromAny(inputs["expenses_cents"])
 	outputTax := int64FromAny(inputs["output_tax_cents"])
 	inputTax := int64FromAny(inputs["input_tax_cents"])
-	profit := int64FromAny(inputs["taxable_profit_cents"])
-	if profit == 0 {
+	profit, profitProvided := int64MapValue(inputs, "taxable_profit_cents")
+	if !profitProvided {
 		profit = revenue - expenses
 	}
 	if profit < 0 {
@@ -334,10 +461,12 @@ func calculateOutputs(taxType string, rule Rule, inputs map[string]any, start, e
 	switch taxType {
 	case "vat":
 		rate := int64FromAny(rule.Rules["vat_standard_bps"])
-		if outputTax == 0 && revenue > 0 {
+		_, outputProvided := inputs["output_tax_cents"]
+		_, inputProvided := inputs["input_tax_cents"]
+		if !outputProvided && revenue > 0 {
 			outputTax = revenue * rate / 10000
 		}
-		if inputTax == 0 && expenses > 0 {
+		if !inputProvided && expenses > 0 {
 			inputTax = expenses * rate / 10000
 		}
 		out["output_tax_cents"] = outputTax
@@ -355,8 +484,8 @@ func calculateOutputs(taxType string, rule Rule, inputs map[string]any, start, e
 		out["estimated_payable_cents"] = profit * rate / 10000
 		out["rate_bps"] = rate
 	case "social_contributions":
-		monthly := int64FromAny(inputs["social_contribution_cents"])
-		if monthly == 0 {
+		monthly, monthlyProvided := int64MapValue(inputs, "social_contribution_cents")
+		if !monthlyProvided {
 			monthly = int64FromAny(rule.Rules["monthly_cents"])
 		}
 		months := int64FromAny(inputs["months"])
@@ -390,26 +519,29 @@ func insertCalculation(db *sql.DB, profile Profile, periodID int64, taxType stri
 func upsertEstimatedObligation(db *sql.DB, profile Profile, periodID, calcID int64, taxType string, outputs map[string]any, dueDate string) (*Obligation, error) {
 	title := fmt.Sprintf("%s %s estimate", profile.Name, strings.ReplaceAll(taxType, "_", " "))
 	amount := int64FromAny(outputs["estimated_payable_cents"])
+	direction := "payable"
+	if amount < 0 {
+		direction = "receivable"
+		amount = -amount
+		title = fmt.Sprintf("%s %s refund estimate", profile.Name, strings.ReplaceAll(taxType, "_", " "))
+	}
 	existing := int64(0)
 	if periodID > 0 {
 		_ = db.QueryRow(`SELECT id FROM tax_obligations WHERE project_id=? AND profile_id=? AND period_id=? AND tax_type=? AND status IN ('estimated','draft') ORDER BY id DESC LIMIT 1`, profile.ProjectID, profile.ID, periodID, taxType).Scan(&existing)
 	}
 	if existing > 0 {
-		_, err := db.Exec(`UPDATE tax_obligations SET calculation_id=?, title=?, amount_cents=?, currency=?, due_date=?, authority=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-			calcID, title, amount, profile.Currency, dueDate, defaultAuthority(profile, taxType), existing)
+		_, err := db.Exec(`UPDATE tax_obligations SET calculation_id=?, title=?, amount_cents=?, currency=?, due_date=?, authority=?, direction=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
+			calcID, title, amount, profile.Currency, dueDate, defaultAuthority(profile, taxType), direction, profile.ProjectID, existing)
 		if err != nil {
 			return nil, err
 		}
 		o, err := getObligation(db, profile.ProjectID, existing)
 		return &o, err
 	}
-	return insertObligation(db, profile, periodID, calcID, taxType, title, amount, profile.Currency, dueDate, defaultAuthority(profile, taxType), "estimated", nil)
+	return insertObligation(db, profile, periodID, calcID, taxType, title, amount, profile.Currency, dueDate, defaultAuthority(profile, taxType), direction, "estimated", nil)
 }
 
-func insertObligation(db *sql.DB, profile Profile, periodID, calcID int64, taxType, title string, amount int64, currency, dueDate, authority, status string, metadata map[string]any) (*Obligation, error) {
-	if taxType == "" {
-		return nil, errors.New("tax_type is required")
-	}
+func insertObligation(db *sql.DB, profile Profile, periodID, calcID int64, taxType, title string, amount int64, currency, dueDate, authority, direction, status string, metadata map[string]any) (*Obligation, error) {
 	if title == "" {
 		title = strings.ReplaceAll(taxType, "_", " ") + " obligation"
 	}
@@ -419,8 +551,23 @@ func insertObligation(db *sql.DB, profile Profile, periodID, calcID int64, taxTy
 	if status == "" {
 		status = "estimated"
 	}
-	res, err := db.Exec(`INSERT INTO tax_obligations (project_id,profile_id,period_id,calculation_id,tax_type,authority,title,amount_cents,currency,due_date,status,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		profile.ProjectID, profile.ID, nullInt(periodID), nullInt(calcID), taxType, authority, title, amount, currency, dueDate, status, mustJSON(metadata))
+	if direction == "" {
+		direction = "payable"
+	}
+	if err := validateObligationInput(profile, taxType, direction, amount, currency, status); err != nil {
+		return nil, err
+	}
+	if periodID > 0 {
+		period, err := getPeriod(db, profile.ProjectID, periodID)
+		if err != nil {
+			return nil, err
+		}
+		if int64FromAny(period["profile_id"]) != profile.ID || normalizeTaxType(stringFromAny(period["tax_type"])) != taxType {
+			return nil, errors.New("period does not belong to this profile and tax type")
+		}
+	}
+	res, err := db.Exec(`INSERT INTO tax_obligations (project_id,profile_id,period_id,calculation_id,tax_type,authority,title,amount_cents,currency,due_date,direction,status,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		profile.ProjectID, profile.ID, nullInt(periodID), nullInt(calcID), taxType, authority, title, amount, currency, dueDate, direction, status, mustJSON(metadata))
 	if err != nil {
 		return nil, err
 	}
@@ -431,7 +578,7 @@ func insertObligation(db *sql.DB, profile Profile, periodID, calcID int64, taxTy
 }
 
 func getObligation(db *sql.DB, projectID string, id int64) (Obligation, error) {
-	row := db.QueryRow(`SELECT id,project_id,profile_id,COALESCE(period_id,0),COALESCE(calculation_id,0),tax_type,authority,title,amount_cents,currency,due_date,status,filed_at,filing_ref,waived_reason,metadata_json FROM tax_obligations WHERE project_id=? AND id=?`, projectID, id)
+	row := db.QueryRow(`SELECT id,project_id,profile_id,COALESCE(period_id,0),COALESCE(calculation_id,0),tax_type,authority,title,amount_cents,currency,due_date,direction,status,filed_at,filing_ref,waived_reason,metadata_json FROM tax_obligations WHERE project_id=? AND id=?`, projectID, id)
 	return scanObligation(row)
 }
 
@@ -442,7 +589,7 @@ type obligationScanner interface {
 func scanObligation(row obligationScanner) (Obligation, error) {
 	var o Obligation
 	var meta string
-	if err := row.Scan(&o.ID, &o.ProjectID, &o.ProfileID, &o.PeriodID, &o.CalculationID, &o.TaxType, &o.Authority, &o.Title, &o.AmountCents, &o.Currency, &o.DueDate, &o.Status, &o.FiledAt, &o.FilingRef, &o.WaivedReason, &meta); err != nil {
+	if err := row.Scan(&o.ID, &o.ProjectID, &o.ProfileID, &o.PeriodID, &o.CalculationID, &o.TaxType, &o.Authority, &o.Title, &o.AmountCents, &o.Currency, &o.DueDate, &o.Direction, &o.Status, &o.FiledAt, &o.FilingRef, &o.WaivedReason, &meta); err != nil {
 		return Obligation{}, err
 	}
 	o.Metadata = parseJSONMap(meta)
@@ -472,23 +619,40 @@ func syncBilling(ctx *sdk.AppCtx, profile Profile, start, end string) sourceSumm
 		out.Warnings = append(out.Warnings, "billing platform API unavailable")
 		return out
 	}
-	var raw map[string]any
-	err := ctx.PlatformAPI().CallAppResult("billing", "invoices_search", map[string]any{
-		"date_from": start,
-		"date_to":   end,
-		"status":    "open,paid",
-	}, &raw)
-	if err != nil {
-		out.Unavailable = true
-		out.Warnings = append(out.Warnings, "billing sync failed: "+err.Error())
-		return out
+	statuses := []string{"open", "paid"}
+	if strings.EqualFold(profile.AccountingBasis, "cash") {
+		statuses = []string{"paid"}
 	}
-	out.Raw = raw
-	out.RevenueCents = sumNested(raw, "total_cents", "subtotal_cents", "amount_cents")
-	out.OutputTaxCents = sumNested(raw, "tax_cents", "vat_cents", "output_tax_cents")
-	out.Items = countLikelyItems(raw)
+	rawPages := map[string]any{}
+	for _, status := range statuses {
+		var page map[string]any
+		err := ctx.PlatformAPI().CallAppResult("billing", "invoices_search", map[string]any{
+			"_project_id": profile.ProjectID,
+			"since":       start,
+			"until":       exclusiveDateEnd(end),
+			"status":      status,
+			"currency":    profile.Currency,
+			"limit":       200,
+		}, &page)
+		if err != nil {
+			out.Unavailable = true
+			out.Warnings = append(out.Warnings, "billing sync failed: "+err.Error())
+			return out
+		}
+		rows := objectRows(page["invoices"])
+		for _, row := range rows {
+			out.RevenueCents += int64FromAny(row["subtotal_cents"])
+			out.OutputTaxCents += int64FromAny(row["tax_cents"])
+		}
+		out.Items += len(rows)
+		if len(rows) == 200 {
+			out.Warnings = append(out.Warnings, "billing returned the 200-row maximum for status "+status+"; narrow the period before relying on this estimate")
+		}
+		rawPages[status] = page
+	}
+	out.Raw = rawPages
 	if out.OutputTaxCents == 0 && out.RevenueCents > 0 && profile.VATRegistered {
-		out.Warnings = append(out.Warnings, "billing returned revenue without explicit output tax; estimator may infer standard-rate tax")
+		out.Warnings = append(out.Warnings, "billing returned revenue with zero recorded output tax; zero is preserved and should be reviewed for exempt or zero-rated sales")
 	}
 	return out
 }
@@ -500,22 +664,51 @@ func syncBills(ctx *sdk.AppCtx, profile Profile, start, end string) sourceSummar
 		out.Warnings = append(out.Warnings, "bills platform API unavailable")
 		return out
 	}
-	var raw map[string]any
-	err := ctx.PlatformAPI().CallAppResult("bills", "bills_search", map[string]any{
-		"date_from": start,
-		"date_to":   end,
-	}, &raw)
-	if err != nil {
-		out.Unavailable = true
-		out.Warnings = append(out.Warnings, "bills sync failed: "+err.Error())
-		return out
+	statuses := []string{"received", "approved", "scheduled", "paid"}
+	if strings.EqualFold(profile.AccountingBasis, "cash") {
+		statuses = []string{"paid"}
 	}
-	out.Raw = raw
-	out.ExpensesCents = sumNested(raw, "total_cents", "subtotal_cents", "amount_cents")
-	out.InputTaxCents = sumNested(raw, "tax_cents", "vat_cents", "input_tax_cents")
-	out.Items = countLikelyItems(raw)
+	rawPages := map[string]any{}
+	for _, status := range statuses {
+		offset := 0
+		statusPages := []any{}
+		for {
+			var page map[string]any
+			err := ctx.PlatformAPI().CallAppResult("bills", "bills_search", map[string]any{
+				"_project_id": profile.ProjectID,
+				"since":       start,
+				"until":       exclusiveDateEnd(end),
+				"status":      status,
+				"currency":    profile.Currency,
+				"limit":       200,
+				"offset":      offset,
+			}, &page)
+			if err != nil {
+				out.Unavailable = true
+				out.Warnings = append(out.Warnings, "bills sync failed: "+err.Error())
+				return out
+			}
+			rows := objectRows(page["bills"])
+			for _, row := range rows {
+				out.ExpensesCents += int64FromAny(row["subtotal_cents"])
+				out.InputTaxCents += int64FromAny(row["tax_cents"])
+			}
+			out.Items += len(rows)
+			statusPages = append(statusPages, page)
+			if !boolFromAny(page["has_more"]) || len(rows) == 0 {
+				break
+			}
+			next := intFromAny(page["next_offset"])
+			if next <= offset {
+				next = offset + len(rows)
+			}
+			offset = next
+		}
+		rawPages[status] = statusPages
+	}
+	out.Raw = rawPages
 	if out.InputTaxCents == 0 && out.ExpensesCents > 0 && profile.VATRegistered {
-		out.Warnings = append(out.Warnings, "bills returned expenses without explicit input tax; estimator may infer standard-rate recoverable tax")
+		out.Warnings = append(out.Warnings, "bills returned expenses with zero recorded input tax; zero is preserved and should be reviewed for recoverability")
 	}
 	return out
 }
@@ -564,13 +757,18 @@ func audit(db *sql.DB, projectID, entityType string, entityID int64, action, mes
 }
 
 func projectID(ctx *sdk.AppCtx, args map[string]any) string {
-	if v := stringArg(args, "project_id", ""); v != "" {
+	if ctx != nil {
+		if v := strings.TrimSpace(ctx.CurrentProject()); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(stringArg(args, "_project_id", "")); v != "" {
 		return v
 	}
 	if v := os.Getenv("APTEVA_PROJECT_ID"); v != "" {
 		return v
 	}
-	return "default"
+	return ""
 }
 
 func normalizeTaxType(v string) string {
@@ -592,6 +790,9 @@ func normalizeTaxType(v string) string {
 func defaultAuthority(p Profile, taxType string) string {
 	if p.Country == "ES" && taxType == "social_contributions" {
 		return "Tesoreria General de la Seguridad Social"
+	}
+	if p.Country == "FR" && taxType == "social_contributions" {
+		return "URSSAF"
 	}
 	if p.Country == "ES" {
 		return "Agencia Tributaria"
@@ -805,6 +1006,67 @@ func sumNested(v any, keys ...string) int64 {
 	return total
 }
 
+func objectRows(v any) []map[string]any {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if row, ok := item.(map[string]any); ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func exclusiveDateEnd(end string) string {
+	parsed, err := time.Parse("2006-01-02", end)
+	if err != nil {
+		return end
+	}
+	return parsed.AddDate(0, 0, 1).Format("2006-01-02")
+}
+
+func int64MapValue(m map[string]any, key string) (int64, bool) {
+	v, ok := m[key]
+	if !ok {
+		return 0, false
+	}
+	return int64FromAny(v), true
+}
+
+func stringFromAny(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprint(v)
+}
+
+func boolFromAny(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		b, _ := strconv.ParseBool(x)
+		return b
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	}
+	return false
+}
+
+func intFromAny(v any) int {
+	return int(int64FromAny(v))
+}
+
 func countLikelyItems(v any) int {
 	switch x := v.(type) {
 	case map[string]any:
@@ -868,7 +1130,7 @@ func profileProps() map[string]any {
 		"name": strSchema(), "country": strSchema(), "structure": strSchema(), "region": strSchema(),
 		"fiscal_year_start": strSchema(), "fiscal_year_end": strSchema(), "vat_registered": boolSchema(),
 		"filing_cadence": strSchema(), "accounting_basis": strSchema(), "currency": strSchema(),
-		"config": map[string]any{"type": "object"}, "archived": boolSchema(),
+		"config": map[string]any{"type": "object"}, "archived": boolSchema(), "auto_open_periods": boolSchema(),
 	}
 }
 
@@ -894,11 +1156,11 @@ func estimateProps() map[string]any {
 }
 
 func obligationProps() map[string]any {
-	return map[string]any{"profile_id": intSchema(), "period_id": intSchema(), "tax_type": strSchema(), "title": strSchema(), "amount_cents": intSchema(), "currency": strSchema(), "due_date": strSchema(), "authority": strSchema(), "status": strSchema(), "metadata": map[string]any{"type": "object"}}
+	return map[string]any{"profile_id": intSchema(), "period_id": intSchema(), "tax_type": strSchema(), "title": strSchema(), "amount_cents": intSchema(), "currency": strSchema(), "due_date": strSchema(), "authority": strSchema(), "direction": strSchema(), "status": strSchema(), "metadata": map[string]any{"type": "object"}}
 }
 
 func paymentProps() map[string]any {
-	return map[string]any{"obligation_id": intSchema(), "amount_cents": intSchema(), "currency": strSchema(), "paid_at": strSchema(), "method": strSchema(), "reference": strSchema(), "notes": strSchema(), "bills_bill_id": intSchema(), "bills_payment_id": intSchema(), "metadata": map[string]any{"type": "object"}}
+	return map[string]any{"obligation_id": intSchema(), "amount_cents": intSchema(), "currency": strSchema(), "paid_at": strSchema(), "method": strSchema(), "reference": strSchema(), "notes": strSchema(), "metadata": map[string]any{"type": "object"}}
 }
 
 func adjustmentProps() map[string]any {

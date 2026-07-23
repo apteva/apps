@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: taxes
 display_name: Taxes
-version: 1.0.2
+version: 1.0.3
 description: Business tax profiles, estimates, statutory obligations, social contributions, filings, and payment tracking.
 author: Apteva
 scopes: [project, global]
@@ -109,7 +109,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedTaxRules(ctx.AppDB()); err != nil {
 		return err
 	}
-	ctx.Logger().Info("taxes mounted", "version", "1.0.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("taxes mounted", "version", "1.0.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -167,6 +167,9 @@ func (a *App) handleToolHTTP(w http.ResponseWriter, r *http.Request) {
 			args[k] = vals[0]
 		}
 	}
+	if args["_project_id"] == nil {
+		args["_project_id"] = r.URL.Query().Get("project_id")
+	}
 	for _, tool := range a.MCPTools() {
 		if tool.Name != name {
 			continue
@@ -195,11 +198,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "tax_periods_list", Description: "List tax periods. Args: profile_id?, tax_type?, status?, period_start?, period_end?.", InputSchema: schemaObject(map[string]any{"profile_id": intSchema(), "tax_type": strSchema(), "status": strSchema(), "period_start": strSchema(), "period_end": strSchema()}, nil), Handler: a.toolPeriodsList},
 		{Name: "tax_periods_get", Description: "Fetch one tax period by id.", InputSchema: schemaObject(map[string]any{"id": intSchema()}, []string{"id"}), Handler: a.toolPeriodsGet},
 		{Name: "tax_periods_close", Description: "Close a period. Args: id, status? (default closed), filed_at?, filing_ref?.", InputSchema: schemaObject(map[string]any{"id": intSchema(), "status": strSchema(), "filed_at": strSchema(), "filing_ref": strSchema()}, []string{"id"}), Handler: a.toolPeriodsClose},
-		{Name: "tax_estimate_vat", Description: "Estimate VAT/IVA/TVA. Args: profile_id, period_start, period_end, period_id?, output_tax_cents?, input_tax_cents?, revenue_cents?, expenses_cents?, create_obligation?.", InputSchema: schemaObject(estimateProps(), []string{"profile_id", "period_start", "period_end"}), Handler: a.toolEstimateVAT},
-		{Name: "tax_estimate_income_tax", Description: "Estimate income tax. Args: profile_id, period_start, period_end, revenue_cents?, expenses_cents?, taxable_profit_cents?, create_obligation?.", InputSchema: schemaObject(estimateProps(), []string{"profile_id", "period_start", "period_end"}), Handler: a.toolEstimateIncome},
-		{Name: "tax_estimate_corporate_tax", Description: "Estimate corporate tax. Args: profile_id, period_start, period_end, revenue_cents?, expenses_cents?, taxable_profit_cents?, create_obligation?.", InputSchema: schemaObject(estimateProps(), []string{"profile_id", "period_start", "period_end"}), Handler: a.toolEstimateCorporate},
-		{Name: "tax_estimate_social_contributions", Description: "Estimate social contributions. Args: profile_id, period_start, period_end, months?, social_contribution_cents?, create_obligation?.", InputSchema: schemaObject(estimateProps(), []string{"profile_id", "period_start", "period_end"}), Handler: a.toolEstimateSocial},
-		{Name: "tax_estimate_all", Description: "Run the relevant estimates for the profile structure. Args: profile_id, period_start, period_end, period_id?, create_obligation?.", InputSchema: schemaObject(estimateProps(), []string{"profile_id", "period_start", "period_end"}), Handler: a.toolEstimateAll},
+		{Name: "tax_estimate_vat", Description: "Estimate VAT/IVA/TVA for a generated period_id, or a start/end range when create_obligation=false.", InputSchema: schemaObject(estimateProps(), []string{"profile_id"}), Handler: a.toolEstimateVAT},
+		{Name: "tax_estimate_income_tax", Description: "Estimate income tax for a generated period_id, or a start/end range when create_obligation=false.", InputSchema: schemaObject(estimateProps(), []string{"profile_id"}), Handler: a.toolEstimateIncome},
+		{Name: "tax_estimate_corporate_tax", Description: "Estimate corporate tax for a generated period_id, or a start/end range when create_obligation=false.", InputSchema: schemaObject(estimateProps(), []string{"profile_id"}), Handler: a.toolEstimateCorporate},
+		{Name: "tax_estimate_social_contributions", Description: "Estimate social contributions for a generated period_id, or a start/end range when create_obligation=false.", InputSchema: schemaObject(estimateProps(), []string{"profile_id"}), Handler: a.toolEstimateSocial},
+		{Name: "tax_estimate_all", Description: "Estimate every applicable generated period in the requested range, or only period_id when supplied.", InputSchema: schemaObject(estimateProps(), []string{"profile_id"}), Handler: a.toolEstimateAll},
 		{Name: "tax_obligations_create", Description: "Create a tax/statutory obligation. Args: profile_id, tax_type, title, amount_cents, currency?, due_date?, authority?, period_id?, metadata?.", InputSchema: schemaObject(obligationProps(), []string{"profile_id", "tax_type", "title", "amount_cents"}), Handler: a.toolObligationsCreate},
 		{Name: "tax_obligations_update", Description: "Update an obligation. Args: id plus amount_cents?, status?, due_date?, title?, authority?, metadata?.", InputSchema: schemaObject(withID(obligationProps()), []string{"id"}), Handler: a.toolObligationsUpdate},
 		{Name: "tax_obligations_list", Description: "List obligations. Args: profile_id?, period_id?, tax_type?, status?, due_before?, authority?.", InputSchema: schemaObject(map[string]any{"profile_id": intSchema(), "period_id": intSchema(), "tax_type": strSchema(), "status": strSchema(), "due_before": strSchema(), "authority": strSchema()}, nil), Handler: a.toolObligationsList},
@@ -208,7 +211,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "tax_obligations_mark_waived", Description: "Mark an obligation waived. Args: id, reason.", InputSchema: schemaObject(map[string]any{"id": intSchema(), "reason": strSchema()}, []string{"id", "reason"}), Handler: a.toolObligationsMarkWaived},
 		{Name: "tax_payments_record", Description: "Record a tax payment. Args: obligation_id, amount_cents, paid_at?, method?, reference?, notes?, bills_bill_id?, bills_payment_id?.", InputSchema: schemaObject(paymentProps(), []string{"obligation_id", "amount_cents"}), Handler: a.toolPaymentsRecord},
 		{Name: "tax_payments_list", Description: "List tax payments. Args: obligation_id?, profile_id?.", InputSchema: schemaObject(map[string]any{"obligation_id": intSchema(), "profile_id": intSchema()}, nil), Handler: a.toolPaymentsList},
-		{Name: "tax_payments_link_bill", Description: "Link an existing bills bill/payment to a tax obligation. Args: obligation_id, bills_bill_id?, bills_payment_id?, amount_cents?, paid_at?.", InputSchema: schemaObject(map[string]any{"obligation_id": intSchema(), "bills_bill_id": intSchema(), "bills_payment_id": intSchema(), "amount_cents": intSchema(), "paid_at": strSchema()}, []string{"obligation_id"}), Handler: a.toolPaymentsLinkBill},
+		{Name: "tax_payments_link_bill", Description: "Link a Bills bill to an obligation. A tax payment is recorded only when bills_payment_id is supplied and verified against that bill.", InputSchema: schemaObject(map[string]any{"obligation_id": intSchema(), "bills_bill_id": intSchema(), "bills_payment_id": intSchema()}, []string{"obligation_id", "bills_bill_id"}), Handler: a.toolPaymentsLinkBill},
 		{Name: "tax_payments_create_bill", Description: "Create a payable tax authority bill through the bills app and link it to the obligation. Args: obligation_id, vendor_name?, vendor_email?, due_date?.", InputSchema: schemaObject(map[string]any{"obligation_id": intSchema(), "vendor_name": strSchema(), "vendor_email": strSchema(), "due_date": strSchema()}, []string{"obligation_id"}), Handler: a.toolPaymentsCreateBill},
 		{Name: "tax_adjustments_create", Description: "Create a manual adjustment. Args: profile_id, tax_type, kind, amount_cents, reason, period_id?, currency?, metadata?.", InputSchema: schemaObject(adjustmentProps(), []string{"profile_id", "tax_type", "kind", "amount_cents", "reason"}), Handler: a.toolAdjustmentsCreate},
 		{Name: "tax_adjustments_list", Description: "List adjustments. Args: profile_id?, period_id?, tax_type?, status?.", InputSchema: schemaObject(map[string]any{"profile_id": intSchema(), "period_id": intSchema(), "tax_type": strSchema(), "status": strSchema()}, nil), Handler: a.toolAdjustmentsList},
@@ -265,6 +268,7 @@ type Obligation struct {
 	AmountCents   int64          `json:"amount_cents"`
 	Currency      string         `json:"currency"`
 	DueDate       string         `json:"due_date"`
+	Direction     string         `json:"direction"`
 	Status        string         `json:"status"`
 	FiledAt       string         `json:"filed_at"`
 	FilingRef     string         `json:"filing_ref"`
@@ -329,6 +333,9 @@ func serveReadOnlyList(w http.ResponseWriter, r *http.Request, fn func(*sdk.AppC
 			args[k] = vals[0]
 		}
 	}
+	if args["_project_id"] == nil {
+		args["_project_id"] = r.URL.Query().Get("project_id")
+	}
 	out, err := fn(globalCtx, args)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -352,8 +359,8 @@ func (a *App) toolProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		Currency:        strings.ToUpper(stringArg(args, "currency", "EUR")),
 		Config:          mapArg(args, "config"),
 	}
-	if p.Name == "" || p.Country == "" || p.Structure == "" {
-		return nil, errors.New("name, country, and structure are required")
+	if err := validateProfile(p); err != nil {
+		return nil, err
 	}
 	res, err := ctx.AppDB().Exec(`INSERT INTO tax_profiles
 		(project_id,name,country,structure,region,fiscal_year_start,fiscal_year_end,vat_registered,filing_cadence,accounting_basis,currency,config_json)
@@ -372,6 +379,11 @@ func (a *App) toolProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 			return nil, err
 		}
 		out["periods"] = generated
+		next, err := generatePeriodsForProfile(ctx.AppDB(), p, intArg(args, "year", currentYear())+1)
+		if err != nil {
+			return nil, err
+		}
+		out["next_year_periods"] = next
 	}
 	return out, nil
 }
@@ -418,6 +430,9 @@ func (a *App) toolProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if hasArg(args, "archived") {
 		p.Archived = boolArg(args, "archived", p.Archived)
 	}
+	if err := validateProfile(p); err != nil {
+		return nil, err
+	}
 	_, err = ctx.AppDB().Exec(`UPDATE tax_profiles SET
 		name=?, country=?, structure=?, region=?, fiscal_year_start=?, fiscal_year_end=?, vat_registered=?,
 		filing_cadence=?, accounting_basis=?, currency=?, config_json=?, archived=?, updated_at=CURRENT_TIMESTAMP
@@ -428,7 +443,20 @@ func (a *App) toolProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	audit(ctx.AppDB(), p.ProjectID, "tax_profile", p.ID, "updated", p.Name, nil)
-	return map[string]any{"profile": p}, nil
+	out := map[string]any{"profile": p}
+	if boolArg(args, "auto_open_periods", true) && !p.Archived {
+		periods, err := generatePeriodsForProfile(ctx.AppDB(), p, currentYear())
+		if err != nil {
+			return nil, err
+		}
+		next, err := generatePeriodsForProfile(ctx.AppDB(), p, currentYear()+1)
+		if err != nil {
+			return nil, err
+		}
+		out["periods"] = periods
+		out["next_year_periods"] = next
+	}
+	return out, nil
 }
 
 func (a *App) toolProfilesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -504,19 +532,26 @@ func (a *App) toolPeriodsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	taxType := normalizeTaxType(stringArg(args, "tax_type", ""))
-	if taxType == "" {
-		return nil, errors.New("tax_type is required")
+	if err := validateTaxType(taxType); err != nil {
+		return nil, err
+	}
+	if !containsString(inferredTaxTypes(profile), taxType) {
+		return nil, fmt.Errorf("%s is not active for this profile", taxType)
 	}
 	start, end := stringArg(args, "period_start", ""), stringArg(args, "period_end", "")
-	if start == "" || end == "" {
-		return nil, errors.New("period_start and period_end are required")
+	if !validISODate(start) || !validISODate(end) || start > end {
+		return nil, errors.New("period_start and period_end must be valid ordered YYYY-MM-DD dates")
+	}
+	dueDate := stringArg(args, "due_date", "")
+	if dueDate != "" && !validISODate(dueDate) {
+		return nil, errors.New("due_date must use YYYY-MM-DD")
 	}
 	res, err := ctx.AppDB().Exec(`INSERT INTO tax_periods
 		(project_id,profile_id,tax_type,period_start,period_end,due_date,metadata_json)
 		VALUES (?,?,?,?,?,?,?)
 		ON CONFLICT(project_id, profile_id, tax_type, period_start, period_end)
 		DO UPDATE SET due_date=excluded.due_date, metadata_json=excluded.metadata_json, updated_at=CURRENT_TIMESTAMP`,
-		profile.ProjectID, profile.ID, taxType, start, end, stringArg(args, "due_date", ""), mustJSON(mapArg(args, "metadata")))
+		profile.ProjectID, profile.ID, taxType, start, end, dueDate, mustJSON(mapArg(args, "metadata")))
 	if err != nil {
 		return nil, err
 	}
@@ -550,6 +585,14 @@ func (a *App) toolPeriodsList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	addIntFilter(&where, &vals, "profile_id", int64Arg(args, "profile_id", 0))
 	addStringFilter(&where, &vals, "tax_type", normalizeTaxType(stringArg(args, "tax_type", "")))
 	addStringFilter(&where, &vals, "status", stringArg(args, "status", ""))
+	if start := stringArg(args, "period_start", ""); start != "" {
+		where = append(where, "period_end>=?")
+		vals = append(vals, start)
+	}
+	if end := stringArg(args, "period_end", ""); end != "" {
+		where = append(where, "period_start<=?")
+		vals = append(vals, end)
+	}
 	rows, err := ctx.AppDB().Query(`SELECT id,project_id,profile_id,tax_type,period_start,period_end,due_date,status,filed_at,filing_ref,metadata_json FROM tax_periods WHERE `+strings.Join(where, " AND ")+` ORDER BY period_start DESC, tax_type`, vals...)
 	if err != nil {
 		return nil, err
@@ -567,10 +610,20 @@ func (a *App) toolPeriodsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 func (a *App) toolPeriodsClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64Arg(args, "id", 0)
 	status := stringArg(args, "status", "closed")
-	_, err := ctx.AppDB().Exec(`UPDATE tax_periods SET status=?, filed_at=?, filing_ref=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
+	if status != "closed" && status != "filed" {
+		return nil, errors.New("status must be closed or filed")
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE tax_periods SET status=?, filed_at=?, filing_ref=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
 		status, stringArg(args, "filed_at", ""), stringArg(args, "filing_ref", ""), projectID(ctx, args), id)
 	if err != nil {
 		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, sql.ErrNoRows
 	}
 	audit(ctx.AppDB(), projectID(ctx, args), "tax_period", id, "closed", status, nil)
 	p, err := getPeriod(ctx.AppDB(), projectID(ctx, args), id)
@@ -598,22 +651,102 @@ func (a *App) toolEstimateAll(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	types := []string{"vat"}
-	switch profile.Structure {
-	case "ES_AUTONOMO":
-		types = append(types, "income_tax", "social_contributions")
-	case "ES_SL", "FR_SAS", "FR_SASU", "FR_SARL", "FR_EURL":
-		types = append(types, "corporate_tax")
-	default:
-		types = append(types, "income_tax")
+	applicable := inferredTaxTypes(profile)
+	if len(applicable) == 0 {
+		return nil, errors.New("this profile has no applicable tax types")
 	}
+	allowed := map[string]bool{}
+	for _, taxType := range applicable {
+		allowed[taxType] = true
+	}
+
 	var estimates []any
-	for _, typ := range types {
-		out, err := a.calculate(ctx, cloneMap(args), typ)
+	if periodID := int64Arg(args, "period_id", 0); periodID > 0 {
+		period, err := getPeriod(ctx.AppDB(), profile.ProjectID, periodID)
+		if err != nil {
+			return nil, err
+		}
+		taxType := normalizeTaxType(stringFromAny(period["tax_type"]))
+		if int64FromAny(period["profile_id"]) != profile.ID || !allowed[taxType] {
+			return nil, errors.New("period does not belong to this profile or its active tax regime")
+		}
+		callArgs := cloneMap(args)
+		callArgs["period_start"] = period["period_start"]
+		callArgs["period_end"] = period["period_end"]
+		if !hasArg(callArgs, "due_date") || stringArg(callArgs, "due_date", "") == "" {
+			callArgs["due_date"] = period["due_date"]
+		}
+		out, err := a.calculate(ctx, callArgs, taxType)
 		if err != nil {
 			return nil, err
 		}
 		estimates = append(estimates, out)
+		return map[string]any{"profile": profile, "estimates": estimates}, nil
+	}
+
+	start := stringArg(args, "period_start", fmt.Sprintf("%04d-01-01", currentYear()))
+	end := stringArg(args, "period_end", fmt.Sprintf("%04d-12-31", currentYear()))
+	rows, err := ctx.AppDB().Query(`SELECT id,tax_type,period_start,period_end,due_date
+		FROM tax_periods
+		WHERE project_id=? AND profile_id=? AND status='open' AND period_start>=? AND period_end<=?
+		ORDER BY period_start,tax_type`, profile.ProjectID, profile.ID, start, end)
+	if err != nil {
+		return nil, err
+	}
+	type estimatePeriod struct {
+		id                     int64
+		taxType                string
+		periodStart, periodEnd string
+		dueDate                string
+	}
+	var selectedPeriods []estimatePeriod
+	for rows.Next() {
+		var period estimatePeriod
+		if err := rows.Scan(&period.id, &period.taxType, &period.periodStart, &period.periodEnd, &period.dueDate); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !allowed[period.taxType] {
+			continue
+		}
+		selectedPeriods = append(selectedPeriods, period)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if boolArg(args, "create_obligation", true) {
+		for _, period := range selectedPeriods {
+			if period.dueDate == "" {
+				return nil, fmt.Errorf("%s period ending %s requires a confirmed due date", period.taxType, period.periodEnd)
+			}
+			if period.taxType == "social_contributions" &&
+				!hasArg(args, "social_contribution_cents") &&
+				int64FromAny(profile.Config["monthly_social_contribution_cents"]) <= 0 {
+				return nil, errors.New("social_contribution_cents or profile config.monthly_social_contribution_cents is required")
+			}
+			if _, err := findRule(ctx.AppDB(), profile.Country, profile.Structure, period.taxType, yearFromDate(period.periodStart)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for _, period := range selectedPeriods {
+		callArgs := cloneMap(args)
+		callArgs["period_id"] = period.id
+		callArgs["period_start"] = period.periodStart
+		callArgs["period_end"] = period.periodEnd
+		callArgs["due_date"] = period.dueDate
+		out, err := a.calculate(ctx, callArgs, period.taxType)
+		if err != nil {
+			return nil, err
+		}
+		estimates = append(estimates, out)
+	}
+	if len(estimates) == 0 {
+		return nil, errors.New("no open generated periods found in this range; generate periods first")
 	}
 	return map[string]any{"profile": profile, "estimates": estimates}, nil
 }
@@ -623,32 +756,100 @@ func (a *App) calculate(ctx *sdk.AppCtx, args map[string]any, taxType string) (a
 	if err != nil {
 		return nil, err
 	}
+	taxType = normalizeTaxType(taxType)
+	if !containsString(inferredTaxTypes(profile), taxType) {
+		return nil, fmt.Errorf("%s is not active for this profile", taxType)
+	}
+	if taxType == "vat" && !profile.VATRegistered {
+		return nil, errors.New("VAT is disabled for this profile")
+	}
+	periodID := int64Arg(args, "period_id", 0)
 	start, end := stringArg(args, "period_start", ""), stringArg(args, "period_end", "")
+	requestedDueDate := stringArg(args, "due_date", "")
+	dueDate := requestedDueDate
+	if periodID > 0 {
+		period, err := getPeriod(ctx.AppDB(), profile.ProjectID, periodID)
+		if err != nil {
+			return nil, err
+		}
+		if int64FromAny(period["profile_id"]) != profile.ID || normalizeTaxType(stringFromAny(period["tax_type"])) != taxType {
+			return nil, errors.New("period does not belong to this profile and tax type")
+		}
+		status := stringFromAny(period["status"])
+		if status != "open" {
+			return nil, fmt.Errorf("period is %s; only open periods can be estimated", status)
+		}
+		start = stringFromAny(period["period_start"])
+		end = stringFromAny(period["period_end"])
+		dueDate = stringFromAny(period["due_date"])
+		if requestedDueDate != "" {
+			dueDate = requestedDueDate
+		}
+	}
 	if start == "" || end == "" {
-		return nil, errors.New("period_start and period_end are required")
+		return nil, errors.New("period_id or period_start and period_end are required")
+	}
+	if !validISODate(start) || !validISODate(end) || start > end {
+		return nil, errors.New("period_start and period_end must be valid ordered YYYY-MM-DD dates")
+	}
+	if dueDate != "" && !validISODate(dueDate) {
+		return nil, errors.New("due_date must use YYYY-MM-DD")
+	}
+	if periodID == 0 && boolArg(args, "create_obligation", true) {
+		err := ctx.AppDB().QueryRow(`SELECT id,due_date FROM tax_periods
+			WHERE project_id=? AND profile_id=? AND tax_type=? AND period_start=? AND period_end=? AND status='open'
+			LIMIT 1`, profile.ProjectID, profile.ID, taxType, start, end).Scan(&periodID, &dueDate)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("create_obligation requires a matching open generated period")
+		}
+		if err != nil {
+			return nil, err
+		}
 	}
 	year := yearFromDate(start)
 	rule, err := findRule(ctx.AppDB(), profile.Country, profile.Structure, taxType, year)
 	if err != nil {
 		return nil, err
 	}
-	inputs, sources, warnings := a.collectInputs(ctx, args, profile, start, end)
+	inputArgs := args
+	if taxType == "social_contributions" {
+		inputArgs = cloneMap(args)
+		inputArgs["sync_sources"] = false
+	}
+	inputs, sources, warnings := a.collectInputs(ctx, inputArgs, profile, start, end)
 	outputs := calculateOutputs(taxType, rule, inputs, start, end)
-	for _, adj := range adjustmentsFor(ctx.AppDB(), profile.ProjectID, profile.ID, int64Arg(args, "period_id", 0), taxType) {
+	if warning := stringFromAny(rule.Rules["warning"]); warning != "" {
+		warnings = append(warnings, warning)
+	}
+	if taxType == "social_contributions" && int64FromAny(outputs["monthly_cents"]) <= 0 {
+		warnings = append(warnings, "monthly social contribution is missing; set it explicitly before creating an obligation")
+	}
+	if dueDate == "" {
+		warnings = append(warnings, "filing deadline requires confirmation; no due date was assigned")
+	}
+	for _, adj := range adjustmentsFor(ctx.AppDB(), profile.ProjectID, profile.ID, periodID, taxType) {
 		outputs["adjustments_cents"] = int64FromAny(outputs["adjustments_cents"]) + int64FromAny(adj["amount_cents"])
 		outputs["estimated_payable_cents"] = int64FromAny(outputs["estimated_payable_cents"]) + int64FromAny(adj["amount_cents"])
 	}
 	if sources["billing_unavailable"] == true || sources["bills_unavailable"] == true {
 		warnings = append(warnings, "cross-app source data was unavailable; estimate may rely on caller-supplied amounts or zero defaults")
 	}
-	periodID := int64Arg(args, "period_id", 0)
+	createObligation := boolArg(args, "create_obligation", true)
+	if createObligation {
+		if dueDate == "" {
+			return nil, errors.New("confirm due_date before creating an obligation for this period")
+		}
+		if taxType == "social_contributions" && int64FromAny(outputs["monthly_cents"]) <= 0 {
+			return nil, errors.New("social_contribution_cents is required before creating a social contribution obligation")
+		}
+	}
 	calcID, err := insertCalculation(ctx.AppDB(), profile, periodID, taxType, rule, start, end, inputs, outputs, sources, warnings)
 	if err != nil {
 		return nil, err
 	}
 	var obligation *Obligation
-	if boolArg(args, "create_obligation", true) {
-		obligation, err = upsertEstimatedObligation(ctx.AppDB(), profile, periodID, calcID, taxType, outputs, stringArg(args, "due_date", ""))
+	if createObligation {
+		obligation, err = upsertEstimatedObligation(ctx.AppDB(), profile, periodID, calcID, taxType, outputs, dueDate)
 		if err != nil {
 			return nil, err
 		}
@@ -673,14 +874,24 @@ func (a *App) calculate(ctx *sdk.AppCtx, args map[string]any, taxType string) (a
 }
 
 func (a *App) collectInputs(ctx *sdk.AppCtx, args map[string]any, profile Profile, start, end string) (map[string]any, map[string]any, []string) {
-	inputs := map[string]any{
-		"revenue_cents":             int64Arg(args, "revenue_cents", 0),
-		"expenses_cents":            int64Arg(args, "expenses_cents", 0),
-		"output_tax_cents":          int64Arg(args, "output_tax_cents", 0),
-		"input_tax_cents":           int64Arg(args, "input_tax_cents", 0),
-		"taxable_profit_cents":      int64Arg(args, "taxable_profit_cents", 0),
-		"social_contribution_cents": int64Arg(args, "social_contribution_cents", 0),
-		"months":                    intArg(args, "months", monthsBetween(start, end)),
+	inputs := map[string]any{"months": intArg(args, "months", monthsBetween(start, end))}
+	manualKeys := []string{
+		"revenue_cents",
+		"expenses_cents",
+		"output_tax_cents",
+		"input_tax_cents",
+		"taxable_profit_cents",
+		"social_contribution_cents",
+	}
+	for _, key := range manualKeys {
+		if hasArg(args, key) {
+			inputs[key] = int64Arg(args, key, 0)
+		}
+	}
+	if !hasArg(args, "social_contribution_cents") {
+		if configured := int64FromAny(profile.Config["monthly_social_contribution_cents"]); configured > 0 {
+			inputs["social_contribution_cents"] = configured
+		}
 	}
 	sources := map[string]any{}
 	warnings := []string{}
@@ -694,14 +905,22 @@ func (a *App) collectInputs(ctx *sdk.AppCtx, args map[string]any, profile Profil
 	if billing.Unavailable {
 		sources["billing_unavailable"] = true
 	} else {
-		inputs["revenue_cents"] = int64FromAny(inputs["revenue_cents"]) + billing.RevenueCents
-		inputs["output_tax_cents"] = int64FromAny(inputs["output_tax_cents"]) + billing.OutputTaxCents
+		if !hasArg(args, "revenue_cents") {
+			inputs["revenue_cents"] = billing.RevenueCents
+		}
+		if !hasArg(args, "output_tax_cents") {
+			inputs["output_tax_cents"] = billing.OutputTaxCents
+		}
 	}
 	if bills.Unavailable {
 		sources["bills_unavailable"] = true
 	} else {
-		inputs["expenses_cents"] = int64FromAny(inputs["expenses_cents"]) + bills.ExpensesCents
-		inputs["input_tax_cents"] = int64FromAny(inputs["input_tax_cents"]) + bills.InputTaxCents
+		if !hasArg(args, "expenses_cents") {
+			inputs["expenses_cents"] = bills.ExpensesCents
+		}
+		if !hasArg(args, "input_tax_cents") {
+			inputs["input_tax_cents"] = bills.InputTaxCents
+		}
 	}
 	warnings = append(warnings, billing.Warnings...)
 	warnings = append(warnings, bills.Warnings...)
@@ -713,7 +932,7 @@ func (a *App) toolObligationsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	o, err := insertObligation(ctx.AppDB(), profile, int64Arg(args, "period_id", 0), 0, normalizeTaxType(stringArg(args, "tax_type", "")), stringArg(args, "title", ""), int64Arg(args, "amount_cents", 0), strings.ToUpper(stringArg(args, "currency", profile.Currency)), stringArg(args, "due_date", ""), stringArg(args, "authority", defaultAuthority(profile, normalizeTaxType(stringArg(args, "tax_type", "")))), "estimated", mapArg(args, "metadata"))
+	o, err := insertObligation(ctx.AppDB(), profile, int64Arg(args, "period_id", 0), 0, normalizeTaxType(stringArg(args, "tax_type", "")), stringArg(args, "title", ""), int64Arg(args, "amount_cents", 0), strings.ToUpper(stringArg(args, "currency", profile.Currency)), stringArg(args, "due_date", ""), stringArg(args, "authority", defaultAuthority(profile, normalizeTaxType(stringArg(args, "tax_type", "")))), stringArg(args, "direction", "payable"), "estimated", mapArg(args, "metadata"))
 	if err != nil {
 		return nil, err
 	}
@@ -743,14 +962,24 @@ func (a *App) toolObligationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if hasArg(args, "authority") {
 		o.Authority = stringArg(args, "authority", o.Authority)
 	}
+	if hasArg(args, "direction") {
+		o.Direction = stringArg(args, "direction", o.Direction)
+	}
 	if hasArg(args, "status") {
 		o.Status = stringArg(args, "status", o.Status)
 	}
 	if hasArg(args, "metadata") {
 		o.Metadata = mapArg(args, "metadata")
 	}
-	_, err = ctx.AppDB().Exec(`UPDATE tax_obligations SET tax_type=?, title=?, amount_cents=?, currency=?, due_date=?, authority=?, status=?, metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
-		o.TaxType, o.Title, o.AmountCents, o.Currency, o.DueDate, o.Authority, o.Status, mustJSON(o.Metadata), o.ProjectID, o.ID)
+	profile, err := getProfile(ctx.AppDB(), o.ProjectID, o.ProfileID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateObligationInput(profile, o.TaxType, o.Direction, o.AmountCents, o.Currency, o.Status); err != nil {
+		return nil, err
+	}
+	_, err = ctx.AppDB().Exec(`UPDATE tax_obligations SET tax_type=?, title=?, amount_cents=?, currency=?, due_date=?, authority=?, direction=?, status=?, metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
+		o.TaxType, o.Title, o.AmountCents, o.Currency, o.DueDate, o.Authority, o.Direction, o.Status, mustJSON(o.Metadata), o.ProjectID, o.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -771,7 +1000,7 @@ func (a *App) toolObligationsList(ctx *sdk.AppCtx, args map[string]any) (any, er
 		where = append(where, "due_date <= ?")
 		vals = append(vals, due)
 	}
-	rows, err := ctx.AppDB().Query(`SELECT id,project_id,profile_id,COALESCE(period_id,0),COALESCE(calculation_id,0),tax_type,authority,title,amount_cents,currency,due_date,status,filed_at,filing_ref,waived_reason,metadata_json FROM tax_obligations WHERE `+strings.Join(where, " AND ")+` ORDER BY due_date, id`, vals...)
+	rows, err := ctx.AppDB().Query(`SELECT id,project_id,profile_id,COALESCE(period_id,0),COALESCE(calculation_id,0),tax_type,authority,title,amount_cents,currency,due_date,direction,status,filed_at,filing_ref,waived_reason,metadata_json FROM tax_obligations WHERE `+strings.Join(where, " AND ")+` ORDER BY due_date, id`, vals...)
 	if err != nil {
 		return nil, err
 	}
@@ -795,9 +1024,12 @@ func (a *App) toolObligationsGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 func (a *App) toolObligationsMarkFiled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64Arg(args, "id", 0)
 	filedAt := stringArg(args, "filed_at", time.Now().UTC().Format(time.RFC3339))
-	_, err := ctx.AppDB().Exec(`UPDATE tax_obligations SET status='filed', filed_at=?, filing_ref=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, filedAt, stringArg(args, "filing_ref", ""), projectID(ctx, args), id)
+	res, err := ctx.AppDB().Exec(`UPDATE tax_obligations SET status='filed', filed_at=?, filing_ref=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, filedAt, stringArg(args, "filing_ref", ""), projectID(ctx, args), id)
 	if err != nil {
 		return nil, err
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return nil, sql.ErrNoRows
 	}
 	audit(ctx.AppDB(), projectID(ctx, args), "tax_obligation", id, "filed", "", nil)
 	o, err := getObligation(ctx.AppDB(), projectID(ctx, args), id)
@@ -806,17 +1038,24 @@ func (a *App) toolObligationsMarkFiled(ctx *sdk.AppCtx, args map[string]any) (an
 
 func (a *App) toolObligationsMarkWaived(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64Arg(args, "id", 0)
-	_, err := ctx.AppDB().Exec(`UPDATE tax_obligations SET status='waived', waived_reason=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, stringArg(args, "reason", ""), projectID(ctx, args), id)
+	reason := strings.TrimSpace(stringArg(args, "reason", ""))
+	if reason == "" {
+		return nil, errors.New("waiver reason is required")
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE tax_obligations SET status='waived', waived_reason=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, reason, projectID(ctx, args), id)
 	if err != nil {
 		return nil, err
 	}
-	audit(ctx.AppDB(), projectID(ctx, args), "tax_obligation", id, "waived", stringArg(args, "reason", ""), nil)
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return nil, sql.ErrNoRows
+	}
+	audit(ctx.AppDB(), projectID(ctx, args), "tax_obligation", id, "waived", reason, nil)
 	o, err := getObligation(ctx.AppDB(), projectID(ctx, args), id)
 	return map[string]any{"obligation": o}, err
 }
 
 func (a *App) toolPaymentsRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.recordPayment(ctx, args, int64Arg(args, "bills_bill_id", 0), int64Arg(args, "bills_payment_id", 0))
+	return a.recordPayment(ctx, args, 0, 0)
 }
 
 func (a *App) toolPaymentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -839,7 +1078,64 @@ func (a *App) toolPaymentsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolPaymentsLinkBill(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.recordPayment(ctx, args, int64Arg(args, "bills_bill_id", 0), int64Arg(args, "bills_payment_id", 0))
+	o, err := getObligation(ctx.AppDB(), projectID(ctx, args), int64Arg(args, "obligation_id", 0))
+	if err != nil {
+		return nil, err
+	}
+	billID := int64Arg(args, "bills_bill_id", 0)
+	if billID <= 0 {
+		return nil, errors.New("bills_bill_id is required")
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("bills platform API unavailable")
+	}
+	var billOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("bills", "bills_get", map[string]any{
+		"_project_id": o.ProjectID,
+		"id":          billID,
+	}, &billOut); err != nil {
+		return nil, fmt.Errorf("verify bill: %w", err)
+	}
+	bill, ok := billOut["bill"].(map[string]any)
+	if !ok || bill == nil || !boolArg(billOut, "found", true) {
+		return nil, errors.New("bill not found")
+	}
+	if strings.ToUpper(stringFromAny(bill["currency"])) != o.Currency {
+		return nil, errors.New("bill currency does not match the tax obligation")
+	}
+	if err := setObligationBillLink(ctx.AppDB(), o, billID); err != nil {
+		return nil, err
+	}
+	paymentID := int64Arg(args, "bills_payment_id", 0)
+	if paymentID == 0 {
+		return map[string]any{
+			"obligation_id":    o.ID,
+			"bills_bill_id":    billID,
+			"linked":           true,
+			"payment_recorded": false,
+		}, nil
+	}
+	var verified map[string]any
+	for _, payment := range objectRows(bill["payments"]) {
+		if int64FromAny(payment["id"]) == paymentID {
+			verified = payment
+			break
+		}
+	}
+	if verified == nil {
+		return nil, errors.New("bills_payment_id does not belong to the supplied bill")
+	}
+	verifiedArgs := map[string]any{
+		"_project_id":   o.ProjectID,
+		"obligation_id": o.ID,
+		"amount_cents":  int64FromAny(verified["amount_cents"]),
+		"currency":      strings.ToUpper(stringFromAny(verified["currency"])),
+		"paid_at":       stringFromAny(verified["sent_at"]),
+		"method":        stringFromAny(verified["method"]),
+		"reference":     stringFromAny(verified["external_id"]),
+		"notes":         "Verified from Bills payment",
+	}
+	return a.recordPayment(ctx, verifiedArgs, billID, paymentID)
 }
 
 func (a *App) recordPayment(ctx *sdk.AppCtx, args map[string]any, billID, paymentID int64) (any, error) {
@@ -847,20 +1143,48 @@ func (a *App) recordPayment(ctx *sdk.AppCtx, args map[string]any, billID, paymen
 	if err != nil {
 		return nil, err
 	}
-	amount := int64Arg(args, "amount_cents", o.AmountCents)
-	if amount == 0 {
-		return nil, errors.New("amount_cents is required")
+	if o.Direction != "payable" {
+		return nil, errors.New("payments can only be recorded against payable obligations")
+	}
+	amount := int64Arg(args, "amount_cents", 0)
+	if amount <= 0 {
+		return nil, errors.New("amount_cents must be positive")
+	}
+	currency := strings.ToUpper(stringArg(args, "currency", o.Currency))
+	if currency != o.Currency {
+		return nil, errors.New("payment currency must match the obligation")
+	}
+	var alreadyPaid int64
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(SUM(amount_cents),0) FROM tax_payments WHERE project_id=? AND obligation_id=?`, o.ProjectID, o.ID).Scan(&alreadyPaid); err != nil {
+		return nil, err
+	}
+	remaining := o.AmountCents - alreadyPaid
+	if amount > remaining {
+		return nil, fmt.Errorf("payment exceeds remaining obligation amount of %d cents", remaining)
 	}
 	paidAt := stringArg(args, "paid_at", time.Now().UTC().Format(time.RFC3339))
 	res, err := ctx.AppDB().Exec(`INSERT INTO tax_payments (project_id,obligation_id,amount_cents,currency,paid_at,method,reference,bills_bill_id,bills_payment_id,notes,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		o.ProjectID, o.ID, amount, stringArg(args, "currency", o.Currency), paidAt, stringArg(args, "method", ""), stringArg(args, "reference", ""), nullInt(billID), nullInt(paymentID), stringArg(args, "notes", ""), mustJSON(mapArg(args, "metadata")))
+		o.ProjectID, o.ID, amount, currency, paidAt, stringArg(args, "method", ""), stringArg(args, "reference", ""), nullInt(billID), nullInt(paymentID), stringArg(args, "notes", ""), mustJSON(mapArg(args, "metadata")))
 	if err != nil {
+		if paymentID > 0 && strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return nil, errors.New("this Bills payment is already linked")
+		}
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	_, _ = ctx.AppDB().Exec(`UPDATE tax_obligations SET status='paid', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND (SELECT COALESCE(SUM(amount_cents),0) FROM tax_payments WHERE obligation_id=?) >= amount_cents`, o.ProjectID, o.ID, o.ID)
+	newPaid := alreadyPaid + amount
+	if newPaid >= o.AmountCents {
+		if _, err := ctx.AppDB().Exec(`UPDATE tax_obligations SET status='paid', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, o.ProjectID, o.ID); err != nil {
+			return nil, err
+		}
+	}
 	audit(ctx.AppDB(), o.ProjectID, "tax_obligation", o.ID, "payment_recorded", "", map[string]any{"payment_id": id, "amount_cents": amount})
-	return map[string]any{"payment_id": id, "obligation_id": o.ID}, nil
+	return map[string]any{
+		"payment_id":      id,
+		"obligation_id":   o.ID,
+		"paid_cents":      newPaid,
+		"remaining_cents": max64(0, o.AmountCents-newPaid),
+	}, nil
 }
 
 func (a *App) toolPaymentsCreateBill(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -868,13 +1192,23 @@ func (a *App) toolPaymentsCreateBill(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
+	if o.Direction != "payable" || o.AmountCents <= 0 {
+		return nil, errors.New("a Bills payable can only be created for a positive payable obligation")
+	}
+	if existing := int64FromAny(o.Metadata["bills_bill_id"]); existing > 0 {
+		return map[string]any{"obligation": o, "bills_bill_id": existing, "already_linked": true}, nil
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("bills platform API unavailable")
+	}
 	vendorName := stringArg(args, "vendor_name", o.Authority)
 	if vendorName == "" {
 		vendorName = "Tax authority"
 	}
 	var vendorOut map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("bills", "vendors_upsert_by_email", map[string]any{
-		"email": stringArg(args, "vendor_email", "tax-authority@example.invalid"),
+		"_project_id": o.ProjectID,
+		"email":       stringArg(args, "vendor_email", fmt.Sprintf("tax-authority-%s-%s@apteva.invalid", strings.ToLower(profileCountryForObligation(ctx.AppDB(), o)), strings.ReplaceAll(o.TaxType, "_", "-"))),
 		"defaults": map[string]any{
 			"name": vendorName,
 		},
@@ -882,8 +1216,12 @@ func (a *App) toolPaymentsCreateBill(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, fmt.Errorf("create/link vendor in bills: %w", err)
 	}
 	vendorID := findNestedInt(vendorOut, "vendor", "id")
+	if vendorID <= 0 {
+		return nil, errors.New("Bills did not return a vendor id")
+	}
 	var billOut map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("bills", "bills_create", map[string]any{
+		"_project_id":           o.ProjectID,
 		"vendor_id":             vendorID,
 		"vendor_invoice_number": fmt.Sprintf("tax-%d", o.ID),
 		"currency":              o.Currency,
@@ -898,9 +1236,18 @@ func (a *App) toolPaymentsCreateBill(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, fmt.Errorf("create bill in bills: %w", err)
 	}
 	billID := findNestedInt(billOut, "bill", "id")
-	_, _ = ctx.AppDB().Exec(`UPDATE tax_obligations SET metadata_json=json_set(COALESCE(NULLIF(metadata_json,''),'{}'), '$.bills_bill_id', ?) WHERE project_id=? AND id=?`, billID, o.ProjectID, o.ID)
+	if billID <= 0 {
+		return nil, errors.New("Bills did not return a bill id")
+	}
+	if err := setObligationBillLink(ctx.AppDB(), o, billID); err != nil {
+		return nil, err
+	}
 	audit(ctx.AppDB(), o.ProjectID, "tax_obligation", o.ID, "bill_created", "", map[string]any{"bills_bill_id": billID})
-	return map[string]any{"obligation": o, "bills_bill_id": billID, "bills_response": billOut}, nil
+	updated, err := getObligation(ctx.AppDB(), o.ProjectID, o.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"obligation": updated, "bills_bill_id": billID, "bills_response": billOut}, nil
 }
 
 func (a *App) toolAdjustmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -908,13 +1255,46 @@ func (a *App) toolAdjustmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
+	taxType := normalizeTaxType(stringArg(args, "tax_type", ""))
+	if err := validateTaxType(taxType); err != nil {
+		return nil, err
+	}
+	if !containsString(inferredTaxTypes(profile), taxType) {
+		return nil, fmt.Errorf("%s is not active for this profile", taxType)
+	}
+	kind := strings.TrimSpace(stringArg(args, "kind", ""))
+	reason := strings.TrimSpace(stringArg(args, "reason", ""))
+	amount := int64Arg(args, "amount_cents", 0)
+	currency := strings.ToUpper(stringArg(args, "currency", profile.Currency))
+	if kind == "" {
+		return nil, errors.New("kind is required")
+	}
+	if reason == "" {
+		return nil, errors.New("reason is required")
+	}
+	if amount == 0 {
+		return nil, errors.New("amount_cents cannot be zero")
+	}
+	if currency != profile.Currency {
+		return nil, fmt.Errorf("currency %s does not match profile currency %s", currency, profile.Currency)
+	}
+	periodID := int64Arg(args, "period_id", 0)
+	if periodID > 0 {
+		period, err := getPeriod(ctx.AppDB(), profile.ProjectID, periodID)
+		if err != nil {
+			return nil, err
+		}
+		if int64FromAny(period["profile_id"]) != profile.ID || normalizeTaxType(stringFromAny(period["tax_type"])) != taxType {
+			return nil, errors.New("period does not belong to this profile and tax type")
+		}
+	}
 	res, err := ctx.AppDB().Exec(`INSERT INTO tax_adjustments (project_id,profile_id,period_id,tax_type,kind,amount_cents,currency,reason,metadata_json) VALUES (?,?,?,?,?,?,?,?,?)`,
-		profile.ProjectID, profile.ID, nullInt(int64Arg(args, "period_id", 0)), normalizeTaxType(stringArg(args, "tax_type", "")), stringArg(args, "kind", ""), int64Arg(args, "amount_cents", 0), stringArg(args, "currency", profile.Currency), stringArg(args, "reason", ""), mustJSON(mapArg(args, "metadata")))
+		profile.ProjectID, profile.ID, nullInt(periodID), taxType, kind, amount, currency, reason, mustJSON(mapArg(args, "metadata")))
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	audit(ctx.AppDB(), profile.ProjectID, "tax_adjustment", id, "created", stringArg(args, "reason", ""), nil)
+	audit(ctx.AppDB(), profile.ProjectID, "tax_adjustment", id, "created", reason, nil)
 	return map[string]any{"adjustment_id": id}, nil
 }
 
@@ -949,20 +1329,49 @@ func (a *App) toolReportGenerate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	report := map[string]any{"profile": profile, "generated_at": time.Now().UTC().Format(time.RFC3339)}
-	if periodID := int64Arg(args, "period_id", 0); periodID > 0 {
+	periodID := int64Arg(args, "period_id", 0)
+	start := stringArg(args, "period_start", "")
+	end := stringArg(args, "period_end", "")
+	taxTypes := stringSliceArg(args, "tax_types")
+	for _, taxType := range taxTypes {
+		if err := validateTaxType(taxType); err != nil {
+			return nil, err
+		}
+	}
+	report := map[string]any{
+		"profile":      profile,
+		"generated_at": time.Now().UTC().Format(time.RFC3339),
+		"scope": map[string]any{
+			"period_id":    periodID,
+			"period_start": start,
+			"period_end":   end,
+			"tax_types":    taxTypes,
+		},
+	}
+	if periodID > 0 {
 		period, err := getPeriod(ctx.AppDB(), profile.ProjectID, periodID)
 		if err != nil {
 			return nil, err
 		}
+		if int64FromAny(period["profile_id"]) != profile.ID {
+			return nil, errors.New("period does not belong to this profile")
+		}
+		start = stringFromAny(period["period_start"])
+		end = stringFromAny(period["period_end"])
 		report["period"] = period
 	}
-	obligations, _ := a.toolObligationsList(ctx, map[string]any{"project_id": profile.ProjectID, "profile_id": profile.ID})
-	adjustments, _ := a.toolAdjustmentsList(ctx, map[string]any{"project_id": profile.ProjectID, "profile_id": profile.ID})
+	obligations, err := reportObligations(ctx.AppDB(), profile, periodID, start, end, taxTypes)
+	if err != nil {
+		return nil, err
+	}
+	adjustments, err := reportAdjustments(ctx.AppDB(), profile, periodID, start, end, taxTypes)
+	if err != nil {
+		return nil, err
+	}
 	report["obligations"] = obligations
 	report["adjustments"] = adjustments
 	res, err := ctx.AppDB().Exec(`INSERT INTO tax_documents (project_id,profile_id,period_id,document_type,title,content_json) VALUES (?,?,?,?,?,?)`,
-		profile.ProjectID, profile.ID, nullInt(int64Arg(args, "period_id", 0)), "report", "Tax report - "+profile.Name, mustJSON(report))
+		profile.ProjectID, profile.ID, nullInt(periodID), "report", reportTitle(profile, periodID, start, end), mustJSON(report))
 	if err != nil {
 		return nil, err
 	}
