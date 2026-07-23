@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func TestVoiceMediaRelayPacesSpeechAndAddsSilenceTail(t *testing.T) {
@@ -119,6 +123,48 @@ func TestVoiceCallValidityAcceptsCompletedExchange(t *testing.T) {
 	validity := assessVoiceCall(call)
 	if validity.Status != "valid" || len(validity.Reasons) != 0 {
 		t.Fatalf("validity=%#v", validity)
+	}
+}
+
+func TestVoiceCallerCompletedAcceptsDoneEvidence(t *testing.T) {
+	threadID := "caller-one"
+	if !voiceCallerCompleted([]sdk.RuntimeTelemetryEvent{{
+		ThreadID: threadID,
+		Type:     "tool.call",
+		Data:     json.RawMessage(`{"name":"done"}`),
+	}}, threadID) {
+		t.Fatal("done tool call was not accepted as completion evidence")
+	}
+	if !voiceCallerCompleted([]sdk.RuntimeTelemetryEvent{{
+		ThreadID: threadID,
+		Type:     "thread.done",
+	}}, threadID) {
+		t.Fatal("thread.done was not accepted as completion evidence")
+	}
+	if voiceCallerCompleted([]sdk.RuntimeTelemetryEvent{{
+		ThreadID: threadID,
+		Type:     "tool.call",
+		Data:     json.RawMessage(`{"name":"send"}`),
+	}}, threadID) {
+		t.Fatal("unrelated tool call was accepted as completion evidence")
+	}
+}
+
+func TestVoiceMetricsSortsTelemetryChronologically(t *testing.T) {
+	started := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.state", Time: started.Add(4 * time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
+		{ThreadID: "target", Type: "realtime.state", Time: started.Add(2500 * time.Millisecond), Data: json.RawMessage(`{"state":"thinking"}`)},
+		{ThreadID: "target", Type: "realtime.user", Time: started.Add(2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.state", Time: started.Add(time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
+	}
+
+	metrics := voiceMetrics(targetEvents, nil, "target", "caller", started, nil, nil, "caller_done")
+	if metrics.FirstResponseMS != 1000 {
+		t.Fatalf("first response = %d, want 1000", metrics.FirstResponseMS)
+	}
+	if metrics.AverageResponseMS != 2000 {
+		t.Fatalf("average response = %d, want 2000", metrics.AverageResponseMS)
 	}
 }
 

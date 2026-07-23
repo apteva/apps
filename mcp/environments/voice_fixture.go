@@ -26,6 +26,7 @@ const (
 	voiceFrameBytes       = voiceBytesPerSecond / (int(time.Second / voiceFrameDuration))
 	voiceSilenceTail      = time.Second
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
+	voiceCompletionGrace  = 2 * time.Second
 	maxVoiceRelayBuffer   = 5 * voiceBytesPerSecond
 	maxVoiceRecordingSize = 32 << 20
 )
@@ -294,14 +295,16 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		case <-timeout.C:
 			endedBy = "timeout"
 		case bridgeErr := <-bridgeErrors:
-			if bridgeErr != nil && !websocket.IsCloseError(bridgeErr, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-				endedBy = "audio_disconnected"
-			} else {
+			if bridgeErr == nil || websocket.IsCloseError(bridgeErr, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				endedBy = "caller_done"
+			} else if s.waitForVoiceCallerCompletion(ctx, run.RuntimeID, call) {
+				endedBy = "caller_done"
+			} else {
+				endedBy = "audio_disconnected"
 			}
 		case <-ticker.C:
 			events, listErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
-			if listErr == nil && hasThreadEvent(events, call.CallerThreadID, "thread.done") {
+			if listErr == nil && voiceCallerCompleted(events, call.CallerThreadID) {
 				endedBy = "caller_done"
 			}
 			targetEvents, targetListErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
@@ -531,13 +534,45 @@ func sendVoiceRelayResult(ctx context.Context, result chan<- error, err error) {
 	}
 }
 
-func hasThreadEvent(events []sdk.RuntimeTelemetryEvent, threadID, eventType string) bool {
+func voiceCallerCompleted(events []sdk.RuntimeTelemetryEvent, threadID string) bool {
 	for _, event := range events {
-		if event.ThreadID == threadID && event.Type == eventType {
+		if event.ThreadID != threadID {
+			continue
+		}
+		if event.Type == "thread.done" {
+			return true
+		}
+		if event.Type != "tool.call" {
+			continue
+		}
+		var data struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil && data.Name == "done" {
 			return true
 		}
 	}
 	return false
+}
+
+func (s *service) waitForVoiceCallerCompletion(ctx context.Context, runtimeID string, call *VoiceCall) bool {
+	timer := time.NewTimer(voiceCompletionGrace)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		events, err := s.runtime().ListRuntimeAgentTelemetry(runtimeID, call.CallerAgentAlias, call.StartedAt, 500)
+		if err == nil && voiceCallerCompleted(events, call.CallerThreadID) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-timer.C:
+			return false
+		case <-ticker.C:
+		}
+	}
 }
 
 func voiceTranscript(events []sdk.RuntimeTelemetryEvent, threadID string, started time.Time) []VoiceTranscriptTurn {
@@ -568,6 +603,10 @@ func voiceMetrics(targetEvents, callerEvents []sdk.RuntimeTelemetryEvent, target
 		CallerAudioS:       float64(len(callerAudio)) / voiceBytesPerSecond,
 		EndedBy:            endedBy,
 	}
+	targetEvents = append([]sdk.RuntimeTelemetryEvent(nil), targetEvents...)
+	callerEvents = append([]sdk.RuntimeTelemetryEvent(nil), callerEvents...)
+	sort.SliceStable(targetEvents, func(i, j int) bool { return targetEvents[i].Time.Before(targetEvents[j].Time) })
+	sort.SliceStable(callerEvents, func(i, j int) bool { return callerEvents[i].Time.Before(callerEvents[j].Time) })
 	var pendingUser time.Time
 	var responseLatencies []int64
 	for _, event := range targetEvents {
@@ -586,7 +625,9 @@ func voiceMetrics(targetEvents, callerEvents []sdk.RuntimeTelemetryEvent, target
 					metrics.FirstResponseMS = event.Time.Sub(started).Milliseconds()
 				}
 				if !pendingUser.IsZero() {
-					responseLatencies = append(responseLatencies, event.Time.Sub(pendingUser).Milliseconds())
+					if latency := event.Time.Sub(pendingUser).Milliseconds(); latency >= 0 {
+						responseLatencies = append(responseLatencies, latency)
+					}
 					pendingUser = time.Time{}
 				}
 			}
