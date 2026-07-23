@@ -157,10 +157,22 @@ func TestVoiceConversationIdleRequiresSettledTwoSidedExchange(t *testing.T) {
 		{Speaker: "receptionist", Text: "Your callback is booked. Goodbye."},
 	}
 	listening := func(threadID string) []sdk.RuntimeTelemetryEvent {
-		return []sdk.RuntimeTelemetryEvent{{
+		events := []sdk.RuntimeTelemetryEvent{{
 			ThreadID: threadID, Type: "realtime.state", Time: quietAt,
 			Data: json.RawMessage(`{"state":"listening"}`),
 		}}
+		if threadID == "target" {
+			events = append(events,
+				sdk.RuntimeTelemetryEvent{ThreadID: threadID, Type: "realtime.assistant", Time: quietAt.Add(-4 * time.Second)},
+				sdk.RuntimeTelemetryEvent{ThreadID: threadID, Type: "realtime.user", Time: quietAt.Add(-2 * time.Second)},
+			)
+		} else {
+			events = append(events,
+				sdk.RuntimeTelemetryEvent{ThreadID: threadID, Type: "realtime.user", Time: quietAt.Add(-3 * time.Second)},
+				sdk.RuntimeTelemetryEvent{ThreadID: threadID, Type: "realtime.assistant", Time: quietAt.Add(-2500 * time.Millisecond)},
+			)
+		}
+		return events
 	}
 
 	if !voiceConversationIsIdle(
@@ -201,6 +213,80 @@ func TestVoiceConversationIdleRequiresSettledTwoSidedExchange(t *testing.T) {
 		pendingTool, "target", listening("caller"), "caller",
 	) {
 		t.Fatal("pending tool call was detected as idle")
+	}
+}
+
+func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 17, 8, 0, 0, time.UTC)
+	quietAt := now.Add(-voiceConversationIdle - time.Second)
+	activity := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   quietAt,
+	}
+	transcript := []VoiceTranscriptTurn{
+		{Speaker: "receptionist", Text: "When should we call?"},
+		{Speaker: "caller", Text: "Monday at four."},
+		{Speaker: "receptionist", Text: "Your callback is booked."},
+	}
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-4 * time.Second)},
+		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-3 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
+	}
+	callerEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-1500 * time.Millisecond)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second)},
+		{ThreadID: "caller", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
+	}
+
+	if voiceConversationIsIdle(
+		now, activity, transcript,
+		targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("conversation completed before the target acknowledged the caller's final utterance")
+	}
+
+	targetEvents = append(targetEvents, sdk.RuntimeTelemetryEvent{
+		ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-500 * time.Millisecond),
+	})
+	if !voiceConversationIsIdle(
+		now, activity, append(transcript, VoiceTranscriptTurn{Speaker: "receptionist", Text: "Goodbye."}),
+		targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("conversation did not complete after final caller audio was acknowledged")
+	}
+}
+
+func TestVoiceRelayDeliverySettledWaitsForMediaAndBothDestinations(t *testing.T) {
+	base := time.Date(2026, time.July, 23, 17, 0, 0, 0, time.UTC)
+	activity := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   base,
+	}
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.assistant", Time: base},
+		{ThreadID: "target", Type: "realtime.user", Time: base.Add(3 * time.Second)},
+	}
+	callerEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "caller", Type: "realtime.user", Time: base.Add(time.Second)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(2 * time.Second)},
+	}
+	if !voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
+		t.Fatal("fully delivered relay was not settled")
+	}
+
+	activity.active["caller"] = true
+	if voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
+		t.Fatal("active media relay was considered settled")
+	}
+	activity.active["caller"] = false
+
+	callerEvents = append(callerEvents, sdk.RuntimeTelemetryEvent{
+		ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(4 * time.Second),
+	})
+	if voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
+		t.Fatal("unacknowledged caller output was considered settled")
 	}
 }
 

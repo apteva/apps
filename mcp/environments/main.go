@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.4.6
+version: 0.4.7
 description: Isolated test environments with project apps, fake connections, deterministic seeds, agents, interactive web and voice fixtures, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments

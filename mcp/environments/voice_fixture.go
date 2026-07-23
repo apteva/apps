@@ -24,7 +24,7 @@ const (
 	voiceBytesPerSecond   = voiceSampleRate * 2
 	voiceFrameDuration    = 20 * time.Millisecond
 	voiceFrameBytes       = voiceBytesPerSecond / (int(time.Second / voiceFrameDuration))
-	voiceSilenceTail      = time.Second
+	voiceSilenceTail      = 2 * time.Second
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
 	voiceCompletionGrace  = 2 * time.Second
 	voiceConversationIdle = 8 * time.Second
@@ -323,6 +323,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	defer ticker.Stop()
 	endedBy := ""
 	lastTranscript := ""
+	callerDone := false
 	for endedBy == "" {
 		select {
 		case <-ctx.Done():
@@ -340,7 +341,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		case <-ticker.C:
 			events, listErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
 			if listErr == nil && voiceCallerCompleted(events, call.CallerThreadID) {
-				endedBy = "caller_done"
+				callerDone = true
 			}
 			targetEvents, targetListErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 			if targetListErr == nil {
@@ -354,11 +355,17 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 					_ = s.db.saveVoiceCall(call)
 					s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
 				}
-				if listErr == nil && voiceConversationIsIdle(
-					time.Now(), mediaActivity, transcript,
-					targetEvents, call.TargetThreadID, events, call.CallerThreadID,
-				) {
-					endedBy = "conversation_idle"
+				if listErr == nil {
+					if callerDone && voiceRelayDeliverySettled(
+						mediaActivity, targetEvents, call.TargetThreadID, events, call.CallerThreadID,
+					) {
+						endedBy = "caller_done"
+					} else if voiceConversationIsIdle(
+						time.Now(), mediaActivity, transcript,
+						targetEvents, call.TargetThreadID, events, call.CallerThreadID,
+					) {
+						endedBy = "conversation_idle"
+					}
 				}
 			}
 		}
@@ -600,10 +607,10 @@ func voiceConversationIsIdle(
 		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
 		return false
 	}
-	mediaActive, lastActivity := media.snapshot()
-	if mediaActive {
+	if !voiceRelayDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
 		return false
 	}
+	_, lastActivity := media.snapshot()
 	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
 	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
 	if target.state != "listening" || caller.state != "listening" ||
@@ -616,6 +623,34 @@ func voiceConversationIsIdle(
 		}
 	}
 	return !lastActivity.IsZero() && now.Sub(lastActivity) >= voiceConversationIdle
+}
+
+func voiceRelayDeliverySettled(
+	media *voiceMediaActivity,
+	targetEvents []sdk.RuntimeTelemetryEvent,
+	targetThreadID string,
+	callerEvents []sdk.RuntimeTelemetryEvent,
+	callerThreadID string,
+) bool {
+	active, _ := media.snapshot()
+	if active {
+		return false
+	}
+	targetOutput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.assistant")
+	callerInput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.user")
+	callerOutput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.assistant")
+	targetInput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.user")
+	return !targetOutput.After(callerInput) && !callerOutput.After(targetInput)
+}
+
+func voiceLastRealtimeEvent(events []sdk.RuntimeTelemetryEvent, threadID, eventType string) time.Time {
+	var latest time.Time
+	for _, event := range events {
+		if event.ThreadID == threadID && event.Type == eventType && event.Time.After(latest) {
+			latest = event.Time
+		}
+	}
+	return latest
 }
 
 func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
