@@ -20,17 +20,18 @@ import (
 // callAppResponses to match what the real platform proxy returns.
 type recordingPlatform struct {
 	tk.BasePlatformClient
-	mu               sync.Mutex
-	executeCalls     []executeCall
-	callAppCalls     []callAppCall
-	startOAuthCalls  []sdk.OAuthStartRequest
-	disconnectCalls  []int64
-	nextStartOAuth   *sdk.OAuthStartResult
-	nextStartErr     error
-	listConnections  []sdk.PlatformConnection
-	executeResponses map[string]*sdk.ExecuteResult
-	callAppResponses map[string]json.RawMessage
-	identity         *sdk.InstallIdentity
+	mu                 sync.Mutex
+	executeCalls       []executeCall
+	callAppCalls       []callAppCall
+	startOAuthCalls    []sdk.OAuthStartRequest
+	disconnectCalls    []int64
+	nextStartOAuth     *sdk.OAuthStartResult
+	nextStartErr       error
+	listConnections    []sdk.PlatformConnection
+	listConnectionsErr error
+	executeResponses   map[string]*sdk.ExecuteResult
+	callAppResponses   map[string]json.RawMessage
+	identity           *sdk.InstallIdentity
 }
 
 type executeCall struct {
@@ -61,6 +62,9 @@ func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, er
 	return &sdk.PlatformConnection{ID: id, AppSlug: "facebook-ads", ProjectID: "test-proj"}, nil
 }
 func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	if p.listConnectionsErr != nil {
+		return nil, p.listConnectionsErr
+	}
 	if len(p.listConnections) == 0 {
 		return nil, nil
 	}
@@ -176,6 +180,9 @@ func newAdsCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 
 func TestAccountAdd_StartsOAuth(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{{
+		ID: 6, AppSlug: "facebook-ads", ProjectID: "test-proj", Status: "failed",
+	}}
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -203,6 +210,9 @@ func TestAccountAdd_StartsOAuth(t *testing.T) {
 
 func TestAccountAdd_StartsGoogleOAuth(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{{
+		ID: 6, AppSlug: "google-ads", ProjectID: "test-proj", Status: "pending",
+	}}
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -238,6 +248,9 @@ func TestAccountAdd_RejectsUnknownPlatform(t *testing.T) {
 
 func TestAccountAdd_RollsBackPendingOnOAuthErr(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{{
+		ID: 6, AppSlug: "facebook-ads", ProjectID: "test-proj", Status: "failed",
+	}}
 	pf.nextStartErr = errors.New("oauth provider down")
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
@@ -253,7 +266,32 @@ func TestAccountAdd_RollsBackPendingOnOAuthErr(t *testing.T) {
 	}
 }
 
-func TestPlatforms_AllowsFirstAccountOAuth(t *testing.T) {
+func TestAccountAdd_RequiresConfiguredIntegration(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	out, err := app.toolAccountAdd(ctx, map[string]any{"platform": "meta"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["isError"] != true || result["code"] != "integration_setup_required" {
+		t.Fatalf("expected setup-required error, got %#v", result)
+	}
+	if result["integration_slug"] != "facebook-ads" || result["setup_url"] != "/integrations?app=facebook-ads" {
+		t.Fatalf("missing setup metadata: %#v", result)
+	}
+	if len(pf.startOAuthCalls) != 0 {
+		t.Fatalf("OAuth must not start before integration setup: %#v", pf.startOAuthCalls)
+	}
+	var pending int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM pending_accounts`).Scan(&pending)
+	if pending != 0 {
+		t.Fatalf("pending row created before integration setup")
+	}
+}
+
+func TestPlatforms_ReportsSetupRequired(t *testing.T) {
 	pf := newRecordingPlatform()
 	newAdsCtx(t, pf)
 	app := &App{}
@@ -273,8 +311,72 @@ func TestPlatforms_AllowsFirstAccountOAuth(t *testing.T) {
 		t.Fatalf("platforms=%#v", payload.Platforms)
 	}
 	for _, platform := range payload.Platforms {
-		if platform["can_add"] != true {
-			t.Fatalf("first account is disabled for %#v", platform)
+		if platform["can_add"] != false || platform["configured"] != false || platform["state"] != "setup_required" {
+			t.Fatalf("unconfigured platform state is wrong: %#v", platform)
+		}
+		if platform["setup_url"] == "" {
+			t.Fatalf("setup URL missing: %#v", platform)
+		}
+	}
+}
+
+func TestPlatforms_DistinguishesReadyAndConnected(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{
+		{ID: 6, AppSlug: "facebook-ads", ProjectID: "test-proj", Status: "failed"},
+		{ID: 8, AppSlug: "google-ads", ProjectID: "test-proj", Status: "active"},
+	}
+	newAdsCtx(t, pf)
+	app := &App{}
+	request := httptest.NewRequest(http.MethodGet, "/platforms?project_id=test-proj", nil)
+	response := httptest.NewRecorder()
+	app.handlePlatforms(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Platforms []map[string]any `json:"platforms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	byPlatform := map[string]map[string]any{}
+	for _, platform := range payload.Platforms {
+		byPlatform[platform["platform"].(string)] = platform
+	}
+	meta := byPlatform["meta"]
+	if meta["state"] != "ready" || meta["configured"] != true || meta["can_add"] != true || meta["available"] != false {
+		t.Fatalf("Meta readiness state is wrong: %#v", meta)
+	}
+	google := byPlatform["google"]
+	if google["state"] != "connected" || google["connection_count"] != float64(1) || google["available"] != true {
+		t.Fatalf("Google connected state is wrong: %#v", google)
+	}
+}
+
+func TestPlatforms_ReportsReadinessFailureAsUnavailable(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnectionsErr = errors.New("platform API unavailable")
+	newAdsCtx(t, pf)
+	app := &App{}
+	request := httptest.NewRequest(http.MethodGet, "/platforms?project_id=test-proj", nil)
+	response := httptest.NewRecorder()
+	app.handlePlatforms(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Platforms []map[string]any `json:"platforms"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, platform := range payload.Platforms {
+		if platform["state"] != "unavailable" || platform["can_add"] != false || platform["configured"] != false {
+			t.Fatalf("readiness failure state is wrong: %#v", platform)
+		}
+		if platform["unavailable_reason"] != "Could not check integration setup. Refresh and try again." {
+			t.Fatalf("readiness failure message is wrong: %#v", platform)
 		}
 	}
 }

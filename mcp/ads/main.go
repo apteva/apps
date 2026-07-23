@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.5
+version: 0.1.6
 scopes: [project, global]
 requires:
   permissions:
@@ -694,6 +694,16 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return mcpError(err.Error()), nil
 	}
 	forceNew, _ := args["force_new"].(bool)
+	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		ProjectID: pid,
+		AppSlug:   def.IntegrationSlug,
+	})
+	if err != nil {
+		return mcpError("could not check " + def.DisplayName + " integration setup: " + err.Error()), nil
+	}
+	if len(conns) == 0 {
+		return integrationSetupRequired(&def), nil
+	}
 
 	// Reuse path (mirrors social): the access token from any active
 	// Meta connection in this project covers all the user's ad
@@ -708,16 +718,10 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			pid, def.Platform,
 		).Scan(&existingConnID)
 		if err != nil {
-			conns, lerr := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
-				ProjectID: pid,
-				AppSlug:   def.IntegrationSlug,
-			})
-			if lerr == nil {
-				for _, c := range conns {
-					if c.Status == "active" {
-						existingConnID = c.ID
-						break
-					}
+			for _, c := range conns {
+				if c.Status == "active" {
+					existingConnID = c.ID
+					break
 				}
 			}
 		}
@@ -787,6 +791,17 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			def.DisplayName, out.AuthorizeURL, pendingID,
 		),
 	}, nil
+}
+
+func integrationSetupRequired(def *platformDef) map[string]any {
+	out := mcpError(
+		def.DisplayName + " is not configured. Create the " + def.IntegrationSlug +
+			" integration first, then return to Ads and add the account.",
+	)
+	out["code"] = "integration_setup_required"
+	out["integration_slug"] = def.IntegrationSlug
+	out["setup_url"] = "/integrations?app=" + url.QueryEscape(def.IntegrationSlug)
+	return out
 }
 
 func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1166,10 +1181,12 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 	for _, opt := range adsPlatformOptions {
 		connectionCount := 0
 		activeConnectionID := int64(0)
-		if conns, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		conns, listErr := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 			ProjectID: pid,
 			AppSlug:   opt.IntegrationSlug,
-		}); err == nil {
+		})
+		configured := listErr == nil && len(conns) > 0
+		if listErr == nil {
 			for _, c := range conns {
 				if c.Status != "active" {
 					continue
@@ -1190,10 +1207,24 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			).Scan(&n)
 			activeAccount = n > 0
 		}
-		available := activeAccount || connectionCount > 0
-		canAdd := opt.Supported
+		connected := activeAccount || connectionCount > 0
+		canAdd := opt.Supported && configured && listErr == nil
+		state := "setup_required"
+		if listErr != nil {
+			state = "unavailable"
+		} else if !opt.Supported {
+			state = "unsupported"
+		} else if connected {
+			state = "connected"
+		} else if configured {
+			state = "ready"
+		}
 		unavailable := opt.Unavailable
-		if !opt.Supported && unavailable == "" {
+		if listErr != nil {
+			unavailable = "Could not check integration setup. Refresh and try again."
+		} else if opt.Supported && !configured {
+			unavailable = "Create the " + opt.IntegrationSlug + " integration first."
+		} else if !opt.Supported && unavailable == "" {
 			unavailable = opt.DisplayName + " is not supported by this Ads version."
 		}
 		out = append(out, map[string]any{
@@ -1201,8 +1232,11 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			"display_name":         opt.DisplayName,
 			"integration_slug":     opt.IntegrationSlug,
 			"supported":            opt.Supported,
-			"available":            available,
+			"configured":           configured,
+			"available":            connected,
+			"state":                state,
 			"can_add":              canAdd,
+			"setup_url":            "/integrations?app=" + url.QueryEscape(opt.IntegrationSlug),
 			"requires_picker":      opt.Supported,
 			"connection_count":     connectionCount,
 			"active_connection_id": activeConnectionID,

@@ -43,8 +43,11 @@ interface PlatformInfo {
   display_name: string;
   integration_slug: string;
   supported: boolean;
+  configured: boolean;
   available: boolean;
+  state: "setup_required" | "ready" | "connected" | "unsupported" | "unavailable";
   can_add: boolean;
+  setup_url: string;
   connection_count: number;
   active_account: boolean;
   unavailable_reason?: string;
@@ -309,7 +312,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
 
   const startPlatform = async (platform: PlatformInfo) => {
     if (!platform.can_add) {
-      setError(platform.unavailable_reason || "This platform is not available.");
+      setError(platform.unavailable_reason || "Set up this integration before adding an account.");
       return;
     }
     const popup = window.open("about:blank", "ads_oauth", "width=620,height=760");
@@ -589,32 +592,51 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       </div>
 
       {addOpen && (
-        <Modal title="Add ad account" description="Choose a provider. Existing connections are reused; otherwise authorization opens in a new window." onClose={() => setAddOpen(false)} labelledBy="ads-add-title">
+        <Modal title="Add ad account" description="Connect a configured ads provider, or set up its integration first." onClose={() => setAddOpen(false)} labelledBy="ads-add-title">
           <div className="divide-y divide-border">
             {platforms.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-text-muted">Checking providers...</p>
             ) : platforms.map((platform) => (
-              <button
-                type="button"
-                key={platform.platform}
-                disabled={!platform.can_add || startingPlatform === platform.platform}
-                onClick={() => startPlatform(platform)}
-                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-bg-input disabled:cursor-not-allowed disabled:opacity-50"
-              >
+              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3">
                 <ProviderMark platform={platform.platform} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-center gap-2">
                     <span className="truncate text-sm font-medium">{platform.display_name}</span>
                     {platform.active_account && <span className="rounded bg-green/15 px-1.5 py-0.5 text-xs text-green">Added</span>}
+                    {platform.state === "setup_required" && <span className="rounded bg-yellow/15 px-1.5 py-0.5 text-xs text-yellow">Setup required</span>}
                   </span>
                   <span className="mt-0.5 block text-xs text-text-muted">
-                    {platform.available
+                    {platform.state === "connected"
                       ? `${platform.connection_count} active connection${platform.connection_count === 1 ? "" : "s"}`
-                      : "Authorization required"}
+                      : platform.state === "ready"
+                        ? "Ready to authorize"
+                        : platform.unavailable_reason || "Integration unavailable"}
                   </span>
                 </span>
-                <span aria-hidden="true" className="text-text-muted">›</span>
-              </button>
+                {platform.state === "setup_required" ? (
+                  <a
+                    href={platform.setup_url || "/integrations"}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-8 shrink-0 items-center rounded border border-border px-3 text-xs font-medium text-text hover:bg-bg-input"
+                  >
+                    Set up
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={!platform.can_add || startingPlatform === platform.platform}
+                    onClick={() => startPlatform(platform)}
+                    className="h-8 shrink-0 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {startingPlatform === platform.platform
+                      ? "Starting..."
+                      : platform.state === "connected"
+                        ? "Choose accounts"
+                        : "Connect"}
+                  </button>
+                )}
+              </div>
             ))}
           </div>
           <footer className="flex justify-end border-t border-border px-4 py-3">
