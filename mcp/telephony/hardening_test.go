@@ -146,6 +146,33 @@ func testCall(id, status string) callRow {
 	}
 }
 
+func TestDirectiveWithCallContext(t *testing.T) {
+	call := testCall("context", "pending")
+	call.Direction = "inbound"
+	call.RouteID = "route-1"
+
+	got := directiveWithCallContext("Help the caller.", call)
+	for _, want := range []string{
+		"Help the caller.",
+		"[CALL CONTEXT]",
+		`"call_id": "context"`,
+		`"direction": "inbound"`,
+		`"provider": "twilio"`,
+		`"provider_call_id": "CAcontext"`,
+		`"route_id": "route-1"`,
+		`"from_number": "+14155550101"`,
+		`"to_number": "+14155550100"`,
+		"[END CALL CONTEXT]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("directive missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "Help the caller.") > strings.Index(got, "[CALL CONTEXT]") {
+		t.Fatalf("configured directive must precede call context:\n%s", got)
+	}
+}
+
 func TestManifestSeparatesPublicCarrierRoutes(t *testing.T) {
 	routes := (&App{}).HTTPRoutes()
 	public := map[string]bool{}
@@ -328,7 +355,7 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
 	}
 	spawn := platform.spawned[0]
-	if spawn.AgentID != route.AgentID || spawn.Directive != route.AutoDirective || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting {
+	if spawn.AgentID != route.AgentID || spawn.Directive != directiveWithCallContext(route.AutoDirective, call) || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting {
 		t.Fatalf("unexpected realtime spawn: %+v", spawn)
 	}
 	stored, err := a.db().findCall(call.ID)

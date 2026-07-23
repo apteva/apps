@@ -93,7 +93,10 @@ func TestPlivoImmediateInboundSpawnsRealtimeAndRecords(t *testing.T) {
 	if !strings.Contains(response.Body.String(), `<Stream bidirectional="true"`) || !strings.Contains(response.Body.String(), `<Record recordSession="true"`) {
 		t.Fatalf("inbound XML lacks realtime stream or recording: %s", response.Body.String())
 	}
-	if len(platform.spawned) != 1 || platform.spawned[0].Directive != route.AutoDirective {
+	if len(platform.spawned) != 1 ||
+		!strings.HasPrefix(platform.spawned[0].Directive, route.AutoDirective) ||
+		!strings.Contains(platform.spawned[0].Directive, `"direction": "inbound"`) ||
+		!strings.Contains(platform.spawned[0].Directive, `"from_number": "+14155550100"`) {
 		t.Fatalf("realtime thread was not spawned from route config: %#v", platform.spawned)
 	}
 	call, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "plivo-call-1")
