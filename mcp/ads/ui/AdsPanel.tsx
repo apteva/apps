@@ -434,31 +434,35 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       )}
 
       {pendingPicker && (
-        <section className="mx-4 mt-3 border border-border bg-bg-card md:mx-5">
-          <header className="flex items-center justify-between gap-3 border-b border-border px-3 py-2">
-            <div>
-              <h2 className="text-sm font-medium">Choose an ad account</h2>
-              <p className="text-xs text-text-muted">{pendingPicker.pages.length} available</p>
-            </div>
-            <button type="button" onClick={() => setPendingPicker(null)} aria-label="Close account picker" title="Close" className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input">×</button>
-          </header>
-          <div className="max-h-64 divide-y divide-border overflow-auto">
+        <Modal
+          title="Choose an ad account"
+          description={`${pendingPicker.pages.length} available from ${pendingPicker.platform === "meta" ? "Meta Ads" : "this provider"}.`}
+          size="large"
+          onClose={() => setPendingPicker(null)}
+          labelledBy="ads-account-picker-title"
+        >
+          <div className="max-h-[60vh] divide-y divide-border overflow-y-auto">
             {pendingPicker.pages.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-text-muted">No ad accounts were returned by this connection.</p>
             ) : pendingPicker.pages.map((page) => (
-              <div key={page.id} className="flex items-center gap-3 px-3 py-2">
+              <div key={page.id} className="flex items-center gap-3 px-4 py-3">
                 <ProviderMark platform={pendingPicker.platform || ""} size="sm" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{page.name || page.id}</div>
                   <div className="truncate text-xs text-text-muted">{page.id} · {page.currency || "-"} · {page.timezone || "-"}</div>
                 </div>
-                <button type="button" onClick={() => finalizeAccount(page)} className="h-8 shrink-0 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">
+                <button
+                  type="button"
+                  onClick={() => finalizeAccount(page)}
+                  aria-label={`Select ${page.name || page.id}`}
+                  className="h-8 w-20 shrink-0 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input"
+                >
                   Select
                 </button>
               </div>
             ))}
           </div>
-        </section>
+        </Modal>
       )}
 
       <div className="flex min-h-0 flex-1 flex-col md:flex-row">
