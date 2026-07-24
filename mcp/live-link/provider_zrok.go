@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,16 @@ func (p *zrokProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	}
 	if connectionID != state.ConnectionID {
 		return "", errors.New("the bound zrok connection changed — restore the original connection or delete the existing zrok name before reconfiguring")
+	}
+	publicURL, err := zrokResolveName(context.Background(), token, state.Namespace, state.Name)
+	if err != nil {
+		return "", fmt.Errorf("resolve zrok public URL: %w", err)
+	}
+	if state.PublicURL != publicURL {
+		state.PublicURL = publicURL
+		if err := dbPutZrokState(ctx.AppDB(), state); err != nil {
+			return "", fmt.Errorf("update zrok public URL: %w", err)
+		}
 	}
 	if err := ensureZrokEnvironment(ctx.DataDir(), token); err != nil {
 		return "", fmt.Errorf("enable zrok environment: %w", err)
@@ -137,6 +148,16 @@ func (a *App) configureZrok(ctx *sdk.AppCtx, raw json.RawMessage) (*ZrokState, e
 		return nil, errors.New("the bound zrok connection changed — restore the original connection and delete its reserved name first")
 	}
 	if existing != nil && existing.Name == name {
+		publicURL, err := zrokResolveName(context.Background(), token, existing.Namespace, existing.Name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve zrok public URL: %w", err)
+		}
+		if existing.PublicURL != publicURL {
+			existing.PublicURL = publicURL
+			if err := dbPutZrokState(ctx.AppDB(), existing); err != nil {
+				return nil, fmt.Errorf("update zrok public URL: %w", err)
+			}
+		}
 		if err := dbSetActiveProvider(ctx.AppDB(), providerNameZrok); err != nil {
 			return nil, err
 		}
@@ -148,11 +169,16 @@ func (a *App) configureZrok(ctx *sdk.AppCtx, raw json.RawMessage) (*ZrokState, e
 	if err := zrokCreateName(context.Background(), token, zrokNamespace, name); err != nil {
 		return nil, fmt.Errorf("reserve zrok name %q: %w", name, err)
 	}
+	publicURL, err := zrokResolveName(context.Background(), token, zrokNamespace, name)
+	if err != nil {
+		_ = zrokDeleteName(context.Background(), token, zrokNamespace, name)
+		return nil, fmt.Errorf("resolve zrok public URL: %w", err)
+	}
 	next := &ZrokState{
 		ConnectionID: connectionID,
 		Namespace:    zrokNamespace,
 		Name:         name,
-		PublicURL:    "https://" + name + ".share.zrok.io",
+		PublicURL:    publicURL,
 	}
 	if err := dbPutZrokState(ctx.AppDB(), next); err != nil {
 		_ = zrokDeleteName(context.Background(), token, zrokNamespace, name)
@@ -272,6 +298,12 @@ type zrokEnableResponse struct {
 	Config   string `json:"cfg"`
 }
 
+type zrokName struct {
+	NamespaceToken string `json:"namespaceToken"`
+	NamespaceName  string `json:"namespaceName"`
+	Name           string `json:"name"`
+}
+
 var (
 	zrokEnableEnvironment = func(ctx context.Context, token string) (*zrokEnableResponse, error) {
 		out := &zrokEnableResponse{}
@@ -287,14 +319,48 @@ var (
 		return zrokAPIRequest(ctx, http.MethodDelete, "/share/name", token,
 			map[string]string{"namespaceToken": namespace, "name": name}, nil)
 	}
+	zrokResolveName = func(ctx context.Context, token, namespace, name string) (string, error) {
+		var names []zrokName
+		if err := zrokAPIRequest(ctx, http.MethodGet, "/share/names/"+url.PathEscape(namespace), token, nil, &names); err != nil {
+			return "", err
+		}
+		for _, candidate := range names {
+			if candidate.NamespaceToken == namespace && candidate.Name == name {
+				return zrokPublicURL(name, candidate.NamespaceName)
+			}
+		}
+		return "", fmt.Errorf("reserved name %q was not returned by namespace %q", name, namespace)
+	}
 )
 
-func zrokAPIRequest(ctx context.Context, method, path, token string, body, out any) error {
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return err
+func zrokPublicURL(name, namespaceName string) (string, error) {
+	hostSuffix := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(namespaceName), "."))
+	if hostSuffix == "" || len(name)+1+len(hostSuffix) > 253 {
+		return "", errors.New("zrok returned an invalid namespace hostname")
 	}
-	req, err := http.NewRequestWithContext(ctx, method, zrokAPIEndpoint+"/api/v2"+path, bytes.NewReader(payload))
+	for _, label := range strings.Split(hostSuffix, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", errors.New("zrok returned an invalid namespace hostname")
+		}
+		for _, char := range label {
+			if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+				return "", errors.New("zrok returned an invalid namespace hostname")
+			}
+		}
+	}
+	return "https://" + name + "." + hostSuffix, nil
+}
+
+func zrokAPIRequest(ctx context.Context, method, path, token string, body, out any) error {
+	var requestBody io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		requestBody = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, zrokAPIEndpoint+"/api/v2"+path, requestBody)
 	if err != nil {
 		return err
 	}

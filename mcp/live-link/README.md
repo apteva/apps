@@ -11,7 +11,7 @@ and bounded run history.
 | Cloudflare Quick | No | Fresh `*.trycloudflare.com` URL per start | `cloudflared` |
 | Cloudflare Named | Yes | Stable hostname on a Cloudflare zone | `cloudflared` |
 | ngrok | Yes | Random URL, or a configured reserved domain | `ngrok` |
-| zrok | Yes | Stable free `*.share.zrok.io` reserved name | `zrok2` |
+| zrok | Yes | Stable free reserved name in zrok's public namespace | `zrok2` |
 
 Binding an integration does not silently switch providers. Select the provider
 in the panel, acknowledge that the target will be public, then choose **Go
@@ -30,7 +30,7 @@ settings only for a domain already reserved on the ngrok account.
 zrok uses the `enable_token` stored in a bound zrok connection to enable one
 isolated native zrok environment per Live Link install. Configure a reserved
 name in the panel; zrok's public namespace maps it to
-`https://<name>.share.zrok.io`. Switching providers preserves the name.
+the HTTPS hostname returned by zrok for its public namespace. Switching providers preserves the name.
 The explicit **Release name** action removes the upstream name and local native
 environment.
 

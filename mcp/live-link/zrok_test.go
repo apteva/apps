@@ -24,6 +24,21 @@ func TestNormalizeZrokName(t *testing.T) {
 	}
 }
 
+func TestZrokPublicURLUsesNamespaceReturnedByAPI(t *testing.T) {
+	got, err := zrokPublicURL("apteva", "shares.zrok.io")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://apteva.shares.zrok.io" {
+		t.Fatalf("url=%q", got)
+	}
+	for _, invalid := range []string{"", "https://shares.zrok.io", "shares.zrok.io/path", "-bad.example", "bad_.example"} {
+		if _, err := zrokPublicURL("apteva", invalid); err == nil {
+			t.Errorf("invalid namespace hostname %q was accepted", invalid)
+		}
+	}
+}
+
 func TestZrokArtifactsArePinned(t *testing.T) {
 	for _, platform := range [][2]string{
 		{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "amd64"}, {"darwin", "arm64"},
@@ -133,18 +148,20 @@ func TestConfigureAndDestroyZrokLifecycle(t *testing.T) {
 	platform.credentials[fakeZrokConnID] = &sdk.ConnectionCredentials{
 		Fields: map[string]string{"enable_token": "zrok-test-token"},
 	}
-	oldEnable, oldCreate, oldDelete := zrokEnableEnvironment, zrokCreateName, zrokDeleteName
+	oldEnable, oldCreate, oldDelete, oldResolve := zrokEnableEnvironment, zrokCreateName, zrokDeleteName, zrokResolveName
 	t.Cleanup(func() {
-		zrokEnableEnvironment, zrokCreateName, zrokDeleteName = oldEnable, oldCreate, oldDelete
+		zrokEnableEnvironment, zrokCreateName, zrokDeleteName, zrokResolveName = oldEnable, oldCreate, oldDelete, oldResolve
 	})
 	zrokEnableEnvironment = func(_ context.Context, _ string) (*zrokEnableResponse, error) {
 		return &zrokEnableResponse{Identity: "identity-id", Config: `{}`}, nil
 	}
 	var created, deleted string
+	createCalls := 0
 	zrokCreateName = func(_ context.Context, token, namespace, name string) error {
 		if token != "zrok-test-token" || namespace != "public" {
 			t.Fatalf("create token/namespace mismatch")
 		}
+		createCalls++
 		created = name
 		return nil
 	}
@@ -155,6 +172,12 @@ func TestConfigureAndDestroyZrokLifecycle(t *testing.T) {
 		deleted = name
 		return nil
 	}
+	zrokResolveName = func(_ context.Context, token, namespace, name string) (string, error) {
+		if token != "zrok-test-token" || namespace != "public" {
+			t.Fatalf("resolve token/namespace mismatch")
+		}
+		return "https://" + name + ".shares.zrok.io", nil
+	}
 
 	app := &App{mgr: NewManager(nil, nil)}
 	app.providers = []Provider{&zrokProvider{app: app}, &cloudflareQuickProvider{app: app}}
@@ -164,8 +187,20 @@ func TestConfigureAndDestroyZrokLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, ok := got.(*ZrokState)
-	if !ok || state.PublicURL != "https://stable-link.share.zrok.io" || created != "stable-link" {
+	if !ok || state.PublicURL != "https://stable-link.shares.zrok.io" || created != "stable-link" {
 		t.Fatalf("configuration=%#v created=%q", got, created)
+	}
+	state.PublicURL = "https://stable-link.share.zrok.io"
+	if err := dbPutZrokState(ctx.AppDB(), state); err != nil {
+		t.Fatal(err)
+	}
+	got, err = app.configureProvider(ctx, providerNameZrok, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = got.(*ZrokState)
+	if state.PublicURL != "https://stable-link.shares.zrok.io" || createCalls != 1 {
+		t.Fatalf("refreshed configuration=%#v create calls=%d", state, createCalls)
 	}
 	if active := app.activeProviderName(ctx); active != providerNameZrok {
 		t.Fatalf("active provider=%q", active)

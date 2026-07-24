@@ -524,7 +524,11 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                   disabled={isRunning || busy !== null}
                   className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
                 />
-                <span className="text-text-dim text-xs font-mono">.share.zrok.io</span>
+                <span className="text-text-dim text-xs font-mono">
+                  {status.zrok_url
+                    ? new URL(status.zrok_url).hostname.slice((status.zrok_name || "").length)
+                    : " · zrok public namespace"}
+                </span>
               </div>
             </label>
             <button
