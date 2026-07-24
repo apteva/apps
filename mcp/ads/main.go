@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.16
+version: 0.1.17
 scopes: [project, global]
 requires:
   permissions:
@@ -635,13 +635,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "creative_create",
 			Description: "Create a creative from one provider-neutral specification. " +
 				"Formats: link, image, video, carousel. identity_id is the publishing identity (a Facebook Page ID on Meta). " +
-				"Use image_url/image_hash for images, video_id for video, and cards for carousel. " +
-				"Args: ad_account_id, format, name, identity_id?, headline?, primary_text?, description?, destination_url?, call_to_action?, image_url?, image_hash?, video_id?, cards?, url_tags?, platform_options.",
+				"Use image_url/image_hash for images, video_id plus thumbnail_url/thumbnail_hash for video, and cards for carousel. " +
+				"Args: ad_account_id, format, name, identity_id?, secondary_identity_id?, headline?, primary_text?, description?, destination_url?, call_to_action?, image_url?, image_hash?, video_id?, thumbnail_url?, thumbnail_hash?, cards?, url_tags?, platform_options.",
 			InputSchema: schemaObject(map[string]any{
-				"ad_account_id":   map[string]any{"type": "integer"},
-				"format":          map[string]any{"type": "string", "enum": []string{"link", "image", "video", "carousel"}},
-				"name":            map[string]any{"type": "string"},
-				"identity_id":     map[string]any{"type": "string"},
+				"ad_account_id": map[string]any{"type": "integer"},
+				"format":        map[string]any{"type": "string", "enum": []string{"link", "image", "video", "carousel"}},
+				"name":          map[string]any{"type": "string"},
+				"identity_id":   map[string]any{"type": "string"},
+				"secondary_identity_id": map[string]any{
+					"type":        "string",
+					"description": "Optional secondary publishing identity; Meta maps this to the Instagram user ID.",
+				},
 				"headline":        map[string]any{"type": "string"},
 				"primary_text":    map[string]any{"type": "string"},
 				"description":     map[string]any{"type": "string"},
@@ -650,9 +654,14 @@ func (a *App) MCPTools() []sdk.Tool {
 					"learn_more", "shop_now", "sign_up", "book_travel", "contact_us",
 					"download", "get_offer", "get_quote", "subscribe", "watch_more",
 				}},
-				"image_url":  map[string]any{"type": "string"},
-				"image_hash": map[string]any{"type": "string"},
-				"video_id":   map[string]any{"type": "string"},
+				"image_url":     map[string]any{"type": "string"},
+				"image_hash":    map[string]any{"type": "string"},
+				"video_id":      map[string]any{"type": "string"},
+				"thumbnail_url": map[string]any{"type": "string"},
+				"thumbnail_hash": map[string]any{
+					"type":        "string",
+					"description": "Provider-side image hash used as a video thumbnail.",
+				},
 				"cards": map[string]any{
 					"type":     "array",
 					"minItems": 2,
@@ -1970,6 +1979,7 @@ func (metaAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	}
 
 	story := map[string]any{"page_id": identityID}
+	putString(story, "instagram_user_id", args, "secondary_identity_id")
 	switch format {
 	case "link", "image":
 		destination := stringArgAny(args, "destination_url")
@@ -1999,6 +2009,11 @@ func (metaAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		putString(videoData, "title", args, "headline")
 		putString(videoData, "message", args, "primary_text")
 		putString(videoData, "link_description", args, "description")
+		putString(videoData, "image_url", args, "thumbnail_url")
+		putString(videoData, "image_hash", args, "thumbnail_hash")
+		if stringArgAny(args, "thumbnail_url") == "" && stringArgAny(args, "thumbnail_hash") == "" {
+			return mcpError("video creatives require thumbnail_url or thumbnail_hash"), nil
+		}
 		if cta := metaCTA(args, destination); cta != nil {
 			videoData["call_to_action"] = cta
 		}

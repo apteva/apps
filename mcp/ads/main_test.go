@@ -1145,17 +1145,19 @@ func TestMetaCreativeCreateVideo_MapsGenericSpec(t *testing.T) {
 	acctID, _ := res.LastInsertId()
 
 	if _, err := app.toolCreativeCreate(ctx, map[string]any{
-		"ad_account_id":   acctID,
-		"format":          "video",
-		"name":            "Launch video",
-		"identity_id":     "page_7",
-		"headline":        "See it work",
-		"primary_text":    "A complete walkthrough.",
-		"description":     "Two minutes.",
-		"destination_url": "https://example.com/demo",
-		"call_to_action":  "watch_more",
-		"video_id":        "video_9",
-		"url_tags":        "utm_source=meta",
+		"ad_account_id":         acctID,
+		"format":                "video",
+		"name":                  "Launch video",
+		"identity_id":           "page_7",
+		"secondary_identity_id": "instagram_8",
+		"headline":              "See it work",
+		"primary_text":          "A complete walkthrough.",
+		"description":           "Two minutes.",
+		"destination_url":       "https://example.com/demo",
+		"call_to_action":        "watch_more",
+		"video_id":              "video_9",
+		"thumbnail_hash":        "thumb_hash_10",
+		"url_tags":              "utm_source=meta",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1165,12 +1167,13 @@ func TestMetaCreativeCreateVideo_MapsGenericSpec(t *testing.T) {
 		t.Fatalf("wrong creative create call: %#v", call)
 	}
 	story, ok := call.Input["object_story_spec"].(map[string]any)
-	if !ok || story["page_id"] != "page_7" {
+	if !ok || story["page_id"] != "page_7" || story["instagram_user_id"] != "instagram_8" {
 		t.Fatalf("missing Meta page identity: %#v", call.Input)
 	}
 	video, ok := story["video_data"].(map[string]any)
 	if !ok || video["video_id"] != "video_9" || video["title"] != "See it work" ||
-		video["message"] != "A complete walkthrough." || video["link_description"] != "Two minutes." {
+		video["message"] != "A complete walkthrough." || video["link_description"] != "Two minutes." ||
+		video["image_hash"] != "thumb_hash_10" {
 		t.Fatalf("video story is wrong: %#v", story)
 	}
 	cta, ok := video["call_to_action"].(map[string]any)
