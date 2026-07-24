@@ -1,6 +1,6 @@
 module github.com/apteva/apps/mcp/creators
 
-go 1.26.5
+go 1.25.0
 
 require (
 	github.com/apteva/app-sdk v0.40.0

@@ -43,6 +43,7 @@ func TestProtocolFixturePersistenceBindingsAndEvents(t *testing.T) {
 	if err := validateSpec(spec); err != nil {
 		t.Fatal(err)
 	}
+	normalizeProtocolFixtureSpecs(&spec)
 	bindings := protocolFixtureBindings(spec)
 	if len(bindings) != 1 || bindings[0].App != "telephony" || bindings[0].Role != "carrier" || bindings[0].Slug != "twilio" || bindings[0].Credentials["auth_token"] == "" {
 		t.Fatalf("bindings=%#v", bindings)
@@ -51,7 +52,10 @@ func TestProtocolFixturePersistenceBindingsAndEvents(t *testing.T) {
 	if err := s.createRun(run); err != nil {
 		t.Fatal(err)
 	}
-	fixture := normalizeProtocolFixtureSpec(spec.ProtocolFixtures[0])
+	fixture := spec.ProtocolFixtures[0]
+	if bindings[0].Credentials["auth_token"] != stringConfig(fixture.Config, "auth_token", "") {
+		t.Fatal("persisted fixture and runtime binding use different auth tokens")
+	}
 	instance := &ProtocolFixtureInstance{RunID: run.ID, ID: fixture.ID, Pack: fixture.Pack, Version: fixture.Version, Protocol: "twilio", TargetApp: fixture.TargetApp, Status: "running", Config: fixture.Config}
 	if err := s.createProtocolFixture(instance); err != nil {
 		t.Fatal(err)
