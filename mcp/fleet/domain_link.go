@@ -810,24 +810,45 @@ func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target str
 }
 
 func (a *App) refreshParentTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target string) error {
+	_, err := a.refreshParentTenantIngressTargetsCount(ctx, t, target)
+	return err
+}
+
+type ingressRefreshResult struct {
+	Expected  int
+	Rewritten int
+}
+
+func (a *App) refreshParentTenantIngressTargetsCount(ctx *sdk.AppCtx, t *Tenant, target string) (ingressRefreshResult, error) {
 	hosts, err := a.store.listTenantHosts(t.ID)
 	if err != nil {
-		return err
+		return ingressRefreshResult{}, err
 	}
 	if t.Domain == "" && len(hosts) == 0 {
-		return nil
+		return ingressRefreshResult{}, nil
 	}
 	if ctx == nil || ctx.PlatformAPI() == nil {
-		return errors.New("platform ingress is unavailable")
+		return ingressRefreshResult{}, errors.New("platform ingress is unavailable")
 	}
 	target = strings.TrimRight(target, "/")
+	result := ingressRefreshResult{}
+	seen := map[string]bool{}
 	expose := func(hostname, certFQDN string) error {
+		hostname = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(hostname, ".")))
 		if hostname == "" {
 			return nil
 		}
+		if seen[hostname] {
+			return nil
+		}
+		seen[hostname] = true
+		result.Expected++
 		_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
 			Hostname: hostname, Target: target, OwnerKind: "fleet", CertFQDN: certFQDN,
 		})
+		if err == nil {
+			result.Rewritten++
+		}
 		return err
 	}
 	var firstErr error
@@ -846,7 +867,7 @@ func (a *App) refreshParentTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, targ
 			firstErr = err
 		}
 	}
-	return firstErr
+	return result, firstErr
 }
 
 func (a *App) refreshTenantIngress(ctx *sdk.AppCtx, t *Tenant) error {
