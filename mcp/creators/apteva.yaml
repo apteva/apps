@@ -2,10 +2,11 @@ schema: apteva-app/v1
 
 name: creators
 display_name: Creators
-version: 0.2.5
+version: 0.3.0
 description: |
   Patreon-like creator memberships for Apteva. Manage tiers, members,
-  gated posts, protected file drops, payment links, and supporter updates.
+  ordered collections, gated posts, protected file drops, payment links,
+  and supporter updates.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/creators
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/creators/icon.svg
@@ -79,6 +80,18 @@ provides:
       description: List posts by status, visibility, or search query.
     - name: creators_post_get
       description: Fetch one post with attachments.
+    - name: creators_collection_create
+      description: Create a draft or published ordered collection of posts.
+    - name: creators_collection_list
+      description: List collections by publication status.
+    - name: creators_collection_get
+      description: Fetch one collection with its ordered posts.
+    - name: creators_collection_update
+      description: Update collection copy, metadata, cover image, status, or ordering metadata.
+    - name: creators_collection_set_posts
+      description: Replace the ordered posts in a collection.
+    - name: creators_collection_archive
+      description: Archive a collection without deleting its posts.
     - name: creators_attachment_upload
       description: Upload a gated attachment to storage and attach it to a post.
     - name: creators_attachment_add_from_storage

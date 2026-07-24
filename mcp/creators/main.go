@@ -86,6 +86,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/members/", Handler: a.handleMemberItem},
 		{Pattern: "/posts", Handler: a.handlePosts},
 		{Pattern: "/posts/", Handler: a.handlePostItem},
+		{Pattern: "/collections", Handler: a.handleCollections},
+		{Pattern: "/collections/", Handler: a.handleCollectionItem},
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/attachments/", Handler: a.handleAttachmentItem},
 		{Pattern: "/activity", Handler: a.handleEvents},
@@ -109,11 +111,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "creators_member_set_tier", Description: "Assign a member to a tier. Args: space_id? or space_slug?, member_id, tier_id (0 clears), status?.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger(), "tier_id": sInteger(), "status": sString()}, []string{"member_id"}), Handler: a.toolMemberSetTier},
 		{Name: "creators_member_set_status", Description: "Set member status. Args: space_id? or space_slug?, member_id, status, current_period_end?.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger(), "status": sString(), "current_period_end": sString()}, []string{"member_id", "status"}), Handler: a.toolMemberSetStatus},
 		{Name: "creators_member_rotate_portal_token", Description: "Revoke the current member portal token and issue a new 90-day token. Args: space_id? or space_slug?, member_id.", InputSchema: spaceSchema(map[string]any{"member_id": sInteger()}, []string{"member_id"}), Handler: a.toolMemberRotatePortalToken},
-		{Name: "creators_post_create", Description: "Create a creator post. Args: space_id? or space_slug?, title, body?, slug?, visibility?, tier_ids?, status?, scheduled_at?.", InputSchema: spaceSchema(map[string]any{"title": sString(), "body": sString(), "slug": sString(), "visibility": sString(), "tier_ids": sArray("integer"), "status": sString(), "scheduled_at": sString()}, []string{"title"}), Handler: a.toolPostCreate},
+		{Name: "creators_post_create", Description: "Create a creator post. Args: space_id? or space_slug?, title, body?, slug?, visibility?, tier_ids?, collection_ids?, status?, scheduled_at?.", InputSchema: spaceSchema(map[string]any{"title": sString(), "body": sString(), "slug": sString(), "visibility": sString(), "tier_ids": sArray("integer"), "collection_ids": sArray("integer"), "status": sString(), "scheduled_at": sString()}, []string{"title"}), Handler: a.toolPostCreate},
 		{Name: "creators_post_update", Description: "Update a post. Args: space_id? or space_slug?, id, patch.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolPostUpdate},
 		{Name: "creators_post_publish", Description: "Publish a post now or schedule it. Args: space_id? or space_slug?, id, scheduled_at?.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "scheduled_at": sString()}, []string{"id"}), Handler: a.toolPostPublish},
 		{Name: "creators_post_list", Description: "List posts. Args: space_id? or space_slug?, status?, visibility?, q?, limit?.", InputSchema: spaceSchema(map[string]any{"status": sString(), "visibility": sString(), "q": sString(), "limit": sInteger()}, nil), Handler: a.toolPostList},
 		{Name: "creators_post_get", Description: "Fetch one post with attachments. Args: space_id? or space_slug?, id OR slug.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "slug": sString()}, nil), Handler: a.toolPostGet},
+		{Name: "creators_collection_create", Description: "Create an ordered collection of posts. Args: space_id? or space_slug?, title, slug?, description?, status?, cover_storage_file_id?, metadata?, sort_order?.", InputSchema: spaceSchema(map[string]any{"title": sString(), "slug": sString(), "description": sString(), "status": sString(), "cover_storage_file_id": sInteger(), "metadata": sObject(), "sort_order": sInteger()}, []string{"title"}), Handler: a.toolCollectionCreate},
+		{Name: "creators_collection_list", Description: "List collections in a creator space. Args: space_id? or space_slug?, status?.", InputSchema: spaceSchema(map[string]any{"status": sString()}, nil), Handler: a.toolCollectionList},
+		{Name: "creators_collection_get", Description: "Fetch one collection and its ordered posts. Args: space_id? or space_slug?, id OR slug.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "slug": sString()}, nil), Handler: a.toolCollectionGet},
+		{Name: "creators_collection_update", Description: "Update collection details. Args: space_id? or space_slug?, id, patch.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolCollectionUpdate},
+		{Name: "creators_collection_set_posts", Description: "Replace a collection's ordered posts. Args: space_id? or space_slug?, id, post_ids in display order.", InputSchema: spaceSchema(map[string]any{"id": sInteger(), "post_ids": sArray("integer")}, []string{"id", "post_ids"}), Handler: a.toolCollectionSetPosts},
+		{Name: "creators_collection_archive", Description: "Archive a collection without deleting its posts. Args: space_id? or space_slug?, id.", InputSchema: spaceSchema(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCollectionArchive},
 		{Name: "creators_attachment_upload", Description: "Upload bytes to storage and attach them to a post. Args: space_id? or space_slug?, post_id, filename, content_base64, content_type?, visibility?, tier_ids?.", InputSchema: spaceSchema(map[string]any{"post_id": sInteger(), "filename": sString(), "content_base64": sString(), "content_type": sString(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "filename", "content_base64"}), Handler: a.toolAttachmentUpload},
 		{Name: "creators_attachment_add_from_storage", Description: "Attach an existing storage file to a creator post. Args: space_id? or space_slug?, post_id, storage_file_id, filename?, content_type?, size_bytes?, visibility?, tier_ids?.", InputSchema: spaceSchema(map[string]any{"post_id": sInteger(), "storage_file_id": sInteger(), "filename": sString(), "content_type": sString(), "size_bytes": sInteger(), "visibility": sString(), "tier_ids": sArray("integer")}, []string{"post_id", "storage_file_id"}), Handler: a.toolAttachmentAddFromStorage},
 		{Name: "creators_file_get_download_link", Description: "Mint a storage signed URL after checking access. Args: space_id? or space_slug?, attachment_id, member_id OR portal_token, ttl_seconds?.", InputSchema: spaceSchema(map[string]any{"attachment_id": sInteger(), "member_id": sInteger(), "portal_token": sString(), "ttl_seconds": sInteger()}, []string{"attachment_id"}), Handler: a.toolFileGetDownloadLink},
@@ -195,20 +203,21 @@ type MembershipPayment struct {
 }
 
 type Post struct {
-	ID          int64           `json:"id"`
-	ProjectID   string          `json:"project_id"`
-	SpaceID     int64           `json:"space_id"`
-	Title       string          `json:"title"`
-	Slug        string          `json:"slug"`
-	Body        string          `json:"body"`
-	Status      string          `json:"status"`
-	Visibility  string          `json:"visibility"`
-	TierIDs     json.RawMessage `json:"tier_ids"`
-	PublishedAt string          `json:"published_at,omitempty"`
-	ScheduledAt string          `json:"scheduled_at,omitempty"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
-	Attachments []Attachment    `json:"attachments,omitempty"`
+	ID            int64           `json:"id"`
+	ProjectID     string          `json:"project_id"`
+	SpaceID       int64           `json:"space_id"`
+	Title         string          `json:"title"`
+	Slug          string          `json:"slug"`
+	Body          string          `json:"body"`
+	Status        string          `json:"status"`
+	Visibility    string          `json:"visibility"`
+	TierIDs       json.RawMessage `json:"tier_ids"`
+	PublishedAt   string          `json:"published_at,omitempty"`
+	ScheduledAt   string          `json:"scheduled_at,omitempty"`
+	CreatedAt     string          `json:"created_at"`
+	UpdatedAt     string          `json:"updated_at"`
+	Attachments   []Attachment    `json:"attachments,omitempty"`
+	CollectionIDs []int64         `json:"collection_ids,omitempty"`
 }
 
 type Attachment struct {
@@ -628,6 +637,10 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, link, err)
 		return
 	}
+	if len(parts) >= 2 && parts[1] == "collections" {
+		a.handlePublicCollections(w, r, ctx, space, parts)
+		return
+	}
 	if len(parts) >= 3 && parts[1] == "posts" {
 		post, err := getPostBySlug(ctx.AppDB(), space.ProjectID, space.ID, parts[2], true)
 		if err != nil || post == nil || post.Status != "published" || post.Visibility != "public" {
@@ -672,6 +685,10 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 			"portal_token":  parts[0],
 		})
 		writeOrErr(w, link, err)
+		return
+	}
+	if len(parts) >= 2 && parts[1] == "collections" {
+		a.handleMemberCollections(w, r, ctx, member, parts)
 		return
 	}
 	posts, err := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
@@ -1034,9 +1051,9 @@ func createSpace(ctx *sdk.AppCtx, pid string, args map[string]any) (*Space, erro
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	slug := slugify(strArg(args, "slug"))
-	if slug == "" {
-		slug = slugify(name)
+	slug := slugify(name)
+	if requested := strArg(args, "slug"); requested != "" {
+		slug = slugify(requested)
 	}
 	currency := strings.ToUpper(strArg(args, "default_currency"))
 	if currency == "" {
@@ -1189,9 +1206,9 @@ func createTier(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 		return nil, fmt.Errorf("invalid interval %q", interval)
 	}
 	benefits := jsonArray(args["benefits"])
-	slug := slugify(strArg(args, "slug"))
-	if slug == "" {
-		slug = slugify(name)
+	slug := slugify(name)
+	if requested := strArg(args, "slug"); requested != "" {
+		slug = slugify(requested)
 	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO tiers (project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order)
@@ -1630,13 +1647,22 @@ func createPost(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 	if !validPostStatus(status) {
 		return nil, fmt.Errorf("invalid status %q", status)
 	}
-	slug := slugify(strArg(args, "slug"))
-	if slug == "" {
-		slug = slugify(title)
+	slug := slugify(title)
+	if requested := strArg(args, "slug"); requested != "" {
+		slug = slugify(requested)
 	}
 	tierIDs := jsonIntArray(args["tier_ids"])
 	if err := validateTierIDs(ctx.AppDB(), pid, spaceID, tierIDs); err != nil {
 		return nil, err
+	}
+	collectionIDs, collectionsProvided, err := collectionIDsFromMap(args)
+	if err != nil {
+		return nil, err
+	}
+	if collectionsProvided {
+		if err := validateCollectionIDs(ctx.AppDB(), pid, spaceID, collectionIDs); err != nil {
+			return nil, err
+		}
 	}
 	scheduledAt := strArg(args, "scheduled_at")
 	if status == "scheduled" {
@@ -1660,6 +1686,12 @@ func createPost(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any)
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if collectionsProvided {
+		if err := setPostCollections(ctx, pid, spaceID, id, collectionIDs); err != nil {
+			_, _ = ctx.AppDB().Exec(`DELETE FROM posts WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
+			return nil, err
+		}
+	}
 	post, err := getPost(ctx.AppDB(), pid, spaceID, id, true)
 	if err == nil {
 		_ = logEvent(ctx, pid, spaceID, "post.created", "agent", "post", id, map[string]any{"title": title})
@@ -1685,35 +1717,53 @@ func listPosts(db *sql.DB, pid string, spaceID int64, f postFilters) ([]Post, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []Post
 	for rows.Next() {
 		p, err := scanPost(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, *p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	postPointers := make([]*Post, len(out))
+	for i := range out {
+		postPointers[i] = &out[i]
+	}
+	if err := hydratePostCollectionIDs(db, pid, spaceID, postPointers); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func getPost(db *sql.DB, pid string, spaceID, id int64, withAttachments bool) (*Post, error) {
 	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	p, err := scanPost(row)
-	if err != nil || p == nil || !withAttachments {
+	if err != nil || p == nil {
 		return p, err
 	}
-	p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
+	p.CollectionIDs, err = listCollectionIDsForPost(db, pid, spaceID, p.ID)
+	if err == nil && withAttachments {
+		p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
+	}
 	return p, err
 }
 
 func getPostBySlug(db *sql.DB, pid string, spaceID int64, slug string, withAttachments bool) (*Post, error) {
 	row := db.QueryRow(`SELECT `+postColumns()+` FROM posts WHERE project_id=? AND space_id=? AND slug=?`, pid, spaceID, slug)
 	p, err := scanPost(row)
-	if err != nil || p == nil || !withAttachments {
+	if err != nil || p == nil {
 		return p, err
 	}
-	p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
+	p.CollectionIDs, err = listCollectionIDsForPost(db, pid, spaceID, p.ID)
+	if err == nil && withAttachments {
+		p.Attachments, err = listAttachments(db, pid, spaceID, p.ID)
+	}
 	return p, err
 }
 
@@ -1743,6 +1793,15 @@ func updatePost(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string
 	}
 	sets := []string{}
 	args := []any{}
+	collectionIDs, collectionsProvided, err := collectionIDsFromMap(patch)
+	if err != nil {
+		return nil, err
+	}
+	if collectionsProvided {
+		if err := validateCollectionIDs(ctx.AppDB(), pid, spaceID, collectionIDs); err != nil {
+			return nil, err
+		}
+	}
 	if v := cleanString(patch["title"]); v != "" {
 		sets, args = append(sets, "title=?"), append(args, v)
 	}
@@ -1784,13 +1843,31 @@ func updatePost(ctx *sdk.AppCtx, pid string, spaceID, id int64, patch map[string
 			sets, args = append(sets, "scheduled_at=?"), append(args, v)
 		}
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && !collectionsProvided {
 		return getPost(ctx.AppDB(), pid, spaceID, id, true)
 	}
-	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
-	args = append(args, pid, spaceID, id)
-	if _, err := ctx.AppDB().Exec(`UPDATE posts SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND space_id=? AND id=?`, args...); err != nil {
-		return nil, err
+	if len(sets) > 0 {
+		sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
+		args = append(args, pid, spaceID, id)
+		result, err := ctx.AppDB().Exec(`UPDATE posts SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND space_id=? AND id=?`, args...)
+		if err != nil {
+			return nil, err
+		}
+		if affected, _ := result.RowsAffected(); affected == 0 {
+			return nil, fmt.Errorf("post %d not found", id)
+		}
+	}
+	if collectionsProvided {
+		post, err := getPost(ctx.AppDB(), pid, spaceID, id, false)
+		if err != nil {
+			return nil, err
+		}
+		if post == nil {
+			return nil, fmt.Errorf("post %d not found", id)
+		}
+		if err := setPostCollections(ctx, pid, spaceID, id, collectionIDs); err != nil {
+			return nil, err
+		}
 	}
 	post, err := getPost(ctx.AppDB(), pid, spaceID, id, true)
 	if post == nil && err == nil {

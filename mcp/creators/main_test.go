@@ -16,16 +16,28 @@ const testProject = "creators-test"
 
 type storageLookupPlatform struct {
 	tk.BasePlatformClient
-	found bool
+	found       bool
+	contentType string
+	signedURL   string
 }
 
 func (p *storageLookupPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
-	if app != "storage" || tool != "files_get" {
+	if app != "storage" {
 		return nil
 	}
-	file := out.(*storageFileMetadata)
-	if p.found {
-		*file = storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: "image/png", SizeBytes: 68}
+	switch tool {
+	case "files_get":
+		file := out.(*storageFileMetadata)
+		if p.found {
+			contentType := p.contentType
+			if contentType == "" {
+				contentType = "image/png"
+			}
+			*file = storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: contentType, SizeBytes: 68}
+		}
+	case "files_get_url":
+		result := out.(*map[string]any)
+		*result = map[string]any{"url": p.signedURL}
 	}
 	return nil
 }
@@ -67,7 +79,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.5" {
+	if m.Name != "creators" || m.Version != "0.3.0" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
