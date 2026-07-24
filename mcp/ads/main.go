@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.13
+version: 0.1.14
 scopes: [project, global]
 requires:
   permissions:
@@ -1312,7 +1312,7 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 		"adAccountId": true, "customer_id": true,
 		"objectId":   true,
 		"campaignId": true, "campaign_id": true,
-		"adsetId": true, "adset_id": true,
+		"adSetId": true, "adsetId": true, "adset_id": true,
 		"adId": true, "ad_id": true,
 		"creative":     true,
 		"resourceName": true,
@@ -1712,7 +1712,7 @@ func (metaAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if errOut := a.requireMetaResource(ctx, acct, def.AdSetListTool, "ad set", asid); errOut != nil {
 		return errOut, nil
 	}
-	input := map[string]any{"adsetId": asid}
+	input := map[string]any{"adSetId": asid}
 	if v, _ := args["name"].(string); v != "" {
 		input["name"] = v
 	}
@@ -1743,7 +1743,7 @@ func (metaAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if errOut := a.requireMetaResource(ctx, acct, def.AdSetListTool, "ad set", asid); errOut != nil {
 		return errOut, nil
 	}
-	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{"adsetId": asid})
+	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{"adSetId": asid})
 }
 
 func (metaAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {

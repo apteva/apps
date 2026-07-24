@@ -1039,6 +1039,55 @@ func TestAdSetList_UsesMetaObjectEdge(t *testing.T) {
 	}
 }
 
+func TestAdSetUpdateAndDelete_UseCaseSensitiveMetaID(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["adset_list"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"data":[{"id":"adset_1"}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdSetUpdate(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"adset_id":      "adset_1",
+		"name":          "Updated",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("expected ownership lookup + update, got %#v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["objectId"] != "act_42" {
+		t.Fatalf("ownership lookup must use objectId: %#v", pf.executeCalls[0])
+	}
+	update := pf.executeCalls[1]
+	if update.Tool != "adset_update" || update.Input["adSetId"] != "adset_1" {
+		t.Fatalf("ad set update ID is wrong: %#v", update)
+	}
+	if _, wrongCase := update.Input["adsetId"]; wrongCase {
+		t.Fatalf("ad set update leaked wrong-case adsetId: %#v", update.Input)
+	}
+
+	if _, err := app.toolAdSetDelete(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"adset_id":      "adset_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remove := pf.executeCalls[3]
+	if remove.Tool != "adset_delete" || remove.Input["adSetId"] != "adset_1" {
+		t.Fatalf("ad set delete ID is wrong: %#v", remove)
+	}
+}
+
 func TestAdListAndCreate_UseMetaCreativeShape(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)
