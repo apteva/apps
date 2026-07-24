@@ -459,21 +459,13 @@ func computeSmartCropReelV2(
 		}
 	}
 	markSmartCropSceneCuts(samples)
-	// Preserve the pre-correction tracking signal. A background model can
-	// legitimately settle a noisy cached storyboard, but a later profile/head
-	// guard may restore the real one-sided subject position. If the original
-	// storyboard traversed more than a portrait-safe distance, keep the bounded
-	// one-second source pass enabled so that late correction has dense evidence
-	// instead of interpolating between two sparse poses.
-	trackingNeeded := smartCropReelNeedsTracking(samples, row.Width, cw) ||
-		smartCropFaceTrackNeedsSourceSamples(samples, cw)
 	backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
 		target.StartMs-10_000, target.EndMs+10_000, 12)
 	backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
 	backgroundCorrections := correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 	trackingFrames := 0
 	stationaryCorrections := 0
-	if trackingNeeded || smartCropReelNeedsTracking(samples, row.Width, cw) ||
+	if smartCropReelNeedsTracking(samples, row.Width, cw) ||
 		smartCropFaceTrackNeedsSourceSamples(samples, cw) ||
 		smartCropLateRefinementNeedsSourceSamples(samples, row.Width, cw) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
@@ -507,6 +499,7 @@ func computeSmartCropReelV2(
 	promoteSmartCropDetailedFaces(samples, cw, false)
 	faceFalsePositives := filterSmartCropWeakFaceAnchors(samples, cw)
 	faceFalsePositives += filterSmartCropWeakFaceDirectionClusters(samples, row.Width, cw)
+	faceFalsePositives += correctSmartCropWeakFaceExcursions(samples, row.Width, cw)
 	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)

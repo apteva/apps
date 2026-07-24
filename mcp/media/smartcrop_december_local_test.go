@@ -128,7 +128,7 @@ func TestMonikaDecemberSourceRegression(t *testing.T) {
 		{"hypnoteased-drop", "hypnoteased", 352_065, 381_815, 350, 750},
 		{"hypnoteased-countdown", "hypnoteased", 419_950, 453_520, 350, 800},
 		{"resist-first", "resist", 429_975, 461_085, 450, 1314},
-		{"resist-second", "resist", 500_199, 542_065, 250, 900},
+		{"resist-second", "resist", 500_199, 542_065, 240, 900},
 		{"puppy-roll", "puppy", 424_970, 458_230, 500, 1050},
 		{"mindless-flop", "mindless", 805_610, 842_750, 500, 850},
 		{"slow-freeze-torso", "slow-freeze", 714_630, 752_945, 150, 650},

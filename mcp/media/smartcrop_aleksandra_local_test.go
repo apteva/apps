@@ -131,11 +131,9 @@ func aleksandraProductionReelPath(
 	samples := aleksandraFixtureSamples(t, storyboardDir, storyboardPositions, srcW, srcH)
 	backgroundImages := aleksandraFixtureImages(t, backgroundDir)
 	markSmartCropSceneCuts(samples)
-	trackingNeeded := smartCropReelNeedsTracking(samples, srcW, cropW) ||
-		smartCropFaceTrackNeedsSourceSamples(samples, cropW)
 	correctSmartCropBackgroundSamples(samples, backgroundImages, srcW, cropW)
 	target := smartCropTarget{StartMs: start, EndMs: end}
-	if trackingNeeded || smartCropReelNeedsTracking(samples, srcW, cropW) ||
+	if smartCropReelNeedsTracking(samples, srcW, cropW) ||
 		smartCropFaceTrackNeedsSourceSamples(samples, cropW) ||
 		smartCropLateRefinementNeedsSourceSamples(samples, srcW, cropW) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW)
@@ -167,6 +165,7 @@ func aleksandraProductionReelPath(
 	promoteSmartCropDetailedFaces(samples, cropW, false)
 	filterSmartCropWeakFaceAnchors(samples, cropW)
 	filterSmartCropWeakFaceDirectionClusters(samples, srcW, cropW)
+	correctSmartCropWeakFaceExcursions(samples, srcW, cropW)
 	correctSmartCropFaceTracks(samples, srcW, cropW)
 	for _, sample := range samples {
 		face := "none"
