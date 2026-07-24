@@ -53,10 +53,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.57
+version: 0.7.58
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.57 moves the demo
-  cursor onto structured controls before their visible state changes.
+  Watch, steer, and replay hosted browser sessions. v0.7.58 adds durable final
+  browser frames and agent-selected live, final, session, and timeline cards.
 scopes: [project, global]
 requires:
   permissions:
@@ -97,7 +97,7 @@ provides:
     - name: browser_open
       description: "Compatibility alias for browser_session(action=open). Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
     - name: browser_screenshot
-      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
+      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
     - name: browser_recording
       description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
@@ -108,6 +108,15 @@ provides:
       icon: monitor
       entry: /ui/ComputerPanel.mjs
   ui_components:
+    - name: browser-session
+      entry: /ui/BrowserCard.mjs
+      slots: [chat.message_attachment]
+    - name: browser-view
+      entry: /ui/BrowserViewCard.mjs
+      slots: [chat.message_attachment]
+    - name: browser-timeline
+      entry: /ui/TimelineCard.mjs
+      slots: [chat.message_attachment]
     - name: browser-card
       entry: /ui/BrowserCard.mjs
       slots: [chat.message_attachment]
@@ -475,6 +484,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}/tabs/{tab_id}", Handler: a.handleCloseTab},
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
 		{Method: http.MethodPost, Pattern: "/internal/sessions/{id}/extract", Handler: a.handleInternalSessionExtract},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/presentation", Handler: a.handleSessionPresentation},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/timeline", Handler: a.handleSessionTimeline},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/stream", Handler: a.handleSessionStream},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording", Handler: a.handleRecordingMetadata},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}", Handler: a.handleRecordingPlaylist},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}/asset", Handler: a.handleRecordingAsset},
@@ -664,7 +676,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_screenshot",
 			Description: "Capture a clean PNG of the session's current viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). " +
-				"Returns {png_b64, current_url, width, height} and som only when include_som=true.",
+				"Returns {png_b64, screenshot_url, current_url, width, height} and som only when include_som=true. screenshot_url remains valid as the clean final frame after the session closes.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id":  map[string]any{"type": "string"},
 				"annotate":    map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
@@ -1012,6 +1024,7 @@ func (a *App) toolBrowserSwitchTab(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err := tc.SwitchTab(tabID); err != nil {
 		return nil, fmt.Errorf("switch_tab: %w", err)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "switch_tab"
 	payload["tab_id"] = tabID
@@ -1031,6 +1044,7 @@ func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := tc.CloseTab(tabID); err != nil {
 		return nil, fmt.Errorf("close_tab: %w", err)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "close_tab"
 	payload["tab_id"] = tabID
@@ -1274,6 +1288,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		return nil, errors.New("computer session history is unavailable")
 	}
 	if err := dbPutSession(ctx.AppDB(), sessionRecord(id, sess, "active", "", nil)); err != nil {
+		_ = comp.Close()
+		return nil, err
+	}
+	if err := dbAppendNavigation(ctx.AppDB(), id, currentURL(comp), activeTabTitle(comp), now); err != nil {
 		_ = comp.Close()
 		return nil, err
 	}
@@ -1524,11 +1542,12 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	m := out.(map[string]any)
 	res := map[string]any{
-		"png_b64":     m["screenshot_b64"],
-		"screenshot":  m["screenshot"],
-		"current_url": m["current_url"],
-		"width":       m["width"],
-		"height":      m["height"],
+		"png_b64":        m["screenshot_b64"],
+		"screenshot":     m["screenshot"],
+		"screenshot_url": sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
+		"current_url":    m["current_url"],
+		"width":          m["width"],
+		"height":         m["height"],
 	}
 	if som, ok := m["som"]; ok {
 		res["som"] = som
@@ -1935,6 +1954,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			fmt.Sprintf("browser remained at %q", afterURL),
 			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
 	for k, v := range uploadMeta {
@@ -2456,6 +2476,12 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	}
 	payload := a.sessionEventPayload(id, s)
 	active := sessionRecord(id, s, "active", "", nil)
+	if shot, err := screenshotWithOptions(s.comp, false); err == nil && len(shot) > 0 {
+		active.FinalScreenshot = shot
+		active.FinalScreenshotMIME = imageMIME(shot)
+	} else if err != nil && ctx != nil {
+		ctx.Logger().Warn("final browser screenshot failed", "session_id", id, "err", err.Error())
+	}
 	var persistErr error
 	if ctx == nil || ctx.AppDB() == nil {
 		persistErr = errors.New("computer session history is unavailable")
@@ -3039,6 +3065,25 @@ func streamURL(c backends.Computer) string {
 		return stream.StreamURL()
 	}
 	return ""
+}
+
+func activeTabTitle(c backends.Computer) string {
+	activeID := activeTabID(c)
+	for _, tab := range tabsFor(c) {
+		if tab.ID == activeID || tab.Active {
+			return tab.Title
+		}
+	}
+	return ""
+}
+
+func (a *App) recordSessionNavigation(ctx *sdk.AppCtx, id string, sess *session) {
+	if ctx == nil || ctx.AppDB() == nil || sess == nil || sess.comp == nil {
+		return
+	}
+	if err := dbAppendNavigation(ctx.AppDB(), id, currentURL(sess.comp), activeTabTitle(sess.comp), time.Now()); err != nil {
+		ctx.Logger().Warn("computer navigation history failed", "session_id", id, "err", err.Error())
+	}
 }
 
 func tabsFor(c backends.Computer) []backends.TabInfo {
@@ -4006,11 +4051,8 @@ func normalizeExtractOptions(body extractRequest) (extractOptions, error) {
 	return opts, nil
 }
 
-// handleSessionScreenshot streams the session's current screenshot inline.
-// Path is /sessions/{id}/screenshot — strip the prefix + suffix to
-// get id. Returns 404 if the session is unknown; the panel will then
-// stop polling that id on its own when the session disappears from
-// the list.
+// handleSessionScreenshot streams the current clean frame for an active
+// session and the durable final frame after the browser has closed.
 func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	rest := pathSessionID(r.URL.Path, "/screenshot")
 	if rest == "" {
@@ -4019,7 +4061,20 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := a.reg.get(rest)
 	if !ok {
-		httpErr(w, http.StatusNotFound, "session not found")
+		ctx := appCtxForRequest(r, nil)
+		if ctx == nil || ctx.AppDB() == nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		row, err := dbGetSession(ctx.AppDB(), rest)
+		if err != nil || len(row.FinalScreenshot) == 0 {
+			httpErr(w, http.StatusNotFound, "session screenshot not found")
+			return
+		}
+		contentType := firstNonEmpty(row.FinalScreenshotMIME, imageMIME(row.FinalScreenshot))
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(row.FinalScreenshot)
 		return
 	}
 	sess.actionMu.Lock()
@@ -4042,6 +4097,94 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	// through.
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(shot)
+}
+
+func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/presentation")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	ctx := appCtxForRequest(r, nil)
+	var info sessionInfo
+	if sess, ok := a.reg.get(id); ok {
+		sess.actionMu.Lock()
+		info = a.sessionInfo(id, sess)
+		sess.actionMu.Unlock()
+	} else {
+		if ctx == nil || ctx.AppDB() == nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		row, err := dbGetSession(ctx.AppDB(), id)
+		if err != nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		info = historicalSessionInfo(row)
+	}
+	writeJSON(w, map[string]any{
+		"session":        info,
+		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"stream_url":     sessionResourceURL(ctx, id, "stream"),
+		"timeline_url":   sessionResourceURL(ctx, id, "timeline"),
+		"recording_url":  sessionResourceURL(ctx, id, "recording"),
+	})
+}
+
+func (a *App) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/timeline")
+	ctx := appCtxForRequest(r, nil)
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if ctx == nil || ctx.AppDB() == nil {
+		httpErr(w, http.StatusServiceUnavailable, "session history unavailable")
+		return
+	}
+	steps, err := dbListNavigation(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"session_id": id, "steps": steps})
+}
+
+func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/stream")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	ctx := appCtxForRequest(r, nil)
+	if sess, ok := a.reg.get(id); ok {
+		sess.actionMu.Lock()
+		liveURL := streamURL(sess.comp)
+		backend := sess.backend
+		sess.actionMu.Unlock()
+		if liveURL != "" {
+			writeJSON(w, map[string]any{"kind": "iframe", "url": liveURL, "backend": backend, "status": "active"})
+			return
+		}
+		writeJSON(w, map[string]any{"kind": "snapshot", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
+		return
+	}
+	if ctx == nil || ctx.AppDB() == nil {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	row, err := dbGetSession(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, map[string]any{"kind": "final", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
+}
+
+func sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
+	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/" + strings.Trim(resource, "/")
+	return withRecordingQuery(path, ctx, "", "")
 }
 
 func pathSessionID(path, suffix string) string {

@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.57
+version: 0.7.58
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.57 moves the demo
-  cursor onto structured controls before their visible state changes.
+  Watch, steer, and replay hosted browser sessions. v0.7.58 adds durable final
+  browser frames and agent-selected live, final, session, and timeline cards.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -152,7 +152,9 @@ provides:
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,
         annotate? (default false; set true for Set-of-Mark labels),
-        include_som? (default false; returns structured SoM targets only when true).
+        include_som? (default false; returns structured SoM targets only when
+        true). Returns screenshot_url, a stable app-owned URL that continues
+        serving the clean final frame after the browser closes.
     - name: browser_recording
       description: |
         Retrieve provider-neutral playback metadata for an active or historical
@@ -173,10 +175,62 @@ provides:
       entry: /ui/ComputerPanel.mjs
 
   ui_components:
-    # Inline browser-session card — agent attaches after a successful
-    # browser_session(open). Carries enough context (backend, URL,
-    # status) to identify the session at a glance + a deep-link to
-    # the operator panel for live watching.
+    # Canonical components. The agent chooses whether and which card to attach;
+    # opening or driving a browser never creates chat attachments automatically.
+    - name: browser-session
+      entry: /ui/BrowserCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [session_id]
+        properties:
+          session_id: { type: string }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+
+    - name: browser-view
+      entry: /ui/BrowserViewCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          session_id: { type: string }
+          mode: { type: string, enum: [live, final, snapshot], default: final }
+          screenshot_url: { type: string }
+          som:
+            type: array
+            items:
+              type: object
+              properties:
+                label: { type: integer }
+                x: { type: number }
+                y: { type: number }
+                w: { type: number }
+                h: { type: number }
+                kind: { type: string }
+          caption: { type: string }
+          height: { type: integer, default: 360 }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+        mode: final
+        caption: "Example Domain"
+
+    - name: browser-timeline
+      entry: /ui/TimelineCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [session_id]
+        properties:
+          session_id: { type: string }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+
+    # v0.7.57 compatibility aliases. They use the canonical source primitives
+    # so old messages remain renderable without duplicate browser viewers.
     - name: browser-card
       entry: /ui/BrowserCard.mjs
       slots: [chat.message_attachment]
@@ -362,11 +416,10 @@ provides:
       command: /computer
       body_file: skills/how-to-use-computer.md
       description: |
-        Teaches the agent which chat component to attach for which
-        browser action. Loads on browser_session and computer_use
-        tool calls. Render-only attachments — for human-in-the-loop
-        questions, use the existing pace() + console-injection
-        pattern instead.
+        Teaches the agent when a browser result benefits from an explicitly
+        selected live, final, session, or timeline card. Loads on
+        browser_session and computer_use tool calls. Browser actions never
+        attach cards automatically.
       metadata:
         category: browsing
         icon: 🖥️

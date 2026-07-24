@@ -36,18 +36,20 @@ goal, pick the lowest.
 no Set-of-Mark labels. Use `computer_use(action="screenshot")` for navigation,
 or pass `annotate=true` to `browser_screenshot` only when labels are desired.
 
-## Chat attachments
+## Chat attachments are agent-selected
 
-When you do something visible to the browser, attach a component
-instead of describing it in prose. All render-only — never use them
-to ask the operator a question.
+Opening or driving a browser does not create an attachment automatically. You
+decide whether a visual card materially helps the answer and explicitly attach
+only the most useful card. All cards are render-only; never use them to ask the
+operator a question.
 
 | When | Component | Key props |
 |---|---|---|
-| After `browser_session(open)` succeeds | `browser-card` | `instance_id`, `backend`, `url`, `status` |
-| After `screenshot` | `screenshot-with-som` | `screenshot_url`, `som: [{label,x,y,w,h,kind}]`, `caption` |
-| After traversing several pages | `navigation-timeline` | `steps: [{url,title,thumbnail,ts}]` |
-| Mid-flow "watch me work" tile | `live-view` | `instance_id`, `height`, `mode` |
+| The result is visual: inspect a page, verify navigation, or show what loaded | `browser-view` | `session_id`, `mode:"final"`, `caption` |
+| A live view is genuinely useful while work continues | `browser-view` | `session_id`, `mode:"live"`, `height` |
+| Session metadata is the result, but page pixels are not useful | `browser-session` | `session_id` |
+| Several distinct pages are part of the result | `browser-timeline` | `session_id` |
+| A specific marked screenshot is needed | `browser-view` | `mode:"snapshot"`, `screenshot_url`, `som`, `caption` |
 
 Attach via:
 
@@ -55,9 +57,20 @@ Attach via:
 respond(components=[{ app: "computer", name: "<from-table>", props: {...} }])
 ```
 
-Default `live-view` to `mode: "thumb"` (polled image). `mode: "live"`
-is the full screencast — only when the view IS the message; multiple
-live tiles in one transcript get expensive.
+For ordinary browser navigation or inspection, attach `browser-view` with
+`mode:"final"` after the work is complete and the session has been closed. The
+card uses the durable clean final frame, so the user sees the actual destination
+page (for example, the Example Domain page after navigating to example.com), not
+only backend/session metadata.
+
+Use `mode:"live"` sparingly. A live card updates while the session is active and
+falls back to the final stored frame after close. Do not attach both
+`browser-session` and `browser-view` for the same result unless both metadata and
+pixels are independently useful.
+
+The older names `browser-card`, `screenshot-with-som`, `live-view`, and
+`navigation-timeline` remain compatibility aliases for existing transcripts.
+Use the canonical names above for new messages.
 
 ## Session cleanup
 

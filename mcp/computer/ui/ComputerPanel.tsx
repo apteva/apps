@@ -204,7 +204,10 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [contexts, setContexts] = useState<ContextRow[]>([]);
   const [settings, setSettings] = useState<ComputerSettings>({ default_backend: "local", lock_backend: false });
   const [err, setErr] = useState<string | null>(null);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(() => {
+    const query = new URLSearchParams(window.location.search);
+    return query.get("instance") || query.get("session_id");
+  });
   const [eventPreviewTick, setEventPreviewTick] = useState(0);
   const [nowTick, setNowTick] = useState(Date.now());
   const [showOpen, setShowOpen] = useState(false);
