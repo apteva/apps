@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,102 +40,8 @@ import (
 
 // ─── Embedded manifest ─────────────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: deploy
-display_name: Deploy
-version: 0.16.0
-description: Build and release services, Android apps, and iOS apps.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.ingress.write
-    - platform.connections.execute
-    - platform.connections.read_credentials
-  integrations:
-    - role: code
-      kind: app
-      required: true
-      compatible_app_names: [code]
-      label: Code app
-      hint: Install the Code app to host repositories the Deploy app builds.
-    - role: domains
-      kind: app
-      required: false
-      compatible_app_names: [domains]
-      label: Domains app
-      hint: Install the Domains app to attach a custom domain to a deployment.
-    - role: play_store
-      kind: integration
-      required: false
-      compatible_slugs: [google-play-developer]
-      label: Google Play Developer
-      hint: Required to publish Android App Bundles to Google Play.
-    - role: android_signing
-      kind: integration
-      required: false
-      compatible_slugs: [android-upload-signing]
-      label: Android Upload Signing
-      hint: Required only when Deploy must sign an Android App Bundle that Gradle did not sign.
-    - role: app_store
-      kind: integration
-      required: false
-      compatible_slugs: [app-store-connect]
-      label: App Store Connect
-      hint: Required to sign, upload, and publish iOS apps.
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: deploy_init,    description: "Bind a source to a new deployment." }
-    - { name: deploy_list,    description: "List deployments in this project." }
-    - { name: deploy_get,     description: "Full deployment detail + builds + current release." }
-    - { name: deploy_env_list, description: "List environments for a deployment." }
-    - { name: deploy_env_create, description: "Create a staging/dev environment for a deployment." }
-    - { name: deploy_env_update, description: "Update one environment's source, env vars, build config, or domain." }
-    - { name: deploy_env_destroy, description: "Archive a non-production environment." }
-    - { name: deploy_build,   description: "Fetch source, run the framework build; returns build_id." }
-    - { name: deploy_release, description: "Promote a build to live." }
-    - { name: deploy_promote, description: "Promote a tested build from one environment to another." }
-    - { name: deploy_rollout, description: "Change a Google Play production rollout fraction." }
-    - { name: deploy_halt, description: "Halt a mobile rollout or expire a TestFlight build." }
-    - { name: deploy_status,  description: "Current build + release state, URL, last 10 builds." }
-    - { name: deploy_logs,    description: "Tail build or runtime logs." }
-    - { name: deploy_stop,    description: "Stop the live release." }
-    - { name: deploy_destroy, description: "Stop, drop, delete artifacts." }
-    - { name: deploy_attach_domain, description: "Attach an FQDN to a deployment via the Domains app." }
-    - { name: deploy_detach_domain, description: "Clear a deployment's domain link." }
-    - { name: deploy_list_routes, description: "Server-side: live deployments as a route table for the host-based proxy. Polled by apteva-server's host-router; not for agents." }
-    - { name: deploy_health, description: "Deployment health and artifact retention status." }
-    - { name: deploy_update, description: "Update deployment or environment configuration." }
-    - { name: deploy_restart, description: "Restart a service release without rebuilding." }
-    - { name: deploy_set_env, description: "Merge environment variables into a deployment environment." }
-  ui_panels:
-    - { slot: project.page, label: "Deploy", icon: rocket, entry: /ui/DeployPanel.mjs }
-  workers:
-    - { name: mobile_release_sync, schedule: "@every 1m" }
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/deploy
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/deploy.db
-  migrations: migrations/
-config_schema:
-  - name: retain_rollback_builds
-    type: text
-    default: "3"
-    label: Retained rollback builds
-    description: Number of most recent successful builds to keep per deployment in addition to live/current builds. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 

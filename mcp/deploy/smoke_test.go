@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
@@ -27,6 +28,22 @@ func TestMain(m *testing.M) {
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func TestEmbeddedManifestMatchesSource(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded := (&App{}).Manifest()
+	if embedded.Name != source.Name || embedded.Version != source.Version {
+		t.Fatalf("embedded manifest %s@%s != source %s@%s",
+			embedded.Name, embedded.Version, source.Name, source.Version)
+	}
 }
 
 // Smoke test: bring up the schema in an in-memory DB, run the

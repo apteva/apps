@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -61,14 +62,19 @@ func writeFixture(t *testing.T) string {
 
 func spawnDeploySidecar(t *testing.T) *tk.Sidecar {
 	t.Helper()
-	dataDir := t.TempDir()
+	return spawnDeploySidecarWithState(t, t.TempDir(), 9300, 9399)
+}
+
+func spawnDeploySidecarWithState(t *testing.T, dataDir string, portStart, portEnd int) *tk.Sidecar {
+	t.Helper()
 	return tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithEnv("DEPLOY_DATA_DIR", dataDir),
+		tk.WithEnv("DB_PATH", filepath.Join(dataDir, "app.db")),
 		// Stay out of the way of common dev ports (8080/3000/etc).
 		tk.WithConfig(map[string]string{
-			"port_range_start": "9300",
-			"port_range_end":   "9399",
+			"port_range_start": strconv.Itoa(portStart),
+			"port_range_end":   strconv.Itoa(portEnd),
 		}),
 	)
 }
@@ -169,6 +175,87 @@ func TestSidecar_FullFlow_BuildReleaseStopDestroy(t *testing.T) {
 	out = sc.MCP("deploy_list", map[string]any{})
 	if cnt, _ := out["count"].(float64); cnt != 0 {
 		t.Fatalf("list count after destroy = %v, want 0", cnt)
+	}
+}
+
+func TestSidecar_RecoversDeadReleaseAfterRestart(t *testing.T) {
+	if _, err := lookGo(); err != nil {
+		t.Skip("go binary not on PATH; skipping integration test")
+	}
+
+	stateDir := t.TempDir()
+	src := writeFixture(t)
+	sc := spawnDeploySidecarWithState(t, stateDir, 9500, 9599)
+	out := sc.MCP("deploy_init", map[string]any{
+		"name": "recovery-fixture", "source_kind": "local",
+		"source_ref": src, "framework": "go",
+	})
+	dep := out["deployment"].(map[string]any)
+	depID := int64(dep["id"].(float64))
+
+	out = sc.MCP("deploy_build", map[string]any{"id": depID, "release": true})
+	liveBuild := out["build"].(map[string]any)
+	liveRelease := out["release"].(map[string]any)
+	liveBuildID := int64(liveBuild["id"].(float64))
+	liveReleaseID := int64(liveRelease["id"].(float64))
+	liveRelease, err := waitForLiveRelease(sc, depID, liveReleaseID, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	livePID := int(liveRelease["pid"].(float64))
+	livePort := int(liveRelease["port"].(float64))
+	if _, err := getWithRetry("http://127.0.0.1:"+strconv.Itoa(livePort)+"/", 5*time.Second); err != nil {
+		t.Fatalf("initial release unreachable: %v", err)
+	}
+
+	// A newer successful build must not be selected: it was built but
+	// never promoted to this environment.
+	out = sc.MCP("deploy_build", map[string]any{"id": depID})
+	newerBuild := out["build"].(map[string]any)
+	newerBuildID := int64(newerBuild["id"].(float64))
+	if newerBuildID == liveBuildID {
+		t.Fatalf("expected a distinct unpromoted build, both were %d", liveBuildID)
+	}
+
+	// Stop only the sidecar, then kill the independently supervised child.
+	// The DB still says the old release is live, reproducing the production
+	// restart shape that recoverBootOrphan handles during the next mount.
+	sc.Stop()
+	proc, err := os.FindProcess(livePID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proc.Kill(); err != nil {
+		t.Fatalf("kill live child %d: %v", livePID, err)
+	}
+	if err := waitUntilUnreachable("http://127.0.0.1:"+strconv.Itoa(livePort)+"/", 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := spawnDeploySidecarWithState(t, stateDir, 9500, 9599)
+	recovered, err := waitForRecoveredRelease(restarted, depID, liveReleaseID, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := int64(recovered["build_id"].(float64)); got != liveBuildID {
+		t.Fatalf("recovered build=%d, want previously-live build=%d (newer unpromoted=%d)",
+			got, liveBuildID, newerBuildID)
+	}
+	recoveredPort := int(recovered["port"].(float64))
+	body, err := getWithRetry("http://127.0.0.1:"+strconv.Itoa(recoveredPort)+"/", 5*time.Second)
+	if err != nil {
+		t.Fatalf("recovered release unreachable: %v", err)
+	}
+	if !contains(body, "hello deploy") {
+		t.Fatalf("unexpected recovered response: %q", body)
+	}
+
+	// Do not leave the recovered child behind after the sidecar test exits.
+	if stopped := restarted.MCP("deploy_stop", map[string]any{"id": depID}); stopped["stopped"] != true {
+		t.Fatalf("stop recovered release: %v", stopped)
+	}
+	if destroyed := restarted.MCP("deploy_destroy", map[string]any{"id": depID}); destroyed["destroyed"] != true {
+		t.Fatalf("destroy recovered deployment: %v", destroyed)
 	}
 }
 
@@ -368,6 +455,45 @@ func getWithRetry(url string, timeout time.Duration) (string, error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return "", lastErr
+}
+
+func waitUntilUnreachable(url string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(url)
+		if err != nil {
+			return nil
+		}
+		_ = resp.Body.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("%s remained reachable for %s", url, timeout)
+}
+
+func waitForRecoveredRelease(sc *tk.Sidecar, deploymentID, oldReleaseID int64, timeout time.Duration) (map[string]any, error) {
+	return waitForLiveReleaseMatching(sc, deploymentID, timeout, func(id int64) bool { return id != oldReleaseID })
+}
+
+func waitForLiveRelease(sc *tk.Sidecar, deploymentID, releaseID int64, timeout time.Duration) (map[string]any, error) {
+	return waitForLiveReleaseMatching(sc, deploymentID, timeout, func(id int64) bool { return id == releaseID })
+}
+
+func waitForLiveReleaseMatching(sc *tk.Sidecar, deploymentID int64, timeout time.Duration, matches func(int64) bool) (map[string]any, error) {
+	deadline := time.Now().Add(timeout)
+	var last any
+	for time.Now().Before(deadline) {
+		out := sc.MCP("deploy_status", map[string]any{"id": deploymentID})
+		last = out["current_release"]
+		current, ok := last.(map[string]any)
+		if ok && current["status"] == "live" {
+			id, _ := current["id"].(float64)
+			if matches(int64(id)) {
+				return current, nil
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("replacement release did not become live within %s; last=%v", timeout, last)
 }
 
 // lookGo is a thin wrapper around exec.LookPath that we keep as its
