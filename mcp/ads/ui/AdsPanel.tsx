@@ -642,7 +642,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     href={platform.setup_url || "/integrations"}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 w-32 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
+                    className="inline-flex h-8 w-28 shrink-0 items-center justify-center whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
                   >
                     Set up
                   </a>
@@ -651,12 +651,12 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     type="button"
                     disabled={!platform.can_add || startingPlatform === platform.platform}
                     onClick={() => startPlatform(platform)}
-                    className="h-8 w-32 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
+                    className="h-8 w-28 shrink-0 whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
                   >
                     {startingPlatform === platform.platform
                       ? "Starting..."
                       : platform.state === "connected"
-                        ? "Choose accounts"
+                        ? "Choose"
                         : "Connect"}
                   </button>
                 )}
