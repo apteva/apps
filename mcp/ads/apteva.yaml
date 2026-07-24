@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.15
+version: 0.1.16
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -58,6 +58,11 @@ provides:
     - { name: ad_update,                    description: "Update an ad." }
     - { name: ad_delete,                    description: "Delete an ad." }
     - { name: creative_upload,              description: "Upload an image or video to the platform's creative library. Reads bytes from the storage app when storage_id is given, or accepts a public source_url passthrough." }
+    - { name: creative_create,              description: "Create a provider-native creative from a generic link, image, video, or carousel specification." }
+    - { name: creative_get,                 description: "Get one creative from the selected ad account." }
+    - { name: creative_delete,              description: "Delete one creative from the selected ad account when the provider supports deletion." }
+    - { name: creative_asset_status,        description: "Inspect processing/readiness for an uploaded creative asset such as a Meta video." }
+    - { name: creative_asset_delete,        description: "Delete an uploaded creative asset when supported by the provider." }
     - { name: creative_list,                description: "List creatives in the ad account." }
     - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }

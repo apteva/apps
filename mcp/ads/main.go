@@ -10,9 +10,10 @@
 //     the matching pending_accounts row and the user picks an ad account
 //     from the connected platform's account list.
 //   - All campaign / ad set / ad / creative / audience state lives
-//     upstream — this app does NOT shadow it locally. Each tool resolves
-//     a local ad_account id to {connection_id, native_account_id}, then
-//     proxies through to the integration via ExecuteIntegrationTool.
+//     upstream. Locally we only retain account bindings and uploaded-asset
+//     ownership records needed to enforce project boundaries. Each tool
+//     resolves a local ad_account id to {connection_id, native_account_id},
+//     then proxies through to the integration via ExecuteIntegrationTool.
 //   - platform_options is the escape hatch: any field the platform
 //     supports but we haven't unified gets passed through. This keeps
 //     the unified API thin and honest about platform differences
@@ -37,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.15
+version: 0.1.16
 scopes: [project, global]
 requires:
   permissions:
@@ -114,9 +115,13 @@ type platformDef struct {
 
 	// Creative tools.
 	CreativeCreateTool      string
+	CreativeGetTool         string
+	CreativeDeleteTool      string
 	CreativeListTool        string
 	CreativeUploadImageTool string
 	CreativeUploadVideoTool string
+	CreativeAssetStatusTool string
+	CreativeAssetDeleteTool string
 
 	// Audience tools.
 	AudienceListTool            string
@@ -153,9 +158,13 @@ var platforms = map[string]platformDef{
 		AdUpdateTool:                "ad_update",
 		AdDeleteTool:                "ad_delete",
 		CreativeCreateTool:          "creative_create",
+		CreativeGetTool:             "creative_get",
+		CreativeDeleteTool:          "creative_delete",
 		CreativeListTool:            "creative_list",
 		CreativeUploadImageTool:     "creative_upload_image",
 		CreativeUploadVideoTool:     "creative_upload_video",
+		CreativeAssetStatusTool:     "video_status",
+		CreativeAssetDeleteTool:     "video_delete",
 		AudienceListTool:            "audience_list",
 		AudienceCreateCustomTool:    "audience_create_custom",
 		AudienceCreateLookalikeTool: "audience_create_lookalike",
@@ -181,7 +190,9 @@ var platforms = map[string]platformDef{
 		AdUpdateTool:             "ad_mutate",
 		AdDeleteTool:             "ad_mutate",
 		CreativeCreateTool:       "asset_mutate",
+		CreativeGetTool:          "search",
 		CreativeListTool:         "search",
+		CreativeAssetStatusTool:  "search",
 		AudienceListTool:         "search",
 		AudienceCreateCustomTool: "user_list_mutate",
 	},
@@ -201,7 +212,12 @@ type platformAdapter interface {
 	AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeGet(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeAssetStatus(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeAssetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
@@ -616,6 +632,70 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── Creatives ──
 		{
+			Name: "creative_create",
+			Description: "Create a creative from one provider-neutral specification. " +
+				"Formats: link, image, video, carousel. identity_id is the publishing identity (a Facebook Page ID on Meta). " +
+				"Use image_url/image_hash for images, video_id for video, and cards for carousel. " +
+				"Args: ad_account_id, format, name, identity_id?, headline?, primary_text?, description?, destination_url?, call_to_action?, image_url?, image_hash?, video_id?, cards?, url_tags?, platform_options.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id":   map[string]any{"type": "integer"},
+				"format":          map[string]any{"type": "string", "enum": []string{"link", "image", "video", "carousel"}},
+				"name":            map[string]any{"type": "string"},
+				"identity_id":     map[string]any{"type": "string"},
+				"headline":        map[string]any{"type": "string"},
+				"primary_text":    map[string]any{"type": "string"},
+				"description":     map[string]any{"type": "string"},
+				"destination_url": map[string]any{"type": "string"},
+				"call_to_action": map[string]any{"type": "string", "enum": []string{
+					"learn_more", "shop_now", "sign_up", "book_travel", "contact_us",
+					"download", "get_offer", "get_quote", "subscribe", "watch_more",
+				}},
+				"image_url":  map[string]any{"type": "string"},
+				"image_hash": map[string]any{"type": "string"},
+				"video_id":   map[string]any{"type": "string"},
+				"cards": map[string]any{
+					"type":     "array",
+					"minItems": 2,
+					"maxItems": 10,
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"headline":        map[string]any{"type": "string"},
+							"description":     map[string]any{"type": "string"},
+							"destination_url": map[string]any{"type": "string"},
+							"image_url":       map[string]any{"type": "string"},
+							"image_hash":      map[string]any{"type": "string"},
+							"call_to_action": map[string]any{"type": "string", "enum": []string{
+								"learn_more", "shop_now", "sign_up", "book_travel", "contact_us",
+								"download", "get_offer", "get_quote", "subscribe", "watch_more",
+							}},
+						},
+					},
+				},
+				"url_tags":         map[string]any{"type": "string"},
+				"platform_options": map[string]any{"type": "object"},
+			}, []string{"ad_account_id", "format", "name"}),
+			Handler: a.toolCreativeCreate,
+		},
+		{
+			Name:        "creative_get",
+			Description: "Get a creative that belongs to the selected ad account. Args: ad_account_id, creative_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"creative_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "creative_id"}),
+			Handler: a.toolCreativeGet,
+		},
+		{
+			Name:        "creative_delete",
+			Description: "Delete a creative that belongs to the selected ad account. Remove ads using it first. Args: ad_account_id, creative_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"creative_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "creative_id"}),
+			Handler: a.toolCreativeDelete,
+		},
+		{
 			Name: "creative_upload",
 			Description: "Upload an image or video to the platform's creative library. " +
 				"Provide either storage_id (file id from the storage app — the bytes are fetched and forwarded) OR source_url (a public URL the platform can fetch directly). " +
@@ -630,6 +710,26 @@ func (a *App) MCPTools() []sdk.Tool {
 				"platform_options": map[string]any{"type": "object"},
 			}, []string{"ad_account_id", "kind"}),
 			Handler: a.toolCreativeUpload,
+		},
+		{
+			Name:        "creative_asset_status",
+			Description: "Get processing/readiness for an uploaded creative asset. Meta supports video IDs; Google accepts an asset id or full resource name. Args: ad_account_id, asset_id, kind?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"asset_id":      map[string]any{"type": "string"},
+				"kind":          map[string]any{"type": "string", "enum": []string{"image", "video"}},
+			}, []string{"ad_account_id", "asset_id"}),
+			Handler: a.toolCreativeAssetStatus,
+		},
+		{
+			Name:        "creative_asset_delete",
+			Description: "Delete an uploaded creative asset when the provider supports it. Meta currently supports video assets; remove dependent ads and creatives first. Args: ad_account_id, asset_id, kind.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"asset_id":      map[string]any{"type": "string"},
+				"kind":          map[string]any{"type": "string", "enum": []string{"image", "video"}},
+			}, []string{"ad_account_id", "asset_id", "kind"}),
+			Handler: a.toolCreativeAssetDelete,
 		},
 		{
 			Name:        "creative_list",
@@ -1314,6 +1414,8 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 		"campaignId": true, "campaign_id": true,
 		"adSetId": true, "adsetId": true, "adset_id": true,
 		"adId": true, "ad_id": true,
+		"creativeId": true, "creative_id": true,
+		"videoId": true, "asset_id": true,
 		"creative":     true,
 		"resourceName": true,
 	}
@@ -1376,6 +1478,49 @@ func (a *App) requireMetaResource(ctx *sdk.AppCtx, acct *adAccount, tool, resour
 		return mcpError(resourceType + " does not belong to the selected ad account")
 	}
 	return nil
+}
+
+func (a *App) metaVideoBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, tool, videoID string) (bool, error) {
+	after := ""
+	for page := 0; page < 20; page++ {
+		input := map[string]any{
+			"adAccountId": acct.NativeAccountID,
+			"fields":      "id,object_story_spec",
+			"limit":       100,
+		}
+		if after != "" {
+			input["after"] = after
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
+		if err != nil {
+			return false, err
+		}
+		if res == nil || !res.Success {
+			return false, fmt.Errorf("%s video ownership lookup failed", tool)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(res.Data, &payload); err != nil {
+			return false, err
+		}
+		if rows, ok := payload["data"].([]any); ok {
+			for _, raw := range rows {
+				row, _ := raw.(map[string]any)
+				story, _ := row["object_story_spec"].(map[string]any)
+				video, _ := story["video_data"].(map[string]any)
+				if toString(video["video_id"]) == videoID {
+					return true, nil
+				}
+			}
+		}
+		paging, _ := payload["paging"].(map[string]any)
+		cursors, _ := paging["cursors"].(map[string]any)
+		next := toString(cursors["after"])
+		if next == "" || next == after {
+			return false, nil
+		}
+		after = next
+	}
+	return false, errors.New("video ownership lookup exceeded pagination limit")
 }
 
 // ─── Campaign tools ────────────────────────────────────────────────
@@ -1816,6 +1961,116 @@ func (metaAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 	return a.execOrErr(ctx, acct, def.AdDeleteTool, map[string]any{"adId": adID})
 }
 
+func (metaAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	format := strings.ToLower(stringArgAny(args, "format"))
+	name := stringArgAny(args, "name")
+	identityID := stringArgAny(args, "identity_id")
+	if name == "" || identityID == "" {
+		return mcpError("meta creative_create requires name and identity_id (Facebook Page ID)"), nil
+	}
+
+	story := map[string]any{"page_id": identityID}
+	switch format {
+	case "link", "image":
+		destination := stringArgAny(args, "destination_url")
+		if destination == "" {
+			return mcpError("link and image creatives require destination_url"), nil
+		}
+		linkData := map[string]any{"link": destination}
+		putString(linkData, "name", args, "headline")
+		putString(linkData, "message", args, "primary_text")
+		putString(linkData, "description", args, "description")
+		putString(linkData, "picture", args, "image_url")
+		putString(linkData, "image_hash", args, "image_hash")
+		if format == "image" && stringArgAny(args, "image_url") == "" && stringArgAny(args, "image_hash") == "" {
+			return mcpError("image creatives require image_url or image_hash"), nil
+		}
+		if cta := metaCTA(args, destination); cta != nil {
+			linkData["call_to_action"] = cta
+		}
+		story["link_data"] = linkData
+	case "video":
+		videoID := stringArgAny(args, "video_id")
+		destination := stringArgAny(args, "destination_url")
+		if videoID == "" {
+			return mcpError("video creatives require video_id"), nil
+		}
+		videoData := map[string]any{"video_id": videoID}
+		putString(videoData, "title", args, "headline")
+		putString(videoData, "message", args, "primary_text")
+		putString(videoData, "link_description", args, "description")
+		if cta := metaCTA(args, destination); cta != nil {
+			videoData["call_to_action"] = cta
+		}
+		story["video_data"] = videoData
+	case "carousel":
+		rawCards, _ := args["cards"].([]any)
+		if len(rawCards) < 2 || len(rawCards) > 10 {
+			return mcpError("carousel creatives require 2 to 10 cards"), nil
+		}
+		children := make([]any, 0, len(rawCards))
+		for i, raw := range rawCards {
+			card, _ := raw.(map[string]any)
+			destination := stringArgAny(card, "destination_url")
+			if destination == "" {
+				return mcpError(fmt.Sprintf("carousel card %d requires destination_url", i+1)), nil
+			}
+			if stringArgAny(card, "image_url") == "" && stringArgAny(card, "image_hash") == "" {
+				return mcpError(fmt.Sprintf("carousel card %d requires image_url or image_hash", i+1)), nil
+			}
+			child := map[string]any{"link": destination}
+			putString(child, "name", card, "headline")
+			putString(child, "description", card, "description")
+			putString(child, "picture", card, "image_url")
+			putString(child, "image_hash", card, "image_hash")
+			if cta := metaCTA(card, destination); cta != nil {
+				child["call_to_action"] = cta
+			}
+			children = append(children, child)
+		}
+		linkData := map[string]any{"child_attachments": children}
+		putString(linkData, "message", args, "primary_text")
+		putString(linkData, "link", args, "destination_url")
+		story["link_data"] = linkData
+	default:
+		return mcpError("format must be link, image, video, or carousel"), nil
+	}
+
+	input := map[string]any{
+		def.AccountIDInputField: acct.NativeAccountID,
+		"name":                  name,
+		"object_story_spec":     story,
+	}
+	putString(input, "url_tags", args, "url_tags")
+	mergeOptions(input, args)
+	return a.execOrErr(ctx, acct, def.CreativeCreateTool, input)
+}
+
+func (metaAdapter) CreativeGet(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	creativeID := stringArgAny(args, "creative_id")
+	if creativeID == "" {
+		return mcpError("creative_id required"), nil
+	}
+	if errOut := a.requireMetaResource(ctx, acct, def.CreativeListTool, "creative", creativeID); errOut != nil {
+		return errOut, nil
+	}
+	return a.execOrErr(ctx, acct, def.CreativeGetTool, map[string]any{
+		"creativeId": creativeID,
+		"fields":     metaCreativeFields,
+	})
+}
+
+func (metaAdapter) CreativeDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	creativeID := stringArgAny(args, "creative_id")
+	if creativeID == "" {
+		return mcpError("creative_id required"), nil
+	}
+	if errOut := a.requireMetaResource(ctx, acct, def.CreativeListTool, "creative", creativeID); errOut != nil {
+		return errOut, nil
+	}
+	return a.execOrErr(ctx, acct, def.CreativeDeleteTool, map[string]any{"creativeId": creativeID})
+}
+
 func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	kind, _ := args["kind"].(string)
 	if kind != "image" && kind != "video" {
@@ -1861,7 +2116,64 @@ func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		input["file_url"] = sourceURL
 	}
 	mergeOptions(input, args)
-	return a.execOrErr(ctx, acct, tool, input)
+	parsed, errOut := a.execIntegrationTool(ctx, acct, tool, input)
+	if errOut != nil {
+		return errOut, nil
+	}
+	if assetID := creativeAssetID(parsed, kind); assetID != "" {
+		recordCreativeAsset(ctx, args, acct, assetID, kind)
+	}
+	return parsed, nil
+}
+
+func (metaAdapter) CreativeAssetStatus(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	assetID := stringArgAny(args, "asset_id")
+	kind := strings.ToLower(stringArgAny(args, "kind"))
+	if assetID == "" {
+		return mcpError("asset_id required"), nil
+	}
+	if kind != "" && kind != "video" {
+		return mcpError("Meta only exposes processing status for video assets"), nil
+	}
+	if !creativeAssetTracked(ctx, args, acct, assetID) {
+		ok, err := a.metaVideoBelongsToAccount(ctx, acct, def.CreativeListTool, assetID)
+		if err != nil {
+			return mcpError("verify video ownership: " + err.Error()), nil
+		}
+		if !ok {
+			return mcpError("video asset does not belong to the selected ad account or was not uploaded through this app"), nil
+		}
+	}
+	return a.execOrErr(ctx, acct, def.CreativeAssetStatusTool, map[string]any{
+		"videoId": assetID,
+		"fields":  "id,title,status,length,source,thumbnails,created_time",
+	})
+}
+
+func (metaAdapter) CreativeAssetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	assetID := stringArgAny(args, "asset_id")
+	kind := strings.ToLower(stringArgAny(args, "kind"))
+	if assetID == "" {
+		return mcpError("asset_id required"), nil
+	}
+	if kind != "video" {
+		return mcpError("Meta asset deletion currently supports video assets; image hashes remain reusable in the account library"), nil
+	}
+	if !creativeAssetTracked(ctx, args, acct, assetID) {
+		ok, err := a.metaVideoBelongsToAccount(ctx, acct, def.CreativeListTool, assetID)
+		if err != nil {
+			return mcpError("verify video ownership: " + err.Error()), nil
+		}
+		if !ok {
+			return mcpError("video asset does not belong to the selected ad account or was not uploaded through this app"), nil
+		}
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.CreativeAssetDeleteTool, map[string]any{"videoId": assetID})
+	if errOut != nil {
+		return errOut, nil
+	}
+	deleteCreativeAssetRecord(ctx, args, acct, assetID)
+	return parsed, nil
 }
 
 func (metaAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2397,6 +2709,71 @@ func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 	})
 }
 
+func (googleAdapter) CreativeCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	format := strings.ToLower(stringArgAny(args, "format"))
+	name := stringArgAny(args, "name")
+	opts, _ := args["platform_options"].(map[string]any)
+	asset, _ := opts["asset"].(map[string]any)
+	if len(asset) == 0 {
+		switch format {
+		case "video":
+			videoID := stringArgAny(args, "video_id")
+			if videoID == "" {
+				return mcpError("google video creatives require video_id containing a YouTube video ID"), nil
+			}
+			asset = map[string]any{
+				"name": name,
+				"youtubeVideoAsset": map[string]any{
+					"youtubeVideoId": videoID,
+				},
+			}
+		case "image":
+			return mcpError("google image creative creation requires platform_options.asset with imageAsset.data; Google Ads does not ingest image assets from a public URL"), nil
+		case "link", "carousel":
+			return mcpError("Google Ads embeds link and carousel creative fields in the ad format; create reusable assets here, then supply the ad-format payload to ad_create"), nil
+		default:
+			return mcpError("format must be link, image, video, or carousel"), nil
+		}
+	}
+	if name != "" {
+		asset["name"] = name
+	}
+	if !googlePayloadScoped(asset, acct.NativeAccountID) {
+		return mcpError("google asset payload contains a resource from another customer"), nil
+	}
+	return a.execOrErr(ctx, acct, def.CreativeCreateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": asset}},
+	})
+}
+
+func (googleAdapter) CreativeGet(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	creativeID := stringArgAny(args, "creative_id")
+	if creativeID == "" {
+		return mcpError("creative_id required"), nil
+	}
+	if strings.HasPrefix(creativeID, "customers/") && !strings.HasPrefix(creativeID, "customers/"+acct.NativeAccountID+"/assets/") {
+		return mcpError("google creative resource belongs to another customer"), nil
+	}
+	id := creativeID
+	if strings.HasPrefix(creativeID, "customers/") {
+		parts := strings.Split(creativeID, "/")
+		id = parts[len(parts)-1]
+	}
+	if !googleNumericID(id) {
+		return mcpError("google creative_id must be a numeric asset id or full asset resource name"), nil
+	}
+	query := "SELECT asset.id, asset.name, asset.type, asset.resource_name, asset.youtube_video_asset.youtube_video_id FROM asset WHERE asset.id = " + id + " LIMIT 1"
+	return a.execOrErr(ctx, acct, def.CreativeGetTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"query":       query,
+	})
+}
+
+func (googleAdapter) CreativeDelete(_ *App, _ *sdk.AppCtx, _ *adAccount, _ *platformDef, _ map[string]any) (any, error) {
+	return mcpError("Google Ads reusable assets cannot be removed through AssetService; remove ads and asset links that reference the asset instead"), nil
+}
+
 func (googleAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	opts, _ := args["platform_options"].(map[string]any)
 	asset, _ := opts["asset"].(map[string]any)
@@ -2410,6 +2787,21 @@ func (googleAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"create": asset}},
 	})
+}
+
+func (googleAdapter) CreativeAssetStatus(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	assetID := stringArgAny(args, "asset_id")
+	if assetID == "" {
+		return mcpError("asset_id required"), nil
+	}
+	return (googleAdapter{}).CreativeGet(a, ctx, acct, def, map[string]any{
+		"creative_id":   assetID,
+		"ad_account_id": args["ad_account_id"],
+	})
+}
+
+func (googleAdapter) CreativeAssetDelete(_ *App, _ *sdk.AppCtx, _ *adAccount, _ *platformDef, _ map[string]any) (any, error) {
+	return mcpError("Google Ads reusable assets cannot be removed through AssetService; remove ads and asset links that reference the asset instead"), nil
 }
 
 func (googleAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2519,12 +2911,52 @@ func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── Creative tools ────────────────────────────────────────────────
 
+func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeCreate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCreativeGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeGet(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCreativeDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeDelete(a, ctx, acct, def, args)
+}
+
 func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
 	}
 	return platformAdapters[acct.Platform].CreativeUpload(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCreativeAssetStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeAssetStatus(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCreativeAssetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeAssetDelete(a, ctx, acct, def, args)
 }
 
 func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2562,6 +2994,113 @@ func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) 
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
+
+func putString(dst map[string]any, dstKey string, src map[string]any, srcKey string) {
+	if value := stringArgAny(src, srcKey); value != "" {
+		dst[dstKey] = value
+	}
+}
+
+func metaCTA(args map[string]any, destination string) map[string]any {
+	raw := strings.ToLower(stringArgAny(args, "call_to_action"))
+	if raw == "" && destination == "" {
+		return nil
+	}
+	if raw == "" {
+		raw = "learn_more"
+	}
+	types := map[string]string{
+		"learn_more":  "LEARN_MORE",
+		"shop_now":    "SHOP_NOW",
+		"sign_up":     "SIGN_UP",
+		"book_travel": "BOOK_TRAVEL",
+		"contact_us":  "CONTACT_US",
+		"download":    "DOWNLOAD",
+		"get_offer":   "GET_OFFER",
+		"get_quote":   "GET_QUOTE",
+		"subscribe":   "SUBSCRIBE",
+		"watch_more":  "WATCH_MORE",
+	}
+	ctaType, ok := types[raw]
+	if !ok {
+		ctaType = strings.ToUpper(raw)
+	}
+	cta := map[string]any{"type": ctaType}
+	if destination != "" {
+		cta["value"] = map[string]any{"link": destination}
+	}
+	return cta
+}
+
+func creativeAssetID(parsed any, kind string) string {
+	payload, _ := parsed.(map[string]any)
+	if payload == nil {
+		return ""
+	}
+	if id := firstString(payload, "id", "resourceName", "resource_name"); id != "" {
+		return id
+	}
+	if results, ok := payload["results"].([]any); ok && len(results) > 0 {
+		if row, ok := results[0].(map[string]any); ok {
+			return firstString(row, "resourceName", "resource_name", "id")
+		}
+	}
+	if kind == "image" {
+		if images, ok := payload["images"].(map[string]any); ok {
+			for _, raw := range images {
+				if image, ok := raw.(map[string]any); ok {
+					if hash := firstString(image, "hash"); hash != "" {
+						return hash
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func recordCreativeAsset(ctx *sdk.AppCtx, args map[string]any, acct *adAccount, assetID, kind string) {
+	pid, err := requireProject(ctx, args)
+	if err != nil || assetID == "" {
+		return
+	}
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO creative_assets (project_id, ad_account_id, platform, native_asset_id, kind)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(project_id, ad_account_id, platform, native_asset_id)
+		 DO UPDATE SET kind=excluded.kind`,
+		pid, acct.ID, acct.Platform, assetID, kind,
+	); err != nil {
+		ctx.Logger().Warn("record creative asset failed", "asset_id", assetID, "error", err)
+	}
+}
+
+func creativeAssetTracked(ctx *sdk.AppCtx, args map[string]any, acct *adAccount, assetID string) bool {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return false
+	}
+	var found int
+	return ctx.AppDB().QueryRow(
+		`SELECT 1 FROM creative_assets
+		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?`,
+		pid, acct.ID, acct.Platform, assetID,
+	).Scan(&found) == nil
+}
+
+func deleteCreativeAssetRecord(ctx *sdk.AppCtx, args map[string]any, acct *adAccount, assetID string) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return
+	}
+	if _, err := ctx.AppDB().Exec(
+		`DELETE FROM creative_assets
+		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?`,
+		pid, acct.ID, acct.Platform, assetID,
+	); err != nil {
+		ctx.Logger().Warn("delete creative asset record failed", "asset_id", assetID, "error", err)
+	}
+}
 
 // execOrErr wraps execIntegrationTool to fit the MCP-tool return contract.
 func (a *App) execOrErr(ctx *sdk.AppCtx, acct *adAccount, tool string, input map[string]any) (any, error) {

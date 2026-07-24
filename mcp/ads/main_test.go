@@ -1131,7 +1131,162 @@ func TestAdListAndCreate_UseMetaCreativeShape(t *testing.T) {
 	}
 }
 
-// --- creative_upload -----------------------------------------------
+// --- creatives -----------------------------------------------------
+
+func TestMetaCreativeCreateVideo_MapsGenericSpec(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeCreate(ctx, map[string]any{
+		"ad_account_id":   acctID,
+		"format":          "video",
+		"name":            "Launch video",
+		"identity_id":     "page_7",
+		"headline":        "See it work",
+		"primary_text":    "A complete walkthrough.",
+		"description":     "Two minutes.",
+		"destination_url": "https://example.com/demo",
+		"call_to_action":  "watch_more",
+		"video_id":        "video_9",
+		"url_tags":        "utm_source=meta",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	call := pf.executeCalls[0]
+	if call.Tool != "creative_create" || call.Input["adAccountId"] != "act_42" {
+		t.Fatalf("wrong creative create call: %#v", call)
+	}
+	story, ok := call.Input["object_story_spec"].(map[string]any)
+	if !ok || story["page_id"] != "page_7" {
+		t.Fatalf("missing Meta page identity: %#v", call.Input)
+	}
+	video, ok := story["video_data"].(map[string]any)
+	if !ok || video["video_id"] != "video_9" || video["title"] != "See it work" ||
+		video["message"] != "A complete walkthrough." || video["link_description"] != "Two minutes." {
+		t.Fatalf("video story is wrong: %#v", story)
+	}
+	cta, ok := video["call_to_action"].(map[string]any)
+	if !ok || cta["type"] != "WATCH_MORE" {
+		t.Fatalf("video CTA is wrong: %#v", video)
+	}
+	value, ok := cta["value"].(map[string]any)
+	if !ok || value["link"] != "https://example.com/demo" {
+		t.Fatalf("video CTA destination is wrong: %#v", cta)
+	}
+	if call.Input["url_tags"] != "utm_source=meta" {
+		t.Fatalf("url tags missing: %#v", call.Input)
+	}
+}
+
+func TestMetaCreativeCreateCarousel_MapsCards(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeCreate(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"format":        "carousel",
+		"name":          "Product carousel",
+		"identity_id":   "page_7",
+		"primary_text":  "Choose a product.",
+		"cards": []any{
+			map[string]any{"headline": "One", "destination_url": "https://example.com/one", "image_url": "https://cdn.example.com/one.jpg"},
+			map[string]any{"headline": "Two", "destination_url": "https://example.com/two", "image_hash": "hash_2", "call_to_action": "shop_now"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	story := pf.executeCalls[0].Input["object_story_spec"].(map[string]any)
+	linkData := story["link_data"].(map[string]any)
+	children := linkData["child_attachments"].([]any)
+	if len(children) != 2 {
+		t.Fatalf("wrong carousel card count: %#v", linkData)
+	}
+	second := children[1].(map[string]any)
+	if second["image_hash"] != "hash_2" || second["name"] != "Two" {
+		t.Fatalf("second carousel card is wrong: %#v", second)
+	}
+}
+
+func TestMetaCreativeGetAndDelete_VerifyAccountOwnership(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["creative_list"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"data":[{"id":"creative_1"}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeGet(ctx, map[string]any{"ad_account_id": acctID, "creative_id": "creative_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolCreativeDelete(ctx, map[string]any{"ad_account_id": acctID, "creative_id": "creative_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 4 ||
+		pf.executeCalls[0].Tool != "creative_list" ||
+		pf.executeCalls[1].Tool != "creative_get" ||
+		pf.executeCalls[2].Tool != "creative_list" ||
+		pf.executeCalls[3].Tool != "creative_delete" {
+		t.Fatalf("creative ownership sequence is wrong: %#v", pf.executeCalls)
+	}
+	if pf.executeCalls[3].Input["creativeId"] != "creative_1" {
+		t.Fatalf("creative delete ID is wrong: %#v", pf.executeCalls[3])
+	}
+}
+
+func TestGoogleCreativeCreateVideo_MapsYouTubeAsset(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',7,'1234567890','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeCreate(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"format":        "video",
+		"name":          "Launch video",
+		"video_id":      "abc123xyz89",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "asset_mutate" || call.Input["customer_id"] != "1234567890" {
+		t.Fatalf("wrong Google asset call: %#v", call)
+	}
+	ops := call.Input["operations"].([]any)
+	create := ops[0].(map[string]any)["create"].(map[string]any)
+	video := create["youtubeVideoAsset"].(map[string]any)
+	if create["name"] != "Launch video" || video["youtubeVideoId"] != "abc123xyz89" {
+		t.Fatalf("wrong YouTube asset payload: %#v", create)
+	}
+}
 
 func TestCreativeUpload_FetchesFromStorage(t *testing.T) {
 	pf := newRecordingPlatform()
@@ -1191,6 +1346,11 @@ func TestCreativeUpload_RejectsWithoutSource(t *testing.T) {
 
 func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.executeResponses["creative_upload_video"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"video_123"}`),
+	}
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -1216,6 +1376,41 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 	}
 	if _, leaked := call.Input["name"]; leaked {
 		t.Fatalf("video upload must use title, not name: %#v", call.Input)
+	}
+	var tracked int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123' AND kind='video'`,
+		acctID,
+	).Scan(&tracked); err != nil || tracked != 1 {
+		t.Fatalf("uploaded video was not tracked: count=%d err=%v", tracked, err)
+	}
+
+	if _, err := app.toolCreativeAssetStatus(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"asset_id":      "video_123",
+		"kind":          "video",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pf.executeCalls[1].Tool != "video_status" || pf.executeCalls[1].Input["videoId"] != "video_123" {
+		t.Fatalf("wrong video status call: %#v", pf.executeCalls[1])
+	}
+
+	if _, err := app.toolCreativeAssetDelete(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"asset_id":      "video_123",
+		"kind":          "video",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pf.executeCalls[2].Tool != "video_delete" || pf.executeCalls[2].Input["videoId"] != "video_123" {
+		t.Fatalf("wrong video delete call: %#v", pf.executeCalls[2])
+	}
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123'`,
+		acctID,
+	).Scan(&tracked); err != nil || tracked != 0 {
+		t.Fatalf("deleted video tracking remains: count=%d err=%v", tracked, err)
 	}
 }
 
