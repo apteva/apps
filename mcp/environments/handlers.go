@@ -257,6 +257,32 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported fixture operation"))
 		return
 	}
+	if len(parts) >= 2 && parts[1] == "protocol-fixtures" {
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, run.ProtocolFixtures)
+			return
+		}
+		if len(parts) == 3 && r.Method == http.MethodGet {
+			fixture, err := a.svc.db.getProtocolFixture(run.ID, parts[2])
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if fixture == nil {
+				http.NotFound(w, r)
+				return
+			}
+			events, err := a.svc.db.listProtocolEvents(run.ID, parts[2], "")
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"fixture": fixture, "events": events})
+			return
+		}
+		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported protocol fixture operation"))
+		return
+	}
 	if len(parts) == 2 && parts[1] == "inspect" {
 		if r.Method != http.MethodGet {
 			httpError(w, http.StatusMethodNotAllowed, errors.New("GET only"))

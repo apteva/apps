@@ -111,6 +111,9 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.createWebFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create web fixtures: %w", err)
 	}
+	if err = s.createProtocolFixtures(run, spec); err != nil {
+		return run, fmt.Errorf("create protocol fixtures: %w", err)
+	}
 	created := false
 	defer func() {
 		if err != nil && !aborted {
@@ -121,10 +124,11 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 			run.Error = err.Error()
 			_ = s.db.updateRun(run.ID, "failed", err.Error())
 			_ = s.db.setWebFixturesStatus(run.ID, "failed")
+			_ = s.db.setProtocolFixturesStatus(run.ID, "failed")
 			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
 		}
 	}()
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: spec.IntegrationBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
 	}
@@ -160,6 +164,9 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.db.setWebFixturesStatus(run.ID, "running"); err != nil {
 		return run, err
 	}
+	if err = s.db.setProtocolFixturesStatus(run.ID, "running"); err != nil {
+		return run, err
+	}
 	s.decorateRun(run)
 	s.ctx.Emit("environment.started", map[string]any{"environment_id": environmentID, "run_id": run.ID, "runtime_id": runtimeID})
 	return run, nil
@@ -188,16 +195,23 @@ func (s *service) stopRun(run *Run) error {
 	if err := s.db.setWebFixturesStatus(run.ID, "stopping"); err != nil {
 		return err
 	}
+	if err := s.db.setProtocolFixturesStatus(run.ID, "stopping"); err != nil {
+		return err
+	}
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
 	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
 		_ = s.db.updateRun(run.ID, "failed", err.Error())
 		_ = s.db.setWebFixturesStatus(run.ID, "failed")
+		_ = s.db.setProtocolFixturesStatus(run.ID, "failed")
 		return err
 	}
 	if err := s.db.updateRun(run.ID, "stopped", ""); err != nil {
 		return err
 	}
 	if err := s.db.setWebFixturesStatus(run.ID, "stopped"); err != nil {
+		return err
+	}
+	if err := s.db.setProtocolFixturesStatus(run.ID, "stopped"); err != nil {
 		return err
 	}
 	s.ctx.Emit("environment.stopped", map[string]any{"environment_id": run.EnvironmentID, "run_id": run.ID, "runtime_id": run.RuntimeID})
@@ -227,6 +241,9 @@ func (s *service) reconcile(context.Context) error {
 				continue
 			}
 			if err := s.db.setWebFixturesStatus(r.ID, "expired"); err != nil {
+				return err
+			}
+			if err := s.db.setProtocolFixturesStatus(r.ID, "expired"); err != nil {
 				return err
 			}
 			s.ctx.Emit("environment.expired", map[string]any{"environment_id": r.EnvironmentID, "run_id": r.ID, "runtime_id": r.RuntimeID})
@@ -391,6 +408,33 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 			min = 1
 		}
 		return AssertionResult{Passed: n >= min, Actual: n}, nil
+	case "protocol_event":
+		run, err := s.db.getRun(runtimeID)
+		if err != nil || run == nil {
+			if err == nil {
+				err = errors.New("run not found")
+			}
+			return AssertionResult{}, err
+		}
+		events, err := s.db.listProtocolEvents(run.ID, a.Fixture, "")
+		if err != nil {
+			return AssertionResult{}, err
+		}
+		count := 0
+		for _, event := range events {
+			if a.EventType != "" && event.Type != a.EventType {
+				continue
+			}
+			if a.Path != "" && !reflect.DeepEqual(jsonPath(event.Data, a.Path), a.Equals) {
+				continue
+			}
+			count++
+		}
+		min := a.MinCalls
+		if min == 0 {
+			min = 1
+		}
+		return AssertionResult{Passed: count >= min, Actual: count}, nil
 	default:
 		return AssertionResult{}, fmt.Errorf("unsupported assertion type %q", a.Type)
 	}
@@ -430,6 +474,15 @@ func validateSpec(spec EnvironmentSpec) error {
 		seen[fixture.ID] = true
 		if err := validateWebFixtureSpec(fixture); err != nil {
 			return fmt.Errorf("web fixture %s: %w", fixture.ID, err)
+		}
+	}
+	for i, fixture := range spec.ProtocolFixtures {
+		if seen[fixture.ID] {
+			return fmt.Errorf("protocol fixture %d: duplicate id %q", i, fixture.ID)
+		}
+		seen[fixture.ID] = true
+		if err := validateProtocolFixtureSpec(fixture); err != nil {
+			return fmt.Errorf("protocol fixture %s: %w", fixture.ID, err)
 		}
 	}
 	return nil

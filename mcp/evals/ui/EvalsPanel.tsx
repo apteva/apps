@@ -155,6 +155,7 @@ interface EnvironmentSpec {
   integration_mode: string;
   integration_bindings: Record<string, any>[];
   seeds: SeedStep[];
+  protocol_fixtures?: { id: string; pack: string; version: string; target_app: string; config?: Record<string, any> }[];
 }
 
 interface TaskDraft {
@@ -216,6 +217,8 @@ interface VoiceCase {
   greeting?: string;
   max_first_response_ms?: number;
   max_average_response_ms?: number;
+  transport?: "direct" | "carrier";
+  protocol_fixture?: string;
 }
 
 interface VoiceTranscriptTurn {
@@ -694,6 +697,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const [callerBehavior, setCallerBehavior] = useState("Ask follow-up questions when needed. End the call once the goal is resolved or clearly cannot be resolved.");
   const [greeting, setGreeting] = useState("");
   const [maxFirstResponseMS, setMaxFirstResponseMS] = useState(2000);
+  const [voiceTransport, setVoiceTransport] = useState<"direct" | "carrier">("direct");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -737,7 +741,17 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const selectedIntegrations = catalog.integrations.filter((item) => fakeSlugs.includes(item.slug));
   const tasksValid = tasks.length > 0 && tasks.every((item) => item.prompt.trim() && goalsFromText(item.success).length > 0);
   const environmentValid = environmentMode === "clone" ? Boolean(environmentName.trim()) : Boolean(savedEnvironmentID);
-  const voiceValid = mode === "text" || Boolean(realtimeProvider);
+  const telephonyApp = catalog.apps.find((item) => item.name === "telephony");
+  const savedEnvironment = catalog.environments.find((item) => item.id === savedEnvironmentID);
+  const savedCarrierFixture = savedEnvironment?.spec?.protocol_fixtures?.find((item) => item.pack === "telephony-carrier");
+  const carrierFixtureID = environmentMode === "clone" ? "telephony-carrier" : savedCarrierFixture?.id || "";
+  const carrierReady = voiceTransport === "direct" || (environmentMode === "clone" ? Boolean(telephonyApp) : Boolean(savedCarrierFixture));
+  const voiceValid = mode === "text" || (Boolean(realtimeProvider) && carrierReady);
+
+  useEffect(() => {
+    if (mode !== "voice" || voiceTransport !== "carrier" || environmentMode !== "clone" || !telephonyApp) return;
+    setSelectedAppIDs((current) => current.includes(telephonyApp.install_id) ? current : [...current, telephonyApp.install_id]);
+  }, [mode, voiceTransport, environmentMode, telephonyApp?.install_id]);
 
   const toggleApp = (item: CatalogApp) => {
     if (selectedAppIDs.includes(item.install_id)) {
@@ -790,6 +804,12 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
               integration_mode: "mock",
               integration_bindings: integrationBindings(),
               seeds,
+              protocol_fixtures: mode === "voice" && voiceTransport === "carrier" ? [{
+                id: "telephony-carrier",
+                pack: "telephony-carrier",
+                version: "1.0.0",
+                target_app: "telephony",
+              }] : [],
             } satisfies EnvironmentSpec,
           }),
         });
@@ -828,6 +848,8 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
               caller_voice: callerVoice.trim(),
               greeting: greeting.trim(),
               max_first_response_ms: maxFirstResponseMS,
+              transport: voiceTransport,
+              protocol_fixture: voiceTransport === "carrier" ? carrierFixtureID : undefined,
             } satisfies VoiceCase : undefined,
             goals: goalsFromText(task.success),
             assertions: [],
@@ -870,12 +892,14 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
         <span className="ev-label">Test type</span>
         <div className="ev-segment"><button type="button" data-active={mode === "text"} onClick={() => { setMode("text"); setTimeoutSeconds(600); }}>Text task</button><button type="button" data-active={mode === "voice"} onClick={() => { setMode("voice"); setTimeoutSeconds(90); }}>Voice call</button></div>
         {mode === "voice" && <div className="ev-setup" style={{ marginTop: 10 }}>
+          <label style={{ display: "block", marginBottom: 12 }}><span className="ev-label">Call path</span><div className="ev-segment"><button type="button" data-active={voiceTransport === "direct"} onClick={() => setVoiceTransport("direct")}>Direct audio</button><button type="button" data-active={voiceTransport === "carrier"} onClick={() => setVoiceTransport("carrier")}>Through Telephony</button></div><span className="ev-help">{voiceTransport === "carrier" ? "Exercises Telephony inbound routing, signed callbacks, Media Streams, and carrier audio codecs inside the environment." : "Connects the simulated caller directly to the realtime agent."}</span></label>
           {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
             <label><span className="ev-label">Realtime provider</span><select value={realtimeProvider} onChange={(event) => { const provider = catalog.realtime_providers.find((item) => item.name === event.target.value); setRealtimeProvider(event.target.value); setReceptionistVoice(provider?.default_voice || ""); setCallerVoice(provider?.default_voice || ""); }} className="ev-field">{catalog.realtime_providers.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></label>
             <label><span className="ev-label">Receptionist voice</span><input value={receptionistVoice} onChange={(event) => setReceptionistVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
             <label><span className="ev-label">Caller voice</span><input value={callerVoice} onChange={(event) => setCallerVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
             <label><span className="ev-label">Maximum first response</span><div style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="number" min={250} max={10000} step={250} value={maxFirstResponseMS} onChange={(event) => setMaxFirstResponseMS(Number(event.target.value))} className="ev-field" /><span className="ev-muted">ms</span></div></label>
           </div>}
+          {voiceTransport === "carrier" && !carrierReady && <div className="ev-error" style={{ marginTop: 10 }}><span>{environmentMode === "clone" ? "Install Telephony in this project before using the carrier path." : "The selected environment has no Telephony carrier fixture."}</span></div>}
 	          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={callerPersona} onChange={(event) => setCallerPersona(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={callerBehavior} onChange={(event) => setCallerBehavior(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={greeting} onChange={(event) => setGreeting(event.target.value)} placeholder="First response only" className="ev-field" /></label></div></details>
         </div>}
       </section>

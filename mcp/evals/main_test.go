@@ -45,7 +45,7 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 		ID: "case-one", SuiteID: suite.ID, Name: "Answer a caller", Mode: "voice",
 		Prompt: "Help the caller book an appointment", Goals: []string{"The appointment is booked"},
 		Assertions: []Assertion{{Name: "record", Type: "app_state", App: "crm", Tool: "contacts_get"}},
-		Voice:      &VoiceCase{CallerGoal: "Book an appointment for tomorrow", CallerPersona: "A concise customer", MaxFirstResponseMS: 2000},
+		Voice:      &VoiceCase{CallerGoal: "Book an appointment for tomorrow", CallerPersona: "A concise customer", MaxFirstResponseMS: 2000, Transport: "carrier", ProtocolFixture: "telephony-carrier"},
 		Enabled:    true,
 	}
 	if err := db.saveCase(item); err != nil {
@@ -67,7 +67,7 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || len(got.Runs) != 2 || got.Runs[0].CaseSnapshot.Mode != "voice" || got.Runs[0].CaseSnapshot.Voice == nil || got.Runs[0].CaseSnapshot.Voice.CallerGoal != "Book an appointment for tomorrow" {
+	if got == nil || len(got.Runs) != 2 || got.Runs[0].CaseSnapshot.Mode != "voice" || got.Runs[0].CaseSnapshot.Voice == nil || got.Runs[0].CaseSnapshot.Voice.CallerGoal != "Book an appointment for tomorrow" || got.Runs[0].CaseSnapshot.Voice.Transport != "carrier" {
 		t.Fatalf("experiment=%#v", got)
 	}
 
@@ -303,7 +303,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.3.4" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.4.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {

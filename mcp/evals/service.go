@@ -80,6 +80,16 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 		if item.TimeoutSeconds > 300 {
 			return nil, errors.New("voice timeout_seconds must be at most 300")
 		}
+		item.Voice.Transport = strings.ToLower(strings.TrimSpace(item.Voice.Transport))
+		if item.Voice.Transport == "" {
+			item.Voice.Transport = "direct"
+		}
+		if item.Voice.Transport != "direct" && item.Voice.Transport != "carrier" {
+			return nil, errors.New("voice transport must be direct or carrier")
+		}
+		if item.Voice.Transport == "carrier" && strings.TrimSpace(item.Voice.ProtocolFixture) == "" {
+			return nil, errors.New("voice protocol_fixture required for carrier transport")
+		}
 	} else {
 		item.Voice = nil
 	}
