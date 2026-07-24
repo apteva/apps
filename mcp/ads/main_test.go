@@ -1425,6 +1425,55 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 	}
 }
 
+func TestCreativeAssetDelete_MetaPermissionErrorRequestsReconnect(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["video_delete"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data: json.RawMessage(
+			`{"error":{"code":10,"error_subcode":1363055,"message":"Application does not have permission for this action"}}`,
+		),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO creative_assets (project_id, ad_account_id, platform, native_asset_id, kind)
+		 VALUES ('test-proj',?,'meta','video_123','video')`,
+		acctID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolCreativeAssetDelete(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"asset_id":      "video_123",
+		"kind":          "video",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	content := result["content"].([]map[string]any)[0]["text"].(string)
+	if result["isError"] != true || !strings.Contains(content, "pages_manage_posts") ||
+		!strings.Contains(content, "Reconnect") {
+		t.Fatalf("unexpected permission guidance: %#v", result)
+	}
+
+	var tracked int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123'`,
+		acctID,
+	).Scan(&tracked); err != nil || tracked != 1 {
+		t.Fatalf("failed deletion must retain tracking: count=%d err=%v", tracked, err)
+	}
+}
+
 func TestMetaLibraryLists_RequestReadableFields(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)

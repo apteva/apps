@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.19
+version: 0.1.20
 scopes: [project, global]
 requires:
   permissions:
@@ -2190,6 +2190,14 @@ func (metaAdapter) CreativeAssetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount,
 	}
 	parsed, errOut := a.execIntegrationTool(ctx, acct, def.CreativeAssetDeleteTool, map[string]any{"videoId": assetID})
 	if errOut != nil {
+		errorText := fmt.Sprint(errOut)
+		if strings.Contains(errorText, `"error_subcode":1363055`) ||
+			strings.Contains(errorText, "Application does not have permission for this action") {
+			return mcpError(
+				"Meta refused video deletion because this connection is missing the required Page content permission. " +
+					"Reconnect the Facebook Ads integration to grant pages_manage_posts, then retry creative_asset_delete.",
+			), nil
+		}
 		return errOut, nil
 	}
 	deleteCreativeAssetRecord(ctx, args, acct, assetID)
