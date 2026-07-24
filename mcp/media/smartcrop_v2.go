@@ -459,13 +459,23 @@ func computeSmartCropReelV2(
 		}
 	}
 	markSmartCropSceneCuts(samples)
+	// Preserve the pre-correction tracking signal. A background model can
+	// legitimately settle a noisy cached storyboard, but a later profile/head
+	// guard may restore the real one-sided subject position. If the original
+	// storyboard traversed more than a portrait-safe distance, keep the bounded
+	// one-second source pass enabled so that late correction has dense evidence
+	// instead of interpolating between two sparse poses.
+	trackingNeeded := smartCropReelNeedsTracking(samples, row.Width, cw) ||
+		smartCropFaceTrackNeedsSourceSamples(samples, cw)
 	backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
 		target.StartMs-10_000, target.EndMs+10_000, 12)
 	backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
 	backgroundCorrections := correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 	trackingFrames := 0
 	stationaryCorrections := 0
-	if smartCropReelNeedsTracking(samples, row.Width, cw) || smartCropFaceTrackNeedsSourceSamples(samples, cw) {
+	if trackingNeeded || smartCropReelNeedsTracking(samples, row.Width, cw) ||
+		smartCropFaceTrackNeedsSourceSamples(samples, cw) ||
+		smartCropLateRefinementNeedsSourceSamples(samples, row.Width, cw) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
 		if len(positions) >= 2 {
 			extra, sampleErr := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
@@ -732,6 +742,24 @@ func smartCropReelNeedsTracking(samples []smartCropV2Sample, srcW, cropW int) bo
 		start = end
 	}
 	return false
+}
+
+// smartCropLateRefinementNeedsSourceSamples predicts the late temporal and
+// head/reclining passes on a shallow copy. On a sparse long-video storyboard,
+// those passes can reveal a profile/head-drop move only after the decision to
+// request one-second source samples has already passed. Replaying the cheap
+// in-memory corrections keeps the existing order while ensuring that such a
+// move gets dense evidence instead of a several-second pan toward empty room.
+func smartCropLateRefinementNeedsSourceSamples(samples []smartCropV2Sample, srcW, cropW int) bool {
+	if len(samples) < 2 || srcW <= cropW || cropW <= 0 {
+		return false
+	}
+	probe := append([]smartCropV2Sample(nil), samples...)
+	correctSmartCropReelTemporalOutliers(probe, srcW, cropW)
+	correctSmartCropStationarySubjectTails(probe, srcW, cropW)
+	refineSmartCropHeadSamples(probe, srcW, cropW)
+	correctSmartCropHeadTracks(probe, srcW, cropW)
+	return smartCropReelNeedsTracking(probe, srcW, cropW)
 }
 
 func smartCropAdaptiveTrackingPositions(samples []smartCropV2Sample, target smartCropTarget, durationMs int64, srcW, cropW int) []int64 {

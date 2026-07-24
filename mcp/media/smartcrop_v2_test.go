@@ -213,6 +213,26 @@ func TestHeadAwareNarrowCropAcceptsSmallTallFace(t *testing.T) {
 	}
 }
 
+func TestLateHeadRefinementActivatesDenseTracking(t *testing.T) {
+	plain := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(plain, color.RGBA{R: 82, G: 88, B: 96, A: 255})
+	profile := cloneRGBA(plain)
+	fillSmartCropTestEllipse(profile, 100, 112, 10, 15, color.RGBA{R: 205, G: 160, B: 140, A: 255})
+
+	samples := make([]smartCropV2Sample, 6)
+	for i := range samples {
+		samples[i] = smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * 5_000, X: 448},
+			img:   plain,
+		}
+	}
+	samples[4].img = profile
+	samples[5].img = profile
+	if !smartCropLateRefinementNeedsSourceSamples(samples, 1280, 404) {
+		t.Fatal("late head/profile correction did not activate dense tracking")
+	}
+}
+
 func TestTallSubjectExtentCropProtectsConnectedLeaningPerson(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})

@@ -100,6 +100,46 @@ func TestSmartCropProceduralScenarioMatrix(t *testing.T) {
 			t.Fatalf("motion-certified departure was frozen: %+v", samples)
 		}
 	})
+
+	t.Run("single-profile-anchor-defeats-alternating-room-fallback", func(t *testing.T) {
+		const localSrcW, localCropW = 1280, 404
+		xs := []int{408, 408, 700, 408, 696, 812, 408, 696, 408, 696, 408, 696}
+		samples := make([]smartCropV2Sample, len(xs))
+		for i, x := range xs {
+			samples[i] = smartCropV2Sample{
+				point: cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+				img:   frame,
+			}
+		}
+		samples[5].face = &smartCropFace{
+			CenterX: 1014, MinX: 970, MaxX: 1058, Scale: 88, Quality: 11.8,
+		}
+		correctSmartCropFaceTracks(samples, localSrcW, localCropW)
+		for i, sample := range samples {
+			if sample.point.X < 700 {
+				t.Fatalf("sample %d stayed on alternating empty-room fallback: %+v", i, samples)
+			}
+		}
+	})
+
+	t.Run("single-profile-anchor-does-not-freeze-one-way-traversal", func(t *testing.T) {
+		const localSrcW, localCropW = 1280, 404
+		xs := []int{392, 400, 408, 416, 430, 520, 610, 696, 760, 812}
+		samples := make([]smartCropV2Sample, len(xs))
+		for i, x := range xs {
+			samples[i] = smartCropV2Sample{
+				point: cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+				img:   frame,
+			}
+		}
+		samples[len(samples)-1].face = &smartCropFace{
+			CenterX: 1014, MinX: 970, MaxX: 1058, Scale: 88, Quality: 11.8,
+		}
+		correctSmartCropFaceTracks(samples, localSrcW, localCropW)
+		if samples[0].point.X != xs[0] || samples[4].point.X != xs[4] {
+			t.Fatalf("one-way traversal was frozen by its only face anchor: %+v", samples)
+		}
+	})
 }
 
 func TestSmartCropProceduralBackgroundModel(t *testing.T) {
