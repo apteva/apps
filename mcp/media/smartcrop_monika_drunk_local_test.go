@@ -357,7 +357,10 @@ func localSmartCropReelPath(t *testing.T, video string, duration, start, end int
 	backgroundImages := localSmartCropBackgroundImages(t, video, duration, srcW, srcH)
 	correctSmartCropBackgroundSamples(samples, backgroundImages, srcW, cropW)
 	target := smartCropTarget{StartMs: start, EndMs: end}
-	if smartCropReelNeedsTracking(samples, srcW, cropW) || smartCropFaceTrackNeedsSourceSamples(samples, cropW) {
+	postTrackingNeeded := smartCropReelNeedsTracking(samples, srcW, cropW)
+	postFaceTrackingNeeded := smartCropFaceTrackNeedsSourceSamples(samples, cropW)
+	lateTrackingNeeded := smartCropLateRefinementNeedsSourceSamples(samples, srcW, cropW)
+	if postTrackingNeeded || postFaceTrackingNeeded || lateTrackingNeeded {
 		extra, err := analyzeSmartCropV2Input(context.Background(), "ffmpeg", video,
 			smartCropAdaptiveTrackingPositions(samples, target, duration, srcW, cropW),
 			srcW, srcH, 9, 16)
@@ -380,6 +383,7 @@ func localSmartCropReelPath(t *testing.T, video string, duration, start, end int
 	promoteSmartCropDetailedFaces(samples, cropW, false)
 	filterSmartCropWeakFaceAnchors(samples, cropW)
 	filterSmartCropWeakFaceDirectionClusters(samples, srcW, cropW)
+	correctSmartCropWeakFaceExcursions(samples, srcW, cropW)
 	correctSmartCropFaceTracks(samples, srcW, cropW)
 	path := make([]cropPathPoint, len(samples))
 	for i := range samples {

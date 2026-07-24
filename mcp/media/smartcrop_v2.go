@@ -465,7 +465,9 @@ func computeSmartCropReelV2(
 	backgroundCorrections := correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 	trackingFrames := 0
 	stationaryCorrections := 0
-	if smartCropReelNeedsTracking(samples, row.Width, cw) || smartCropFaceTrackNeedsSourceSamples(samples, cw) {
+	if smartCropReelNeedsTracking(samples, row.Width, cw) ||
+		smartCropFaceTrackNeedsSourceSamples(samples, cw) ||
+		smartCropLateRefinementNeedsSourceSamples(samples, row.Width, cw) {
 		positions := smartCropAdaptiveTrackingPositions(samples, target, row.DurationMs, row.Width, cw)
 		if len(positions) >= 2 {
 			extra, sampleErr := analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
@@ -497,6 +499,7 @@ func computeSmartCropReelV2(
 	promoteSmartCropDetailedFaces(samples, cw, false)
 	faceFalsePositives := filterSmartCropWeakFaceAnchors(samples, cw)
 	faceFalsePositives += filterSmartCropWeakFaceDirectionClusters(samples, row.Width, cw)
+	faceFalsePositives += correctSmartCropWeakFaceExcursions(samples, row.Width, cw)
 	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
@@ -732,6 +735,24 @@ func smartCropReelNeedsTracking(samples []smartCropV2Sample, srcW, cropW int) bo
 		start = end
 	}
 	return false
+}
+
+// smartCropLateRefinementNeedsSourceSamples predicts the late temporal and
+// head/reclining passes on a shallow copy. On a sparse long-video storyboard,
+// those passes can reveal a profile/head-drop move only after the decision to
+// request one-second source samples has already passed. Replaying the cheap
+// in-memory corrections keeps the existing order while ensuring that such a
+// move gets dense evidence instead of a several-second pan toward empty room.
+func smartCropLateRefinementNeedsSourceSamples(samples []smartCropV2Sample, srcW, cropW int) bool {
+	if len(samples) < 2 || srcW <= cropW || cropW <= 0 {
+		return false
+	}
+	probe := append([]smartCropV2Sample(nil), samples...)
+	correctSmartCropReelTemporalOutliers(probe, srcW, cropW)
+	correctSmartCropStationarySubjectTails(probe, srcW, cropW)
+	refineSmartCropHeadSamples(probe, srcW, cropW)
+	correctSmartCropHeadTracks(probe, srcW, cropW)
+	return smartCropReelNeedsTracking(probe, srcW, cropW)
 }
 
 func smartCropAdaptiveTrackingPositions(samples []smartCropV2Sample, target smartCropTarget, durationMs int64, srcW, cropW int) []int64 {
