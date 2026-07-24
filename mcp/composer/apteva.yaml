@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.6.0
+version: 0.6.1
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,11 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.6.1 implements composition-level timing reflow across layered tracks.
+  Clips sharing a section_id or group_id now move as one timed section when
+  reflow is set to composition, so generated avatar durations can compact
+  fullscreen, screenshot, and PIP layouts without desynchronizing overlays.
 
   v0.6.0 replaces the Composer panel with an AI-native multi-track editing
   workspace while retaining the stable V1 composition and render contract.

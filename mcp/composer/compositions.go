@@ -77,7 +77,7 @@ type Timing struct {
 	PaddingAfter float64 `json:"padding_after,omitempty"` // seconds added after the fitted source
 	MinLength    float64 `json:"min_length,omitempty"`
 	MaxLength    float64 `json:"max_length,omitempty"`
-	Reflow       string  `json:"reflow,omitempty"`   // none|following|track|linked_group|composition
+	Reflow       string  `json:"reflow,omitempty"`   // none|following|track|linked_group|composition; composition reflows section_id/group_id spans across tracks
 	Behavior     string  `json:"behavior,omitempty"` // trim|pad|trim_or_loop|loop|stretch|regenerate
 	FadeOut      float64 `json:"fade_out,omitempty"`
 }
