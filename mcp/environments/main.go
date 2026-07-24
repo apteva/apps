@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.5.2
-description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.5.2 paces virtual carrier audio and appends the silence needed for realtime caller turn detection.
+version: 0.5.3
+description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.5.3 applies paced audio, silence tails, and playback acknowledgements to both virtual carrier directions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 tags: [environments, testing, agents, evals, mocks]
@@ -69,7 +69,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.5.2, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.5.3, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

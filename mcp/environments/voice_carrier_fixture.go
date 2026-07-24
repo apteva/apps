@@ -418,30 +418,62 @@ func carrierVirtualNumber(callID string) string {
 }
 
 func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carrierMediaSocket, streamSID string, activity *voiceMediaActivity, capture *cappedAudio, result chan<- error) {
+	incoming := make(chan voiceRelayEvent, 128)
+	go readVoiceAudio(ctx, caller, capture, incoming)
+
+	ticker := time.NewTicker(voiceFrameDuration)
+	defer ticker.Stop()
+	var relay voiceMediaRelay
 	resampler := newCarrierResampler(24000, 8000)
 	for {
-		messageType, data, err := caller.conn.ReadMessage()
-		if err != nil {
-			sendVoiceRelayResult(ctx, result, err)
+		input := (<-chan voiceRelayEvent)(incoming)
+		if relay.queue.bytes >= maxVoiceRelayBuffer {
+			input = nil
+		}
+		select {
+		case <-ctx.Done():
 			return
-		}
-		if messageType != websocket.BinaryMessage || len(data) == 0 {
-			continue
-		}
-		capture.append(data)
-		activity.update("caller", true, time.Now())
-		pcm8 := resampler.Process(carrierBytesToPCM(data))
-		for len(pcm8) > 0 {
-			count := 160
-			if len(pcm8) < count {
-				count = len(pcm8)
-			}
-			payload := base64.StdEncoding.EncodeToString(carrierPCMToUlaw(pcm8[:count]))
-			if err := media.writeJSON(map[string]any{"event": "media", "streamSid": streamSID, "media": map[string]string{"track": "inbound", "payload": payload}}); err != nil {
-				sendVoiceRelayResult(ctx, result, err)
+		case event := <-input:
+			switch {
+			case event.err != nil:
+				sendVoiceRelayResult(ctx, result, event.err)
 				return
+			case event.interrupt:
+				relay.interrupt()
+				activity.update("caller", false, time.Now())
+			case event.chunk != nil:
+				relay.append(*event.chunk)
+				activity.update("caller", true, time.Now())
 			}
-			pcm8 = pcm8[count:]
+		case <-ticker.C:
+			frame, _, acks, ok := relay.nextFrame()
+			if !ok {
+				activity.update("caller", false, time.Time{})
+				continue
+			}
+			activity.update("caller", true, time.Now())
+			pcm8 := resampler.Process(carrierBytesToPCM(frame))
+			for len(pcm8) > 0 {
+				count := 160
+				if len(pcm8) < count {
+					count = len(pcm8)
+				}
+				payload := base64.StdEncoding.EncodeToString(carrierPCMToUlaw(pcm8[:count]))
+				if err := media.writeJSON(map[string]any{"event": "media", "streamSid": streamSID, "media": map[string]string{"track": "inbound", "payload": payload}}); err != nil {
+					sendVoiceRelayResult(ctx, result, err)
+					return
+				}
+				pcm8 = pcm8[count:]
+			}
+			for _, playback := range acks {
+				ack, _ := json.Marshal(map[string]any{
+					"type": "playback.progress", "item_id": playback.itemID, "audio_end_ms": playback.audioEndMS,
+				})
+				if err := caller.write(websocket.TextMessage, ack); err != nil {
+					sendVoiceRelayResult(ctx, result, err)
+					return
+				}
+			}
 		}
 	}
 }
