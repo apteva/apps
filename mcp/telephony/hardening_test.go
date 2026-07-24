@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,6 +33,9 @@ type answerPlatform struct {
 	integrationCalls    []integrationCall
 	integrationResponse map[string]json.RawMessage
 	credentials         *sdk.ConnectionCredentials
+	bindings            map[string]any
+	connection          *sdk.PlatformConnection
+	agents              map[int64]*sdk.PlatformAgent
 }
 
 type integrationCall struct {
@@ -40,7 +44,28 @@ type integrationCall struct {
 }
 
 func (p *answerPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
-	return &sdk.InstallIdentity{InstallID: 42, PublicURL: "https://example.test"}, nil
+	return &sdk.InstallIdentity{InstallID: 42, PublicURL: "https://example.test", Bindings: p.bindings}, nil
+}
+
+func (p *answerPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if p.connection != nil {
+		copy := *p.connection
+		copy.ID = id
+		return &copy, nil
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: "twilio", Status: "connected"}, nil
+}
+
+func (p *answerPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	if agent := p.agents[id]; agent != nil {
+		copy := *agent
+		return &copy, nil
+	}
+	return nil, errors.New("agent not found")
+}
+
+func (p *answerPlatform) GetAgent(id int64) (*sdk.PlatformAgent, error) {
+	return p.GetInstance(id)
 }
 
 func (p *answerPlatform) SpawnRealtimeThread(req sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {

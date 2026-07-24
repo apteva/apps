@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.17
+version: 0.1.18
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -60,6 +60,7 @@ requires:
     - platform.apps.call
     - platform.connections.execute
     - platform.connections.read_credentials
+    - platform.instances.read
     - platform.realtime.spawn
   apps:
     - name: storage

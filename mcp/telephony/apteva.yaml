@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.17
+version: 0.1.18
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -25,6 +25,7 @@ requires:
     - platform.apps.call
     - platform.connections.execute        # invoke carrier API
     - platform.connections.read_credentials  # read carrier phone_number to fill From=
+    - platform.instances.read             # resolve assigned agent names in the routing panel
     - platform.realtime.spawn             # open realtime threads in core
   apps:
     - name: storage
