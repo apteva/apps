@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.12
+version: 0.1.13
 scopes: [project, global]
 requires:
   permissions:
@@ -1310,9 +1310,11 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 	opts, _ := args["platform_options"].(map[string]any)
 	protected := map[string]bool{
 		"adAccountId": true, "customer_id": true,
+		"objectId":   true,
 		"campaignId": true, "campaign_id": true,
 		"adsetId": true, "adset_id": true,
 		"adId": true, "ad_id": true,
+		"creative":     true,
 		"resourceName": true,
 	}
 	for k, v := range opts {
@@ -1327,7 +1329,12 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 func (a *App) metaResourceBelongsToAccount(ctx *sdk.AppCtx, acct *adAccount, tool, resourceID string) (bool, error) {
 	after := ""
 	for page := 0; page < 20; page++ {
-		input := map[string]any{"adAccountId": acct.NativeAccountID, "limit": 100}
+		input := map[string]any{"fields": "id", "limit": 100}
+		if tool == "adset_list" || tool == "ad_list" {
+			input["objectId"] = acct.NativeAccountID
+		} else {
+			input["adAccountId"] = acct.NativeAccountID
+		}
 		if after != "" {
 			input["after"] = after
 		}
@@ -1455,6 +1462,14 @@ var metaBillingEvent = map[string]string{
 	"thruplay":    "THRUPLAY",
 }
 
+const (
+	metaCampaignFields = "id,name,objective,status,effective_status,bid_strategy,daily_budget,lifetime_budget,budget_remaining,special_ad_categories,start_time,stop_time,created_time,updated_time"
+	metaAdSetFields    = "id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,bid_strategy,bid_amount,optimization_goal,billing_event,targeting,promoted_object,start_time,end_time,budget_remaining,created_time,dsa_beneficiary,dsa_payor"
+	metaAdFields       = "id,name,adset_id,campaign_id,status,effective_status,creative{id,name,thumbnail_url,object_story_spec},tracking_specs,created_time"
+	metaCreativeFields = "id,name,status,object_story_spec,thumbnail_url,url_tags,created_time"
+	metaAudienceFields = "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status,description"
+)
+
 type metaAdapter struct{}
 
 func (metaAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error) {
@@ -1534,12 +1549,22 @@ func (metaAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	if v, _ := args["end_time"].(string); v != "" {
 		input["end_time"] = v
 	}
+	if _, hasDaily := input["daily_budget"]; !hasDaily {
+		if _, hasLifetime := input["lifetime_budget"]; !hasLifetime {
+			if _, configured := opts["is_adset_budget_sharing_enabled"]; !configured {
+				input["is_adset_budget_sharing_enabled"] = false
+			}
+		}
+	}
 	mergeOptions(input, args)
 	return a.execOrErr(ctx, acct, def.CampaignCreateTool, input)
 }
 
 func (metaAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
+	input := map[string]any{
+		def.AccountIDInputField: acct.NativeAccountID,
+		"fields":                metaCampaignFields,
+	}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
 	}
@@ -1665,10 +1690,11 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 }
 
 func (metaAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
+	objectID := acct.NativeAccountID
 	if cid, _ := args["campaign_id"].(string); cid != "" {
-		input["campaign_id"] = cid
+		objectID = cid
 	}
+	input := map[string]any{"objectId": objectID, "fields": metaAdSetFields}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
 	}
@@ -1731,7 +1757,7 @@ func (metaAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 		def.AccountIDInputField: acct.NativeAccountID,
 		"adset_id":              asid,
 		"name":                  name,
-		"creative_id":           cr,
+		"creative":              map[string]any{"creative_id": cr},
 	}
 	if v, _ := args["status"].(string); v != "" {
 		input["status"] = v
@@ -1743,10 +1769,11 @@ func (metaAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 }
 
 func (metaAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
+	objectID := acct.NativeAccountID
 	if v, _ := args["adset_id"].(string); v != "" {
-		input["adset_id"] = v
+		objectID = v
 	}
+	input := map[string]any{"objectId": objectID, "fields": metaAdFields}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
 	}
@@ -1772,7 +1799,7 @@ func (metaAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 		input["status"] = v
 	}
 	if v, _ := args["creative_id"].(string); v != "" {
-		input["creative_id"] = v
+		input["creative"] = map[string]any{"creative_id": v}
 	}
 	mergeOptions(input, args)
 	return a.execOrErr(ctx, acct, def.AdUpdateTool, input)
@@ -1801,7 +1828,13 @@ func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	}
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if name, _ := args["name"].(string); name != "" {
-		input["name"] = name
+		if kind == "video" {
+			input["title"] = name
+		} else {
+			input["name"] = name
+		}
+	} else if kind == "video" {
+		input["title"] = "Video"
 	}
 	if storageID > 0 {
 		var fetched struct {
@@ -1832,7 +1865,10 @@ func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 }
 
 func (metaAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
+	input := map[string]any{
+		def.AccountIDInputField: acct.NativeAccountID,
+		"fields":                metaCreativeFields,
+	}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
 	}
@@ -1843,7 +1879,10 @@ func (metaAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *p
 }
 
 func (metaAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
-	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
+	input := map[string]any{
+		def.AccountIDInputField: acct.NativeAccountID,
+		"fields":                metaAudienceFields,
+	}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
 	}
@@ -1864,6 +1903,11 @@ func (metaAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount
 	}
 	if v, _ := args["subtype"].(string); v != "" {
 		input["subtype"] = v
+	} else {
+		input["subtype"] = "CUSTOM"
+	}
+	if input["subtype"] == "CUSTOM" {
+		input["customer_file_source"] = "USER_PROVIDED_ONLY"
 	}
 	mergeOptions(input, args)
 	return a.execOrErr(ctx, acct, def.AudienceCreateCustomTool, input)
@@ -1879,11 +1923,16 @@ func (metaAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAcco
 	input := map[string]any{
 		def.AccountIDInputField: acct.NativeAccountID,
 		"name":                  name,
+		"subtype":               "LOOKALIKE",
 		"origin_audience_id":    src,
-		"country":               country,
+		"lookalike_spec": map[string]any{
+			"type":    "similarity",
+			"country": country,
+			"ratio":   0.01,
+		},
 	}
 	if v, ok := args["ratio"].(float64); ok && v > 0 {
-		input["ratio"] = v
+		input["lookalike_spec"].(map[string]any)["ratio"] = v
 	}
 	mergeOptions(input, args)
 	return a.execOrErr(ctx, acct, def.AudienceCreateLookalikeTool, input)

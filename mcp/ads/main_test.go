@@ -735,6 +735,35 @@ func TestCampaignCreate_PlatformOptionsOverride(t *testing.T) {
 	if call.Input["adAccountId"] != "act_42" {
 		t.Fatalf("protected account id was overridden: %v", call.Input["adAccountId"])
 	}
+	if call.Input["is_adset_budget_sharing_enabled"] != false {
+		t.Fatalf("non-CBO campaign must disable ad set budget sharing by default: %#v", call.Input)
+	}
+}
+
+func TestCampaignList_RequestsDisplayFields(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCampaignList(ctx, map[string]any{"ad_account_id": acctID, "limit": 50}); err != nil {
+		t.Fatal(err)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "campaign_list" || call.Input["adAccountId"] != "act_42" {
+		t.Fatalf("wrong campaign list call: %#v", call)
+	}
+	fields, _ := call.Input["fields"].(string)
+	for _, field := range []string{"name", "objective", "status", "effective_status", "daily_budget"} {
+		if !strings.Contains(fields, field) {
+			t.Fatalf("campaign fields missing %q: %s", field, fields)
+		}
+	}
 }
 
 func TestCampaignPause_SetsStatusPaused(t *testing.T) {
@@ -980,6 +1009,79 @@ func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	}
 }
 
+func TestAdSetList_UsesMetaObjectEdge(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdSetList(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"campaign_id":   "120000",
+		"limit":         50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "adset_list" || call.Input["objectId"] != "120000" {
+		t.Fatalf("wrong ad set list edge: %#v", call)
+	}
+	if _, leaked := call.Input["adAccountId"]; leaked {
+		t.Fatalf("adset_list must not send adAccountId: %#v", call.Input)
+	}
+	if !strings.Contains(call.Input["fields"].(string), "optimization_goal") {
+		t.Fatalf("ad set fields missing: %v", call.Input["fields"])
+	}
+}
+
+func TestAdListAndCreate_UseMetaCreativeShape(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdList(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"adset_id":      "adset_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listCall := pf.executeCalls[0]
+	if listCall.Tool != "ad_list" || listCall.Input["objectId"] != "adset_1" {
+		t.Fatalf("wrong ad list edge: %#v", listCall)
+	}
+	if !strings.Contains(listCall.Input["fields"].(string), "effective_status") {
+		t.Fatalf("ad fields missing: %v", listCall.Input["fields"])
+	}
+
+	if _, err := app.toolAdCreate(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"adset_id":      "adset_1",
+		"name":          "Test ad",
+		"creative_id":   "creative_1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	createCall := pf.executeCalls[1]
+	creative, ok := createCall.Input["creative"].(map[string]any)
+	if createCall.Tool != "ad_create" || !ok || creative["creative_id"] != "creative_1" {
+		t.Fatalf("wrong ad creative payload: %#v", createCall)
+	}
+	if _, leaked := createCall.Input["creative_id"]; leaked {
+		t.Fatalf("ad_create must not send top-level creative_id: %#v", createCall.Input)
+	}
+}
+
 // --- creative_upload -----------------------------------------------
 
 func TestCreativeUpload_FetchesFromStorage(t *testing.T) {
@@ -1038,7 +1140,88 @@ func TestCreativeUpload_RejectsWithoutSource(t *testing.T) {
 	}
 }
 
+func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeUpload(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"kind":          "video",
+		"source_url":    "https://cdn.example.com/clip.mp4",
+		"name":          "Launch clip",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "creative_upload_video" ||
+		call.Input["file_url"] != "https://cdn.example.com/clip.mp4" ||
+		call.Input["title"] != "Launch clip" {
+		t.Fatalf("video upload payload is wrong: %#v", call)
+	}
+	if _, leaked := call.Input["name"]; leaked {
+		t.Fatalf("video upload must use title, not name: %#v", call.Input)
+	}
+}
+
+func TestMetaLibraryLists_RequestReadableFields(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCreativeList(ctx, map[string]any{"ad_account_id": acctID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAudienceList(ctx, map[string]any{"ad_account_id": acctID}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(pf.executeCalls[0].Input["fields"].(string), "thumbnail_url") {
+		t.Fatalf("creative fields missing: %#v", pf.executeCalls[0].Input)
+	}
+	audienceFields := pf.executeCalls[1].Input["fields"].(string)
+	if strings.Contains(audienceFields, "approximate_count,") ||
+		!strings.Contains(audienceFields, "approximate_count_lower_bound") ||
+		!strings.Contains(audienceFields, "approximate_count_upper_bound") {
+		t.Fatalf("audience fields are not Graph v25 compatible: %s", audienceFields)
+	}
+}
+
 // --- audience_create_lookalike -------------------------------------
+
+func TestAudienceCreateCustom_DefaultsRequiredMetaFields(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','meta',7,'act_42','Test')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAudienceCreateCustom(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"name":          "Customer list",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := pf.executeCalls[0]
+	if call.Input["subtype"] != "CUSTOM" || call.Input["customer_file_source"] != "USER_PROVIDED_ONLY" {
+		t.Fatalf("custom audience defaults missing: %#v", call.Input)
+	}
+}
 
 func TestAudienceCreateLookalike_ForwardsArgs(t *testing.T) {
 	pf := newRecordingPlatform()
@@ -1064,10 +1247,11 @@ func TestAudienceCreateLookalike_ForwardsArgs(t *testing.T) {
 	if call.Tool != "audience_create_lookalike" {
 		t.Fatalf("wrong tool: %s", call.Tool)
 	}
-	if call.Input["origin_audience_id"] != "120000" || call.Input["country"] != "US" {
+	if call.Input["origin_audience_id"] != "120000" || call.Input["subtype"] != "LOOKALIKE" {
 		t.Fatalf("args not forwarded: %#v", call.Input)
 	}
-	if call.Input["ratio"] != 0.01 {
-		t.Fatalf("ratio not forwarded: %v", call.Input["ratio"])
+	spec, ok := call.Input["lookalike_spec"].(map[string]any)
+	if !ok || spec["country"] != "US" || spec["ratio"] != 0.01 || spec["type"] != "similarity" {
+		t.Fatalf("lookalike spec not mapped: %#v", call.Input)
 	}
 }

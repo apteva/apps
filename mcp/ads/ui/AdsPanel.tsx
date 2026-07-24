@@ -134,7 +134,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className={`w-full rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-2xl" : "max-w-lg"}`}
+        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-2xl" : "max-w-lg"}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
