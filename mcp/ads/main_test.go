@@ -471,6 +471,19 @@ func TestAccountFinalize_WritesAdAccount(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("ad_accounts row not inserted")
 	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected one account discovery call, got %#v", pf.executeCalls)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "account_list" {
+		t.Fatalf("account discovery tool = %q", call.Tool)
+	}
+	if call.Input["fields"] != "id,name,account_id,account_status,currency,timezone_name" {
+		t.Fatalf("account discovery fields = %v", call.Input["fields"])
+	}
+	if call.Input["limit"] != 100 {
+		t.Fatalf("account discovery limit = %v", call.Input["limit"])
+	}
 }
 
 func TestAccountFinalize_RejectsUnknownAdAccount(t *testing.T) {

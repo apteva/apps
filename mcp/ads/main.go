@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.9
+version: 0.1.10
 scopes: [project, global]
 requires:
   permissions:
@@ -1458,7 +1458,10 @@ var metaBillingEvent = map[string]string{
 type metaAdapter struct{}
 
 func (metaAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{})
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{
+		"fields": "id,name,account_id,account_status,currency,timezone_name",
+		"limit":  100,
+	})
 	if err != nil {
 		return nil, err
 	}
