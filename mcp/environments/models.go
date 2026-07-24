@@ -24,6 +24,7 @@ type EnvironmentSpec struct {
 	Agents              []AgentSpec                     `json:"agents,omitempty"`
 	SnapshotID          string                          `json:"snapshot_id,omitempty"`
 	WebFixtures         []WebFixtureSpec                `json:"web_fixtures,omitempty"`
+	ProtocolFixtures    []ProtocolFixtureSpec           `json:"protocol_fixtures,omitempty"`
 	VoiceFixtures       []VoiceFixtureSpec              `json:"voice_fixtures,omitempty"`
 }
 
@@ -101,6 +102,49 @@ type VoiceFixtureSpec struct {
 	TargetAgent      string `json:"target_agent,omitempty"`
 	TargetDirective  string `json:"target_directive,omitempty"`
 	DisconnectOnDone bool   `json:"disconnect_on_done,omitempty"`
+	Transport        string `json:"transport,omitempty"`
+	ProtocolFixture  string `json:"protocol_fixture,omitempty"`
+}
+
+type ProtocolFixtureSpec struct {
+	ID        string         `json:"id"`
+	Pack      string         `json:"pack"`
+	Version   string         `json:"version,omitempty"`
+	TargetApp string         `json:"target_app,omitempty"`
+	Config    map[string]any `json:"config,omitempty"`
+}
+
+type ProtocolFixtureCatalogItem struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Version     string `json:"version"`
+	Protocol    string `json:"protocol"`
+	TargetApp   string `json:"target_app"`
+}
+
+type ProtocolFixtureInstance struct {
+	RunID     string         `json:"run_id"`
+	ID        string         `json:"id"`
+	Pack      string         `json:"pack"`
+	Version   string         `json:"version"`
+	Protocol  string         `json:"protocol"`
+	TargetApp string         `json:"target_app"`
+	Status    string         `json:"status"`
+	Config    map[string]any `json:"config,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+type ProtocolFixtureEvent struct {
+	ID        int64          `json:"id"`
+	RunID     string         `json:"run_id"`
+	FixtureID string         `json:"fixture_id"`
+	CallID    string         `json:"call_id,omitempty"`
+	Type      string         `json:"type"`
+	Direction string         `json:"direction,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
 type VoiceCall struct {
@@ -122,6 +166,7 @@ type VoiceCall struct {
 	TargetTelemetry  []sdk.RuntimeTelemetryEvent `json:"target_telemetry,omitempty"`
 	CallerTelemetry  []sdk.RuntimeTelemetryEvent `json:"caller_telemetry,omitempty"`
 	Execution        *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
+	ProtocolEvents   []ProtocolFixtureEvent      `json:"protocol_events,omitempty"`
 }
 
 type VoiceCallValidity struct {
@@ -181,15 +226,16 @@ type Definition struct {
 }
 
 type Run struct {
-	ID            string               `json:"id"`
-	EnvironmentID string               `json:"environment_id,omitempty"`
-	RuntimeID     string               `json:"runtime_id"`
-	Kind          string               `json:"kind"`
-	Status        string               `json:"status"`
-	Error         string               `json:"error,omitempty"`
-	StartedAt     time.Time            `json:"started_at"`
-	StoppedAt     *time.Time           `json:"stopped_at,omitempty"`
-	WebFixtures   []WebFixtureInstance `json:"web_fixtures,omitempty"`
+	ID               string                    `json:"id"`
+	EnvironmentID    string                    `json:"environment_id,omitempty"`
+	RuntimeID        string                    `json:"runtime_id"`
+	Kind             string                    `json:"kind"`
+	Status           string                    `json:"status"`
+	Error            string                    `json:"error,omitempty"`
+	StartedAt        time.Time                 `json:"started_at"`
+	StoppedAt        *time.Time                `json:"stopped_at,omitempty"`
+	WebFixtures      []WebFixtureInstance      `json:"web_fixtures,omitempty"`
+	ProtocolFixtures []ProtocolFixtureInstance `json:"protocol_fixtures,omitempty"`
 }
 
 type Snapshot struct {

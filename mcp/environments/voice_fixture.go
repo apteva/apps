@@ -211,6 +211,9 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if err := validateVoiceSpec(spec); err != nil {
 		return nil, err
 	}
+	if spec.Transport == "carrier" {
+		return s.runCarrierVoiceCall(ctx, run, spec)
+	}
 	call = &VoiceCall{
 		ID: "voice_" + token(12), RunID: run.ID, Status: "running", Spec: spec,
 		TargetThreadID: "reception-" + token(6), CallerThreadID: "caller-" + token(6),
@@ -431,6 +434,11 @@ func normalizeVoiceSpec(spec *VoiceFixtureSpec) {
 	if !spec.DisconnectOnDone {
 		spec.DisconnectOnDone = true
 	}
+	spec.Transport = strings.ToLower(strings.TrimSpace(spec.Transport))
+	if spec.Transport == "" {
+		spec.Transport = "direct"
+	}
+	spec.ProtocolFixture = strings.TrimSpace(spec.ProtocolFixture)
 }
 
 func validateVoiceSpec(spec VoiceFixtureSpec) error {
@@ -442,6 +450,12 @@ func validateVoiceSpec(spec VoiceFixtureSpec) error {
 	}
 	if len(spec.TargetDirective) > 50000 || len(spec.CallerPersona) > 4000 || len(spec.CallerBehavior) > 4000 || len(spec.CallerGoal) > 4000 {
 		return errors.New("voice fixture text is too long")
+	}
+	if spec.Transport != "" && spec.Transport != "direct" && spec.Transport != "carrier" {
+		return errors.New("transport must be direct or carrier")
+	}
+	if spec.Transport == "carrier" && spec.ProtocolFixture == "" {
+		return errors.New("protocol_fixture required for carrier transport")
 	}
 	return nil
 }

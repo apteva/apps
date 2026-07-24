@@ -114,6 +114,10 @@ func (s *service) decorateRun(run *Run) {
 		}
 	}
 	run.WebFixtures = fixtures
+	protocolFixtures, err := s.db.listProtocolFixtures(run.ID)
+	if err == nil {
+		run.ProtocolFixtures = protocolFixtures
+	}
 }
 
 func webFixturePath(x WebFixtureInstance) string {

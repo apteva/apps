@@ -41,7 +41,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_run_create", Description: "Start an inline eval or one-off run from spec.", InputSchema: objectSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
@@ -159,7 +159,7 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
 	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders}, err
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -196,7 +196,7 @@ func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures}
+	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures, "protocol_fixtures": r.ProtocolFixtures}
 	if agent := str(args, "agent"); agent != "" {
 		events, err := a.svc.runtime().ListRuntimeAgentTelemetry(r.RuntimeID, agent, time.Time{}, 500)
 		if err != nil {

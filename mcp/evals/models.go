@@ -55,6 +55,8 @@ type VoiceCase struct {
 	Greeting             string `json:"greeting,omitempty"`
 	MaxFirstResponseMS   int64  `json:"max_first_response_ms,omitempty"`
 	MaxAverageResponseMS int64  `json:"max_average_response_ms,omitempty"`
+	Transport            string `json:"transport,omitempty"`
+	ProtocolFixture      string `json:"protocol_fixture,omitempty"`
 }
 
 type Assertion struct {
@@ -146,6 +148,7 @@ type EnvironmentVoiceCall struct {
 	TargetRecording string                     `json:"target_recording,omitempty"`
 	CallerRecording string                     `json:"caller_recording,omitempty"`
 	Execution       *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	ProtocolEvents  []map[string]any           `json:"protocol_events,omitempty"`
 }
 
 type VoiceCallValidity struct {
