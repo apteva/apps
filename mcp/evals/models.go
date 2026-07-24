@@ -61,6 +61,7 @@ type Assertion struct {
 	Name       string         `json:"name"`
 	Type       string         `json:"type"`
 	App        string         `json:"app,omitempty"`
+	MCP        string         `json:"mcp,omitempty"`
 	Tool       string         `json:"tool,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 	Path       string         `json:"path,omitempty"`

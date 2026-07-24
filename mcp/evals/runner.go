@@ -130,7 +130,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return err
 	}
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
+		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
 		var result AssertionResult
 		if callErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result); callErr != nil {
 			result = AssertionResult{Name: assertion.Name, Passed: false, Message: callErr.Error()}

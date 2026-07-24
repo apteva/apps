@@ -41,9 +41,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_run_create", Description: "Start an inline eval or one-off run from spec.", InputSchema: objectSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, connections, integrations, web fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
+		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
 		{Name: "environment_inspect", Description: "Inspect runtime state, edge calls, and optional agent telemetry.", InputSchema: requiredSchema("run_id"), Handler: a.toolInspect},
 		{Name: "environment_assert", Description: "Run an app, edge, telemetry, web state, or web event assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
 		{Name: "environment_snapshot", Description: "Snapshot a running defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshot},
@@ -148,13 +149,17 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
 	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
 	if err != nil {
 		return nil, err
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
 	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders}, err
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -165,6 +170,18 @@ func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	var out any
 	err = a.svc.runtime().CallRuntimeAppResult(r.RuntimeID, str(args, "app"), str(args, "tool"), input, &out)
 	return out, err
+}
+func (a *App) toolMCPCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	input, _ := args["input"].(map[string]any)
+	var out any
+	if err := a.svc.runtime().CallRuntimeManagedMCPResult(r.RuntimeID, str(args, "mcp"), str(args, "tool"), input, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)

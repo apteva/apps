@@ -353,6 +353,11 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 502, err)
 		return
 	}
+	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
+	if err != nil {
+		httpError(w, 502, err)
+		return
+	}
 	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
 	if err != nil {
 		httpError(w, 502, err)
@@ -364,7 +369,7 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders})
+	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders})
 }
 func (a *App) handleCatalogItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

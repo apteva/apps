@@ -12,6 +12,7 @@ type EnvironmentSpec struct {
 	TTLSeconds          int                             `json:"ttl_seconds,omitempty"`
 	AppInstallIDs       []int64                         `json:"app_install_ids,omitempty"`
 	ConnectionIDs       []int64                         `json:"connection_ids,omitempty"`
+	MCPServerIDs        []int64                         `json:"mcp_server_ids,omitempty"`
 	NetworkMode         sdk.RuntimeNetworkMode          `json:"network_mode,omitempty"`
 	IntegrationMode     string                          `json:"integration_mode,omitempty"`
 	AllowHostSuffixes   []string                        `json:"allow_host_suffixes,omitempty"`
@@ -201,6 +202,7 @@ type Snapshot struct {
 type Assertion struct {
 	Type       string         `json:"type"`
 	App        string         `json:"app,omitempty"`
+	MCP        string         `json:"mcp,omitempty"`
 	Tool       string         `json:"tool,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 	Path       string         `json:"path,omitempty"`

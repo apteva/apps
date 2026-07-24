@@ -125,6 +125,14 @@ interface Integration {
   tool_count?: number;
 }
 
+interface ManagedMCP {
+  id: number;
+  name: string;
+  description?: string;
+  status: string;
+  tool_count: number;
+}
+
 interface EnvironmentTool {
   name: string;
   description?: string;
@@ -142,6 +150,7 @@ interface EnvironmentSpec {
   ttl_seconds: number;
   app_install_ids: number[];
   connection_ids: number[];
+  mcp_server_ids: number[];
   network_mode: string;
   integration_mode: string;
   integration_bindings: Record<string, any>[];
@@ -166,6 +175,7 @@ interface Assertion {
   name: string;
   type: string;
   app?: string;
+  mcp?: string;
   tool?: string;
   input?: Record<string, any>;
   path?: string;
@@ -383,6 +393,7 @@ interface Catalog {
   apps: CatalogApp[];
   connections: Connection[];
   integrations: Integration[];
+  managed_mcps: ManagedMCP[];
   snapshots: any[];
   realtime_providers: RealtimeProvider[];
 }
@@ -668,6 +679,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const [savedEnvironmentID, setSavedEnvironmentID] = useState("");
   const [environmentName, setEnvironmentName] = useState("");
   const [selectedAppIDs, setSelectedAppIDs] = useState<number[]>([]);
+  const [selectedMCPIDs, setSelectedMCPIDs] = useState<number[]>([]);
   const [fakeSlugs, setFakeSlugs] = useState<string[]>([]);
   const [seeds, setSeeds] = useState<SeedStep[]>([]);
   const [seedAppID, setSeedAppID] = useState("");
@@ -721,6 +733,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   }, [agent?.id, catalog.apps.length, catalog.connections.length, catalog.integrations.length]);
 
   const selectedApps = catalog.apps.filter((item) => selectedAppIDs.includes(item.install_id));
+  const selectedMCPs = (catalog.managed_mcps || []).filter((item) => selectedMCPIDs.includes(item.id));
   const selectedIntegrations = catalog.integrations.filter((item) => fakeSlugs.includes(item.slug));
   const tasksValid = tasks.length > 0 && tasks.every((item) => item.prompt.trim() && goalsFromText(item.success).length > 0);
   const environmentValid = environmentMode === "clone" ? Boolean(environmentName.trim()) : Boolean(savedEnvironmentID);
@@ -734,6 +747,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
       setSelectedAppIDs([...selectedAppIDs, item.install_id]);
     }
   };
+  const toggleMCP = (item: ManagedMCP) => setSelectedMCPIDs(selectedMCPIDs.includes(item.id) ? selectedMCPIDs.filter((id) => id !== item.id) : [...selectedMCPIDs, item.id]);
   const toggleIntegration = (item: Integration) => setFakeSlugs(fakeSlugs.includes(item.slug) ? fakeSlugs.filter((slug) => slug !== item.slug) : [...fakeSlugs, item.slug]);
   const updateTask = (id: number, patch: Partial<TaskDraft>) => setTasks(tasks.map((item) => item.id === id ? { ...item, ...patch } : item));
   const removeTask = (id: number) => setTasks(tasks.filter((item) => item.id !== id));
@@ -769,8 +783,9 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             spec: {
               version: 1,
               ttl_seconds: 3600,
-              app_install_ids: selectedAppIDs,
-              connection_ids: [],
+	              app_install_ids: selectedAppIDs,
+	              connection_ids: [],
+	              mcp_server_ids: selectedMCPIDs,
               network_mode: "block",
               integration_mode: "mock",
               integration_bindings: integrationBindings(),
@@ -870,9 +885,10 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
         {environmentMode === "clone" ? <div className="ev-setup" style={{ marginTop: 10 }}>
           <div className="ev-setup-title">Reusable isolated project clone</div><div className="ev-setup-copy">Fresh app data, mocked project connections, and blocked external traffic. The environment is saved in Environments and reused by this eval.</div>
           <label style={{ display: "block", marginTop: 12 }}><span className="ev-label">Environment name</span><input value={environmentName} onChange={(event) => setEnvironmentName(event.target.value)} placeholder="Agent evaluation environment" className="ev-field" /></label>
-          <div className="ev-summary-grid"><div className="ev-summary-item"><span className="ev-summary-value">{capabilitiesLoading ? "…" : selectedApps.length}</span><span className="ev-summary-label">agent apps</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedIntegrations.length}</span><span className="ev-summary-label">mocked integrations</span></div><div className="ev-summary-item"><span className="ev-summary-value">{seeds.length}</span><span className="ev-summary-label">seed steps</span></div></div>
-          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Customize project clone</summary><div className="ev-advanced-body">
-            <div><span className="ev-label">Installed apps</span><TogglePicker placeholder="Search project apps" items={catalog.apps} selected={new Set(selectedAppIDs.map(String))} keyOf={(item) => String(item.install_id)} titleOf={(item) => item.display_name || item.name} detailOf={(item) => item.description || item.name} onToggle={toggleApp} /></div>
+	          <div className="ev-summary-grid"><div className="ev-summary-item"><span className="ev-summary-value">{capabilitiesLoading ? "…" : selectedApps.length}</span><span className="ev-summary-label">agent apps</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedMCPs.length}</span><span className="ev-summary-label">MCP servers</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedIntegrations.length}</span><span className="ev-summary-label">mocked integrations</span></div><div className="ev-summary-item"><span className="ev-summary-value">{seeds.length}</span><span className="ev-summary-label">seed steps</span></div></div>
+	          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Customize project clone</summary><div className="ev-advanced-body">
+	            <div><span className="ev-label">Installed apps</span><TogglePicker placeholder="Search project apps" items={catalog.apps} selected={new Set(selectedAppIDs.map(String))} keyOf={(item) => String(item.install_id)} titleOf={(item) => item.display_name || item.name} detailOf={(item) => item.description || item.name} onToggle={toggleApp} /></div>
+	            <div><span className="ev-label">Managed MCP servers</span><TogglePicker placeholder="Search project MCP servers" items={catalog.managed_mcps || []} selected={new Set(selectedMCPIDs.map(String))} keyOf={(item) => String(item.id)} titleOf={(item) => item.name} detailOf={(item) => item.description || `${item.tool_count || 0} tools`} onToggle={toggleMCP} /></div>
             <div><span className="ev-label">Fake integrations</span><TogglePicker placeholder="Search integrations" items={catalog.integrations} selected={new Set(fakeSlugs)} keyOf={(item) => item.slug} titleOf={(item) => item.name} detailOf={(item) => item.description || `${item.tool_count || 0} tools`} onToggle={toggleIntegration} /></div>
             <div><span className="ev-label">Seed test data</span><select value={seedAppID} onChange={(event) => { const app = selectedApps.find((item) => String(item.install_id) === event.target.value); if (app) setSeeds([...seeds, { app: app.name, tool: "", input: {} }]); setSeedAppID(""); }} className="ev-field"><option value="">Add seed step from an app</option>{selectedApps.map((item) => <option key={item.install_id} value={item.install_id}>{item.display_name || item.name}</option>)}</select><div className="ev-task-list" style={{ marginTop: 8 }}>{seeds.map((seed, index) => { const app = catalog.apps.find((item) => item.name === seed.app); return app ? <SeedEditor key={`${seed.app}-${index}`} app={app} seed={seed} onChange={(next) => setSeeds(seeds.map((item, itemIndex) => itemIndex === index ? next : item))} onRemove={() => setSeeds(seeds.filter((_, itemIndex) => itemIndex !== index))} /> : null; })}</div></div>
           </div></details>
@@ -1194,7 +1210,7 @@ export default function EvalsPanel(props: NativePanelProps) {
   const [tab, setTab] = useState<"evals" | "runs">("evals");
   const [suites, setSuites] = useState<Suite[]>([]);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
-  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], snapshots: [], realtime_providers: [] });
+  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], managed_mcps: [], snapshots: [], realtime_providers: [] });
   const [selectedSuite, setSelectedSuite] = useState("");
   const [selectedExperiment, setSelectedExperiment] = useState("");
   const [detail, setDetail] = useState<Experiment | null>(null);

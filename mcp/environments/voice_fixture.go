@@ -247,10 +247,20 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if err != nil {
 		return call, fmt.Errorf("load runtime: %w", err)
 	}
-	mcpNames := make([]string, 0, len(runtime.Apps))
+	mcpNames := make([]string, 0, len(runtime.Apps)+len(runtime.ManagedMCPs)+len(runtime.MCPAttachments))
 	for _, app := range runtime.Apps {
 		if app.Name != "" && app.Status == "running" {
 			mcpNames = append(mcpNames, app.Name)
+		}
+	}
+	for _, mcp := range runtime.ManagedMCPs {
+		if mcp.Name != "" && mcp.Status == "running" {
+			mcpNames = append(mcpNames, mcp.Name)
+		}
+	}
+	for _, attachment := range runtime.MCPAttachments {
+		if attachment.Name != "" {
+			mcpNames = append(mcpNames, attachment.Name)
 		}
 	}
 	sort.Strings(mcpNames)

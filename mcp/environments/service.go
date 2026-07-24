@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -123,7 +124,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
 		}
 	}()
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: spec.IntegrationBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: spec.IntegrationBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
 	}
@@ -281,6 +282,39 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 		}
 		got := jsonPath(actual, a.Path)
 		return AssertionResult{Passed: reflect.DeepEqual(got, a.Equals), Actual: got}, nil
+	case "mcp_state":
+		var actual any
+		if err := s.runtime().CallRuntimeManagedMCPResult(runtimeID, a.MCP, a.Tool, a.Input, &actual); err != nil {
+			return AssertionResult{}, err
+		}
+		got := jsonPath(actual, a.Path)
+		return AssertionResult{Passed: reflect.DeepEqual(got, a.Equals), Actual: got}, nil
+	case "mcp_tool_call":
+		agent := a.AgentAlias
+		if agent == "" {
+			agent = "main"
+		}
+		events, err := s.runtime().ListRuntimeAgentTelemetry(runtimeID, agent, time.Time{}, 1000)
+		if err != nil {
+			return AssertionResult{}, err
+		}
+		count := 0
+		for _, event := range events {
+			if event.Type != "tool.call" {
+				continue
+			}
+			var data struct {
+				Name string `json:"name"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && (a.Tool == "" || data.Name == a.Tool || data.Name == a.MCP+"_"+a.Tool) {
+				count++
+			}
+		}
+		min := a.MinCalls
+		if min == 0 {
+			min = 1
+		}
+		return AssertionResult{Passed: count >= min, Actual: count}, nil
 	case "edge_call":
 		calls, err := s.runtime().ListRuntimeEdgeCalls(runtimeID)
 		if err != nil {
@@ -381,6 +415,9 @@ func validateSpec(spec EnvironmentSpec) error {
 	}
 	if spec.NetworkMode == "" {
 		spec.NetworkMode = sdk.RuntimeNetworkBlock
+	}
+	if len(spec.MCPServerIDs) > 16 {
+		return errors.New("mcp_server_ids may contain at most 16 entries")
 	}
 	seen := map[string]bool{}
 	for i, fixture := range spec.WebFixtures {
