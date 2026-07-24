@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.21
+version: 0.1.22
 scopes: [project, global]
 requires:
   permissions:
@@ -122,7 +122,6 @@ type platformDef struct {
 	CreativeUploadVideoTool string
 	CreativeAssetStatusTool string
 	CreativeAssetDeleteTool string
-	PageListTool            string
 
 	// Audience tools.
 	AudienceListTool            string
@@ -166,7 +165,6 @@ var platforms = map[string]platformDef{
 		CreativeUploadVideoTool:     "creative_upload_video",
 		CreativeAssetStatusTool:     "video_status",
 		CreativeAssetDeleteTool:     "video_delete",
-		PageListTool:                "page_list",
 		AudienceListTool:            "audience_list",
 		AudienceCreateCustomTool:    "audience_create_custom",
 		AudienceCreateLookalikeTool: "audience_create_lookalike",
@@ -734,12 +732,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "creative_asset_delete",
-			Description: "Delete an uploaded creative asset when the provider supports it. Meta currently supports video assets; remove dependent ads and creatives first. identity_id optionally selects the Facebook Page used for Page-authorized deletion. Args: ad_account_id, asset_id, kind, identity_id?.",
+			Description: "Delete an uploaded creative asset when the provider supports it. Meta currently supports ad-account video assets; remove dependent ads and creatives first. Args: ad_account_id, asset_id, kind.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"asset_id":      map[string]any{"type": "string"},
 				"kind":          map[string]any{"type": "string", "enum": []string{"image", "video"}},
-				"identity_id":   map[string]any{"type": "string"},
 			}, []string{"ad_account_id", "asset_id", "kind"}),
 			Handler: a.toolCreativeAssetDelete,
 		},
@@ -2191,38 +2188,11 @@ func (metaAdapter) CreativeAssetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount,
 			return mcpError("video asset does not belong to the selected ad account or was not uploaded through this app"), nil
 		}
 	}
-	parsed, errOut := a.execIntegrationTool(ctx, acct, def.CreativeAssetDeleteTool, map[string]any{"videoId": assetID})
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.CreativeAssetDeleteTool, map[string]any{
+		def.AccountIDInputField: acct.NativeAccountID,
+		"video_id":              assetID,
+	})
 	if errOut != nil {
-		errorText := fmt.Sprint(errOut)
-		if strings.Contains(errorText, `"error_subcode":1363055`) ||
-			strings.Contains(errorText, "Application does not have permission for this action") {
-			pages, pagesErr := a.execIntegrationTool(ctx, acct, def.PageListTool, map[string]any{
-				"fields": "id,name,access_token,tasks",
-				"limit":  100,
-			})
-			if pagesErr == nil {
-				identityID := stringArgAny(args, "identity_id")
-				for _, page := range resultRows(pages) {
-					pageID := firstString(page, "id")
-					pageToken := firstString(page, "access_token", "accessToken")
-					if pageToken == "" || (identityID != "" && pageID != identityID) {
-						continue
-					}
-					pageResult, pageErr := a.execIntegrationTool(ctx, acct, def.CreativeAssetDeleteTool, map[string]any{
-						"videoId":      assetID,
-						"access_token": pageToken,
-					})
-					if pageErr == nil {
-						deleteCreativeAssetRecord(ctx, args, acct, assetID)
-						return pageResult, nil
-					}
-				}
-			}
-			return mcpError(
-				"Meta refused video deletion with both the user token and available Page tokens. " +
-					"Confirm the Facebook Ads connection grants pages_manage_posts and pass identity_id when the video belongs to a specific Page.",
-			), nil
-		}
 		return errOut, nil
 	}
 	deleteCreativeAssetRecord(ctx, args, acct, assetID)

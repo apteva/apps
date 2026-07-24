@@ -30,7 +30,6 @@ type recordingPlatform struct {
 	listConnections    []sdk.PlatformConnection
 	listConnectionsErr error
 	executeResponses   map[string]*sdk.ExecuteResult
-	executeQueues      map[string][]*sdk.ExecuteResult
 	callAppResponses   map[string]json.RawMessage
 	identity           *sdk.InstallIdentity
 }
@@ -55,7 +54,6 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
-		executeQueues:    map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
 }
@@ -90,12 +88,6 @@ func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) { return p.id
 func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.mu.Lock()
 	p.executeCalls = append(p.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
-	if queue := p.executeQueues[tool]; len(queue) > 0 {
-		response := queue[0]
-		p.executeQueues[tool] = queue[1:]
-		p.mu.Unlock()
-		return response, nil
-	}
 	p.mu.Unlock()
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
@@ -1422,7 +1414,9 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if pf.executeCalls[2].Tool != "video_delete" || pf.executeCalls[2].Input["videoId"] != "video_123" {
+	if pf.executeCalls[2].Tool != "video_delete" ||
+		pf.executeCalls[2].Input["adAccountId"] != "act_42" ||
+		pf.executeCalls[2].Input["video_id"] != "video_123" {
 		t.Fatalf("wrong video delete call: %#v", pf.executeCalls[2])
 	}
 	if err := ctx.AppDB().QueryRow(
@@ -1430,127 +1424,6 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 		acctID,
 	).Scan(&tracked); err != nil || tracked != 0 {
 		t.Fatalf("deleted video tracking remains: count=%d err=%v", tracked, err)
-	}
-}
-
-func TestCreativeAssetDelete_MetaPermissionErrorReportsPageTokenFailure(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["video_delete"] = &sdk.ExecuteResult{
-		Success: false,
-		Status:  400,
-		Data: json.RawMessage(
-			`{"error":{"code":10,"error_subcode":1363055,"message":"Application does not have permission for this action"}}`,
-		),
-	}
-	pf.executeResponses["page_list"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"data":[{"id":"page_7","access_token":"page-token"}]}`),
-	}
-	ctx := newAdsCtx(t, pf)
-	app := &App{}
-
-	res, _ := ctx.AppDB().Exec(
-		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
-		 VALUES ('test-proj','meta',7,'act_42','Test')`,
-	)
-	acctID, _ := res.LastInsertId()
-	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO creative_assets (project_id, ad_account_id, platform, native_asset_id, kind)
-		 VALUES ('test-proj',?,'meta','video_123','video')`,
-		acctID,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := app.toolCreativeAssetDelete(ctx, map[string]any{
-		"ad_account_id": acctID,
-		"asset_id":      "video_123",
-		"kind":          "video",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	result := out.(map[string]any)
-	content := result["content"].([]map[string]any)[0]["text"].(string)
-	if result["isError"] != true || !strings.Contains(content, "pages_manage_posts") ||
-		!strings.Contains(content, "Page tokens") {
-		t.Fatalf("unexpected permission guidance: %#v", result)
-	}
-	if len(pf.executeCalls) != 3 ||
-		pf.executeCalls[0].Tool != "video_delete" ||
-		pf.executeCalls[1].Tool != "page_list" ||
-		pf.executeCalls[2].Input["access_token"] != "page-token" {
-		t.Fatalf("unexpected Page-token fallback calls: %#v", pf.executeCalls)
-	}
-
-	var tracked int
-	if err := ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123'`,
-		acctID,
-	).Scan(&tracked); err != nil || tracked != 1 {
-		t.Fatalf("failed deletion must retain tracking: count=%d err=%v", tracked, err)
-	}
-}
-
-func TestCreativeAssetDelete_RetriesWithSelectedPageToken(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeQueues["video_delete"] = []*sdk.ExecuteResult{
-		{
-			Success: false,
-			Status:  400,
-			Data: json.RawMessage(
-				`{"error":{"code":10,"error_subcode":1363055,"message":"Application does not have permission for this action"}}`,
-			),
-		},
-		{Success: true, Status: 200, Data: json.RawMessage(`{"success":true}`)},
-	}
-	pf.executeResponses["page_list"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(
-			`{"data":[{"id":"page_other","access_token":"wrong-token"},{"id":"page_7","access_token":"page-token"}]}`,
-		),
-	}
-	ctx := newAdsCtx(t, pf)
-	app := &App{}
-
-	res, _ := ctx.AppDB().Exec(
-		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
-		 VALUES ('test-proj','meta',7,'act_42','Test')`,
-	)
-	acctID, _ := res.LastInsertId()
-	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO creative_assets (project_id, ad_account_id, platform, native_asset_id, kind)
-		 VALUES ('test-proj',?,'meta','video_123','video')`,
-		acctID,
-	); err != nil {
-		t.Fatal(err)
-	}
-
-	out, err := app.toolCreativeAssetDelete(ctx, map[string]any{
-		"ad_account_id": acctID,
-		"asset_id":      "video_123",
-		"kind":          "video",
-		"identity_id":   "page_7",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.(map[string]any)["success"] != true {
-		t.Fatalf("unexpected delete response: %#v", out)
-	}
-	if len(pf.executeCalls) != 3 ||
-		pf.executeCalls[2].Input["access_token"] != "page-token" {
-		t.Fatalf("selected Page token was not used: %#v", pf.executeCalls)
-	}
-
-	var tracked int
-	if err := ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123'`,
-		acctID,
-	).Scan(&tracked); err != nil || tracked != 0 {
-		t.Fatalf("successful Page-token deletion retained tracking: count=%d err=%v", tracked, err)
 	}
 }
 
