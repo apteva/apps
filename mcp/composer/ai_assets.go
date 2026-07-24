@@ -147,7 +147,7 @@ func resolveRelativeClipStarts(edit *Edit) bool {
 	if edit == nil {
 		return false
 	}
-	changed := false
+	changed := resolveCompositionSectionStarts(edit)
 	for ti := range edit.Timeline.Tracks {
 		track := &edit.Timeline.Tracks[ti]
 		byID := map[string]*Clip{}
@@ -174,6 +174,109 @@ func resolveRelativeClipStarts(edit *Edit) bool {
 		}
 	}
 	return changed
+}
+
+type compositionSection struct {
+	start      float64
+	firstIndex int
+	clips      []*Clip
+}
+
+func resolveCompositionSectionStarts(edit *Edit) bool {
+	if edit == nil || !compositionReflowEnabled(edit) {
+		return false
+	}
+
+	sectionsByKey := map[string]*compositionSection{}
+	sections := make([]*compositionSection, 0)
+	clipIndex := 0
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			clip := &edit.Timeline.Tracks[ti].Clips[i]
+			key := clipSectionKey(clip)
+			if key == "" {
+				clipIndex++
+				continue
+			}
+			section := sectionsByKey[key]
+			if section == nil {
+				section = &compositionSection{
+					start:      clip.Start,
+					firstIndex: clipIndex,
+				}
+				sectionsByKey[key] = section
+				sections = append(sections, section)
+			} else if clip.Start < section.start {
+				section.start = clip.Start
+			}
+			section.clips = append(section.clips, clip)
+			clipIndex++
+		}
+	}
+	if len(sections) < 2 {
+		return false
+	}
+
+	sort.SliceStable(sections, func(i, j int) bool {
+		if sameTime(sections[i].start, sections[j].start) {
+			return sections[i].firstIndex < sections[j].firstIndex
+		}
+		return sections[i].start < sections[j].start
+	})
+
+	changed := false
+	cursor := sections[0].start
+	for i := 0; i < len(sections); {
+		batchEnd := i + 1
+		for batchEnd < len(sections) && sameTime(sections[batchEnd].start, sections[i].start) {
+			batchEnd++
+		}
+		batchSpan := 0.0
+		for _, section := range sections[i:batchEnd] {
+			sectionSpan := 0.0
+			for _, clip := range section.clips {
+				offset := clip.Start - section.start
+				nextStart := cursor + offset
+				if trimFloat(nextStart) != trimFloat(clip.Start) {
+					clip.Start = nextStart
+					changed = true
+				}
+				sectionSpan = maxFloat(sectionSpan, offset+clipDuration(*clip))
+			}
+			batchSpan = maxFloat(batchSpan, sectionSpan)
+		}
+		cursor += batchSpan
+		i = batchEnd
+	}
+	return changed
+}
+
+func compositionReflowEnabled(edit *Edit) bool {
+	if edit == nil {
+		return false
+	}
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			timing := edit.Timeline.Tracks[ti].Clips[i].Timing
+			if timing != nil && strings.EqualFold(strings.TrimSpace(timing.Reflow), "composition") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func clipSectionKey(clip *Clip) string {
+	if clip == nil {
+		return ""
+	}
+	if sectionID := strings.TrimSpace(clip.SectionID); sectionID != "" {
+		return "section:" + sectionID
+	}
+	if groupID := strings.TrimSpace(clip.GroupID); groupID != "" {
+		return "group:" + groupID
+	}
+	return ""
 }
 
 func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string, providerOptions, cacheOptions map[string]any) (bool, string, error) {

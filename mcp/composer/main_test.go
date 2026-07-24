@@ -893,6 +893,153 @@ func TestResolveRelativeClipStarts_UsesTimingReflow(t *testing.T) {
 	}
 }
 
+func TestResolveRelativeClipStarts_CompositionReflowsSectionsAcrossTracks(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"id":"base","type":"visual","clips":[
+			{"uid":"intro-video","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":20,
+				"timing":{"mode":"fixed","reflow":"composition"}},
+			{"uid":"detail-image","section_id":"detail","asset":{"type":"image","src":"storage:2"},"start":30,"length":18},
+			{"uid":"outro-video","section_id":"outro","asset":{"type":"video","src":"storage:3"},"start":65,"length":16}
+		]},
+		{"id":"pip","type":"visual","clips":[
+			{"uid":"detail-pip","section_id":"detail","asset":{"type":"video","src":"storage:4"},"start":30,"length":18}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected composition reflow to compact linked sections")
+	}
+	base := e.Timeline.Tracks[0].Clips
+	pip := e.Timeline.Tracks[1].Clips[0]
+	if got := base[1].Start; got != 20 {
+		t.Fatalf("detail image start = %v, want 20", got)
+	}
+	if got := pip.Start; got != 20 {
+		t.Fatalf("detail PIP start = %v, want 20", got)
+	}
+	if got := base[2].Start; got != 38 {
+		t.Fatalf("outro start = %v, want 38", got)
+	}
+}
+
+func TestResolveRelativeClipStarts_CompositionPreservesSectionOffsets(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"id":"base","type":"visual","clips":[
+			{"uid":"intro","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":20,
+				"timing":{"mode":"fixed","reflow":"composition"}},
+			{"uid":"detail","section_id":"detail","asset":{"type":"image","src":"storage:2"},"start":30,"length":20},
+			{"uid":"outro","section_id":"outro","asset":{"type":"video","src":"storage:3"},"start":60,"length":10}
+		]},
+		{"id":"overlay","type":"visual","clips":[
+			{"uid":"detail-label","section_id":"detail","asset":{"type":"image","src":"storage:4"},"start":32,"length":5}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected composition reflow to compact sections")
+	}
+	base := e.Timeline.Tracks[0].Clips
+	overlay := e.Timeline.Tracks[1].Clips[0]
+	if got := base[1].Start; got != 20 {
+		t.Fatalf("detail start = %v, want 20", got)
+	}
+	if got := overlay.Start; got != 22 {
+		t.Fatalf("detail overlay start = %v, want 22", got)
+	}
+	if got := base[2].Start; got != 40 {
+		t.Fatalf("outro start = %v, want 40", got)
+	}
+}
+
+func TestResolveRelativeClipStarts_CompositionPreservesParallelSections(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"id":"base","type":"visual","clips":[
+			{"uid":"intro","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":20,
+				"timing":{"mode":"fixed","reflow":"composition"}},
+			{"uid":"detail","section_id":"detail","asset":{"type":"image","src":"storage:2"},"start":30,"length":18},
+			{"uid":"outro","section_id":"outro","asset":{"type":"video","src":"storage:3"},"start":65,"length":10}
+		]},
+		{"id":"overlay","type":"visual","clips":[
+			{"uid":"badge","section_id":"badge","asset":{"type":"image","src":"storage:4"},"start":30,"length":5}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected composition reflow to compact sections")
+	}
+	base := e.Timeline.Tracks[0].Clips
+	badge := e.Timeline.Tracks[1].Clips[0]
+	if got := base[1].Start; got != 20 {
+		t.Fatalf("detail start = %v, want 20", got)
+	}
+	if got := badge.Start; got != 20 {
+		t.Fatalf("parallel badge start = %v, want 20", got)
+	}
+	if got := base[2].Start; got != 38 {
+		t.Fatalf("outro start = %v, want 38", got)
+	}
+}
+
+func TestResolveRelativeClipStarts_CompositionUsesGeneratedSectionDurations(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"id":"base","type":"visual","clips":[
+			{"uid":"intro-video","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":30,
+				"duration_mode":"fit_generated_reflow","timing":{"mode":"fixed","reflow":"composition"},
+				"ai":{"media_kind":"avatar","prompt":"intro","actual_duration_seconds":20}},
+			{"uid":"detail-image","section_id":"detail","asset":{"type":"image","src":"storage:2"},"start":30,"length":35,
+				"timing":{"mode":"fit_source","source":"clip:detail-pip"}},
+			{"uid":"outro-video","section_id":"outro","asset":{"type":"video","src":"storage:3"},"start":65,"length":30,
+				"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"avatar","prompt":"outro","actual_duration_seconds":16}}
+		]},
+		{"id":"pip","type":"visual","clips":[
+			{"uid":"detail-pip","section_id":"detail","asset":{"type":"video","src":"storage:4"},"start":30,"length":35,
+				"duration_mode":"fit_generated",
+				"ai":{"media_kind":"avatar","prompt":"detail","actual_duration_seconds":18}}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for ti := range e.Timeline.Tracks {
+		for i := range e.Timeline.Tracks[ti].Clips {
+			syncClipDurationFromAI(&e.Timeline.Tracks[ti].Clips[i])
+		}
+	}
+	if !applyTimelineTiming(e) {
+		t.Fatal("expected screenshot duration to fit its generated PIP")
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected generated durations to reflow the composition")
+	}
+	base := e.Timeline.Tracks[0].Clips
+	pip := e.Timeline.Tracks[1].Clips[0]
+	if got := base[0].Length; got != 20 {
+		t.Fatalf("intro length = %v, want 20", got)
+	}
+	if got := base[1].Start; got != 20 {
+		t.Fatalf("detail start = %v, want 20", got)
+	}
+	if got := base[1].Length; got != 18 {
+		t.Fatalf("detail image length = %v, want 18", got)
+	}
+	if got := pip.Start; got != 20 {
+		t.Fatalf("detail PIP start = %v, want 20", got)
+	}
+	if got := base[2].Start; got != 38 {
+		t.Fatalf("outro start = %v, want 38", got)
+	}
+	if got := base[2].Length; got != 16 {
+		t.Fatalf("outro length = %v, want 16", got)
+	}
+}
+
 func TestAICacheKey_IncludesImageSize(t *testing.T) {
 	base := &AIAsset{MediaKind: "image", Prompt: "portrait recipe still", Model: "flux-2-pro", Size: "720x1280"}
 	other := *base
