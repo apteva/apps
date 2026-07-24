@@ -556,7 +556,12 @@ func (a *App) handleAttachments(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
-	att, err := addAttachment(ctx, pid, space.ID, args)
+	var att *Attachment
+	if strArg(args, "content_base64") != "" {
+		att, err = uploadAttachment(ctx, pid, space.ID, args)
+	} else {
+		att, err = addAttachment(ctx, pid, space.ID, args)
+	}
 	writeOrErr(w, map[string]any{"attachment": att}, err)
 }
 

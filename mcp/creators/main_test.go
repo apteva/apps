@@ -95,7 +95,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.3.1" {
+	if m.Name != "creators" || m.Version != "0.3.2" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
@@ -395,16 +395,28 @@ func TestUploadAttachmentUsesCurrentStorageContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attachment, err := uploadAttachment(ctx, testProject, space.ID, map[string]any{
-		"post_id": post.ID, "filename": "cover.png",
-		"content_base64": "iVBORw0KGgo=", "content_type": "image/png",
-	})
-	if err != nil {
-		t.Fatal(err)
+	body := strings.NewReader(`{
+		"post_id": ` + jsonNumber(post.ID) + `,
+		"filename": "cover.png",
+		"content_base64": "iVBORw0KGgo=",
+		"content_type": "image/png"
+	}`)
+	request := httptest.NewRequest(http.MethodPost, "/attachments?project_id="+testProject+"&space_id="+jsonNumber(space.ID), body)
+	recorder := httptest.NewRecorder()
+	(&App{}).handleAttachments(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if platform.uploadName != "cover.png" {
 		t.Fatalf("storage upload name = %q, want cover.png", platform.uploadName)
 	}
+	var response struct {
+		Attachment Attachment `json:"attachment"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	attachment := response.Attachment
 	if attachment.StorageFileID != platform.uploadID || attachment.Filename != "trusted.png" {
 		t.Fatalf("uploaded attachment = %#v", attachment)
 	}
