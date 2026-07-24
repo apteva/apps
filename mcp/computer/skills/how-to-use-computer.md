@@ -39,34 +39,44 @@ or pass `annotate=true` to `browser_screenshot` only when labels are desired.
 ## Chat attachments are agent-selected
 
 Opening or driving a browser does not create an attachment automatically. You
-decide whether a visual card materially helps the answer and explicitly attach
-only the most useful card. All cards are render-only; never use them to ask the
-operator a question.
+still decide which card belongs in the response. However, when the user directly
+asks you to open, show, inspect, review, or navigate to a webpage, the final
+response must include exactly one `browser-view` unless the user explicitly asks
+for text only or the destination channel does not support components. All cards
+are render-only; never use them to ask the operator a question.
 
 | When | Component | Key props |
 |---|---|---|
-| The result is visual: inspect a page, verify navigation, or show what loaded | `browser-view` | `session_id`, `mode:"final"`, `caption` |
-| A live view is genuinely useful while work continues | `browser-view` | `session_id`, `mode:"live"`, `height` |
+| Open, show, inspect, review, or navigate to a webpage | `browser-view` | `session_id` |
 | Session metadata is the result, but page pixels are not useful | `browser-session` | `session_id` |
 | Several distinct pages are part of the result | `browser-timeline` | `session_id` |
-| A specific marked screenshot is needed | `browser-view` | `mode:"snapshot"`, `screenshot_url`, `som`, `caption` |
+| A specific marked screenshot is needed | legacy `screenshot-with-som` | `screenshot_url`, `som`, `caption` |
 
 Attach via:
 
 ```
-respond(components=[{ app: "computer", name: "<from-table>", props: {...} }])
+channels_send(
+  channel="current",
+  text="<final outcome>",
+  components=[{ app: "computer", name: "browser-view", props: {session_id: "br_..."} }]
+)
 ```
 
-For ordinary browser navigation or inspection, attach `browser-view` with
-`mode:"final"` after the work is complete and the session has been closed. The
-card uses the durable clean final frame, so the user sees the actual destination
-page (for example, the Example Domain page after navigating to example.com), not
-only backend/session metadata.
+`browser_session(open)` and `browser_session(close)` return a `view` object that
+is already shaped like a channel component. Copy that object into the final
+`channels_send(..., components=[...])`. Do not add `screenshot_url` or a display
+mode.
 
-Use `mode:"live"` sparingly. A live card updates while the session is active and
-falls back to the final stored frame after close. Do not attach both
-`browser-session` and `browser-view` for the same result unless both metadata and
-pixels are independently useful.
+The canonical `browser-view` follows the session lifecycle itself. While the
+session is active, it shows the live stream when available and otherwise follows
+the latest frame. After close, it automatically settles on the durable clean
+final frame. The same attachment therefore works whether it is sent during the
+browse or after cleanup.
+
+The acknowledgement before browser work is text-only. The single final outcome
+contains the `browser-view`; do not send a second component-only message. Do not
+attach both `browser-session` and `browser-view` for the same result unless both
+metadata and pixels are independently useful.
 
 The older names `browser-card`, `screenshot-with-som`, `live-view`, and
 `navigation-timeline` remain compatibility aliases for existing transcripts.

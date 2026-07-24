@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.58
+version: 0.7.59
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.58 adds durable final
-  browser frames and agent-selected live, final, session, and timeline cards.
+  Watch, steer, and replay hosted browser sessions. v0.7.59 makes browser-view
+  follow a session live and automatically settle on its durable final frame.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -69,7 +69,9 @@ provides:
         the browser open, close it with browser_session(action=close,
         session_id=...). Closing is especially important for Browserbase/Steel
         sessions and persisted contexts because it releases provider resources
-        and lets context state flush cleanly.
+        and lets context state flush cleanly. Open, status, and close results
+        include view, a copyable browser-view component reference containing
+        only session_id.
     - name: computer_use
       description: |
         Drive an app-owned browser session. Default workflow: call
@@ -166,7 +168,9 @@ provides:
       description: |
         Close a session opened by this app and release browser/provider
         resources. Use this when finished unless the user explicitly wants the
-        session left open. Compatibility alias for browser_session(action=close).
+        session left open. Returns view, a browser-view component reference
+        containing only session_id. Compatibility alias for
+        browser_session(action=close).
 
   ui_panels:
     - slot: project.page
@@ -194,27 +198,14 @@ provides:
       slots: [chat.message_attachment]
       props_schema:
         type: object
+        required: [session_id]
         properties:
           session_id: { type: string }
-          mode: { type: string, enum: [live, final, snapshot], default: final }
-          screenshot_url: { type: string }
-          som:
-            type: array
-            items:
-              type: object
-              properties:
-                label: { type: integer }
-                x: { type: number }
-                y: { type: number }
-                w: { type: number }
-                h: { type: number }
-                kind: { type: string }
           caption: { type: string }
           height: { type: integer, default: 360 }
       preview_props:
         preview: true
         session_id: "br_example"
-        mode: final
         caption: "Example Domain"
 
     - name: browser-timeline
@@ -416,10 +407,10 @@ provides:
       command: /computer
       body_file: skills/how-to-use-computer.md
       description: |
-        Teaches the agent when a browser result benefits from an explicitly
-        selected live, final, session, or timeline card. Loads on
-        browser_session and computer_use tool calls. Browser actions never
-        attach cards automatically.
+        Teaches the agent to attach the session-following browser-view for
+        direct webpage requests and when to choose session or timeline cards.
+        Loads on browser_session and computer_use tool calls. Browser actions
+        never attach cards automatically.
       metadata:
         category: browsing
         icon: 🖥️

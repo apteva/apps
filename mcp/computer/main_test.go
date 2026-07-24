@@ -81,6 +81,21 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 	if !sameStringSlices(yamlEvents, embedEvents) {
 		t.Errorf("publish-event drift: yaml=%v embed=%v", yamlEvents, embedEvents)
 	}
+
+	var browserView *sdk.UIComponent
+	for i := range fromFile.Provides.UIComponents {
+		if fromFile.Provides.UIComponents[i].Name == "browser-view" {
+			browserView = &fromFile.Provides.UIComponents[i]
+			break
+		}
+	}
+	if browserView == nil {
+		t.Fatal("browser-view component missing")
+	}
+	required, ok := browserView.PropsSchema["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "session_id" {
+		t.Fatalf("browser-view must require only session_id, got %#v", browserView.PropsSchema["required"])
+	}
 }
 
 // TestRegistry covers the registry's contract: put adds, get refreshes
@@ -172,6 +187,7 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if got := openMap["width"]; got != 1024 {
 		t.Errorf("open width: want 1024, got %v", got)
 	}
+	assertBrowserViewReference(t, openMap["view"], sessionID)
 	if fake.openSessionURL != "https://example.com" {
 		t.Errorf("OpenSession URL: want example.com, got %q", fake.openSessionURL)
 	}
@@ -281,6 +297,7 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if closeOut.(map[string]any)["closed"] != true {
 		t.Errorf("close closed=true expected; got %v", closeOut)
 	}
+	assertBrowserViewReference(t, closeOut.(map[string]any)["view"], sessionID)
 	if fake.closeCalls != 1 {
 		t.Errorf("Close calls: want 1, got %d", fake.closeCalls)
 	}
@@ -300,10 +317,26 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if closeOut2.(map[string]any)["closed"] != false {
 		t.Errorf("2nd close: closed=false expected; got %v", closeOut2)
 	}
+	assertBrowserViewReference(t, closeOut2.(map[string]any)["view"], sessionID)
 
 	// screenshot after close — error, not panic
 	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
+	}
+}
+
+func assertBrowserViewReference(t *testing.T, value any, sessionID string) {
+	t.Helper()
+	view, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("view = %T, want map", value)
+	}
+	if view["app"] != "computer" || view["name"] != "browser-view" {
+		t.Fatalf("view identity = %#v", view)
+	}
+	props, ok := view["props"].(map[string]any)
+	if !ok || len(props) != 1 || props["session_id"] != sessionID {
+		t.Fatalf("view props = %#v, want only session_id=%q", view["props"], sessionID)
 	}
 }
 

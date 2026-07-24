@@ -33,7 +33,9 @@ export interface BrowserViewProps {
   session_id?: string;
   /** v0.7.57 compatibility */
   instance_id?: string;
-  mode?: "live" | "final" | "snapshot";
+  /** Compatibility/display override. Canonical browser-view follows the
+   * session automatically and therefore omits this prop. */
+  mode?: "follow" | "live" | "thumb" | "final" | "snapshot";
   screenshot_url?: string;
   som?: SoMItem[];
   caption?: string;
@@ -44,7 +46,7 @@ export interface BrowserViewProps {
 
 export default function BrowserViewCard(props: BrowserViewProps) {
   const id = props.session_id ?? props.instance_id ?? "";
-  const requestedMode = props.mode ?? "final";
+  const requestedMode = props.mode ?? "follow";
   const [presentation, setPresentation] = useState<Presentation | null>(null);
   const [stream, setStream] = useState<StreamDescriptor | null>(null);
   const [tick, setTick] = useState(0);
@@ -84,10 +86,14 @@ export default function BrowserViewCard(props: BrowserViewProps) {
     };
   }, [id, props.preview, props.projectId, requestedMode]);
 
-  const isLive = requestedMode === "live" && presentation?.session.status === "active";
+  const sessionIsActive = presentation?.session.status === "active";
+  const isLive = (requestedMode === "follow" || requestedMode === "live") && sessionIsActive;
+  const isLiveThumbnail = requestedMode === "thumb" && sessionIsActive;
   const baseScreenshot = props.preview
     ? PREVIEW_SCREENSHOT
-    : props.screenshot_url || presentation?.screenshot_url || (id ? sessionURL(id, "screenshot", props.projectId) : "");
+    : requestedMode === "snapshot"
+      ? props.screenshot_url ?? ""
+      : presentation?.screenshot_url || (id ? sessionURL(id, "screenshot", props.projectId) : "");
   const screenshot = useMemo(() => {
     if (!baseScreenshot || props.preview || requestedMode === "snapshot") return baseScreenshot;
     const separator = baseScreenshot.includes("?") ? "&" : "?";
@@ -95,6 +101,15 @@ export default function BrowserViewCard(props: BrowserViewProps) {
   }, [baseScreenshot, props.preview, requestedMode, tick]);
   const pageURL = props.preview ? "https://example.com/" : presentation?.session.current_url ?? "";
   const status = props.preview ? "final" : presentation?.session.status ?? (requestedMode === "snapshot" ? "snapshot" : "loading");
+  const viewLabel = isLive
+    ? "Live"
+    : isLiveThumbnail
+      ? "Live snapshot"
+      : requestedMode === "snapshot"
+        ? "Snapshot"
+        : status === "active"
+          ? "Latest frame"
+          : "Final frame";
   const som = props.som ?? [];
 
   return (
@@ -138,7 +153,7 @@ export default function BrowserViewCard(props: BrowserViewProps) {
       <div className="px-4 py-3 border-t border-border">
         <DataList
           items={[
-            { label: "View", value: isLive ? "Live" : requestedMode === "snapshot" ? "Snapshot" : "Final frame" },
+            { label: "View", value: viewLabel },
             { label: "Page", value: hostFor(pageURL) },
           ]}
         />
