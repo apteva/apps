@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: creators
 display_name: Creators
-version: 0.3.0
+version: 0.3.1
 description: |
   Patreon-like creator memberships for Apteva. Manage tiers, members,
   ordered collections, gated posts, protected file drops, payment links,

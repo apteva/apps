@@ -241,6 +241,22 @@ type storageFileMetadata struct {
 	SizeBytes   int64  `json:"size_bytes"`
 }
 
+type storageFileLookupResult struct {
+	ID          int64                `json:"id"`
+	Name        string               `json:"name"`
+	ContentType string               `json:"content_type"`
+	SizeBytes   int64                `json:"size_bytes"`
+	File        *storageFileMetadata `json:"file"`
+	Found       bool                 `json:"found"`
+}
+
+type storageUploadResult struct {
+	FileID int64                `json:"file_id"`
+	ID     int64                `json:"id"`
+	URL    string               `json:"url"`
+	File   *storageFileMetadata `json:"file"`
+}
+
 // ─── HTTP handlers ────────────────────────────────────────────────
 
 func (a *App) handleSpaces(w http.ResponseWriter, r *http.Request) {
@@ -1927,13 +1943,9 @@ func uploadAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[strin
 	size := int64(len(raw))
 	space, _ := getSpace(ctx.AppDB(), pid, spaceID)
 	folder := fmt.Sprintf("/creators/%s/posts/%s", space.Slug, post.Slug)
-	var out struct {
-		FileID int64  `json:"file_id"`
-		ID     int64  `json:"id"`
-		URL    string `json:"url"`
-	}
+	var out storageUploadResult
 	call := map[string]any{
-		"filename":       filename,
+		"name":           filename,
 		"folder":         folder,
 		"content_base64": content,
 		"visibility":     "private",
@@ -1948,6 +1960,12 @@ func uploadAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[strin
 	fileID := out.FileID
 	if fileID == 0 {
 		fileID = out.ID
+	}
+	if fileID == 0 && out.File != nil {
+		fileID = out.File.ID
+	}
+	if fileID == 0 {
+		return nil, errors.New("storage.files_upload returned no file ID")
 	}
 	args["storage_file_id"] = fileID
 	args["size_bytes"] = size
@@ -1966,13 +1984,11 @@ func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]a
 		}
 		return nil, fmt.Errorf("post %d not found", postID)
 	}
-	var file storageFileMetadata
-	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
-		"id": fileID, "_project_id": pid,
-	}, &file); err != nil {
+	file, err := getStorageFileMetadata(ctx, pid, fileID)
+	if err != nil {
 		return nil, fmt.Errorf("storage.files_get: %w", err)
 	}
-	if file.ID != fileID {
+	if file == nil || file.ID != fileID {
 		return nil, fmt.Errorf("storage file %d not found", fileID)
 	}
 	args["filename"] = file.Name
@@ -2003,6 +2019,24 @@ func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]a
 		_ = logEvent(ctx, pid, spaceID, "attachment.added", "agent", "attachment", id, map[string]any{"post_id": postID, "storage_file_id": fileID})
 	}
 	return att, err
+}
+
+func getStorageFileMetadata(ctx *sdk.AppCtx, pid string, fileID int64) (*storageFileMetadata, error) {
+	var out storageFileLookupResult
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
+		"id": fileID, "_project_id": pid,
+	}, &out); err != nil {
+		return nil, err
+	}
+	if out.File != nil {
+		return out.File, nil
+	}
+	if out.ID == 0 {
+		return nil, nil
+	}
+	return &storageFileMetadata{
+		ID: out.ID, Name: out.Name, ContentType: out.ContentType, SizeBytes: out.SizeBytes,
+	}, nil
 }
 
 func listAttachments(db *sql.DB, pid string, spaceID, postID int64) ([]Attachment, error) {

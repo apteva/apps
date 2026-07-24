@@ -867,13 +867,11 @@ func (a *App) toolCollectionArchive(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func validateCollectionCover(ctx *sdk.AppCtx, pid string, fileID int64) error {
-	var file storageFileMetadata
-	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
-		"id": fileID, "_project_id": pid,
-	}, &file); err != nil {
+	file, err := getStorageFileMetadata(ctx, pid, fileID)
+	if err != nil {
 		return fmt.Errorf("storage.files_get: %w", err)
 	}
-	if file.ID != fileID {
+	if file == nil || file.ID != fileID {
 		return fmt.Errorf("storage file %d not found", fileID)
 	}
 	if !strings.HasPrefix(strings.ToLower(file.ContentType), "image/") {

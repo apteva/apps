@@ -261,7 +261,7 @@ func TestCollectionDraftIsNotPublicAndVisibleCountDoesNotLeak(t *testing.T) {
 
 func TestCollectionCoverRequiresStorageImageAndRedirects(t *testing.T) {
 	platform := &storageLookupPlatform{
-		found: true, contentType: "image/jpeg", signedURL: "https://storage.example/cover.jpg",
+		found: true, wrapped: true, contentType: "image/jpeg", signedURL: "https://storage.example/cover.jpg",
 	}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	globalCtx = ctx
