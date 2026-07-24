@@ -67,6 +67,12 @@ func normalizeProtocolFixtureSpec(spec ProtocolFixtureSpec) ProtocolFixtureSpec 
 	return spec
 }
 
+func normalizeProtocolFixtureSpecs(spec *EnvironmentSpec) {
+	for i := range spec.ProtocolFixtures {
+		spec.ProtocolFixtures[i] = normalizeProtocolFixtureSpec(spec.ProtocolFixtures[i])
+	}
+}
+
 func protocolFixtureBindings(spec EnvironmentSpec) []sdk.RuntimeIntegrationBinding {
 	out := append([]sdk.RuntimeIntegrationBinding(nil), spec.IntegrationBindings...)
 	for _, raw := range spec.ProtocolFixtures {

@@ -95,6 +95,9 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = validateSpec(spec); err != nil {
 		return nil, err
 	}
+	// Generate fixture credentials once so the persisted protocol fixture and
+	// its runtime integration binding use the same signing secret.
+	normalizeProtocolFixtureSpecs(&spec)
 	if s.runtime() == nil {
 		return nil, errors.New("runtime API unavailable")
 	}
