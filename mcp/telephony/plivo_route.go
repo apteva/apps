@@ -247,15 +247,18 @@ func (a *App) handlePlivoInboundStatus(w http.ResponseWriter, r *http.Request, r
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	status := normalizeCallStatus(r.FormValue("CallStatus"))
-	reason := firstNonEmpty(r.FormValue("HangupCauseName"), r.FormValue("HangupCause"), r.FormValue("HangupSource"))
-	if status != "" {
-		if err := a.db().updateStatus(row.ID, status, reason); err != nil {
+	update := callbackUpdateFor("plivo", r)
+	if update.Status != "" {
+		created, err := a.db().updateStatusWithFacts(row.ID, update.Status, update.Error, update.Facts)
+		if err != nil {
 			http.Error(w, "persist status", http.StatusInternalServerError)
 			return
 		}
+		if created && globalCtx != nil {
+			_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), row.ID)
+		}
 	}
-	if isTerminalStatus(status) && globalCtx != nil {
+	if isTerminalStatus(update.Status) && globalCtx != nil {
 		_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
 	}
 	w.WriteHeader(http.StatusNoContent)

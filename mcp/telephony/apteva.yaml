@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.16
+version: 0.1.17
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -39,11 +39,6 @@ requires:
       tools:
         voice.place:  make_call
         voice.update: update_call    # hangup via Status=completed
-      events:
-        - call.initiated
-        - call.ringing
-        - call.completed
-        - call.failed
       required: true
       label: "Voice carrier"
       hint: "Provide a Twilio, Telnyx, Plivo, SignalWire, or Vonage connection with a voice-capable phone number. The From= value is read from the connection's phone_number field."
@@ -73,6 +68,9 @@ provides:
     - { name: telephony_pending_calls, description: "List pending inbound calls for the calling agent." }
     - { name: telephony_hangup,       description: "End an active call. Args: call_id." }
     - { name: telephony_active_calls, description: "List ongoing calls with thread IDs and durations." }
+    - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
+    - { name: telephony_call_get, description: "Get one call by Telephony or provider call id." }
+    - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
@@ -96,6 +94,67 @@ provides:
     - { name: telephony_compliance_requirement_set, description: "Set a compliance requirement value or document. Args: compliance_id plus provider requirement fields." }
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness. Args: compliance_id." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review. Args: compliance_id." }
+  publishes:
+    - name: call.incoming
+      description: An inbound call reached a configured route.
+      payload: &call_event_payload
+        schema_version: integer
+        event_id: string
+        topic: string
+        call_id: string
+        provider: string
+        provider_call_id: string
+        direction: string
+        from_number: string
+        to_number: string
+        status: string
+        previous_status: string
+        agent_id: integer
+        route_id: string
+        occurred_at: string
+        placed_at: string
+        answered_at: string
+        ended_at: string
+        revision: integer
+        source: string
+        provider_event_id: string
+        provider_sequence: integer
+        duration_seconds: integer
+        talk_duration_seconds: integer
+        error_message: string
+        termination: object
+    - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
+    - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
+    - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
+    - { name: call.completed, description: "The call ended normally.", payload: *call_event_payload }
+    - { name: call.failed, description: "The call failed.", payload: *call_event_payload }
+    - { name: call.busy, description: "The destination was busy.", payload: *call_event_payload }
+    - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
+    - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
+    - name: recording.ready
+      description: A provider recording is ready.
+      payload: &recording_event_payload
+        id: string
+        call_id: string
+        provider: string
+        provider_recording_id: string
+        provider_status: string
+        channels: integer
+        track: string
+        format: string
+        duration_ms: integer
+        size_bytes: integer
+        storage_file_id: integer
+        storage_status: string
+        created_at: string
+        completed_at: string
+        stored_at: string
+    - { name: recording.stored, description: "A recording was copied to durable Storage.", payload: *recording_event_payload }
+    - name: recording.deleted
+      description: A recording was deleted.
+      payload:
+        recording_id: string
+        call_id: string
   ui_panels:
     - slot: project.page
       label: Calls
