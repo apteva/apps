@@ -561,7 +561,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     </div>
                   </div>
                 ) : (
-                  <table className="w-full min-w-3xl table-fixed text-sm">
+                  <table className="w-full table-fixed text-sm" style={{ minWidth: "48rem" }}>
                     <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim">
                       <tr>
                         <th className="w-2/5 px-4 py-2 text-left font-medium">Campaign</th>
