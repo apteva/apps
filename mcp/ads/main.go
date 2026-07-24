@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.18
+version: 0.1.19
 scopes: [project, global]
 requires:
   permissions:
@@ -1697,6 +1697,8 @@ func (metaAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		if mapped, ok := metaBidStrategy[bs]; ok {
 			input["bid_strategy"] = mapped
 		}
+	} else if input["daily_budget"] != nil || input["lifetime_budget"] != nil {
+		input["bid_strategy"] = "LOWEST_COST_WITHOUT_CAP"
 	}
 	if v, _ := args["start_time"].(string); v != "" {
 		input["start_time"] = v
@@ -1813,6 +1815,8 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 		if mapped, ok := metaBidStrategy[bs]; ok {
 			input["bid_strategy"] = mapped
 		}
+	} else if input["daily_budget"] != nil || input["lifetime_budget"] != nil {
+		input["bid_strategy"] = "LOWEST_COST_WITHOUT_CAP"
 	}
 	if v := intArg(args, "bid_amount_cents", 0); v > 0 {
 		input["bid_amount"] = strconv.Itoa(v)

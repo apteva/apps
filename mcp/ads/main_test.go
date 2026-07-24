@@ -992,11 +992,12 @@ func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	acctID, _ := res.LastInsertId()
 
 	if _, err := app.toolAdSetCreate(ctx, map[string]any{
-		"ad_account_id":     acctID,
-		"campaign_id":       "120000",
-		"name":              "AS1",
-		"optimization_goal": "conversions",
-		"targeting":         map[string]any{"geo_locations": map[string]any{"countries": []any{"US"}}},
+		"ad_account_id":      acctID,
+		"campaign_id":        "120000",
+		"name":               "AS1",
+		"optimization_goal":  "conversions",
+		"daily_budget_cents": 100,
+		"targeting":          map[string]any{"geo_locations": map[string]any{"countries": []any{"US"}}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1006,6 +1007,9 @@ func TestAdSetCreate_MapsOptimizationGoal(t *testing.T) {
 	}
 	if call.Input["billing_event"] != "IMPRESSIONS" {
 		t.Fatalf("billing_event default lost: %v", call.Input["billing_event"])
+	}
+	if call.Input["bid_strategy"] != "LOWEST_COST_WITHOUT_CAP" {
+		t.Fatalf("budgeted ad set must default to lowest cost: %#v", call.Input)
 	}
 }
 
