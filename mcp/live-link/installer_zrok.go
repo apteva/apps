@@ -96,7 +96,9 @@ func zrokArtifact(goos, goarch string) (binaryArtifact, error) {
 	const base = "https://github.com/openziti/zrok/releases/download/v2.0.4/"
 	artifact := binaryArtifact{
 		Version: zrokPinnedVersion, Archived: true,
-		MaxDownload: 40 << 20, MaxExtracted: 80 << 20,
+		// zrok2 v2.0.4 is 87-92 MiB depending on platform. Keep the
+		// extraction bounded while leaving headroom for every pinned asset.
+		MaxDownload: 40 << 20, MaxExtracted: 128 << 20,
 		AllowedHosts: map[string]bool{
 			"github.com": true, "release-assets.githubusercontent.com": true,
 			"objects.githubusercontent.com": true,

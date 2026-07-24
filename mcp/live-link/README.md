@@ -85,7 +85,7 @@ For each provider, Live Link resolves the agent in this order:
 3. A matching managed binary in the app data directory.
 4. A pinned and verified download for supported Linux or macOS architectures.
 
-Version `0.6.0` pins cloudflared `2026.7.1`, ngrok `3.39.9`, and zrok `2.0.4`.
+Version `0.6.1` pins cloudflared `2026.7.1`, ngrok `3.39.9`, and zrok `2.0.4`.
 The ngrok stable download URL is mutable; a changed upstream archive
 intentionally fails checksum verification until a new Live Link version updates
 the pin. zrok artifacts use the checksums published with its GitHub release.

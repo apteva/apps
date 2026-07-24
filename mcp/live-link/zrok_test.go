@@ -38,6 +38,9 @@ func TestZrokArtifactsArePinned(t *testing.T) {
 		if err := validateArtifactURL(artifact); err != nil {
 			t.Errorf("%s/%s: invalid artifact: %v", platform[0], platform[1], err)
 		}
+		if artifact.MaxExtracted < 100<<20 {
+			t.Errorf("%s/%s: extraction limit %d is below the pinned zrok2 binary size", platform[0], platform[1], artifact.MaxExtracted)
+		}
 	}
 	if _, err := zrokArtifact("windows", "amd64"); err == nil || !strings.Contains(err.Error(), "zrok2_path") {
 		t.Fatalf("unsupported platform error=%v", err)
