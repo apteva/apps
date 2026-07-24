@@ -5,13 +5,18 @@ import {
   ArrowUp,
   Check,
   FolderOpen,
+  ImagePlus,
+  LoaderCircle,
   Plus,
   Save,
   Send,
+  Trash2,
   X,
 } from "lucide-react";
 
 const API = "/api/apps/creators";
+const STORAGE_API = "/api/apps/storage";
+const MAX_COVER_BYTES = 20 * 1024 * 1024;
 
 function qs(projectId: string, extra: Record<string, unknown> = {}) {
   const params = new URLSearchParams();
@@ -46,6 +51,32 @@ async function api(path: string, projectId: string, options: any = {}) {
     throw new Error(message);
   }
   return response.json();
+}
+
+function storageFileURL(fileId: number, projectId: string) {
+  return `${STORAGE_API}/files/${fileId}/content${qs(projectId)}`;
+}
+
+async function uploadCoverFile(file: File, projectId: string, folder: string) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("folder", folder);
+  form.append("visibility", "private");
+  const response = await fetch(`${STORAGE_API}/files${qs(projectId)}`, {
+    method: "POST",
+    credentials: "same-origin",
+    body: form,
+  });
+  if (!response.ok) {
+    throw new Error(`Cover upload failed: ${await response.text()}`);
+  }
+  const payload = await response.json();
+  const uploaded = payload.file || payload;
+  const id = Number(uploaded.id || 0);
+  if (!id) {
+    throw new Error("Storage did not return a file ID");
+  }
+  return id;
 }
 
 const emptyCollectionDraft = {
@@ -88,6 +119,8 @@ function CreatorsPanel({ projectId }: { projectId: string }) {
   const [selectedCollectionId, setSelectedCollectionId] = useState<number | null>(null);
   const [collectionEditor, setCollectionEditor] = useState<any>(null);
   const [orderedPostIds, setOrderedPostIds] = useState<number[]>([]);
+  const [coverUploading, setCoverUploading] = useState(false);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
 
   const spaceQuery = selectedSpaceId ? { space_id: selectedSpaceId } : {};
 
@@ -274,6 +307,62 @@ function CreatorsPanel({ projectId }: { projectId: string }) {
       setCollectionEditor(null);
       setOrderedPostIds([]);
       await load();
+    });
+
+  const uploadCollectionCover = async (event: any) => {
+    const file = event.target.files?.[0] as File | undefined;
+    event.target.value = "";
+    if (!file || !selectedCollectionId) return;
+    if (!file.type.startsWith("image/")) {
+      setStatus("Collection cover must be an image.");
+      return;
+    }
+    if (file.size > MAX_COVER_BYTES) {
+      setStatus("Collection cover must be 20 MB or smaller.");
+      return;
+    }
+    setCoverUploading(true);
+    setStatus("");
+    try {
+      const folder = `/creators/${space?.slug || "creator"}/collections/`;
+      const fileId = await uploadCoverFile(file, projectId, folder);
+      await api(`/collections/${selectedCollectionId}`, projectId, {
+        method: "PATCH",
+        query: spaceQuery,
+        body: { cover_storage_file_id: fileId },
+      });
+      setCollectionEditor((current: any) => ({
+        ...current,
+        cover_storage_file_id: fileId,
+      }));
+      await load();
+      setStatus("Collection cover updated.");
+    } catch (error: any) {
+      setStatus(error.message || "Cover upload failed");
+    } finally {
+      setCoverUploading(false);
+    }
+  };
+
+  const removeCollectionCover = () =>
+    run(async () => {
+      if (!selectedCollectionId) return;
+      setCoverUploading(true);
+      try {
+        await api(`/collections/${selectedCollectionId}`, projectId, {
+          method: "PATCH",
+          query: spaceQuery,
+          body: { cover_storage_file_id: 0 },
+        });
+        setCollectionEditor((current: any) => ({
+          ...current,
+          cover_storage_file_id: "",
+        }));
+        await load();
+        setStatus("Collection cover removed.");
+      } finally {
+        setCoverUploading(false);
+      }
     });
 
   const toggleCollectionPost = (id: number) => {
@@ -463,7 +552,7 @@ function CreatorsPanel({ projectId }: { projectId: string }) {
                   <Archive size={16} />
                   Archive
                 </button>
-                <button type="button" onClick={saveCollection} className={primary}>
+                <button type="button" onClick={saveCollection} disabled={coverUploading} className={primary}>
                   <Save size={16} />
                   Save
                 </button>
@@ -506,21 +595,64 @@ function CreatorsPanel({ projectId }: { projectId: string }) {
                     ))}
                   </select>
                 </label>
-                <label className={fieldLabel}>
-                  <span>Cover storage file ID</span>
-                  <input
-                    type="number"
-                    min="1"
-                    value={collectionEditor.cover_storage_file_id}
-                    onChange={(event) =>
-                      setCollectionEditor({
-                        ...collectionEditor,
-                        cover_storage_file_id: event.target.value,
-                      })
-                    }
-                    className={input}
-                  />
-                </label>
+                <div className={`${fieldLabel} md:col-span-2`}>
+                  <span>Cover image</span>
+                  <div className="border border-border rounded overflow-hidden bg-bg-input">
+                    <div className="aspect-[3/1] min-h-36 max-h-64 grid place-items-center overflow-hidden">
+                      {collectionEditor.cover_storage_file_id ? (
+                        <img
+                          src={storageFileURL(Number(collectionEditor.cover_storage_file_id), projectId)}
+                          alt={`${collectionEditor.title} cover`}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : (
+                        <ImagePlus size={30} className="text-text-muted" />
+                      )}
+                    </div>
+                    <div className="border-t border-border px-3 py-2 flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => coverInputRef.current?.click()}
+                        disabled={coverUploading}
+                        className={secondary}
+                      >
+                        {coverUploading ? (
+                          <LoaderCircle size={16} className="animate-spin" />
+                        ) : (
+                          <ImagePlus size={16} />
+                        )}
+                        {coverUploading
+                          ? "Uploading"
+                          : collectionEditor.cover_storage_file_id
+                            ? "Replace cover"
+                            : "Upload cover"}
+                      </button>
+                      <input
+                        ref={coverInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={uploadCollectionCover}
+                        className="hidden"
+                      />
+                      {collectionEditor.cover_storage_file_id && (
+                        <button
+                          type="button"
+                          onClick={removeCollectionCover}
+                          disabled={coverUploading}
+                          className={secondary}
+                        >
+                          <Trash2 size={16} />
+                          Remove
+                        </button>
+                      )}
+                      {collectionEditor.cover_storage_file_id && (
+                        <span className="ml-auto text-xs text-text-muted">
+                          Storage #{collectionEditor.cover_storage_file_id}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
                 <label className={`${fieldLabel} md:col-span-2`}>
                   <span>Description</span>
                   <textarea
