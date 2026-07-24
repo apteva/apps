@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.17
+version: 0.1.18
 scopes: [project, global]
 requires:
   permissions:
@@ -1617,11 +1617,12 @@ var metaBillingEvent = map[string]string{
 }
 
 const (
-	metaCampaignFields = "id,name,objective,status,effective_status,bid_strategy,daily_budget,lifetime_budget,budget_remaining,special_ad_categories,start_time,stop_time,created_time,updated_time"
-	metaAdSetFields    = "id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,bid_strategy,bid_amount,optimization_goal,billing_event,targeting,promoted_object,start_time,end_time,budget_remaining,created_time,dsa_beneficiary,dsa_payor"
-	metaAdFields       = "id,name,adset_id,campaign_id,status,effective_status,creative{id,name,thumbnail_url,object_story_spec},tracking_specs,created_time"
-	metaCreativeFields = "id,name,status,object_story_spec,thumbnail_url,url_tags,created_time"
-	metaAudienceFields = "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status,description"
+	metaCampaignFields    = "id,name,objective,status,effective_status,bid_strategy,daily_budget,lifetime_budget,budget_remaining,special_ad_categories,start_time,stop_time,created_time,updated_time"
+	metaAdSetFields       = "id,name,campaign_id,status,effective_status,daily_budget,lifetime_budget,bid_strategy,bid_amount,optimization_goal,billing_event,targeting,promoted_object,start_time,end_time,budget_remaining,created_time,dsa_beneficiary,dsa_payor"
+	metaAdFields          = "id,name,adset_id,campaign_id,status,effective_status,creative{id,name,thumbnail_url,object_story_spec},tracking_specs,created_time"
+	metaCreativeFields    = "id,name,status,object_story_spec,thumbnail_url,url_tags,created_time"
+	metaCreativeGetFields = "id,name,status,object_story_spec,thumbnail_url,url_tags,body,title,link_url,image_url"
+	metaAudienceFields    = "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status,description"
 )
 
 type metaAdapter struct{}
@@ -2071,7 +2072,7 @@ func (metaAdapter) CreativeGet(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	}
 	return a.execOrErr(ctx, acct, def.CreativeGetTool, map[string]any{
 		"creativeId": creativeID,
-		"fields":     metaCreativeFields,
+		"fields":     metaCreativeGetFields,
 	})
 }
 

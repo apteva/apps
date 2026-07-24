@@ -1255,6 +1255,10 @@ func TestMetaCreativeGetAndDelete_VerifyAccountOwnership(t *testing.T) {
 		pf.executeCalls[3].Tool != "creative_delete" {
 		t.Fatalf("creative ownership sequence is wrong: %#v", pf.executeCalls)
 	}
+	getFields, _ := pf.executeCalls[1].Input["fields"].(string)
+	if strings.Contains(getFields, "created_time") || !strings.Contains(getFields, "object_story_spec") {
+		t.Fatalf("creative get fields are not Graph node compatible: %q", getFields)
+	}
 	if pf.executeCalls[3].Input["creativeId"] != "creative_1" {
 		t.Fatalf("creative delete ID is wrong: %#v", pf.executeCalls[3])
 	}
