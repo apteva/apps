@@ -82,11 +82,13 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 		t.Errorf("publish-event drift: yaml=%v embed=%v", yamlEvents, embedEvents)
 	}
 
-	var browserView *sdk.UIComponent
+	var browserView, browserCard *sdk.UIComponent
 	for i := range fromFile.Provides.UIComponents {
-		if fromFile.Provides.UIComponents[i].Name == "browser-view" {
+		switch fromFile.Provides.UIComponents[i].Name {
+		case "browser-view":
 			browserView = &fromFile.Provides.UIComponents[i]
-			break
+		case "browser-card":
+			browserCard = &fromFile.Provides.UIComponents[i]
 		}
 	}
 	if browserView == nil {
@@ -95,6 +97,27 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 	required, ok := browserView.PropsSchema["required"].([]any)
 	if !ok || len(required) != 1 || required[0] != "session_id" {
 		t.Fatalf("browser-view must require only session_id, got %#v", browserView.PropsSchema["required"])
+	}
+	if browserCard == nil {
+		t.Fatal("browser-card compatibility alias missing")
+	}
+	if browserCard.Entry != browserView.Entry {
+		t.Fatalf("browser-card must resolve to browser-view renderer: alias=%q canonical=%q", browserCard.Entry, browserView.Entry)
+	}
+	required, ok = browserCard.PropsSchema["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "instance_id" {
+		t.Fatalf("browser-card compatibility alias must require only instance_id, got %#v", browserCard.PropsSchema["required"])
+	}
+
+	var embeddedBrowserCard *sdk.UIComponent
+	for i := range fromEmbed.Provides.UIComponents {
+		if fromEmbed.Provides.UIComponents[i].Name == "browser-card" {
+			embeddedBrowserCard = &fromEmbed.Provides.UIComponents[i]
+			break
+		}
+	}
+	if embeddedBrowserCard == nil || embeddedBrowserCard.Entry != browserView.Entry {
+		t.Fatalf("embedded browser-card must resolve to browser-view renderer, got %#v", embeddedBrowserCard)
 	}
 }
 

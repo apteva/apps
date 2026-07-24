@@ -53,10 +53,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.59
+version: 0.7.60
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.59 makes browser-view
-  follow a session live and automatically settle on its durable final frame.
+  Watch, steer, and replay hosted browser sessions. v0.7.60 makes the legacy
+  browser-card alias render the same live-to-final session view as browser-view.
 scopes: [project, global]
 requires:
   permissions:
@@ -118,7 +118,7 @@ provides:
       entry: /ui/TimelineCard.mjs
       slots: [chat.message_attachment]
     - name: browser-card
-      entry: /ui/BrowserCard.mjs
+      entry: /ui/BrowserViewCard.mjs
       slots: [chat.message_attachment]
     - name: screenshot-with-som
       entry: /ui/ScreenshotCard.mjs

@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.59
+version: 0.7.60
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.59 makes browser-view
-  follow a session live and automatically settle on its durable final frame.
+  Watch, steer, and replay hosted browser sessions. v0.7.60 makes the legacy
+  browser-card alias render the same live-to-final session view as browser-view.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -220,25 +220,22 @@ provides:
         preview: true
         session_id: "br_example"
 
-    # v0.7.57 compatibility aliases. They use the canonical source primitives
-    # so old messages remain renderable without duplicate browser viewers.
+    # Compatibility aliases. They resolve onto canonical renderers so old
+    # messages and stale agent output remain visual without duplicate viewers.
     - name: browser-card
-      entry: /ui/BrowserCard.mjs
+      entry: /ui/BrowserViewCard.mjs
       slots: [chat.message_attachment]
       props_schema:
         type: object
-        required: [instance_id, backend, url]
+        required: [instance_id]
         properties:
           instance_id: { type: string }
-          backend:     { type: string, enum: [local, browserbase, steel, browser-engine, service] }
-          url:         { type: string }
-          status:      { type: string }
+          caption:     { type: string }
+          height:      { type: integer, default: 360 }
       preview_props:
         preview: true
         instance_id: "demo-instance"
-        backend: "local"
-        url: "https://example.com"
-        status: "active"
+        caption: "Example Domain"
 
     # Annotated screenshot — agent attaches after computer_use(screenshot).
     # Renders the image with SoM badges as an SVG
