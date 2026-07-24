@@ -103,11 +103,13 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		RecordingMode: req.RecordingMode, RecordingChannels: req.RecordingChannels,
 	})
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
-		"To":             req.To,
-		"From":           req.From,
-		"Twiml":          twiml,
-		"StatusCallback": c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
-		"Timeout":        req.TimeoutSec,
+		"To":                   req.To,
+		"From":                 req.From,
+		"Twiml":                twiml,
+		"StatusCallback":       c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
+		"StatusCallbackMethod": "POST",
+		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
+		"Timeout":              req.TimeoutSec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("twilio make_call failed: %w", err)
@@ -147,6 +149,7 @@ func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*ca
 		"Twiml":                cxml,
 		"StatusCallback":       c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID),
 		"StatusCallbackMethod": "POST",
+		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
 	})
 	if err != nil {
