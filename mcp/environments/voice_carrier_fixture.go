@@ -447,12 +447,56 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 }
 
 func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller *voiceSocket, activity *voiceMediaActivity, capture *cappedAudio, result chan<- error) {
+	incoming := make(chan voiceRelayEvent, 128)
+	go readCarrierAudio(ctx, media, capture, incoming)
+
+	ticker := time.NewTicker(voiceFrameDuration)
+	defer ticker.Stop()
+	var relay voiceMediaRelay
+	for {
+		input := (<-chan voiceRelayEvent)(incoming)
+		if relay.queue.bytes >= maxVoiceRelayBuffer {
+			input = nil
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-input:
+			if event.err != nil {
+				sendVoiceRelayResult(ctx, result, event.err)
+				return
+			}
+			if event.chunk != nil {
+				relay.append(*event.chunk)
+				activity.update("receptionist", true, time.Now())
+			}
+		case <-ticker.C:
+			frame, speechStarted, _, ok := relay.nextFrame()
+			if !ok {
+				activity.update("receptionist", false, time.Time{})
+				continue
+			}
+			activity.update("receptionist", true, time.Now())
+			if speechStarted {
+				if err := caller.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
+					sendVoiceRelayResult(ctx, result, err)
+					return
+				}
+			}
+			if err := caller.write(websocket.BinaryMessage, frame); err != nil {
+				sendVoiceRelayResult(ctx, result, err)
+				return
+			}
+		}
+	}
+}
+
+func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
 	resampler := newCarrierResampler(8000, 24000)
-	lastSpeech := time.Time{}
 	for {
 		messageType, raw, err := media.conn.ReadMessage()
 		if err != nil {
-			sendVoiceRelayResult(ctx, result, err)
+			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{err: err})
 			return
 		}
 		if messageType != websocket.TextMessage {
@@ -487,17 +531,8 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 		if len(data) == 0 {
 			continue
 		}
-		now := time.Now()
-		if carrierRMS(pcm24) > 300 && (lastSpeech.IsZero() || now.Sub(lastSpeech) > 500*time.Millisecond) {
-			_ = caller.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`))
-		}
-		if carrierRMS(pcm24) > 300 {
-			lastSpeech = now
-		}
 		capture.append(data)
-		activity.update("receptionist", true, now)
-		if err := caller.write(websocket.BinaryMessage, data); err != nil {
-			sendVoiceRelayResult(ctx, result, err)
+		if !sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{chunk: &voiceAudioChunk{audio: data}}) {
 			return
 		}
 	}
