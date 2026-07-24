@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -18,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.18
+version: 0.8.23
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -96,6 +97,20 @@ provides:
       description: List Fleet domain grants.
     - name: tenant_domain_revoke
       description: Revoke a Fleet domain grant.
+    - name: tenant_host_attach
+      description: Register one exact application hostname for a tenant.
+    - name: tenant_host_list
+      description: List exact tenant host mappings.
+    - name: tenant_host_remove
+      description: Remove one exact tenant host mapping.
+    - name: tenant_ingress_prepare_direct
+      description: Prepare a hosted tenant to serve its domains directly on its Instances host.
+    - name: tenant_ingress_verify
+      description: Verify hosted direct-ingress DNS, HTTPS, and tenant-local routes.
+    - name: tenant_ingress_finalize
+      description: Finalize hosted direct ingress after successful verification.
+    - name: tenant_ingress_rollback
+      description: Restore parent ingress for a hosted direct-ingress tenant.
     - name: tenant_domain_record_set
       description: Proxy a DNS upsert for a tenant inherited domain.
     - name: tenant_domain_record_delete
@@ -123,9 +138,9 @@ provides:
     - name: fleet_tenant_backup_plan
       description: Report backup coverage and Backup-app scope arguments for a tenant.
     - name: fleet_tenant_snapshot
-      description: Provider hook used by Backup to snapshot one local Fleet tenant.
+      description: Provider hook used by Backup to stream a snapshot of one local Fleet tenant.
     - name: fleet_tenant_restore
-      description: Provider hook used by Backup to restore one local Fleet tenant.
+      description: Provider hook used by Backup to stream and restore one local Fleet tenant snapshot.
   ui_panels:
     - slot: project.page
       label: Fleet
@@ -135,7 +150,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.18
+    ref: fleet/v0.8.23
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -167,16 +182,17 @@ type App struct {
 	// when network detection fails (offline dev box, locked-down VPS).
 	publicHost string
 
-	transferMu     sync.Mutex
-	transfers      map[string]*tenantTransfer
-	transferSecret []byte
-	metaMu         sync.Mutex
-	metaCache      map[string]metaCacheEntry
-	hostedTunnelMu sync.Mutex
-	hostedTunnels  map[hostedTunnelKey]int
-	dirtyTunnels   map[hostedTunnelKey]bool
-	runtimeMu      sync.Mutex
-	runtimeReady   map[int64]time.Time
+	transferMu         sync.Mutex
+	transfers          map[string]*tenantTransfer
+	transferSecret     []byte
+	metaMu             sync.Mutex
+	metaCache          map[string]metaCacheEntry
+	hostedTunnelMu     sync.Mutex
+	hostedTunnels      map[hostedTunnelKey]int
+	dirtyTunnels       map[hostedTunnelKey]bool
+	startupRetryDelays []time.Duration
+	runtimeMu          sync.Mutex
+	runtimeReady       map[int64]time.Time
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -214,7 +230,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.publicHost = detectPublicHost()
 	globalCtx = ctx
 	if err := a.reconcileOnBoot(ctx); err != nil {
-		ctx.Logger().Warn("fleet: reconcile on boot", "err", err)
+		return fmt.Errorf("fleet startup reconciliation failed: %w", err)
 	}
 	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot(), "public_host", a.publicHost)
 	return nil
@@ -509,7 +525,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_domain_grant",
-			Description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes the base + wildcard DNS records and registers parent ingress to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?.",
+			Description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes the base + wildcard DNS records; application hostnames are registered individually with tenant_host_attach. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -536,7 +552,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_domain_revoke",
-			Description: "Revoke a Fleet domain grant: unregister parent ingress, delete DNS records, and remove the grant. Args: tenant_id, domain.",
+			Description: "Revoke a Fleet domain grant: remove linked exact-host ingress, delete DNS records, and remove the grant. Args: tenant_id, domain.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -546,6 +562,89 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "domain"},
 			},
 			Handler: a.toolDomainGrantRevoke,
+		},
+		{
+			Name:        "tenant_host_attach",
+			Description: "Register one exact application hostname against a tenant's current ingress target. Fleet persists the mapping and refreshes it whenever a hosted tunnel changes. DNS is not modified. An active covering domain grant is linked automatically; domain_grant_id can select one explicitly. Existing manual exact routes can be adopted by calling this tool. Args: tenant_id, hostname, domain_grant_id?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":       map[string]any{"type": "string"},
+					"hostname":        map[string]any{"type": "string"},
+					"domain_grant_id": map[string]any{"type": "integer"},
+				},
+				"required": []string{"tenant_id", "hostname"},
+			},
+			Handler: a.toolTenantHostAttach,
+		},
+		{
+			Name:        "tenant_host_list",
+			Description: "List exact tenant host mappings and their ingress reconciliation status. Args: tenant_id? (optional filter).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+				},
+			},
+			Handler: a.toolTenantHostList,
+		},
+		{
+			Name:        "tenant_host_remove",
+			Description: "Remove one exact tenant hostname from parent ingress and Fleet persistence without changing DNS or tenant data. Args: tenant_id, hostname.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"hostname":  map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "hostname"},
+			},
+			Handler: a.toolTenantHostRemove,
+		},
+		{
+			Name:        "tenant_ingress_prepare_direct",
+			Description: "Prepare a hosted tenant for direct ingress on its Instances host. Opens host HTTP/HTTPS firewall services, restarts the tenant with native ingress, and repoints Fleet-managed DNS while retaining parent routes. Client-managed DNS must be pointed to the returned target_ip. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolIngressPrepareDirect,
+		},
+		{
+			Name:        "tenant_ingress_verify",
+			Description: "Verify a prepared hosted tenant's DNS targets, public HTTPS, native listeners, and recorded tenant-local application routes. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"tenant_id": map[string]any{"type": "string"}},
+				"required":   []string{"tenant_id"},
+			},
+			Handler: a.toolIngressVerify,
+		},
+		{
+			Name:        "tenant_ingress_finalize",
+			Description: "Re-run direct-ingress verification and remove parent ingress routes only after every check passes. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"tenant_id": map[string]any{"type": "string"}},
+				"required":   []string{"tenant_id"},
+			},
+			Handler: a.toolIngressFinalize,
+		},
+		{
+			Name:        "tenant_ingress_rollback",
+			Description: "Restore parent routes and Fleet-managed DNS for a hosted direct-ingress tenant. The first call preserves native ingress during DNS TTL; call again with confirm_disable=true after the TTL to restart in parent mode. Args: tenant_id, confirm_disable?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":       map[string]any{"type": "string"},
+					"confirm_disable": map[string]any{"type": "boolean"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolIngressRollback,
 		},
 		{
 			Name:        "tenant_domain_record_set",
@@ -712,29 +811,30 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "fleet_tenant_snapshot",
-			Description: "Provider hook used by Backup. Stops a local tenant if needed, archives its full data dir plus metadata, restarts it, and returns archive_b64. Args: tenant_id or scope_id.",
+			Description: "Provider hook used by Backup. Stops a local tenant if needed and returns a signed streaming snapshot URL. Args: tenant_id or scope_id, supports_streaming.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id":  map[string]any{"type": "string"},
-					"scope_id":   map[string]any{"type": "string"},
-					"scope_kind": map[string]any{"type": "string"},
+					"tenant_id":          map[string]any{"type": "string"},
+					"scope_id":           map[string]any{"type": "string"},
+					"scope_kind":         map[string]any{"type": "string"},
+					"supports_streaming": map[string]any{"type": "boolean"},
 				},
 			},
 			Handler: a.toolFleetTenantSnapshot,
 		},
 		{
 			Name:        "fleet_tenant_restore",
-			Description: "Provider hook used by Backup. Replaces a local tenant's data dir from archive_b64 and restarts it if it was running. Args: tenant_id or scope_id, archive_b64.",
+			Description: "Provider hook used by Backup. Prepares a signed streaming upload that validates and restores one local tenant. Args: tenant_id or scope_id, prepare_stream.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id":   map[string]any{"type": "string"},
-					"scope_id":    map[string]any{"type": "string"},
-					"scope_kind":  map[string]any{"type": "string"},
-					"archive_b64": map[string]any{"type": "string"},
+					"tenant_id":      map[string]any{"type": "string"},
+					"scope_id":       map[string]any{"type": "string"},
+					"scope_kind":     map[string]any{"type": "string"},
+					"archive_b64":    map[string]any{"type": "string"},
+					"prepare_stream": map[string]any{"type": "boolean"},
 				},
-				"required": []string{"archive_b64"},
 			},
 			Handler: a.toolFleetTenantRestore,
 		},

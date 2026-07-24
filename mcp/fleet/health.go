@@ -86,13 +86,19 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 		app.Logger().Error("fleet: decrypt key", "tenant", t.ID, "err", err)
 		return
 	}
-	baseURL, err := a.internalTenantBaseURL(app, t)
-	if err != nil {
-		_ = a.store.updateHealth(t.ID, false, "", []byte(fmt.Sprintf(`{"error":%q}`, err.Error())))
+	baseURL := ""
+	var baseErr error
+	if t.IngressMode == IngressDirect {
+		baseURL = "https://" + t.Domain
+	} else {
+		baseURL, baseErr = a.internalTenantBaseURL(app, t)
+	}
+	if baseErr != nil {
+		_ = a.store.updateHealth(t.ID, false, "", []byte(fmt.Sprintf(`{"error":%q}`, baseErr.Error())))
 		a.maybeRespawnHosted(ctx, app, t)
 		return
 	}
-	if t.IsHosted() && a.takeHostedTunnelChanged(t.InstanceID, portFromTenant(t)) {
+	if t.IsHosted() && t.IngressMode != IngressDirect && a.takeHostedTunnelChanged(t.InstanceID, portFromTenant(t)) {
 		if err := a.refreshTenantIngressTargets(app, t, baseURL); err != nil {
 			a.markHostedTunnelDirty(t.InstanceID, portFromTenant(t))
 			app.Logger().Warn("fleet: refresh hosted ingress target", "tenant", t.ID, "err", err)

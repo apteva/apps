@@ -590,6 +590,7 @@ func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 		return err
 	}
 	ctx := context.Background()
+	var reconcileErrs []error
 	for _, t := range tenants {
 		if a.tenantOperation(t.ID) != "" {
 			continue
@@ -599,23 +600,10 @@ func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 			continue
 		}
 		if t.IsHosted() {
-			alive, checkErr := hostedPortListening(app, t.InstanceID, port)
-			if checkErr != nil {
-				app.Logger().Warn("fleet: hosted reconcile check", "tenant", t.ID, "err", checkErr)
-				continue
-			}
-			if alive {
-				if baseURL, tunnelErr := a.internalTenantBaseURL(app, t); tunnelErr == nil {
-					if routeErr := a.refreshTenantIngressTargets(app, t, baseURL); routeErr != nil {
-						app.Logger().Warn("fleet: hosted route reconcile", "tenant", t.ID, "err", routeErr)
-					}
-				}
-				if t.Status == StatusStopped {
-					_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
-				}
-				_ = a.store.resetRespawn(t.ID)
-			} else if t.Status == StatusActive || t.Status == StatusStarting || t.Status == StatusSetupPending {
-				a.tryRespawnHosted(ctx, app, t)
+			if reconcileErr := a.reconcileHostedOnBoot(ctx, app, t, port); reconcileErr != nil {
+				_ = a.store.recordEvent(t.ID, "hosted_reconcile_failed", "worker:reconcile",
+					map[string]any{"error": reconcileErr.Error(), "instance_id": t.InstanceID})
+				reconcileErrs = append(reconcileErrs, fmt.Errorf("tenant %s: %w", t.ID, reconcileErr))
 			}
 			continue
 		}
@@ -630,7 +618,7 @@ func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 			a.tryRespawn(ctx, t)
 		}
 	}
-	return nil
+	return errors.Join(reconcileErrs...)
 }
 
 // portInUse reports whether something is bound to localhost:<port>. We
@@ -891,14 +879,7 @@ func (a *App) tryRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant) 
 		return
 	}
 	_ = a.store.bumpRespawn(t.ID)
-	_, _, err = a.spawnHostedTenant(app, hostedSpawnSpec{
-		InstanceID: t.InstanceID,
-		InstanceIP: info.PublicIPv4,
-		Slug:       t.Slug,
-		Port:       port,
-		AptevaVer:  tenantVersion(t),
-		FreshSetup: false,
-	})
+	_, _, err = a.spawnHostedTenant(app, hostedSpawnSpecForTenant(t, info.PublicIPv4, port))
 	if err != nil {
 		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn", map[string]any{"error": err.Error()})
 		return

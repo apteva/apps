@@ -129,13 +129,48 @@ func instanceRunCommand(ctx *sdk.AppCtx, instanceID int64, cmd string, timeoutS 
 // hostedSpawnSpec captures everything spawnHosted needs. Built from
 // toolCreate's args + a fresh resolution of the target instance.
 type hostedSpawnSpec struct {
-	InstanceID int64
-	InstanceIP string
-	Slug       string
-	Port       int
-	AptevaVer  string // npm version, e.g. "0.17.3"
-	FreshSetup bool   // first boot → scrape setup_token from log
-	Quarantine bool   // management API only; do not activate copied workloads
+	InstanceID  int64
+	InstanceIP  string
+	Slug        string
+	Port        int
+	AptevaVer   string // npm version, e.g. "0.17.3"
+	FreshSetup  bool   // first boot → scrape setup_token from log
+	Quarantine  bool   // management API only; do not activate copied workloads
+	IngressMode string
+	PrimaryHost string
+	ACMEEmail   string
+}
+
+func hostedSpawnSpecForTenant(t *Tenant, instanceIP string, port int) hostedSpawnSpec {
+	spec := hostedSpawnSpec{
+		InstanceID:  t.InstanceID,
+		InstanceIP:  instanceIP,
+		Slug:        t.Slug,
+		Port:        port,
+		AptevaVer:   tenantVersion(t),
+		IngressMode: t.IngressMode,
+		PrimaryHost: t.Domain,
+		ACMEEmail:   hostedACMEEmail(),
+	}
+	return spec
+}
+
+func hostedACMEEmail() string {
+	if email := strings.TrimSpace(os.Getenv("FLEET_ACME_EMAIL")); email != "" {
+		return email
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_ACME_EMAIL"))
+}
+
+func hostedProcessEnv(spec hostedSpawnSpec) string {
+	directIngress := !spec.Quarantine && (spec.IngressMode == IngressDirectPending || spec.IngressMode == IngressDirect)
+	if !directIngress {
+		return "APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=0 APTEVA_HTTP_LISTEN_ADDR= APTEVA_HTTPS_LISTEN_ADDR="
+	}
+	return fmt.Sprintf(
+		"APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=1 APTEVA_HTTP_LISTEN_ADDR=:80 APTEVA_HTTPS_LISTEN_ADDR=:443 APTEVA_PRIMARY_HOST=%s APTEVA_ACME_EMAIL=%s",
+		sh(spec.PrimaryHost), sh(spec.ACMEEmail),
+	)
 }
 
 // spawnHostedTenant boots a fresh apteva-server on the remote VPS.
@@ -163,6 +198,14 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	}
 	if err := validateTenantPort(spec.Port); err != nil {
 		return "", "", err
+	}
+	directIngress := !spec.Quarantine && (spec.IngressMode == IngressDirectPending || spec.IngressMode == IngressDirect)
+	if directIngress {
+		primaryHost, hostErr := normaliseExactHostname(spec.PrimaryHost)
+		if hostErr != nil {
+			return "", "", fmt.Errorf("hosted direct ingress requires a primary domain: %w", hostErr)
+		}
+		spec.PrimaryHost = primaryHost
 	}
 	if err := a.ensureHostedRuntime(ctx, spec.InstanceID); err != nil {
 		return "", "", err
@@ -206,16 +249,17 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 		}
 	}
 
-	// 3) Spawn under setsid so the process survives the SSH session
-	//    drop. It binds only to VPS loopback; Fleet reaches it through
-	//    the Instances SSH tunnel.
-	quarantineEnv := "APTEVA_CLONE_QUARANTINE=0 "
+	// 3) Spawn under setsid so the process survives the SSH session drop.
+	// The management port always stays on loopback. Direct hosted ingress
+	// additionally binds the server-native HTTP/TLS listeners on 80/443.
+	envArgs := hostedProcessEnv(spec)
+	quarantineEnv := "APTEVA_CLONE_QUARANTINE=0"
 	if spec.Quarantine {
-		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1 "
+		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1"
 	}
 	inner := fmt.Sprintf(
-		`exec env APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=0 APTEVA_HTTP_LISTEN_ADDR= APTEVA_HTTPS_LISTEN_ADDR= %s%s --data-dir %s --port %d --no-browser >>%s 2>&1`,
-		quarantineEnv, sh(binPath), sh(dataDir), spec.Port, sh(logPath),
+		`exec env %s %s %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
+		envArgs, quarantineEnv, sh(binPath), sh(dataDir), spec.Port, sh(logPath),
 	)
 	spawnCmd := fmt.Sprintf(`
 set -eu
@@ -550,6 +594,7 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		Status:        StatusStarting,
 		InstanceID:    instanceID,
 		TargetVersion: version,
+		IngressMode:   IngressParent,
 	}
 	apiKeyStub, err := a.keys.seal([]byte("pending"))
 	if err != nil {

@@ -319,24 +319,14 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				map[string]any{"version": requested, "stage": "stop", "error": err.Error()})
 			return nil, fmt.Errorf("stop hosted: %w", err)
 		}
-		_, _, sErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
-			InstanceID: t.InstanceID,
-			InstanceIP: info.PublicIPv4,
-			Slug:       t.Slug,
-			Port:       port,
-			AptevaVer:  requested,
-			FreshSetup: false,
-		})
+		newSpec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
+		newSpec.AptevaVer = requested
+		_, _, sErr := a.spawnHostedTenant(ctx, newSpec)
 		if sErr != nil {
 			restoreTarget()
-			_, _, rollbackErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
-				InstanceID: t.InstanceID,
-				InstanceIP: info.PublicIPv4,
-				Slug:       t.Slug,
-				Port:       port,
-				AptevaVer:  oldVersion,
-				FreshSetup: false,
-			})
+			rollbackSpec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
+			rollbackSpec.AptevaVer = oldVersion
+			_, _, rollbackErr := a.spawnHostedTenant(ctx, rollbackSpec)
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error(), "rollback_error": errorString(rollbackErr)})
 			if rollbackErr != nil {
