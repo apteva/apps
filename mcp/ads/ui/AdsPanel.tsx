@@ -105,6 +105,7 @@ function Modal({
   title,
   description,
   actions,
+  size = "default",
   onClose,
   children,
   labelledBy,
@@ -112,6 +113,7 @@ function Modal({
   title: string;
   description?: string;
   actions?: React.ReactNode;
+  size?: "default" | "large";
   onClose: () => void;
   children: React.ReactNode;
   labelledBy: string;
@@ -132,7 +134,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className="w-full max-w-lg rounded border border-border bg-bg-card shadow-xl"
+        className={`w-full rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-2xl" : "max-w-lg"}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -611,6 +613,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               ↻
             </button>
           )}
+          size="large"
           onClose={() => setAddOpen(false)}
           labelledBy="ads-add-title"
         >
@@ -639,7 +642,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     href={platform.setup_url || "/integrations"}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex h-8 w-20 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
+                    className="inline-flex h-8 w-32 shrink-0 items-center justify-center rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
                   >
                     Set up
                   </a>
@@ -648,7 +651,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     type="button"
                     disabled={!platform.can_add || startingPlatform === platform.platform}
                     onClick={() => startPlatform(platform)}
-                    className="h-8 w-20 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
+                    className="h-8 w-32 shrink-0 rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
                   >
                     {startingPlatform === platform.platform
                       ? "Starting..."
