@@ -23,14 +23,16 @@ import (
 // ─── fake PlatformClient ──────────────────────────────────────────
 
 const fakeCFConnID int64 = 4242
+const fakeZrokConnID int64 = 5252
 
 // fakePlatform implements sdk.PlatformClient with a registry of
 // (tool → handler) entries the test wires up.
 type fakePlatform struct {
 	tk.BasePlatformClient
-	bindings map[string]any
-	tools    map[string]func(input map[string]any) *sdk.ExecuteResult
-	calls    []fakeCall
+	bindings    map[string]any
+	tools       map[string]func(input map[string]any) *sdk.ExecuteResult
+	calls       []fakeCall
+	credentials map[int64]*sdk.ConnectionCredentials
 }
 
 type fakeCall struct {
@@ -40,8 +42,9 @@ type fakeCall struct {
 
 func newFakePlatform() *fakePlatform {
 	return &fakePlatform{
-		bindings: map[string]any{"cloudflare": float64(fakeCFConnID)}, // WhoAmI bindings come from JSON; ints arrive as float64
-		tools:    map[string]func(map[string]any) *sdk.ExecuteResult{},
+		bindings:    map[string]any{"cloudflare": float64(fakeCFConnID)}, // WhoAmI bindings come from JSON; ints arrive as float64
+		tools:       map[string]func(map[string]any) *sdk.ExecuteResult{},
+		credentials: map[int64]*sdk.ConnectionCredentials{},
 	}
 }
 
@@ -60,7 +63,17 @@ func (p *fakePlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	}, nil
 }
 func (p *fakePlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
-	return &sdk.PlatformConnection{ID: id, AppSlug: "cloudflare", Name: "test", Status: "active"}, nil
+	slug := "cloudflare"
+	if id == fakeZrokConnID {
+		slug = "zrok"
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Name: "test", Status: "active"}, nil
+}
+func (p *fakePlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	if credentials := p.credentials[id]; credentials != nil {
+		return credentials, nil
+	}
+	return nil, errors.New("fake: no credentials")
 }
 func (p *fakePlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.calls = append(p.calls, fakeCall{Tool: tool, Input: input})

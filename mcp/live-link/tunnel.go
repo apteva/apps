@@ -69,6 +69,9 @@ const (
 	// reserved domain on paid plans; we discover the URL by scraping
 	// ngrok's logfmt-mode stdout for `url=https://...`.
 	ModeNgrok Mode = "ngrok"
+	// ModeZrok runs zrok2 locally against the app-owned native environment.
+	// A reserved public name makes the URL stable across process restarts.
+	ModeZrok Mode = "zrok"
 )
 
 // StartParams bundles everything the Manager needs to spawn a tunnel
@@ -78,13 +81,16 @@ const (
 //	Named (cloudflared): Binary, RunID, Token, Hostname (Target optional, label only)
 //	Ngrok:               Binary, Target, RunID, Authtoken (Hostname optional — pre-reserved domain)
 type StartParams struct {
-	Binary    string
-	Target    string // local URL to forward to (used as label in named mode)
-	RunID     int64
-	Mode      Mode
-	Token     string // named-cloudflare: connector token from cfd_tunnel create
-	Hostname  string // named-cloudflare: e.g. "tunnel.example.com"; pre-known public host. ngrok: optional reserved domain (paid plans).
-	Authtoken string // ngrok: agent authtoken from operator's ngrok integration
+	Binary        string
+	Target        string // local URL to forward to (used as label in named mode)
+	RunID         int64
+	Mode          Mode
+	Token         string // named-cloudflare: connector token from cfd_tunnel create
+	Hostname      string // named-cloudflare: e.g. "tunnel.example.com"; pre-known public host. ngrok: optional reserved domain (paid plans).
+	Authtoken     string // ngrok: agent authtoken from operator's ngrok integration
+	ZrokName      string // zrok: reserved name
+	ZrokNamespace string // zrok: namespace token (v0.6 uses "public")
+	ZrokHome      string // zrok: isolated HOME containing .zrok2
 }
 
 // Manager owns the tunnel-agent subprocess for one app install.
@@ -174,6 +180,19 @@ func (m *Manager) Start(p StartParams) error {
 		if p.Authtoken == "" {
 			return errors.New("ngrok mode: authtoken is empty (bind the ngrok integration first)")
 		}
+	case ModeZrok:
+		if p.Target == "" {
+			return errors.New("zrok mode: target URL is empty")
+		}
+		if p.ZrokName == "" || p.ZrokNamespace == "" {
+			return errors.New("zrok mode: reserved name is not configured")
+		}
+		if p.ZrokHome == "" {
+			return errors.New("zrok mode: isolated home directory is empty")
+		}
+		if p.Hostname == "" {
+			return errors.New("zrok mode: public URL is empty")
+		}
 	default:
 		return fmt.Errorf("unknown mode %q", p.Mode)
 	}
@@ -202,16 +221,28 @@ func (m *Manager) Start(p StartParams) error {
 		if p.Hostname != "" {
 			args = append(args, "--url", "https://"+p.Hostname)
 		}
+	case ModeZrok:
+		args = []string{
+			"share", "public", p.Target,
+			"--headless", "--force-local",
+			"--name-selection", p.ZrokNamespace + ":" + p.ZrokName,
+		}
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	// Never inherit stale tunnel credentials, and never put live credentials
 	// in argv where process listings and crash reports can expose them.
-	cmd.Env = withoutEnvKeys(os.Environ(), "TUNNEL_TOKEN", "NGROK_AUTHTOKEN")
+	cmd.Env = withoutEnvKeys(os.Environ(), "TUNNEL_TOKEN", "NGROK_AUTHTOKEN", "ZROK2_API_ENDPOINT", "ZROK2_DEFAULT_NAMESPACE", "ZROK2_HEADLESS", "HOME")
 	switch p.Mode {
 	case ModeNamed:
 		cmd.Env = append(cmd.Env, "TUNNEL_TOKEN="+p.Token)
 	case ModeNgrok:
 		cmd.Env = append(cmd.Env, "NGROK_AUTHTOKEN="+p.Authtoken)
+	case ModeZrok:
+		cmd.Env = append(cmd.Env,
+			"HOME="+p.ZrokHome,
+			"ZROK2_HEADLESS=true",
+			"ZROK2_DEFAULT_NAMESPACE="+p.ZrokNamespace,
+		)
 	}
 	// Combined stderr is where cloudflared writes the assigned URL.
 	// Stdout is mostly empty but we read it anyway so the pipe doesn't
@@ -235,6 +266,8 @@ func (m *Manager) Start(p StartParams) error {
 			hint := "install from github.com/cloudflare/cloudflared or set the cloudflared_path config"
 			if p.Mode == ModeNgrok {
 				hint = "install ngrok (brew install ngrok) or set the ngrok_path config"
+			} else if p.Mode == ModeZrok {
+				hint = "install zrok2 or set the zrok2_path config"
 			}
 			return fmt.Errorf("agent binary not found at %q — %s", binary, hint)
 		}
@@ -288,6 +321,14 @@ func (m *Manager) Start(p StartParams) error {
 		go m.scanForURL(stdout, p.RunID, nil)
 		go m.scanForURL(stderr, p.RunID, nil)
 		m.publicURL = "https://" + p.Hostname
+		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
+		if cb != nil {
+			go cb(runID, url)
+		}
+	case ModeZrok:
+		go m.scanForURL(stdout, p.RunID, nil)
+		go m.scanForURL(stderr, p.RunID, nil)
+		m.publicURL = p.Hostname
 		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
 		if cb != nil {
 			go cb(runID, url)

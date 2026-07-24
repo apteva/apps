@@ -68,11 +68,31 @@ func boolInt(v bool) int {
 
 func validProviderName(name string) bool {
 	switch name {
-	case providerNameQuick, providerNameNamed, providerNameNgrok:
+	case providerNameQuick, providerNameNamed, providerNameNgrok, providerNameZrok:
 		return true
 	default:
 		return false
 	}
+}
+
+// normalizeZrokName applies zrok v2's documented public-name grammar.
+// Names are DNS labels in a namespace, so mixed case, dots, underscores,
+// and leading/trailing hyphens are rejected rather than silently rewritten.
+func normalizeZrokName(raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if len(name) < 3 || len(name) > 63 {
+		return "", errors.New("zrok name must be between 3 and 63 characters")
+	}
+	if name[0] == '-' || name[len(name)-1] == '-' {
+		return "", errors.New("zrok name cannot start or end with a hyphen")
+	}
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			continue
+		}
+		return "", errors.New("zrok name must use lowercase ASCII letters, digits, and hyphens")
+	}
+	return name, nil
 }
 
 // normalizeDNSName accepts an ASCII DNS hostname and returns its canonical

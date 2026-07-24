@@ -99,6 +99,52 @@ sleep 30
 	}
 }
 
+func TestZrokManagerUsesIsolatedHomeWithoutToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("subprocess test")
+	}
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "args")
+	envPath := filepath.Join(dir, "env")
+	binary := filepath.Join(dir, "capture-zrok")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$CAPTURE_ARGS"
+printf 'HOME=%s\nZROK2_HEADLESS=%s\nZROK2_DEFAULT_NAMESPACE=%s\nZROK2_API_ENDPOINT=%s\n' "$HOME" "${ZROK2_HEADLESS-}" "${ZROK2_DEFAULT_NAMESPACE-}" "${ZROK2_API_ENDPOINT-}" > "$CAPTURE_ENV"
+sleep 30
+`
+	if err := os.WriteFile(binary, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CAPTURE_ARGS", argsPath)
+	t.Setenv("CAPTURE_ENV", envPath)
+	t.Setenv("ZROK2_API_ENDPOINT", "https://stale.invalid")
+	home := filepath.Join(dir, "isolated-home")
+	mgr := NewManager(nil, nil)
+	if err := mgr.Start(StartParams{
+		Binary: binary, Target: "http://127.0.0.1:5280", Mode: ModeZrok, RunID: 9,
+		Hostname: "https://safe-name.share.zrok.io", ZrokName: "safe-name",
+		ZrokNamespace: "public", ZrokHome: home,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mgr.Stop() })
+	waitForFile(t, argsPath)
+	waitForFile(t, envPath)
+
+	args, _ := os.ReadFile(argsPath)
+	if got := string(args); got != "share\npublic\nhttp://127.0.0.1:5280\n--headless\n--force-local\n--name-selection\npublic:safe-name\n" {
+		t.Fatalf("argv=%q", got)
+	}
+	env, _ := os.ReadFile(envPath)
+	gotEnv := string(env)
+	if !strings.Contains(gotEnv, "HOME="+home+"\n") ||
+		!strings.Contains(gotEnv, "ZROK2_HEADLESS=true\n") ||
+		!strings.Contains(gotEnv, "ZROK2_DEFAULT_NAMESPACE=public\n") ||
+		!strings.Contains(gotEnv, "ZROK2_API_ENDPOINT=\n") {
+		t.Fatalf("unexpected zrok environment: %q", gotEnv)
+	}
+}
+
 func waitForFile(t *testing.T, path string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

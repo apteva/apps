@@ -7,11 +7,12 @@
 // instance" — it decides what to spawn, what state to persist, what
 // to tear down.
 //
-// v0.5.0 ships three providers:
+// v0.6.0 ships four providers:
 //
 //   - cloudflare-quick  : anonymous trycloudflare.com URL per start
 //   - cloudflare-named  : stable URL on a CF zone the operator owns
 //   - ngrok             : random or reserved ngrok URL
+//   - zrok              : stable reserved name on zrok's public namespace
 //
 // They share one Manager because only one public tunnel may run per install.
 // The operator's explicit selection is persisted in runtime_state; merely
@@ -95,4 +96,5 @@ func (a *App) activeProviderName(ctx *sdk.AppCtx) string {
 const (
 	providerNameQuick = "cloudflare-quick"
 	providerNameNamed = "cloudflare-named"
+	providerNameZrok  = "zrok"
 )
