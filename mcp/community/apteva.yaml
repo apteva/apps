@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.4.1
+version: 0.4.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -17,7 +17,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [community, courses, membership, forum, dms]
 
 scopes: [project, global]

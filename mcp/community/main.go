@@ -32,7 +32,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.4.1
+version: 0.4.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -42,8 +42,9 @@ description: |
   /api/apps/community/ui/portal/dist/index.html. Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
 tags: [community, courses, membership, forum, dms]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
