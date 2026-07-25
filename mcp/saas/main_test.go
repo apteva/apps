@@ -292,8 +292,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.8.0" {
-		t.Errorf("manifest.Version=%q, want 0.8.0", m.Version)
+	if m.Version != "0.8.1" {
+		t.Errorf("manifest.Version=%q, want 0.8.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -402,6 +402,40 @@ func TestPlanList_ProjectsCatalogProductIdentity(t *testing.T) {
 	}
 	if catalogCalls != 1 {
 		t.Fatalf("plan list should hydrate products with one Catalog call: %+v", platform.calls)
+	}
+}
+
+func TestPlanUpsert_DefaultsNewPaidPlansAndPreservesExplicitManualCollection(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+
+	createdOut, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "automatic", "name": "Automatic", "billing_mode": "paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := createdOut.(map[string]any)["plan"].(*Plan)
+	if got := strArg(mapFromAny(created.Metadata), "collection_method"); got != "charge_automatically" {
+		t.Fatalf("new paid plan collection_method=%q, want charge_automatically", got)
+	}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "manual", "name": "Manual", "billing_mode": "paid",
+		"metadata": map[string]any{"collection_method": "send_invoice"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updatedOut, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "manual", "name": "Manual renamed", "billing_mode": "paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := updatedOut.(map[string]any)["plan"].(*Plan)
+	if got := strArg(mapFromAny(updated.Metadata), "collection_method"); got != "send_invoice" {
+		t.Fatalf("existing manual plan collection_method=%q, want send_invoice", got)
 	}
 }
 
@@ -565,6 +599,59 @@ func TestFulfillmentPersistenceMigration_ScrubsExistingRowsOnMount(t *testing.T)
 	}
 	if !strings.Contains(outputJSON, `"token_id":"tok_legacy"`) {
 		t.Fatalf("upgrade removed safe fulfillment output: %s", outputJSON)
+	}
+}
+
+func TestAutomaticCollectionDefaultMigration_PreservesExistingPaidPlans(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	matches, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range matches {
+		if strings.HasSuffix(path, "011_automatic_collection_default.sql") {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO saas_plans (project_id,key,name,billing_mode,metadata_json)
+		VALUES
+		  ('proj-test','legacy','Legacy','paid','{"note":"keep"}'),
+		  ('proj-test','explicit-auto','Explicit Auto','paid','{"collection_method":"charge_automatically"}'),
+		  ('proj-test','free','Free','free','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("migrations/011_automatic_collection_default.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"legacy":        "send_invoice",
+		"explicit-auto": "charge_automatically",
+		"free":          "",
+	} {
+		var metadata string
+		if err := db.QueryRow(`SELECT metadata_json FROM saas_plans WHERE project_id='proj-test' AND key=?`, key).Scan(&metadata); err != nil {
+			t.Fatal(err)
+		}
+		if got := strArg(mapFromAny(json.RawMessage(metadata)), "collection_method"); got != want {
+			t.Fatalf("%s collection_method=%q, want %q (metadata=%s)", key, got, want, metadata)
+		}
 	}
 }
 
@@ -1616,8 +1703,11 @@ func TestTrialCycleDue_UpdatesCheckoutAndPaidEventActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout, _ = dbCheckoutGet(db, "proj-test", checkout.ID)
-	if checkout.Status != "awaiting_payment" || checkout.PaymentURL != "https://pay.example/session" || int64PtrValue(checkout.InvoiceID) != 702 {
-		t.Fatalf("trial checkout not updated with payment link: %+v", checkout)
+	if checkout.Status != "awaiting_payment" || checkout.PaymentURL != "" || int64PtrValue(checkout.InvoiceID) != 702 {
+		t.Fatalf("trial checkout not updated for automatic collection: %+v", checkout)
+	}
+	if !hasCall(pf.calls, "billing:invoices_collect") || hasCall(pf.calls, "billing:invoices_send_payment_link") {
+		t.Fatalf("default paid plan should collect automatically: %+v", pf.calls)
 	}
 	if err := app.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: "proj-test", Data: map[string]any{"id": 702, "status": "paid"}}); err != nil {
 		t.Fatal(err)
@@ -2701,7 +2791,6 @@ func TestAutomaticCollectionCheckoutSavesMethodAndRenewalCollects(t *testing.T) 
 			"key": "crm-pro", "name": "CRM Pro", "billing_mode": "paid",
 			"catalog_product_id": 7001, "catalog_price_id": 8001,
 			"subscription_required": true,
-			"metadata":              map[string]any{"collection_method": "charge_automatically"},
 		}); err != nil {
 			t.Fatal(err)
 		}

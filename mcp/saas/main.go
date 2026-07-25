@@ -2131,7 +2131,7 @@ func checkoutCollectionMethod(plan *Plan, price checkoutPrice) string {
 	method := strings.ToLower(firstNonEmpty(
 		strArg(price.Metadata, "collection_method"),
 		strArg(mapFromAny(plan.Metadata), "collection_method"),
-		"send_invoice",
+		"charge_automatically",
 	))
 	if method != "charge_automatically" {
 		return "send_invoice"
@@ -3444,6 +3444,22 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	if discountID != 0 && billingMode == "free" && !subscriptionRequired {
 		return nil, errors.New("catalog_discount_id requires a subscription plan")
 	}
+	metadata := mapFromAny(args["metadata"])
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
+		var existingMetadata string
+		err := db.QueryRow(`SELECT metadata_json FROM saas_plans WHERE project_id=? AND key=?`, pid, key).Scan(&existingMetadata)
+		switch {
+		case err == nil && strArg(mapFromAny(json.RawMessage(existingMetadata)), "collection_method") != "":
+			metadata["collection_method"] = strArg(mapFromAny(json.RawMessage(existingMetadata)), "collection_method")
+		case err == nil || errors.Is(err, sql.ErrNoRows):
+			metadata["collection_method"] = "charge_automatically"
+		default:
+			return nil, err
+		}
+	}
 	_, err = db.Exec(`
 		INSERT INTO saas_plans
 			(project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, catalog_discount_id, subscription_required, metadata_json)
@@ -3459,7 +3475,7 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 			updated_at=CURRENT_TIMESTAMP`,
 		pid, key, name, billingMode,
 		nullableInt64(int64Arg(args, "catalog_product_id")), nullableInt64(priceID),
-		nullableInt64(discountID), boolInt(subscriptionRequired), jsonOrEmpty(args["metadata"], "{}"))
+		nullableInt64(discountID), boolInt(subscriptionRequired), jsonOrEmpty(metadata, "{}"))
 	if err != nil {
 		return nil, err
 	}

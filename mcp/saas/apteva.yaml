@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.8.0
+version: 0.8.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -15,6 +15,8 @@ description: |
   payments directly.
   v0.8.0 adds provider-independent recurring collection policy: SaaS chooses
   automatic collection or invoice links while Billing owns payment execution.
+  v0.8.1 makes automatic collection the default for new paid plans while
+  preserving the invoice behavior of plans created before the upgrade.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
