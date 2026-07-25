@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.7.0
+version: 0.7.1
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -28,7 +28,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/subscriptions/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [subscriptions, recurring, commerce, saas, memberships]
 
 scopes: [project, global]
