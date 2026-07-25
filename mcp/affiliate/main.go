@@ -28,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.12
+version: 0.1.13
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -1792,7 +1792,7 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 		aggregated := map[string]StatInput{}
 		for _, call := range calls {
-			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results"})
+			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "result", "results"})
 			if err != nil {
 				return nil, err
 			}

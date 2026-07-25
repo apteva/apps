@@ -689,7 +689,18 @@ func TestProviderPagesHandleRootArrays(t *testing.T) {
 }
 
 func TestAwinStatsUseCampaignPerformanceReport(t *testing.T) {
-	ctx := newTestCtx(t, nil, map[string]string{
+	platform := newRecordingPlatform()
+	platform.responses["awin:campaign_performance_report"] = json.RawMessage(`{
+		"parameters": {"publisherId": 745899, "region": "US"},
+		"result": [{
+			"date": "2026-07-22",
+			"quantity": {"clicks": 12, "total": 3},
+			"saleAmount": {"total": 150.25},
+			"commissionAmount": {"total": 30.50},
+			"currency": "USD"
+		}]
+	}`)
+	ctx := newTestCtx(t, platform, map[string]string{
 		"awin_publisher_id": "745899",
 		"awin_region":       "us",
 	})
@@ -719,6 +730,22 @@ func TestAwinStatsUseCampaignPerformanceReport(t *testing.T) {
 	})
 	if row.Clicks != 12 || row.Conversions != 3 || row.RevenueCents != 15025 || row.CommissionCents != 3050 {
 		t.Fatalf("Awin campaign row=%+v", row)
+	}
+
+	if _, err := (&App{}).toolRefresh(ctx, map[string]any{
+		"network": "awin",
+		"kind":    "stats",
+		"from":    "2026-07-20",
+		"to":      "2026-07-22",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := dbStats(ctx.AppDB(), "2026-07-20", "2026-07-22", "awin", 0, 0, "day")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stats) != 1 || stats[0].Clicks != 12 || stats[0].Conversions != 3 {
+		t.Fatalf("Awin persisted stats=%+v", stats)
 	}
 }
 
