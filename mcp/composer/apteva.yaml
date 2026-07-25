@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.6.1
+version: 0.6.2
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -233,6 +233,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/composer
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [video, composition, render, ffmpeg, timeline]
 
 scopes: [project, global]
