@@ -324,11 +324,12 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	call.StartedAt = time.Now().UTC()
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var receptionistAudio, callerAudio cappedAudio
+	var receptionistAudio, callerAudio, deliveredCallerAudio cappedAudio
 	bridgeErrors := make(chan error, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
-	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, "receptionist", mediaActivity, &receptionistAudio, bridgeErrors)
-	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, "caller", mediaActivity, &callerAudio, bridgeErrors)
+	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, true)
+	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, "receptionist", mediaActivity, &receptionistAudio, nil, nil, bridgeErrors)
+	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, "caller", mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeErrors)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
 	defer timeout.Stop()
@@ -403,12 +404,22 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		PostToolIdleSeconds: 1, RequireActivity: true,
 	})
 	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	if audioPipeline != nil {
+		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
+		call.Metrics.AudioConditions = audioPipeline.metrics()
+	}
 	call.Validity = assessVoiceCall(call)
 	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistAudio.bytes()); err != nil {
 		return call, err
 	}
 	if err := s.writeVoiceRecording(call.ID, "caller", callerAudio.bytes()); err != nil {
 		return call, err
+	}
+	if audioPipeline != nil {
+		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredCallerAudio.bytes()); err != nil {
+			return call, err
+		}
+		call.DeliveredCallerRecording = "caller-delivered"
 	}
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
@@ -439,6 +450,29 @@ func normalizeVoiceSpec(spec *VoiceFixtureSpec) {
 		spec.Transport = "direct"
 	}
 	spec.ProtocolFixture = strings.TrimSpace(spec.ProtocolFixture)
+	if spec.AudioConditions != nil {
+		spec.AudioConditions.Preset = strings.ToLower(strings.TrimSpace(spec.AudioConditions.Preset))
+		if spec.AudioConditions.Preset == "" {
+			spec.AudioConditions.Preset = "clean"
+		}
+		spec.AudioConditions.Intensity = strings.ToLower(strings.TrimSpace(spec.AudioConditions.Intensity))
+		if spec.AudioConditions.Intensity == "" {
+			spec.AudioConditions.Intensity = "moderate"
+		}
+		spec.AudioConditions.Codec = strings.ToLower(strings.TrimSpace(spec.AudioConditions.Codec))
+		if spec.AudioConditions.Codec == "" {
+			spec.AudioConditions.Codec = "none"
+		}
+		if spec.AudioConditions.Preset == "poor_phone" && spec.AudioConditions.Codec == "none" {
+			spec.AudioConditions.Codec = "g711_mulaw"
+		}
+		if spec.AudioConditions.Seed == 0 {
+			spec.AudioConditions.Seed = defaultVoiceAudioSeed
+		}
+		if spec.AudioConditions.Preset == "clean" && spec.AudioConditions.Codec == "none" {
+			spec.AudioConditions = nil
+		}
+	}
 }
 
 func validateVoiceSpec(spec VoiceFixtureSpec) error {
@@ -456,6 +490,26 @@ func validateVoiceSpec(spec VoiceFixtureSpec) error {
 	}
 	if spec.Transport == "carrier" && spec.ProtocolFixture == "" {
 		return errors.New("protocol_fixture required for carrier transport")
+	}
+	if audio := spec.AudioConditions; audio != nil {
+		switch audio.Preset {
+		case "clean", "office", "cafe", "street", "train_station", "poor_phone":
+		default:
+			return errors.New("audio_conditions.preset must be clean, office, cafe, street, train_station, or poor_phone")
+		}
+		switch audio.Intensity {
+		case "light", "moderate", "heavy":
+		default:
+			return errors.New("audio_conditions.intensity must be light, moderate, or heavy")
+		}
+		switch audio.Codec {
+		case "none", "g711_mulaw":
+		default:
+			return errors.New("audio_conditions.codec must be none or g711_mulaw")
+		}
+		if audio.Seed < 0 {
+			return errors.New("audio_conditions.seed must be zero or greater")
+		}
 	}
 	return nil
 }
@@ -502,6 +556,8 @@ func pumpVoiceAudio(
 	speaker string,
 	activity *voiceMediaActivity,
 	capture *cappedAudio,
+	delivered *cappedAudio,
+	pipeline *voiceAudioPipeline,
 	result chan<- error,
 ) {
 	incoming := make(chan voiceRelayEvent, 128)
@@ -542,6 +598,10 @@ func pumpVoiceAudio(
 					sendVoiceRelayResult(ctx, result, err)
 					return
 				}
+			}
+			frame = pipeline.process(frame)
+			if delivered != nil {
+				delivered.append(frame)
 			}
 			if err := destination.write(websocket.BinaryMessage, frame); err != nil {
 				sendVoiceRelayResult(ctx, result, err)
@@ -911,7 +971,7 @@ func voiceTurnCounts(transcript []VoiceTranscriptTurn) (receptionist, caller, tr
 }
 
 func (s *service) voiceRecordingPath(callID, speaker string) (string, error) {
-	if !validID(callID) || (speaker != "receptionist" && speaker != "caller") {
+	if !validID(callID) || (speaker != "receptionist" && speaker != "caller" && speaker != "caller-delivered") {
 		return "", errors.New("invalid voice recording")
 	}
 	root := strings.TrimSpace(s.ctx.DataDir())

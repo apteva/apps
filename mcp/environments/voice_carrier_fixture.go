@@ -222,10 +222,11 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	call.StartedAt = time.Now().UTC()
 	bridgeCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var receptionistAudio, callerAudio cappedAudio
+	var receptionistAudio, callerAudio, deliveredCallerAudio cappedAudio
 	bridgeErrors := make(chan error, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
-	go relayCallerToCarrier(bridgeCtx, callerSocket, media, streamSID, mediaActivity, &callerAudio, bridgeErrors)
+	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, false)
+	go relayCallerToCarrier(bridgeCtx, callerSocket, media, streamSID, mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeErrors)
 	go relayCarrierToCaller(bridgeCtx, media, callerSocket, mediaActivity, &receptionistAudio, bridgeErrors)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
@@ -306,12 +307,22 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1, PostToolIdleSeconds: 1, RequireActivity: true,
 	})
 	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	if audioPipeline != nil {
+		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
+		call.Metrics.AudioConditions = audioPipeline.metrics()
+	}
 	call.Validity = assessVoiceCall(call)
 	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistAudio.bytes()); err != nil {
 		return call, err
 	}
 	if err := s.writeVoiceRecording(call.ID, "caller", callerAudio.bytes()); err != nil {
 		return call, err
+	}
+	if audioPipeline != nil {
+		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredCallerAudio.bytes()); err != nil {
+			return call, err
+		}
+		call.DeliveredCallerRecording = "caller-delivered"
 	}
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
@@ -417,7 +428,7 @@ func carrierVirtualNumber(callID string) string {
 	return "+1555" + suffix
 }
 
-func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carrierMediaSocket, streamSID string, activity *voiceMediaActivity, capture *cappedAudio, result chan<- error) {
+func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carrierMediaSocket, streamSID string, activity *voiceMediaActivity, capture, delivered *cappedAudio, pipeline *voiceAudioPipeline, result chan<- error) {
 	incoming := make(chan voiceRelayEvent, 128)
 	go readVoiceAudio(ctx, caller, capture, incoming)
 
@@ -452,6 +463,10 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				continue
 			}
 			activity.update("caller", true, time.Now())
+			frame = pipeline.process(frame)
+			if delivered != nil {
+				delivered.append(frame)
+			}
 			pcm8 := resampler.Process(carrierBytesToPCM(frame))
 			for len(pcm8) > 0 {
 				count := 160

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -343,6 +345,94 @@ func TestVoiceOpeningGuidanceDoesNotBecomeInitialConversationPrompt(t *testing.T
 	}
 	if !strings.Contains(voiceOpeningCue(), "stop and wait") {
 		t.Fatalf("opening cue=%q", voiceOpeningCue())
+	}
+}
+
+func TestVoiceAudioConditionsAreDeterministic(t *testing.T) {
+	samples := make([]int16, voiceFrameBytes/2)
+	for i := range samples {
+		samples[i] = int16(5000 * math.Sin(2*math.Pi*440*float64(i)/voiceSampleRate))
+	}
+	frame := pcm16ToBytes(samples)
+	spec := &VoiceAudioConditions{Preset: "train_station", Intensity: "moderate", Codec: "none", Seed: 73}
+	first := newVoiceAudioPipeline(spec, true).process(frame)
+	second := newVoiceAudioPipeline(spec, true).process(frame)
+	if !bytes.Equal(first, second) {
+		t.Fatal("same audio condition seed produced different output")
+	}
+	if bytes.Equal(first, frame) {
+		t.Fatal("train station condition did not alter caller audio")
+	}
+	delivered := pcm16FromBytes(first)
+	residual := make([]int16, len(samples))
+	for i := range samples {
+		residual[i] = delivered[i] - samples[i]
+	}
+	measuredSNR := 20 * math.Log10(pcmRMS(samples)/pcmRMS(residual))
+	if measuredSNR < 9.5 || measuredSNR > 10.5 {
+		t.Fatalf("measured SNR=%.2f dB, want approximately 10 dB", measuredSNR)
+	}
+}
+
+func TestVoiceAudioConditionsProcessSilenceAndTelephoneCodec(t *testing.T) {
+	silence := make([]byte, voiceFrameBytes)
+	noisy := newVoiceAudioPipeline(&VoiceAudioConditions{
+		Preset: "office", Intensity: "heavy", Codec: "g711_mulaw", Seed: 42,
+	}, true)
+	delivered := noisy.process(silence)
+	if isSilentPCM(delivered) {
+		t.Fatal("conditioned silence did not contain ambient audio")
+	}
+	if len(delivered) != len(silence) {
+		t.Fatalf("conditioned frame size=%d, want %d", len(delivered), len(silence))
+	}
+	metrics := noisy.metrics()
+	if metrics == nil || metrics.ProcessedFrames != 1 || metrics.Codec != "g711_mulaw" || metrics.TargetSNRDB != 4 {
+		t.Fatalf("unexpected condition metrics: %+v", metrics)
+	}
+}
+
+func TestVoiceAudioConditionNormalizationAndValidation(t *testing.T) {
+	spec := VoiceFixtureSpec{
+		CallerGoal: "Ask for help", TimeoutSeconds: 30,
+		AudioConditions: &VoiceAudioConditions{Preset: " Poor_Phone "},
+	}
+	normalizeVoiceSpec(&spec)
+	if spec.AudioConditions == nil || spec.AudioConditions.Preset != "poor_phone" ||
+		spec.AudioConditions.Intensity != "moderate" || spec.AudioConditions.Codec != "g711_mulaw" ||
+		spec.AudioConditions.Seed != defaultVoiceAudioSeed {
+		t.Fatalf("unexpected normalized conditions: %+v", spec.AudioConditions)
+	}
+	if err := validateVoiceSpec(spec); err != nil {
+		t.Fatalf("valid conditions rejected: %v", err)
+	}
+
+	spec.AudioConditions.Preset = "spaceship"
+	if err := validateVoiceSpec(spec); err == nil {
+		t.Fatal("unknown audio preset accepted")
+	}
+
+	clean := VoiceFixtureSpec{
+		CallerGoal: "Ask for help", TimeoutSeconds: 30,
+		AudioConditions: &VoiceAudioConditions{Preset: "clean", Codec: "none"},
+	}
+	normalizeVoiceSpec(&clean)
+	if clean.AudioConditions != nil {
+		t.Fatalf("clean default should not allocate a pipeline: %+v", clean.AudioConditions)
+	}
+}
+
+func TestVoiceTelephoneRoundTripPreservesFrameLengthAndChangesSignal(t *testing.T) {
+	input := make([]int16, voiceFrameBytes/2)
+	for i := range input {
+		input[i] = int16((i%101 - 50) * 400)
+	}
+	output := voiceTelephoneMuLawRoundTrip(input)
+	if len(output) != len(input) {
+		t.Fatalf("telephone output length=%d, want %d", len(output), len(input))
+	}
+	if slices.Equal(output, input) {
+		t.Fatal("telephone codec did not change input")
 	}
 }
 

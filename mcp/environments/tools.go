@@ -13,6 +13,37 @@ import (
 )
 
 var objectSchema = map[string]any{"type": "object", "additionalProperties": true}
+var voiceCallSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"run_id":           map[string]any{"type": "string"},
+		"caller_goal":      map[string]any{"type": "string"},
+		"caller_persona":   map[string]any{"type": "string"},
+		"caller_behavior":  map[string]any{"type": "string"},
+		"provider":         map[string]any{"type": "string"},
+		"voice":            map[string]any{"type": "string"},
+		"caller_provider":  map[string]any{"type": "string"},
+		"caller_voice":     map[string]any{"type": "string"},
+		"greeting":         map[string]any{"type": "string"},
+		"target_agent":     map[string]any{"type": "string"},
+		"target_directive": map[string]any{"type": "string"},
+		"timeout_seconds":  map[string]any{"type": "integer", "minimum": 15, "maximum": 300},
+		"transport":        map[string]any{"type": "string", "enum": []string{"direct", "carrier"}},
+		"protocol_fixture": map[string]any{"type": "string"},
+		"audio_conditions": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"preset":    map[string]any{"type": "string", "enum": []string{"clean", "office", "cafe", "street", "train_station", "poor_phone"}},
+				"intensity": map[string]any{"type": "string", "enum": []string{"light", "moderate", "heavy"}},
+				"codec":     map[string]any{"type": "string", "enum": []string{"none", "g711_mulaw"}},
+				"seed":      map[string]any{"type": "integer", "minimum": 0},
+			},
+			"additionalProperties": false,
+		},
+	},
+	"required":             []string{"run_id", "caller_goal"},
+	"additionalProperties": true,
+}
 
 func requiredSchema(fields ...string) map[string]any {
 	props := map[string]any{}
@@ -54,9 +85,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_agent_send", Description: "Send a message to a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "message"), Handler: a.toolAgentSend},
 		{Name: "environment_agent_control", Description: "Pause, resume, or stop a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "action"), Handler: a.toolAgentControl},
 		{Name: "environment_agent_wait", Description: "Wait for a runtime agent to finish and return its normalized trace and metrics.", InputSchema: requiredSchema("run_id", "agent"), Handler: a.toolAgentWait},
-		{Name: "environment_voice_call", Description: "Run a full-duplex simulated caller against a realtime runtime agent.", InputSchema: requiredSchema("run_id", "caller_goal"), Handler: a.toolVoiceCall},
+		{Name: "environment_voice_call", Description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions.", InputSchema: voiceCallSchema, Handler: a.toolVoiceCall},
 		{Name: "environment_voice_call_get", Description: "Get a voice call transcript, metrics, and recording handles.", InputSchema: requiredSchema("id"), Handler: a.toolVoiceCallGet},
-		{Name: "environment_voice_recording_get", Description: "Get a base64-encoded WAV recording for caller or receptionist.", InputSchema: requiredSchema("id", "speaker"), Handler: a.toolVoiceRecordingGet},
+		{Name: "environment_voice_recording_get", Description: "Get a base64-encoded WAV recording for receptionist, clean caller, or caller-delivered audio.", InputSchema: requiredSchema("id", "speaker"), Handler: a.toolVoiceRecordingGet},
 	}
 }
 

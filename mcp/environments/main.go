@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.5.3
-description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.5.3 applies paced audio, silence tails, and playback acknowledgements to both virtual carrier directions.
+version: 0.6.0
+description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.6.0 adds deterministic background scenes and line degradation to live voice simulations.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 tags: [environments, testing, agents, evals, mocks]
@@ -50,9 +50,9 @@ provides:
     - { name: environment_agent_send, description: "Send a message to a runtime agent." }
     - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
     - { name: environment_agent_wait, description: "Wait for a runtime agent and return its normalized trace and metrics." }
-    - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent." }
+    - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions." }
     - { name: environment_voice_call_get, description: "Get a simulated voice call, transcript, metrics, and recording handles." }
-    - { name: environment_voice_recording_get, description: "Get one WAV recording from a simulated voice call." }
+    - { name: environment_voice_recording_get, description: "Get a receptionist, clean caller, or delivered caller WAV recording from a simulated voice call." }
   publishes:
     - { name: environment.created, description: "An environment definition was created." }
     - { name: environment.started, description: "An environment runtime is running." }
@@ -69,7 +69,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.5.3, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.6.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
