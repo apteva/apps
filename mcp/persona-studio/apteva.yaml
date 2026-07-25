@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.21
+version: 0.1.22
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
@@ -54,7 +54,8 @@ description: |
   UI unlink persona references, item files, and items.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [ai, persona, virtual-influencer, ugc, media, content]
 
 scopes: [project, global]
