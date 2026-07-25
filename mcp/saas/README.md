@@ -165,6 +165,25 @@ Supported lifecycle events are `account_active`, `account_past_due`,
 `account_suspended`, `account_resumed`, `account_cancelled`, `plan_upgraded`,
 `plan_downgraded`, and `plan_changed`.
 
+Fulfillment inputs and outputs are persisted as `redacted` by default. Common
+credential fields are removed recursively, and actions can name additional
+sensitive paths:
+
+```json
+{
+  "persist_input": "redacted",
+  "persist_output": "none",
+  "sensitive_input_paths": ["provider.credentials"],
+  "sensitive_output_paths": ["session.exchange_code"]
+}
+```
+
+Persistence modes are `redacted`, `none`, and `full`. `full` must be selected
+explicitly. Actions using `persist_output: none` cannot configure `store`
+mappings because there would be no durable response available to resume the
+mapping after an interrupted call. Sensitive output values cannot be mapped
+into account metadata.
+
 ## Live Usage
 
 Plan usage sources point at app tools and tell SaaS where to read the

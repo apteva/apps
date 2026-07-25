@@ -26,6 +26,7 @@ type platformStub struct {
 	priceTrialDays              int64
 	priceMetadata               map[string]any
 	failures                    map[string]int
+	failureMessages             map[string]string
 	grants                      map[string]bool
 	failGrantFeature            string
 	failGrantOnce               bool
@@ -104,6 +105,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	if p.failures[key] > 0 {
 		p.failures[key]--
 		return fmt.Errorf("injected failure for %s", key)
+	}
+	if message := p.failureMessages[key]; message != "" {
+		return errors.New(message)
 	}
 	var body map[string]any
 	switch tool {
@@ -228,6 +232,12 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "running"}}
 	case "containers_destroy":
 		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "deleted"}}
+	case "credentials_create":
+		body = map[string]any{
+			"token":    "customer-secret-token",
+			"token_id": "tok_123",
+			"session":  map[string]any{"exchange_code": "custom-secret-code", "expires_at": "2026-08-01T00:00:00Z"},
+		}
 	case "crm_saas_usage_snapshot":
 		if p.emptyUsage {
 			body = map[string]any{"usage": []map[string]any{}}
@@ -280,8 +290,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.7.0" {
-		t.Errorf("manifest.Version=%q, want 0.7.0", m.Version)
+	if m.Version != "0.7.1" {
+		t.Errorf("manifest.Version=%q, want 0.7.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -489,6 +499,71 @@ func TestReliabilityMigration_PreservesExistingRows(t *testing.T) {
 	}
 }
 
+func TestFulfillmentPersistenceMigration_ScrubsExistingRowsOnMount(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	matches, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range matches {
+		if strings.HasSuffix(path, "010_fulfillment_persistence.sql") {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO saas_plans (project_id,key,name) VALUES ('proj-test','legacy','Legacy')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`
+		INSERT INTO saas_plan_actions (project_id,plan_key,event,app_name,tool_name)
+		VALUES ('proj-test','legacy','account_active','credentials','credentials_create')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionID, _ := result.LastInsertId()
+	if _, err := db.Exec(`
+		INSERT INTO saas_fulfillment_runs
+			(project_id,account_id,plan_action_id,transition_id,event,app_name,tool_name,status,input_json,output_json)
+		VALUES ('proj-test','legacy-account',?,'legacy-transition','account_active','credentials','credentials_create','succeeded',
+		        '{"api_key":"legacy-input-secret"}','{"token":"legacy-output-secret","token_id":"tok_legacy"}')`, actionID); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("migrations/010_fulfillment_persistence.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	manifest := app.Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, &platformStub{}, nil).WithProject("proj-test")
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json,output_json FROM saas_fulfillment_runs WHERE account_id='legacy-account'`).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(inputJSON, "legacy-input-secret") || strings.Contains(outputJSON, "legacy-output-secret") {
+		t.Fatalf("upgrade retained historical secrets: input=%s output=%s", inputJSON, outputJSON)
+	}
+	if !strings.Contains(outputJSON, `"token_id":"tok_legacy"`) {
+		t.Fatalf("upgrade removed safe fulfillment output: %s", outputJSON)
+	}
+}
+
 func TestPlanActionUpdate_PartialPatch(t *testing.T) {
 	ctx, db := newTestCtx(t, &platformStub{})
 	defer db.Close()
@@ -536,6 +611,9 @@ func TestPlanActionUpdate_PartialPatch(t *testing.T) {
 	if got.FailureMode != "mark_degraded" {
 		t.Fatalf("failure_mode=%q", got.FailureMode)
 	}
+	if got.PersistInput != persistenceRedacted || got.PersistOutput != persistenceRedacted {
+		t.Fatalf("persistence defaults changed: input=%q output=%q", got.PersistInput, got.PersistOutput)
+	}
 	args := mapFromAny(got.Args)
 	if args["name"] != "new" || args["image"] != "ghcr.io/apteva/apteva:latest" {
 		t.Fatalf("args not updated: %+v", args)
@@ -575,6 +653,187 @@ func TestPlanActionUpdate_RejectsUnknownAndBadFailureMode(t *testing.T) {
 	action := created.(map[string]any)["action"].(*PlanAction)
 	if _, err := app.toolPlanActionUpdate(ctx, map[string]any{"id": action.ID, "failure_mode": "explode"}); err == nil || !strings.Contains(err.Error(), "unsupported failure_mode") {
 		t.Fatalf("expected unsupported failure mode, got %v", err)
+	}
+}
+
+func TestFulfillmentPersistence_RedactsSecretsByDefault(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args":                   map[string]any{"provider_api_key": "provider-secret-value"},
+		"sensitive_output_paths": []any{"session.exchange_code"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "secure", "plan_key": "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json, output_json FROM saas_fulfillment_runs WHERE account_id=?`, acct.ID).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"provider-secret-value", "customer-secret-token", "custom-secret-code"} {
+		if strings.Contains(inputJSON, secret) || strings.Contains(outputJSON, secret) {
+			t.Fatalf("persisted fulfillment leaked %q: input=%s output=%s", secret, inputJSON, outputJSON)
+		}
+	}
+	var input, output map[string]any
+	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		t.Fatal(err)
+	}
+	if input["provider_api_key"] != redactedValue || output["token"] != redactedValue || output["token_id"] != "tok_123" {
+		t.Fatalf("unexpected persisted values: input=%+v output=%+v", input, output)
+	}
+	if mapFromAny(output["session"])["exchange_code"] != redactedValue {
+		t.Fatalf("configured path was not redacted: %+v", output)
+	}
+	var provisioningJSON string
+	if err := db.QueryRow(`SELECT output_json FROM saas_provisioning_steps WHERE account_id=? AND step='fulfillment'`, acct.ID).Scan(&provisioningJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(provisioningJSON, "customer-secret-token") || strings.Contains(provisioningJSON, "custom-secret-code") {
+		t.Fatalf("provisioning output leaked fulfillment secret: %s", provisioningJSON)
+	}
+}
+
+func TestFulfillmentPersistence_NoneStoresNoPayload(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args": map[string]any{"api_key": "input-secret"}, "persist_input": "none", "persist_output": "none",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "no-payload", "plan_key": "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json, output_json FROM saas_fulfillment_runs WHERE account_id=?`, acct.ID).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	if inputJSON != "{}" || outputJSON != "{}" {
+		t.Fatalf("none persistence stored payloads: input=%s output=%s", inputJSON, outputJSON)
+	}
+}
+
+func TestFulfillmentPersistence_RedactsErrorsAndHistoricalRuns(t *testing.T) {
+	pf := &platformStub{failureMessages: map[string]string{
+		"credentials:credentials_create": "upstream rejected api_key=provider-secret-value",
+	}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	added, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args": map[string]any{"api_key": "provider-secret-value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := added.(map[string]any)["action"].(*PlanAction)
+	if _, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "failed-secret", "plan_key": "api"}); err == nil || strings.Contains(err.Error(), "provider-secret-value") {
+		t.Fatalf("caller received an unredacted fulfillment error: %v", err)
+	}
+	var storedError string
+	if err := db.QueryRow(`SELECT error FROM saas_fulfillment_runs WHERE plan_action_id=?`, action.ID).Scan(&storedError); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(storedError, "provider-secret-value") || !strings.Contains(storedError, redactedValue) {
+		t.Fatalf("stored error was not redacted: %q", storedError)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO saas_fulfillment_runs
+			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error)
+		VALUES ('proj-test', 'legacy', ?, 'legacy-secret', 'account_active', 'credentials', 'credentials_create', 'succeeded',
+		        '{"api_key":"old-input-secret","safe":"kept"}',
+		        '{"token":"old-output-secret","token_id":"tok_old"}',
+		        'provider rejected token=old-output-secret')`, action.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := scrubFulfillmentHistory(db); err != nil {
+		t.Fatal(err)
+	}
+	var inputJSON, outputJSON, errorText string
+	if err := db.QueryRow(`SELECT input_json, output_json, error FROM saas_fulfillment_runs WHERE account_id='legacy'`).Scan(&inputJSON, &outputJSON, &errorText); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"old-input-secret", "old-output-secret"} {
+		if strings.Contains(inputJSON, secret) || strings.Contains(outputJSON, secret) || strings.Contains(errorText, secret) {
+			t.Fatalf("historical scrub retained %q: input=%s output=%s error=%s", secret, inputJSON, outputJSON, errorText)
+		}
+	}
+	if !strings.Contains(inputJSON, `"safe":"kept"`) || !strings.Contains(outputJSON, `"token_id":"tok_old"`) {
+		t.Fatalf("historical scrub removed safe fields: input=%s output=%s", inputJSON, outputJSON)
+	}
+}
+
+func TestFulfillmentPersistence_RejectsSensitiveStoreMapping(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"store": map[string]any{"metadata.customer_token": "token"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "unsafe-store", "plan_key": "api"}); err == nil || !strings.Contains(err.Error(), "contains sensitive data") {
+		t.Fatalf("expected sensitive store rejection, got %v", err)
+	}
+	acct, err := dbAccountBySlug(db, "proj-test", "unsafe-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(acct.Metadata), "customer-secret-token") {
+		t.Fatalf("account metadata leaked token: %s", acct.Metadata)
+	}
+}
+
+func TestPlanActionPersistence_ValidatesConfiguration(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"persist_output": "none", "store": map[string]any{"metadata.token_id": "token_id"},
+	}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("expected none/store validation error, got %v", err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"persist_output": "sometimes",
+	}); err == nil || !strings.Contains(err.Error(), "unsupported persistence mode") {
+		t.Fatalf("expected persistence mode validation error, got %v", err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"sensitive_output_paths": "token",
+	}); err == nil || !strings.Contains(err.Error(), "array") {
+		t.Fatalf("expected sensitive path validation error, got %v", err)
 	}
 }
 
