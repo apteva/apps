@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.5.1
+version: 0.5.2
 description: |
   Public hostname control for Apteva. Routes exposes a stable app-level
   API for registering hostnames such as app.example.com or
@@ -14,7 +14,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/routes
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/routes/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [routes, ingress, hostname, infrastructure, reverse-proxy]
 
 scopes: [global]
