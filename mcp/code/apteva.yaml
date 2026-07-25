@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.24
+version: 0.5.25
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -49,7 +49,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/code
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/code/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [code, editor, repositories, agent]
 
 scopes: [project, global]
