@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.5.4
+version: 0.5.5
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes text and image requests to configured
@@ -54,6 +54,21 @@ requires:
       compatible_slugs: [openai-codex]
       required: false
       label: "OpenAI Codex provider"
+    - role: minimax_provider
+      kind: integration
+      compatible_slugs: [minimax-api]
+      required: false
+      label: "MiniMax provider"
+    - role: z_ai_provider
+      kind: integration
+      compatible_slugs: [z-ai]
+      required: false
+      label: "Z.ai provider"
+    - role: moonshot_ai_provider
+      kind: integration
+      compatible_slugs: [moonshot-ai]
+      required: false
+      label: "Moonshot AI provider"
 
 provides:
   http_routes:
@@ -141,5 +156,14 @@ config_schema:
   - name: openrouter_api_key
     type: password
     label: OpenRouter API key
+  - name: minimax_api_key
+    type: password
+    label: MiniMax API key
+  - name: z_ai_api_key
+    type: password
+    label: Z.ai API key
+  - name: moonshot_ai_api_key
+    type: password
+    label: Moonshot AI API key
 
 upgrade_policy: auto-patch

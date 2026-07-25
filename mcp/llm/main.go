@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.4
+version: 0.5.5
 description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -63,6 +63,18 @@ requires:
     - role: openai_codex_provider
       kind: integration
       compatible_slugs: [openai-codex]
+      required: false
+    - role: minimax_provider
+      kind: integration
+      compatible_slugs: [minimax-api]
+      required: false
+    - role: z_ai_provider
+      kind: integration
+      compatible_slugs: [z-ai]
+      required: false
+    - role: moonshot_ai_provider
+      kind: integration
+      compatible_slugs: [moonshot-ai]
       required: false
 provides:
   http_routes:
@@ -147,6 +159,15 @@ config_schema:
   - name: openrouter_api_key
     type: password
     label: OpenRouter API key
+  - name: minimax_api_key
+    type: password
+    label: MiniMax API key
+  - name: z_ai_api_key
+    type: password
+    label: Z.ai API key
+  - name: moonshot_ai_api_key
+    type: password
+    label: Moonshot AI API key
 upgrade_policy: auto-patch
 `
 
@@ -196,7 +217,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.5.4", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.5.5", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -663,6 +684,7 @@ type ProviderModel struct {
 type ModelSyncResult struct {
 	Provider   string          `json:"provider"`
 	Status     string          `json:"status"`
+	Discovery  string          `json:"discovery,omitempty"`
 	ModelCount int             `json:"model_count"`
 	Error      string          `json:"error,omitempty"`
 	Models     []ProviderModel `json:"models,omitempty"`
@@ -2109,10 +2131,13 @@ func providerIntegrationRoles() map[string]string {
 	return map[string]string{
 		"anthropic":    "anthropic_provider",
 		"fireworks":    "fireworks_provider",
+		"minimax":      "minimax_provider",
+		"moonshot-ai":  "moonshot_ai_provider",
 		"openai":       "openai_provider",
 		"openrouter":   "openrouter_provider",
 		"opencode-go":  "opencode_go_provider",
 		"openai-codex": "openai_codex_provider",
+		"z-ai":         "z_ai_provider",
 	}
 }
 
@@ -2166,6 +2191,15 @@ func (a *App) syncProviderModelsWithContext(reqCtx context.Context, ctx *sdk.App
 		if !cfg.Enabled {
 			continue
 		}
+		if providerModelDiscoveryMode(cfg.Provider) == "manual" {
+			rows, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: projectID, Provider: cfg.Provider, Status: "active"})
+			if err != nil {
+				results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Discovery: "manual", Error: err.Error()})
+				continue
+			}
+			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "ok", Discovery: "manual", ModelCount: len(rows), Models: rows})
+			continue
+		}
 		models, err := a.discoverProviderModels(reqCtx, ctx, &cfg)
 		if err != nil {
 			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: err.Error()})
@@ -2187,6 +2221,13 @@ func (a *App) syncProviderModelsWithContext(reqCtx context.Context, ctx *sdk.App
 		results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "ok", ModelCount: len(rows), Models: rows})
 	}
 	return results
+}
+
+func providerModelDiscoveryMode(provider string) string {
+	if normalizeProvider(provider) == "z-ai" {
+		return "manual"
+	}
+	return "api"
 }
 
 func (a *App) discoverProviderModels(reqCtx context.Context, appCtx *sdk.AppCtx, cfg *ProviderConfig) ([]ProviderModel, error) {
@@ -2400,13 +2441,29 @@ func providerModelFromRaw(provider string, raw json.RawMessage) (ProviderModel, 
 		return ProviderModel{}, false
 	}
 	display := firstNonEmpty(strAny(m["display_name"]), strAny(m["name"]), id)
-	capabilities := json.RawMessage(`{}`)
-	if v, ok := m["capabilities"]; ok {
-		capabilities = jsonFromAny(v)
+	capabilityValues := map[string]any{}
+	if v, ok := m["capabilities"].(map[string]any); ok {
+		for key, value := range v {
+			capabilityValues[key] = value
+		}
+	}
+	for _, key := range []string{"supports_image_in", "supports_video_in", "supports_reasoning"} {
+		if value, ok := m[key]; ok {
+			capabilityValues[key] = value
+		}
 	}
 	inputModalities := json.RawMessage(`[]`)
 	if v, ok := m["input_modalities"]; ok {
 		inputModalities = jsonFromAny(v)
+	} else if _, hasImage := m["supports_image_in"]; hasImage || m["supports_video_in"] != nil {
+		modalities := []string{"text"}
+		if boolFromAny(m["supports_image_in"]) {
+			modalities = append(modalities, "image")
+		}
+		if boolFromAny(m["supports_video_in"]) {
+			modalities = append(modalities, "video")
+		}
+		inputModalities = jsonFromAny(modalities)
 	}
 	outputModalities := json.RawMessage(`[]`)
 	if v, ok := m["output_modalities"]; ok {
@@ -2419,7 +2476,7 @@ func providerModelFromRaw(provider string, raw json.RawMessage) (ProviderModel, 
 		ModelID:          id,
 		DisplayName:      display,
 		GatewayModel:     gatewayModelID(provider, id),
-		Capabilities:     capabilities,
+		Capabilities:     jsonFromAny(capabilityValues),
 		ContextWindow:    int64FromAny(firstNonNil(m["context_window"], m["context_length"], m["max_context_length"])),
 		InputModalities:  inputModalities,
 		OutputModalities: outputModalities,
@@ -3983,11 +4040,21 @@ func intArgQuery(r *http.Request, key string, dflt int) int {
 }
 
 func boolArg(args map[string]any, key string) bool {
-	switch v := args[key].(type) {
+	return boolFromAny(args[key])
+}
+
+func boolFromAny(value any) bool {
+	switch v := value.(type) {
 	case bool:
 		return v
 	case string:
-		return v == "true" || v == "1"
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		return err == nil && parsed
+	case float64:
+		return v != 0
+	case json.Number:
+		n, err := v.Float64()
+		return err == nil && n != 0
 	default:
 		return false
 	}
@@ -4137,6 +4204,12 @@ func defaultBaseURL(provider string) string {
 		return "https://opencode.ai/zen/go/v1"
 	case "openai-codex":
 		return "https://chatgpt.com/backend-api/codex"
+	case "minimax":
+		return "https://api.minimax.io/v1"
+	case "z-ai":
+		return "https://api.z.ai/api/paas/v4"
+	case "moonshot-ai":
+		return "https://api.moonshot.ai/v1"
 	default:
 		return ""
 	}
