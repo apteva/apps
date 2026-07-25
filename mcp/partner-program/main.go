@@ -23,9 +23,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: partner-program
 display_name: Partner Program
-version: 0.1.0
+version: 0.1.1
 description: Merchant-side referral and affiliate program.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

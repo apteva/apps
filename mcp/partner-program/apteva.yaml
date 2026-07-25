@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: partner-program
 display_name: Partner Program
-version: 0.1.0
+version: 0.1.1
 description: |
   Merchant-side referral and affiliate program for SaaS, services, and
   commerce. Track approved partners, campaigns, referral links/codes,
@@ -12,6 +12,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/partner-program
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [partners, referrals, affiliate, commissions, growth, saas]
 
 scopes: [project, global]
