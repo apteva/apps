@@ -44,19 +44,27 @@ type Case struct {
 }
 
 type VoiceCase struct {
-	CallerName           string `json:"caller_name,omitempty"`
-	CallerPersona        string `json:"caller_persona,omitempty"`
-	CallerGoal           string `json:"caller_goal"`
-	CallerBehavior       string `json:"caller_behavior,omitempty"`
-	Provider             string `json:"provider,omitempty"`
-	Voice                string `json:"voice,omitempty"`
-	CallerProvider       string `json:"caller_provider,omitempty"`
-	CallerVoice          string `json:"caller_voice,omitempty"`
-	Greeting             string `json:"greeting,omitempty"`
-	MaxFirstResponseMS   int64  `json:"max_first_response_ms,omitempty"`
-	MaxAverageResponseMS int64  `json:"max_average_response_ms,omitempty"`
-	Transport            string `json:"transport,omitempty"`
-	ProtocolFixture      string `json:"protocol_fixture,omitempty"`
+	CallerName           string                `json:"caller_name,omitempty"`
+	CallerPersona        string                `json:"caller_persona,omitempty"`
+	CallerGoal           string                `json:"caller_goal"`
+	CallerBehavior       string                `json:"caller_behavior,omitempty"`
+	Provider             string                `json:"provider,omitempty"`
+	Voice                string                `json:"voice,omitempty"`
+	CallerProvider       string                `json:"caller_provider,omitempty"`
+	CallerVoice          string                `json:"caller_voice,omitempty"`
+	Greeting             string                `json:"greeting,omitempty"`
+	MaxFirstResponseMS   int64                 `json:"max_first_response_ms,omitempty"`
+	MaxAverageResponseMS int64                 `json:"max_average_response_ms,omitempty"`
+	Transport            string                `json:"transport,omitempty"`
+	ProtocolFixture      string                `json:"protocol_fixture,omitempty"`
+	AudioConditions      *VoiceAudioConditions `json:"audio_conditions,omitempty"`
+}
+
+type VoiceAudioConditions struct {
+	Preset    string `json:"preset,omitempty"`
+	Intensity string `json:"intensity,omitempty"`
+	Codec     string `json:"codec,omitempty"`
+	Seed      int64  `json:"seed,omitempty"`
 }
 
 type Assertion struct {
@@ -139,16 +147,17 @@ type Run struct {
 }
 
 type EnvironmentVoiceCall struct {
-	ID              string                     `json:"id"`
-	Status          string                     `json:"status"`
-	Error           string                     `json:"error,omitempty"`
-	Validity        VoiceCallValidity          `json:"validity"`
-	Transcript      []VoiceTranscriptTurn      `json:"transcript"`
-	Metrics         VoiceCallMetrics           `json:"metrics"`
-	TargetRecording string                     `json:"target_recording,omitempty"`
-	CallerRecording string                     `json:"caller_recording,omitempty"`
-	Execution       *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
-	ProtocolEvents  []map[string]any           `json:"protocol_events,omitempty"`
+	ID                       string                     `json:"id"`
+	Status                   string                     `json:"status"`
+	Error                    string                     `json:"error,omitempty"`
+	Validity                 VoiceCallValidity          `json:"validity"`
+	Transcript               []VoiceTranscriptTurn      `json:"transcript"`
+	Metrics                  VoiceCallMetrics           `json:"metrics"`
+	TargetRecording          string                     `json:"target_recording,omitempty"`
+	CallerRecording          string                     `json:"caller_recording,omitempty"`
+	DeliveredCallerRecording string                     `json:"delivered_caller_recording,omitempty"`
+	Execution                *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	ProtocolEvents           []map[string]any           `json:"protocol_events,omitempty"`
 }
 
 type VoiceCallValidity struct {
@@ -164,18 +173,30 @@ type VoiceTranscriptTurn struct {
 }
 
 type VoiceCallMetrics struct {
-	DurationMS                 int64   `json:"duration_ms"`
-	FirstResponseMS            int64   `json:"first_response_ms,omitempty"`
-	AverageResponseMS          int64   `json:"average_response_ms,omitempty"`
-	ReceptionistAudioS         float64 `json:"receptionist_audio_seconds"`
-	CallerAudioS               float64 `json:"caller_audio_seconds"`
-	Interruptions              int     `json:"interruptions"`
-	ToolCalls                  int     `json:"tool_calls"`
-	RealtimeErrors             int     `json:"realtime_errors"`
-	ReceptionistRealtimeErrors int     `json:"receptionist_realtime_errors"`
-	CallerRealtimeErrors       int     `json:"caller_realtime_errors"`
-	DroppedAudioEvents         int     `json:"dropped_audio_events"`
-	EndedBy                    string  `json:"ended_by"`
+	DurationMS                 int64                       `json:"duration_ms"`
+	FirstResponseMS            int64                       `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64                       `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64                     `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64                     `json:"caller_audio_seconds"`
+	DeliveredCallerAudioS      float64                     `json:"delivered_caller_audio_seconds,omitempty"`
+	Interruptions              int                         `json:"interruptions"`
+	ToolCalls                  int                         `json:"tool_calls"`
+	RealtimeErrors             int                         `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int                         `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int                         `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int                         `json:"dropped_audio_events"`
+	EndedBy                    string                      `json:"ended_by"`
+	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
+}
+
+type VoiceAudioConditionMetrics struct {
+	Preset          string  `json:"preset"`
+	Intensity       string  `json:"intensity"`
+	Codec           string  `json:"codec"`
+	Seed            int64   `json:"seed"`
+	TargetSNRDB     float64 `json:"target_snr_db,omitempty"`
+	ProcessedFrames int64   `json:"processed_frames"`
+	ClippedSamples  int64   `json:"clipped_samples"`
 }
 
 type JudgeVerdict struct {

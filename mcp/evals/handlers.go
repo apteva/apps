@@ -244,7 +244,7 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 3 && parts[1] == "recordings" && r.Method == http.MethodGet {
-		if run.VoiceCall == nil || (parts[2] != "receptionist" && parts[2] != "caller") {
+		if run.VoiceCall == nil || (parts[2] != "receptionist" && parts[2] != "caller" && parts[2] != "caller-delivered") {
 			http.NotFound(w, r)
 			return
 		}

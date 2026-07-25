@@ -219,6 +219,14 @@ interface VoiceCase {
   max_average_response_ms?: number;
   transport?: "direct" | "carrier";
   protocol_fixture?: string;
+  audio_conditions?: VoiceAudioConditions;
+}
+
+interface VoiceAudioConditions {
+  preset: "clean" | "office" | "cafe" | "street" | "train_station" | "poor_phone";
+  intensity: "light" | "moderate" | "heavy";
+  codec: "none" | "g711_mulaw";
+  seed: number;
 }
 
 interface VoiceTranscriptTurn {
@@ -243,6 +251,7 @@ interface VoiceCall {
     average_response_ms?: number;
     receptionist_audio_seconds: number;
     caller_audio_seconds: number;
+    delivered_caller_audio_seconds?: number;
     interruptions: number;
     tool_calls: number;
     realtime_errors: number;
@@ -250,7 +259,17 @@ interface VoiceCall {
     caller_realtime_errors: number;
     dropped_audio_events: number;
     ended_by: string;
+    audio_conditions?: {
+      preset: string;
+      intensity: string;
+      codec: string;
+      seed: number;
+      target_snr_db?: number;
+      processed_frames: number;
+      clipped_samples: number;
+    };
   };
+  delivered_caller_recording?: string;
 }
 
 interface AssertionResult {
@@ -430,6 +449,16 @@ function appURL(path: string) {
 const modelID = (model: Model) =>
   model.gateway_model || `${model.provider || ""}/${model.model_id || ""}`.replace(/^\//, "");
 const modelLabel = (model: Model) => model.display_name || modelID(model);
+const audioPresetOptions: { value: VoiceAudioConditions["preset"]; label: string }[] = [
+  { value: "clean", label: "Clean audio" },
+  { value: "office", label: "Busy office" },
+  { value: "cafe", label: "Cafe" },
+  { value: "street", label: "Street traffic" },
+  { value: "train_station", label: "Train station" },
+  { value: "poor_phone", label: "Poor phone line" },
+];
+const audioPresetLabel = (value?: string) =>
+  audioPresetOptions.find((option) => option.value === value)?.label || "Clean audio";
 const pct = (value?: number) => `${Math.round((value || 0) * 100)}%`;
 const score = (value?: number) => (value == null ? "-" : String(Math.round(value)));
 const resultTone = (value: number | undefined, passed: boolean) =>
@@ -698,6 +727,10 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const [greeting, setGreeting] = useState("");
   const [maxFirstResponseMS, setMaxFirstResponseMS] = useState(2000);
   const [voiceTransport, setVoiceTransport] = useState<"direct" | "carrier">("direct");
+  const [audioPreset, setAudioPreset] = useState<VoiceAudioConditions["preset"]>("clean");
+  const [audioIntensity, setAudioIntensity] = useState<VoiceAudioConditions["intensity"]>("moderate");
+  const [audioCodec, setAudioCodec] = useState<VoiceAudioConditions["codec"]>("none");
+  const [audioSeed, setAudioSeed] = useState(42);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -850,6 +883,12 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
               max_first_response_ms: maxFirstResponseMS,
               transport: voiceTransport,
               protocol_fixture: voiceTransport === "carrier" ? carrierFixtureID : undefined,
+              audio_conditions: {
+                preset: audioPreset,
+                intensity: audioIntensity,
+                codec: voiceTransport === "carrier" ? "none" : audioCodec,
+                seed: audioSeed,
+              },
             } satisfies VoiceCase : undefined,
             goals: goalsFromText(task.success),
             assertions: [],
@@ -899,6 +938,16 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             <label><span className="ev-label">Caller voice</span><input value={callerVoice} onChange={(event) => setCallerVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
             <label><span className="ev-label">Maximum first response</span><div style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="number" min={250} max={10000} step={250} value={maxFirstResponseMS} onChange={(event) => setMaxFirstResponseMS(Number(event.target.value))} className="ev-field" /><span className="ev-muted">ms</span></div></label>
           </div>}
+          <div style={{ marginTop: 12 }}>
+            <span className="ev-label">Caller audio conditions</span>
+            <div className="ev-grid-2">
+              <label><span className="ev-label">Background</span><select value={audioPreset} onChange={(event) => { const preset = event.target.value as VoiceAudioConditions["preset"]; setAudioPreset(preset); setAudioCodec(preset === "poor_phone" ? "g711_mulaw" : "none"); }} className="ev-field">{audioPresetOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              <label><span className="ev-label">Noise level</span><select value={audioIntensity} onChange={(event) => setAudioIntensity(event.target.value as VoiceAudioConditions["intensity"])} disabled={audioPreset === "clean"} className="ev-field"><option value="light">Light · 18 dB SNR</option><option value="moderate">Moderate · 10 dB SNR</option><option value="heavy">Heavy · 4 dB SNR</option></select></label>
+              <label><span className="ev-label">Line quality</span><select value={voiceTransport === "carrier" ? "none" : audioCodec} onChange={(event) => setAudioCodec(event.target.value as VoiceAudioConditions["codec"])} disabled={voiceTransport === "carrier"} className="ev-field"><option value="none">Full-band audio</option><option value="g711_mulaw">8 kHz phone codec</option></select></label>
+              <label><span className="ev-label">Repeatable seed</span><input type="number" min={0} step={1} value={audioSeed} onChange={(event) => setAudioSeed(Math.max(0, Number(event.target.value) || 0))} className="ev-field" /></label>
+            </div>
+            <span className="ev-help">{voiceTransport === "carrier" ? "Background conditions are mixed before the carrier applies its own phone codec." : "The caller remains a live realtime agent; Environments alters only the audio delivered to the agent under test."}</span>
+          </div>
           {voiceTransport === "carrier" && !carrierReady && <div className="ev-error" style={{ marginTop: 10 }}><span>{environmentMode === "clone" ? "Install Telephony in this project before using the carrier path." : "The selected environment has no Telephony carrier fixture."}</span></div>}
 	          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={callerPersona} onChange={(event) => setCallerPersona(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={callerBehavior} onChange={(event) => setCallerBehavior(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={greeting} onChange={(event) => setGreeting(event.target.value)} placeholder="First response only" className="ev-field" /></label></div></details>
         </div>}
@@ -1046,7 +1095,7 @@ function ScenarioEditor({ suite, initial, catalog, onClose, onSaved }: {
   return <Drawer title={initial ? "Edit scenario" : "New scenario"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" onClick={save} disabled={!item.name || !item.prompt || (item.mode === "voice" && catalog.realtime_providers.length === 0)} className="ev-primary">Save scenario</button></>}>
     <div className="ev-form">
       <label><span className="ev-label">Scenario name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
-      <div><span className="ev-label">Scenario type</span><div className="ev-segment"><button type="button" data-active={(item.mode || "text") === "text"} onClick={() => setItem({ ...item, mode: "text", voice: undefined, timeout_seconds: 600 })}>Text task</button><button type="button" data-active={item.mode === "voice"} onClick={() => setItem({ ...item, mode: "voice", timeout_seconds: 90, voice: item.voice || { caller_goal: item.prompt || "", provider: defaultProvider?.name, caller_provider: defaultProvider?.name, voice: defaultProvider?.default_voice, caller_voice: defaultProvider?.default_voice, max_first_response_ms: 2000 } })}>Voice call</button></div></div>
+      <div><span className="ev-label">Scenario type</span><div className="ev-segment"><button type="button" data-active={(item.mode || "text") === "text"} onClick={() => setItem({ ...item, mode: "text", voice: undefined, timeout_seconds: 600 })}>Text task</button><button type="button" data-active={item.mode === "voice"} onClick={() => setItem({ ...item, mode: "voice", timeout_seconds: 90, voice: item.voice || { caller_goal: item.prompt || "", provider: defaultProvider?.name, caller_provider: defaultProvider?.name, voice: defaultProvider?.default_voice, caller_voice: defaultProvider?.default_voice, max_first_response_ms: 2000, audio_conditions: { preset: "clean", intensity: "moderate", codec: "none", seed: 42 } } })}>Voice call</button></div></div>
       <label><span className="ev-label">{item.mode === "voice" ? "What does the caller need?" : "Task to perform"}</span><textarea rows={5} value={item.prompt || ""} onChange={(event) => setItem({ ...item, prompt: event.target.value, voice: item.mode === "voice" ? { ...(item.voice || { caller_goal: "" }), caller_goal: event.target.value } : item.voice })} className="ev-field" /></label>
       {item.mode === "voice" && <div className="ev-setup">
         {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
@@ -1055,6 +1104,15 @@ function ScenarioEditor({ suite, initial, catalog, onClose, onSaved }: {
           <label><span className="ev-label">Caller voice</span><input value={item.voice?.caller_voice || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_voice: event.target.value } })} placeholder="Provider default" className="ev-field" /></label>
           <label><span className="ev-label">Maximum first response (ms)</span><input type="number" min={250} max={10000} step={250} value={item.voice?.max_first_response_ms || 2000} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), max_first_response_ms: Number(event.target.value) } })} className="ev-field" /></label>
         </div>}
+        <div style={{ marginTop: 12 }}>
+          <span className="ev-label">Caller audio conditions</span>
+          <div className="ev-grid-2">
+            <label><span className="ev-label">Background</span><select value={item.voice?.audio_conditions?.preset || "clean"} onChange={(event) => { const preset = event.target.value as VoiceAudioConditions["preset"]; setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { intensity: "moderate", seed: 42 }), preset, codec: preset === "poor_phone" ? "g711_mulaw" : "none" } } }); }} className="ev-field">{audioPresetOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label><span className="ev-label">Noise level</span><select value={item.voice?.audio_conditions?.intensity || "moderate"} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", codec: "none", seed: 42 }), intensity: event.target.value as VoiceAudioConditions["intensity"] } } })} disabled={(item.voice?.audio_conditions?.preset || "clean") === "clean"} className="ev-field"><option value="light">Light · 18 dB SNR</option><option value="moderate">Moderate · 10 dB SNR</option><option value="heavy">Heavy · 4 dB SNR</option></select></label>
+            <label><span className="ev-label">Line quality</span><select value={item.voice?.audio_conditions?.codec || "none"} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", intensity: "moderate", seed: 42 }), codec: event.target.value as VoiceAudioConditions["codec"] } } })} className="ev-field"><option value="none">Full-band audio</option><option value="g711_mulaw">8 kHz phone codec</option></select></label>
+            <label><span className="ev-label">Repeatable seed</span><input type="number" min={0} step={1} value={item.voice?.audio_conditions?.seed ?? 42} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", intensity: "moderate", codec: "none" }), seed: Math.max(0, Number(event.target.value) || 0) } } })} className="ev-field" /></label>
+          </div>
+        </div>
         <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={item.voice?.caller_persona || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_persona: event.target.value } })} placeholder="A natural, concise customer" className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={item.voice?.caller_behavior || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_behavior: event.target.value } })} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={item.voice?.greeting || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), greeting: event.target.value } })} placeholder="First response only" className="ev-field" /></label></div></details>
       </div>}
       <label><span className="ev-label">Success criteria</span><textarea rows={5} value={(item.goals || []).join("\n")} onChange={(event) => setItem({ ...item, goals: event.target.value.split("\n") })} placeholder="One requirement per line" className="ev-field" /></label>
@@ -1070,6 +1128,9 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   const goals = run.judge?.per_goal || [];
   const simulationChecks = (run.assertions || []).filter((result) => result.gating);
   const successChecks = (run.assertions || []).filter((result) => !result.gating);
+  const audioConditions = run.voice_call?.metrics.audio_conditions;
+  const configuredAudio = run.case.voice?.audio_conditions;
+  const hasConditionedAudio = Boolean(run.voice_call?.delivered_caller_recording || audioConditions);
   const [suggestions, setSuggestions] = useState(run.suggestions || []);
   const [error, setError] = useState("");
   const apply = async (id: string) => {
@@ -1087,7 +1148,8 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
       <div className="ev-section-heading"><div className="ev-section-title">Voice simulation</div><Status value={run.voice_call.validity?.status === "valid" ? "pass" : run.voice_call.validity?.status === "invalid" ? "error" : "unknown"} /></div>
       {run.voice_call.validity?.status === "invalid" && <div className="ev-error"><span>{run.voice_call.validity.reasons?.join("; ") || "The simulated conversation was invalid."}</span></div>}
       <div className="ev-inspector-summary"><Metric label="Duration" value={`${(run.voice_call.metrics.duration_ms / 1000).toFixed(1)}s`} /><Metric label="First response" value={run.voice_call.metrics.first_response_ms ? `${run.voice_call.metrics.first_response_ms}ms` : "-"} /><Metric label="End reason" value={run.voice_call.metrics.ended_by || "-"} /><Metric label="Receptionist audio" value={`${run.voice_call.metrics.receptionist_audio_seconds.toFixed(1)}s`} /><Metric label="Caller audio" value={`${run.voice_call.metrics.caller_audio_seconds.toFixed(1)}s`} /><Metric label="Audio errors" value={String(run.voice_call.metrics.realtime_errors)} /></div>
-      <div className="ev-grid-2" style={{ marginTop: 10 }}><label><span className="ev-label">Receptionist recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/receptionist`)} style={{ width: "100%", height: 36 }} /></label><label><span className="ev-label">Caller recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller`)} style={{ width: "100%", height: 36 }} /></label></div>
+      {(audioConditions || configuredAudio) && <div className="ev-inspector-summary" style={{ marginTop: 10 }}><Metric label="Background" value={audioPresetLabel(audioConditions?.preset || configuredAudio?.preset)} /><Metric label="Noise level" value={audioConditions?.intensity || configuredAudio?.intensity || "-"} /><Metric label="Line quality" value={(audioConditions?.codec || configuredAudio?.codec || "none").replace("carrier_", "").replace("g711_mulaw", "8 kHz phone")} /><Metric label="Seed" value={String(audioConditions?.seed ?? configuredAudio?.seed ?? 42)} />{audioConditions?.target_snr_db != null && <Metric label="Target SNR" value={`${audioConditions.target_snr_db} dB`} />}</div>}
+      <div className="ev-grid-2" style={{ marginTop: 10 }}><label><span className="ev-label">Receptionist recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/receptionist`)} style={{ width: "100%", height: 36 }} /></label><label><span className="ev-label">{hasConditionedAudio ? "Clean caller recording" : "Caller recording"}</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller`)} style={{ width: "100%", height: 36 }} /></label>{hasConditionedAudio && <label><span className="ev-label">Audio delivered to agent</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller-delivered`)} style={{ width: "100%", height: 36 }} /></label>}</div>
       <div className="ev-result-list" style={{ marginTop: 10 }}>{run.voice_call.transcript.length === 0 ? <Empty title="No transcript recorded" /> : run.voice_call.transcript.map((turn, index) => <div className="ev-result-row" key={`${turn.at_ms}-${index}`}><div style={{ width: "100%" }}><div className="ev-trace-role">{turn.speaker} · {(turn.at_ms / 1000).toFixed(1)}s</div><div className="ev-trace-text">{turn.text}</div></div></div>)}</div>
     </section>}
     {simulationChecks.length > 0 && <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Simulation checks</div><div className="ev-result-list">{simulationChecks.map((result, index) => <div className="ev-result-row" key={index}><span style={{ color: result.passed ? "var(--color-success)" : "var(--color-error)" }}>{result.passed ? "✓" : "×"}</span><div><div style={{ fontSize: 12 }}>{result.name || `Check ${index + 1}`}</div><div className="ev-muted">{result.message}</div></div></div>)}</div></section>}

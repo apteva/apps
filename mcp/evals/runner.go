@@ -87,6 +87,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 				"disconnect_on_done": true,
 				"transport":          voice.Transport,
 				"protocol_fixture":   voice.ProtocolFixture,
+				"audio_conditions":   voice.AudioConditions,
 			},
 		}
 		if err = s.setRunStage(run, "connecting_voice_call"); err != nil {
