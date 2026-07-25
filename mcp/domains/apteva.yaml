@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.5.0
+version: 0.5.1
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -22,7 +22,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/domains
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/domains/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [domains, dns, infrastructure, registrar]
 
 scopes: [project, global]
