@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.1.0
+version: 0.1.1
 description: |
   Embedded MQTT broker for Apteva. Acts as the LAN message bus for
   smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
@@ -25,7 +25,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/mqtt
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/mqtt/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [mqtt, iot, home-automation, broker, infrastructure]
 
 scopes: [project, global]

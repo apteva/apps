@@ -24,9 +24,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: mqtt
 display_name: MQTT Broker
-version: 0.1.0
+version: 0.1.1
 description: Embedded MQTT broker. LAN message bus for IoT devices; bridges to the platform event bus.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions: [db.write.app, net.egress]
