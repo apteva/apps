@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.23
+version: 0.1.24
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -34,6 +34,8 @@ description: |
   missing.
 
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [mobile, simulator, emulator, ios, android, dev]
 
 scopes: [project]

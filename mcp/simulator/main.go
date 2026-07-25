@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.23
+version: 0.1.24
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -53,6 +53,8 @@ description: |
   input. Called by the Code app on repos_dev_start for mobile repos;
   usable standalone for any flow that produces a mobile artifact.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [mobile, simulator, emulator, ios, android, dev]
 scopes: [project]
 min_apteva_version: "0.10.0"
