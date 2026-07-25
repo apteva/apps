@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.3.1
+version: 0.3.2
 description: |
   Periodic database backups of your Apteva instance: the platform DB
   plus app.db from running sidecars. Snapshots are captured online and
@@ -14,7 +14,8 @@ description: |
   included by the platform snapshot endpoint.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/backup
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/backup/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [backup, infrastructure, ops, snapshot, restore]
 
 scopes: [global]
@@ -73,7 +74,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.1
+    ref: backup/v0.3.2
     entry: mcp/backup
   port: 8080
   health_check: /health

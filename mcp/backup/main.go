@@ -50,11 +50,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.1
+version: 0.3.2
 description: |
   Periodic database backups of the platform DB and app.db from running
   sidecars. Supports local disk, AWS S3, Cloudflare R2, and local Fleet tenants.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [global]
 min_apteva_version: "0.10.0"
 requires:
@@ -103,7 +105,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.1
+    ref: backup/v0.3.2
     entry: mcp/backup
   port: 8080
   health_check: /health
