@@ -265,6 +265,7 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 		sampleRate      int
 		rawPacketBytes  int
 	}{
+		{provider: "signalwire", codec: carrierCodecL16_24, sampleRate: 24000, rawPacketBytes: 960},
 		{provider: "telnyx", codec: carrierCodecPCMU8, sampleRate: 8000, rawPacketBytes: 160},
 		{provider: "plivo", codec: carrierCodecPCMU8, sampleRate: 8000, rawPacketBytes: 160},
 	} {
@@ -281,7 +282,9 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 			done := make(chan struct{})
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				defer close(done)
-				if tc.provider == "telnyx" {
+				if tc.provider == "signalwire" {
+					a.handleSignalWireMediaStream(w, r)
+				} else if tc.provider == "telnyx" {
 					a.handleTelnyxMediaStream(w, r)
 				} else {
 					a.handlePlivoMediaStream(w, r)
@@ -398,18 +401,18 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 				t.Fatal("carrier playback progress did not reach Core")
 			}
 
-			loud := make([]int16, tc.sampleRate/50)
-			for i := range loud {
-				loud[i] = 7000
+			callerSpeech := telephoneSpeech(tc.sampleRate, 500, 3500)
+			frameSamples := tc.sampleRate / 50
+			for offset := 0; offset < len(callerSpeech); offset += frameSamples {
+				frame := callerSpeech[offset:min(len(callerSpeech), offset+frameSamples)]
+				if tc.codec == carrierCodecPCMU8 {
+					raw = pcm16ToUlaw(frame)
+				} else {
+					raw = pcm16ToBytes(frame)
+				}
+				speechFrame, _ := json.Marshal(map[string]any{"event": "media", "media": map[string]string{"payload": base64.StdEncoding.EncodeToString(raw)}})
+				_ = wsutil.WriteClientText(carrier, speechFrame)
 			}
-			if tc.codec == carrierCodecPCMU8 {
-				raw = pcm16ToUlaw(loud)
-			} else {
-				raw = pcm16ToBytes(loud)
-			}
-			loudFrame, _ := json.Marshal(map[string]any{"event": "media", "media": map[string]string{"payload": base64.StdEncoding.EncodeToString(raw)}})
-			_ = wsutil.WriteClientText(carrier, loudFrame)
-			_ = wsutil.WriteClientText(carrier, loudFrame)
 			speechObserved := false
 			for until := time.Now().Add(time.Second); !speechObserved && time.Now().Before(until); {
 				select {

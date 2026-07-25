@@ -38,15 +38,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string) (*cal
 	}
 
 	_, err = tx.Exec(`INSERT INTO calls
-        (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_request_id,
-         carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
-         directive, voice, audio_bridge_url, status, placed_at, project_id,
-	         idempotency_key, state_expires_at, deadline_at, recording_mode,
-	         recording_channels, recording_storage_mode, recording_retention_days)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	        (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_request_id,
+	         carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
+	         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
+		         idempotency_key, state_expires_at, deadline_at, recording_mode,
+		         recording_channels, recording_storage_mode, recording_retention_days)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
-		call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
+		call.ForwardedFrom, call.IngressPath, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
 		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
 		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
 		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays)

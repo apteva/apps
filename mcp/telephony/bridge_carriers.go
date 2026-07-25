@@ -152,7 +152,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	inputResampler := carrierInputResampler(cfg.InputCodec)
 	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 	playback := newTwilioPlaybackTracker()
-	speechDetector := newPCMSpeechStartDetector()
+	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
 	var coreWriteMu sync.Mutex
 
 	go func() {
@@ -192,13 +192,24 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
 				}
-				pcm24, err := decodeCarrierPayload(f.Media.Payload, cfg.InputCodec, inputResampler)
+				pcm, err := decodeCarrierPCM(f.Media.Payload, cfg.InputCodec)
 				if err != nil {
 					continue
 				}
-				localSpeechStarted := speechDetector.observe(bytesToPCM16(pcm24)) && playback.hasPending()
+				processed := audioFrontend.process(pcm)
+				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				if localSpeechStarted {
+					audioFrontend.markLocalSignal()
+				}
+				pcm24 := processed.PCM
+				if inputResampler != nil {
+					pcm24 = inputResampler.Process(processed.PCM)
+				}
+				if len(pcm24) == 0 {
+					continue
+				}
 				coreWriteMu.Lock()
-				err = wsutil.WriteClientBinary(core, pcm24)
+				err = wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24))
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					err = wsutil.WriteClientText(core, control)
@@ -206,6 +217,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				coreWriteMu.Unlock()
 				if err != nil {
 					return
+				}
+				if localSpeechStarted {
+					logLocalBargeIn(globalCtx.Logger(), cfg.Provider, callID, processed)
 				}
 			case "mark":
 				if f.Mark == nil {
@@ -259,7 +273,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		},
 	)
 	defer func() {
-		globalCtx.Logger().Info("carrier media bridge metrics", "provider", cfg.Provider, "call", callID, "max_queued_ms", maxQueuedMS)
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, cfg.Provider, cfg.InputCodec, maxQueuedMS)
 	}()
 
 	var nextFrame realtimeBridgeControl
@@ -283,10 +297,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				nextFrame = control
 			case "interrupt":
 				nextFrame = realtimeBridgeControl{}
+				interruptSource := audioFrontend.markInterrupt(control.Source)
 				packetizer.clear()
-				if _, err := pacer.clear(ctx); err != nil {
+				clearedMS, err := pacer.clear(ctx)
+				if err != nil {
 					return
 				}
+				globalCtx.Logger().Info("carrier playback cleared", "provider", cfg.Provider, "call", callID, "source", interruptSource, "queued_ms", clearedMS)
 			}
 			continue
 		}
@@ -405,6 +422,11 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		_ = core.Close()
 	}()
 
+	audioFrontend := newCarrierAudioFrontend(16000)
+	audioFrontend.mode = localBargeInOff
+	var coreWriteMu sync.Mutex
+	defer logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "vonage", carrierCodecL16_16, 0)
+
 	go func() {
 		defer cancel()
 		inputResampler := newPCMResampler(16000, 24000)
@@ -419,8 +441,15 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			if op != ws.OpBinary || len(data) == 0 {
 				continue
 			}
-			pcm24 := inputResampler.Process(bytesToPCM16(data))
-			if err := wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24)); err != nil {
+			processed := audioFrontend.process(bytesToPCM16(data))
+			pcm24 := inputResampler.Process(processed.PCM)
+			if len(pcm24) == 0 {
+				continue
+			}
+			coreWriteMu.Lock()
+			err = wsutil.WriteClientBinary(core, pcm16ToBytes(pcm24))
+			coreWriteMu.Unlock()
+			if err != nil {
 				return
 			}
 		}
@@ -436,6 +465,13 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		data, op, err := wsutil.ReadServerData(core)
 		if err != nil {
 			return
+		}
+		if op == ws.OpText {
+			control, ok := parseRealtimeBridgeControl(data)
+			if ok && control.Type == "interrupt" {
+				audioFrontend.markInterrupt(control.Source)
+			}
+			continue
 		}
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
@@ -512,28 +548,37 @@ func carrierOutputResampler(codec string) *pcmResampler {
 }
 
 func decodeCarrierPayload(payload, codec string, streaming ...*pcmResampler) ([]byte, error) {
-	raw, err := base64.StdEncoding.DecodeString(payload)
+	pcm, err := decodeCarrierPCM(payload, codec)
 	if err != nil {
 		return nil, err
 	}
 	switch codec {
 	case carrierCodecPCMU8:
-		pcm := ulawToPCM16(raw)
 		if len(streaming) > 0 && streaming[0] != nil {
 			return pcm16ToBytes(streaming[0].Process(pcm)), nil
 		}
 		return pcm16ToBytes(resamplePCM(pcm, 8000, 24000)), nil
 	case carrierCodecL16_16:
-		pcm := bytesToPCM16(raw)
 		if len(streaming) > 0 && streaming[0] != nil {
 			return pcm16ToBytes(streaming[0].Process(pcm)), nil
 		}
 		return pcm16ToBytes(resamplePCM(pcm, 16000, 24000)), nil
 	case carrierCodecL16_24:
-		return raw, nil
+		return pcm16ToBytes(pcm), nil
 	default:
-		return raw, nil
+		return pcm16ToBytes(pcm), nil
 	}
+}
+
+func decodeCarrierPCM(payload, codec string) ([]int16, error) {
+	raw, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, err
+	}
+	if codec == carrierCodecPCMU8 {
+		return ulawToPCM16(raw), nil
+	}
+	return bytesToPCM16(raw), nil
 }
 
 func encodeCarrierPayload(pcm24Bytes []byte, codec string, streaming ...*pcmResampler) (string, error) {

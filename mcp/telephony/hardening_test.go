@@ -175,6 +175,8 @@ func TestDirectiveWithCallContext(t *testing.T) {
 	call := testCall("context", "pending")
 	call.Direction = "inbound"
 	call.RouteID = "route-1"
+	call.ForwardedFrom = "+34930494946"
+	call.IngressPath = "forwarded"
 
 	got := directiveWithCallContext("Help the caller.", call)
 	for _, want := range []string{
@@ -187,7 +189,13 @@ func TestDirectiveWithCallContext(t *testing.T) {
 		`"route_id": "route-1"`,
 		`"from_number": "+14155550101"`,
 		`"to_number": "+14155550100"`,
+		`"forwarded_from": "+34930494946"`,
+		`"ingress_path": "forwarded"`,
 		"[END CALL CONTEXT]",
+		"[VOICE SAFETY]",
+		"Never infer missing or unclear dates",
+		"Require explicit caller confirmation",
+		"[END VOICE SAFETY]",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("directive missing %q:\n%s", want, got)
@@ -431,6 +439,7 @@ func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
 	}
 	form := url.Values{
 		"CallSid": {"CAdirect"}, "From": {"+34648257793"}, "To": {route.PhoneNumber},
+		"ForwardedFrom": {"+34930494946"},
 	}
 	endpoint := strings.TrimPrefix(a.inboundRouteURL(route), a.publicAppURL())
 	req := httptest.NewRequest(http.MethodPost, endpoint, strings.NewReader(form.Encode()))
@@ -452,6 +461,14 @@ func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
 	stored, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "CAdirect")
 	if err != nil || stored == nil || stored.Status != "answered" || stored.ThreadID != "tel-"+stored.ID {
 		t.Fatalf("stored call=%+v err=%v", stored, err)
+	}
+	if stored.ForwardedFrom != "+34930494946" || stored.IngressPath != "forwarded" {
+		t.Fatalf("forwarding metadata not persisted: %+v", stored)
+	}
+	if len(platform.spawned) != 1 ||
+		!strings.Contains(platform.spawned[0].Directive, `"forwarded_from": "+34930494946"`) ||
+		!strings.Contains(platform.spawned[0].Directive, `"ingress_path": "forwarded"`) {
+		t.Fatalf("forwarding metadata missing from realtime directive: %+v", platform.spawned)
 	}
 }
 
