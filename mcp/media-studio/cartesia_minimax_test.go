@@ -286,7 +286,7 @@ func TestCartesiaAndMiniMaxProviderQualificationAndModels(t *testing.T) {
 	}
 	if !audioProviderSupports("cartesia", "voice.create") ||
 		!audioProviderSupports("minimax-audio", "voice.create") ||
-		!strings.Contains(string(mustReadTestFile(t, "apteva.yaml")), "version: 0.10.57") {
+		!strings.Contains(string(mustReadTestFile(t, "apteva.yaml")), "version: 0.10.58") {
 		t.Fatal("provider or manifest capability missing")
 	}
 }

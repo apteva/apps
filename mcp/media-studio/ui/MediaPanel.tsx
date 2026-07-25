@@ -2,7 +2,16 @@
 // Loaded by the dashboard via dynamic import; uses host React via
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
-import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type DragEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { AudioLines, Maximize2, Pause, Play, Plus, Upload, Volume2, VolumeX, X } from "lucide-react";
 import {
   buildVideoReferencePayload,
@@ -10,6 +19,7 @@ import {
   DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
+  insertPromptToken,
   isDurableMediaReference,
   isReferenceToVideoModel,
   mergeHistoryPage,
@@ -24,6 +34,7 @@ import {
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoReferenceImageLimit,
+  videoPromptReferences,
   videoSourceRequired,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
@@ -528,6 +539,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [folderSuggestions, setFolderSuggestions] = useState<string[]>([]);
   const activeKindRef = useRef<Kind>(activeKind);
   const promptRef = useRef(prompt);
+  const promptInputRef = useRef<HTMLTextAreaElement | null>(null);
   const historyRequestRef = useRef(0);
   activeKindRef.current = activeKind;
   promptRef.current = prompt;
@@ -1018,6 +1030,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         : currentModel?.max_source_images || 1
       : 1;
   const referenceInputMax = activeKind === "image" ? editSourceLimit : videoSourceLimit;
+  const promptReferences = videoIsReferenceModel
+    ? videoPromptReferences(videoModel, videoReferencePurpose, sourceImages.length)
+    : [];
 
   const addSourceImage = (value: string, label: string) => {
     const trimmed = value.trim();
@@ -1029,6 +1044,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   };
   const removeSourceImage = (index: number) => {
     setSourceImages((cur) => cur.filter((_, i) => i !== index));
+  };
+  const insertVideoPromptReference = (token: string) => {
+    const input = promptInputRef.current;
+    const selectionStart = input?.selectionStart ?? prompt.length;
+    const selectionEnd = input?.selectionEnd ?? selectionStart;
+    const next = insertPromptToken(prompt, token, selectionStart, selectionEnd);
+    setPrompt(next.value);
+    window.requestAnimationFrame(() => {
+      const current = promptInputRef.current;
+      if (!current) return;
+      current.focus();
+      current.setSelectionRange(next.cursor, next.cursor);
+    });
   };
 
   // Auto-snap aspect / duration / resolution when the user picks a
@@ -2166,6 +2194,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               onError={setStatus}
               referencePurpose={videoIsReferenceModel ? videoReferencePurpose : undefined}
               onReferencePurposeChange={setVideoReferencePurpose}
+              promptReferences={promptReferences}
+              onInsertPromptReference={insertVideoPromptReference}
               hint={
                 showVideoRefInput
                   ? referenceInputMax > 1
@@ -2180,6 +2210,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             kind={activeKind}
             prompt={prompt}
             setPrompt={setPrompt}
+            promptInputRef={promptInputRef}
             promptLength={promptLength}
             promptLimit={promptLimit}
             promptTooLong={promptTooLong}
@@ -2521,6 +2552,7 @@ interface ComposerProps {
   kind: Kind;
   prompt: string;
   setPrompt: (v: string) => void;
+  promptInputRef: RefObject<HTMLTextAreaElement | null>;
   promptLength: number;
   promptLimit: number;
   promptTooLong: boolean;
@@ -2713,6 +2745,7 @@ function Composer(p: ComposerProps) {
           )}
         </label>
         <textarea
+          ref={p.promptInputRef}
           rows={7}
           value={p.prompt}
           onChange={(e) => p.setPrompt(e.target.value)}
@@ -3900,6 +3933,8 @@ function ReferenceImageInput({
   hint,
   referencePurpose,
   onReferencePurposeChange,
+  promptReferences,
+  onInsertPromptReference,
 }: {
   projectId: string;
   sources: SourceImageRef[];
@@ -3911,6 +3946,8 @@ function ReferenceImageInput({
   hint?: string;
   referencePurpose?: VideoReferencePurpose;
   onReferencePurposeChange?: (purpose: VideoReferencePurpose) => void;
+  promptReferences?: Array<{ token: string; label: string }>;
+  onInsertPromptReference?: (token: string) => void;
 }) {
   const [urlInput, setUrlInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -3953,51 +3990,6 @@ function ReferenceImageInput({
         (sources.length > 0 ? "border border-accent" : "border border-dashed border-border")
       }
     >
-      {sources.length > 0 && (
-        <div className="flex gap-2 overflow-x-auto pb-1">
-          {sources.map((src, index) => {
-            const previewSrc = sourceImagePreviewSrc(src.value, projectId);
-            return (
-              <div
-                key={`${src.value}-${index}`}
-                className="flex items-center gap-2 border border-border rounded p-1.5 bg-bg"
-                style={{ minWidth: 180, maxWidth: 240 }}
-              >
-                {previewSrc ? (
-                  <img
-                    src={previewSrc}
-                    alt=""
-                    style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
-                  />
-                ) : (
-                  <div
-                    style={{ width: 44, height: 44, borderRadius: 4, background: "var(--apteva-bg-input, #222)", flexShrink: 0 }}
-                    className="flex items-center justify-center text-text-dim text-xs"
-                  >
-                    ref
-                  </div>
-                )}
-                <div className="min-w-0 flex-1">
-                  <div className="text-text-dim" style={{ fontSize: 10 }}>
-                    Reference {index + 1}
-                  </div>
-                  <div className="text-xs text-text truncate" title={src.label}>
-                    {src.label || "(set)"}
-                  </div>
-                </div>
-                <button
-                  onClick={() => onRemove(index)}
-                  aria-label={`Remove reference ${index + 1}`}
-                  className="text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded"
-                  title="Remove reference"
-                >
-                  x
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
       {referencePurpose && onReferencePurposeChange && (
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <span className="text-text-muted text-xs font-medium">Reference use</span>
@@ -4026,6 +4018,73 @@ function ReferenceImageInput({
               </button>
             ))}
           </div>
+        </div>
+      )}
+      {promptReferences && promptReferences.length > 0 && onInsertPromptReference && (
+        <div className="flex items-start gap-2 flex-wrap">
+          <span className="text-text-muted text-xs font-medium py-1">Prompt references</span>
+          <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+            {promptReferences.map((reference) => (
+              <button
+                key={reference.token}
+                type="button"
+                onClick={() => onInsertPromptReference(reference.token)}
+                className="flex items-center gap-1.5 max-w-full px-2 py-1 text-xs border border-border rounded bg-bg-input text-text hover:border-accent"
+                title={`Insert ${reference.token} at the prompt cursor`}
+              >
+                <span className="text-text-dim truncate">{reference.label}</span>
+                <code className="text-accent flex-shrink-0">{reference.token}</code>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {sources.length > 0 && (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {sources.map((src, index) => {
+            const previewSrc = sourceImagePreviewSrc(src.value, projectId);
+            const roleLabel = referencePurpose === "identity"
+              ? index === 0 ? "Primary identity" : `Identity angle ${index + 1}`
+              : `Reference ${index + 1}`;
+            return (
+              <div
+                key={`${src.value}-${index}`}
+                className="flex items-center gap-2 border border-border rounded p-1.5 bg-bg"
+                style={{ minWidth: 180, maxWidth: 240 }}
+              >
+                {previewSrc ? (
+                  <img
+                    src={previewSrc}
+                    alt=""
+                    style={{ width: 44, height: 44, objectFit: "cover", borderRadius: 4, flexShrink: 0 }}
+                  />
+                ) : (
+                  <div
+                    style={{ width: 44, height: 44, borderRadius: 4, background: "var(--apteva-bg-input, #222)", flexShrink: 0 }}
+                    className="flex items-center justify-center text-text-dim text-xs"
+                  >
+                    ref
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="text-text-dim" style={{ fontSize: 10 }}>
+                    {roleLabel}
+                  </div>
+                  <div className="text-xs text-text truncate" title={src.label}>
+                    {src.label || "(set)"}
+                  </div>
+                </div>
+                <button
+                  onClick={() => onRemove(index)}
+                  aria-label={`Remove ${roleLabel.toLowerCase()}`}
+                  className="text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded"
+                  title="Remove reference"
+                >
+                  x
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div className="flex items-center justify-between gap-3 flex-wrap">

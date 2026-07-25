@@ -1,5 +1,9 @@
 export type DurationKind = "video" | "audio_sfx" | "music";
 export type VideoReferencePurpose = "identity" | "reference";
+export interface VideoPromptReference {
+  token: string;
+  label: string;
+}
 
 export const DEFAULT_IMAGE_FORMAT = "jpeg";
 export const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -75,6 +79,50 @@ export function videoReferenceImageLimit(
     return 7;
   }
   return 9;
+}
+
+export function videoPromptReferences(
+  modelID: string,
+  purpose: VideoReferencePurpose,
+  imageCount: number,
+): VideoPromptReference[] {
+  if (!isReferenceToVideoModel(modelID) || imageCount <= 0) return [];
+  const normalized = modelID.toLowerCase();
+  if (normalized.startsWith("kling-") && purpose === "identity") {
+    return [{ token: "@Element1", label: "Subject" }];
+  }
+  return Array.from({ length: imageCount }, (_, index) => {
+    const number = index + 1;
+    if (normalized.startsWith("happyhorse-1-0-")) {
+      return { token: `character${number}`, label: `Reference ${number}` };
+    }
+    if (normalized.startsWith("happyhorse-")) {
+      return { token: `[Image ${number}]`, label: `Reference ${number}` };
+    }
+    return {
+      token: `@Image${number}`,
+      label: purpose === "identity" ? `Identity photo ${number}` : `Reference ${number}`,
+    };
+  });
+}
+
+export function insertPromptToken(
+  prompt: string,
+  token: string,
+  selectionStart: number,
+  selectionEnd: number,
+): { value: string; cursor: number } {
+  const start = Math.max(0, Math.min(selectionStart, prompt.length));
+  const end = Math.max(start, Math.min(selectionEnd, prompt.length));
+  const before = prompt.slice(0, start);
+  const after = prompt.slice(end);
+  const prefix = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const suffix = after.length > 0 && !/^\s/.test(after) ? " " : "";
+  const inserted = prefix + token + suffix;
+  return {
+    value: before + inserted + after,
+    cursor: before.length + prefix.length + token.length,
+  };
 }
 
 export function buildVideoReferencePayload(

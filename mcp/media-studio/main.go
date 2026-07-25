@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.57
+version: 0.10.58
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.57 adds provider-neutral
+  as a subscription-backed image provider. v0.10.58 adds model-aware reference
+  labels and responsive prompt-reference controls that insert each provider's
+  required image token at the current prompt cursor. v0.10.57 adds provider-neutral
   identity and scene reference groups for every Venice reference-to-video
   model, structured Kling identity elements, model-specific limits and prompt
   tokens, and live video resolution controls. v0.10.56 merges owned Fish Audio

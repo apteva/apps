@@ -5,6 +5,7 @@ import {
   DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
+  insertPromptToken,
   isReferenceToVideoModel,
   isDurableMediaReference,
   mergeHistoryPage,
@@ -19,6 +20,7 @@ import {
   uploadValidationError,
   videoSourceRequired,
   videoReferenceImageLimit,
+  videoPromptReferences,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
   voicesForProvider,
@@ -84,6 +86,47 @@ describe("Media Panel logic", () => {
     expect(videoReferenceImageLimit("kling-o3-pro-reference-to-video", "reference")).toBe(7);
     expect(videoReferenceImageLimit("grok-imagine-reference-to-video-private")).toBe(7);
     expect(videoReferenceImageLimit("happyhorse-1-1-reference-to-video")).toBe(9);
+  });
+
+  test("surfaces the prompt tokens used by each Venice R2V family", () => {
+    expect(videoPromptReferences(
+      "kling-o3-pro-reference-to-video",
+      "identity",
+      3,
+    )).toEqual([{ token: "@Element1", label: "Subject" }]);
+    expect(videoPromptReferences(
+      "grok-imagine-reference-to-video-private",
+      "identity",
+      2,
+    ).map((item) => item.token)).toEqual(["@Image1", "@Image2"]);
+    expect(videoPromptReferences(
+      "happyhorse-1-0-reference-to-video",
+      "reference",
+      2,
+    ).map((item) => item.token)).toEqual(["character1", "character2"]);
+    expect(videoPromptReferences(
+      "happyhorse-1-1-reference-to-video",
+      "reference",
+      2,
+    ).map((item) => item.token)).toEqual(["[Image 1]", "[Image 2]"]);
+  });
+
+  test("inserts a reference token at the prompt cursor with stable spacing", () => {
+    expect(insertPromptToken("Walking through Barcelona", "@Element1", 0, 0))
+      .toEqual({
+        value: "@Element1 Walking through Barcelona",
+        cursor: 9,
+      });
+    expect(insertPromptToken("Walking Barcelona", "@Image1", 8, 8))
+      .toEqual({
+        value: "Walking @Image1 Barcelona",
+        cursor: 15,
+      });
+    expect(insertPromptToken("Use old reference", "@Image2", 4, 7))
+      .toEqual({
+        value: "Use @Image2 reference",
+        cursor: 11,
+      });
   });
 
   test("only sends video aspect when live model metadata supports it", () => {
