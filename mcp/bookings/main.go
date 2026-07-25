@@ -25,11 +25,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.1.1
+version: 0.1.2
 description: Calendly-style booking links for human and AI-agent meetings.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/bookings/icon.svg
 tags: [bookings, scheduling, calendar, meetings, agents]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
