@@ -46,12 +46,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: streaming
 display_name: Streaming
-version: 0.1.0
+version: 0.1.1
 description: |
   Live ingest + HLS packaging for sibling Apteva apps. v0.1 is fully
   standalone: segments and recordings live on the sidecar's local
   data dir.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

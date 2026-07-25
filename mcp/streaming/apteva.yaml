@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: streaming
 display_name: Streaming
-version: 0.1.0
+version: 0.1.1
 description: |
   Live ingest + HLS packaging for sibling Apteva apps. Owns RTMP ingest,
   ffmpeg-driven HLS segmentation, recording-to-mp4, viewer heartbeats,
@@ -18,7 +18,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/streaming
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/streaming/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [streaming, video, live, hls, rtmp, infrastructure]
 
 scopes: [project, global]
