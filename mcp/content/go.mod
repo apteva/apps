@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/content
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.36.5
+	github.com/apteva/app-sdk v0.43.0
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/yuin/goldmark v1.7.8
 	gopkg.in/yaml.v3 v3.0.1
