@@ -1,4 +1,4 @@
-# Billing (v0.8.17)
+# Billing (v0.9.0)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
@@ -12,7 +12,9 @@ Customers, invoices, and payments for Apteva agents and human teams.
   with provider-ID idempotency and paid-invoice reopening after refunds.
 - **Append-only audit log** per invoice for status transitions.
 - **Stripe Checkout payment links** reconciled against persisted expected
-  amount/currency/session records before invoice state changes.
+  amount/currency/session records before invoice state changes. All Stripe
+  calls use the bound integration; the platform owns webhook registration,
+  encrypted signing-secret storage, and signature verification.
 - **Reusable payment methods** through provider-hosted setup sessions.
 - **PDF + print view** at `GET /invoices/{id}/pdf` (server-rendered
   via gofpdf — Helvetica, A4, no font embedding) and

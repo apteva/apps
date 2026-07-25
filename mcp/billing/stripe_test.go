@@ -1,71 +1,74 @@
 package main
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
-func TestStripeDirectCreatesWebhookAndCheckoutSession(t *testing.T) {
-	var calls []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls = append(calls, r.URL.Path)
-		if got := r.Header.Get("Authorization"); got != "Bearer sk_test_direct" {
-			t.Fatalf("Authorization=%q", got)
-		}
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("parse form: %v", err)
-		}
-		switch r.URL.Path {
-		case "/webhook_endpoints":
-			if got := r.Form.Get("url"); got != "https://billing-test.example/webhooks/stripe" {
-				t.Fatalf("webhook url=%q", got)
-			}
-			if got := r.Form["enabled_events[]"]; len(got) == 0 {
-				t.Fatalf("enabled_events missing: %#v", r.Form)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"we_123","url":"https://billing-test.example/webhooks/stripe","secret":"whsec_generated"}`))
-		case "/checkout/sessions":
-			if got := r.Form.Get("mode"); got != "payment" {
-				t.Fatalf("mode=%q", got)
-			}
-			if got := r.Form.Get("line_items[0][price_data][currency]"); got != "usd" {
-				t.Fatalf("currency=%q", got)
-			}
-			if got := r.Form.Get("line_items[0][price_data][unit_amount]"); got != "1650" {
-				t.Fatalf("unit_amount=%q", got)
-			}
-			if got := r.Form.Get("line_items[0][quantity]"); got != "1" {
-				t.Fatalf("quantity=%q", got)
-			}
-			if got := r.Form.Get("metadata[apteva_project_id]"); got != "test-proj" {
-				t.Fatalf("metadata project=%q", got)
-			}
-			if got := r.Form.Get("success_url"); !strings.HasPrefix(got, "https://billing-test.example/dashboard?app=billing") {
-				t.Fatalf("success_url=%q", got)
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123","expires_at":1893456000}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer srv.Close()
-	t.Setenv("STRIPE_API_BASE", srv.URL)
+type stripeToolCall struct {
+	ConnectionID int64
+	Tool         string
+	Input        map[string]any
+}
 
-	ctx := newTestCtx(t, tk.WithConfig(map[string]string{
-		"stripe_secret_key":  "sk_test_direct",
-		"stripe_webhook_url": "https://billing-test.example/webhooks/stripe",
-	}))
+type stripePlatformStub struct {
+	tk.BasePlatformClient
+	ensureCalls []sdk.IntegrationWebhookEnsureRequest
+	verifyCalls []sdk.IntegrationWebhookVerifyRequest
+	toolCalls   []stripeToolCall
+	verifyEvent json.RawMessage
+}
+
+func (s *stripePlatformStub) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{
+		AppName: "billing", InstallID: 1, ProjectID: "test-proj",
+		Bindings: map[string]any{"payment_processor": float64(57)},
+	}, nil
+}
+
+func (s *stripePlatformStub) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "stripe", Status: "active"}, nil
+}
+
+func (s *stripePlatformStub) PlatformInfo() (*sdk.PlatformInfo, error) {
+	return &sdk.PlatformInfo{PublicURL: "https://billing-test.example"}, nil
+}
+
+func (s *stripePlatformStub) EnsureIntegrationWebhook(req sdk.IntegrationWebhookEnsureRequest) (*sdk.IntegrationWebhookStatus, error) {
+	s.ensureCalls = append(s.ensureCalls, req)
+	return &sdk.IntegrationWebhookStatus{
+		ConnectionID: req.ConnectionID, Role: req.Role, Provider: "stripe", Status: "ready",
+	}, nil
+}
+
+func (s *stripePlatformStub) VerifyIntegrationWebhook(req sdk.IntegrationWebhookVerifyRequest) (*sdk.IntegrationWebhookVerifyResult, error) {
+	s.verifyCalls = append(s.verifyCalls, req)
+	return &sdk.IntegrationWebhookVerifyResult{Provider: "stripe", Event: s.verifyEvent}, nil
+}
+
+func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	s.toolCalls = append(s.toolCalls, stripeToolCall{ConnectionID: connectionID, Tool: tool, Input: input})
+	switch tool {
+	case "create_checkout_session":
+		return &sdk.ExecuteResult{
+			Success: true, Status: http.StatusOK,
+			Data: json.RawMessage(`{"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123","expires_at":1893456000}`),
+		}, nil
+	default:
+		return nil, fmt.Errorf("unexpected Stripe tool %q", tool)
+	}
+}
+
+func TestStripeIntegrationEnsuresWebhookBeforeCheckoutSession(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
 	app := &App{}
 	cust := mustCustomer(t, ctx, "buyer@example.com", "Buyer")
 	inv := mustDraft(t, ctx, cust.ID, []any{line("Fractional taxed usage", 1.5, 1000, 1000)})
@@ -79,15 +82,27 @@ func TestStripeDirectCreatesWebhookAndCheckoutSession(t *testing.T) {
 	if got["stripe_session_id"] != "cs_test_123" {
 		t.Fatalf("stripe_session_id=%v", got["stripe_session_id"])
 	}
-	if len(calls) != 2 || calls[0] != "/webhook_endpoints" || calls[1] != "/checkout/sessions" {
-		t.Fatalf("calls=%v", calls)
+	if len(platform.ensureCalls) != 1 {
+		t.Fatalf("webhook ensure calls=%d, want 1", len(platform.ensureCalls))
 	}
-	settings, err := loadStripeSettings(ctx.AppDB())
-	if err != nil {
-		t.Fatalf("load settings: %v", err)
+	ensure := platform.ensureCalls[0]
+	if ensure.ConnectionID != 57 || ensure.Role != "payment_processor" ||
+		ensure.CallbackPath != "/webhooks/stripe" {
+		t.Fatalf("ensure request=%#v", ensure)
 	}
-	if settings.WebhookEndpointID != "we_123" || settings.WebhookSecret != "whsec_generated" {
-		t.Fatalf("settings=%#v", settings)
+	if len(platform.toolCalls) != 1 || platform.toolCalls[0].Tool != "create_checkout_session" {
+		t.Fatalf("Stripe tool calls=%#v", platform.toolCalls)
+	}
+	input := platform.toolCalls[0].Input
+	if input["mode"] != "payment" {
+		t.Fatalf("mode=%v", input["mode"])
+	}
+	if !strings.HasPrefix(input["success_url"].(string), "https://billing-test.example/dashboard?app=billing") {
+		t.Fatalf("success_url=%q", input["success_url"])
+	}
+	meta := input["metadata"].(map[string]any)
+	if meta["apteva_project_id"] != "test-proj" {
+		t.Fatalf("metadata=%#v", meta)
 	}
 	var expectedAmount int64
 	if err := ctx.AppDB().QueryRow(
@@ -174,18 +189,37 @@ func TestStripeWebhookRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-func TestVerifyStripeWebhookSignature(t *testing.T) {
-	secret := "whsec_test"
-	payload := []byte(`{"id":"evt_123","type":"checkout.session.completed"}`)
-	now := time.Unix(1893456000, 0)
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(fmt.Sprintf("%d.%s", now.Unix(), payload)))
-	header := fmt.Sprintf("t=%d,v1=%s", now.Unix(), hex.EncodeToString(mac.Sum(nil)))
-
-	if err := verifyStripeWebhookSignature(payload, header, secret, now); err != nil {
-		t.Fatalf("verify valid signature: %v", err)
+func TestPlatformVerifiedStripeWebhookMarksInvoicePaid(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	cust := mustCustomer(t, ctx, "webhook@example.com", "Webhook Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Service", 1, 1200, 0)}).ID)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO billing_checkout_sessions
+		 (project_id, invoice_id, provider, provider_session_id, amount_cents, currency, status)
+		 VALUES ('test-proj', ?, 'stripe', 'cs_verified', 1200, 'USD', 'pending')`, inv.ID); err != nil {
+		t.Fatal(err)
 	}
-	if err := verifyStripeWebhookSignature(payload, header, "wrong", now); err == nil {
-		t.Fatal("expected wrong secret to fail")
+	payload := []byte(`{"id":"evt_verified","type":"checkout.session.completed","data":{"object":{"id":"cs_verified","mode":"payment","payment_status":"paid","amount_total":1200,"currency":"usd","payment_intent":"pi_verified"}}}`)
+	platform.verifyEvent = payload
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/stripe", strings.NewReader(string(payload)))
+	req.Header.Set("Stripe-Signature", "t=platform-verifies,v1=opaque-to-billing")
+	rec := httptest.NewRecorder()
+	app.handleStripeWebhook(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook status=%d: %s", rec.Code, rec.Body.String())
+	}
+	if len(platform.verifyCalls) != 1 ||
+		platform.verifyCalls[0].Payload != string(payload) ||
+		platform.verifyCalls[0].Signature != "t=platform-verifies,v1=opaque-to-billing" {
+		t.Fatalf("verify calls=%#v", platform.verifyCalls)
+	}
+	got, err := dbInvoiceGetByID(ctx.AppDB(), "test-proj", inv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "paid" || got.AmountPaidCents != 1200 {
+		t.Fatalf("invoice after verified webhook=%+v", got)
 	}
 }

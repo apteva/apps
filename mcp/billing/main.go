@@ -37,20 +37,22 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.18
+version: 0.9.0
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
   Checkout links are created only when explicitly requested.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/billing
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [billing, invoices, payments, finance]
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
-    - net.egress
     - platform.apps.call
     - platform.connections.execute
-    - platform.connections.read_credentials
   apps:
     - name: catalog
       optional: true
@@ -58,13 +60,14 @@ requires:
     - role: payment_processor
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, refunds.create, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create: create_customer
         customers.search: search_customers
         checkout_sessions.create: create_checkout_session
         refunds.create: create_refund
-        webhooks.process: process_webhook
+        payment_methods.get: get_payment_method
+        payment_methods.detach: detach_payment_method
       required: false
       label: "Payment processor (Stripe)"
 provides:
@@ -105,19 +108,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// passing AppCtx — can reach it. (Same pattern as crm.)
 	globalCtx = ctx
 
-	if stripeDirectConfigured(ctx) {
-		ctx.Logger().Info("billing: stripe_secret_key configured — direct Stripe payment links enabled")
-		if err := ensureStripeWebhook(ctx); err != nil {
-			ctx.Logger().Warn("billing: Stripe webhook auto-registration pending", "err", err.Error())
+	if bound := ctx.IntegrationFor("payment_processor"); bound != nil {
+		ctx.Logger().Info("billing: payment_processor integration bound — on-demand Stripe payment links enabled")
+		if err := ensureStripeWebhook(ctx, bound); err != nil {
+			ctx.Logger().Warn("billing: platform-managed Stripe webhook reconciliation pending", "err", err.Error())
 		}
-	} else if ctx.IntegrationFor("payment_processor") != nil {
-		ctx.Logger().Info("billing: payment_processor integration bound — Stripe payment links enabled")
 	} else {
 		ctx.Logger().Info("billing: no payment_processor bound — manual-payment mode only")
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.18",
+		"version", "0.9.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -144,9 +145,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/payment-methods/", Handler: a.handleHTTPPaymentMethodItem},
 		{Pattern: "/setup-sessions", Handler: a.handleHTTPSetupSessionsCollection},
 		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
-		// Stripe webhook receiver. Public POST endpoint configured
-		// automatically when stripe_secret_key is set, or manually
-		// when using the legacy payment_processor integration path.
+		// Stripe webhook receiver. The platform automatically registers
+		// this URL and verifies events through the bound connection.
 		{Pattern: "/webhooks/stripe", Handler: a.handleStripeWebhook},
 	}
 }
@@ -434,7 +434,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_send_payment_link",
-			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is configured, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses stripe_secret_key config when present, otherwise falls back to the bound payment_processor integration (Stripe). The URL is valid for 24h. On payment success, the verified webhook records the payment and transitions the invoice to 'paid' automatically. Args: invoice_id (required), success_url, cancel_url.",
+			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is connected, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses only the bound payment_processor integration; Billing never receives Stripe credentials. The URL is valid for 24h. On payment success, the platform-verified webhook records the payment and transitions the invoice to 'paid' automatically. Args: invoice_id (required), success_url, cancel_url.",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":  map[string]any{"type": "integer"},
 				"success_url": map[string]any{"type": "string"},
@@ -477,7 +477,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "payment_method_detach",
-			Description: "Detach a stored payment method. With direct Stripe config, detaches it at Stripe too; otherwise marks it detached locally after the provider webhook or operator action. Args: id.",
+			Description: "Detach a stored payment method. For Stripe methods, detaches it through the bound payment_processor integration before updating Billing locally. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),

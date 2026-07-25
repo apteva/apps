@@ -16,6 +16,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
+	if m.Icon != "/ui/icon.svg" || m.IconStyle != "monochrome" {
+		t.Errorf("embedded manifest icon = (%q, %q), want unified monochrome icon", m.Icon, m.IconStyle)
+	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
@@ -23,9 +26,14 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, p := range m.Requires.Permissions {
 		perms[string(p)] = true
 	}
-	for _, want := range []string{"platform.connections.execute", "platform.connections.read_credentials"} {
+	for _, want := range []string{"platform.connections.execute"} {
 		if !perms[want] {
 			t.Errorf("embedded manifest missing permission %q", want)
+		}
+	}
+	for _, forbidden := range []string{"net.egress", "platform.connections.read_credentials"} {
+		if perms[forbidden] {
+			t.Errorf("embedded manifest must not request direct Stripe permission %q", forbidden)
 		}
 	}
 	foundProcessor := false
@@ -37,6 +45,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 			}
 			if dep.Tools["checkout_sessions.create"] == "" {
 				t.Error("payment_processor missing checkout_sessions.create tool mapping")
+			}
+			if dep.Tools["webhooks.process"] != "" {
+				t.Error("payment_processor must use platform webhook verification, not an integration process_webhook tool")
 			}
 		}
 	}

@@ -40,9 +40,10 @@ conventions.
 ## Stripe payment processing
 
 `invoices_send_payment_link` creates a Stripe-hosted Checkout Session for
-the invoice's exact outstanding balance. It requires either Billing's direct
-Stripe configuration or a bound `payment_processor` integration. The verified
-webhook records the payment idempotently.
+the invoice's exact outstanding balance. It requires a bound
+`payment_processor` integration. Billing never receives Stripe API or webhook
+signing secrets; the platform registers and verifies the webhook through the
+connection. The verified webhook records the payment idempotently.
 
 **Stripe availability is a capability, never the default invoice workflow.**
 Only call `invoices_send_payment_link` when the user's current request

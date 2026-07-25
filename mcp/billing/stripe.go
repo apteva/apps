@@ -1,12 +1,10 @@
 package main
 
-// Stripe integration (v0.8.0+).
+// Stripe integration.
 //
-// Stripe can be configured directly with `stripe_secret_key`. In that
-// mode billing creates its own webhook endpoint in Stripe and stores
-// the returned signing secret locally, so operators do not need to
-// paste a whsec_ value. The older `payment_processor` integration
-// remains a fallback for installs that already use it.
+// Billing never receives or stores Stripe credentials. Every outbound
+// API call uses the bound payment_processor integration, and the platform
+// owns webhook registration plus signature verification.
 //
 // When the integration isn't bound, the whole module degrades:
 // invoices_send_payment_link returns a clean "bind the integration"
@@ -14,10 +12,6 @@ package main
 // billing keeps working as before (manual payment recording).
 
 import (
-	"crypto/hmac"
-	"crypto/sha256"
-	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,148 +75,7 @@ func safeData(r *sdk.ExecuteResult) []byte {
 	return r.Data
 }
 
-func stripeSecretKey(ctx *sdk.AppCtx) string {
-	return strings.TrimSpace(configString(ctx, "stripe_secret_key", ""))
-}
-
-func stripeDirectConfigured(ctx *sdk.AppCtx) bool {
-	return stripeSecretKey(ctx) != ""
-}
-
-func stripeAPIBase() string {
-	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("STRIPE_API_BASE")), "/"); v != "" {
-		return v
-	}
-	return "https://api.stripe.com/v1"
-}
-
-func stripeFormValues(values neturl.Values, prefix string, v any) {
-	switch x := v.(type) {
-	case nil:
-		return
-	case map[string]any:
-		for k, child := range x {
-			key := k
-			if prefix != "" {
-				key = prefix + "[" + k + "]"
-			}
-			stripeFormValues(values, key, child)
-		}
-	case []map[string]any:
-		for i, child := range x {
-			stripeFormValues(values, fmt.Sprintf("%s[%d]", prefix, i), child)
-		}
-	case []any:
-		for i, child := range x {
-			stripeFormValues(values, fmt.Sprintf("%s[%d]", prefix, i), child)
-		}
-	case []string:
-		for _, child := range x {
-			values.Add(prefix+"[]", child)
-		}
-	case string:
-		values.Set(prefix, x)
-	case fmt.Stringer:
-		values.Set(prefix, x.String())
-	case int:
-		values.Set(prefix, strconv.Itoa(x))
-	case int64:
-		values.Set(prefix, strconv.FormatInt(x, 10))
-	case float64:
-		values.Set(prefix, strconv.FormatFloat(x, 'f', -1, 64))
-	case bool:
-		values.Set(prefix, strconv.FormatBool(x))
-	default:
-		values.Set(prefix, fmt.Sprint(x))
-	}
-}
-
-func executeStripeDirect(ctx *sdk.AppCtx, method, path string, input map[string]any, out any) error {
-	secret := stripeSecretKey(ctx)
-	if secret == "" {
-		return errors.New("stripe_secret_key is not configured")
-	}
-	values := neturl.Values{}
-	for k, v := range input {
-		stripeFormValues(values, k, v)
-	}
-	req, err := http.NewRequest(method, stripeAPIBase()+path, strings.NewReader(values.Encode()))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+secret)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Stripe-Version", "2024-06-20")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("stripe %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("stripe %s %s failed (HTTP %d): %s", method, path, resp.StatusCode, string(data))
-	}
-	if out != nil {
-		if err := json.Unmarshal(data, out); err != nil {
-			return fmt.Errorf("stripe %s %s: decode response: %w", method, path, err)
-		}
-	}
-	return nil
-}
-
-type stripeSettings struct {
-	WebhookEndpointID string
-	WebhookSecret     string
-	WebhookURL        string
-	Mode              string
-}
-
-func loadStripeSettings(db *sql.DB) (stripeSettings, error) {
-	var s stripeSettings
-	err := db.QueryRow(
-		`SELECT webhook_endpoint_id, webhook_secret, webhook_url, mode
-		 FROM billing_stripe_settings
-		 WHERE id = 1`,
-	).Scan(&s.WebhookEndpointID, &s.WebhookSecret, &s.WebhookURL, &s.Mode)
-	if errors.Is(err, sql.ErrNoRows) {
-		return s, nil
-	}
-	return s, err
-}
-
-func saveStripeSettings(db *sql.DB, s stripeSettings) error {
-	_, err := db.Exec(
-		`INSERT INTO billing_stripe_settings
-		   (id, webhook_endpoint_id, webhook_secret, webhook_url, mode, updated_at)
-		 VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		 ON CONFLICT(id) DO UPDATE SET
-		   webhook_endpoint_id = excluded.webhook_endpoint_id,
-		   webhook_secret = excluded.webhook_secret,
-		   webhook_url = excluded.webhook_url,
-		   mode = excluded.mode,
-		   updated_at = CURRENT_TIMESTAMP`,
-		s.WebhookEndpointID, s.WebhookSecret, s.WebhookURL, s.Mode)
-	return err
-}
-
-func stripeWebhookURL(ctx *sdk.AppCtx) (string, error) {
-	if override := strings.TrimSpace(configString(ctx, "stripe_webhook_url", "")); override != "" {
-		return strings.TrimRight(override, "/"), nil
-	}
-	publicURL := stripePublicBaseURL(ctx)
-	if publicURL == "" {
-		return "", errors.New("platform public URL is not configured; set stripe_webhook_url to a public tunnel URL for local testing")
-	}
-	return strings.TrimRight(publicURL, "/") + "/webhooks/stripe", nil
-}
-
 func stripePublicBaseURL(ctx *sdk.AppCtx) string {
-	if override := strings.TrimSpace(configString(ctx, "stripe_webhook_url", "")); override != "" {
-		if u, err := neturl.Parse(override); err == nil && u.Scheme != "" && u.Host != "" {
-			return u.Scheme + "://" + u.Host
-		}
-	}
 	var publicURL string
 	if info, err := ctx.PlatformInfo(); err == nil && info != nil {
 		publicURL = strings.TrimSpace(info.PublicURL)
@@ -233,29 +86,15 @@ func stripePublicBaseURL(ctx *sdk.AppCtx) string {
 	return strings.TrimRight(publicURL, "/")
 }
 
-func ensureStripeWebhook(ctx *sdk.AppCtx) error {
-	if !stripeDirectConfigured(ctx) {
-		return nil
+func ensureStripeWebhook(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) error {
+	if bound == nil {
+		return errors.New("payment_processor integration required")
 	}
-	webhookURL, err := stripeWebhookURL(ctx)
-	if err != nil {
-		return err
-	}
-	settings, err := loadStripeSettings(ctx.AppDB())
-	if err != nil {
-		return err
-	}
-	if settings.WebhookSecret != "" && settings.WebhookURL == webhookURL {
-		return nil
-	}
-	var endpoint struct {
-		ID     string `json:"id"`
-		URL    string `json:"url"`
-		Secret string `json:"secret"`
-	}
-	input := map[string]any{
-		"url": webhookURL,
-		"enabled_events": []string{
+	status, err := ctx.PlatformAPI().EnsureIntegrationWebhook(sdk.IntegrationWebhookEnsureRequest{
+		ConnectionID: bound.ConnectionID,
+		Role:         "payment_processor",
+		CallbackPath: "/webhooks/stripe",
+		Events: []string{
 			"checkout.session.completed",
 			"payment_intent.succeeded",
 			"setup_intent.succeeded",
@@ -263,22 +102,17 @@ func ensureStripeWebhook(ctx *sdk.AppCtx) error {
 			"payment_method.detached",
 			"charge.refunded",
 		},
-		"metadata": map[string]any{
-			"apteva_app": "billing",
-		},
-	}
-	if err := executeStripeDirect(ctx, http.MethodPost, "/webhook_endpoints", input, &endpoint); err != nil {
-		return err
-	}
-	if endpoint.ID == "" || endpoint.Secret == "" {
-		return errors.New("Stripe did not return a webhook endpoint id and signing secret")
-	}
-	return saveStripeSettings(ctx.AppDB(), stripeSettings{
-		WebhookEndpointID: endpoint.ID,
-		WebhookSecret:     endpoint.Secret,
-		WebhookURL:        endpoint.URL,
-		Mode:              "direct",
 	})
+	if err != nil {
+		return fmt.Errorf("platform webhook registration: %w", err)
+	}
+	if status == nil || status.Status != "ready" {
+		if status != nil && status.LastError != "" {
+			return fmt.Errorf("platform webhook is not ready: %s", status.LastError)
+		}
+		return errors.New("platform webhook is not ready")
+	}
+	return nil
 }
 
 type setupSessionRequest struct {
@@ -290,17 +124,12 @@ type setupSessionRequest struct {
 }
 
 func (a *App) createStripeSetupSession(ctx *sdk.AppCtx, pid string, cust *Customer, req setupSessionRequest) (*SetupSession, error) {
-	var bound *sdk.BoundIntegration
-	if stripeDirectConfigured(ctx) {
-		if err := ensureStripeWebhook(ctx); err != nil {
-			return nil, fmt.Errorf("stripe webhook setup: %w", err)
-		}
-	} else {
-		var err error
-		bound, err = requireProcessor(ctx)
-		if err != nil {
-			return nil, err
-		}
+	bound, err := requireProcessor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureStripeWebhook(ctx, bound); err != nil {
+		return nil, fmt.Errorf("stripe webhook setup: %w", err)
 	}
 	stripeCustomerID, err := ensureStripeCustomer(ctx, pid, cust, bound)
 	if err != nil {
@@ -344,14 +173,8 @@ func (a *App) createStripeSetupSession(ctx *sdk.AppCtx, pid string, cust *Custom
 		SetupIntent string `json:"setup_intent"`
 		ExpiresAt   int64  `json:"expires_at"`
 	}
-	if stripeDirectConfigured(ctx) {
-		if err := executeStripeDirect(ctx, http.MethodPost, "/checkout/sessions", input, &sess); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
-			return nil, err
-		}
+	if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
+		return nil, err
 	}
 	if sess.ID == "" || sess.URL == "" {
 		return nil, errors.New("Stripe returned no setup session URL")
@@ -393,17 +216,11 @@ func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sd
 	var out struct {
 		ID string `json:"id"`
 	}
-	if stripeDirectConfigured(ctx) {
-		if err := executeStripeDirect(ctx, http.MethodPost, "/customers", input, &out); err != nil {
-			return "", err
-		}
-	} else {
-		if bound == nil {
-			return "", errors.New("payment_processor integration required")
-		}
-		if err := executeStripe(ctx, bound, "create_customer", input, &out); err != nil {
-			return "", err
-		}
+	if bound == nil {
+		return "", errors.New("payment_processor integration required")
+	}
+	if err := executeStripe(ctx, bound, "create_customer", input, &out); err != nil {
+		return "", err
 	}
 	if out.ID == "" {
 		return "", errors.New("Stripe returned no customer id")
@@ -414,50 +231,6 @@ func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sd
 		ctx.Logger().Warn("stripe customer id persistence failed", "customer_id", cust.ID, "err", err.Error())
 	}
 	return out.ID, nil
-}
-
-func parseStripeSignature(header string) (int64, []string) {
-	var ts int64
-	var sigs []string
-	for _, part := range strings.Split(header, ",") {
-		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "t":
-			ts = atoi64(v)
-		case "v1":
-			sigs = append(sigs, v)
-		}
-	}
-	return ts, sigs
-}
-
-func verifyStripeWebhookSignature(payload []byte, header, secret string, now time.Time) error {
-	if secret == "" {
-		return errors.New("stripe webhook signing secret is not configured")
-	}
-	ts, sigs := parseStripeSignature(header)
-	if ts == 0 || len(sigs) == 0 {
-		return errors.New("malformed Stripe-Signature header")
-	}
-	eventTime := time.Unix(ts, 0)
-	if now.Sub(eventTime) > 5*time.Minute || eventTime.Sub(now) > 5*time.Minute {
-		return errors.New("Stripe-Signature timestamp outside tolerance")
-	}
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, _ = mac.Write([]byte(strconv.FormatInt(ts, 10)))
-	_, _ = mac.Write([]byte("."))
-	_, _ = mac.Write(payload)
-	expected := mac.Sum(nil)
-	for _, sig := range sigs {
-		got, err := hex.DecodeString(sig)
-		if err == nil && hmac.Equal(got, expected) {
-			return nil
-		}
-	}
-	return errors.New("Stripe-Signature HMAC mismatch")
 }
 
 // ─── Send payment link ──────────────────────────────────────────────
@@ -481,13 +254,9 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if id == 0 {
 		return nil, errors.New("invoice_id required")
 	}
-	var bound *sdk.BoundIntegration
-	if !stripeDirectConfigured(ctx) {
-		var err error
-		bound, err = requireProcessor(ctx)
-		if err != nil {
-			return nil, err
-		}
+	bound, err := requireProcessor(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	inv, cust, err := loadInvoiceForRender(ctx.AppDB(), pid, id)
@@ -577,17 +346,11 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		URL       string `json:"url"`
 		ExpiresAt int64  `json:"expires_at"`
 	}
-	if stripeDirectConfigured(ctx) {
-		if err := ensureStripeWebhook(ctx); err != nil {
-			return nil, fmt.Errorf("stripe webhook setup: %w", err)
-		}
-		if err := executeStripeDirect(ctx, http.MethodPost, "/checkout/sessions", input, &sess); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
-			return nil, err
-		}
+	if err := ensureStripeWebhook(ctx, bound); err != nil {
+		return nil, fmt.Errorf("stripe webhook setup: %w", err)
+	}
+	if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
+		return nil, err
 	}
 	if sess.URL == "" {
 		return nil, errors.New("Stripe returned no payment URL")
@@ -644,10 +407,9 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 // ─── Webhook handler ────────────────────────────────────────────────
 
 // handleStripeWebhook is the public POST /webhooks/stripe endpoint.
-// Stripe POSTs here after a payment event. We forward the raw body
-// + the Stripe-Signature header to the integration's process_webhook
-// tool, which verifies the signature using the webhookSecret in the
-// connection credentials. On success, dispatches on event type.
+// Stripe POSTs here after a payment event. We send the raw body and
+// Stripe-Signature header to the platform connection layer, which
+// verifies it using the encrypted signing secret that Billing never sees.
 //
 // Idempotency is handled by dbPaymentRecord — the (method,
 // external_id) unique index on payments rejects duplicates cleanly,
@@ -671,9 +433,8 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify + parse via the integration's process_webhook tool.
-	// process_webhook returns the canonical Stripe Event payload
-	// on success; signature failure returns success=false.
+	// Verify via the platform connection layer and parse only the
+	// authenticated event it returns.
 	var event struct {
 		ID   string `json:"id"`
 		Type string `json:"type"`
@@ -681,40 +442,24 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 			Object json.RawMessage `json:"object"`
 		} `json:"data"`
 	}
-	if stripeDirectConfigured(ctx) {
-		settings, err := loadStripeSettings(ctx.AppDB())
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "load stripe settings: "+err.Error())
-			return
-		}
-		if settings.WebhookSecret == "" {
-			if err := ensureStripeWebhook(ctx); err != nil {
-				httpErr(w, http.StatusServiceUnavailable, "stripe webhook is not configured: "+err.Error())
-				return
-			}
-			settings, _ = loadStripeSettings(ctx.AppDB())
-		}
-		if err := verifyStripeWebhookSignature(body, signature, settings.WebhookSecret, time.Now().UTC()); err != nil {
-			httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
-			return
-		}
-		if err := json.Unmarshal(body, &event); err != nil {
-			httpErr(w, http.StatusBadRequest, "decode webhook payload: "+err.Error())
-			return
-		}
-	} else {
-		bound := ctx.IntegrationFor("payment_processor")
-		if bound == nil {
-			httpErr(w, http.StatusServiceUnavailable, "no payment_processor integration bound")
-			return
-		}
-		if err := executeStripe(ctx, bound, "process_webhook", map[string]any{
-			"payload":   string(body),
-			"signature": signature,
-		}, &event); err != nil {
-			httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
-			return
-		}
+	if ctx.IntegrationFor("payment_processor") == nil {
+		httpErr(w, http.StatusServiceUnavailable, "no payment_processor integration bound")
+		return
+	}
+	verified, err := ctx.PlatformAPI().VerifyIntegrationWebhook(sdk.IntegrationWebhookVerifyRequest{
+		Role: "payment_processor", Payload: string(body), Signature: signature,
+	})
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
+		return
+	}
+	if verified == nil || verified.Provider != "stripe" {
+		httpErr(w, http.StatusBadRequest, "webhook verification returned the wrong provider")
+		return
+	}
+	if err := json.Unmarshal(verified.Event, &event); err != nil {
+		httpErr(w, http.StatusBadRequest, "decode verified webhook payload: "+err.Error())
+		return
 	}
 
 	if err := a.dispatchStripeEvent(ctx, event.ID, event.Type, event.Data.Object); err != nil {
@@ -873,8 +618,8 @@ func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) e
 		Reusable:                true,
 		Metadata:                json.RawMessage(`{}`),
 	}
-	if stripeDirectConfigured(ctx) {
-		if fetched, err := fetchStripePaymentMethod(ctx, si.PaymentMethod); err == nil && fetched != nil {
+	if bound := ctx.IntegrationFor("payment_processor"); bound != nil {
+		if fetched, err := fetchStripePaymentMethod(ctx, bound, si.PaymentMethod); err == nil && fetched != nil {
 			pm.ProviderCustomerID = firstString(pm.ProviderCustomerID, fetched.ProviderCustomerID)
 			pm.Type = firstString(fetched.Type, pm.Type)
 			pm.DisplayBrand = fetched.DisplayBrand
@@ -939,7 +684,7 @@ func (a *App) handlePaymentMethodDetached(ctx *sdk.AppCtx, obj json.RawMessage) 
 	return nil
 }
 
-func fetchStripePaymentMethod(ctx *sdk.AppCtx, providerPaymentMethodID string) (*PaymentMethod, error) {
+func fetchStripePaymentMethod(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, providerPaymentMethodID string) (*PaymentMethod, error) {
 	var raw struct {
 		ID       string            `json:"id"`
 		Type     string            `json:"type"`
@@ -961,7 +706,12 @@ func fetchStripePaymentMethod(ctx *sdk.AppCtx, providerPaymentMethodID string) (
 			Last4    string `json:"last4"`
 		} `json:"us_bank_account"`
 	}
-	if err := executeStripeDirect(ctx, http.MethodGet, "/payment_methods/"+providerPaymentMethodID, map[string]any{}, &raw); err != nil {
+	if bound == nil {
+		return nil, errors.New("payment_processor integration required")
+	}
+	if err := executeStripe(ctx, bound, "get_payment_method", map[string]any{
+		"payment_method_id": providerPaymentMethodID,
+	}, &raw); err != nil {
 		return nil, err
 	}
 	pm := &PaymentMethod{
