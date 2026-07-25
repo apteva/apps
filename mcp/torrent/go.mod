@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/anacrolix/torrent v1.58.0
-	github.com/apteva/app-sdk v0.38.5
+	github.com/apteva/app-sdk v0.43.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/time v0.0.0-20220609170525-579cf78fd858
 	modernc.org/sqlite v1.50.0
