@@ -53,10 +53,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.60
+version: 0.7.61
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.60 makes the legacy
-  browser-card alias render the same live-to-final session view as browser-view.
+  Watch, steer, and replay hosted browser sessions. v0.7.61 adopts Computer's
+  canonical icon and host-provided app identity across its chat cards.
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

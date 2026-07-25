@@ -1,23 +1,9 @@
-import type { CardVendor } from "@apteva/ui-kit";
-
 export const BACKEND_LABEL: Record<string, string> = {
   local: "Local Chrome",
   browserbase: "Browserbase",
   steel: "Steel",
   "browser-engine": "Browser Engine",
   service: "Browser Service",
-};
-
-export const computerVendor: CardVendor = {
-  name: "Computer",
-  logo: (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <rect x="3" y="4" width="18" height="12" rx="2" />
-      <path d="M8 20h8" />
-      <path d="M12 16v4" />
-    </svg>
-  ),
-  color: { light: "#2563eb", dark: "#93c5fd" },
 };
 
 export function appURL(path: string, projectId?: string, extra?: Record<string, string | number | undefined>) {

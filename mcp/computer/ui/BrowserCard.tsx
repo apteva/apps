@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
-import { BACKEND_LABEL, computerVendor, hostFor, panelURL, sessionURL } from "./shared";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
+import { BACKEND_LABEL, hostFor, panelURL, sessionURL } from "./shared";
 
 interface SessionInfo {
   session_id: string;
@@ -48,8 +48,7 @@ export default function BrowserCard(props: Props) {
 
   return (
     <Card>
-      <CardHeader
-        vendor={computerVendor}
+      <AppCardHeader
         title={hostFor(session.current_url) || "Browser session"}
         subtitle={BACKEND_LABEL[session.backend] ?? session.backend}
         status={{

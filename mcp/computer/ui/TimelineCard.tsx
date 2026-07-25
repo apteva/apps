@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
-import { computerVendor, hostFor, sessionURL } from "./shared";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
+import { hostFor, sessionURL } from "./shared";
 
 interface Step {
   url: string;
@@ -34,8 +34,7 @@ export default function TimelineCard(props: Props) {
   const steps = props.preview ? PREVIEW_STEPS : props.steps ?? remoteSteps;
   return (
     <Card>
-      <CardHeader
-        vendor={computerVendor}
+      <AppCardHeader
         title="Navigation timeline"
         subtitle={steps.length ? `${steps.length} page${steps.length === 1 ? "" : "s"} visited` : "No pages visited"}
         status={steps.length ? undefined : { label: "empty", variant: "muted" }}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
-import { computerVendor, hostFor, panelURL, PREVIEW_SCREENSHOT, sessionURL } from "./shared";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
+import { hostFor, panelURL, PREVIEW_SCREENSHOT, sessionURL } from "./shared";
 
 export interface SoMItem {
   label: number;
@@ -114,8 +114,7 @@ export default function BrowserViewCard(props: BrowserViewProps) {
 
   return (
     <Card>
-      <CardHeader
-        vendor={computerVendor}
+      <AppCardHeader
         title={props.caption ?? (pageURL ? hostFor(pageURL) : "Browser view")}
         subtitle={pageURL || id}
         status={{ label: isLive ? "live" : status, variant: isLive ? "live" : "muted" }}
