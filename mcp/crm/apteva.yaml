@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.22
+version: 0.8.23
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -12,7 +12,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/crm
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/crm/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [crm, contacts, productivity]
 
 scopes: [project, global]
