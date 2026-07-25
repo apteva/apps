@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.6.1
+version: 0.7.0
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -21,6 +21,10 @@ description: |
   history and generic proration calculations for external orchestrators.
   v0.6.0 applies opaque source metadata atomically with item changes and
   supports idempotent metadata reconciliation without lifecycle transitions.
+  v0.7.0 adds durable active-subscription renewal scheduling. The lifecycle
+  worker creates exactly one pending cycle at next_renewal_at, applies due
+  next-cycle item changes first, honors cancellation at period end, and emits
+  subscription.cycle_due without taking ownership of payment collection.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions

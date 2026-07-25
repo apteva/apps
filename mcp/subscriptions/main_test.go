@@ -322,6 +322,100 @@ func TestCollectibleTrialCreatesPendingCycleWithoutCommerceCalls(t *testing.T) {
 	}
 }
 
+func TestActiveRenewalCreatesOnePendingCycleWithoutCommerceCalls(t *testing.T) {
+	pf := &noCommercePlatform{}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf), tk.WithEmitter(rec))
+	now := time.Date(2026, 8, 25, 15, 0, 0, 0, time.UTC)
+	renewalAt := now.Add(-time.Minute)
+	sub, err := dbSubscriptionCreate(ctx, "proj-test", map[string]any{
+		"customer_id": 42, "customer_email": "renew@example.com", "kind": "saas", "status": "active",
+		"current_period_start": renewalAt.AddDate(0, -1, 0).Format(time.RFC3339),
+		"current_period_end":   renewalAt.Format(time.RFC3339),
+		"next_renewal_at":      renewalAt.Format(time.RFC3339),
+		"interval":             "month", "interval_count": 1,
+		"items":    []any{map[string]any{"title": "Pro plan", "quantity": 1, "unit_amount_cents": 2900, "currency": "USD"}},
+		"metadata": map[string]any{"collection_method": "charge_automatically"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "active" {
+		t.Fatalf("status=%s, want active while collection is pending", got.Status)
+	}
+	if len(got.Cycles) != 1 {
+		t.Fatalf("cycles=%d, want 1", len(got.Cycles))
+	}
+	cycle := got.Cycles[0]
+	if cycle.PaymentStatus != "pending" || cycle.TotalCents != 2900 {
+		t.Fatalf("unexpected renewal cycle: %+v", cycle)
+	}
+	wantStart := renewalAt.Format(time.RFC3339)
+	wantEnd := renewalAt.AddDate(0, 1, 0).Format(time.RFC3339)
+	if cycle.PeriodStart != wantStart || cycle.PeriodEnd != wantEnd {
+		t.Fatalf("period=%s..%s, want %s..%s", cycle.PeriodStart, cycle.PeriodEnd, wantStart, wantEnd)
+	}
+	if pf.Calls != 0 {
+		t.Fatalf("Subscriptions made %d cross-app commerce calls", pf.Calls)
+	}
+	events := rec.EventsByTopic("subscription.cycle_due")
+	if len(events) != 1 {
+		t.Fatalf("cycle_due events=%d, want 1", len(events))
+	}
+
+	if err := runSubscriptionLifecycle(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if len(got.Cycles) != 1 || len(rec.EventsByTopic("subscription.cycle_due")) != 1 {
+		t.Fatalf("repeat worker duplicated renewal: cycles=%d events=%d", len(got.Cycles), len(rec.EventsByTopic("subscription.cycle_due")))
+	}
+}
+
+func TestActiveRenewalHonorsCancellationAtPeriodEnd(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	now := time.Date(2026, 8, 25, 15, 0, 0, 0, time.UTC)
+	renewalAt := now.Add(-time.Minute)
+	sub, err := dbSubscriptionCreate(ctx, "proj-test", map[string]any{
+		"customer_email": "cancel@example.com", "kind": "saas", "status": "active",
+		"current_period_start": renewalAt.AddDate(0, -1, 0).Format(time.RFC3339),
+		"current_period_end":   renewalAt.Format(time.RFC3339),
+		"next_renewal_at":      renewalAt.Format(time.RFC3339),
+		"items":                []any{map[string]any{"title": "Pro plan", "quantity": 1, "unit_amount_cents": 2900, "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET cancel_at=? WHERE id=?`, renewalAt.Format(time.RFC3339), sub.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "ended" || len(got.Cycles) != 0 {
+		t.Fatalf("cancel-at-period-end result=%s cycles=%d", got.Status, len(got.Cycles))
+	}
+	if len(rec.EventsByTopic("subscription.ended")) != 1 || len(rec.EventsByTopic("subscription.cycle_due")) != 0 {
+		t.Fatalf("unexpected cancellation events: ended=%d due=%d", len(rec.EventsByTopic("subscription.ended")), len(rec.EventsByTopic("subscription.cycle_due")))
+	}
+}
+
 func TestTrialEndWorkerIsProjectScoped(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-a"))
 	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)

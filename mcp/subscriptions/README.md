@@ -10,6 +10,10 @@ Subscriptions owns recurrence and renewal cycles. It does not own access rights 
 
 Each `subscription_cycle` can link to an invoice, order, and entitlement grant.
 
+The lifecycle worker claims both trial endings and active renewals, creates one
+pending cycle per due period, and emits `subscription.cycle_due` idempotently.
+Product apps decide how that due cycle is fulfilled or collected.
+
 ## Trial end ownership
 
 Subscriptions owns the recurring-domain transition at trial end:
@@ -26,6 +30,16 @@ Subscriptions does not create Billing customers, initiate charges, create
 payment links, or reconcile payment-provider sessions. A commerce workflow can
 consume `subscription.cycle_due`, use the existing invoice preparation tool,
 call Billing, and update the cycle through `subscription_cycles_update`.
+
+## Active renewals
+
+The lifecycle worker also claims active subscriptions whose
+`next_renewal_at` is due. It creates one pending cycle for the next period and
+publishes `subscription.cycle_due` for the external commerce workflow.
+Collection success advances the period through `subscriptions_update_status`;
+an unpaid cycle remains idempotently pending and is not duplicated on later
+worker runs. Cancellation at period end transitions directly to `ended`
+without creating another cycle.
 
 ## Discount ownership
 
