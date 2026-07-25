@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.8.1
+version: 0.8.2
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -20,7 +20,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/saas/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [saas, access, subscriptions, entitlements, usage]
 
 scopes: [project, global]

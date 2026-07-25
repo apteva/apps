@@ -292,7 +292,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.8.1" {
+	if m.Version != "0.8.2" {
 		t.Errorf("manifest.Version=%q, want 0.8.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
