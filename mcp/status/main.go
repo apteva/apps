@@ -21,9 +21,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: status
 display_name: Status
-version: 2.0.1
+version: 2.0.2
 description: Per-agent status line. Agent writes via MCP; dashboard reads live.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
