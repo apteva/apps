@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: screenshots
 display_name: Screenshots
-version: 0.1.4
+version: 0.1.5
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. v0.1: URL-driven capture only.
