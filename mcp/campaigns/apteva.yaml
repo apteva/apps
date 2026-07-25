@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.13
+version: 0.2.14
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -20,7 +20,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/campaigns
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/campaigns/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [campaigns, marketing, broadcast, email, sms]
 
 scopes: [project, global]
