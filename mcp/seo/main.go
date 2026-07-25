@@ -35,9 +35,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.9
+version: 0.4.10
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions: [db.write.app, net.egress, platform.connections.execute]
