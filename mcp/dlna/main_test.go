@@ -67,7 +67,7 @@ func newDLNATestApp(t *testing.T, platform *dlnaPlatformStub) *App {
 func TestManifestAndToolSurfaceMatch(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "dlna" || manifest.Version != "0.2.0" {
+	if manifest.Name != "dlna" || manifest.Version != "0.2.1" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {

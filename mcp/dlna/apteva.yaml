@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.2.0
+version: 0.2.1
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -21,7 +21,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/dlna
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/dlna/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [dlna, upnp, media, lan, tv, streaming]
 
 scopes: [project]
