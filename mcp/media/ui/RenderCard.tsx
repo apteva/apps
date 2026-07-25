@@ -14,20 +14,8 @@
 //   cancelled → muted "cancelled by operator"
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, type CardVendor } from "@apteva/ui-kit";
+import { AppCardHeader, Card } from "@apteva/ui-kit";
 import MediaCard from "./MediaCard";
-
-const renderLogo = (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
-    <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-  </svg>
-);
-
-const renderVendor: CardVendor = {
-  name: "Render",
-  logo: renderLogo,
-  color: { light: "#0f766e", dark: "#5eead4" },
-};
 
 interface RenderRow {
   id: number;
@@ -124,14 +112,14 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <CardHeader title={`Render #${render_id}`} status={{ label: "missing", variant: "muted" }} />
+        <AppCardHeader title={`Render #${render_id}`} status={{ label: "missing", variant: "muted" }} />
       </Card>
     );
   }
   if (!row) {
     return (
       <Card>
-        <CardHeader title={`Render #${render_id}`} status={{ label: "loading", variant: "muted" }} />
+        <AppCardHeader title={`Render #${render_id}`} status={{ label: "loading", variant: "muted" }} />
       </Card>
     );
   }
@@ -149,8 +137,7 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
 
   return (
     <Card>
-      <CardHeader
-        vendor={renderVendor}
+      <AppCardHeader
         title={prettyOp(row.operation)}
         subtitle={row.output_name || `render #${row.id}`}
         status={status}

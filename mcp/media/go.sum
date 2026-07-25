@@ -1,5 +1,5 @@
-github.com/apteva/app-sdk v0.38.4 h1:/Sf01o/BUq5TFdmC9Ozl2Om2tMwJ3F8bTDmxNTZsms8=
-github.com/apteva/app-sdk v0.38.4/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
+github.com/apteva/app-sdk v0.42.0 h1:NjA5erfjbx5BMzs830GlscnPnpfabjrespXjTKGWQwo=
+github.com/apteva/app-sdk v0.42.0/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
 github.com/disintegration/imaging v1.6.2/go.mod h1:44/5580QXChDfwIclfc/PCwrr44amcmDAg8hxG0Ewe4=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=

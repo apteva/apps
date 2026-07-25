@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.83
+version: 0.13.84
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -21,7 +21,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [media, video, audio, ffmpeg, catalog, edit, render]
 
 scopes: [project, global]

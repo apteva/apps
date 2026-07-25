@@ -11,19 +11,7 @@
 // auto-fills in once Deepgram finishes.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, type CardVendor } from "@apteva/ui-kit";
-
-const transcriptLogo = (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
-    <path d="M4 4h16v3H4zM4 10h16v3H4zM4 16h12v3H4z" />
-  </svg>
-);
-
-const transcriptVendor: CardVendor = {
-  name: "Transcript",
-  logo: transcriptLogo,
-  color: { light: "#0f766e", dark: "#5eead4" },
-};
+import { AppCardHeader, Card } from "@apteva/ui-kit";
 
 interface TranscriptRow {
   file_id: string;
@@ -145,14 +133,14 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
   if (missing) {
     return (
       <Card>
-        <CardHeader title={`Transcript #${fid}`} status={{ label: "no transcript", variant: "muted" }} />
+        <AppCardHeader title={`Transcript #${fid}`} status={{ label: "no transcript", variant: "muted" }} />
       </Card>
     );
   }
   if (!row) {
     return (
       <Card>
-        <CardHeader title={`Transcript #${fid}`} status={{ label: "loading", variant: "muted" }} />
+        <AppCardHeader title={`Transcript #${fid}`} status={{ label: "loading", variant: "muted" }} />
       </Card>
     );
   }
@@ -164,8 +152,7 @@ export default function TranscriptCard({ file_id, projectId, max_lines, preview 
 
   return (
     <Card>
-      <CardHeader
-        vendor={transcriptVendor}
+      <AppCardHeader
         title={row.language ? `Transcript · ${row.language}` : "Transcript"}
         subtitle={row.provider ? `${row.provider}${row.model ? ` / ${row.model}` : ""}` : undefined}
         status={status}
