@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: vpn
 display_name: VPN
-version: 0.1.0
+version: 0.1.1
 description: |
   Backend-agnostic VPN orchestrator. Provisions a VPN server on an
   Instances host (local id 0 or a Hetzner VPS), generates keys,
@@ -21,7 +21,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/vpn
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/vpn/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [vpn, wireguard, network, infrastructure]
 
 scopes: [project, global]
