@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: cdn
 display_name: CDN
-version: 0.2.2
+version: 0.2.3
 description: |
   Public-facing edge for apps that emit URLs. Composes domains (DNS),
   certs (TLS), and routes (host-based reverse-proxy) into one
@@ -23,7 +23,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/cdn
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/cdn/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [cdn, edge, hostname, routing, infrastructure]
 
 scopes: [global]
