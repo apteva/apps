@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: email-checker
 display_name: Email Checker
-version: 0.3.0
+version: 0.3.1
 description: |
   Stateless email validation. Live checks (RFC 5322 syntax, DNS MX
   lookup, optional SMTP RCPT probe) plus list-based classification
@@ -11,6 +11,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/email-checker
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [email, validation, productivity]
 
 scopes: [project, global]
