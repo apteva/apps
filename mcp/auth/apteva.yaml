@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.7.3
+version: 0.7.4
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -15,9 +15,13 @@ description: |
   URL changes from v0.3); the dashboard renders a consolidated AuthPanel
   with OrgSwitcher.
 
+  v0.7.4 adds Auth's adaptive themed app icon and updates the app to
+  the current Apteva app SDK.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/auth/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [auth, identity, jwt, oauth, mfa, saas]
 
 scopes: [project]
