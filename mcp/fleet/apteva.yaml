@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.23
+version: 0.8.24
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -22,7 +22,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/fleet/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [fleet, tenants, multi-instance, control-plane, ops]
 
 scopes: [project, global]
@@ -165,7 +166,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.23
+    ref: fleet/v0.8.24
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
