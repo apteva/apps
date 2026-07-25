@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: health
 display_name: Health
-version: 0.1.0
+version: 0.1.1
 description: |
   Personal health log — weight, sleep, mood, heart rate, blood
   pressure, workouts. One flexible time-series table for any numeric
@@ -14,7 +14,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/health
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/health/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [health, fitness, personal, metrics, workouts]
 
 scopes: [project, global]

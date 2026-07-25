@@ -27,9 +27,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: health
 display_name: Health
-version: 0.1.0
+version: 0.1.1
 description: Personal health log — metrics, workouts, goals, NL ingest.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions: [db.write.app]
