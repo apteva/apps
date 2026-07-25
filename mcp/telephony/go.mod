@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/telephony
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.38.5
+	github.com/apteva/app-sdk v0.43.0
 	github.com/gobwas/ws v1.4.0
 	github.com/osgochina/webrtcvad-go v0.0.2
 	github.com/twilio/twilio-go v1.30.9
