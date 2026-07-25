@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/docs
 go 1.26.1
 
 require (
-	github.com/apteva/app-sdk v0.38.2
+	github.com/apteva/app-sdk v0.43.0
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
 	github.com/johnfercher/maroto/v2 v2.4.0
