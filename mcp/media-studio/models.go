@@ -716,6 +716,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 				DefaultAspect     string   `json:"defaultAspectRatio"`
 				DefaultResolution string   `json:"defaultResolution"`
 				PromptCharLimit   int      `json:"promptCharacterLimit"`
+				PromptLimitSnake  int      `json:"prompt_character_limit"`
 				Steps             struct {
 					Default int `json:"default"`
 					Max     int `json:"max"`
@@ -737,6 +738,9 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 	_ = json.Unmarshal(raw, &spec)
 
 	c := spec.ModelSpec.Constraints
+	if c.PromptCharLimit == 0 {
+		c.PromptCharLimit = c.PromptLimitSnake
+	}
 	aspects := c.AspectRatiosCamel
 	if len(aspects) == 0 {
 		aspects = c.AspectRatiosSnake
@@ -843,7 +847,7 @@ func veniceMaxSourceImages(id string) int {
 		return 3
 	}
 	if strings.Contains(lower, "reference-to-video") {
-		return 9
+		return veniceReferenceProfile(id).MaxImages
 	}
 	if strings.Contains(lower, "image-to-video") {
 		return 1

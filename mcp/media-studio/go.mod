@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/media-studio
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.36.3
+	github.com/apteva/app-sdk v0.42.0
 	golang.org/x/image v0.44.0
 	modernc.org/sqlite v1.50.0
 )

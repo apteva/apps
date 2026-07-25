@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampDuration,
+  buildVideoReferencePayload,
   DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
+  isReferenceToVideoModel,
   isDurableMediaReference,
   mergeHistoryPage,
   projectScopedStorageContentURL,
@@ -16,9 +18,11 @@ import {
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  videoReferenceImageLimit,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
   voicesForProvider,
+  type VideoReferencePurpose,
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
@@ -55,6 +59,31 @@ describe("Media Panel logic", () => {
     expect(videoSourceRequired("image-to-video", "model")).toBe(true);
     expect(videoSourceRequired(undefined, "seedance-reference-to-video")).toBe(true);
     expect(videoSourceRequired("text-to-video", "model")).toBe(false);
+  });
+
+  test("builds provider-neutral reference groups for every R2V model", () => {
+    const images = ["storage:1", "https://example.test/side.jpg"];
+    expect(isReferenceToVideoModel("kling-o3-pro-reference-to-video")).toBe(true);
+    expect(buildVideoReferencePayload(
+      "kling-o3-pro-reference-to-video",
+      "identity" satisfies VideoReferencePurpose,
+      images,
+    )).toEqual({
+      reference_groups: [{ role: "identity", images }],
+    });
+    expect(buildVideoReferencePayload(
+      "happyhorse-1-1-reference-to-video",
+      "reference",
+      images,
+    )).toEqual({
+      reference_groups: [{ role: "reference", images }],
+    });
+    expect(buildVideoReferencePayload("wan-2-7-image-to-video", "identity", images))
+      .toEqual({ source_image: "storage:1" });
+    expect(videoReferenceImageLimit("kling-o3-pro-reference-to-video", "identity")).toBe(4);
+    expect(videoReferenceImageLimit("kling-o3-pro-reference-to-video", "reference")).toBe(7);
+    expect(videoReferenceImageLimit("grok-imagine-reference-to-video-private")).toBe(7);
+    expect(videoReferenceImageLimit("happyhorse-1-1-reference-to-video")).toBe(9);
   });
 
   test("only sends video aspect when live model metadata supports it", () => {

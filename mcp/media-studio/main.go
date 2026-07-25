@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.56
+version: 0.10.57
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.56 merges owned Fish Audio
+  as a subscription-backed image provider. v0.10.57 adds provider-neutral
+  identity and scene reference groups for every Venice reference-to-video
+  model, structured Kling identity elements, model-specific limits and prompt
+  tokens, and live video resolution controls. v0.10.56 merges owned Fish Audio
   voices with its popular public TTS catalog, deduplicating models and
   excluding non-TTS entries. v0.10.55 restricts the voice
   picker to the provider selected by the active TTS model, preventing
@@ -302,7 +305,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — " +
 				"for avatar this is the spoken script), model?, size? (image), duration? (video/audio/music, seconds), " +
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
-				"source_image? or source_images? (image edit and video references; Venice reference-to-video models support multiple refs), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras; video supports consents.seedance when required). Video + avatar are async (queued; delivered via the " +
+				"source_image? or source_images? (image edit and video references), reference_groups? (provider-neutral identity/scene groups for Venice reference-to-video), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras; video supports consents.seedance when required). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
 				"when no storage), text (summary), resource (fetchable URL per storage_id). For chat responses, " +
 				"pass the returned _meta.chat_component object unchanged in respond(components=[...]) so the generated " +
@@ -336,6 +339,24 @@ func (a *App) MCPTools() []sdk.Tool {
 					"type":        "array",
 					"description": "Multiple source image references for image.edit or video reference models. Accepts storage:N, URL, or base64. Media Studio validates the selected provider/model limit before calling the provider.",
 					"items":       map[string]any{"type": "string"},
+				},
+				"reference_groups": map[string]any{
+					"type":        "array",
+					"description": "Provider-neutral video reference groups for Venice reference-to-video models. Use identity for one subject (first image frontal, remaining images additional angles), scene for environment/style references, or reference for general ordered references. Do not combine with source_image/source_images.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"role": map[string]any{
+								"type": "string",
+								"enum": []string{"identity", "scene", "reference"},
+							},
+							"images": map[string]any{
+								"type":  "array",
+								"items": map[string]any{"type": "string"},
+							},
+						},
+						"required": []string{"role", "images"},
+					},
 				},
 				"n": map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 				"cache_key": map[string]any{
@@ -375,7 +396,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_estimate",
-			Description: "Estimate media generation cost without creating media. Args match media_generate: kind, prompt?, model?, size?, duration?, voice?, aspect?, avatar?, source_image?, source_images?, n?, options?. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it.",
+			Description: "Estimate media generation cost without creating media. Args match media_generate: kind, prompt?, model?, size?, duration?, voice?, aspect?, avatar?, source_image?, source_images?, reference_groups?, n?, options?. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":         map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"}},
 				"provider":     map[string]any{"type": "string"},
@@ -390,6 +411,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source_images": map[string]any{
 					"type":  "array",
 					"items": map[string]any{"type": "string"},
+				},
+				"reference_groups": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"role":   map[string]any{"type": "string", "enum": []string{"identity", "scene", "reference"}},
+							"images": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						},
+						"required": []string{"role", "images"},
+					},
 				},
 				"n":       map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
 				"options": map[string]any{"type": "object"},

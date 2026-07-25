@@ -185,7 +185,13 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	pid := projectScope(ctx)
 	if wantsDraft(args) {
-		for _, ref := range sourceImageRefs(args) {
+		draftRefs := sourceImageRefs(args)
+		groupRefs, err := videoReferenceImageRefs(args)
+		if err != nil {
+			return mcpError("reference_groups: " + err.Error()), nil
+		}
+		draftRefs = append(draftRefs, groupRefs...)
+		for _, ref := range draftRefs {
 			if isInlineMediaRef(ref) {
 				return mcpError("draft source images must use storage:N or an HTTP(S) URL"), nil
 			}
@@ -230,6 +236,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	args["_storage_folder"] = storageFolder
 	if kind == KindVideo && bound.AppSlug == "venice-ai" {
 		normalizeVeniceVideoArgsForModel(ctx, args, capability)
+		if err := normalizeVeniceReferencePrompt(args); err != nil {
+			return mcpError("reference_groups: " + err.Error()), nil
+		}
 		estimatedSeconds = estimatedDurationSeconds(kind, args)
 	}
 	if err := validateProviderPrompt(ctx, bound, kind, capability, args); err != nil {
@@ -250,7 +259,29 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	// Used by image.edit (single-image /image/edit and Venice multi-edit)
 	// and video.generate image-to-video. Original refs are preserved for
 	// history and cache lineage.
-	if refs := sourceImageRefs(args); len(refs) > 0 {
+	refs := sourceImageRefs(args)
+	groupRefs, groupErr := videoReferenceImageRefs(args)
+	if groupErr != nil {
+		return mcpError("reference_groups: " + groupErr.Error()), nil
+	}
+	if len(refs) > 0 && len(groupRefs) > 0 {
+		return mcpError("use either source_image/source_images or reference_groups, not both"), nil
+	}
+	if len(groupRefs) > 0 {
+		if kind != KindVideo || bound.AppSlug != "venice-ai" || !isReferenceToVideoModel(strArg(args, "model", "")) {
+			return mcpError("reference_groups requires a Venice reference-to-video model"), nil
+		}
+		groups, err := resolveVideoReferenceGroups(ctx, args)
+		if err != nil {
+			return mcpError("reference_groups: " + err.Error()), nil
+		}
+		if err := validateVeniceVideoReferences(strArg(args, "model", ""), groups, nil); err != nil {
+			return mcpError("reference_groups: " + err.Error()), nil
+		}
+		args["_resolved_reference_groups"] = groups
+		args["_source_image_refs"] = groupRefs
+	}
+	if len(refs) > 0 {
 		maxRefs := maxSourceImagesFor(bound.AppSlug, capability, strArg(args, "model", ""))
 		if maxRefs > 0 && len(refs) > maxRefs {
 			return mcpError("model supports at most " + strconv.Itoa(maxRefs) + " source image(s), got " + strconv.Itoa(len(refs))), nil
@@ -1056,7 +1087,7 @@ func maxSourceImagesFor(providerSlug, capability, model string) int {
 		if providerSlug == "venice-ai" {
 			m := strings.ToLower(model)
 			if strings.Contains(m, "reference-to-video") {
-				return 9
+				return veniceReferenceProfile(model).MaxImages
 			}
 			if strings.Contains(m, "image-to-video") {
 				return 1

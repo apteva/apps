@@ -1,4 +1,5 @@
 export type DurationKind = "video" | "audio_sfx" | "music";
+export type VideoReferencePurpose = "identity" | "reference";
 
 export const DEFAULT_IMAGE_FORMAT = "jpeg";
 export const MAX_IMAGE_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -56,6 +57,41 @@ export function videoSourceRequired(modelType: string | undefined, modelID: stri
   return normalizedType === "image-to-video" ||
     normalizedID.includes("image-to-video") ||
     normalizedID.includes("reference-to-video");
+}
+
+export function isReferenceToVideoModel(modelID: string): boolean {
+  return modelID.toLowerCase().includes("reference-to-video");
+}
+
+export function videoReferenceImageLimit(
+  modelID: string,
+  purpose: VideoReferencePurpose = "reference",
+): number {
+  const normalized = modelID.toLowerCase();
+  if (normalized.startsWith("kling-")) {
+    return purpose === "identity" ? 4 : 7;
+  }
+  if (normalized.startsWith("grok-imagine-")) {
+    return 7;
+  }
+  return 9;
+}
+
+export function buildVideoReferencePayload(
+  modelID: string,
+  purpose: VideoReferencePurpose,
+  images: string[],
+): Record<string, unknown> {
+  if (images.length === 0) return {};
+  if (isReferenceToVideoModel(modelID)) {
+    return {
+      reference_groups: [{
+        role: purpose,
+        images,
+      }],
+    };
+  }
+  return { source_image: images[0] };
 }
 
 export function shouldSendVideoAspect(

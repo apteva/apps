@@ -2783,18 +2783,6 @@ func TestCacheHandler_RequiresOwningProject(t *testing.T) {
 	_ = ctx
 }
 
-func TestVeniceVideoPromptLimit(t *testing.T) {
-	base := map[string]any{"model": "veo3.1-fast-text-to-video", "duration": "5s"}
-	base["prompt"] = strings.Repeat("a", veniceVideoPromptCharLimit)
-	if _, err := buildVeniceVideoQueueArgs(base); err != nil {
-		t.Fatalf("limit-sized prompt rejected: %v", err)
-	}
-	base["prompt"] = strings.Repeat("a", veniceVideoPromptCharLimit+1)
-	if _, err := buildVeniceVideoQueueArgs(base); err == nil || !strings.Contains(err.Error(), "2500") {
-		t.Fatalf("over-limit prompt error = %v", err)
-	}
-}
-
 func TestVeniceImageVideoModelsRequireSourceImage(t *testing.T) {
 	for _, model := range []string{"seedance-image-to-video", "seedance-reference-to-video"} {
 		_, err := buildVeniceVideoQueueArgs(map[string]any{

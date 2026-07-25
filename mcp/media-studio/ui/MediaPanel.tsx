@@ -5,11 +5,13 @@
 import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
 import { AudioLines, Maximize2, Pause, Play, Plus, Upload, Volume2, VolumeX, X } from "lucide-react";
 import {
+  buildVideoReferencePayload,
   clampDuration,
   DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
+  isReferenceToVideoModel,
   mergeHistoryPage,
   projectScopedStorageContentURL,
   providerFromQualifiedId,
@@ -21,11 +23,13 @@ import {
   ttsOutputFormats,
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
+  videoReferenceImageLimit,
   videoSourceRequired,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
   voicesForProvider,
   type DurationKind,
+  type VideoReferencePurpose,
 } from "./mediaPanelLogic";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
@@ -445,6 +449,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   });
   const [aspect, setAspect] = useState("16:9");
   const [videoNoSound, setVideoNoSound] = useState(false);
+  const [videoResolution, setVideoResolution] = useState("720p");
+  const [videoReferencePurpose, setVideoReferencePurpose] =
+    useState<VideoReferencePurpose>("identity");
   const [voice, setVoice] = useState("");
   // Video model picker — live-loaded from /models?kind=video.
   // Auto-snaps to the first listed model when the dropdown lands.
@@ -993,6 +1000,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     activeKind === "video" && videoSourceRequired(currentModel?.model_type, videoModel);
   const showVideoRefInput =
     activeKind === "video" && (!!currentModel?.supports_image_to_video || videoNeedsSource);
+  const videoIsReferenceModel =
+    activeKind === "video" && isReferenceToVideoModel(videoModel);
   const videoSourceMissing = videoNeedsSource && sourceImages.length === 0;
   const draftHasInlineSource = sourceImages.some((source) => !isDurableMediaReference(source.value));
   const editSourceLimit =
@@ -1001,7 +1010,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       : 1;
   const videoSourceLimit =
     activeKind === "video" && showVideoRefInput
-      ? currentModel?.max_source_images || (videoModel.includes("reference-to-video") ? 9 : 1)
+      ? isReferenceToVideoModel(videoModel)
+        ? Math.min(
+            currentModel?.max_source_images || videoReferenceImageLimit(videoModel, videoReferencePurpose),
+            videoReferenceImageLimit(videoModel, videoReferencePurpose),
+          )
+        : currentModel?.max_source_images || 1
       : 1;
   const referenceInputMax = activeKind === "image" ? editSourceLimit : videoSourceLimit;
 
@@ -1049,6 +1063,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     if (currentModel.aspect_ratios && currentModel.aspect_ratios.length > 0
         && !currentModel.aspect_ratios.includes(aspect)) {
       setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
+    }
+    if (activeKind === "video" && currentModel.resolutions && currentModel.resolutions.length > 0
+        && !currentModel.resolutions.includes(videoResolution)) {
+      setVideoResolution(currentModel.default_resolution || currentModel.resolutions[0]);
     }
     if (currentModel.durations && currentModel.durations.length > 0) {
       const want = `${duration}s`;
@@ -1294,17 +1312,35 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (shouldSendVideoAspect(currentModel?.aspect_ratios, !!currentModel)) {
         body.aspect = aspect;
       }
-      if (videoNoSound) {
-        body.options = { audio: false };
+      const videoOptions: Record<string, unknown> = {};
+      if (currentModel?.resolutions?.length) {
+        videoOptions.resolution = videoResolution;
       }
-      // Image/video references pass through the same source args as
-      // image edit. Reference-to-video models can accept multiple refs.
+      if (videoNoSound) {
+        videoOptions.audio = false;
+      }
+      if (Object.keys(videoOptions).length > 0) {
+        body.options = videoOptions;
+      }
+      // R2V references use a provider-neutral group. The sidecar maps
+      // identity groups to Kling elements and flattens them for models
+      // whose native API accepts ordered reference images.
       if (showVideoRefInput && sourceImages.length > 0) {
-        if (sourceImages.length === 1) {
-          body.source_image = sourceImages[0].value;
-        } else {
-          body.source_images = sourceImages.map((x) => x.value);
+        if (sourceImages.length > videoSourceLimit) {
+          setStatus(
+            `Error: ${videoModel} supports at most ${videoSourceLimit} ` +
+            `${videoReferencePurpose === "identity" ? "identity" : "reference"} images.`,
+          );
+          return null;
         }
+        Object.assign(
+          body,
+          buildVideoReferencePayload(
+            videoModel,
+            videoReferencePurpose,
+            sourceImages.map((x) => x.value),
+          ),
+        );
       }
     } else if (activeKind === "audio_tts") {
       if (audioModel) body.model = audioModel;
@@ -1407,6 +1443,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     duration,
     aspect,
     videoNoSound,
+    videoResolution,
+    videoReferencePurpose,
     audioModel,
     audioFormat,
     audioSpeed,
@@ -2126,6 +2164,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               onRemove={removeSourceImage}
               onClear={() => setSourceImages([])}
               onError={setStatus}
+              referencePurpose={videoIsReferenceModel ? videoReferencePurpose : undefined}
+              onReferencePurposeChange={setVideoReferencePurpose}
               hint={
                 showVideoRefInput
                   ? referenceInputMax > 1
@@ -2183,6 +2223,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setAspect={setAspect}
             videoNoSound={videoNoSound}
             setVideoNoSound={setVideoNoSound}
+            videoResolution={videoResolution}
+            setVideoResolution={setVideoResolution}
             voice={voice}
             setVoice={setVoice}
             avatars={avatars}
@@ -2522,6 +2564,8 @@ interface ComposerProps {
   setAspect: (v: string) => void;
   videoNoSound: boolean;
   setVideoNoSound: (v: boolean) => void;
+  videoResolution: string;
+  setVideoResolution: (v: string) => void;
   voice: string;
   setVoice: (v: string) => void;
   avatars: AvatarEntry[];
@@ -2737,6 +2781,13 @@ function Composer(p: ComposerProps) {
                 : undefined
             }
           />
+          {p.currentModel?.resolutions && p.currentModel.resolutions.length > 0 && (
+            <ConstrainedResolution
+              resolutions={p.currentModel.resolutions}
+              value={p.videoResolution}
+              onChange={p.setVideoResolution}
+            />
+          )}
           <VideoAudioSelect
             value={p.videoNoSound}
             onChange={p.setVideoNoSound}
@@ -3847,6 +3898,8 @@ function ReferenceImageInput({
   onClear,
   onError,
   hint,
+  referencePurpose,
+  onReferencePurposeChange,
 }: {
   projectId: string;
   sources: SourceImageRef[];
@@ -3856,6 +3909,8 @@ function ReferenceImageInput({
   onClear: () => void;
   onError: (message: string) => void;
   hint?: string;
+  referencePurpose?: VideoReferencePurpose;
+  onReferencePurposeChange?: (purpose: VideoReferencePurpose) => void;
 }) {
   const [urlInput, setUrlInput] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -3941,6 +3996,36 @@ function ReferenceImageInput({
               </div>
             );
           })}
+        </div>
+      )}
+      {referencePurpose && onReferencePurposeChange && (
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <span className="text-text-muted text-xs font-medium">Reference use</span>
+          <div
+            role="group"
+            aria-label="Reference use"
+            className="inline-flex border border-border rounded overflow-hidden"
+          >
+            {([
+              ["identity", "Subject identity"],
+              ["reference", "General reference"],
+            ] as const).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={referencePurpose === value}
+                onClick={() => onReferencePurposeChange(value)}
+                className={
+                  "px-2.5 py-1.5 text-xs border-0 " +
+                  (referencePurpose === value
+                    ? "bg-accent text-bg font-bold"
+                    : "bg-bg-input text-text-muted hover:text-text")
+                }
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
       <div className="flex items-center justify-between gap-3 flex-wrap">
