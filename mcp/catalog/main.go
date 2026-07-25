@@ -32,13 +32,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: catalog
 display_name: Catalog
-version: 0.2.0
+version: 0.2.1
 description: |
   Products, prices, and discounts — source of truth for what the business sells.
   Modelled after Stripe's Product + Price split. Self-contained: calls
   no other app; downstream apps (billing, subscriptions, checkout)
   call catalog.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
