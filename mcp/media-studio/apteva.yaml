@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.58
+version: 0.10.59
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs, Fish Audio, Cartesia, and MiniMax can power
@@ -135,6 +135,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [ai, image-generation, video-generation, audio, music, productivity]
 
 scopes: [project, global]
