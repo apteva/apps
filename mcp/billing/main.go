@@ -37,11 +37,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.9.1
+version: 0.10.0
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
-  Checkout links are created only when explicitly requested.
+  Checkout links are created only when explicitly requested. Product apps
+  can request durable, idempotent off-session invoice collection.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
 icon: /ui/icon.svg
@@ -60,11 +61,13 @@ requires:
     - role: payment_processor
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create: create_customer
         customers.search: search_customers
         checkout_sessions.create: create_checkout_session
+        payment_intents.create: create_payment_intent
+        payment_intents.get: get_payment_intent
         refunds.create: create_refund
         payment_methods.get: get_payment_method
         payment_methods.detach: detach_payment_method
@@ -118,7 +121,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.9.1",
+		"version", "0.10.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -434,13 +437,25 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_send_payment_link",
-			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is connected, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses only the bound payment_processor integration; Billing never receives Stripe credentials. The URL is valid for 24h. On payment success, the platform-verified webhook records the payment and transitions the invoice to 'paid' automatically. Args: invoice_id (required), success_url, cancel_url.",
+			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is connected, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses only the bound payment_processor integration; Billing never receives Stripe credentials. The URL is valid for 24h. On payment success, the platform-verified webhook records the payment and transitions the invoice to 'paid' automatically. Product apps may set save_payment_method=true to collect consent during the first checkout for later recurring charges. Args: invoice_id (required), success_url, cancel_url, save_payment_method, set_default_payment_method.",
 			InputSchema: schemaObject(map[string]any{
-				"invoice_id":  map[string]any{"type": "integer"},
-				"success_url": map[string]any{"type": "string"},
-				"cancel_url":  map[string]any{"type": "string"},
+				"invoice_id":                 map[string]any{"type": "integer"},
+				"success_url":                map[string]any{"type": "string"},
+				"cancel_url":                 map[string]any{"type": "string"},
+				"save_payment_method":        map[string]any{"type": "boolean"},
+				"set_default_payment_method": map[string]any{"type": "boolean"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesSendPaymentLink,
+		},
+		{
+			Name:        "invoices_collect",
+			Description: "Collect an open invoice automatically with an active reusable saved payment method. Billing owns the off-session processor call, durable attempt state, webhook reconciliation, and invoice payment record. Product apps must supply a stable idempotency_key. Args: invoice_id, idempotency_key, optional payment_method_id.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":        map[string]any{"type": "integer"},
+				"idempotency_key":   map[string]any{"type": "string"},
+				"payment_method_id": map[string]any{"type": "integer"},
+			}, []string{"invoice_id", "idempotency_key"}),
+			Handler: a.toolInvoicesCollect,
 		},
 		// ── Payment methods ──────────────────────────────────────────
 		{

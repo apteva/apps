@@ -24,6 +24,7 @@ type stripePlatformStub struct {
 	verifyCalls []sdk.IntegrationWebhookVerifyRequest
 	toolCalls   []stripeToolCall
 	verifyEvent json.RawMessage
+	intent      json.RawMessage
 }
 
 func (s *stripePlatformStub) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -56,10 +57,31 @@ func (s *stripePlatformStub) VerifyIntegrationWebhook(req sdk.IntegrationWebhook
 func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	s.toolCalls = append(s.toolCalls, stripeToolCall{ConnectionID: connectionID, Tool: tool, Input: input})
 	switch tool {
+	case "create_customer":
+		return &sdk.ExecuteResult{
+			Success: true, Status: http.StatusOK,
+			Data: json.RawMessage(`{"id":"cus_test_123"}`),
+		}, nil
 	case "create_checkout_session":
 		return &sdk.ExecuteResult{
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123","expires_at":1893456000}`),
+		}, nil
+	case "create_payment_intent":
+		data := s.intent
+		if len(data) == 0 {
+			data = json.RawMessage(`{"id":"pi_collect_123","status":"succeeded","amount":1200,"currency":"usd","payment_method":"pm_test_123"}`)
+		}
+		return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
+	case "get_payment_intent":
+		return &sdk.ExecuteResult{
+			Success: true, Status: http.StatusOK,
+			Data: json.RawMessage(`{"id":"pi_checkout_123","status":"succeeded","amount":1100,"currency":"usd","payment_method":"pm_test_123"}`),
+		}, nil
+	case "get_payment_method":
+		return &sdk.ExecuteResult{
+			Success: true, Status: http.StatusOK,
+			Data: json.RawMessage(`{"id":"pm_test_123","type":"card","customer":"cus_test_123","card":{"brand":"visa","last4":"4242","exp_month":12,"exp_year":2030,"country":"US"}}`),
 		}, nil
 	default:
 		return nil, fmt.Errorf("unexpected Stripe tool %q", tool)
@@ -141,6 +163,106 @@ func TestCheckoutCompletedRequiresPersistedMatchingSession(t *testing.T) {
 	got, err := dbInvoiceGetByID(ctx.AppDB(), "test-proj", inv.ID)
 	if err != nil || got.Status != "paid" || got.AmountPaidCents != 1100 {
 		t.Fatalf("invoice after checkout = %+v, err=%v", got, err)
+	}
+}
+
+func TestPaymentLinkCanSaveDefaultPaymentMethod(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	cust := mustCustomer(t, ctx, "save@example.com", "Save Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Recurring", 1, 1000, 1000)}).ID)
+
+	if _, err := app.toolInvoicesSendPaymentLink(ctx, map[string]any{
+		"invoice_id":                 inv.ID,
+		"save_payment_method":        true,
+		"set_default_payment_method": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.toolCalls) != 2 ||
+		platform.toolCalls[0].Tool != "create_customer" ||
+		platform.toolCalls[1].Tool != "create_checkout_session" {
+		t.Fatalf("tool calls=%#v", platform.toolCalls)
+	}
+	checkoutInput := platform.toolCalls[1].Input
+	if checkoutInput["customer"] != "cus_test_123" {
+		t.Fatalf("customer=%v", checkoutInput["customer"])
+	}
+	if _, ok := checkoutInput["customer_email"]; ok {
+		t.Fatalf("customer_email must be omitted when saving a payment method")
+	}
+	intentData := checkoutInput["payment_intent_data"].(map[string]any)
+	if intentData["setup_future_usage"] != "off_session" {
+		t.Fatalf("payment_intent_data=%#v", intentData)
+	}
+
+	completed := []byte(`{"id":"cs_test_123","mode":"payment","payment_status":"paid","amount_total":1100,"currency":"usd","payment_intent":"pi_checkout_123","customer":"cus_test_123"}`)
+	if err := app.handleCheckoutCompleted(ctx, completed); err != nil {
+		t.Fatal(err)
+	}
+	pm, err := dbDefaultPaymentMethod(ctx.AppDB(), "test-proj", cust.ID)
+	if err != nil || pm == nil {
+		t.Fatalf("default payment method=%+v err=%v", pm, err)
+	}
+	if pm.ProviderPaymentMethodID != "pm_test_123" || pm.DisplayLast4 != "4242" || !pm.IsDefault {
+		t.Fatalf("saved payment method=%+v", pm)
+	}
+}
+
+func TestInvoicesCollectIsDurablyIdempotent(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	cust := mustCustomer(t, ctx, "renew@example.com", "Renew Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Renewal", 1, 1200, 0)}).ID)
+	if _, err := dbPaymentMethodUpsert(ctx.AppDB(), &PaymentMethod{
+		ProjectID:               "test-proj",
+		CustomerID:              cust.ID,
+		Provider:                "stripe",
+		ProviderCustomerID:      "cus_collect",
+		ProviderPaymentMethodID: "pm_collect",
+		Type:                    "card",
+		Status:                  "active",
+		IsDefault:               true,
+		Reusable:                true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{
+		"invoice_id":      inv.ID,
+		"idempotency_key": "subscription:19:cycle:2:collect",
+	}
+	first, err := app.toolInvoicesCollect(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.toolInvoicesCollect(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.(map[string]any)["replayed"] != true {
+		t.Fatalf("second response=%#v", second)
+	}
+	var createCalls int
+	for _, call := range platform.toolCalls {
+		if call.Tool == "create_payment_intent" {
+			createCalls++
+			if call.Input["off_session"] != true || call.Input["confirm"] != true {
+				t.Fatalf("payment intent input=%#v", call.Input)
+			}
+		}
+	}
+	if createCalls != 1 {
+		t.Fatalf("create_payment_intent calls=%d, want 1; first=%#v", createCalls, first)
+	}
+	got, err := dbInvoiceGetByID(ctx.AppDB(), "test-proj", inv.ID)
+	if err != nil || got.Status != "paid" || got.AmountPaidCents != 1200 {
+		t.Fatalf("invoice=%+v err=%v", got, err)
+	}
+	attempt, err := dbCollectionAttemptByKey(ctx.AppDB(), "test-proj", args["idempotency_key"].(string))
+	if err != nil || attempt.Status != "succeeded" || attempt.ProviderPaymentIntentID != "pi_collect_123" {
+		t.Fatalf("attempt=%+v err=%v", attempt, err)
 	}
 }
 

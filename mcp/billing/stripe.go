@@ -97,6 +97,7 @@ func ensureStripeWebhook(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) error {
 		Events: []string{
 			"checkout.session.completed",
 			"payment_intent.succeeded",
+			"payment_intent.payment_failed",
 			"setup_intent.succeeded",
 			"setup_intent.setup_failed",
 			"payment_method.detached",
@@ -275,6 +276,11 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if len(inv.LineItems) == 0 {
 		return nil, errors.New("invoice has no line items")
 	}
+	savePaymentMethod := boolFromArg(args, "save_payment_method")
+	setDefaultPaymentMethod := boolFromArg(args, "set_default_payment_method")
+	if setDefaultPaymentMethod {
+		savePaymentMethod = true
+	}
 
 	amountDue := inv.TotalCents - inv.AmountPaidCents
 	if amountDue <= 0 {
@@ -329,7 +335,6 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	input := map[string]any{
 		"mode":                "payment",
 		"line_items":          lineItems,
-		"customer_email":      cust.Email,
 		"success_url":         successURL,
 		"cancel_url":          cancelURL,
 		"client_reference_id": fmt.Sprintf("inv_%d", inv.ID),
@@ -339,6 +344,19 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 			"apteva_project_id":     pid,
 			"apteva_invoice_number": inv.Number,
 		},
+	}
+	if savePaymentMethod {
+		stripeCustomerID, err := ensureStripeCustomer(ctx, pid, cust, bound)
+		if err != nil {
+			return nil, err
+		}
+		input["customer"] = stripeCustomerID
+		input["payment_intent_data"] = map[string]any{
+			"setup_future_usage": "off_session",
+			"metadata":           input["metadata"],
+		}
+	} else {
+		input["customer_email"] = cust.Email
 	}
 
 	var sess struct {
@@ -372,10 +390,11 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if _, err := tx.Exec(
 		`INSERT INTO billing_checkout_sessions
 		   (project_id, invoice_id, provider, provider_session_id,
-		    amount_cents, currency, status, expires_at, created_at)
-		 VALUES (?, ?, 'stripe', ?, ?, ?, 'pending', ?, ?)`,
+		    amount_cents, currency, status, expires_at, created_at,
+		    save_payment_method, set_default_payment_method)
+		 VALUES (?, ?, 'stripe', ?, ?, ?, 'pending', ?, ?, ?, ?)`,
 		pid, inv.ID, sess.ID, amountDue, inv.Currency,
-		nullStr(expiresAt), now); err != nil {
+		nullStr(expiresAt), now, boolInt(savePaymentMethod), boolInt(setDefaultPaymentMethod)); err != nil {
 		return nil, fmt.Errorf("persist checkout session: %w", err)
 	}
 	if _, err := tx.Exec(
@@ -398,9 +417,11 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	}
 
 	return map[string]any{
-		"url":               sess.URL,
-		"stripe_session_id": sess.ID,
-		"expires_at":        sess.ExpiresAt,
+		"url":                        sess.URL,
+		"stripe_session_id":          sess.ID,
+		"expires_at":                 sess.ExpiresAt,
+		"save_payment_method":        savePaymentMethod,
+		"set_default_payment_method": setDefaultPaymentMethod,
 	}, nil
 }
 
@@ -480,10 +501,9 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 	case "checkout.session.completed":
 		return a.handleCheckoutCompleted(ctx, obj)
 	case "payment_intent.succeeded":
-		// Reserved for non-Checkout flows (direct PaymentIntent
-		// creation). Not used by v0.8.0's send-payment-link path
-		// but the catalog declares the event, so handle gracefully.
-		return nil
+		return a.handleCollectionPaymentIntent(ctx, obj)
+	case "payment_intent.payment_failed":
+		return a.handleCollectionPaymentIntent(ctx, obj)
 	case "setup_intent.succeeded":
 		return a.handleSetupIntentSucceeded(ctx, obj)
 	case "setup_intent.setup_failed":
@@ -542,11 +562,14 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 
 	var pid, expectedCurrency, sessionStatus string
 	var invoiceID, expectedAmount int64
+	var savePaymentMethodInt, setDefaultPaymentMethodInt int
 	if err := ctx.AppDB().QueryRow(
-		`SELECT project_id, invoice_id, amount_cents, currency, status
+		`SELECT project_id, invoice_id, amount_cents, currency, status,
+		        save_payment_method, set_default_payment_method
 		 FROM billing_checkout_sessions
 		 WHERE provider = 'stripe' AND provider_session_id = ?`, sess.ID).
-		Scan(&pid, &invoiceID, &expectedAmount, &expectedCurrency, &sessionStatus); err != nil {
+		Scan(&pid, &invoiceID, &expectedAmount, &expectedCurrency, &sessionStatus,
+			&savePaymentMethodInt, &setDefaultPaymentMethodInt); err != nil {
 		return fmt.Errorf("unrecognized checkout session %s: %w", sess.ID, err)
 	}
 	if sess.AmountTotal != expectedAmount {
@@ -575,10 +598,77 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 		 WHERE provider = 'stripe' AND provider_session_id = ?`, now, sess.ID); err != nil {
 		return fmt.Errorf("complete checkout session: %w", err)
 	}
+	if savePaymentMethodInt == 1 {
+		if err := a.saveCheckoutPaymentMethod(
+			ctx, pid, inv.CustomerID, sess.Customer, sess.PaymentIntent, setDefaultPaymentMethodInt == 1,
+		); err != nil {
+			return fmt.Errorf("save checkout payment method: %w", err)
+		}
+	}
 	emitInvoice(ctx, "invoice.paid", inv)
 	ctx.Logger().Info("stripe payment recorded",
 		"invoice_id", invoiceID, "payment_id", pay.ID, "amount", sess.AmountTotal, "session", sess.ID)
 	return nil
+}
+
+func (a *App) saveCheckoutPaymentMethod(ctx *sdk.AppCtx, pid string, customerID int64, providerCustomerID, paymentIntentID string, setDefault bool) error {
+	if paymentIntentID == "" {
+		return errors.New("checkout payment has no payment_intent")
+	}
+	bound, err := requireProcessor(ctx)
+	if err != nil {
+		return err
+	}
+	var intent stripePaymentIntent
+	if err := executeStripe(ctx, bound, "get_payment_intent", map[string]any{
+		"payment_intent_id": paymentIntentID,
+	}, &intent); err != nil {
+		return err
+	}
+	if intent.PaymentMethod == "" {
+		return fmt.Errorf("payment intent %s has no payment_method", paymentIntentID)
+	}
+	pm, err := fetchStripePaymentMethod(ctx, bound, intent.PaymentMethod)
+	if err != nil {
+		return err
+	}
+	pm.ProjectID = pid
+	pm.CustomerID = customerID
+	pm.ProviderCustomerID = firstString(pm.ProviderCustomerID, providerCustomerID)
+	pm.Status = "active"
+	pm.IsDefault = setDefault
+	pm.Reusable = true
+	rawMeta, _ := json.Marshal(map[string]any{
+		"stripe_payment_intent_id": paymentIntentID,
+		"saved_via":                "invoice_checkout",
+	})
+	pm.Metadata = rawMeta
+	saved, err := dbPaymentMethodUpsert(ctx.AppDB(), pm)
+	if err != nil {
+		return err
+	}
+	emitPaymentMethod(ctx, "payment_method.attached", saved)
+	return nil
+}
+
+func (a *App) handleCollectionPaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
+	var intent stripePaymentIntent
+	if err := json.Unmarshal(obj, &intent); err != nil {
+		return fmt.Errorf("decode payment_intent: %w", err)
+	}
+	if intent.ID == "" {
+		return nil
+	}
+	attempt, err := dbCollectionAttemptByIntent(ctx.AppDB(), "stripe", intent.ID)
+	if err != nil || attempt == nil {
+		return err
+	}
+	inv, err := dbInvoiceGetByID(ctx.AppDB(), attempt.ProjectID, attempt.InvoiceID)
+	if err != nil || inv == nil {
+		return err
+	}
+	_, err = a.applyCollectionIntent(ctx, attempt.ProjectID, inv, attempt.ID, &intent)
+	return err
 }
 
 func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) error {

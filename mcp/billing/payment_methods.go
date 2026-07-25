@@ -373,6 +373,28 @@ func dbPaymentMethodsList(db *sql.DB, pid string, f paymentMethodFilters) ([]*Pa
 	return out, rows.Err()
 }
 
+func dbDefaultPaymentMethod(db *sql.DB, pid string, customerID int64) (*PaymentMethod, error) {
+	methods, err := dbPaymentMethodsList(db, pid, paymentMethodFilters{
+		customerID: customerID,
+		status:     "active",
+		limit:      100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, pm := range methods {
+		if pm.IsDefault && pm.Reusable {
+			return pm, nil
+		}
+	}
+	for _, pm := range methods {
+		if pm.Reusable {
+			return pm, nil
+		}
+	}
+	return nil, nil
+}
+
 func dbPaymentMethodGet(db *sql.DB, pid string, id int64) (*PaymentMethod, error) {
 	row := db.QueryRow(
 		`SELECT pm.id, pm.project_id, pm.customer_id,

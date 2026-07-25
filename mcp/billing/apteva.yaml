@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.9.1
+version: 0.10.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -15,6 +15,8 @@ description: |
   Stripe API and signing secrets out of Billing. Checkout remains
   strictly on demand, and verified payment events reconcile invoices
   to paid automatically.
+  v0.10.0 adds durable, idempotent off-session invoice collection for
+  product apps while keeping recurring schedules out of Billing.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -37,11 +39,13 @@ requires:
     - role: payment_processor                  # Stripe (or any future processor) for card-payable invoices
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create:         create_customer
         customers.search:         search_customers
         checkout_sessions.create: create_checkout_session
+        payment_intents.create:    create_payment_intent
+        payment_intents.get:       get_payment_intent
         refunds.create:           create_refund
         payment_methods.get:      get_payment_method
         payment_methods.detach:   detach_payment_method
@@ -100,6 +104,12 @@ provides:
         payment_processor integration; Billing never receives Stripe keys.
         On payment success, the platform-verified webhook records the payment
         and transitions the invoice to paid.
+    - name: invoices_collect
+      description: |
+        Collect an open invoice automatically using an active reusable saved
+        payment method. Product apps provide a stable idempotency key; Billing
+        owns the off-session processor call, durable attempt state, webhook
+        reconciliation, and invoice payment record.
     - name: payment_method_setup_create
       description: Create a provider-hosted setup session so a customer can save a reusable payment method. Supports card and bank-debit types such as sepa_debit where the processor supports them.
     - name: payment_methods_list
@@ -225,6 +235,20 @@ provides:
         status: string
         total_cents: integer
         currency: string
+    - name: invoice.payment_failed
+      description: Automatic collection failed and the product app should apply its dunning or grace policy.
+      payload:
+        id: integer
+        customer_id: integer
+        status: string
+        collection_attempt: object
+    - name: invoice.payment_action_required
+      description: Automatic collection needs customer authentication or another provider action.
+      payload:
+        id: integer
+        customer_id: integer
+        status: string
+        collection_attempt: object
     - name: payment_method.attached
       description: A reusable customer payment method was attached after a successful setup flow.
       payload:

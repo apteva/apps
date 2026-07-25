@@ -46,6 +46,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 			if dep.Tools["checkout_sessions.create"] == "" {
 				t.Error("payment_processor missing checkout_sessions.create tool mapping")
 			}
+			if dep.Tools["payment_intents.create"] == "" {
+				t.Error("payment_processor missing payment_intents.create tool mapping")
+			}
 			if dep.Tools["webhooks.process"] != "" {
 				t.Error("payment_processor must use platform webhook verification, not an integration process_webhook tool")
 			}
@@ -93,7 +96,7 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 		"customers_upsert_by_email", "customers_update", "customers_merge",
 		"invoices_create", "invoices_create_from_prepared_lines", "invoices_add_line_item", "invoices_update",
 		"invoices_finalize", "invoices_void", "invoices_get", "invoices_search",
-		"invoices_render_pdf", "invoices_send_payment_link",
+		"invoices_render_pdf", "invoices_send_payment_link", "invoices_collect",
 		"payment_method_setup_create", "payment_methods_list",
 		"payment_method_default_set", "payment_method_detach",
 		"payments_record", "payments_list",
