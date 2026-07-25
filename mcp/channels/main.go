@@ -35,14 +35,15 @@ var (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.6.0
+version: 0.6.1
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, ntfy.sh notifications, and Telegram channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
   history, streams updates to the dashboard, delivers provider-backed
   notifications, and forwards inbound user messages/actions to agents.
 author: Apteva
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [global]
 requires:
   permissions:

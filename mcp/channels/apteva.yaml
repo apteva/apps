@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.6.0
+version: 0.6.1
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, ntfy.sh notifications, and Telegram channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -10,7 +10,8 @@ description: |
   notifications, and forwards inbound user messages/actions to agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/channels
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [channels, chat, messaging, agent]
 
 scopes: [global]
