@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.10
+version: 0.2.11
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
@@ -12,7 +12,8 @@ description: |
   example --js-runtimes node:/path/to/node.
 
 author: Apteva
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [media, video, audio, youtube, patreon, download, yt-dlp]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
