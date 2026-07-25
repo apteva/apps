@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.6
+version: 0.8.7
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -46,6 +46,8 @@ description: |
   policy ingestion, strict numeric aggregates, and batched dashboards.
   v0.8.6 restores anonymous static-site tracking under the server's
   explicit public-route policy while preserving existing tag URLs.
+  v0.8.7 adds Analytics' adaptive themed app icon and updates the app
+  to the current Apteva app SDK.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
