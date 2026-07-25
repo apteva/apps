@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Apteva adaptive app icon. -->
+  <rect x="8" y="3" width="8" height="18" rx="2"/>
+  <path d="M3 8h8"/>
+  <path d="m8 5 3 3-3 3"/>
+  <path d="M21 16h-8"/>
+  <path d="m16 13-3 3 3 3"/>
+</svg>
