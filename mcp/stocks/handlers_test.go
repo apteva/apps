@@ -144,7 +144,7 @@ func TestEmbeddedManifest(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("db block missing or wrong: %+v", m.DB)
 	}
-	if m.Version != "0.7.3" {
+	if m.Version != "0.7.4" {
 		t.Fatalf("version = %q, want 0.7.3", m.Version)
 	}
 }
