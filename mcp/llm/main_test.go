@@ -1413,6 +1413,7 @@ func TestEmbeddingsRouteForwardsAndRecordsRawUsage(t *testing.T) {
 }
 
 type llmPlatformStub struct {
+	tk.BasePlatformClient
 	identity           *sdk.InstallIdentity
 	credentials        map[int64]*sdk.ConnectionCredentials
 	connection         *sdk.PlatformConnection
@@ -1461,7 +1462,7 @@ func (p *llmPlatformStub) ListProjects() ([]sdk.PlatformProject, error) { return
 func (p *llmPlatformStub) SpawnRealtimeThread(sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
 	return nil, nil
 }
-func (p *llmPlatformStub) KillThread(string) error { return nil }
+func (p *llmPlatformStub) KillThread(int64, string) error { return nil }
 func (p *llmPlatformStub) PlatformInfo() (*sdk.PlatformInfo, error) {
 	return &sdk.PlatformInfo{}, nil
 }

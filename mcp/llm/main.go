@@ -28,11 +28,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.5
+version: 0.5.6
 description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
 requires:
   permissions:
     - db.write.app
