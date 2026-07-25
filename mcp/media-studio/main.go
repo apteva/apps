@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.53
+version: 0.10.54
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.53 publishes the
+  as a subscription-backed image provider. v0.10.54 adds a provider-grouped
+  voice picker, automatically routes generation through the selected voice's
+  provider, and moves custom voice cloning and design into a responsive
+  creation dialog. v0.10.53 publishes the
   complete provider-neutral voice stack with Fish Audio, Cartesia, and
   MiniMax cloning available through the same tools and UI. v0.10.52 adds
   provider-neutral Cartesia and MiniMax TTS, voice catalogs, cloning, and

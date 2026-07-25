@@ -81,14 +81,30 @@ export function voiceProviderSupportsPrompt(provider: string): boolean {
   return provider === "elevenlabs" || provider === "minimax-audio";
 }
 
+export function voiceProviderSupportsCreation(provider: string): boolean {
+  return provider === "elevenlabs" ||
+    provider === "fish-audio" ||
+    provider === "cartesia" ||
+    provider === "minimax-audio";
+}
+
+export function modelForVoiceProvider(
+  provider: string,
+  models: Array<{ id: string; provider?: string }>,
+): string {
+  return models.find((model) =>
+    (model.provider || providerFromQualifiedId(model.id)) === provider
+  )?.id || "";
+}
+
 export function shouldReplaceVoiceSelection(
   currentVoice: string,
   catalogVoiceIDs: string[],
   trackedVoiceIDs: string[],
 ): boolean {
-  return catalogVoiceIDs.length > 0 &&
-    !catalogVoiceIDs.includes(currentVoice) &&
-    !trackedVoiceIDs.includes(currentVoice);
+  const availableVoiceIDs = [...catalogVoiceIDs, ...trackedVoiceIDs];
+  return !availableVoiceIDs.includes(currentVoice) &&
+    (!!currentVoice || availableVoiceIDs.length > 0);
 }
 
 export function formatMediaTime(seconds: number): string {

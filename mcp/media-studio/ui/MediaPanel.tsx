@@ -3,7 +3,7 @@
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
 import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
-import { AudioLines, Maximize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
+import { AudioLines, Maximize2, Pause, Play, Plus, Upload, Volume2, VolumeX, X } from "lucide-react";
 import {
   clampDuration,
   DEFAULT_IMAGE_FORMAT,
@@ -11,6 +11,7 @@ import {
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
+  modelForVoiceProvider,
   projectScopedStorageContentURL,
   providerFromQualifiedId,
   selectedModelProvider,
@@ -22,6 +23,7 @@ import {
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
   type DurationKind,
 } from "./mediaPanelLogic";
@@ -662,11 +664,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
       setVoices(list);
-      if (list.length > 0 && !list.some((x) => x.id === voice)) {
-        setVoice(list[0].id);
-      }
     } catch {}
-  }, [activeKind, projectId, voice]);
+  }, [activeKind, projectId]);
 
   useEffect(() => {
     loadBindings();
@@ -944,19 +943,22 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     : bindings?.audio_tts.slug
       ? [{ connection_id: 0, slug: bindings.audio_tts.slug, default: true }]
       : [];
+  const voiceProviderCount = audioProviders.filter((item) =>
+    voiceProviderSupportsCreation(item.slug)
+  ).length;
   const selectedAudioProvider = currentModel?.provider || providerFromQualifiedId(audioModel) || audioProviders[0]?.slug || "";
   useEffect(() => {
     if (activeKind !== "audio_tts" || !selectedAudioProvider) return;
     const candidates = voices.filter((item) => !item.provider || item.provider === selectedAudioProvider);
     const trackedVoiceIDs = voiceIdentities
       .filter((identity) => identity.status === "ready" && identity.provider === selectedAudioProvider)
-      .map((identity) => audioProviders.length > 1
+      .map((identity) => voiceProviderCount > 1
         ? `${identity.provider}:${identity.provider_identity_id}`
         : identity.provider_identity_id);
     if (shouldReplaceVoiceSelection(voice, candidates.map((item) => item.id), trackedVoiceIDs)) {
-      setVoice(candidates[0].id);
+      setVoice(candidates[0]?.id || trackedVoiceIDs[0] || "");
     }
-  }, [activeKind, audioProviders.length, selectedAudioProvider, voiceIdentities, voices, voice]);
+  }, [activeKind, selectedAudioProvider, voiceIdentities, voiceProviderCount, voices, voice]);
   useEffect(() => {
     const formats = ttsOutputFormats(selectedAudioProvider);
     if (formats.length > 0 && !formats.includes(audioFormat)) {
@@ -1130,9 +1132,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
     const voiceCapableProviders = audioProviders.filter((item) =>
-        item.slug === "elevenlabs" || item.slug === "fish-audio" ||
-        item.slug === "cartesia" || item.slug === "minimax-audio"
-      );
+      voiceProviderSupportsCreation(item.slug)
+    );
     const provider = voiceCreateProvider ||
       voiceCapableProviders.find((item) => item.slug === selectedAudioProvider)?.slug ||
       voiceCapableProviders[0]?.slug;
@@ -1226,8 +1227,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         return;
       }
       const providerVoiceID = result._meta?.provider_identity_id || result._meta?.identity?.provider_identity_id || "";
-      const routedVoiceID = providerVoiceID && audioProviders.length > 1 ? `${provider}:${providerVoiceID}` : providerVoiceID;
-      const providerModel = liveModels.find((item) => item.provider === provider);
+      const routedVoiceID = providerVoiceID && voiceCapableProviders.length > 1
+        ? `${provider}:${providerVoiceID}`
+        : providerVoiceID;
+      const providerModel = liveModels?.find((item) => item.provider === provider);
       if (providerModel) setAudioModel(providerModel.id);
       if (routedVoiceID) setVoice(routedVoiceID);
       setVoiceCreateName("");
@@ -1675,6 +1678,120 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         .ms-composer-options input[type="text"],
         .ms-composer-options input[type="number"] { width: 100%; min-width: 0 !important; }
         .ms-option-wide { grid-column: 1 / -1; }
+        .ms-tts-settings {
+          grid-column: 1 / -1;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          min-width: 0;
+        }
+        .ms-tts-controls {
+          display: grid;
+          grid-template-columns: minmax(240px, 1.6fr) minmax(140px, 0.8fr) minmax(120px, 0.6fr);
+          gap: 14px;
+          align-items: end;
+        }
+        .ms-tts-controls > div { min-width: 0; }
+        .ms-tts-controls select,
+        .ms-tts-controls input { width: 100%; max-width: none !important; }
+        .ms-voice-picker {
+          min-width: 0;
+          padding-top: 14px;
+          border-top: 1px solid var(--border);
+        }
+        .ms-voice-picker-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 7px;
+        }
+        .ms-voice-picker-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 8px;
+          align-items: stretch;
+        }
+        .ms-voice-picker-row select { width: 100%; min-width: 0; min-height: 40px; }
+        .ms-provider-label {
+          display: inline-flex;
+          align-items: center;
+          min-height: 20px;
+          padding: 1px 6px;
+          border: 1px solid var(--border);
+          border-radius: 4px;
+          color: var(--text-muted);
+          font-size: 10px;
+          font-weight: 600;
+        }
+        .ms-voice-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 10010;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(0, 0, 0, 0.78);
+        }
+        .ms-voice-dialog {
+          width: min(720px, calc(100vw - 48px));
+          max-height: min(760px, calc(100vh - 48px));
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--bg-card);
+          box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+        }
+        .ms-voice-dialog-body {
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+          overflow: auto;
+          padding: 20px;
+        }
+        .ms-voice-form-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 14px;
+          align-items: end;
+        }
+        .ms-voice-form-grid > div { min-width: 0; }
+        .ms-voice-form-grid select,
+        .ms-voice-form-grid input,
+        .ms-voice-form-grid textarea { width: 100%; min-width: 0; }
+        .ms-voice-mode {
+          display: inline-grid;
+          grid-auto-flow: column;
+          grid-auto-columns: 1fr;
+          padding: 3px;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--bg-input);
+        }
+        .ms-voice-mode button {
+          min-height: 34px;
+          padding: 5px 12px;
+          border-radius: 4px;
+          color: var(--text-muted);
+          font-size: 12px;
+          font-weight: 600;
+        }
+        .ms-voice-mode button[data-active="true"] {
+          background: var(--accent);
+          color: var(--bg);
+        }
+        .ms-voice-dialog-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 14px 20px;
+          border-top: 1px solid var(--border);
+          background: var(--bg-card);
+        }
         .ms-composer-footer {
           display: flex;
           align-items: center;
@@ -1851,6 +1968,26 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           .ms-create-dialog { width: 100%; max-height: none; height: 100%; border-radius: 0 !important; }
           .ms-create-body { padding: 16px; }
           .ms-composer-options { grid-template-columns: 1fr; }
+          .ms-tts-controls,
+          .ms-voice-form-grid { grid-template-columns: 1fr; }
+          .ms-voice-picker-row { grid-template-columns: 1fr; }
+          .ms-voice-picker-row button { width: 100%; justify-content: center; }
+          .ms-voice-backdrop { padding: 0; align-items: stretch; }
+          .ms-voice-dialog {
+            width: 100%;
+            max-height: none;
+            height: 100%;
+            border-radius: 0;
+          }
+          .ms-voice-dialog-body { padding: 16px; }
+          .ms-voice-dialog-footer {
+            position: sticky;
+            bottom: 0;
+            flex-direction: column;
+            align-items: stretch;
+            padding: 12px 16px;
+          }
+          .ms-voice-dialog-footer > * { width: 100%; }
           .ms-composer-footer {
             position: sticky;
             bottom: -16px;
@@ -2216,6 +2353,10 @@ function CreationDialog({
       ? document.activeElement
       : null;
     const onKeyDown = (event: KeyboardEvent) => {
+      const nestedDialog = dialogRef.current?.querySelector<HTMLElement>(
+        '[role="dialog"][aria-modal="true"]',
+      );
+      if (nestedDialog) return;
       if (event.key === "Escape") {
         onCloseRef.current();
         return;
@@ -2478,13 +2619,48 @@ function Composer(p: ComposerProps) {
     : voiceCreationProviders.some((item) => item.slug === ttsProvider)
       ? ttsProvider
       : voiceCreationProviders[0]?.slug || "";
-  const ttsVoices = ttsProvider ? p.voices.filter((item) => !item.provider || item.provider === ttsProvider) : p.voices;
+  const namespaceVoices = voiceCreationProviders.length > 1;
+  const trackedVoiceChoices: VoiceEntry[] = p.voiceIdentities
+    .filter((identity) => identity.status === "ready" && identity.provider_identity_id)
+    .map((identity) => ({
+      id: namespaceVoices
+        ? `${identity.provider}:${identity.provider_identity_id}`
+        : identity.provider_identity_id,
+      name: identity.name || identity.provider_identity_id,
+      provider: identity.provider,
+      preview: identity.preview_url,
+    }));
+  const knownVoiceIDs = new Set(p.voices.map((item) => item.id));
+  const voiceChoices = [
+    ...p.voices,
+    ...trackedVoiceChoices.filter((item) => !knownVoiceIDs.has(item.id)),
+  ];
+  const selectVoice = (voiceID: string) => {
+    const selected = voiceChoices.find((item) => item.id === voiceID);
+    if (selected?.provider && selected.provider !== ttsProvider) {
+      const compatibleModelID = modelForVoiceProvider(selected.provider, p.liveModels || []);
+      if (compatibleModelID) p.setAudioModel(compatibleModelID);
+    }
+    p.setVoice(voiceID);
+  };
+  const openVoiceCreator = () => {
+    const provider = voiceProviderSupportsCreation(ttsProvider)
+      ? ttsProvider
+      : voiceCreationProvider;
+    p.setVoiceCreateProvider(provider);
+    if (!voiceProviderSupportsPrompt(provider)) p.setVoiceCreateSourceType("audio");
+    p.setVoiceCreateOpen(true);
+  };
   const avatarVBlocked =
     p.kind === "avatar" &&
     p.avatarProvider === "heygen" &&
     p.avatarEngine === "avatar_v" &&
     !!selectedAvatar &&
     !avatarSupportsEngine(selectedAvatar, "avatar_v");
+  const voiceRequiredMissing =
+    p.kind === "audio_tts" &&
+    ttsProviderUsesSeparateVoice(ttsProvider) &&
+    !p.voice;
   return (
     <div className="ms-composer">
       <div>
@@ -2573,15 +2749,46 @@ function Composer(p: ComposerProps) {
         </>
       )}
       {p.kind === "audio_tts" && (
-        <>
+        <div className="ms-tts-settings">
+          <div className="ms-tts-controls">
+            <MediaModelPicker
+              model={p.audioModel}
+              setModel={p.setAudioModel}
+              liveModels={p.liveModels}
+              liveProvider={p.liveProvider}
+              label={ttsProvider === "deepgram" ? "Voice model" : "Provider & model"}
+            />
+            {ttsOutputFormats(ttsProvider).length > 0 && (
+              <div>
+                <label className="text-text-muted text-xs block">Format</label>
+                <select value={p.audioFormat} onChange={(e) => p.setAudioFormat(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                  {ttsOutputFormats(ttsProvider).map((format) => (
+                    <option key={format} value={format}>{format.toUpperCase()}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {(ttsProvider === "fish-audio" || ttsProvider === "cartesia" || ttsProvider === "minimax-audio") && (
+              <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+            )}
+          </div>
+          {ttsProviderUsesSeparateVoice(ttsProvider) && (
+            <VoicePicker
+              voice={p.voice}
+              provider={ttsProvider}
+              voices={voiceChoices}
+              onChange={selectVoice}
+              canCreate={voiceCreationProviders.length > 0}
+              onCreate={openVoiceCreator}
+            />
+          )}
           {voiceCreationProviders.length > 0 && (
-            <VoiceCreatePanel
+            <VoiceCreateDialog
               providers={voiceCreationProviders}
               provider={voiceCreationProvider}
               setProvider={p.setVoiceCreateProvider}
               sourceType={p.voiceCreateSourceType}
               setSourceType={p.setVoiceCreateSourceType}
-              identities={p.voiceIdentities}
               open={p.voiceCreateOpen}
               setOpen={p.setVoiceCreateOpen}
               name={p.voiceCreateName}
@@ -2605,37 +2812,9 @@ function Composer(p: ComposerProps) {
               creating={p.voiceCreating}
               createVoice={p.createVoice}
               onError={p.onError}
-              selectedVoice={p.voice}
-              setSelectedVoice={p.setVoice}
             />
           )}
-          <MediaModelPicker
-            model={p.audioModel}
-            setModel={p.setAudioModel}
-            liveModels={p.liveModels}
-            liveProvider={p.liveProvider}
-          />
-          {ttsOutputFormats(ttsProvider).length > 0 && (
-            <>
-              <div>
-                <label className="text-text-muted text-xs block">Format</label>
-                <select value={p.audioFormat} onChange={(e) => p.setAudioFormat(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
-                  {ttsOutputFormats(ttsProvider).map((format) => (
-                    <option key={format} value={format}>{format.toUpperCase()}</option>
-                  ))}
-                </select>
-              </div>
-              {(ttsProvider === "fish-audio" || ttsProvider === "cartesia" || ttsProvider === "minimax-audio") && (
-                <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
-              )}
-            </>
-          )}
-          {!ttsProviderUsesSeparateVoice(ttsProvider) ? null : ttsVoices.length > 0 ? (
-            <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={ttsVoices} />
-          ) : (
-            <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="voice_id" />
-          )}
-        </>
+        </div>
       )}
       {p.kind === "audio_sfx" && (
         <>
@@ -2732,13 +2911,15 @@ function Composer(p: ComposerProps) {
           </button>
           <button
             onClick={p.generate}
-            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing || voiceRequiredMissing}
             className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
             title={
               avatarVBlocked
                 ? "Selected avatar does not advertise Avatar V support"
                 : p.sourceRequiredMissing
                   ? "The selected video model requires a source image"
+                  : voiceRequiredMissing
+                    ? "Select a voice"
                   : undefined
             }
           >
@@ -2776,13 +2957,12 @@ function EstimateBadge({
   );
 }
 
-function VoiceCreatePanel({
+function VoiceCreateDialog({
   providers,
   provider,
   setProvider,
   sourceType,
   setSourceType,
-  identities,
   open,
   setOpen,
   name,
@@ -2806,15 +2986,12 @@ function VoiceCreatePanel({
   creating,
   createVoice,
   onError,
-  selectedVoice,
-  setSelectedVoice,
 }: {
   providers: ProviderBinding[];
   provider: string;
   setProvider: (v: string) => void;
   sourceType: "prompt" | "audio";
   setSourceType: (v: "prompt" | "audio") => void;
-  identities: MediaIdentity[];
   open: boolean;
   setOpen: (v: boolean) => void;
   name: string;
@@ -2838,25 +3015,48 @@ function VoiceCreatePanel({
   creating: boolean;
   createVoice: () => void;
   onError: (message: string) => void;
-  selectedVoice: string;
-  setSelectedVoice: (v: string) => void;
 }) {
   const activeProvider = provider || providers[0]?.slug || "";
   const activeSourceType =
     voiceProviderSupportsPrompt(activeProvider) ? sourceType : "audio";
-  const readyVoices = identities.filter(
-    (x) =>
-      x.status === "ready" &&
-      x.provider_identity_id &&
-      (!activeProvider || x.provider === activeProvider),
-  );
-  const routedIdentityID = (identity: MediaIdentity) =>
-    providers.length > 1
-      ? `${identity.provider}:${identity.provider_identity_id}`
-      : identity.provider_identity_id;
-  const selectedTracked = readyVoices.some(
-    (x) => routedIdentityID(x) === selectedVoice,
-  );
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const titleID = useId();
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !creating) {
+        setOpen(false);
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+        ),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.setTimeout(() => {
+      dialogRef.current?.querySelector<HTMLInputElement>('input[type="text"]')?.focus();
+    }, 0);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, [open, creating, setOpen]);
   const cloneReady = !!audio.trim();
   const designReady = description.trim().length >= 20;
   const onAudioFile = (file?: File) => {
@@ -2874,174 +3074,132 @@ function VoiceCreatePanel({
     reader.onerror = () => onError(`Could not read ${file.name}.`);
     reader.readAsDataURL(file);
   };
+  if (!open) return null;
   return (
-    <div
-      style={{ flexBasis: "100%" }}
-      className="ms-option-wide border border-border rounded p-2 bg-bg-card"
-    >
-      <div className="flex items-center gap-2 flex-wrap">
-        <button
-          onClick={() => setOpen(!open)}
-          className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent disabled:opacity-50"
-          disabled={providers.length === 0}
-        >
-          {open ? "Close voice creator" : "Create voice"}
-        </button>
-        {providers.length > 1 ? (
-          <select
-            value={activeProvider}
-            onChange={(e) => {
-              setProvider(e.target.value);
-              if (!voiceProviderSupportsPrompt(e.target.value)) setSourceType("audio");
-            }}
-            className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+    <div className="ms-voice-backdrop" onMouseDown={() => !creating && setOpen(false)}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleID}
+        className="ms-voice-dialog"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center justify-between gap-4 px-5 py-4 border-b border-border flex-shrink-0">
+          <div className="min-w-0">
+            <h3 id={titleID} className="text-base font-semibold text-text">New custom voice</h3>
+            <span className="text-text-dim text-xs">{providerLabel(activeProvider)}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            disabled={creating}
+            aria-label="Close custom voice dialog"
+            title="Close"
+            className="p-2 text-text-muted hover:text-text disabled:opacity-50"
           >
-            {providers.map((item) => (
-              <option key={item.slug} value={item.slug}>
-                {providerLabel(item.slug)}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span className="text-text-dim" style={{ fontSize: 10 }}>
-            {activeProvider
-              ? providerLabel(activeProvider)
-              : "No voice provider"}
-          </span>
-        )}
-        {readyVoices.length > 0 && (
-          <>
-            <span className="text-text-dim" style={{ fontSize: 10 }}>
-              {readyVoices.length} custom
-            </span>
-            <select
-              value={selectedTracked ? selectedVoice : ""}
-              onChange={(e) => {
-                if (e.target.value) setSelectedVoice(e.target.value);
-              }}
-              className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
-              style={{ maxWidth: 260 }}
-            >
-              <option value="">Tracked voices</option>
-              {readyVoices.map((identity) => (
-                <option key={identity.id} value={routedIdentityID(identity)}>
-                  {identity.name || identity.provider_identity_id}
-                </option>
-              ))}
-            </select>
-          </>
-        )}
-      </div>
-      {open && (
-        <div className="mt-2 flex flex-col gap-2">
-          <div className="flex items-end gap-2 flex-wrap">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="ms-voice-dialog-body">
+          <div className="ms-voice-form-grid">
+            <div>
+              <label className="text-text-muted text-xs block">Provider</label>
+              <select
+                value={activeProvider}
+                onChange={(e) => {
+                  setProvider(e.target.value);
+                  if (!voiceProviderSupportsPrompt(e.target.value)) setSourceType("audio");
+                }}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                {providers.map((item) => (
+                  <option key={item.slug} value={item.slug}>
+                    {providerLabel(item.slug)}
+                  </option>
+                ))}
+              </select>
+            </div>
             <TextField
-              label="Name"
+              label="Voice name"
               value={name}
               onChange={setName}
               placeholder="Narrator"
             />
-            {voiceProviderSupportsPrompt(activeProvider) && (
-              <div>
-                <label className="text-text-muted text-xs block">Mode</label>
-                <select
-                  value={activeSourceType}
-                  onChange={(e) =>
-                    setSourceType(e.target.value as "prompt" | "audio")
-                  }
-                  className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          </div>
+          {voiceProviderSupportsPrompt(activeProvider) && (
+            <div>
+              <label className="text-text-muted text-xs block mb-1">Method</label>
+              <div className="ms-voice-mode" role="group" aria-label="Voice creation method">
+                <button
+                  type="button"
+                  data-active={activeSourceType === "audio"}
+                  onClick={() => setSourceType("audio")}
                 >
-                  <option value="prompt">Design</option>
-                  <option value="audio">Clone</option>
-                </select>
+                  Clone audio
+                </button>
+                <button
+                  type="button"
+                  data-active={activeSourceType === "prompt"}
+                  onClick={() => setSourceType("prompt")}
+                >
+                  Design voice
+                </button>
               </div>
-            )}
-            {activeSourceType === "prompt" && activeProvider === "elevenlabs" && (
+            </div>
+          )}
+          {activeSourceType === "prompt" && activeProvider === "elevenlabs" && (
+            <div className="ms-voice-form-grid">
               <div>
-                <label className="text-text-muted text-xs block">
-                  Design model
-                </label>
+                <label className="text-text-muted text-xs block">Design model</label>
                 <select
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                   className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
                 >
                   <option value="eleven_ttv_v3">Eleven v3</option>
-                  <option value="eleven_multilingual_ttv_v2">
-                    Multilingual v2
-                  </option>
+                  <option value="eleven_multilingual_ttv_v2">Multilingual v2</option>
                 </select>
               </div>
-            )}
-            {activeProvider !== "cartesia" && (
-            <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none pb-2">
-              <input
-                type="checkbox"
-                checked={enhance}
-                onChange={(e) => setEnhance(e.target.checked)}
-                style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
-              />
-              {activeSourceType === "audio"
-                ? activeProvider === "elevenlabs"
-                  ? "Clean audio"
-                  : activeProvider === "minimax-audio"
-                    ? "Clean & normalize"
-                    : "Enhance audio"
-                : "Enhance prompt"}
-            </label>
-            )}
-            <button
-              onClick={createVoice}
-              disabled={
-                creating ||
-                !name.trim() ||
-                !activeProvider ||
-                (activeSourceType === "audio" ? !cloneReady : !designReady)
-              }
-              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-            >
-              {creating ? "…" : "Create"}
-            </button>
-          </div>
+            </div>
+          )}
           {activeSourceType === "audio" && (
-            <>
-              <div className="flex items-end gap-2 flex-wrap">
-                <label className="text-xs px-2 py-1.5 border border-border rounded text-accent cursor-pointer hover:border-accent">
-                  Choose audio
+            <div className="ms-voice-form-grid">
+              <div style={{ gridColumn: "1 / -1" }}>
+                <label className="text-text-muted text-xs block">Audio sample</label>
+                <div className="flex items-stretch gap-2">
+                  <label className="inline-flex items-center justify-center gap-2 px-3 py-2 border border-border rounded text-accent text-xs cursor-pointer hover:border-accent flex-shrink-0">
+                    <Upload size={14} />
+                    {audioFilename || "Choose audio"}
+                    <input
+                      type="file"
+                      accept="audio/*"
+                      className="hidden"
+                      onChange={(e) => onAudioFile(e.target.files?.[0])}
+                    />
+                  </label>
                   <input
-                    type="file"
-                    accept="audio/*"
-                    className="hidden"
-                    onChange={(e) => onAudioFile(e.target.files?.[0])}
+                    type="text"
+                    value={audio.startsWith("data:") ? "" : audio}
+                    onChange={(event) => {
+                      setAudio(event.target.value);
+                      setAudioFilename("");
+                    }}
+                    placeholder="storage:123 or https://..."
+                    className="flex-1 bg-bg-input border border-border rounded px-3 py-2 text-sm min-w-0"
                   />
-                </label>
-                <TextField
-                  label="Storage / URL"
-                  value={audio.startsWith("data:") ? "" : audio}
-                  onChange={(value) => {
-                    setAudio(value);
-                    setAudioFilename("");
-                  }}
-                  placeholder="storage:123 or https://…"
-                />
-                {audioFilename && (
-                  <span className="text-text-dim text-xs pb-2">
-                    {audioFilename}
-                  </span>
-                )}
-                {activeProvider === "cartesia" && (
-                  <TextField
-                    label="Language"
-                    value={language}
-                    onChange={setLanguage}
-                    placeholder="en"
-                  />
-                )}
+                </div>
               </div>
+              {activeProvider === "cartesia" && (
+                <TextField
+                  label="Language"
+                  value={language}
+                  onChange={setLanguage}
+                  placeholder="en"
+                />
+              )}
               <div>
-                <label className="text-text-muted text-xs block">
-                  Transcript
-                </label>
+                <label className="text-text-muted text-xs block">Transcript</label>
                 <textarea
                   value={transcript}
                   onChange={(e) => setTranscript(e.target.value)}
@@ -3049,27 +3207,23 @@ function VoiceCreatePanel({
                   className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
                 />
               </div>
-            </>
+            </div>
           )}
-          <div>
-            <label className="text-text-muted text-xs block">Description</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder={
-                activeSourceType === "prompt"
-                  ? "Warm, composed narrator with clear pacing and a polished studio tone."
-                  : "Optional voice description"
-              }
-              rows={3}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-            />
-          </div>
           {activeSourceType === "prompt" && (
             <div>
-              <label className="text-text-muted text-xs block">
-                Preview text
-              </label>
+              <label className="text-text-muted text-xs block">Voice description</label>
+              <textarea
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Warm, composed narrator with clear pacing and a polished studio tone."
+                rows={4}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              />
+            </div>
+          )}
+          {activeSourceType === "prompt" && (
+            <div>
+              <label className="text-text-muted text-xs block">Preview text</label>
               <textarea
                 value={previewText}
                 onChange={(e) => setPreviewText(e.target.value)}
@@ -3084,33 +3238,55 @@ function VoiceCreatePanel({
             </div>
           )}
         </div>
-      )}
-      {identities.some((x) => x.status === "failed") && (
-        <div className="flex gap-2 flex-wrap mt-2">
-          {identities
-            .filter((x) => x.status === "failed")
-            .slice(0, 4)
-            .map((identity) => (
-              <div
-                key={identity.id}
-                className="border rounded px-2 py-1 bg-bg-input"
-                style={{
-                  borderColor: "var(--apteva-danger, #ef4444)",
-                  fontSize: 10,
-                  maxWidth: 220,
-                }}
-                title={identity.error || identity.prompt || identity.name}
-              >
-                <span className="text-text truncate block">
-                  {identity.name || `#${identity.id}`}
-                </span>
-                <span className="text-text-dim truncate block">
-                  {identity.error || identity.status}
-                </span>
-              </div>
-            ))}
-        </div>
-      )}
+        <footer className="ms-voice-dialog-footer">
+          {activeProvider !== "cartesia" ? (
+            <label className="inline-flex items-center gap-2 text-xs text-text-muted cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={enhance}
+                onChange={(e) => setEnhance(e.target.checked)}
+                style={{ accentColor: "var(--accent)" }}
+              />
+              {activeSourceType === "audio"
+                ? activeProvider === "elevenlabs"
+                  ? "Clean audio"
+                  : activeProvider === "minimax-audio"
+                    ? "Clean and normalize"
+                    : "Enhance audio"
+                : "Enhance description"}
+            </label>
+          ) : (
+            <span className="text-text-dim text-xs">Audio clone · Cartesia</span>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              disabled={creating}
+              className="px-3 py-2 text-sm border border-border rounded text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={createVoice}
+              disabled={
+                creating ||
+                !name.trim() ||
+                !activeProvider ||
+                (activeSourceType === "audio" ? !cloneReady : !designReady)
+              }
+              className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {creating
+                ? "Creating..."
+                : activeSourceType === "audio"
+                  ? "Clone voice"
+                  : "Create voice"}
+            </button>
+          </div>
+        </footer>
+      </div>
     </div>
   );
 }
@@ -3986,17 +4162,19 @@ function MediaModelPicker({
   setModel,
   liveModels,
   liveProvider,
+  label = "Model",
 }: {
   model: string;
   setModel: (v: string) => void;
   liveModels: LiveModel[] | null;
   liveProvider: string;
+  label?: string;
 }) {
   const models = liveModels || [];
   if (models.length === 0) {
     return (
       <div>
-        <label className="text-text-muted text-xs block">Model</label>
+        <label className="text-text-muted text-xs block">{label}</label>
         <div className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim" style={{ minWidth: 200 }}>
           {liveProvider ? `loading ${liveProvider}…` : "no provider bound"}
         </div>
@@ -4006,7 +4184,7 @@ function MediaModelPicker({
   return (
     <div>
       <label className="text-text-muted text-xs block">
-        Model
+        {label}
         <span className="text-text-dim ml-1" style={{ fontSize: 10 }}>
           · {liveProvider} ({models.length})
         </span>
@@ -4029,6 +4207,75 @@ function MediaModelPicker({
           );
         })}
       </select>
+    </div>
+  );
+}
+
+function VoicePicker({
+  voice,
+  provider,
+  voices,
+  onChange,
+  canCreate,
+  onCreate,
+}: {
+  voice: string;
+  provider: string;
+  voices: VoiceEntry[];
+  onChange: (voiceID: string) => void;
+  canCreate: boolean;
+  onCreate: () => void;
+}) {
+  const selectID = useId();
+  const groups = new Map<string, VoiceEntry[]>();
+  for (const item of voices) {
+    const itemProvider = item.provider || providerFromQualifiedId(item.id) || provider;
+    const group = groups.get(itemProvider) || [];
+    group.push(item);
+    groups.set(itemProvider, group);
+  }
+  return (
+    <div className="ms-voice-picker">
+      <div className="ms-voice-picker-header">
+        <div className="flex items-center gap-2 min-w-0">
+          <label className="text-text-muted text-xs font-semibold" htmlFor={selectID}>
+            Voice
+          </label>
+          {provider && <span className="ms-provider-label">{providerLabel(provider)}</span>}
+        </div>
+      </div>
+      <div className="ms-voice-picker-row">
+        <select
+          id={selectID}
+          value={voices.some((item) => item.id === voice) ? voice : ""}
+          onChange={(event) => onChange(event.target.value)}
+          className="bg-bg-input border border-border rounded px-3 py-2 text-sm"
+        >
+          <option value="">{voices.length > 0 ? "Select a voice" : "No voices available"}</option>
+          {Array.from(groups.entries()).map(([groupProvider, items]) => (
+            <optgroup key={groupProvider} label={providerLabel(groupProvider)}>
+              {items.map((item) => {
+                const details = [item.language, item.gender].filter(Boolean).join(" · ");
+                return (
+                  <option key={item.id} value={item.id}>
+                    {item.name || item.id}{details ? ` · ${details}` : ""}
+                  </option>
+                );
+              })}
+            </optgroup>
+          ))}
+        </select>
+        {canCreate && (
+          <button
+            type="button"
+            onClick={onCreate}
+            className="inline-flex items-center gap-2 px-3 py-2 border border-border rounded text-accent text-xs font-semibold hover:border-accent"
+          >
+            <Plus size={14} />
+            New custom voice
+          </button>
+        )}
+      </div>
     </div>
   );
 }

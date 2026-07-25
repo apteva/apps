@@ -6,6 +6,7 @@ import {
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
+  modelForVoiceProvider,
   projectScopedStorageContentURL,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
@@ -16,6 +17,7 @@ import {
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
 } from "./mediaPanelLogic";
 
@@ -82,6 +84,26 @@ describe("Media Panel logic", () => {
     expect(voiceProviderSupportsPrompt("cartesia")).toBe(false);
   });
 
+  test("exposes custom voice creation only for compatible providers", () => {
+    expect(voiceProviderSupportsCreation("elevenlabs")).toBe(true);
+    expect(voiceProviderSupportsCreation("fish-audio")).toBe(true);
+    expect(voiceProviderSupportsCreation("cartesia")).toBe(true);
+    expect(voiceProviderSupportsCreation("minimax-audio")).toBe(true);
+    expect(voiceProviderSupportsCreation("deepgram")).toBe(false);
+    expect(
+      ["deepgram", "fish-audio"].filter(voiceProviderSupportsCreation),
+    ).toEqual(["fish-audio"]);
+  });
+
+  test("routes a selected voice to a compatible provider model", () => {
+    const models = [
+      { id: "elevenlabs:eleven_flash_v2_5", provider: "elevenlabs" },
+      { id: "fish-audio:s2.1-pro", provider: "fish-audio" },
+    ];
+    expect(modelForVoiceProvider("fish-audio", models)).toBe("fish-audio:s2.1-pro");
+    expect(modelForVoiceProvider("cartesia", models)).toBe("");
+  });
+
   test("preserves tracked voices that are not active in the provider catalog yet", () => {
     expect(shouldReplaceVoiceSelection(
       "minimax-audio:clone-1",
@@ -92,6 +114,16 @@ describe("Media Panel logic", () => {
       "minimax-audio:missing",
       ["minimax-audio:system-1"],
       [],
+    )).toBe(true);
+    expect(shouldReplaceVoiceSelection(
+      "elevenlabs:stale",
+      [],
+      [],
+    )).toBe(true);
+    expect(shouldReplaceVoiceSelection(
+      "",
+      [],
+      ["fish-audio:clone-1"],
     )).toBe(true);
   });
 
