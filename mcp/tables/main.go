@@ -24,9 +24,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.11
+version: 0.1.12
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
