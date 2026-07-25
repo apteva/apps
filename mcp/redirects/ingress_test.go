@@ -210,7 +210,7 @@ func TestRedirectManifestUsesNativeIngress(t *testing.T) {
 
 func TestEmbeddedManifestUsesReleaseFile(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Name != "redirects" || manifest.Version != "0.3.7" {
+	if manifest.Name != "redirects" || manifest.Version != "0.3.8" {
 		t.Fatalf("embedded manifest=%s@%s", manifest.Name, manifest.Version)
 	}
 	foundRead := false
