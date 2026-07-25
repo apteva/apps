@@ -15,12 +15,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: books
 display_name: Books
-version: 0.1.0
+version: 0.1.1
 description: |
   Structured long-form manuscript workspace for Apteva. Create books,
   organize chapters and sections, write in markdown, keep notes, track
   revisions, and export manuscripts.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 homepage: https://github.com/apteva/apps/tree/main/mcp/books
 tags: [books, writing, manuscripts, authors]
 scopes: [project, global]
