@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/messaging
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.36.3
+	github.com/apteva/app-sdk v0.42.0
 	golang.org/x/net v0.55.0
 	modernc.org/sqlite v1.50.0
 )

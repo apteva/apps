@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.39
+version: 0.13.40
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -18,7 +18,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/messaging
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/messaging/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [messaging, email, ses, sms, whatsapp, twilio, inbox]
 
 scopes: [project, global]
