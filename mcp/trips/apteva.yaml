@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.8.5
+version: 0.8.6
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -16,7 +16,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trips
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/trips/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [trips, travel, itinerary, planning]
 
 scopes: [project]
