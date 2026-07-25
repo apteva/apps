@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.6.2
+version: 0.6.3
 description: |
   Publish a locally-installed Apteva instance through one of four HTTPS
   tunnel providers selected explicitly in the Live Link panel:
@@ -31,7 +31,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/live-link/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [tunnel, expose, public-url, cloudflared, ngrok, zrok, infrastructure, dev]
 
 scopes: [global]
