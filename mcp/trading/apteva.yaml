@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.39
+version: 0.4.40
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -25,7 +25,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trading
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/trading/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [trading, finance, agent, polymarket, crypto]
 
 scopes: [project, global]
