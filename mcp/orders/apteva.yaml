@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: orders
 display_name: Orders
-version: 0.2.1
+version: 0.2.2
 description: |
   Generic commerce fulfillment ledger. Orders sits after checkout/billing
   and before fulfillment: it records durable order state, line items,
@@ -15,7 +15,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/orders
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/orders/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [orders, fulfillment, ecommerce, commerce, hosting, saas, shipping, inventory]
 
 scopes: [project, global]
