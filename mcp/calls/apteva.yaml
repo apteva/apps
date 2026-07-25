@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.1.5
+version: 0.1.6
 description: |
   Standalone realtime audio/video calls with WebRTC-ready rooms,
   join tokens, unified human/agent/service participants, chat,
@@ -10,7 +10,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/calls
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/calls/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [calls, video, audio, webrtc, rooms, agents]
 
 scopes: [project, global]
