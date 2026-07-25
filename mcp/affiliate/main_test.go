@@ -669,6 +669,59 @@ func TestTargetCircleUsesExclusiveSavedToBoundary(t *testing.T) {
 	}
 }
 
+func TestProviderPagesHandleRootArrays(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.responses["awin:programs_list"] = json.RawMessage(`[
+		{"id": 1, "name": "First"},
+		{"id": 2, "name": "Second"}
+	]`)
+	ctx := newTestCtx(t, platform, nil)
+
+	pages, err := executeProviderPages(ctx, providerCall{
+		Role: "awin", Tool: "programs_list", Input: map[string]any{"publisherId": "123"},
+	}, []string{"data"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 || len(pages[0].Records) != 2 {
+		t.Fatalf("Awin root-array pages=%+v", pages)
+	}
+}
+
+func TestAwinStatsUseCampaignPerformanceReport(t *testing.T) {
+	ctx := newTestCtx(t, nil, map[string]string{
+		"awin_publisher_id": "745899",
+		"awin_region":       "us",
+	})
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = nil })
+
+	calls, err := providerStatCalls("awin", "2026-07-20", "2026-07-22", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].Tool != "campaign_performance_report" {
+		t.Fatalf("Awin calls=%+v", calls)
+	}
+	if calls[0].Input["region"] != "US" || calls[0].Input["interval"] != "day" {
+		t.Fatalf("Awin input=%+v", calls[0].Input)
+	}
+
+	row := statInputFromMap("awin", map[string]any{
+		"date": "2026-07-22",
+		"quantity": map[string]any{
+			"clicks": 12,
+			"total":  3,
+		},
+		"saleAmount":       map[string]any{"total": 150.25},
+		"commissionAmount": map[string]any{"total": 30.50},
+		"currency":         "USD",
+	})
+	if row.Clicks != 12 || row.Conversions != 3 || row.RevenueCents != 15025 || row.CommissionCents != 3050 {
+		t.Fatalf("Awin campaign row=%+v", row)
+	}
+}
+
 func TestPaginatedStatsAggregateBeforeUpsert(t *testing.T) {
 	platform := newRecordingPlatform()
 	platform.queues["target-circle:transactions_list"] = []json.RawMessage{
