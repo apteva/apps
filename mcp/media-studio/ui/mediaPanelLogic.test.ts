@@ -6,7 +6,6 @@ import {
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
-  modelForVoiceProvider,
   projectScopedStorageContentURL,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
@@ -19,6 +18,7 @@ import {
   videoSourceRequired,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
+  voicesForProvider,
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
@@ -95,13 +95,19 @@ describe("Media Panel logic", () => {
     ).toEqual(["fish-audio"]);
   });
 
-  test("routes a selected voice to a compatible provider model", () => {
-    const models = [
-      { id: "elevenlabs:eleven_flash_v2_5", provider: "elevenlabs" },
-      { id: "fish-audio:s2.1-pro", provider: "fish-audio" },
+  test("only exposes voices from the selected provider", () => {
+    const voices = [
+      { id: "elevenlabs:voice-1", provider: "elevenlabs" },
+      { id: "fish-audio:voice-2", provider: "fish-audio" },
+      { id: "fish-audio:voice-3" },
     ];
-    expect(modelForVoiceProvider("fish-audio", models)).toBe("fish-audio:s2.1-pro");
-    expect(modelForVoiceProvider("cartesia", models)).toBe("");
+    expect(voicesForProvider("fish-audio", voices).map((voice) => voice.id)).toEqual([
+      "fish-audio:voice-2",
+      "fish-audio:voice-3",
+    ]);
+    expect(voicesForProvider("elevenlabs", voices).map((voice) => voice.id)).toEqual([
+      "elevenlabs:voice-1",
+    ]);
   });
 
   test("preserves tracked voices that are not active in the provider catalog yet", () => {

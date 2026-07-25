@@ -88,13 +88,13 @@ export function voiceProviderSupportsCreation(provider: string): boolean {
     provider === "minimax-audio";
 }
 
-export function modelForVoiceProvider(
+export function voicesForProvider<T extends { id: string; provider?: string }>(
   provider: string,
-  models: Array<{ id: string; provider?: string }>,
-): string {
-  return models.find((model) =>
-    (model.provider || providerFromQualifiedId(model.id)) === provider
-  )?.id || "";
+  voices: T[],
+): T[] {
+  return voices.filter((voice) =>
+    (voice.provider || providerFromQualifiedId(voice.id) || provider) === provider
+  );
 }
 
 export function shouldReplaceVoiceSelection(

@@ -11,7 +11,6 @@ import {
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
-  modelForVoiceProvider,
   projectScopedStorageContentURL,
   providerFromQualifiedId,
   selectedModelProvider,
@@ -25,6 +24,7 @@ import {
   videoSourceRequired,
   voiceProviderSupportsCreation,
   voiceProviderSupportsPrompt,
+  voicesForProvider,
   type DurationKind,
 } from "./mediaPanelLogic";
 
@@ -2635,12 +2635,8 @@ function Composer(p: ComposerProps) {
     ...p.voices,
     ...trackedVoiceChoices.filter((item) => !knownVoiceIDs.has(item.id)),
   ];
+  const providerVoiceChoices = voicesForProvider(ttsProvider, voiceChoices);
   const selectVoice = (voiceID: string) => {
-    const selected = voiceChoices.find((item) => item.id === voiceID);
-    if (selected?.provider && selected.provider !== ttsProvider) {
-      const compatibleModelID = modelForVoiceProvider(selected.provider, p.liveModels || []);
-      if (compatibleModelID) p.setAudioModel(compatibleModelID);
-    }
     p.setVoice(voiceID);
   };
   const openVoiceCreator = () => {
@@ -2776,7 +2772,7 @@ function Composer(p: ComposerProps) {
             <VoicePicker
               voice={p.voice}
               provider={ttsProvider}
-              voices={voiceChoices}
+              voices={providerVoiceChoices}
               onChange={selectVoice}
               canCreate={voiceCreationProviders.length > 0}
               onCreate={openVoiceCreator}
@@ -4251,7 +4247,11 @@ function VoicePicker({
           onChange={(event) => onChange(event.target.value)}
           className="bg-bg-input border border-border rounded px-3 py-2 text-sm"
         >
-          <option value="">{voices.length > 0 ? "Select a voice" : "No voices available"}</option>
+          <option value="">
+            {voices.length > 0
+              ? "Select a voice"
+              : `No ${providerLabel(provider)} voices available`}
+          </option>
           {Array.from(groups.entries()).map(([groupProvider, items]) => (
             <optgroup key={groupProvider} label={providerLabel(groupProvider)}>
               {items.map((item) => {
