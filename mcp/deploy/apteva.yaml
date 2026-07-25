@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.16.3
+version: 0.16.4
 description: |
   Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -16,7 +16,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/deploy/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [deploy, build, runtime, android, ios, app-store, google-play, agent]
 
 scopes: [project, global]
