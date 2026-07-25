@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.55
+version: 0.10.56
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.55 restricts the voice
+  as a subscription-backed image provider. v0.10.56 merges owned Fish Audio
+  voices with its popular public TTS catalog, deduplicating models and
+  excluding non-TTS entries. v0.10.55 restricts the voice
   picker to the provider selected by the active TTS model, preventing
   cross-provider voices from appearing. v0.10.54 adds a provider-grouped
   voice picker, automatically routes generation through the selected voice's

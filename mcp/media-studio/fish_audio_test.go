@@ -156,8 +156,9 @@ func TestListVoicesForFishAudio(t *testing.T) {
 	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
 		"list_voice_models": {Success: true, Status: 200, Data: json.RawMessage(`{
 			"total":2,"items":[
-				{"_id":"fish-1","title":"Narrator","state":"created","languages":["en"],"samples":[{"audio":"https://audio.test/one.mp3"}]},
-				{"_id":"fish-failed","title":"Bad","state":"failed"}
+				{"_id":"fish-1","type":"tts","title":"Narrator","state":"created","languages":["en"],"samples":[{"audio":"https://audio.test/one.mp3"}]},
+				{"_id":"fish-svc","type":"svc","title":"Singer","state":"created"},
+				{"_id":"fish-failed","type":"tts","title":"Bad","state":"failed"}
 			]}`)},
 	}
 	ctx := newMediaStudioCtx(t, pf)
@@ -167,6 +168,12 @@ func TestListVoicesForFishAudio(t *testing.T) {
 	}
 	if len(voices) != 1 || voices[0].ID != "fish-1" || voices[0].Name != "Narrator" || voices[0].Language != "en" || voices[0].Preview == "" {
 		t.Fatalf("voices = %+v", voices)
+	}
+	if len(pf.executeCalls) != 2 ||
+		pf.executeCalls[0].Input["self"] != true ||
+		pf.executeCalls[1].Input["self"] != false ||
+		pf.executeCalls[1].Input["sort_by"] != "task_count" {
+		t.Fatalf("execute calls = %+v", pf.executeCalls)
 	}
 }
 
