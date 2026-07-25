@@ -98,6 +98,8 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
 		{Topic: "invoice.voided", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "invoice.refunded", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "invoice.payment_failed", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "invoice.payment_action_required", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "payment_method.attached", Handler: a.handlePaymentMethodAttached},
 	}
 }
@@ -1831,6 +1833,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 		"subscription_id": subID, "cycle_id": cycleID, "currency": price.Currency,
 		"period_start": periodStart, "period_end": periodEnd,
 		"checkout_id": checkout.ID,
+		"metadata":    map[string]any{"collection_method": checkoutCollectionMethod(plan, price)},
 		"success_url": strArg(args, "success_url"), "cancel_url": strArg(args, "cancel_url"),
 	}}
 	if err := a.handleSubscriptionCycleDue(ctx, cycleEvent); err != nil {
@@ -2124,6 +2127,18 @@ func checkoutTrialConfig(plan *Plan, price checkoutPrice) (int64, bool) {
 	return trialDays, requiresPaymentMethod
 }
 
+func checkoutCollectionMethod(plan *Plan, price checkoutPrice) string {
+	method := strings.ToLower(firstNonEmpty(
+		strArg(price.Metadata, "collection_method"),
+		strArg(mapFromAny(plan.Metadata), "collection_method"),
+		"send_invoice",
+	))
+	if method != "charge_automatically" {
+		return "send_invoice"
+	}
+	return method
+}
+
 func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, subscriptionCustomerID int64, plan *Plan, price checkoutPrice, discount *CheckoutDiscount, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
 	checkoutID := strArg(args, "checkout_id")
 	input := map[string]any{
@@ -2142,7 +2157,11 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 		"next_renewal_at":      periodEnd,
 		"source":               "saas",
 		"source_ref":           firstNonEmpty(checkoutID, plan.Key),
-		"metadata":             map[string]any{"saas_plan_key": plan.Key, "saas_customer_id": customer.ID},
+		"metadata": map[string]any{
+			"saas_plan_key":     plan.Key,
+			"saas_customer_id":  customer.ID,
+			"collection_method": checkoutCollectionMethod(plan, price),
+		},
 		"items": []any{map[string]any{
 			"catalog_product_id": price.ProductID,
 			"catalog_price_id":   price.PriceID,
@@ -2191,9 +2210,28 @@ func (a *App) createPaymentLink(ctx *sdk.AppCtx, pid string, invoiceID int64, ar
 	if v := strArg(args, "cancel_url"); v != "" {
 		input["cancel_url"] = v
 	}
+	if boolArg(args, "save_payment_method") {
+		input["save_payment_method"] = true
+	}
+	if boolArg(args, "set_default_payment_method") {
+		input["set_default_payment_method"] = true
+	}
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_send_payment_link", input, &out); err != nil {
 		return nil, fmt.Errorf("create payment link: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) collectInvoice(ctx *sdk.AppCtx, pid string, invoiceID int64, idempotencyKey string) (map[string]any, error) {
+	input := map[string]any{
+		"_project_id":     pid,
+		"invoice_id":      invoiceID,
+		"idempotency_key": idempotencyKey,
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_collect", input, &out); err != nil {
+		return nil, fmt.Errorf("collect invoice: %w", err)
 	}
 	return out, nil
 }
@@ -2704,11 +2742,25 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return fmt.Errorf("subscription %d is linked to multiple SaaS accounts", subID)
 	}
 	acct := accounts[0]
+	collectionMethod := strings.ToLower(strArg(mapFromAny(event.Data["metadata"]), "collection_method"))
+	if collectionMethod == "" {
+		plan, planErr := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+		if planErr != nil {
+			return planErr
+		}
+		if plan != nil {
+			collectionMethod = strings.ToLower(strArg(mapFromAny(plan.Metadata), "collection_method"))
+		}
+	}
+	if collectionMethod != "charge_automatically" {
+		collectionMethod = "send_invoice"
+	}
 	op, claimed, err := dbCommerceCycleClaim(ctx.AppDB(), pid, acct.ID, subID, cycleID)
 	if err != nil || !claimed {
 		return err
 	}
 	checkoutID := strFromAny(event.Data["checkout_id"])
+	initialCheckout := checkoutID != ""
 	if checkoutID == "" {
 		if trialCheckout, lookupErr := dbCheckoutTrialBySubscription(ctx.AppDB(), pid, subID); lookupErr != nil {
 			return lookupErr
@@ -2856,14 +2908,35 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return fail(err)
 	}
 	if len(mapFromAny(op.PaymentLink)) == 0 {
-		linkOut, err := a.createPaymentLink(ctx, pid, invoiceID, map[string]any{
-			"success_url": strFromAny(event.Data["success_url"]),
-			"cancel_url":  strFromAny(event.Data["cancel_url"]),
-		})
+		var billingOut map[string]any
+		if collectionMethod == "charge_automatically" && !initialCheckout {
+			billingOut, err = a.collectInvoice(
+				ctx, pid, invoiceID,
+				fmt.Sprintf("subscription:%d:cycle:%d:collect", subID, cycleID),
+			)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "no reusable payment method") {
+				billingOut, err = a.createPaymentLink(ctx, pid, invoiceID, map[string]any{
+					"success_url":                strFromAny(event.Data["success_url"]),
+					"cancel_url":                 strFromAny(event.Data["cancel_url"]),
+					"save_payment_method":        true,
+					"set_default_payment_method": true,
+				})
+			}
+		} else {
+			linkArgs := map[string]any{
+				"success_url": strFromAny(event.Data["success_url"]),
+				"cancel_url":  strFromAny(event.Data["cancel_url"]),
+			}
+			if collectionMethod == "charge_automatically" {
+				linkArgs["save_payment_method"] = true
+				linkArgs["set_default_payment_method"] = true
+			}
+			billingOut, err = a.createPaymentLink(ctx, pid, invoiceID, linkArgs)
+		}
 		if err != nil {
 			return fail(err)
 		}
-		if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, linkOut); err != nil {
+		if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, billingOut); err != nil {
 			return fail(err)
 		}
 	} else if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, mapFromAny(op.PaymentLink)); err != nil {

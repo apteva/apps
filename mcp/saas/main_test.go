@@ -222,6 +222,8 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"payment": map[string]any{"id": 901, "method": input["method"], "amount_cents": input["amount_cents"]}, "invoice": map[string]any{"id": input["invoice_id"], "status": "paid", "total_cents": input["amount_cents"], "amount_paid_cents": input["amount_cents"]}}
 	case "invoices_send_payment_link":
 		body = map[string]any{"url": "https://pay.example/session", "stripe_session_id": "cs_test_123", "expires_at": 123}
+	case "invoices_collect":
+		body = map[string]any{"collection_attempt": map[string]any{"id": 1101, "invoice_id": input["invoice_id"], "status": "succeeded", "idempotency_key": input["idempotency_key"]}}
 	case "payment_method_setup_create":
 		body = map[string]any{"setup_session": map[string]any{"id": 1001, "provider_session_id": "cs_setup_123", "customer_id": input["customer_id"], "status": "pending", "url": "https://pay.example/setup", "expires_at": 1785000000, "metadata": input["metadata"]}, "url": "https://pay.example/setup"}
 	case "containers_create":
@@ -290,8 +292,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.7.1" {
-		t.Errorf("manifest.Version=%q, want 0.7.1", m.Version)
+	if m.Version != "0.8.0" {
+		t.Errorf("manifest.Version=%q, want 0.8.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -305,7 +307,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
-	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.6.0" || versions["entitlements"] != ">=0.2.0" {
+	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.10.0" || versions["subscriptions"] != ">=0.7.0" || versions["entitlements"] != ">=0.2.0" {
 		t.Fatalf("dependency versions not enforced: %+v", versions)
 	}
 	permissions := map[string]bool{}
@@ -341,8 +343,10 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if !containsString(subscriptionEvents, "subscription.cycle_due") || !containsString(subscriptionEvents, "subscription.change.applied") {
 		t.Fatalf("manifest is missing subscription orchestration events: %v", subscriptionEvents)
 	}
-	if !containsString(billingEvents, "invoice.paid") {
-		t.Fatal("manifest should subscribe to invoice.paid")
+	if !containsString(billingEvents, "invoice.paid") ||
+		!containsString(billingEvents, "invoice.payment_failed") ||
+		!containsString(billingEvents, "invoice.payment_action_required") {
+		t.Fatalf("manifest should subscribe to billing collection events: %v", billingEvents)
 	}
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Entry != "/ui/SaaSPanel.mjs" {
 		t.Fatalf("manifest should expose SaaS UI panel, got %+v", m.Provides.UIPanels)
@@ -2684,6 +2688,77 @@ func TestSubscriptionCycleDue_RetryReusesInvoiceAndDuplicateIsIgnored(t *testing
 	if op == nil || op.Status != "awaiting_payment" || op.Stage != "payment_link_created" || op.AttemptCount != 2 {
 		t.Fatalf("unexpected commerce operation: %+v", op)
 	}
+}
+
+func TestAutomaticCollectionCheckoutSavesMethodAndRenewalCollects(t *testing.T) {
+	t.Run("initial checkout", func(t *testing.T) {
+		pf := &platformStub{}
+		ctx, db := newTestCtx(t, pf)
+		defer db.Close()
+		app := &App{}
+		setupPaidCRMPlan(t, app, ctx)
+		if _, err := app.toolPlanUpsert(ctx, map[string]any{
+			"key": "crm-pro", "name": "CRM Pro", "billing_mode": "paid",
+			"catalog_product_id": 7001, "catalog_price_id": 8001,
+			"subscription_required": true,
+			"metadata":              map[string]any{"collection_method": "charge_automatically"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.toolCheckoutCreate(ctx, map[string]any{
+			"owner_email": "auto@example.com", "slug": "auto", "plan_key": "crm-pro",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		subCall := findCall(pf.calls, "subscriptions", "subscriptions_create")
+		if subCall == nil || strArg(mapFromAny(subCall.Input["metadata"]), "collection_method") != "charge_automatically" {
+			t.Fatalf("subscription collection policy missing: %+v", subCall)
+		}
+		linkCall := findCall(pf.calls, "billing", "invoices_send_payment_link")
+		if linkCall == nil ||
+			linkCall.Input["save_payment_method"] != true ||
+			linkCall.Input["set_default_payment_method"] != true {
+			t.Fatalf("initial checkout must collect recurring consent: %+v", linkCall)
+		}
+		if hasCall(pf.calls, "billing:invoices_collect") {
+			t.Fatal("first checkout cannot collect before the customer enters a payment method")
+		}
+	})
+
+	t.Run("renewal", func(t *testing.T) {
+		pf := &platformStub{}
+		ctx, db := newTestCtx(t, pf)
+		defer db.Close()
+		app := &App{}
+		setupPaidCRMPlan(t, app, ctx)
+		acct, _, err := app.createAccount(ctx, map[string]any{
+			"owner_email": "renewal@example.com", "slug": "renewal",
+			"plan_key": "crm-pro", "subscription_id": 77,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := sdk.Event{Event: "subscription.cycle_due", ProjectID: "proj-test", Data: map[string]any{
+			"subscription_id": 77, "cycle_id": 88, "currency": "USD",
+			"period_start": "2026-08-01T00:00:00Z", "period_end": "2026-09-01T00:00:00Z",
+			"metadata": map[string]any{"collection_method": "charge_automatically"},
+		}}
+		if err := app.handleSubscriptionCycleDue(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+		collectCall := findCall(pf.calls, "billing", "invoices_collect")
+		if collectCall == nil ||
+			collectCall.Input["idempotency_key"] != "subscription:77:cycle:88:collect" {
+			t.Fatalf("automatic collection call=%+v", collectCall)
+		}
+		if hasCall(pf.calls, "billing:invoices_send_payment_link") {
+			t.Fatal("renewal with automatic collection must not create a payment link")
+		}
+		op, err := dbCommerceOperationByInvoice(db, "proj-test", 702)
+		if err != nil || op == nil || op.AccountID != acct.ID {
+			t.Fatalf("commerce operation=%+v err=%v", op, err)
+		}
+	})
 }
 
 func TestInvoicePaid_MarksCycleAndSubscriptionActiveOnce(t *testing.T) {

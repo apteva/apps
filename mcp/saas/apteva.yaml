@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.7.1
+version: 0.8.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -13,6 +13,8 @@ description: |
   the explicit boundary between independently sold SaaS products. It does not install apps,
   run containers, or own catalog eligibility, subscriptions, invoices, or
   payments directly.
+  v0.8.0 adds provider-independent recurring collection policy: SaaS chooses
+  automatic collection or invoice links while Billing owns payment execution.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -33,17 +35,19 @@ requires:
       reason: price resolution plus generic discount reservation and redemption
       optional: false
     - name: billing
-      version: ">=0.8.17"
-      reason: durable invoices, Stripe payment links, reusable payment methods, and payment lifecycle events
+      version: ">=0.10.0"
+      reason: durable invoices, payment links, reusable payment methods, idempotent automatic collection, and payment lifecycle events
       optional: false
       events:
         - invoice.paid
         - invoice.voided
         - invoice.refunded
+        - invoice.payment_failed
+        - invoice.payment_action_required
         - payment_method.attached
     - name: subscriptions
-      version: ">=0.6.0"
-      reason: durable trial expiration, cycle-aware discounts, invoice preparation, and cycle-safe subscription item changes
+      version: ">=0.7.0"
+      reason: durable trial and renewal scheduling, cycle-aware discounts, invoice preparation, and cycle-safe subscription item changes
       optional: false
       events:
         - subscription.active

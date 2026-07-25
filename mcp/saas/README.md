@@ -9,6 +9,10 @@ account filtering.
 
 Shared SaaS access control for Apteva apps.
 
+Plans can set `metadata.collection_method` to `send_invoice` (the default) or
+`charge_automatically`. Automatic plans save the payment method during the
+first hosted checkout, then ask Billing to collect later renewal invoices.
+
 SaaS generalizes the access, lifecycle, and live-usage parts that worked
 well in Hosting without assuming every sold product is a container. Apps
 such as CRM and Storage stay installed once; SaaS sells access to them
