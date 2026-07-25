@@ -1,10 +1,12 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.0
+version: 0.5.1
 description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [evals, testing, agents, quality, regression]
 scopes: [project]
 min_apteva_version: "0.26.1"
@@ -56,7 +58,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.0
+    ref: evals/v0.5.1
     entry: mcp/evals
   port: 8080
   health_check: /health
