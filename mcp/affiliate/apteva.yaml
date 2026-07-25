@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.13
+version: 0.1.14
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
   offers and stats, create monetized links, and optionally wrap them
@@ -14,8 +14,13 @@ description: |
     - Links: URLs the publisher places in content.
     - Stats: normalized performance by day, network, offer, or link.
 
+  v0.1.14 adds Affiliate's adaptive themed app icon and updates the
+  app to the current Apteva app SDK.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/affiliate
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [affiliate, publishers, offers, links, marketing]
 
 scopes: [project, global]
