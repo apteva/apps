@@ -17,9 +17,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: taxes
 display_name: Taxes
-version: 1.0.3
+version: 1.0.4
 description: Business tax profiles, estimates, statutory obligations, social contributions, filings, and payment tracking.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

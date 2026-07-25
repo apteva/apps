@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: taxes
 display_name: Taxes
-version: 1.0.3
+version: 1.0.4
 description: |
   Business tax profiles, estimates, statutory obligations, social
   contributions, filings, and payment tracking. Reads income from
@@ -11,7 +11,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/taxes
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/taxes/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [taxes, finance, vat, corporate-tax, social-security]
 
 scopes: [project, global]
