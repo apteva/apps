@@ -28,9 +28,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fetch
 display_name: Fetch
-version: 0.1.1
+version: 0.1.2
 description: Controlled HTTP client for agents and operators.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
