@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: events
 display_name: Events
-version: 0.1.2
+version: 0.1.3
 description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/events
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/events/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [events, ticketing, performers, scheduling]
 
 scopes: [project]
