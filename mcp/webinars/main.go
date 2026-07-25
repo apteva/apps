@@ -41,11 +41,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: webinars
 display_name: Webinars
-version: 0.1.1
+version: 0.1.2
 description: |
   Live, scheduled, and on-demand webinars on top of streaming + CRM
   + messaging.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
