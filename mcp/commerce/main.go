@@ -811,7 +811,11 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 			}); err != nil {
 				return nil, fmt.Errorf("reopen storefront cart: %w", err)
 			}
-			return dbCartGet(ctx.AppDB(), pid, existing.ID, true)
+			reopened, err := dbCartGet(ctx.AppDB(), pid, existing.ID, true)
+			if err != nil {
+				return nil, err
+			}
+			return a.rebuildCheckoutCart(ctx, pid, reopened)
 		}
 		if existing.Status != "open" && existing.Status != "checkout" && existing.Status != "awaiting_payment" {
 			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
@@ -838,6 +842,80 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		return nil, err
 	}
 	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
+}
+
+func (a *App) rebuildCheckoutCart(ctx *sdk.AppCtx, pid string, cart *Cart) (*Cart, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	var created map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
+		"_project_id":   pid,
+		"session_token": newToken(),
+		"metadata": map[string]any{
+			"source":           "commerce",
+			"store_id":         cart.StoreID,
+			"commerce_cart_id": cart.ID,
+			"recovered":        true,
+		},
+	}, &created); err != nil {
+		return nil, fmt.Errorf("create replacement Checkout cart: %w", err)
+	}
+	checkoutCartID := intArg(unwrap(created, "cart"), "id")
+	if checkoutCartID == 0 {
+		return nil, errors.New("replacement Checkout cart response missing id")
+	}
+	checkoutItemIDs := make(map[int64]int64, len(cart.Items))
+	for _, item := range cart.Items {
+		if item.CatalogPriceID == nil || *item.CatalogPriceID == 0 {
+			return nil, fmt.Errorf("cart item %d is missing its Catalog price", item.ID)
+		}
+		var replayed map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{
+			"_project_id": pid,
+			"cart_id":     checkoutCartID,
+			"price_id":    *item.CatalogPriceID,
+			"quantity":    item.Quantity,
+		}, &replayed); err != nil {
+			return nil, fmt.Errorf("replay cart item %d: %w", item.ID, err)
+		}
+		checkoutItemID, checkoutQty := checkoutCartItem(replayed, *item.CatalogPriceID)
+		if checkoutItemID == 0 || math.Abs(checkoutQty-item.Quantity) > 1e-9 {
+			return nil, fmt.Errorf("replacement Checkout cart returned an inconsistent item %d", item.ID)
+		}
+		checkoutItemIDs[item.ID] = checkoutItemID
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE commerce_carts SET checkout_cart_id=?, status='open', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, checkoutCartID, pid, cart.ID); err != nil {
+		return nil, err
+	}
+	for itemID, checkoutItemID := range checkoutItemIDs {
+		if _, err := tx.Exec(`UPDATE commerce_cart_items SET checkout_item_id=?, updated_at=CURRENT_TIMESTAMP
+			WHERE project_id=? AND cart_id=? AND id=?`, checkoutItemID, pid, cart.ID, itemID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
+}
+
+func checkoutCartRequiresRebuild(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "only 'open' carts") ||
+		strings.Contains(message, "only open carts") ||
+		strings.Contains(message, "cart is converted") ||
+		strings.Contains(message, "cart is cancelled") ||
+		strings.Contains(message, "cart is expired")
 }
 
 func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
@@ -900,8 +978,19 @@ func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		}
 	}
 	var checkoutCart map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": price.ID, "quantity": qty}, &checkoutCart); err != nil {
-		return nil, fmt.Errorf("checkout cart add item: %w", err)
+	addArgs := map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": price.ID, "quantity": qty}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", addArgs, &checkoutCart); err != nil {
+		if !checkoutCartRequiresRebuild(err) {
+			return nil, fmt.Errorf("checkout cart add item: %w", err)
+		}
+		cart, err = a.rebuildCheckoutCart(ctx, pid, cart)
+		if err != nil {
+			return nil, fmt.Errorf("rebuild stale Checkout cart: %w", err)
+		}
+		addArgs["cart_id"] = *cart.CheckoutCartID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", addArgs, &checkoutCart); err != nil {
+			return nil, fmt.Errorf("checkout cart add item after rebuild: %w", err)
+		}
 	}
 	checkoutItemID, checkoutQty := checkoutCartItem(checkoutCart, price.ID)
 	if checkoutItemID == 0 || math.Abs(checkoutQty-(previousQty+qty)) > 1e-9 {
@@ -962,10 +1051,26 @@ func (a *App) setCartItemQuantity(ctx *sdk.AppCtx, args map[string]any) (*Cart, 
 		return nil, errors.New("cart item is not synchronized with Checkout")
 	}
 	var checkoutCart map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", map[string]any{
+	setArgs := map[string]any{
 		"_project_id": pid, "cart_id": *cart.CheckoutCartID, "item_id": *item.CheckoutItemID, "quantity": qty,
-	}, &checkoutCart); err != nil {
-		return nil, fmt.Errorf("checkout cart set quantity: %w", err)
+	}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", setArgs, &checkoutCart); err != nil {
+		if !checkoutCartRequiresRebuild(err) {
+			return nil, fmt.Errorf("checkout cart set quantity: %w", err)
+		}
+		cart, err = a.rebuildCheckoutCart(ctx, pid, cart)
+		if err != nil {
+			return nil, fmt.Errorf("rebuild stale Checkout cart: %w", err)
+		}
+		item, err = dbCartItemGet(ctx.AppDB(), pid, cart.ID, item.ID)
+		if err != nil || item == nil || item.CheckoutItemID == nil {
+			return nil, firstErr(err, errors.New("rebuilt cart item is not synchronized with Checkout"))
+		}
+		setArgs["cart_id"] = *cart.CheckoutCartID
+		setArgs["item_id"] = *item.CheckoutItemID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", setArgs, &checkoutCart); err != nil {
+			return nil, fmt.Errorf("checkout cart set quantity after rebuild: %w", err)
+		}
 	}
 	if err := dbCartSetQuantity(ctx.AppDB(), pid, cart.ID, item.ID, qty); err != nil {
 		if compensationErr := setCheckoutItemQuantity(ctx, pid, *cart.CheckoutCartID, *item.CheckoutItemID, item.Quantity); compensationErr != nil {
