@@ -1207,6 +1207,18 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		return ch, nil
 	}
 	if ch.Status != "started" {
+		if ch.Status == "awaiting_payment" && ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
+			var response map[string]any
+			if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{
+				"_project_id": pid,
+				"session_id":  *ch.CheckoutSessionID,
+			}, &response); err != nil {
+				return nil, fmt.Errorf("checkout_get: %w", err)
+			}
+			if checkoutExternalPatchMatches(unwrap(response, "session"), patch) {
+				return ch, nil
+			}
+		}
 		return nil, fmt.Errorf("checkout is %s; only started checkouts accept updates", ch.Status)
 	}
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
@@ -1252,6 +1264,32 @@ func checkoutPatchMatches(ch *CheckoutSession, patch map[string]any) bool {
 		return false
 	}
 	return true
+}
+
+func checkoutExternalPatchMatches(session, patch map[string]any) bool {
+	for key, value := range patch {
+		switch key {
+		case "current_step", "step":
+			if !strings.EqualFold(strArg(session, "current_step"), strings.TrimSpace(fmt.Sprint(value))) {
+				return false
+			}
+		case "buyer_details", "shipping_address", "billing_address":
+			if jsonText(session[key], "{}") != jsonText(value, "{}") {
+				return false
+			}
+		case "email", "customer_email":
+			if !strings.EqualFold(strArg(session, "email"), strings.TrimSpace(fmt.Sprint(value))) {
+				return false
+			}
+		case "customer_name", "name":
+			if strArg(session, "customer_name") != strings.TrimSpace(fmt.Sprint(value)) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(patch) > 0
 }
 
 func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, map[string]any, error) {

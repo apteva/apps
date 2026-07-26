@@ -795,6 +795,23 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 	if _, exists := args["expires_at"]; exists {
 		t.Fatalf("payment args contain a retry-unstable expiry: %#v", args)
 	}
+	external := map[string]any{
+		"current_step":    "payment",
+		"buyer_details":   map[string]any{"email": "buyer@example.com", "phone": ""},
+		"billing_address": map[string]any{"line1": "Main Street 1", "city": "Barcelona"},
+	}
+	retryPatch := map[string]any{
+		"current_step":    "payment",
+		"buyer_details":   map[string]any{"email": "buyer@example.com", "phone": ""},
+		"billing_address": map[string]any{"line1": "Main Street 1", "city": "Barcelona"},
+	}
+	if !checkoutExternalPatchMatches(external, retryPatch) {
+		t.Fatal("identical awaiting-payment update was not treated as idempotent")
+	}
+	retryPatch["billing_address"] = map[string]any{"line1": "Changed Street 2", "city": "Barcelona"}
+	if checkoutExternalPatchMatches(external, retryPatch) {
+		t.Fatal("changed awaiting-payment address was treated as idempotent")
+	}
 }
 
 func TestHardeningMigrationReconcilesExistingDuplicates(t *testing.T) {
