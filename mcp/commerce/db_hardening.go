@@ -122,16 +122,22 @@ func dbListingUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*L
 	return dbListingGet(db, pid, id, true)
 }
 
-func dbCollectionGetWithProducts(db *sql.DB, pid string, id int64) (*Collection, error) {
+func dbCollectionGetWithProducts(db *sql.DB, pid string, id int64, listingStatus string) (*Collection, error) {
 	collection, err := dbCollectionGet(db, pid, id)
 	if err != nil || collection == nil {
 		return nil, firstErr(err, errors.New("collection not found"))
 	}
-	rows, err := db.Query(`SELECT commerce_listings.id
+	query := `SELECT commerce_listings.id
 		FROM commerce_listings
 		JOIN commerce_collection_listings cl ON cl.listing_id=commerce_listings.id
-		WHERE commerce_listings.project_id=? AND cl.collection_id=?
-		ORDER BY cl.sort_order, commerce_listings.title`, pid, id)
+		WHERE commerce_listings.project_id=? AND cl.collection_id=?`
+	values := []any{pid, id}
+	if listingStatus != "" {
+		query += ` AND commerce_listings.status=?`
+		values = append(values, listingStatus)
+	}
+	query += ` ORDER BY cl.sort_order, commerce_listings.title`
+	rows, err := db.Query(query, values...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,14 +203,14 @@ func dbCollectionUpdate(db *sql.DB, pid string, id int64, patch map[string]any) 
 		vals = append(vals, jsonText(patch["metadata"], "{}"))
 	}
 	if len(sets) == 0 {
-		return dbCollectionGetWithProducts(db, pid, id)
+		return dbCollectionGetWithProducts(db, pid, id, "")
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
 	vals = append(vals, pid, id)
 	if _, err := db.Exec(`UPDATE commerce_collections SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, vals...); err != nil {
 		return nil, err
 	}
-	return dbCollectionGetWithProducts(db, pid, id)
+	return dbCollectionGetWithProducts(db, pid, id, "")
 }
 
 func dbCollectionRemoveListing(db *sql.DB, pid string, collectionID, listingID int64) error {

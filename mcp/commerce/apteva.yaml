@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.3.0
+version: 0.4.0
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -35,6 +35,8 @@ requires:
       optional: true
     - name: billing
       optional: false
+    - name: content
+      optional: true
   integrations:
     - role: supplier_provider
       kind: integration
@@ -54,15 +56,15 @@ provides:
     - { name: commerce_stores_update, description: "Patch a store. Args: id, patch." }
     - { name: commerce_products_create, description: "Create a storefront listing and optional first variant. Can create Catalog product/price when catalog ids are omitted." }
     - { name: commerce_products_list, description: "List storefront listings. Args: store_id?, status?, q?, limit?." }
-    - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?." }
+    - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?, status?." }
     - { name: commerce_products_update, description: "Patch a storefront listing. Args: id, patch." }
     - { name: commerce_products_publish, description: "Publish a listing. Args: id." }
     - { name: commerce_products_archive, description: "Archive a listing. Args: id." }
     - { name: commerce_variants_create, description: "Create a listing variant. Args: listing_id, sku, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?." }
     - { name: commerce_variants_update, description: "Patch a variant. Args: id, patch." }
     - { name: commerce_collections_create, description: "Create a collection. Args: store_id, handle?, title, description_html?." }
-    - { name: commerce_collections_list, description: "List collections. Args: store_id?." }
-    - { name: commerce_collections_get, description: "Fetch a collection and its products. Args: id." }
+    - { name: commerce_collections_list, description: "List collections. Args: store_id?, status?." }
+    - { name: commerce_collections_get, description: "Fetch a collection and its products. Args: id? or handle? plus store_id?, status?." }
     - { name: commerce_collections_update, description: "Patch a collection. Args: id, patch." }
     - { name: commerce_collections_add_product, description: "Add a listing to a collection. Args: collection_id, listing_id." }
     - { name: commerce_collections_remove_product, description: "Remove a listing from a collection. Args: collection_id, listing_id." }
@@ -123,7 +125,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.3.0
+    ref: commerce/v0.4.0
     entry: mcp/commerce
   port: 8080
   health_check: /health

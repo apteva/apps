@@ -5,8 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
+	"html/template"
 	"os"
 	"path/filepath"
 	"strings"
@@ -319,6 +318,16 @@ func findPlatformCall(calls []platformCall, app, tool string) platformCall {
 	return platformCall{}
 }
 
+func countPlatformCalls(calls []platformCall, app, tool string) int {
+	count := 0
+	for _, call := range calls {
+		if call.App == app && call.Tool == tool {
+			count++
+		}
+	}
+	return count
+}
+
 func TestPaidSaleRequiresBillingAndSnapshotsOrder(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["billing:invoices_get"] = map[string]any{"invoice": map[string]any{
@@ -386,46 +395,132 @@ func TestPaidSaleRequiresBillingAndSnapshotsOrder(t *testing.T) {
 	}
 }
 
-func TestPublicStorefrontScopesProjectAndHidesDrafts(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-one"))
-	previous := globalCtx
-	globalCtx = ctx
-	t.Cleanup(func() { globalCtx = previous })
+func TestCommerceExposesNoPublicStorefrontRoute(t *testing.T) {
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.NoAuth || strings.HasPrefix(route.Pattern, "/s/") {
+			t.Fatalf("commerce must not expose a public storefront route: %#v", route)
+		}
+	}
+}
 
-	_, _, _, _ = seedCommerceCart(t, ctx.AppDB(), "project-one", "main", 0)
-	storeTwo, _, _, _ := seedCommerceCart(t, ctx.AppDB(), "project-two", "main", 0)
-	if _, err := dbListingCreate(ctx.AppDB(), "project-two", map[string]any{
-		"store_id": storeTwo.ID, "title": "Draft secret", "handle": "draft-secret", "catalog_product_id": int64(202), "status": "draft",
-	}); err != nil {
+func TestConfigureStorefrontRegistersGenericContentExtension(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["content:sites_get"] = map[string]any{"site": map[string]any{"id": 81, "slug": "main"}}
+	platform.responses["content:extensions_upsert"] = map[string]any{"extension": map[string]any{"key": "commerce-store-1"}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("storefront-project"), tk.WithPlatform(platform))
+	store, err := dbStoreCreate(ctx.AppDB(), "storefront-project", map[string]any{"slug": "main", "name": "Main Store"})
+	if err != nil {
 		t.Fatal(err)
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/s/main?project_id=project-two", nil)
-	recorder := httptest.NewRecorder()
-	(&App{}).handlePublic(recorder, req)
-	if recorder.Code != http.StatusPermanentRedirect || recorder.Header().Get("Location") != "/s/main/?project_id=project-two" {
-		t.Fatalf("unexpected storefront redirect: status=%d location=%q", recorder.Code, recorder.Header().Get("Location"))
+	status, err := (&App{}).configureContentStorefront(ctx, "storefront-project", store, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if !status.Configured || !status.ContentReady || status.SiteID != 81 || status.SiteSlug != "main" {
+		t.Fatalf("unexpected storefront status: %#v", status)
+	}
+	call := findPlatformCall(platform.calls, "content", "extensions_upsert")
+	if call.Tool == "" {
+		t.Fatalf("Content extension was not registered: %#v", platform.calls)
+	}
+	manifest, ok := call.Input["manifest"].(map[string]any)
+	if !ok {
+		t.Fatalf("extension manifest missing: %#v", call.Input)
+	}
+	dataSources, _ := manifest["data_sources"].(map[string]any)
+	product, _ := dataSources["product"].(map[string]any)
+	args, _ := product["args"].(map[string]any)
+	if product["tool"] != "commerce_products_get" || args["status"] != "active" {
+		t.Fatalf("public product source is not active-only: %#v", product)
+	}
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.NoAuth {
+			t.Fatalf("storefront configuration introduced a public Commerce route: %#v", route)
+		}
+	}
+}
 
-	req = httptest.NewRequest(http.MethodGet, "/s/main/?project_id=project-two", nil)
-	recorder = httptest.NewRecorder()
-	(&App{}).handlePublic(recorder, req)
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "Product") || strings.Contains(recorder.Body.String(), "Draft secret") {
-		t.Fatalf("storefront leaked or omitted products: status=%d body=%s", recorder.Code, recorder.Body.String())
+func TestPublicToolFiltersHideDraftProductsAndCollections(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("public-filter"))
+	store, err := dbStoreCreate(ctx.AppDB(), "public-filter", map[string]any{"slug": "main", "name": "Main"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(recorder.Body.String(), `href="./products/product?project_id=project-two"`) {
-		t.Fatalf("storefront product link is not proxy-safe: %s", recorder.Body.String())
-	}
+	active, _ := dbListingCreate(ctx.AppDB(), "public-filter", map[string]any{"store_id": store.ID, "title": "Live", "status": "active"})
+	draft, _ := dbListingCreate(ctx.AppDB(), "public-filter", map[string]any{"store_id": store.ID, "title": "Secret", "status": "draft"})
+	collection, _ := dbCollectionCreate(ctx.AppDB(), "public-filter", map[string]any{"store_id": store.ID, "title": "Live Collection", "status": "active"})
+	draftCollection, _ := dbCollectionCreate(ctx.AppDB(), "public-filter", map[string]any{"store_id": store.ID, "title": "Draft Collection", "status": "draft"})
+	_ = dbCollectionAddListing(ctx.AppDB(), "public-filter", collection.ID, active.ID, 0)
+	_ = dbCollectionAddListing(ctx.AppDB(), "public-filter", collection.ID, draft.ID, 1)
 
-	req = httptest.NewRequest(http.MethodGet, "/s/main/products/draft-secret?project_id=project-two", nil)
-	recorder = httptest.NewRecorder()
-	(&App{}).handlePublic(recorder, req)
-	if recorder.Code != http.StatusNotFound {
-		t.Fatalf("draft product status=%d, want 404", recorder.Code)
+	if _, err := (&App{}).toolProductsGet(ctx, map[string]any{"id": draft.ID, "status": "active"}); err == nil {
+		t.Fatal("active product read returned a draft")
 	}
+	result, err := (&App{}).toolCollectionsGet(ctx, map[string]any{"id": collection.ID, "status": "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.(map[string]any)["collection"].(*Collection)
+	if len(got.Products) != 1 || got.Products[0].ID != active.ID {
+		t.Fatalf("active collection leaked draft products: %#v", got.Products)
+	}
+	if _, err := (&App{}).toolCollectionsGet(ctx, map[string]any{"id": draftCollection.ID, "status": "active"}); err == nil {
+		t.Fatal("active collection read returned a draft collection")
+	}
+}
 
-	if _, err := dbListingStatus(ctx.AppDB(), "project-two", 999999, "active"); err == nil {
-		t.Fatal("publishing a missing product should return an error")
+func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["checkout:cart_create"] = map[string]any{"cart": map[string]any{"id": 451}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("cart-session"), tk.WithPlatform(platform))
+	store, err := dbStoreCreate(ctx.AppDB(), "cart-session", map[string]any{"slug": "main", "name": "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"store_id": store.ID, "session_token": "signed-content-session"}
+	first, err := (&App{}).createCart(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := (&App{}).createCart(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.CheckoutCartID == nil || *first.CheckoutCartID != 451 {
+		t.Fatalf("session cart changed: first=%#v second=%#v", first, second)
+	}
+	if calls := countPlatformCalls(platform.calls, "checkout", "cart_create"); calls != 1 {
+		t.Fatalf("checkout cart_create calls=%d, want 1", calls)
+	}
+}
+
+func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
+	manifest := commerceStorefrontManifest(&Store{ID: 7, Name: "Reference Store"})
+	templates, ok := manifest["templates"].(map[string]any)
+	if !ok || len(templates) < 7 {
+		t.Fatalf("storefront templates missing: %#v", manifest["templates"])
+	}
+	funcs := template.FuncMap{
+		"asset":    func(string) string { return "/" },
+		"action":   func(string) string { return "/" },
+		"href":     func(string) string { return "/" },
+		"get":      func(any, string) any { return nil },
+		"first":    func(any) any { return nil },
+		"text":     func(any) string { return "" },
+		"default":  func(fallback string, _ any) string { return fallback },
+		"money":    func(any, any) string { return "" },
+		"json":     func(any) template.JS { return "{}" },
+		"safeHTML": func(string) template.HTML { return "" },
+	}
+	for name, source := range templates {
+		if _, err := template.New(name).Funcs(funcs).Parse(source.(string)); err != nil {
+			t.Errorf("parse storefront template %s: %v", name, err)
+		}
+	}
+	assets := manifest["assets"].(map[string]any)
+	if strings.Contains(assets["store.js"].(string), "{{") {
+		t.Fatal("static storefront JavaScript contains an unrendered template expression")
 	}
 }
 

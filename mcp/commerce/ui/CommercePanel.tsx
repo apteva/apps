@@ -158,7 +158,20 @@ interface DispatchJob {
   updated_at: string;
 }
 
-type View = "products" | "collections" | "providers" | "stores" | "carts" | "sales";
+interface StorefrontStatus {
+  store_id: number;
+  configured: boolean;
+  content_ready: boolean;
+  site_id?: number;
+  site_slug?: string;
+  hostname?: string;
+  extension_key?: string;
+  version?: string;
+  preview_url?: string;
+  error?: string;
+}
+
+type View = "products" | "collections" | "providers" | "storefront" | "stores" | "carts" | "sales";
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
@@ -176,6 +189,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [providers, setProviders] = useState<ProviderPolicy[]>([]);
   const [sources, setSources] = useState<VariantSource[]>([]);
   const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
+  const [storefront, setStorefront] = useState<StorefrontStatus | null>(null);
   const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
   const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
   const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
@@ -224,7 +238,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setLoading(true);
     const filter = selectedStore ? `?store_id=${encodeURIComponent(selectedStore)}` : "";
     try {
-      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches] = await Promise.all([
+      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches, nextStorefront] = await Promise.all([
         api<Summary>("/admin/summary"),
         api<Store[]>("/admin/stores"),
         api<Product[]>(`/admin/products${filter}`),
@@ -234,6 +248,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
         api<ProviderPolicy[]>(`/admin/providers${filter}`),
         api<VariantSource[]>(`/admin/variant-sources${filter}`),
         api<DispatchJob[]>(`/admin/dispatches${filter ? `${filter}&limit=100` : "?limit=100"}`),
+        selectedStore ? api<StorefrontStatus>(`/admin/storefront?store_id=${encodeURIComponent(selectedStore)}`) : Promise.resolve(null),
       ]);
       if (sequence !== loadSequence.current) return;
       setSummary(nextSummary);
@@ -245,6 +260,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       setProviders(nextProviders || []);
       setSources(nextSources || []);
       setDispatches(nextDispatches || []);
+      setStorefront(nextStorefront);
       setProviderDrafts(Object.fromEntries((nextProviders || []).map((provider) => [provider.connection_id, {
         ...provider, settings: { ...(provider.settings || {}) },
       }])));
@@ -439,9 +455,19 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     await api(`/admin/dispatches/${id}/submit`, { method: "POST" });
   }
 
+  async function configureStorefront() {
+    if (!selectedStore) throw new Error("Select a store before configuring its storefront");
+    const status = await api<StorefrontStatus>("/admin/storefront", {
+      method: "POST",
+      body: JSON.stringify({ store_id: Number(selectedStore) }),
+    });
+    setStorefront(status);
+  }
+
   const tabs: Array<{ id: View; label: string }> = [
     { id: "products", label: "Products" }, { id: "collections", label: "Collections" },
-    { id: "providers", label: "Providers" }, { id: "stores", label: "Stores" },
+    { id: "providers", label: "Providers" }, { id: "storefront", label: "Storefront" },
+    { id: "stores", label: "Stores" },
     { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
   ];
 
@@ -611,8 +637,42 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
               <div className="grid grid-cols-2 gap-3"><Field label="Currency"><input value={storeForm.default_currency} maxLength={3} onChange={(event) => setStoreForm({ ...storeForm, default_currency: event.target.value.toUpperCase() })} className={inputClass} /></Field><Field label="Locale"><input value={storeForm.default_locale} onChange={(event) => setStoreForm({ ...storeForm, default_locale: event.target.value })} className={inputClass} /></Field></div>
               <Field label="Timezone"><input value={storeForm.timezone} onChange={(event) => setStoreForm({ ...storeForm, timezone: event.target.value })} className={inputClass} /></Field>
               <button type="submit" disabled={busy} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">{editingStore ? "Save store" : "Create store"}</button>
-              {editingStore && <a href={`${API}/s/${editingStore.slug}/?${qs()}`} target="_blank" rel="noreferrer" className="block text-center text-sm text-accent hover:underline">Open storefront</a>}
             </form>
+          </section>
+        )}
+
+        {view === "storefront" && (
+          <section className="max-w-4xl space-y-5">
+            <div>
+              <h2 className="text-sm font-semibold">Customer storefront</h2>
+              <p className="mt-1 text-sm text-text-muted">Content owns the public site, theme, domains, and publishing. Commerce supplies live products, collections, carts, and checkout actions.</p>
+            </div>
+            {!selectedStore ? (
+              <div className="rounded-md border border-border px-4 py-10 text-center text-sm text-text-muted">Select a store to manage its storefront.</div>
+            ) : (
+              <div className="grid gap-5 md:grid-cols-3">
+                <div className="border border-border rounded-md divide-y divide-border md:col-span-2">
+                  <StorefrontRow label="Store" value={currentStore?.name || `Store #${selectedStore}`} />
+                  <StorefrontRow label="Content site" value={storefront?.site_slug || "Not configured"} />
+                  <StorefrontRow label="Extension" value={storefront?.extension_key || "Not installed"} />
+                  <StorefrontRow label="Theme version" value={storefront?.version || "-"} />
+                  <StorefrontRow label="Domain" value={storefront?.hostname || "Configure in Content"} />
+                  <div className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
+                    <span className="text-text-muted">Status</span>
+                    <Status value={storefront?.content_ready ? "active" : storefront?.configured ? "unavailable" : "not configured"} />
+                  </div>
+                </div>
+                <aside className="space-y-3">
+                  {storefront?.error && <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">{storefront.error}</div>}
+                  <button type="button" disabled={busy} onClick={() => void run(configureStorefront, storefront?.configured ? "Storefront refreshed" : "Storefront configured")} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">
+                    {storefront?.configured ? "Refresh configuration" : "Configure with Content"}
+                  </button>
+                  {storefront?.preview_url && <a href={storefront.preview_url} target="_blank" rel="noreferrer" className="flex h-9 items-center justify-center rounded-md border border-border text-sm hover:bg-bg-input">Open storefront</a>}
+                  {storefront?.configured && <a href="/apps/content/page" className="flex h-9 items-center justify-center rounded-md border border-border text-sm hover:bg-bg-input">Customize in Content</a>}
+                  <p className="text-xs leading-5 text-text-muted">Without Content installed, Commerce remains available for merchant operations but exposes no public storefront.</p>
+                </aside>
+              </div>
+            )}
           </section>
         )}
 
@@ -658,6 +718,10 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Metric({ label, value }: { label: string; value: number }) {
   return <div className="px-3 py-2.5 border-r border-b lg:border-b-0 border-border last:border-r-0"><div className="text-xs text-text-muted">{label}</div><div className="text-lg font-semibold tabular-nums">{value}</div></div>;
+}
+
+function StorefrontRow({ label, value }: { label: string; value: string }) {
+  return <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-3 px-3 py-3 text-sm"><span className="text-text-muted">{label}</span><span className="truncate text-right font-medium" title={value}>{value}</span></div>;
 }
 
 function DataTable({ headers, children, empty, emptyLabel }: { headers: string[]; children: ReactNode; empty: boolean; emptyLabel: string }) {

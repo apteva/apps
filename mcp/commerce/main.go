@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"math"
 	"net/http"
 	"strconv"
@@ -79,7 +78,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/shipping/quote", Handler: a.handleShippingQuote},
 		{Pattern: "/admin/dispatches", Handler: a.handleDispatches},
 		{Pattern: "/admin/dispatches/", Handler: a.handleDispatch},
-		{Pattern: "/s/", Handler: a.handlePublic, NoAuth: true},
+		{Pattern: "/admin/storefront", Handler: a.handleStorefrontConfiguration},
 	}
 }
 
@@ -91,15 +90,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_stores_update", Description: "Patch a store. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolStoresUpdate},
 		{Name: "commerce_products_create", Description: "Create a storefront listing and optional first variant. Args: store_id, title, handle?, description_html?, catalog_product_id?, price_cents?, sku?, inventory_item_id?.", InputSchema: schemaObject(productCreateProps(), []string{"title"}), Handler: a.toolProductsCreate},
 		{Name: "commerce_products_list", Description: "List storefront listings. Args: store_id?, status?, q?, limit?.", InputSchema: schemaObject(listingFilterProps(), nil), Handler: a.toolProductsList},
-		{Name: "commerce_products_get", Description: "Fetch one listing with variants. Args: id? or handle? plus store_id?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolProductsGet},
+		{Name: "commerce_products_get", Description: "Fetch one listing with variants. Args: id? or handle? plus store_id?, status?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolProductsGet},
 		{Name: "commerce_products_update", Description: "Patch a storefront listing. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolProductsUpdate},
 		{Name: "commerce_products_publish", Description: "Publish a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsPublish},
 		{Name: "commerce_products_archive", Description: "Archive a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsArchive},
 		{Name: "commerce_variants_create", Description: "Create a listing variant. Args: listing_id, sku?, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?.", InputSchema: schemaObject(variantProps(), []string{"listing_id"}), Handler: a.toolVariantsCreate},
 		{Name: "commerce_variants_update", Description: "Patch a variant. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolVariantsUpdate},
 		{Name: "commerce_collections_create", Description: "Create a collection. Args: store_id, handle?, title, description_html?.", InputSchema: schemaObject(collectionProps(), []string{"title"}), Handler: a.toolCollectionsCreate},
-		{Name: "commerce_collections_list", Description: "List collections. Args: store_id?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, nil), Handler: a.toolCollectionsList},
-		{Name: "commerce_collections_get", Description: "Fetch a collection with products. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolCollectionsGet},
+		{Name: "commerce_collections_list", Description: "List collections. Args: store_id?, status?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolCollectionsList},
+		{Name: "commerce_collections_get", Description: "Fetch a collection with products. Args: id? or handle? plus store_id?, status?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolCollectionsGet},
 		{Name: "commerce_collections_update", Description: "Patch a collection. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolCollectionsUpdate},
 		{Name: "commerce_collections_add_product", Description: "Add a listing to a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer"), "sort_order": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsAddProduct},
 		{Name: "commerce_collections_remove_product", Description: "Remove a listing from a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsRemoveProduct},
@@ -443,6 +442,11 @@ func (a *App) toolProductsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	out, err := resolveListing(ctx.AppDB(), pid, args)
+	if err == nil && out != nil {
+		if status := strArg(args, "status"); status != "" && out.Status != status {
+			return nil, errors.New("product not found")
+		}
+	}
 	return map[string]any{"product": out}, err
 }
 
@@ -549,7 +553,15 @@ func (a *App) toolCollectionsGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, intArg(args, "id"))
+	collection, err := resolveCollection(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status")
+	if status != "" && collection.Status != status {
+		return nil, errors.New("collection not found")
+	}
+	out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, collection.ID, status)
 	return map[string]any{"collection": out}, err
 }
 
@@ -734,6 +746,14 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		return nil, errors.New("store is not active")
 	}
 	token := firstNonEmpty(strArg(args, "session_token"), newToken())
+	if existing, err := dbCartGetBySession(ctx.AppDB(), pid, store.ID, token); err != nil {
+		return nil, err
+	} else if existing != nil {
+		if existing.Status != "open" && existing.Status != "checkout" {
+			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
+		}
+		return existing, nil
+	}
 	var checkoutResp map[string]any
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
@@ -1492,6 +1512,10 @@ func dbListingsList(db *sql.DB, pid string, args map[string]any) ([]*Listing, er
 		where = append(where, "store_id=?")
 		vals = append(vals, id)
 	}
+	if status := strArg(args, "status"); status != "" {
+		where = append(where, "status=?")
+		vals = append(vals, status)
+	}
 	if st := strArg(args, "status"); st != "" {
 		where = append(where, "status=?")
 		vals = append(vals, st)
@@ -1748,6 +1772,30 @@ func dbCollectionGet(db *sql.DB, pid string, id int64) (*Collection, error) {
 	return c, err
 }
 
+func resolveCollection(db *sql.DB, pid string, args map[string]any) (*Collection, error) {
+	if id := intArg(args, "id"); id != 0 {
+		collection, err := dbCollectionGet(db, pid, id)
+		if err != nil || collection == nil {
+			return nil, firstErr(err, errors.New("collection not found"))
+		}
+		return collection, nil
+	}
+	handle := strArg(args, "handle")
+	if handle == "" {
+		return nil, errors.New("id or handle required")
+	}
+	store, err := resolveStore(db, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	row := db.QueryRow(collectionSelect()+` WHERE project_id=? AND store_id=? AND handle=?`, pid, store.ID, slugify(handle))
+	collection, err := scanCollection(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("collection not found")
+	}
+	return collection, err
+}
+
 func dbCollectionAddListing(db *sql.DB, pid string, collectionID, listingID int64, sortOrder int) error {
 	if collectionID == 0 || listingID == 0 {
 		return errors.New("collection_id and listing_id required")
@@ -1789,6 +1837,19 @@ func dbCartCreate(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	return dbCartGet(db, pid, id, true)
 }
 
+func dbCartGetBySession(db *sql.DB, pid string, storeID int64, token string) (*Cart, error) {
+	row := db.QueryRow(cartSelect()+` WHERE project_id=? AND store_id=? AND session_token=?`, pid, storeID, token)
+	cart, err := scanCart(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cart.Items, err = dbCartItems(db, pid, cart.ID)
+	return cart, err
+}
+
 func resolveCart(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if id := firstNonZero(intArg(args, "cart_id"), intArg(args, "id")); id != 0 {
 		c, err := dbCartGet(db, pid, id, true)
@@ -1802,14 +1863,9 @@ func resolveCart(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if token == "" || storeID == 0 {
 		return nil, errors.New("cart_id or session_token+store_id required")
 	}
-	row := db.QueryRow(cartSelect()+` WHERE project_id=? AND store_id=? AND session_token=?`, pid, storeID, token)
-	c, err := scanCart(row)
-	if err != nil {
-		return nil, firstErr(skipNoRows(err), errors.New("cart not found"))
-	}
-	c.Items, err = dbCartItems(db, pid, c.ID)
-	if err != nil {
-		return nil, err
+	c, err := dbCartGetBySession(db, pid, storeID, token)
+	if err != nil || c == nil {
+		return nil, firstErr(err, errors.New("cart not found"))
 	}
 	return c, nil
 }
@@ -2492,7 +2548,7 @@ func (a *App) handleCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, id)
+		out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, id, "")
 		httpResult(w, out, err)
 	case http.MethodPatch:
 		var patch map[string]any
@@ -2569,87 +2625,6 @@ func (a *App) handleSale(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := dbSaleGet(ctx.AppDB(), pid, id)
 	httpResult(w, out, notFoundErr(out, err, "sale not found"))
-}
-
-func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	ctx, pid, err := requestAppContext(r)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s/"), "/")
-	parts := strings.Split(rest, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
-		return
-	}
-	store, err := dbStoreGetBySlug(ctx.AppDB(), pid, parts[0])
-	if err != nil || store == nil || store.Status != "active" {
-		http.NotFound(w, r)
-		return
-	}
-	if len(parts) == 1 && !strings.HasSuffix(r.URL.Path, "/") {
-		target := r.URL.Path + "/"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, target, http.StatusPermanentRedirect)
-		return
-	}
-	if len(parts) >= 3 && parts[1] == "products" {
-		row := ctx.AppDB().QueryRow(listingSelect()+` WHERE project_id=? AND store_id=? AND handle=? AND status='active'`, pid, store.ID, slugify(parts[2]))
-		product, err := scanListing(row)
-		if err != nil || product == nil {
-			http.NotFound(w, r)
-			return
-		}
-		product.Variants, err = dbVariantsForListing(ctx.AppDB(), pid, product.ID)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeProductHTML(w, store, product, pid)
-		return
-	}
-	if len(parts) != 1 {
-		http.NotFound(w, r)
-		return
-	}
-	products, err := dbListingsList(ctx.AppDB(), pid, map[string]any{"store_id": store.ID, "status": "active", "limit": int64(100)})
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeStoreHTML(w, store, products, pid)
-}
-
-func writeStoreHTML(w http.ResponseWriter, store *Store, products []*Listing, pid string) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px}.card{border:1px solid #ddd;padding:16px;border-radius:8px}a{color:#111}</style></head><body>", template.HTMLEscapeString(store.Name))
-	fmt.Fprintf(&b, "<h1>%s</h1><div class=grid>", template.HTMLEscapeString(store.Name))
-	for _, p := range products {
-		fmt.Fprintf(&b, "<div class=card><h2><a href=\"./products/%s?project_id=%s\">%s</a></h2><p>%s</p></div>", template.URLQueryEscaper(p.Handle), template.URLQueryEscaper(pid), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
-	}
-	b.WriteString("</div></body></html>")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(b.String()))
-}
-
-func writeProductHTML(w http.ResponseWriter, store *Store, p *Listing, pid string) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px;max-width:760px}.price{font-size:22px;font-weight:700}</style></head><body>", template.HTMLEscapeString(p.Title))
-	fmt.Fprintf(&b, "<p><a href=\"../../?project_id=%s\">%s</a></p><h1>%s</h1><div>%s</div>", template.URLQueryEscaper(pid), template.HTMLEscapeString(store.Name), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
-	if len(p.Variants) > 0 {
-		v := p.Variants[0]
-		fmt.Fprintf(&b, "<p class=price>%s %.2f</p><p>SKU: %s</p>", template.HTMLEscapeString(v.Currency), float64(v.PriceCents)/100, template.HTMLEscapeString(v.SKU))
-	}
-	b.WriteString("</body></html>")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(b.String()))
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {
