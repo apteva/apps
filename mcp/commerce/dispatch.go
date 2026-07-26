@@ -64,12 +64,21 @@ func (a *App) toolShippingQuote(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if len(address) == 0 {
 		return nil, errors.New("shipping_address required")
 	}
+	if cart.Status != "open" {
+		quote := mapArg(cart.Metadata, "shipping_quote")
+		quotedAddress := mapArg(quote, "shipping_address")
+		if len(quote) == 0 || jsonText(quotedAddress, "{}") != jsonText(address, "{}") {
+			return nil, fmt.Errorf("cart is %s; shipping address can no longer be changed", cart.Status)
+		}
+		return map[string]any{
+			"quotes": quote["all"], "selected": quote["selected"],
+			"shipping_cents": cart.ShippingCents, "currency": cart.Currency,
+			"cart": cart, "quote": quote,
+		}, nil
+	}
 	groups, err := cartSourceGroups(ctx.AppDB(), pid, cart)
 	if err != nil {
 		return nil, err
-	}
-	if len(groups) == 0 {
-		return map[string]any{"quotes": []ShippingOption{}, "shipping_cents": 0, "currency": cart.Currency}, nil
 	}
 	var quotes []ShippingOption
 	var selected []ShippingOption

@@ -118,6 +118,7 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 		"description_html":   "<p>Heavyweight</p>",
 		"catalog_product_id": int64(101),
 		"status":             "active",
+		"metadata":           map[string]any{"image_url": "https://example.com/hoodie.jpg"},
 	})
 	if err != nil {
 		t.Fatalf("create listing: %v", err)
@@ -154,6 +155,9 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 	}
 	if len(cart.Items) != 1 || cart.Items[0].TitleSnapshot != "Apteva Hoodie - Black / M" {
 		t.Fatalf("unexpected cart item snapshot: %#v", cart.Items)
+	}
+	if cart.Items[0].ImageURL != "https://example.com/hoodie.jpg" {
+		t.Fatalf("cart item image=%q", cart.Items[0].ImageURL)
 	}
 
 	checkout, err := dbCheckoutCreate(db, pid, cart, 301, []int64{401, 402})
@@ -252,6 +256,43 @@ func TestCartItemTitle(t *testing.T) {
 	}
 }
 
+func TestCheckoutUpdateReplaysIdenticalAwaitingPaymentPatch(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("checkout-replay"))
+	_, _, _, cart := seedCommerceCart(t, ctx.AppDB(), "checkout-replay", "main", 0)
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "checkout-replay", cart, 401, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch := map[string]any{
+		"email":         "buyer@example.com",
+		"customer_name": "Buyer",
+		"shipping_address": map[string]any{
+			"line1": "1 Main Street", "city": "Madrid", "country_code": "ES",
+		},
+		"billing_address": map[string]any{
+			"line1": "1 Main Street", "city": "Madrid", "country_code": "ES",
+		},
+	}
+	if err := dbCheckoutPatch(ctx.AppDB(), "checkout-replay", checkout.ID, patch); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCheckoutInvoice(ctx.AppDB(), "checkout-replay", checkout.ID, 501, "INV-501"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&App{}).checkoutUpdate(ctx, map[string]any{"checkout_id": checkout.ID, "patch": patch})
+	if err != nil {
+		t.Fatalf("identical retry failed: %v", err)
+	}
+	if got.Status != "awaiting_payment" || got.InvoiceNumber != "INV-501" {
+		t.Fatalf("unexpected replayed checkout: %#v", got)
+	}
+	changed := copyMap(patch)
+	changed["email"] = "other@example.com"
+	if _, err := (&App{}).checkoutUpdate(ctx, map[string]any{"checkout_id": checkout.ID, "patch": changed}); err == nil {
+		t.Fatal("changed buyer details were accepted after payment started")
+	}
+}
+
 func TestCheckoutStartReleasesPartialReservations(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["inventory:inventory_reservations_list"] = map[string]any{"reservations": []any{}}
@@ -287,6 +328,36 @@ func TestCheckoutStartReleasesPartialReservations(t *testing.T) {
 	}
 	if !hasPlatformCall(platform.calls, "inventory", "inventory_release_reservation") {
 		t.Fatal("partial reservation was not released")
+	}
+}
+
+func TestShippingQuoteReturnsUpdatedCartWithoutSupplierLines(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("local-shipping"))
+	_, _, variant, cart := seedCommerceCart(t, ctx.AppDB(), "local-shipping", "main", 0)
+	if err := dbCartAddItem(ctx.AppDB(), "local-shipping", cart.ID, variant, 1, 501); err != nil {
+		t.Fatal(err)
+	}
+	address := map[string]any{
+		"line1": "1 Main Street", "city": "Madrid", "postal_code": "28001", "country_code": "ES",
+	}
+	result, err := (&App{}).toolShippingQuote(ctx, map[string]any{"cart_id": cart.ID, "shipping_address": address})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quoted := result.(map[string]any)["cart"].(*Cart)
+	if quoted.TotalCents != 4900 || quoted.ShippingCents != 0 || len(quoted.Items) != 1 {
+		t.Fatalf("unexpected local shipping quote: %#v", quoted)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='checkout' WHERE id=?`, cart.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&App{}).toolShippingQuote(ctx, map[string]any{"cart_id": cart.ID, "shipping_address": address}); err != nil {
+		t.Fatalf("locked quote replay failed: %v", err)
+	}
+	changedAddress := copyMap(address)
+	changedAddress["postal_code"] = "28002"
+	if _, err := (&App{}).toolShippingQuote(ctx, map[string]any{"cart_id": cart.ID, "shipping_address": changedAddress}); err == nil {
+		t.Fatal("locked cart accepted a changed shipping address")
 	}
 }
 
@@ -556,6 +627,48 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	}
 	if !strings.Contains(css, ".cart-total span:last-child{text-align:right") {
 		t.Fatal("storefront cart total is not right-aligned")
+	}
+	checkout := templates["checkout"].(string)
+	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action"} {
+		if !strings.Contains(checkout, expected) {
+			t.Fatalf("checkout template missing %q", expected)
+		}
+	}
+	if strings.Contains(checkout, "site-header") || strings.Contains(checkout, "announcement") {
+		t.Fatal("checkout uses the distraction-heavy storefront chrome")
+	}
+	actions := manifest["actions"].(map[string]any)
+	quote := actions["checkout_quote"].(map[string]any)
+	quoteSteps := quote["steps"].([]any)
+	if len(quoteSteps) != 2 || quoteSteps[1].(map[string]any)["tool"] != "commerce_shipping_quote" {
+		t.Fatalf("checkout quote flow is invalid: %#v", quoteSteps)
+	}
+	submit := actions["checkout_submit"].(map[string]any)
+	submitSteps := submit["steps"].([]any)
+	wantTools := []string{
+		"commerce_cart_create",
+		"commerce_shipping_quote",
+		"commerce_checkout_start",
+		"commerce_checkout_update",
+		"commerce_checkout_pay",
+	}
+	if len(submitSteps) != len(wantTools) {
+		t.Fatalf("checkout submit steps=%d, want %d", len(submitSteps), len(wantTools))
+	}
+	for index, want := range wantTools {
+		if got := submitSteps[index].(map[string]any)["tool"]; got != want {
+			t.Fatalf("checkout submit step %d=%v, want %s", index, got, want)
+		}
+	}
+	for _, expected := range []string{"renderSummary", "Review order", "Placing order", "data-country-select"} {
+		if !strings.Contains(js, expected) {
+			t.Fatalf("checkout JavaScript missing %q", expected)
+		}
+	}
+	for _, expected := range []string{".checkout-layout{display:grid", ".checkout-summary-column", "@media(max-width:900px)"} {
+		if !strings.Contains(css, expected) {
+			t.Fatalf("checkout CSS missing %q", expected)
+		}
 	}
 }
 

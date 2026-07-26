@@ -226,6 +226,7 @@ type CartItem struct {
 	CatalogPriceID  *int64  `json:"catalog_price_id,omitempty"`
 	SKU             string  `json:"sku"`
 	TitleSnapshot   string  `json:"title_snapshot"`
+	ImageURL        string  `json:"image_url,omitempty"`
 	UnitAmountCents int64   `json:"unit_amount_cents"`
 	Currency        string  `json:"currency"`
 	Quantity        float64 `json:"quantity"`
@@ -1019,6 +1020,9 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		delete(patch, "name")
 	}
 	if ch.Status != "started" {
+		if checkoutPatchMatches(ch, patch) {
+			return ch, nil
+		}
 		return nil, fmt.Errorf("checkout is %s; only started checkouts accept updates", ch.Status)
 	}
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
@@ -1031,6 +1035,22 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		return nil, err
 	}
 	return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+}
+
+func checkoutPatchMatches(ch *CheckoutSession, patch map[string]any) bool {
+	if hasKey(patch, "email") && !strings.EqualFold(ch.CustomerEmail, strArg(patch, "email")) {
+		return false
+	}
+	if hasKey(patch, "customer_name") && strings.TrimSpace(ch.CustomerName) != strArg(patch, "customer_name") {
+		return false
+	}
+	if hasKey(patch, "shipping_address") && jsonText(ch.ShippingAddress, "{}") != jsonText(patch["shipping_address"], "{}") {
+		return false
+	}
+	if hasKey(patch, "billing_address") && jsonText(ch.BillingAddress, "{}") != jsonText(patch["billing_address"], "{}") {
+		return false
+	}
+	return true
 }
 
 func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, error) {
@@ -1974,8 +1994,13 @@ func recomputeCart(db *sql.DB, pid string, cartID int64) error {
 }
 
 func dbCartItems(db *sql.DB, pid string, cartID int64) ([]*CartItem, error) {
-	rows, err := db.Query(`SELECT id, cart_id, checkout_item_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity, created_at, updated_at
-		FROM commerce_cart_items WHERE project_id=? AND cart_id=? ORDER BY id`, pid, cartID)
+	rows, err := db.Query(`SELECT ci.id, ci.cart_id, ci.checkout_item_id, ci.variant_id, ci.listing_id,
+		ci.inventory_item_id, ci.catalog_price_id, ci.sku, ci.title_snapshot,
+		COALESCE(l.metadata_json, '{}'), ci.unit_amount_cents, ci.currency, ci.quantity,
+		ci.created_at, ci.updated_at
+		FROM commerce_cart_items ci
+		LEFT JOIN commerce_listings l ON l.project_id=ci.project_id AND l.id=ci.listing_id
+		WHERE ci.project_id=? AND ci.cart_id=? ORDER BY ci.id`, pid, cartID)
 	if err != nil {
 		return nil, err
 	}
@@ -1984,12 +2009,16 @@ func dbCartItems(db *sql.DB, pid string, cartID int64) ([]*CartItem, error) {
 	for rows.Next() {
 		var it CartItem
 		var checkoutID, invID, priceID sql.NullInt64
-		if err := rows.Scan(&it.ID, &it.CartID, &checkoutID, &it.VariantID, &it.ListingID, &invID, &priceID, &it.SKU, &it.TitleSnapshot, &it.UnitAmountCents, &it.Currency, &it.Quantity, &it.CreatedAt, &it.UpdatedAt); err != nil {
+		var listingMetadata string
+		if err := rows.Scan(&it.ID, &it.CartID, &checkoutID, &it.VariantID, &it.ListingID, &invID, &priceID,
+			&it.SKU, &it.TitleSnapshot, &listingMetadata, &it.UnitAmountCents, &it.Currency, &it.Quantity,
+			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
 		it.CheckoutItemID = ptrIfValid(checkoutID)
 		it.InventoryItemID = ptrIfValid(invID)
 		it.CatalogPriceID = ptrIfValid(priceID)
+		it.ImageURL = strArg(jsonMap(listingMetadata), "image_url")
 		out = append(out, &it)
 	}
 	return out, rows.Err()
