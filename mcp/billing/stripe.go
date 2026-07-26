@@ -371,7 +371,7 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 		if err := validateURL("return_url", returnURL); err != nil {
 			return nil, err
 		}
-		input["ui_mode"] = "custom"
+		input["ui_mode"] = "elements"
 		input["return_url"] = returnURL
 	} else {
 		successURL := strings.TrimSpace(strArg(args, "success_url"))

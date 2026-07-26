@@ -71,7 +71,7 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 			Data: json.RawMessage(`{"id":"cus_test_123"}`),
 		}, nil
 	case "create_checkout_session":
-		if input["ui_mode"] == "custom" {
+		if input["ui_mode"] == "elements" {
 			return &sdk.ExecuteResult{
 				Success: true, Status: http.StatusOK,
 				Data: json.RawMessage(`{"id":"cs_test_123","client_secret":"cs_test_123_secret_abc","expires_at":1893456000}`),
@@ -182,7 +182,7 @@ func TestCreateElementsPaymentSessionReturnsOnlyPublicBrowserConfig(t *testing.T
 		t.Fatalf("tool calls=%#v", platform.toolCalls)
 	}
 	input := platform.toolCalls[0].Input
-	if input["ui_mode"] != "custom" || input["return_url"] != "https://store.example/checkout/return" {
+	if input["ui_mode"] != "elements" || input["return_url"] != "https://store.example/checkout/return" {
 		t.Fatalf("custom checkout input=%#v", input)
 	}
 	if _, exists := input["success_url"]; exists {
