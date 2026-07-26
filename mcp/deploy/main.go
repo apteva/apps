@@ -61,6 +61,9 @@ type App struct {
 	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
 	cloudBuildMu sync.Mutex
 
+	sourceCapsuleKeyMu sync.Mutex
+	sourceCapsuleKey   []byte
+
 	// Auto-restart bookkeeping. In-memory: a sidecar restart resets
 	// the counter, which is fine — reconcileReleases will re-adopt
 	// any process that survived. Per deployment: how many consecutive
@@ -111,6 +114,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		if err := os.MkdirAll(filepath.Join(a.dataDir, sub), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", sub, err)
 		}
+	}
+	if _, err := a.sourceCapsuleSigningKey(); err != nil {
+		return err
 	}
 	pathsRebased, err := rebaseLegacyPaths(ctx.AppDB(), a.dataDir)
 	if err != nil {
@@ -179,6 +185,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			"orphan_dirs", pruned.OrphanDirsPruned,
 			"bytes", pruned.BytesPruned,
 		)
+	}
+	if builds, err := dbListAllBuilds(ctx.AppDB()); err == nil {
+		if count, bytes := a.cleanupSourceCapsules(builds, time.Now()); count > 0 {
+			ctx.Logger().Info("removed stale source capsules", "capsules", count, "bytes", bytes)
+		}
 	}
 
 	// Watchdog promotes slow-bind "starting" releases and demotes
@@ -358,6 +369,7 @@ func (a *App) recordBootRecoveryFailure(rel *Release, cause error) {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: http.MethodGet, Pattern: "/source-capsules/", Handler: a.handleSourceCapsule, NoAuth: true},
 		{Pattern: "/api/deployments", Handler: a.handleDeploymentsCollection},
 		{Pattern: "/api/deployments/", Handler: a.handleDeploymentItem},
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
@@ -640,6 +652,7 @@ func (a *App) failBuild(b *Build, msg string) *Build {
 	emit("deploy.build.failed", map[string]any{
 		"deployment_id": b.DeploymentID, "environment_id": b.EnvironmentID, "build_id": b.ID, "error": msg,
 	})
+	a.removeSourceCapsule(b.ID)
 	out, _ := dbGetBuild(globalCtx.AppDB(), b.ID)
 	return out
 }

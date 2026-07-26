@@ -226,6 +226,9 @@ func (a *App) prunableArtifactPaths(b Build) []string {
 	add(b.ArtifactPath)
 	add(filepath.Join(a.buildDir(b.ID), "dist"))
 	add(filepath.Join(a.buildDir(b.ID), "src"))
+	add(filepath.Join(a.buildDir(b.ID), "source-capsule-src"))
+	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleFilename))
+	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleMetadata))
 	return out
 }
 

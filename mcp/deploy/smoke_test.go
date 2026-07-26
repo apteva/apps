@@ -44,6 +44,15 @@ func TestEmbeddedManifestMatchesSource(t *testing.T) {
 		t.Fatalf("embedded manifest %s@%s != source %s@%s",
 			embedded.Name, embedded.Version, source.Name, source.Version)
 	}
+	var signedRoute bool
+	for _, route := range embedded.Provides.HTTPRoutes {
+		if route.Prefix == "/source-capsules/" && route.Method == http.MethodGet && route.NoAuth {
+			signedRoute = true
+		}
+	}
+	if !signedRoute {
+		t.Fatal("source capsule route must be declared GET + no_auth")
+	}
 }
 
 // Smoke test: bring up the schema in an in-memory DB, run the

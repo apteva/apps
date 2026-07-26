@@ -112,6 +112,43 @@ Codemagic example:
 }
 ```
 
+Codemagic normally builds the repository attached to its `app_id`. To build
+Code-app or local sources without giving each user a Git provider account, use
+the fixed Apteva runner and opt into a signed source capsule:
+
+```json
+{
+  "app_id": "apteva-runner-app-id",
+  "workflow_id": "apteva-ios-runner",
+  "branch": "main",
+  "source_mode": "bundle",
+  "source_url_ttl_seconds": 7200,
+  "artifact_mode": "file",
+  "artifact_name": "apteva-build",
+  "groups": ["appstore_credentials"]
+}
+```
+
+Deploy exports the selected source, creates `source.zip`, calculates its
+SHA-256, and gives Codemagic an HMAC-signed HTTPS URL. The URL is bound to the
+build and project, expires after two hours by default, and remains valid across
+a Deploy sidecar restart. The runner verifies the declared size and SHA-256
+before securely extracting it. Deploy removes the capsule when the cloud build
+finishes, fails, is cancelled, or its URL expires.
+
+The bootstrap workflow and its tests live in `codemagic-runner/`. Codemagic
+requires `codemagic.yaml` at repository root, so the contents of that directory
+are published as the root of the single Apteva-owned runner repository.
+
+For an unsigned compile smoke test, add `"smoke_only": true` to
+`target_config_json`. A signed IPA uses the App Store Connect credentials from
+the configured Codemagic variable group.
+
+Local Apteva installations must expose the signed route through an HTTPS URL
+that Codemagic can reach. Configure the server public URL to an HTTPS tunnel,
+or set `source_base_url` to that tunnel origin in the backend configuration.
+The source route verifies its own signature and does not require Storage.
+
 GitHub Actions example:
 
 ```json
@@ -184,6 +221,8 @@ PATH (the build step shells out to it).
 ```
 /data/deploy.db                                metadata
 /data/builds/<build_id>/src/                   unpacked source
+/data/builds/<build_id>/source.zip             active cloud-build source capsule
+/data/builds/<build_id>/source-capsule.json    capsule hash and expiry
 /data/builds/<build_id>/dist/                  build output
 /data/builds/<build_id>/build.log              build stdout/stderr
 /data/releases/<release_id>/runtime.log        runtime or store release log

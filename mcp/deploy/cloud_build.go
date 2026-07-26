@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,20 +28,23 @@ const (
 )
 
 type cloudBuildConfig struct {
-	Owner        string            `json:"owner,omitempty"`
-	Repo         string            `json:"repo,omitempty"`
-	WorkflowID   string            `json:"workflow_id"`
-	Ref          string            `json:"ref,omitempty"`
-	AppID        string            `json:"app_id,omitempty"`
-	Branch       string            `json:"branch,omitempty"`
-	Tag          string            `json:"tag,omitempty"`
-	InstanceType string            `json:"instance_type,omitempty"`
-	ArtifactName string            `json:"artifact_name,omitempty"`
-	ArtifactMode string            `json:"artifact_mode,omitempty"`
-	ArtifactFile string            `json:"artifact_file,omitempty"`
-	Inputs       map[string]any    `json:"inputs,omitempty"`
-	Variables    map[string]string `json:"variables,omitempty"`
-	Groups       []string          `json:"groups,omitempty"`
+	Owner               string            `json:"owner,omitempty"`
+	Repo                string            `json:"repo,omitempty"`
+	WorkflowID          string            `json:"workflow_id"`
+	Ref                 string            `json:"ref,omitempty"`
+	AppID               string            `json:"app_id,omitempty"`
+	Branch              string            `json:"branch,omitempty"`
+	Tag                 string            `json:"tag,omitempty"`
+	InstanceType        string            `json:"instance_type,omitempty"`
+	ArtifactName        string            `json:"artifact_name,omitempty"`
+	ArtifactMode        string            `json:"artifact_mode,omitempty"`
+	ArtifactFile        string            `json:"artifact_file,omitempty"`
+	Inputs              map[string]any    `json:"inputs,omitempty"`
+	Variables           map[string]string `json:"variables,omitempty"`
+	Groups              []string          `json:"groups,omitempty"`
+	SourceMode          string            `json:"source_mode,omitempty"`
+	SourceBaseURL       string            `json:"source_base_url,omitempty"`
+	SourceURLTTLSeconds int               `json:"source_url_ttl_seconds,omitempty"`
 }
 
 type externalBuildJob struct {
@@ -67,7 +71,7 @@ type cloudArtifact struct {
 
 type cloudBuildBackend interface {
 	Name() string
-	Submit(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Deployment, *Build) (*externalBuildJob, error)
+	Submit(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Deployment, *Build, *sourceCapsule) (*externalBuildJob, error)
 	Inspect(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Build) (*externalBuildStatus, error)
 	Cancel(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Build) error
 	Artifact(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Build, *externalBuildStatus) (*cloudArtifact, error)
@@ -98,8 +102,19 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	cfg.WorkflowID = strings.TrimSpace(cfg.WorkflowID)
 	cfg.ArtifactName = strings.TrimSpace(cfg.ArtifactName)
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(cfg.ArtifactMode))
+	cfg.SourceMode = strings.ToLower(strings.TrimSpace(cfg.SourceMode))
+	if cfg.SourceMode == "" {
+		cfg.SourceMode = "repository"
+	}
 	if cfg.ArtifactName == "" {
 		cfg.ArtifactName = defaultCloudArtifactName
+	}
+	if cfg.SourceMode != "repository" && cfg.SourceMode != "bundle" {
+		return cfg, errors.New("source_mode must be repository or bundle")
+	}
+	maxTTLSeconds := int(maxSourceCapsuleTTL / time.Second)
+	if cfg.SourceURLTTLSeconds < 0 || cfg.SourceURLTTLSeconds > maxTTLSeconds {
+		return cfg, fmt.Errorf("source_url_ttl_seconds must be 0 (default) or between 1 and %d", maxTTLSeconds)
 	}
 	switch normalizeBuildBackend(backend) {
 	case buildBackendCodemagic:
@@ -113,6 +128,9 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 			return cfg, errors.New("codemagic backend accepts branch or tag, not both")
 		}
 	case buildBackendGitHubActions:
+		if cfg.SourceMode == "bundle" {
+			return cfg, errors.New("source_mode=bundle is currently supported by the codemagic backend only")
+		}
 		if strings.TrimSpace(cfg.Owner) == "" || strings.TrimSpace(cfg.Repo) == "" || cfg.WorkflowID == "" || strings.TrimSpace(cfg.Ref) == "" {
 			return cfg, errors.New("github_actions backend requires owner, repo, workflow_id, and ref")
 		}
@@ -203,7 +221,19 @@ func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, erro
 		"deployment_id": d.ID, "environment": d.EnvironmentName,
 		"build_id": build.ID, "backend": backendName,
 	})
-	job, err := backend.Submit(ctx, bound, cfg, d, build)
+	var capsule *sourceCapsule
+	if cfg.SourceMode == "bundle" {
+		_ = appendCloudBuildLog(logPath, "preparing signed source capsule")
+		capsule, err = a.prepareSourceCapsule(ctx, d, build, cfg)
+		if err != nil {
+			return a.failBuild(build, "prepare source capsule: "+err.Error()), nil
+		}
+		_ = appendCloudBuildLog(logPath, fmt.Sprintf(
+			"source capsule ready sha256=%s size=%d expires=%d",
+			capsule.SHA256, capsule.Size, capsule.Expires,
+		))
+	}
+	job, err := backend.Submit(ctx, bound, cfg, d, build, capsule)
 	if err != nil {
 		return a.failBuild(build, "submit "+backendName+": "+err.Error()), nil
 	}
@@ -212,7 +242,7 @@ func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, erro
 		"external_status":    defaultStr(job.Status, "queued"),
 		"external_meta_json": defaultStr(job.MetaJSON, "{}"),
 	}
-	if job.SourceSHA != "" {
+	if job.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = job.SourceSHA
 	}
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
@@ -223,6 +253,11 @@ func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, erro
 func (a *App) syncPendingCloudBuilds(ctx context.Context) error {
 	a.cloudBuildMu.Lock()
 	defer a.cloudBuildMu.Unlock()
+	defer func() {
+		if builds, err := dbListAllBuilds(globalCtx.AppDB()); err == nil {
+			a.cleanupSourceCapsules(builds, time.Now())
+		}
+	}()
 	builds, err := dbListPendingCloudBuilds(globalCtx.AppDB(), 100)
 	if err != nil {
 		return err
@@ -266,7 +301,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 	if len(status.ProviderRaw) > 0 {
 		fields["external_meta_json"] = string(status.ProviderRaw)
 	}
-	if status.SourceSHA != "" {
+	if status.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = status.SourceSHA
 	}
 	if status.Status != build.ExternalStatus {
@@ -281,6 +316,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build cancelled")
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+		a.removeSourceCapsule(build.ID)
 		emit("deploy.build.cancelled", map[string]any{
 			"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
 			"build_id": build.ID, "backend": build.BuildBackend,
@@ -291,6 +327,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build "+status.Status)
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+		a.removeSourceCapsule(build.ID)
 		emit("deploy.build.failed", map[string]any{
 			"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
 			"build_id": build.ID, "backend": build.BuildBackend, "error": fields["error"],
@@ -316,7 +353,9 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	}
 	mode := cfg.ArtifactMode
 	if mode == "" {
-		if d.TargetKind == "ios" {
+		if d.TargetKind == "ios" && cfg.SourceMode == "bundle" {
+			mode = "file"
+		} else if d.TargetKind == "ios" {
 			mode = "store_upload"
 		} else {
 			mode = "bundle"
@@ -366,10 +405,11 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	if manifestJSON != "" {
 		fields["artifact_manifest_json"] = manifestJSON
 	}
-	if status.SourceSHA != "" {
+	if status.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = status.SourceSHA
 	}
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, fmt.Sprintf("build succeeded artifact=%s size=%d", distDir, size))
 	fresh, _ := dbGetBuild(globalCtx.AppDB(), build.ID)
 	emit("deploy.build.succeeded", map[string]any{
@@ -432,6 +472,7 @@ func (a *App) cancelCloudBuild(ctx context.Context, build *Build) (*Build, error
 		"status": "cancelled", "external_status": "cancelled",
 		"finished_at": nowUTC(), "error": "cancelled by operator",
 	})
+	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, "cancelled by operator")
 	emit("deploy.build.cancelled", map[string]any{
 		"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
@@ -459,7 +500,7 @@ type codemagicBuildBackend struct{}
 
 func (codemagicBuildBackend) Name() string { return buildBackendCodemagic }
 
-func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, d *Deployment, build *Build) (*externalBuildJob, error) {
+func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, d *Deployment, build *Build, capsule *sourceCapsule) (*externalBuildJob, error) {
 	input := map[string]any{"appId": cfg.AppID, "workflowId": cfg.WorkflowID}
 	if cfg.Branch != "" {
 		input["branch"] = cfg.Branch
@@ -473,6 +514,21 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	variables["APTEVA_BUILD_ID"] = strconv.FormatInt(build.ID, 10)
 	variables["APTEVA_DEPLOYMENT"] = d.Name
 	variables["APTEVA_ENVIRONMENT"] = d.EnvironmentName
+	if cfg.SourceMode == "bundle" {
+		if capsule == nil {
+			return nil, errors.New("codemagic bundle build requires a prepared source capsule")
+		}
+		variables["APTEVA_SOURCE_URL"] = capsule.URL
+		variables["APTEVA_SOURCE_SHA256"] = capsule.SHA256
+		variables["APTEVA_SOURCE_SIZE"] = strconv.FormatInt(capsule.Size, 10)
+		variables["APTEVA_SOURCE_FORMAT"] = capsule.Format
+		variables["APTEVA_SOURCE_FILENAME"] = sourceCapsuleFilename
+		variables["APTEVA_TARGET_KIND"] = d.TargetKind
+		variables["APTEVA_FRAMEWORK"] = d.Framework
+		variables["APTEVA_BUILD_CMD"] = d.BuildCmd
+		variables["APTEVA_TARGET_CONFIG_B64"] = base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}")))
+		variables["APTEVA_ENV_B64"] = base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}")))
+	}
 	input["environment"] = map[string]any{"variables": variables, "groups": cfg.Groups}
 	data, err := executeIntegration(bound, "start_build", input)
 	if err != nil {
@@ -523,7 +579,7 @@ type githubActionsBuildBackend struct{}
 
 func (githubActionsBuildBackend) Name() string { return buildBackendGitHubActions }
 
-func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, _ *Deployment, _ *Build) (*externalBuildJob, error) {
+func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, _ *Deployment, _ *Build, _ *sourceCapsule) (*externalBuildJob, error) {
 	inputs := cloneAnyMap(cfg.Inputs)
 	submittedAt := time.Now().UTC()
 	data, err := executeIntegration(bound, "trigger_workflow", map[string]any{
