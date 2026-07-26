@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -494,6 +495,156 @@ func TestCollectionRejectsCrossStoreProduct(t *testing.T) {
 	listing, _ := dbListingCreate(db, "proj", map[string]any{"store_id": second.ID, "title": "Wrong store"})
 	if err := dbCollectionAddListing(db, "proj", collection.ID, listing.ID, 0); err == nil {
 		t.Fatal("cross-store collection membership should fail")
+	}
+}
+
+func TestCheckoutStartFreezesCommerceAdjustments(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["checkout:checkout_start"] = map[string]any{"session": map[string]any{
+		"id": int64(401), "subtotal_cents": int64(4900), "total_cents": int64(4900), "currency": "USD",
+	}}
+	platform.responses["checkout:checkout_set_adjustments"] = platformResponseFunc(func(input map[string]any) (any, error) {
+		if intArg(input, "shipping_cents") != 600 || intArg(input, "session_id") != 401 {
+			return nil, errors.New("Commerce adjustments were not forwarded")
+		}
+		adjustments := mapArg(input, "adjustments")
+		if strArg(adjustments, "service") != "standard" {
+			return nil, errors.New("shipping quote snapshot was not forwarded")
+		}
+		return map[string]any{"session": map[string]any{
+			"id": int64(401), "subtotal_cents": int64(4900), "shipping_cents": int64(600),
+			"total_cents": int64(5500), "currency": "USD",
+		}}, nil
+	})
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-adjustments"), tk.WithPlatform(platform))
+	_, _, variant, cart := seedCommerceCart(t, ctx.AppDB(), "proj-adjustments", "main", 0)
+	if err := dbCartAddItem(ctx.AppDB(), "proj-adjustments", cart.ID, variant, 1, 501); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCartApplyShipping(ctx.AppDB(), "proj-adjustments", cart.ID, 600, map[string]any{"service": "standard"}); err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := (&App{}).checkoutStart(ctx, map[string]any{"cart_id": cart.ID})
+	if err != nil {
+		t.Fatalf("start checkout: %v", err)
+	}
+	if checkout.CheckoutSessionID == nil || *checkout.CheckoutSessionID != 401 {
+		t.Fatalf("unexpected checkout: %#v", checkout)
+	}
+}
+
+func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
+	sale := &Sale{
+		ID: 71, CustomerEmail: "buyer@example.com", CustomerName: "Ada Lovelace",
+		ShippingAddress: map[string]any{
+			"address1": "1 Main St", "city": "Madrid", "postal_code": "28001", "country_code": "ES",
+		},
+	}
+	line := dispatchLine{
+		SaleItem: &SaleItem{SKU: "LOCAL-1", Quantity: 2},
+		Source: &VariantSource{
+			ExternalProductID: "product-1", ExternalVariantID: "123", ProviderSKU: "PROVIDER-1",
+		},
+	}
+	tests := []struct {
+		provider string
+		settings map[string]any
+		assert   func(*testing.T, map[string]any)
+	}{
+		{"printful", map[string]any{}, func(t *testing.T, request map[string]any) {
+			if intArg(anyMap(anySlice(request["items"])[0]), "sync_variant_id") != 123 || !boolArg(request, "confirm") {
+				t.Fatalf("unexpected Printful request: %#v", request)
+			}
+		}},
+		{"printify", map[string]any{"shop_id": "shop-9"}, func(t *testing.T, request map[string]any) {
+			if strArg(request, "shop_id") != "shop-9" || intArg(anyMap(anySlice(request["line_items"])[0]), "variant_id") != 123 {
+				t.Fatalf("unexpected Printify request: %#v", request)
+			}
+		}},
+		{"bigbuy", map[string]any{}, func(t *testing.T, request map[string]any) {
+			order := mapArg(request, "order")
+			if strArg(order, "language") != "en" || strArg(anyMap(anySlice(order["products"])[0]), "reference") != "PROVIDER-1" {
+				t.Fatalf("unexpected BigBuy request: %#v", request)
+			}
+		}},
+		{"cjdropshipping", map[string]any{}, func(t *testing.T, request map[string]any) {
+			if strArg(anyMap(anySlice(request["products"])[0]), "vid") != "123" {
+				t.Fatalf("unexpected CJ request: %#v", request)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.provider, func(t *testing.T) {
+			request, err := providerOrderRequest(test.provider, &ProviderPolicy{
+				ConnectionID: 9, ProviderSlug: test.provider, Settings: test.settings,
+			}, sale, []dispatchLine{line})
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.assert(t, request)
+		})
+	}
+}
+
+func TestProviderStorageUsesThreeCommerceTables(t *testing.T) {
+	db := openCommerceTestDB(t)
+	rows, err := db.Query(`SELECT name FROM sqlite_master
+		WHERE type='table' AND name IN ('commerce_provider_policies','commerce_variant_sources','commerce_dispatch_jobs')
+		ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if len(names) != 3 {
+		t.Fatalf("provider storage tables=%v, want exactly the three minimal Commerce tables", names)
+	}
+}
+
+func TestSaleFulfillmentStatusAggregatesProviderDispatches(t *testing.T) {
+	db := openCommerceTestDB(t)
+	store, err := dbStoreCreate(db, "aggregate", map[string]any{"slug": "main", "name": "Main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`INSERT INTO commerce_sales
+		(project_id, store_id, status, payment_status, fulfillment_status)
+		VALUES ('aggregate', ?, 'paid', 'paid', 'unsubmitted')`, store.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saleID, _ := result.LastInsertId()
+	for index, status := range []string{"delivered", "submitted"} {
+		if _, err := db.Exec(`INSERT INTO commerce_dispatch_jobs
+			(project_id, store_id, sale_id, order_id, connection_id, provider_slug, status, idempotency_key)
+			VALUES ('aggregate', ?, ?, 1, ?, ?, ?, ?)`,
+			store.ID, saleID, index+1, []string{"printful", "bigbuy"}[index], status, fmt.Sprintf("dispatch-%d", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := updateSaleFulfillmentStatus(db, "aggregate", saleID); err != nil {
+		t.Fatal(err)
+	}
+	sale, _ := dbSaleGet(db, "aggregate", saleID)
+	if sale.FulfillmentStatus != "partially_fulfilled" {
+		t.Fatalf("sale status=%q, want partially_fulfilled", sale.FulfillmentStatus)
+	}
+	if _, err := db.Exec(`UPDATE commerce_dispatch_jobs SET status='delivered' WHERE project_id='aggregate' AND sale_id=?`, saleID); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateSaleFulfillmentStatus(db, "aggregate", saleID); err != nil {
+		t.Fatal(err)
+	}
+	sale, _ = dbSaleGet(db, "aggregate", saleID)
+	if sale.FulfillmentStatus != "delivered" {
+		t.Fatalf("sale status=%q, want delivered", sale.FulfillmentStatus)
 	}
 }
 

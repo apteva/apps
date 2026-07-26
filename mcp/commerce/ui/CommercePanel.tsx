@@ -103,7 +103,62 @@ interface Sale {
   created_at: string;
 }
 
-type View = "products" | "collections" | "stores" | "carts" | "sales";
+interface ProviderPolicy {
+  store_id: number;
+  connection_id: number;
+  provider_slug: string;
+  enabled: boolean;
+  fulfillment_mode: "review" | "automatic";
+  margin_bps: number;
+  settings?: Record<string, unknown>;
+  connected: boolean;
+  is_default?: boolean;
+}
+
+interface ProviderVariant {
+  id: string;
+  sku: string;
+  title: string;
+  cost_cents: number;
+  suggested_price_cents?: number;
+  currency: string;
+  available: boolean;
+  available_quantity?: number;
+}
+
+interface ProviderProduct {
+  id: string;
+  title: string;
+  vendor?: string;
+  image_url?: string;
+  variants?: ProviderVariant[];
+}
+
+interface VariantSource {
+  id: number;
+  store_id: number;
+  variant_id: number;
+  provider_slug: string;
+  provider_sku: string;
+  unit_cost_cents: number;
+  currency: string;
+  availability: string;
+  available_quantity?: number;
+  last_synced_at?: string;
+}
+
+interface DispatchJob {
+  id: number;
+  store_id: number;
+  sale_id: number;
+  provider_slug: string;
+  status: string;
+  external_order_id?: string;
+  error?: string;
+  updated_at: string;
+}
+
+type View = "products" | "collections" | "providers" | "stores" | "carts" | "sales";
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
@@ -118,6 +173,13 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [collections, setCollections] = useState<Collection[]>([]);
   const [carts, setCarts] = useState<Cart[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [providers, setProviders] = useState<ProviderPolicy[]>([]);
+  const [sources, setSources] = useState<VariantSource[]>([]);
+  const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
+  const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
+  const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
+  const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
+  const [selectedProviderProduct, setSelectedProviderProduct] = useState<ProviderProduct | null>(null);
   const [selectedStore, setSelectedStore] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
@@ -162,13 +224,16 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setLoading(true);
     const filter = selectedStore ? `?store_id=${encodeURIComponent(selectedStore)}` : "";
     try {
-      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales] = await Promise.all([
+      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches] = await Promise.all([
         api<Summary>("/admin/summary"),
         api<Store[]>("/admin/stores"),
         api<Product[]>(`/admin/products${filter}`),
         api<Collection[]>(`/admin/collections${filter}`),
         api<Cart[]>(`/admin/carts${filter}`),
         api<Sale[]>(`/admin/sales${filter ? `${filter}&limit=50` : "?limit=50"}`),
+        api<ProviderPolicy[]>(`/admin/providers${filter}`),
+        api<VariantSource[]>(`/admin/variant-sources${filter}`),
+        api<DispatchJob[]>(`/admin/dispatches${filter ? `${filter}&limit=100` : "?limit=100"}`),
       ]);
       if (sequence !== loadSequence.current) return;
       setSummary(nextSummary);
@@ -177,6 +242,12 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       setCollections(nextCollections || []);
       setCarts(nextCarts || []);
       setSales(nextSales || []);
+      setProviders(nextProviders || []);
+      setSources(nextSources || []);
+      setDispatches(nextDispatches || []);
+      setProviderDrafts(Object.fromEntries((nextProviders || []).map((provider) => [provider.connection_id, {
+        ...provider, settings: { ...(provider.settings || {}) },
+      }])));
     } catch (error) {
       if (sequence === loadSequence.current) setNotice({ tone: "error", message: errorMessage(error) });
     } finally {
@@ -297,9 +368,81 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setSelectedSale(refreshed);
   }
 
+  function updateProviderDraft(connectionId: number, patch: Partial<ProviderPolicy>) {
+    setProviderDrafts((current) => ({
+      ...current,
+      [connectionId]: { ...(current[connectionId] || providers.find((row) => row.connection_id === connectionId)!), ...patch },
+    }));
+  }
+
+  function updateProviderSetting(connectionId: number, key: string, value: unknown) {
+    const current = providerDrafts[connectionId] || providers.find((row) => row.connection_id === connectionId);
+    if (!current) return;
+    updateProviderDraft(connectionId, { settings: { ...(current.settings || {}), [key]: value } });
+  }
+
+  async function saveProvider(provider: ProviderPolicy) {
+    if (!selectedStore) throw new Error("Select a store before changing provider policy");
+    const draft = providerDrafts[provider.connection_id] || provider;
+    await api("/admin/providers", {
+      method: "PATCH",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: provider.connection_id, enabled: draft.enabled,
+        fulfillment_mode: draft.fulfillment_mode, margin_bps: draft.margin_bps, settings: draft.settings || {},
+      }),
+    });
+  }
+
+  async function browseProvider(provider: ProviderPolicy) {
+    if (!selectedStore) throw new Error("Select a store before browsing a provider");
+    const result = await api<{ products: ProviderProduct[] }>("/admin/provider-catalog", {
+      method: "POST",
+      body: JSON.stringify({ store_id: Number(selectedStore), connection_id: provider.connection_id }),
+    });
+    setCatalogProvider(provider);
+    setProviderProducts(result.products || []);
+    setSelectedProviderProduct(null);
+  }
+
+  async function openProviderProduct(product: ProviderProduct) {
+    if (!catalogProvider || !selectedStore) return;
+    const result = await api<{ product: ProviderProduct }>("/admin/provider-products", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
+        external_product_id: product.id,
+      }),
+    });
+    setSelectedProviderProduct(result.product);
+  }
+
+  async function importProviderProduct() {
+    if (!catalogProvider || !selectedProviderProduct || !selectedStore) return;
+    await api("/admin/provider-products/import", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
+        product: selectedProviderProduct,
+      }),
+    });
+    setSelectedProviderProduct(null);
+  }
+
+  async function syncSources() {
+    await api("/admin/variant-sources", {
+      method: "POST",
+      body: JSON.stringify({ store_id: selectedStore ? Number(selectedStore) : undefined, limit: 100 }),
+    });
+  }
+
+  async function submitDispatch(id: number) {
+    await api(`/admin/dispatches/${id}/submit`, { method: "POST" });
+  }
+
   const tabs: Array<{ id: View; label: string }> = [
     { id: "products", label: "Products" }, { id: "collections", label: "Collections" },
-    { id: "stores", label: "Stores" }, { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
+    { id: "providers", label: "Providers" }, { id: "stores", label: "Stores" },
+    { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
   ];
 
   return (
@@ -392,6 +535,68 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
               )}
             </aside>
           </section>
+        )}
+
+        {view === "providers" && (
+          <div className="space-y-6">
+            {!selectedStore && <div className="border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">Select a store to configure providers and import products.</div>}
+            <section className="grid xl:grid-cols-[minmax(0,1fr)_420px] gap-5">
+              <div className="min-w-0 space-y-3">
+                <h2 className="text-sm font-semibold">Supplier connections</h2>
+                <div className="border border-border rounded-md divide-y divide-border">
+                  {providers.map((provider) => {
+                    const draft = providerDrafts[provider.connection_id] || provider;
+                    const settings = draft.settings || {};
+                    return (
+                      <div key={provider.connection_id} className="p-3 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div><div className="font-medium capitalize">{provider.provider_slug}</div><div className="text-xs text-text-muted">Connection #{provider.connection_id}{provider.is_default ? " · Default" : ""}</div></div>
+                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.enabled} onChange={(event) => updateProviderDraft(provider.connection_id, { enabled: event.target.checked })} />Enabled</label>
+                        </div>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                          <Field label="Fulfillment"><select value={draft.fulfillment_mode} onChange={(event) => updateProviderDraft(provider.connection_id, { fulfillment_mode: event.target.value as ProviderPolicy["fulfillment_mode"] })} className={inputClass}><option value="review">Review first</option><option value="automatic">Automatic</option></select></Field>
+                          <Field label="Target margin %"><input type="number" min="0" max="94.99" step="0.01" value={(draft.margin_bps / 100).toString()} onChange={(event) => updateProviderDraft(provider.connection_id, { margin_bps: Math.round(Number(event.target.value) * 100) })} className={inputClass} /></Field>
+                          <Field label="Flat shipping"><input type="number" min="0" step="0.01" value={(Number(settings.flat_shipping_cents || 0) / 100).toString()} onChange={(event) => updateProviderSetting(provider.connection_id, "flat_shipping_cents", Math.round(Number(event.target.value) * 100))} className={inputClass} /></Field>
+                          {provider.provider_slug === "printify" ? <Field label="Printify shop ID"><input value={String(settings.shop_id || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "shop_id", event.target.value)} className={inputClass} /></Field> : <div />}
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button type="button" disabled={!selectedStore || busy || !draft.enabled} onClick={() => void run(() => browseProvider(provider), `${provider.provider_slug} catalog loaded`)} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Browse catalog</button>
+                          <button type="button" disabled={!selectedStore || busy} onClick={() => void run(() => saveProvider(provider), "Provider policy saved")} className="h-8 rounded-md bg-accent px-3 text-sm font-medium text-bg disabled:opacity-50">Save</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {providers.length === 0 && <div className="px-3 py-10 text-center text-sm text-text-muted">No Printful, Printify, BigBuy, or CJ Dropshipping connection is bound to Commerce.</div>}
+                </div>
+              </div>
+              <aside className="xl:border-l xl:border-border xl:pl-5 space-y-3 min-w-0">
+                <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">{catalogProvider ? `${catalogProvider.provider_slug} catalog` : "Provider catalog"}</h2>{catalogProvider && <button type="button" onClick={() => { setCatalogProvider(null); setProviderProducts([]); setSelectedProviderProduct(null); }} className="text-sm text-text-muted hover:text-text">Close</button>}</div>
+                {selectedProviderProduct ? (
+                  <div className="space-y-3">
+                    <div className="flex gap-3">{selectedProviderProduct.image_url && <img src={selectedProviderProduct.image_url} alt="" className="h-16 w-16 rounded object-cover bg-bg-input" />}<div className="min-w-0"><div className="font-medium">{selectedProviderProduct.title}</div><div className="text-xs text-text-muted">{selectedProviderProduct.variants?.length || 0} variants</div></div></div>
+                    <div className="max-h-64 overflow-auto border-y border-border divide-y divide-border">{(selectedProviderProduct.variants || []).map((variant) => <div key={variant.id} className="flex items-center justify-between gap-3 py-2 text-sm"><span className="min-w-0"><span className="block truncate">{variant.title}</span><span className="text-xs text-text-muted">{variant.sku || variant.id}</span></span><span className="text-right whitespace-nowrap"><span className="block">{fmtMoney(variant.cost_cents, variant.currency)}</span><span className="text-xs text-text-muted">{variant.available ? "Available" : "Unavailable"}</span></span></div>)}</div>
+                    <div className="flex gap-2"><button type="button" onClick={() => setSelectedProviderProduct(null)} className="flex-1 h-9 rounded-md border border-border text-sm">Back</button><button type="button" disabled={busy || !(selectedProviderProduct.variants?.length)} onClick={() => void run(importProviderProduct, "Product imported as draft")} className="flex-1 h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">Import product</button></div>
+                  </div>
+                ) : catalogProvider ? (
+                  <div className="max-h-[520px] overflow-auto border-y border-border divide-y divide-border">{providerProducts.map((product) => <button type="button" key={product.id} onClick={() => void openProviderProduct(product)} className="w-full flex items-center gap-3 py-2 text-left hover:bg-bg-input"><span className="h-10 w-10 shrink-0 bg-bg-input rounded overflow-hidden">{product.image_url && <img src={product.image_url} alt="" className="h-full w-full object-cover" />}</span><span className="min-w-0"><span className="block truncate text-sm font-medium">{product.title}</span><span className="text-xs text-text-muted">{product.vendor || `ID ${product.id}`}</span></span></button>)}{providerProducts.length === 0 && <p className="py-10 text-center text-sm text-text-muted">No products returned</p>}</div>
+                ) : <p className="text-sm text-text-muted">Choose a connected provider to browse its live catalog.</p>}
+              </aside>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Imported sources</h2><button type="button" disabled={busy || sources.length === 0} onClick={() => void run(syncSources, "Provider sources synchronized")} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Sync now</button></div>
+              <DataTable headers={["Variant", "Provider", "Supplier SKU", "Availability", "Cost", "Last sync"]} empty={sources.length === 0} emptyLabel="No provider-sourced variants">
+                {sources.map((source) => <tr key={source.id} className="border-t border-border"><td className="px-3 py-2.5">#{source.variant_id}</td><td className="px-3 py-2.5 capitalize">{source.provider_slug}</td><td className="px-3 py-2.5">{source.provider_sku || "-"}</td><td className="px-3 py-2.5"><Status value={source.availability} /></td><td className="px-3 py-2.5">{fmtMoney(source.unit_cost_cents, source.currency)}</td><td className="px-3 py-2.5 text-text-muted">{fmtDate(source.last_synced_at || "")}</td></tr>)}
+              </DataTable>
+            </section>
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold">Fulfillment dispatches</h2>
+              <DataTable headers={["Dispatch", "Sale", "Provider", "Provider order", "Status", "Action"]} empty={dispatches.length === 0} emptyLabel="No provider dispatches">
+                {dispatches.map((dispatch) => <tr key={dispatch.id} className="border-t border-border"><td className="px-3 py-2.5">#{dispatch.id}</td><td className="px-3 py-2.5">#{dispatch.sale_id}</td><td className="px-3 py-2.5 capitalize">{dispatch.provider_slug}</td><td className="px-3 py-2.5">{dispatch.external_order_id || "-"}</td><td className="px-3 py-2.5"><Status value={dispatch.status} />{dispatch.error && <div className="mt-1 max-w-xs text-xs text-red-600 truncate" title={dispatch.error}>{dispatch.error}</div>}</td><td className="px-3 py-2.5 text-right">{(dispatch.status === "review" || dispatch.status === "failed") && <button type="button" disabled={busy} onClick={() => void run(() => submitDispatch(dispatch.id), dispatch.status === "review" ? "Dispatch submitted" : "Dispatch retried")} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">{dispatch.status === "review" ? "Approve" : "Retry"}</button>}</td></tr>)}
+              </DataTable>
+            </section>
+          </div>
         )}
 
         {view === "stores" && (
