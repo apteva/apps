@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,21 @@ func TestIOSCustomBuilderStagesIPAManifest(t *testing.T) {
 	}
 	if manifest.Platform != "ios" || manifest.BundleID != "com.example.ios" || manifest.VersionName != "1.2.3" || manifest.BuildNumber != "42" {
 		t.Fatalf("manifest=%+v", manifest)
+	}
+}
+
+func TestSmokeOnlyMobileBuildCannotBePublished(t *testing.T) {
+	artifactDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(artifactDir, "ios-simulator-smoke.zip"), []byte("smoke"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{}).runMobileRelease(
+		&Deployment{TargetKind: "ios", TargetConfigJSON: `{"smoke_only":true}`},
+		&Build{ID: 9, Status: "succeeded", Framework: "ios", ArtifactPath: artifactDir},
+		releaseOptions{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot be published") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

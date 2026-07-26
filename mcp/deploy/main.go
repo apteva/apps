@@ -465,6 +465,13 @@ func main() {
 		runStaticServer(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--capsule-runner" {
+		if err := runCapsuleRunner(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "capsule runner:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	app := &App{}
 	wrapped := wrapApp{app: app}
 	sdk.Run(&wrapped)

@@ -21,6 +21,7 @@ import (
 
 const (
 	buildBackendLocal         = "local"
+	buildBackendRunner        = "runner"
 	buildBackendCodemagic     = "codemagic"
 	buildBackendGitHubActions = "github_actions"
 	defaultCloudArtifactName  = "apteva-build"
@@ -45,6 +46,8 @@ type cloudBuildConfig struct {
 	SourceMode          string            `json:"source_mode,omitempty"`
 	SourceBaseURL       string            `json:"source_base_url,omitempty"`
 	SourceURLTTLSeconds int               `json:"source_url_ttl_seconds,omitempty"`
+	RunnerURL           string            `json:"runner_url,omitempty"`
+	RunnerTokenEnv      string            `json:"runner_token_env,omitempty"`
 }
 
 type externalBuildJob struct {
@@ -65,6 +68,7 @@ type cloudArtifact struct {
 	Name            string
 	URL             string
 	NeedsGitHubAuth bool
+	Headers         map[string]string
 	Archive         bool
 	FileName        string
 }
@@ -81,6 +85,8 @@ func normalizeBuildBackend(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", buildBackendLocal:
 		return buildBackendLocal
+	case "http_runner", "capsule_runner", buildBackendRunner:
+		return buildBackendRunner
 	case "github", "github-actions", buildBackendGitHubActions:
 		return buildBackendGitHubActions
 	case buildBackendCodemagic:
@@ -103,7 +109,9 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	cfg.ArtifactName = strings.TrimSpace(cfg.ArtifactName)
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(cfg.ArtifactMode))
 	cfg.SourceMode = strings.ToLower(strings.TrimSpace(cfg.SourceMode))
-	if cfg.SourceMode == "" {
+	if cfg.SourceMode == "" && normalizeBuildBackend(backend) == buildBackendRunner {
+		cfg.SourceMode = "bundle"
+	} else if cfg.SourceMode == "" {
 		cfg.SourceMode = "repository"
 	}
 	if cfg.ArtifactName == "" {
@@ -117,6 +125,18 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 		return cfg, fmt.Errorf("source_url_ttl_seconds must be 0 (default) or between 1 and %d", maxTTLSeconds)
 	}
 	switch normalizeBuildBackend(backend) {
+	case buildBackendRunner:
+		if cfg.SourceMode != "bundle" {
+			return cfg, errors.New("runner backend requires source_mode=bundle")
+		}
+		if err := validateRunnerBaseURL(cfg.RunnerURL); err != nil {
+			return cfg, err
+		}
+		cfg.RunnerURL = strings.TrimRight(strings.TrimSpace(cfg.RunnerURL), "/")
+		cfg.RunnerTokenEnv = strings.TrimSpace(cfg.RunnerTokenEnv)
+		if cfg.RunnerTokenEnv == "" {
+			cfg.RunnerTokenEnv = defaultRunnerTokenEnv
+		}
 	case buildBackendCodemagic:
 		if strings.TrimSpace(cfg.AppID) == "" || cfg.WorkflowID == "" {
 			return cfg, errors.New("codemagic backend requires app_id and workflow_id")
@@ -129,7 +149,7 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 		}
 	case buildBackendGitHubActions:
 		if cfg.SourceMode == "bundle" {
-			return cfg, errors.New("source_mode=bundle is currently supported by the codemagic backend only")
+			return cfg, errors.New("source_mode=bundle is supported by runner and Codemagic backends only")
 		}
 		if strings.TrimSpace(cfg.Owner) == "" || strings.TrimSpace(cfg.Repo) == "" || cfg.WorkflowID == "" || strings.TrimSpace(cfg.Ref) == "" {
 			return cfg, errors.New("github_actions backend requires owner, repo, workflow_id, and ref")
@@ -158,6 +178,8 @@ func validateBuildBackendSelection(backend, raw string) error {
 
 func cloudBackendFor(name string) (cloudBuildBackend, error) {
 	switch normalizeBuildBackend(name) {
+	case buildBackendRunner:
+		return runnerBuildBackend{}, nil
 	case buildBackendCodemagic:
 		return codemagicBuildBackend{}, nil
 	case buildBackendGitHubActions:
@@ -168,6 +190,9 @@ func cloudBackendFor(name string) (cloudBuildBackend, error) {
 }
 
 func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
+	if normalizeBuildBackend(backend) == buildBackendRunner {
+		return nil, nil
+	}
 	if globalCtx == nil {
 		return nil, errors.New("platform unavailable")
 	}
@@ -838,6 +863,9 @@ func selectCloudArtifactFile(root, configured string) (string, string, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		if filepath.Base(rel) == artifactManifestFilename {
+			return nil
+		}
 		if configured != "" && rel != configured && filepath.Base(rel) != filepath.Base(configured) {
 			return nil
 		}
@@ -876,6 +904,9 @@ func downloadCloudArtifact(bound *sdk.BoundIntegration, artifact *cloudArtifact,
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/vnd.github+json")
 		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	}
+	for key, value := range artifact.Headers {
+		req.Header.Set(key, value)
 	}
 	client := &http.Client{
 		Timeout: 30 * time.Minute,

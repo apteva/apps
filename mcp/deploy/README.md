@@ -4,7 +4,8 @@ Build and release services, Android apps, and iOS apps for Apteva projects.
 
 Takes a code repo (from the **Code** app or a local path) and turns it
 into a built, supervised, URL-addressable process. Builds can run on
-the Deploy host, Codemagic, or GitHub Actions.
+the Deploy host, a Git-independent Apteva capsule runner, Codemagic,
+or GitHub Actions.
 
 ## Surfaces
 
@@ -95,9 +96,61 @@ Play rollout or expires a TestFlight build.
 ## Cloud build backends
 
 Build execution is selected per environment and snapshotted onto each
-build. Existing deployments default to `local`. Bind one or more
-Codemagic/GitHub integrations to the `cloud_build` role, then set
-`build_backend` and `build_backend_config_json`.
+build. Existing deployments default to `local`.
+
+### Git-independent capsule runner
+
+The `runner` backend sends a complete, signed source capsule directly to
+another Deploy binary running in capsule-runner mode. It does not create,
+clone, or require any Git repository. The runner verifies the capsule's
+exact size and SHA-256 before extraction, uses Deploy's existing builders,
+and returns a ZIP artifact over its authenticated HTTP API.
+
+Start a runner on a macOS build host:
+
+```bash
+export APTEVA_RUNNER_TOKEN="$(openssl rand -hex 32)"
+./deploy --capsule-runner \
+  --listen 127.0.0.1:9075 \
+  --data-dir "$HOME/.apteva/deploy-runner" \
+  --concurrency 1
+```
+
+Expose it through HTTPS for a remote Deploy installation. Plain HTTP is
+accepted only for a loopback runner. Configure an environment with:
+
+```json
+{
+  "runner_url": "https://build-mac.example.com",
+  "source_base_url": "https://apteva.example.com",
+  "source_url_ttl_seconds": 7200,
+  "artifact_mode": "file",
+  "artifact_name": "apteva-build"
+}
+```
+
+Set `build_backend` to `runner`. Configure the same secret in Deploy's
+`runner_token` setting and the runner's `APTEVA_RUNNER_TOKEN` environment
+variable. The Deploy sidecar may also receive `APTEVA_RUNNER_TOKEN` directly;
+`runner_token_env` can select another environment-variable name. The token is
+never stored in deployment or build records.
+
+The runner accepts jobs idempotently, supports status, cancellation, logs,
+and authenticated artifact retrieval, retains terminal job output for 24
+hours, and marks interrupted builds failed after a runner restart. Source
+capsules remain owned by Deploy and are removed when the build reaches a
+terminal state.
+
+For an unsigned iOS compile test, add `"smoke_only": true` to
+`target_config_json`. A signed iOS job receives only the required App Store
+Connect signing fields from Deploy's bound `app_store` connection. Android
+jobs receive upload-key fields from `android_signing` when available. Store
+publishing still happens through Deploy after it retrieves the IPA or AAB.
+
+### Integration-backed providers
+
+Bind Codemagic or GitHub integrations to the `cloud_build` role before using
+their respective backends.
 
 Codemagic example:
 
@@ -112,42 +165,10 @@ Codemagic example:
 }
 ```
 
-Codemagic normally builds the repository attached to its `app_id`. To build
-Code-app or local sources without giving each user a Git provider account, use
-the fixed Apteva runner and opt into a signed source capsule:
-
-```json
-{
-  "app_id": "apteva-runner-app-id",
-  "workflow_id": "apteva-ios-runner",
-  "branch": "main",
-  "source_mode": "bundle",
-  "source_url_ttl_seconds": 7200,
-  "artifact_mode": "file",
-  "artifact_name": "apteva-build",
-  "groups": ["appstore_credentials"]
-}
-```
-
-Deploy exports the selected source, creates `source.zip`, calculates its
-SHA-256, and gives Codemagic an HMAC-signed HTTPS URL. The URL is bound to the
-build and project, expires after two hours by default, and remains valid across
-a Deploy sidecar restart. The runner verifies the declared size and SHA-256
-before securely extracting it. Deploy removes the capsule when the cloud build
-finishes, fails, is cancelled, or its URL expires.
-
-The bootstrap workflow and its tests live in `codemagic-runner/`. Codemagic
-requires `codemagic.yaml` at repository root, so the contents of that directory
-are published as the root of the single Apteva-owned runner repository.
-
-For an unsigned compile smoke test, add `"smoke_only": true` to
-`target_config_json`. A signed IPA uses the App Store Connect credentials from
-the configured Codemagic variable group.
-
-Local Apteva installations must expose the signed route through an HTTPS URL
-that Codemagic can reach. Configure the server public URL to an HTTPS tunnel,
-or set `source_base_url` to that tunnel origin in the backend configuration.
-The source route verifies its own signature and does not require Storage.
+Codemagic builds remain repository-backed because Codemagic's API requires an
+application, workflow, and branch or tag. Its legacy `source_mode: bundle`
+option remains accepted for compatibility with operator-managed workflows,
+but the Git-independent path is the `runner` backend above.
 
 GitHub Actions example:
 
@@ -169,10 +190,11 @@ GitHub Actions example:
 | Mode | Contract |
 |------|----------|
 | `bundle` | The named ZIP artifact is unpacked as the service/static build output. |
-| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. |
+| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. Runner/GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. |
 | `store_upload` | The workflow signs and uploads iOS to App Store Connect; Deploy adopts it and continues TestFlight/App Store processing. |
 | `none` | The workflow has no deployable output. |
 
+The capsule runner serves authenticated artifact and log routes directly.
 Codemagic reads short-lived artifact URLs from the completed build.
 GitHub Actions expects a workflow artifact named `apteva-build` unless
 overridden. GitHub workflow inputs are passed exactly as configured, so

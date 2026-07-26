@@ -195,7 +195,7 @@ const API = "/api/apps/deploy/api";
 const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 const TARGET_KINDS = ["service", "android", "ios"] as const;
-const BUILD_BACKENDS = ["local", "codemagic", "github_actions"] as const;
+const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -1220,6 +1220,7 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               <option value="local">Local</option>
+              <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
             </select>
@@ -1805,6 +1806,7 @@ function EditConfigDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               <option value="local">Local</option>
+              <option value="runner">Capsule runner</option>
               <option value="codemagic">Codemagic</option>
               <option value="github_actions">GitHub Actions</option>
             </select>

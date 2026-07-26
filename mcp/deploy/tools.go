@@ -20,7 +20,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "deploy_init", Handler: a.toolInit,
-			Description: "Bind a source to a new service, Android, or iOS deployment. Builds default to local; set build_backend and build_backend_config_json for Codemagic or GitHub Actions.",
+			Description: "Bind a source to a new service, Android, or iOS deployment. Builds default to local; set build_backend and build_backend_config_json for a capsule runner, Codemagic, or GitHub Actions.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -31,7 +31,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"framework":                 map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -91,7 +91,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_extra_json":         map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -116,7 +116,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_extra_json":         map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},
@@ -323,7 +323,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_ref":                map[string]any{"type": "string"},
 					"framework":                 map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
-					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "runner", "codemagic", "github_actions"}},
 					"build_backend_config_json": map[string]any{"type": "string"},
 					"start_cmd":                 map[string]any{"type": "string"},
 					"port_hint":                 map[string]any{"type": "integer"},

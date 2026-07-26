@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.17.1
+version: 0.17.2
 description: |
   Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -71,7 +71,7 @@ requires:
       compatible_slugs: [codemagic, github]
       capabilities: [build.submit, build.status, build.cancel, build.artifacts]
       label: Cloud build providers
-      hint: Optional Codemagic or GitHub connections for builds on hosted runners.
+      hint: Optional Codemagic or GitHub connections. Git-independent capsule runners do not require an integration.
 
 provides:
   http_routes:
@@ -177,6 +177,11 @@ config_schema:
     default: "3"
     label: Retained rollback builds
     description: Number of most recent successful builds to keep per deployment in addition to any build referenced by the current/live release. Older unreferenced build artifacts are pruned automatically. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
+  - name: runner_token
+    type: secret
+    default: ""
+    label: Capsule runner token
+    description: Shared bearer token used to authenticate Git-independent capsule runner jobs. APTEVA_RUNNER_TOKEN overrides this value. Use at least 32 random characters.
   - name: public_host
     type: text
     default: ""

@@ -38,6 +38,7 @@ type mobileTargetConfig struct {
 	AppStoreAppID string   `json:"app_store_app_id,omitempty"`
 	BetaGroupID   string   `json:"beta_group_id,omitempty"`
 	ReleaseType   string   `json:"release_type,omitempty"`
+	SmokeOnly     bool     `json:"smoke_only,omitempty"`
 }
 
 type artifactManifest struct {
@@ -123,7 +124,7 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	}
 
 	if strings.TrimSpace(ov.BuildCmd) != "" {
-		if err := runMobileBuildCommand(srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
 			return "", fmt.Errorf("android build_cmd: %w", err)
 		}
 	} else {
@@ -143,7 +144,7 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 		}
 		args := []string{task, "--console=plain", "--no-daemon"}
 		args = append(args, cfg.GradleArgs...)
-		if err := runMobileBuildCommand(srcDir, bin, args, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, bin, args, ov.Env, logW); err != nil {
 			return "", fmt.Errorf("gradle %s: %w", task, err)
 		}
 	}
@@ -157,7 +158,7 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	if err := copyMobileFile(aab, dst); err != nil {
 		return "", err
 	}
-	if err := ensureAndroidBundleSigned(dst, false, logW); err != nil {
+	if err := ensureAndroidBundleSigned(dst, false, logW, ov.Credentials.AndroidSigning); err != nil {
 		return "", err
 	}
 	manifest := artifactManifest{
@@ -184,7 +185,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		return "", err
 	}
 	if strings.TrimSpace(ov.BuildCmd) != "" {
-		if err := runMobileBuildCommand(srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
 			return "", fmt.Errorf("ios build_cmd: %w", err)
 		}
 		ipa, err := findMobileArtifact(srcDir, ".ipa", "")
@@ -199,22 +200,11 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	if _, err := exec.LookPath("xcodebuild"); err != nil {
 		return "", errors.New("xcodebuild not found; install Xcode")
 	}
-	creds, err := boundConnectionCredentials("app_store")
-	if err != nil {
-		return "", err
-	}
-	issuerID := strings.TrimSpace(creds.Fields["issuer_id"])
-	keyID := strings.TrimSpace(creds.Fields["key_id"])
-	privateKey := normalizePEM(creds.Fields["private_key"])
-	if issuerID == "" || keyID == "" || privateKey == "" {
-		return "", errors.New("App Store Connect connection requires issuer_id, key_id, and private_key")
-	}
-
 	if exists(filepath.Join(srcDir, "project.yml")) && !hasXcodeContainer(srcDir) {
 		if _, err := exec.LookPath("xcodegen"); err != nil {
 			return "", errors.New("project.yml found but xcodegen is not on PATH")
 		}
-		if err := runMobileBuildCommand(srcDir, "xcodegen", []string{"generate"}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodegen", []string{"generate"}, ov.Env, logW); err != nil {
 			return "", fmt.Errorf("xcodegen generate: %w", err)
 		}
 	}
@@ -225,12 +215,26 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	}
 	scheme := strings.TrimSpace(cfg.Scheme)
 	if scheme == "" {
-		scheme, err = discoverFirstIOSScheme(srcDir, containerFlag, containerPath, ov.Env)
+		scheme, err = discoverFirstIOSScheme(buildContext(ov), srcDir, containerFlag, containerPath, ov.Env)
 		if err != nil {
 			return "", err
 		}
 	}
 	configuration := defaultStr(cfg.Configuration, "Release")
+	if cfg.SmokeOnly {
+		return buildIOSSimulatorSmoke(buildContext(ov), srcDir, artifactDir, containerFlag, containerPath, scheme, configuration, ov.Env, cfg, logW)
+	}
+
+	fields, err := mobileBuildCredentialFields(ov.Credentials.AppStore, "app_store")
+	if err != nil {
+		return "", err
+	}
+	issuerID := strings.TrimSpace(fields["issuer_id"])
+	keyID := strings.TrimSpace(fields["key_id"])
+	privateKey := normalizePEM(fields["private_key"])
+	if issuerID == "" || keyID == "" || privateKey == "" {
+		return "", errors.New("App Store Connect connection requires issuer_id, key_id, and private_key")
+	}
 
 	tmp, err := os.MkdirTemp("", "apteva-ios-build-*")
 	if err != nil {
@@ -255,7 +259,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		archiveArgs = append(archiveArgs, "DEVELOPMENT_TEAM="+cfg.TeamID)
 	}
 	archiveArgs = append(archiveArgs, "archive")
-	if err := runMobileBuildCommand(srcDir, "xcodebuild", archiveArgs, ov.Env, logW); err != nil {
+	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", archiveArgs, ov.Env, logW); err != nil {
 		return "", fmt.Errorf("xcodebuild archive: %w", err)
 	}
 
@@ -266,7 +270,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	exportDir := filepath.Join(tmp, "export")
 	exportArgs := []string{"-exportArchive", "-archivePath", archivePath, "-exportPath", exportDir, "-exportOptionsPlist", exportOptions}
 	exportArgs = append(exportArgs, authArgs...)
-	if err := runMobileBuildCommand(srcDir, "xcodebuild", exportArgs, ov.Env, logW); err != nil {
+	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", exportArgs, ov.Env, logW); err != nil {
 		return "", fmt.Errorf("xcodebuild export: %w", err)
 	}
 	ipa, err := findMobileArtifact(exportDir, ".ipa", "")
@@ -279,6 +283,69 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	version := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleShortVersionString")
 	buildNumber := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleVersion")
 	return stageIPAWithVersion(ipa, artifactDir, cfg, version, buildNumber, logW)
+}
+
+func buildIOSSimulatorSmoke(ctx context.Context, srcDir, artifactDir, containerFlag, containerPath, scheme, configuration string, env map[string]string, cfg mobileTargetConfig, logW io.Writer) (string, error) {
+	tmp, err := os.MkdirTemp("", "apteva-ios-smoke-*")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	derivedPath := filepath.Join(tmp, "DerivedData")
+	args := []string{
+		containerFlag, containerPath,
+		"-scheme", scheme,
+		"-configuration", configuration,
+		"-sdk", "iphonesimulator",
+		"-destination", "generic/platform=iOS Simulator",
+		"-derivedDataPath", derivedPath,
+		"CODE_SIGNING_ALLOWED=NO",
+		"build",
+	}
+	if err := runMobileBuildCommand(ctx, srcDir, "xcodebuild", args, env, logW); err != nil {
+		return "", fmt.Errorf("xcodebuild simulator smoke: %w", err)
+	}
+	appPath, err := findIOSAppBundle(filepath.Join(derivedPath, "Build", "Products"))
+	if err != nil {
+		return "", errors.New("iOS simulator smoke build produced no .app")
+	}
+	name := "ios-simulator-smoke.zip"
+	dst := filepath.Join(artifactDir, name)
+	if err := zipDirectoryTree(filepath.Dir(appPath), filepath.Base(appPath), dst); err != nil {
+		return "", err
+	}
+	manifest := artifactManifest{
+		Platform: "ios", Primary: name, BundleID: cfg.BundleID,
+		VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber,
+		Files: []artifactFile{mobileArtifactFile(dst, "simulator-smoke")},
+	}
+	if err := writeArtifactManifest(artifactDir, manifest); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(logW, "=== iOS unsigned simulator smoke: %s ===\n", dst)
+	return name, nil
+}
+
+func findIOSAppBundle(root string) (string, error) {
+	var matches []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".app") {
+			matches = append(matches, path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", os.ErrNotExist
+	}
+	sort.Strings(matches)
+	return matches[0], nil
 }
 
 func stageIPA(ipa, artifactDir string, cfg mobileTargetConfig, logW io.Writer) (string, error) {
@@ -309,8 +376,11 @@ func stageIPAWithVersion(ipa, artifactDir string, cfg mobileTargetConfig, versio
 	return primary, nil
 }
 
-func runMobileBuildCommand(dir, bin string, args []string, userEnv map[string]string, logW io.Writer) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+func runMobileBuildCommand(parent context.Context, dir, bin string, args []string, userEnv map[string]string, logW io.Writer) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 45*time.Minute)
 	defer cancel()
 	fmt.Fprintf(logW, "+ %s %s (cwd=%s)\n", bin, strings.Join(args, " "), dir)
 	cmd := exec.Command(bin, args...)
@@ -334,6 +404,9 @@ func runMobileBuildCommand(dir, bin string, args []string, userEnv map[string]st
 		case <-time.After(5 * time.Second):
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			<-done
+		}
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return context.Canceled
 		}
 		return errors.New("mobile build timed out after 45 minutes")
 	}
@@ -497,9 +570,9 @@ func resolveIOSContainer(root string, cfg mobileTargetConfig) (string, string, e
 	return "", "", errors.New("no .xcworkspace or .xcodeproj found; set project_path/workspace_path or provide project.yml with xcodegen")
 }
 
-func discoverFirstIOSScheme(root, containerFlag, containerPath string, userEnv map[string]string) (string, error) {
+func discoverFirstIOSScheme(ctx context.Context, root, containerFlag, containerPath string, userEnv map[string]string) (string, error) {
 	args := []string{containerFlag, containerPath, "-list", "-json"}
-	cmd := exec.Command("xcodebuild", args...)
+	cmd := exec.CommandContext(ctx, "xcodebuild", args...)
 	cmd.Dir = root
 	cmd.Env = mobileBuildEnv(userEnv)
 	out, err := cmd.Output()
@@ -564,30 +637,51 @@ func normalizePEM(value string) string {
 	return strings.TrimSpace(strings.ReplaceAll(value, `\n`, "\n"))
 }
 
-func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer) error {
+func mobileBuildCredentialFields(supplied map[string]string, role string) (map[string]string, error) {
+	if len(supplied) > 0 {
+		return supplied, nil
+	}
+	if globalCtx == nil {
+		return nil, fmt.Errorf("%s signing credentials were not supplied to the runner", role)
+	}
+	creds, err := boundConnectionCredentials(role)
+	if err != nil {
+		return nil, err
+	}
+	return creds.Fields, nil
+}
+
+func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer, supplied ...map[string]string) error {
 	if androidBundleHasSignature(bundlePath) {
 		fmt.Fprintln(logW, "Android bundle signature present")
 		return nil
 	}
 	jarsigner, lookErr := exec.LookPath("jarsigner")
 
-	creds, credErr := boundConnectionCredentials("android_signing")
-	if credErr != nil {
-		// Compatibility fallback for connections created while upload-key
-		// fields were temporarily part of the Google Play integration.
-		creds, credErr = boundConnectionCredentials("play_store")
+	var fields map[string]string
+	if len(supplied) > 0 && len(supplied[0]) > 0 {
+		fields = supplied[0]
+	} else if globalCtx != nil {
+		creds, credErr := boundConnectionCredentials("android_signing")
+		if credErr == nil {
+			fields = creds.Fields
+		} else if creds, fallbackErr := boundConnectionCredentials("play_store"); fallbackErr == nil {
+			// Compatibility fallback for connections created while upload-key
+			// fields were temporarily part of the Google Play integration.
+			fields = creds.Fields
+		}
 	}
-	if credErr != nil {
+	if len(fields) == 0 {
 		if required {
 			return errors.New("Android AAB is not signed; configure Gradle release signing or bind Android Upload Signing")
 		}
 		fmt.Fprintln(logW, "note: AAB signature was not verified; release will require a signed bundle or upload keystore")
 		return nil
 	}
-	encoded := strings.TrimSpace(creds.Fields["upload_keystore_base64"])
-	alias := strings.TrimSpace(creds.Fields["upload_key_alias"])
-	storePassword := creds.Fields["upload_keystore_password"]
-	keyPassword := creds.Fields["upload_key_password"]
+	encoded := strings.TrimSpace(fields["upload_keystore_base64"])
+	alias := strings.TrimSpace(fields["upload_key_alias"])
+	storePassword := fields["upload_keystore_password"]
+	keyPassword := fields["upload_key_password"]
 	if encoded == "" || alias == "" || storePassword == "" {
 		if required {
 			return errors.New("Android AAB is not signed and the Android Upload Signing connection is incomplete")

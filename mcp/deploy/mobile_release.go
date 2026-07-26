@@ -63,6 +63,9 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if !buildArtifactAvailable(b) {
 		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
 	}
+	if cfg, cfgErr := parseMobileTargetConfig(d.TargetConfigJSON); cfgErr == nil && cfg.SmokeOnly {
+		return nil, errors.New("smoke_only mobile builds cannot be published; disable smoke_only and create a signed build")
+	}
 	manifest, err := readArtifactManifest(b)
 	if err != nil {
 		return nil, err
