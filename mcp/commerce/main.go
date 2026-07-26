@@ -1193,7 +1193,7 @@ func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *Ch
 	if presentation != "elements" && presentation != "hosted" {
 		return nil, fmt.Errorf("unsupported Stripe presentation %q", presentation)
 	}
-	returnURL, err := commerceReturnURL(ctx, pid, store)
+	returnURL, cancelURL, err := commerceCheckoutURLs(ctx, pid, store)
 	if err != nil {
 		return nil, err
 	}
@@ -1208,29 +1208,35 @@ func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *Ch
 		out["return_url"] = returnURL
 	} else {
 		out["success_url"] = returnURL
-		out["cancel_url"] = strings.TrimSuffix(returnURL, "/checkout/return") + "/checkout"
+		out["cancel_url"] = cancelURL
 	}
 	return out, nil
 }
 
 func commerceReturnURL(ctx *sdk.AppCtx, pid string, store *Store) (string, error) {
+	returnURL, _, err := commerceCheckoutURLs(ctx, pid, store)
+	return returnURL, err
+}
+
+func commerceCheckoutURLs(ctx *sdk.AppCtx, pid string, store *Store) (string, string, error) {
 	if base := strings.TrimRight(strings.TrimSpace(store.PublicBaseURL), "/"); base != "" {
 		u, err := url.Parse(base)
 		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-			return "", errors.New("store public_base_url must be an absolute http(s) URL")
+			return "", "", errors.New("store public_base_url must be an absolute http(s) URL")
 		}
-		return base + "/checkout/return", nil
+		return base + "/checkout/return", base + "/checkout", nil
 	}
 	info, err := ctx.PlatformInfo()
 	if err != nil || info == nil || strings.TrimSpace(info.PublicURL) == "" {
-		return "", errors.New("Stripe checkout requires the store public_base_url or the platform public_url")
+		return "", "", errors.New("Stripe checkout requires the store public_base_url or the platform public_url")
 	}
 	siteSlug := strArg(store.Metadata, "content_site_slug")
 	if siteSlug == "" {
-		return "", errors.New("Stripe checkout requires a configured Content storefront")
+		return "", "", errors.New("Stripe checkout requires a configured Content storefront")
 	}
 	query := url.Values{"project_id": []string{pid}, "site": []string{siteSlug}}
-	return strings.TrimRight(info.PublicURL, "/") + "/api/apps/content/public/checkout/return?" + query.Encode(), nil
+	base := strings.TrimRight(info.PublicURL, "/") + "/api/apps/content/public"
+	return base + "/checkout/return?" + query.Encode(), base + "/checkout?" + query.Encode(), nil
 }
 
 func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {

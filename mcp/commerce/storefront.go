@@ -489,7 +489,7 @@ if(checkoutForm){
     checkout.createPaymentElement().mount('#payment-element');
     paymentStage.hidden=false;
     orderButton.hidden=true;
-    paymentButton.disabled=false;
+    paymentButton.disabled=!loaded.actions.getSession().canConfirm;
     paymentStage.scrollIntoView({behavior:'smooth',block:'center'});
   }
   function renderSummary(cart,quoted){

@@ -696,6 +696,16 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 	if methods := anySlice(args["payment_method_types"]); len(methods) != 1 || methods[0] != "card" {
 		t.Fatalf("payment methods are not constrained to card: %#v", methods)
 	}
+
+	store.PaymentPresentation = "hosted"
+	args, err = commercePaymentArgs(ctx, "payment-args", store, &CheckoutSession{ID: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["success_url"] != "https://shop.example/checkout/return" ||
+		args["cancel_url"] != "https://shop.example/checkout" {
+		t.Fatalf("unexpected hosted URLs: %#v", args)
+	}
 }
 
 func TestHardeningMigrationReconcilesExistingDuplicates(t *testing.T) {
