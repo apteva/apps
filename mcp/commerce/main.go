@@ -1326,8 +1326,11 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		var response map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_cancel", map[string]any{
 			"_project_id": pid, "session_id": *ch.CheckoutSessionID,
-		}, &response); err != nil && !strings.Contains(err.Error(), "already cancelled") {
-			return nil, fmt.Errorf("checkout_cancel: %w", err)
+		}, &response); err != nil {
+			message := strings.ToLower(err.Error())
+			if !strings.Contains(message, "already cancelled") && !strings.Contains(message, "already expired") {
+				return nil, fmt.Errorf("checkout_cancel: %w", err)
+			}
 		}
 	}
 	if err := a.releaseDiscountReservation(ctx, pid, ch.DiscountReservationID); err != nil {

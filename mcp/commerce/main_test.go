@@ -588,7 +588,7 @@ func TestPublicToolFiltersHideDraftProductsAndCollections(t *testing.T) {
 func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["checkout:cart_create"] = map[string]any{"cart": map[string]any{"id": 451}}
-	platform.responses["checkout:checkout_cancel"] = map[string]any{"session": map[string]any{"id": 752, "status": "cancelled"}}
+	platform.errors["checkout:checkout_cancel"] = errors.New("session 752 already expired")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("cart-session"), tk.WithPlatform(platform))
 	store, err := dbStoreCreate(ctx.AppDB(), "cart-session", map[string]any{"slug": "main", "name": "Main"})
 	if err != nil {
