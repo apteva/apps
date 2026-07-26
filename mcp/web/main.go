@@ -42,9 +42,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.15
+version: 0.1.16
 description: Browser-native web intelligence for agents.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
@@ -83,7 +85,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: web/v0.1.16
     entry: mcp/web
   port: 8080
   health_check: /health

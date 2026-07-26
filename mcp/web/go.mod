@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/web
 go 1.26
 
 require (
-	github.com/apteva/app-sdk v0.25.0
+	github.com/apteva/app-sdk v0.43.0
 	golang.org/x/net v0.45.0
 	modernc.org/sqlite v1.50.0
 )

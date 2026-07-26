@@ -2,11 +2,14 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.15
+version: 0.1.16
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
+
+  v0.1.16 adds Web's adaptive themed icon and updates the app to the current
+  Apteva app SDK.
 
   v0.1.15 hardens cache and storage semantics, bounds SQLite payloads, honors
   visit_top and configured crawl limits, improves crawl dedupe and Unicode
@@ -40,6 +43,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/web
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [browser, search, research, crawl, observability]
 
 scopes: [project, global]
@@ -138,7 +143,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: web/v0.1.16
     entry: mcp/web
   port: 8080
   health_check: /health
