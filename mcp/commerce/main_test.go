@@ -588,6 +588,7 @@ func TestPublicToolFiltersHideDraftProductsAndCollections(t *testing.T) {
 func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["checkout:cart_create"] = map[string]any{"cart": map[string]any{"id": 451}}
+	platform.responses["checkout:checkout_cancel"] = map[string]any{"session": map[string]any{"id": 752, "status": "cancelled"}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("cart-session"), tk.WithPlatform(platform))
 	store, err := dbStoreCreate(ctx.AppDB(), "cart-session", map[string]any{"slug": "main", "name": "Main"})
 	if err != nil {
@@ -607,6 +608,27 @@ func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
 	}
 	if calls := countPlatformCalls(platform.calls, "checkout", "cart_create"); calls != 1 {
 		t.Fatalf("checkout cart_create calls=%d, want 1", calls)
+	}
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "cart-session", first, 752, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := (&App{}).createCart(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.ID != first.ID || reopened.Status != "open" {
+		t.Fatalf("checkout cart was not reopened: %#v", reopened)
+	}
+	cancelled, err := dbCheckoutGet(ctx.AppDB(), "cart-session", checkout.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != "cancelled" {
+		t.Fatalf("checkout status=%q, want cancelled", cancelled.Status)
+	}
+	if calls := countPlatformCalls(platform.calls, "checkout", "checkout_cancel"); calls != 1 {
+		t.Fatalf("checkout checkout_cancel calls=%d, want 1", calls)
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='awaiting_payment' WHERE id=?`, first.ID); err != nil {
 		t.Fatal(err)

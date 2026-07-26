@@ -797,6 +797,22 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 	if existing, err := dbCartGetBySession(ctx.AppDB(), pid, store.ID, token); err != nil {
 		return nil, err
 	} else if existing != nil {
+		if existing.Status == "checkout" {
+			checkout, err := dbCheckoutGetByCart(ctx.AppDB(), pid, existing.ID)
+			if err != nil {
+				return nil, err
+			}
+			if checkout == nil {
+				return nil, errors.New("checkout cart is missing its checkout session")
+			}
+			if _, err := a.checkoutCancel(ctx, map[string]any{
+				"_project_id": pid,
+				"checkout_id": checkout.ID,
+			}); err != nil {
+				return nil, fmt.Errorf("reopen storefront cart: %w", err)
+			}
+			return dbCartGet(ctx.AppDB(), pid, existing.ID, true)
+		}
 		if existing.Status != "open" && existing.Status != "checkout" && existing.Status != "awaiting_payment" {
 			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
 		}
