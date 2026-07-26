@@ -257,7 +257,8 @@ func TestCartItemTitle(t *testing.T) {
 }
 
 func TestCheckoutUpdateReplaysIdenticalAwaitingPaymentPatch(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("checkout-replay"))
+	platform := newCommercePlatformStub()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("checkout-replay"), tk.WithPlatform(platform))
 	_, _, _, cart := seedCommerceCart(t, ctx.AppDB(), "checkout-replay", "main", 0)
 	checkout, err := dbCheckoutCreate(ctx.AppDB(), "checkout-replay", cart, 401, nil)
 	if err != nil {
@@ -276,10 +277,17 @@ func TestCheckoutUpdateReplaysIdenticalAwaitingPaymentPatch(t *testing.T) {
 	if err := dbCheckoutPatch(ctx.AppDB(), "checkout-replay", checkout.ID, patch); err != nil {
 		t.Fatal(err)
 	}
+	got, err := (&App{}).checkoutUpdate(ctx, map[string]any{"checkout_id": checkout.ID, "patch": patch})
+	if err != nil {
+		t.Fatalf("identical started retry failed: %v", err)
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("identical replay reached Checkout: %#v", platform.calls)
+	}
 	if err := dbCheckoutInvoice(ctx.AppDB(), "checkout-replay", checkout.ID, 501, "INV-501"); err != nil {
 		t.Fatal(err)
 	}
-	got, err := (&App{}).checkoutUpdate(ctx, map[string]any{"checkout_id": checkout.ID, "patch": patch})
+	got, err = (&App{}).checkoutUpdate(ctx, map[string]any{"checkout_id": checkout.ID, "patch": patch})
 	if err != nil {
 		t.Fatalf("identical retry failed: %v", err)
 	}

@@ -1057,10 +1057,10 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		patch["customer_name"] = name
 		delete(patch, "name")
 	}
+	if checkoutPatchMatches(ch, patch) {
+		return ch, nil
+	}
 	if ch.Status != "started" {
-		if checkoutPatchMatches(ch, patch) {
-			return ch, nil
-		}
 		return nil, fmt.Errorf("checkout is %s; only started checkouts accept updates", ch.Status)
 	}
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
