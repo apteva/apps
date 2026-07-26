@@ -31,8 +31,9 @@ func TestSendMessageMissingSenderStructuredError(t *testing.T) {
 	})
 
 	_, err := app.sendMessageImpl(ctx, map[string]any{
-		"id":   c.ID,
-		"body": "Hello",
+		"id":      c.ID,
+		"subject": "Hello",
+		"body":    "Hello",
 	}, false)
 	if err == nil {
 		t.Fatal("expected missing sender error")

@@ -191,9 +191,37 @@ func TestMessageToolSchemasRequirePositiveIDAndContent(t *testing.T) {
 		if _, ok := properties["content_sid"]; !ok {
 			t.Fatalf("%s schema missing content_sid", tool.Name)
 		}
+		if _, ok := properties["idempotency_key"]; !ok {
+			t.Fatalf("%s schema missing idempotency_key", tool.Name)
+		}
 		anyOf, ok := tool.InputSchema["anyOf"].([]any)
 		if !ok || len(anyOf) != 3 {
 			t.Fatalf("%s anyOf=%#v, want body/template_id/content_sid alternatives", tool.Name, tool.InputSchema["anyOf"])
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Fatalf("tool %s not found", name)
+		}
+	}
+}
+
+func TestMessageToolDescriptionsWarnAboutExternalSideEffects(t *testing.T) {
+	wanted := map[string]bool{
+		"contacts_send_message": false,
+		"contacts_reply":        false,
+		"contacts_send_test":    false,
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if _, ok := wanted[tool.Name]; !ok {
+			continue
+		}
+		wanted[tool.Name] = true
+		if !strings.Contains(tool.Description, "REAL EXTERNAL SEND") {
+			t.Fatalf("%s description lacks side-effect warning: %q", tool.Name, tool.Description)
+		}
+		if tool.Name != "contacts_reply" && !strings.Contains(tool.Description, "messaging_senders_list") {
+			t.Fatalf("%s description lacks read-only configuration guidance: %q", tool.Name, tool.Description)
 		}
 	}
 	for name, found := range wanted {
