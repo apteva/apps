@@ -2,11 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
 
@@ -16,6 +18,46 @@ import (
 // guarantees ARE all testable in-process.
 
 const testPID = "test-project"
+
+type wrappedCatalogPlatform struct {
+	tk.BasePlatformClient
+}
+
+func (wrappedCatalogPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	var result any
+	switch app + ":" + tool {
+	case "catalog:catalog_prices_get":
+		result = map[string]any{"price": map[string]any{
+			"id": 100, "product_id": 10, "nickname": "", "unit_amount_cents": 2400,
+			"currency": "EUR", "active": true, "archived_at": "",
+		}}
+	case "catalog:catalog_products_get":
+		result = map[string]any{"product": map[string]any{"id": 10, "name": "Wrapped Catalog Product"}}
+	default:
+		return nil
+	}
+	body, _ := json.Marshal(result)
+	return json.Unmarshal(body, out)
+}
+
+func TestCartAddItemDecodesWrappedCatalogResults(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(wrappedCatalogPlatform{}))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "wrapped-catalog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := dbCartAddItem(ctx, testPID, cart.ID, 100, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Items) != 1 || updated.Items[0].Description != "Wrapped Catalog Product" {
+		t.Fatalf("unexpected cart items: %#v", updated.Items)
+	}
+	if updated.SubtotalCents != 4800 || updated.Currency != "EUR" {
+		t.Fatalf("unexpected cart totals: %#v", updated)
+	}
+}
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()

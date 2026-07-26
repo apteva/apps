@@ -1063,7 +1063,7 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 	if api == nil {
 		return nil, errors.New("platform API unavailable (catalog app must be installed)")
 	}
-	var price struct {
+	type catalogPrice struct {
 		ID              int64  `json:"id"`
 		ProductID       int64  `json:"product_id"`
 		Nickname        string `json:"nickname"`
@@ -1072,10 +1072,14 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 		Active          bool   `json:"active"`
 		ArchivedAt      string `json:"archived_at"`
 	}
+	var priceResponse struct {
+		Price catalogPrice `json:"price"`
+	}
 	if err := api.CallAppResult("catalog", "catalog_prices_get",
-		map[string]any{"id": priceID, "_project_id": pid}, &price); err != nil {
+		map[string]any{"id": priceID, "_project_id": pid}, &priceResponse); err != nil {
 		return nil, fmt.Errorf("catalog price %d lookup failed (is the catalog app installed?): %w", priceID, err)
 	}
+	price := priceResponse.Price
 	if price.ArchivedAt != "" || !price.Active {
 		return nil, fmt.Errorf("catalog price %d is inactive/archived", priceID)
 	}
@@ -1087,12 +1091,14 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 	// Snapshot fields
 	desc := price.Nickname
 	if desc == "" {
-		var product struct {
-			Name string `json:"name"`
+		var productResponse struct {
+			Product struct {
+				Name string `json:"name"`
+			} `json:"product"`
 		}
 		_ = api.CallAppResult("catalog", "catalog_products_get",
-			map[string]any{"id": price.ProductID, "_project_id": pid}, &product)
-		desc = product.Name
+			map[string]any{"id": price.ProductID, "_project_id": pid}, &productResponse)
+		desc = productResponse.Product.Name
 		if desc == "" {
 			desc = fmt.Sprintf("Product #%d", price.ProductID)
 		}
