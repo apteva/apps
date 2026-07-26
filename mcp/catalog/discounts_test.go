@@ -343,6 +343,58 @@ func TestDiscountReservationCapacityIsAtomic(t *testing.T) {
 	}
 }
 
+func TestDiscountBasketFreeShippingAndBuyXGetY(t *testing.T) {
+	db := newTestDB(t)
+	product, price := mustCatalogPrice(t, db, testPID, 1200, "USD", "")
+	now := time.Now().UTC().Truncate(time.Second)
+
+	freeShipping, err := dbDiscountCreate(db, testPID, map[string]any{
+		"name": "Free delivery", "discount_type": "percentage", "percentage_bps": 1,
+		"all_products": true, "automatic": true, "benefit_type": "free_shipping",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, _, _, err := dbDiscountQuote(db, testPID, map[string]any{
+		"discount_id": freeShipping.ID, "currency": "USD", "shipping_cents": int64(650),
+		"lines": []any{map[string]any{
+			"product_id": product.ID, "price_id": price.ID, "quantity": int64(2),
+			"subtotal_cents": int64(2400), "currency": "USD",
+		}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quote.Eligible || quote.ShippingDiscountCents != 650 || quote.TotalCents != 2400 {
+		t.Fatalf("free-shipping quote = %+v", quote)
+	}
+
+	buyTwoGetOne, err := dbDiscountCreate(db, testPID, map[string]any{
+		"name": "Buy two get one", "discount_type": "percentage", "percentage_bps": 1,
+		"product_ids": []any{product.ID}, "benefit_type": "buy_x_get_y",
+		"buy_quantity": int64(2), "get_quantity": int64(1),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, _, _, err = dbDiscountQuote(db, testPID, map[string]any{
+		"discount_id": buyTwoGetOne.ID, "currency": "USD",
+		"lines": []any{map[string]any{
+			"product_id": product.ID, "price_id": price.ID, "quantity": int64(3),
+			"subtotal_cents": int64(3600), "currency": "USD",
+		}},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quote.Eligible || quote.MerchandiseDiscountCents != 1200 || quote.TotalCents != 2400 {
+		t.Fatalf("buy-x-get-y quote = %+v", quote)
+	}
+	if len(quote.Allocations) != 1 || quote.Allocations[0].DiscountCents != 1200 {
+		t.Fatalf("allocations = %+v", quote.Allocations)
+	}
+}
+
 func newConcurrentDiscountTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "catalog.db")

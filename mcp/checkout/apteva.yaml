@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.2.0
+version: 0.3.0
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
@@ -52,6 +52,12 @@ provides:
       description: Lock a cart and create a checkout_session. Cart becomes immutable until session terminates.
     - name: checkout_update
       description: Capture or update email / name / addresses on a started session.
+    - name: checkout_bootstrap
+      description: Restore durable checkout and cart state by session, cart, or recovery token.
+    - name: checkout_advance
+      description: Validate and persist transitions across information, shipping, and payment.
+    - name: checkout_restart
+      description: Replace an unfinished checkout with a fresh session for the same cart.
     - name: checkout_set_adjustments
       description: Replace frozen shipping, discount, tax, and adjustment metadata before payment.
     - name: checkout_pay
@@ -68,6 +74,16 @@ provides:
       label: Checkout
       icon: shopping-cart
       entry: /ui/CheckoutPanel.mjs
+  publishes:
+    - name: checkout.step_changed
+      description: A durable checkout moved to another step.
+    - name: checkout.restarted
+      description: An unfinished checkout was replaced with a fresh session.
+    - name: checkout.expired
+      description: A checkout session expired and its cart was released.
+  workers:
+    - name: checkout-expiration
+      schedule: "@every 1m"
   skills:
     - name: how-to-use-checkout
       command: /checkout
@@ -84,7 +100,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: checkout/v0.2.0
+    ref: checkout/v0.3.0
     entry: mcp/checkout
   port: 8080
   health_check: /health

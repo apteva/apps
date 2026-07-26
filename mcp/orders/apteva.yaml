@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: orders
 display_name: Orders
-version: 0.2.4
+version: 0.3.0
 description: |
   Generic commerce fulfillment ledger. Orders sits after checkout/billing
   and before fulfillment: it records durable order state, line items,
@@ -36,6 +36,8 @@ requires:
     - name: billing
       optional: true
     - name: checkout
+      optional: true
+    - name: inventory
       optional: true
   integrations:
     - role: fulfillment_provider
@@ -96,8 +98,15 @@ provides:
       description: Create a return record for an order.
     - name: returns_get
       description: Fetch one return record.
+    - name: returns_update
+      description: Move a return through approval, transit, receipt, rejection, or cancellation.
+    - name: returns_complete
+      description: Complete a received return, coordinate Billing refund, Inventory restock, and exchange linkage.
     - name: order_events_list
       description: List the append-only event log for an order.
+  publishes:
+    - name: order.payment_updated
+      description: Billing confirmed a partial or full refund and the order payment state was reconciled.
   ui_panels:
     - slot: project.page
       label: Orders
@@ -118,7 +127,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: orders/v0.2.4
+    ref: orders/v0.3.0
     entry: mcp/orders
   port: 8080
   health_check: /health

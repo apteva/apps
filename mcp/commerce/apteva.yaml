@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.6.5
+version: 0.7.0
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -56,6 +56,8 @@ provides:
     - { name: commerce_stores_list, description: "List stores." }
     - { name: commerce_stores_get, description: "Fetch one store by id or slug." }
     - { name: commerce_stores_update, description: "Patch a store. Args: id, patch." }
+    - { name: commerce_store_settings_get, description: "Return Commerce-owned shipping, transactional tax, market, and payment settings." }
+    - { name: commerce_store_settings_update, description: "Patch Commerce-owned store settings without replacing unrelated metadata." }
     - { name: commerce_products_create, description: "Create a storefront listing and optional first variant. Can create Catalog product/price when catalog ids are omitted." }
     - { name: commerce_products_list, description: "List storefront listings. Args: store_id?, status?, q?, limit?." }
     - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?, status?." }
@@ -76,6 +78,8 @@ provides:
     - { name: commerce_cart_add_item, description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?." }
     - { name: commerce_cart_set_quantity, description: "Set a Commerce cart item's quantity in the Commerce cart. Args: cart_id, item_id, quantity." }
     - { name: commerce_checkout_start, description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id." }
+    - { name: commerce_checkout_bootstrap, description: "Return durable cart, quote, checkout, sale, and optional resumed payment state." }
+    - { name: commerce_checkout_quote, description: "Calculate and persist unified shipping, Catalog discount, and transactional tax totals." }
     - { name: commerce_checkout_update, description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch." }
     - { name: commerce_checkout_cancel, description: "Cancel a checkout and release its active inventory reservations. Args: checkout_id." }
     - { name: commerce_checkout_pay, description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id." }
@@ -108,6 +112,12 @@ provides:
       description: A storefront listing was published.
     - name: commerce.checkout.started
       description: A Commerce checkout was started.
+    - name: commerce.checkout.quoted
+      description: Shipping, discount, tax, and total amounts were recalculated.
+    - name: commerce.checkout.expired
+      description: A Commerce checkout expired and its Inventory and Catalog reservations were released.
+    - name: commerce.store.settings_updated
+      description: Commerce-owned store settings changed.
     - name: commerce.sale.created
       description: A Commerce sale was created.
     - name: commerce.sale.paid
@@ -128,7 +138,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.6.5
+    ref: commerce/v0.7.0
     entry: mcp/commerce
   port: 8080
   health_check: /health

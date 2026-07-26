@@ -897,7 +897,7 @@ func (a *App) handleExtensionAction(w http.ResponseWriter, r *http.Request) {
 		value, callErr := invokeExtensionCall(ctx, pid, ext.ProviderApp, step, vars)
 		if callErr != nil {
 			ctx.Logger().Error("extension action failed", "extension", ext.Key, "action", parts[1], "error", callErr)
-			httpErr(w, http.StatusBadGateway, "storefront action unavailable")
+			httpActionErr(w, http.StatusBadGateway, "provider_unavailable", "storefront action unavailable", true)
 			return
 		}
 		results = append(results, value)

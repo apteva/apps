@@ -160,7 +160,7 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 		t.Fatalf("cart item image=%q", cart.Items[0].ImageURL)
 	}
 
-	checkout, err := dbCheckoutCreate(db, pid, cart, 301, []int64{401, 402})
+	checkout, err := dbCheckoutCreate(db, pid, cart, 301, []int64{401, 402}, "", nil)
 	if err != nil {
 		t.Fatalf("create checkout: %v", err)
 	}
@@ -184,6 +184,18 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 	}
 	if sale.TotalCents != 9800 || sale.InvoiceNumber != "INV-501" {
 		t.Fatalf("unexpected sale: %#v", sale)
+	}
+}
+
+func TestCheckoutMarketAllowlist(t *testing.T) {
+	store := &Store{Metadata: map[string]any{
+		"markets": map[string]any{"enabled": []any{"ES", "FR"}},
+	}}
+	if err := validateCheckoutMarket(store, map[string]any{"country_code": "es"}); err != nil {
+		t.Fatalf("enabled market rejected: %v", err)
+	}
+	if err := validateCheckoutMarket(store, map[string]any{"country_code": "US"}); err == nil {
+		t.Fatal("disabled market was accepted")
 	}
 }
 
@@ -260,7 +272,7 @@ func TestCheckoutUpdateReplaysIdenticalAwaitingPaymentPatch(t *testing.T) {
 	platform := newCommercePlatformStub()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("checkout-replay"), tk.WithPlatform(platform))
 	_, _, _, cart := seedCommerceCart(t, ctx.AppDB(), "checkout-replay", "main", 0)
-	checkout, err := dbCheckoutCreate(ctx.AppDB(), "checkout-replay", cart, 401, nil)
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "checkout-replay", cart, 401, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,7 +453,7 @@ func TestPaidSaleRequiresBillingAndSnapshotsOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	cart, _ = dbCartGet(ctx.AppDB(), "proj-paid", cart.ID, true)
-	checkout, err := dbCheckoutCreate(ctx.AppDB(), "proj-paid", cart, 401, nil)
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "proj-paid", cart, 401, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +661,7 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		t.Fatal("storefront cart total is not right-aligned")
 	}
 	checkout := templates["checkout"].(string)
-	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action", "https://js.stripe.com/clover/stripe.js", "payment-element", "data-checkout-step=\"1\"", "data-checkout-step=\"2\"", "data-checkout-step=\"3\"", "Continue to shipping"} {
+	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action", "data-bootstrap-action", "data-reserve-action", "data-payment-action", "https://js.stripe.com/clover/stripe.js", "payment-element", "data-checkout-step=\"1\"", "data-checkout-step=\"2\"", "data-checkout-step=\"3\"", "Continue to shipping"} {
 		if !strings.Contains(checkout, expected) {
 			t.Fatalf("checkout template missing %q", expected)
 		}
@@ -670,27 +682,37 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	}
 	quote := actions["checkout_quote"].(map[string]any)
 	quoteSteps := quote["steps"].([]any)
-	if len(quoteSteps) != 2 || quoteSteps[1].(map[string]any)["tool"] != "commerce_shipping_quote" {
+	if len(quoteSteps) != 2 || quoteSteps[1].(map[string]any)["tool"] != "commerce_checkout_quote" {
 		t.Fatalf("checkout quote flow is invalid: %#v", quoteSteps)
 	}
-	submit := actions["checkout_submit"].(map[string]any)
-	submitSteps := submit["steps"].([]any)
-	wantTools := []string{
+	reserve := actions["checkout_reserve"].(map[string]any)
+	reserveSteps := reserve["steps"].([]any)
+	wantReserveTools := []string{
 		"commerce_cart_create",
-		"commerce_shipping_quote",
+		"commerce_checkout_quote",
 		"commerce_checkout_start",
 		"commerce_checkout_update",
-		"commerce_checkout_pay",
 	}
-	if len(submitSteps) != len(wantTools) {
-		t.Fatalf("checkout submit steps=%d, want %d", len(submitSteps), len(wantTools))
+	if len(reserveSteps) != len(wantReserveTools) {
+		t.Fatalf("checkout reserve steps=%d, want %d", len(reserveSteps), len(wantReserveTools))
 	}
-	for index, want := range wantTools {
-		if got := submitSteps[index].(map[string]any)["tool"]; got != want {
-			t.Fatalf("checkout submit step %d=%v, want %s", index, got, want)
+	for index, want := range wantReserveTools {
+		if got := reserveSteps[index].(map[string]any)["tool"]; got != want {
+			t.Fatalf("checkout reserve step %d=%v, want %s", index, got, want)
 		}
 	}
-	for _, expected := range []string{"renderSummary", "setStep", "Continue to payment", "Calculating shipping", "Reserving your order", "data-country-select", "initCheckout", "createPaymentElement", "stripeActions.confirm", "data-payment-return"} {
+	payment := actions["checkout_payment"].(map[string]any)
+	paymentSteps := payment["steps"].([]any)
+	wantPaymentTools := []string{"commerce_checkout_bootstrap", "commerce_checkout_update", "commerce_checkout_pay"}
+	for index, want := range wantPaymentTools {
+		if got := paymentSteps[index].(map[string]any)["tool"]; got != want {
+			t.Fatalf("checkout payment step %d=%v, want %s", index, got, want)
+		}
+	}
+	if _, ok := actions["checkout_bootstrap"]; !ok {
+		t.Fatal("storefront is missing durable checkout bootstrap")
+	}
+	for _, expected := range []string{"renderSummary", "renderShippingOptions", "setStep", "Continue to payment", "Calculating shipping", "Reserving your order", "data-country-select", "initCheckout", "createPaymentElement", "stripeActions.confirm", "sessionStorage", "data-payment-return"} {
 		if !strings.Contains(js, expected) {
 			t.Fatalf("checkout JavaScript missing %q", expected)
 		}
@@ -716,8 +738,8 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 		args["idempotency_key"] != "commerce-stripe-elements-v1-payment-args-12" {
 		t.Fatalf("unexpected payment args: %#v", args)
 	}
-	if methods := anySlice(args["payment_method_types"]); len(methods) != 1 || methods[0] != "card" {
-		t.Fatalf("payment methods are not constrained to card: %#v", methods)
+	if _, constrained := args["payment_method_types"]; constrained {
+		t.Fatalf("payment methods should default to Stripe dynamic methods: %#v", args)
 	}
 
 	store.PaymentPresentation = "hosted"

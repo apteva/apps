@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.11.2
+version: 0.12.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -133,6 +133,8 @@ provides:
       description: Detach a stored payment method locally and at Stripe through the bound payment_processor integration.
     - name: payments_record
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
+    - name: invoices_refund
+      description: Request an idempotent partial or full Stripe refund and reconcile it through verified processor webhooks.
     - name: payments_list
       description: List payments for a customer or invoice, optionally filtered by method or date range.
     - name: issuer_get
@@ -248,6 +250,13 @@ provides:
         status: string
         total_cents: integer
         currency: string
+    - name: invoice.refund_requested
+      description: A merchant-initiated processor refund was submitted.
+      payload:
+        invoice_id: integer
+        refund_request_id: integer
+        amount_cents: integer
+        currency: string
     - name: invoice.payment_failed
       description: Automatic collection failed and the product app should apply its dunning or grace policy.
       payload:
@@ -317,7 +326,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.11.2
+    ref: billing/v0.12.0
     entry: mcp/billing
   port: 8080
   health_check: /health

@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: catalog
 display_name: Catalog
-version: 0.2.1
+version: 0.3.0
 description: |
-  Products, prices, and generic discounts — the source of truth for
+  Products, prices, and basket-aware promotions — the source of truth for
   what your business sells. Modelled after Stripe's Product + Price
   split: one product, many prices (currencies, intervals, tiers).
   Discounts support one-time commerce purchases and recurring plans
@@ -71,7 +71,7 @@ provides:
     - name: catalog_discount_codes_update
       description: Update a code's active state, redemption limit, or metadata.
     - name: catalog_discounts_quote
-      description: Evaluate discount eligibility and return calculated amounts plus an immutable application snapshot.
+      description: Evaluate code or automatic promotion eligibility for a basket, including merchandise, free-shipping, and buy-X-get-Y benefits, and return immutable allocations.
     - name: catalog_discounts_reserve
       description: Atomically and idempotently reserve discount capacity for a checkout or subscription.
     - name: catalog_discounts_redeem
@@ -141,7 +141,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: catalog/v0.3.0
     entry: mcp/catalog
   port: 8080
   health_check: /health

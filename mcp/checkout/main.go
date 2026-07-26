@@ -23,7 +23,9 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
@@ -68,7 +70,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
-func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "checkout-expiration",
+		Schedule: "@every 1m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return expireCheckoutState(ctx)
+		},
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{{Topic: "invoice.paid", Handler: a.handleInvoicePaid}}
 }
@@ -268,6 +278,35 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolCheckoutUpdate,
 		},
 		{
+			Name:        "checkout_bootstrap",
+			Description: "Restore durable checkout state by session_id, cart_id, or recovery_token. Returns the session and cart without changing payment state.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id":     map[string]any{"type": "integer"},
+				"cart_id":        map[string]any{"type": "integer"},
+				"recovery_token": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolCheckoutBootstrap,
+		},
+		{
+			Name:        "checkout_advance",
+			Description: "Validate and persist a checkout step transition. Steps: information, shipping, payment. Args: session_id, step, buyer_details?, selected_shipping?.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id":        map[string]any{"type": "integer"},
+				"step":              map[string]any{"type": "string", "enum": []string{"information", "shipping", "payment"}},
+				"buyer_details":     map[string]any{"type": "object"},
+				"selected_shipping": map[string]any{"type": "object"},
+			}, []string{"session_id", "step"}),
+			Handler: a.toolCheckoutAdvance,
+		},
+		{
+			Name:        "checkout_restart",
+			Description: "Cancel an unfinished checkout and create a fresh session for the same cart. Args: session_id.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "integer"},
+			}, []string{"session_id"}),
+			Handler: a.toolCheckoutRestart,
+		},
+		{
 			Name:        "checkout_set_adjustments",
 			Description: "Replace frozen checkout adjustments before payment. Intended for trusted commerce orchestrators. Args: session_id, shipping_cents?, discount_cents?, tax_cents?, adjustments?.",
 			InputSchema: schemaObject(map[string]any{
@@ -394,6 +433,12 @@ type CheckoutSession struct {
 	Currency          string          `json:"currency"`
 	Adjustments       json.RawMessage `json:"adjustments,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	CurrentStep       string          `json:"current_step"`
+	BuyerDetails      json.RawMessage `json:"buyer_details,omitempty"`
+	SelectedShipping  json.RawMessage `json:"selected_shipping,omitempty"`
+	RecoveryToken     string          `json:"recovery_token,omitempty"`
+	LastValidatedAt   string          `json:"last_validated_at,omitempty"`
+	AbandonedAt       string          `json:"abandoned_at,omitempty"`
 	CreatedAt         string          `json:"created_at,omitempty"`
 	UpdatedAt         string          `json:"updated_at,omitempty"`
 	CompletedAt       string          `json:"completed_at,omitempty"`
@@ -529,6 +574,79 @@ func (a *App) toolCheckoutUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	emitSession(ctx, "checkout.contact_captured", session)
+	return map[string]any{"session": session}, nil
+}
+
+func (a *App) toolCheckoutBootstrap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	session, err := resolveCheckoutSession(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, errors.New("session not found")
+	}
+	cart, err := dbCartGetByID(ctx.AppDB(), pid, session.CartID)
+	if err != nil || cart == nil {
+		return nil, firstCheckoutErr(err, errors.New("cart not found"))
+	}
+	return map[string]any{"session": session, "cart": cart}, nil
+}
+
+func (a *App) toolCheckoutAdvance(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := int64Arg(args, "session_id")
+	if sessionID == 0 {
+		return nil, errors.New("session_id required")
+	}
+	session, err := dbCheckoutAdvance(ctx.AppDB(), pid, sessionID, args)
+	if err != nil {
+		return nil, err
+	}
+	emitSession(ctx, "checkout.step_changed", session)
+	return map[string]any{"session": session}, nil
+}
+
+func (a *App) toolCheckoutRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := int64Arg(args, "session_id")
+	if sessionID == 0 {
+		return nil, errors.New("session_id required")
+	}
+	current, err := dbCheckoutGet(ctx.AppDB(), pid, sessionID)
+	if err != nil || current == nil {
+		return nil, firstCheckoutErr(err, errors.New("session not found"))
+	}
+	if current.Status == "paid" {
+		return nil, errors.New("paid checkout cannot be restarted")
+	}
+	if current.Status == "awaiting_payment" {
+		return nil, errors.New("awaiting-payment checkout must be resumed or cancelled explicitly")
+	}
+	if current.Status != "cancelled" && current.Status != "expired" {
+		if _, err := dbCheckoutCancel(ctx.AppDB(), pid, sessionID); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE carts SET status='open', invoice_id=NULL, updated_at=CURRENT_TIMESTAMP
+		 WHERE project_id=? AND id=? AND status<>'converted'`, pid, current.CartID); err != nil {
+		return nil, err
+	}
+	session, err := dbCheckoutStart(ctx, pid, current.CartID)
+	if err != nil {
+		return nil, err
+	}
+	emitSession(ctx, "checkout.restarted", session)
 	return map[string]any{"session": session}, nil
 }
 
@@ -1340,7 +1458,8 @@ func dbSessionsList(db *sql.DB, pid string, f sessionFilters) ([]*CheckoutSessio
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
 		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
-		        adjustments_json, metadata, created_at, updated_at, completed_at, expires_at
+		        adjustments_json, metadata, current_step, buyer_details_json, selected_shipping_json,
+		        created_at, updated_at, completed_at, expires_at, last_validated_at, abandoned_at
 		 FROM checkout_sessions
 		 WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY updated_at DESC
@@ -1366,7 +1485,8 @@ func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
 		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
-		        adjustments_json, metadata, created_at, updated_at, completed_at, expires_at
+		        adjustments_json, metadata, current_step, buyer_details_json, selected_shipping_json,
+		        created_at, updated_at, completed_at, expires_at, last_validated_at, abandoned_at
 		 FROM checkout_sessions WHERE id = ? AND project_id = ?`, id, pid)
 	s, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1406,6 +1526,10 @@ func dbCheckoutStart(ctx *sdk.AppCtx, pid string, cartID int64) (*CheckoutSessio
 	ttlMin := configInt64(ctx, "session_ttl_minutes", 30)
 	expires := time.Now().UTC().Add(time.Duration(ttlMin) * time.Minute).Format(time.RFC3339)
 	now := nowRFC3339()
+	recoveryToken, recoveryHash, err := newCheckoutRecoveryToken()
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -1416,10 +1540,10 @@ func dbCheckoutStart(ctx *sdk.AppCtx, pid string, cartID int64) (*CheckoutSessio
 	res, err := tx.Exec(
 		`INSERT INTO checkout_sessions
 		     (project_id, cart_id, provider, subtotal_cents, total_cents, currency,
-		      status, created_at, updated_at, expires_at)
-		 VALUES (?, ?, 'manual', ?, ?, ?, 'started', ?, ?, ?)`,
+		      status, recovery_token_hash, created_at, updated_at, expires_at)
+		 VALUES (?, ?, 'manual', ?, ?, ?, 'started', ?, ?, ?, ?)`,
 		pid, cartID, cart.SubtotalCents, cart.SubtotalCents, cart.Currency,
-		now, now, expires)
+		recoveryHash, now, now, expires)
 	if err != nil {
 		return nil, err
 	}
@@ -1432,7 +1556,11 @@ func dbCheckoutStart(ctx *sdk.AppCtx, pid string, cartID int64) (*CheckoutSessio
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return dbCheckoutGet(db, pid, id)
+	session, err := dbCheckoutGet(db, pid, id)
+	if session != nil {
+		session.RecoveryToken = recoveryToken
+	}
+	return session, err
 }
 
 func dbCheckoutUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*CheckoutSession, error) {
@@ -1511,6 +1639,187 @@ func dbCheckoutSetAdjustments(db *sql.DB, pid string, id int64, args map[string]
 		return nil, err
 	}
 	return dbCheckoutGet(db, pid, id)
+}
+
+func resolveCheckoutSession(db *sql.DB, pid string, args map[string]any) (*CheckoutSession, error) {
+	sessionID := int64Arg(args, "session_id")
+	cartID := int64Arg(args, "cart_id")
+	recoveryToken := strings.TrimSpace(strArg(args, "recovery_token"))
+	count := 0
+	if sessionID != 0 {
+		count++
+	}
+	if cartID != 0 {
+		count++
+	}
+	if recoveryToken != "" {
+		count++
+	}
+	if count != 1 {
+		return nil, errors.New("provide exactly one of session_id, cart_id, or recovery_token")
+	}
+	if sessionID != 0 {
+		return dbCheckoutGet(db, pid, sessionID)
+	}
+	var id int64
+	var err error
+	if cartID != 0 {
+		err = db.QueryRow(
+			`SELECT id FROM checkout_sessions WHERE project_id=? AND cart_id=?
+			 ORDER BY created_at DESC, id DESC LIMIT 1`, pid, cartID).Scan(&id)
+	} else {
+		hash := checkoutRecoveryHash(recoveryToken)
+		err = db.QueryRow(
+			`SELECT id FROM checkout_sessions WHERE project_id=? AND recovery_token_hash=?`,
+			pid, hash).Scan(&id)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dbCheckoutGet(db, pid, id)
+}
+
+func dbCheckoutAdvance(db *sql.DB, pid string, id int64, args map[string]any) (*CheckoutSession, error) {
+	session, err := dbCheckoutGet(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, errors.New("session not found")
+	}
+	if session.Status != "started" {
+		return nil, fmt.Errorf("session is %s; steps are locked after payment preparation", session.Status)
+	}
+	target := strings.ToLower(strings.TrimSpace(strArg(args, "step")))
+	order := map[string]int{"information": 1, "shipping": 2, "payment": 3}
+	targetOrder := order[target]
+	currentOrder := order[session.CurrentStep]
+	if targetOrder == 0 {
+		return nil, errors.New("step must be information, shipping, or payment")
+	}
+	if currentOrder == 0 {
+		currentOrder = 1
+	}
+	if targetOrder > currentOrder+1 {
+		return nil, errors.New("checkout steps cannot be skipped")
+	}
+
+	buyerDetails := session.BuyerDetails
+	if value, ok := args["buyer_details"]; ok {
+		buyerDetails = json.RawMessage(jsonOrEmpty(value, "{}"))
+	}
+	selectedShipping := session.SelectedShipping
+	if value, ok := args["selected_shipping"]; ok {
+		selectedShipping = json.RawMessage(jsonOrEmpty(value, "{}"))
+	}
+	if targetOrder >= 2 {
+		if strings.TrimSpace(session.Email) == "" || !strings.Contains(session.Email, "@") {
+			return nil, errors.New("a valid email is required before shipping")
+		}
+		var address map[string]any
+		_ = json.Unmarshal(session.ShippingAddress, &address)
+		for _, field := range []string{"line1", "city", "postal_code"} {
+			if strings.TrimSpace(strArg(address, field)) == "" {
+				return nil, fmt.Errorf("shipping_address.%s is required", field)
+			}
+		}
+		if firstNonEmptyCheckout(strArg(address, "country_code"), strArg(address, "country")) == "" {
+			return nil, errors.New("shipping_address.country_code is required")
+		}
+	}
+	if targetOrder >= 3 && session.ShippingCents > 0 && len(selectedShipping) <= 2 {
+		return nil, errors.New("selected_shipping is required before payment")
+	}
+	_, err = db.Exec(
+		`UPDATE checkout_sessions
+		    SET current_step=?, buyer_details_json=?, selected_shipping_json=?,
+		        last_validated_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND id=?`,
+		target, string(buyerDetails), string(selectedShipping), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return dbCheckoutGet(db, pid, id)
+}
+
+func newCheckoutRecoveryToken() (string, string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", "", err
+	}
+	token := hex.EncodeToString(buf)
+	return token, checkoutRecoveryHash(token), nil
+}
+
+func checkoutRecoveryHash(token string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
+	return hex.EncodeToString(sum[:])
+}
+
+func expireCheckoutState(ctx *sdk.AppCtx) error {
+	now := nowRFC3339()
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, project_id, cart_id FROM checkout_sessions
+		 WHERE status IN ('started','awaiting_payment')
+		   AND expires_at IS NOT NULL AND datetime(expires_at)<=datetime(?)`, now)
+	if err != nil {
+		return err
+	}
+	type expiredRow struct {
+		id, cartID int64
+		projectID  string
+	}
+	var expired []expiredRow
+	for rows.Next() {
+		var row expiredRow
+		if err := rows.Scan(&row.id, &row.projectID, &row.cartID); err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, row)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range expired {
+		tx, err := ctx.AppDB().Begin()
+		if err != nil {
+			return err
+		}
+		result, err := tx.Exec(
+			`UPDATE checkout_sessions
+			    SET status='expired', current_step='information',
+			        abandoned_at=COALESCE(abandoned_at,CURRENT_TIMESTAMP),
+			        updated_at=CURRENT_TIMESTAMP
+			  WHERE id=? AND project_id=? AND status IN ('started','awaiting_payment')`,
+			row.id, row.projectID)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		changed, _ := result.RowsAffected()
+		if changed > 0 {
+			if _, err := tx.Exec(
+				`UPDATE carts SET status='open', updated_at=CURRENT_TIMESTAMP
+				 WHERE id=? AND project_id=? AND status='checkout'`,
+				row.cartID, row.projectID); err != nil {
+				tx.Rollback()
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		if changed > 0 {
+			if session, err := dbCheckoutGet(ctx.AppDB(), row.projectID, row.id); err == nil {
+				emitSession(ctx.WithProject(row.projectID), "checkout.expired", session)
+			}
+		}
+	}
+	return nil
 }
 
 // dbCheckoutPay is the v0.1.0 manual-payment path: upserts the
@@ -1787,16 +2096,17 @@ func dbCheckoutCancel(db *sql.DB, pid string, id int64) (*CheckoutSession, error
 
 func scanSession(s rowScanner) (*CheckoutSession, error) {
 	var sess CheckoutSession
-	var shipping, billing, adjustments, meta sql.NullString
+	var shipping, billing, adjustments, meta, buyerDetails, selectedShipping sql.NullString
 	var invoiceID sql.NullInt64
-	var completedAt, expiresAt sql.NullString
+	var completedAt, expiresAt, lastValidatedAt, abandonedAt sql.NullString
 	if err := s.Scan(
 		&sess.ID, &sess.ProjectID, &sess.CartID, &sess.Provider, &sess.ProviderSessionID,
 		&sess.Presentation,
 		&sess.Email, &sess.CustomerName,
 		&shipping, &billing, &sess.Status, &invoiceID,
 		&sess.SubtotalCents, &sess.ShippingCents, &sess.DiscountCents, &sess.TaxCents, &sess.TotalCents, &sess.Currency,
-		&adjustments, &meta, &sess.CreatedAt, &sess.UpdatedAt, &completedAt, &expiresAt); err != nil {
+		&adjustments, &meta, &sess.CurrentStep, &buyerDetails, &selectedShipping,
+		&sess.CreatedAt, &sess.UpdatedAt, &completedAt, &expiresAt, &lastValidatedAt, &abandonedAt); err != nil {
 		return nil, err
 	}
 	if shipping.Valid {
@@ -1811,6 +2121,12 @@ func scanSession(s rowScanner) (*CheckoutSession, error) {
 	if adjustments.Valid {
 		sess.Adjustments = json.RawMessage(adjustments.String)
 	}
+	if buyerDetails.Valid {
+		sess.BuyerDetails = json.RawMessage(buyerDetails.String)
+	}
+	if selectedShipping.Valid {
+		sess.SelectedShipping = json.RawMessage(selectedShipping.String)
+	}
 	if invoiceID.Valid {
 		v := invoiceID.Int64
 		sess.InvoiceID = &v
@@ -1820,6 +2136,12 @@ func scanSession(s rowScanner) (*CheckoutSession, error) {
 	}
 	if expiresAt.Valid {
 		sess.ExpiresAt = expiresAt.String
+	}
+	if lastValidatedAt.Valid {
+		sess.LastValidatedAt = lastValidatedAt.String
+	}
+	if abandonedAt.Valid {
+		sess.AbandonedAt = abandonedAt.String
 	}
 	return &sess, nil
 }
@@ -1851,7 +2173,24 @@ func emitSession(ctx *sdk.AppCtx, topic string, s *CheckoutSession) {
 		"total":      s.TotalCents,
 		"currency":   s.Currency,
 		"invoice_id": s.InvoiceID,
+		"step":       s.CurrentStep,
 	})
+}
+
+func firstCheckoutErr(primary, fallback error) error {
+	if primary != nil {
+		return primary
+	}
+	return fallback
+}
+
+func firstNonEmptyCheckout(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ─── Tiny utils ─────────────────────────────────────────────────────

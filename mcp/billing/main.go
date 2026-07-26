@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.11.0
+version: 0.12.0
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.11.0
+    ref: billing/v0.12.0
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -426,6 +426,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"notes":        map[string]any{"type": "string"},
 			}, []string{"invoice_id", "amount_cents", "method"}),
 			Handler: a.toolPaymentsRecord,
+		},
+		{
+			Name:        "invoices_refund",
+			Description: "Request a partial or full Stripe refund for a paid invoice. Billing selects and validates the original Stripe payment, records an idempotent request, calls the bound processor, and waits for the verified refund webhook to update invoice balances. Args: invoice_id, amount_cents?, reason?, idempotency_key.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":      map[string]any{"type": "integer"},
+				"amount_cents":    map[string]any{"type": "integer"},
+				"reason":          map[string]any{"type": "string", "enum": []string{"duplicate", "fraudulent", "requested_by_customer"}},
+				"idempotency_key": map[string]any{"type": "string"},
+			}, []string{"invoice_id", "idempotency_key"}),
+			Handler: a.toolInvoicesRefund,
 		},
 		{
 			Name:        "invoices_render_pdf",

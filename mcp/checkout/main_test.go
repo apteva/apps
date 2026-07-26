@@ -95,7 +95,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatalf("enable foreign_keys: %v", err)
 	}
-	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql"} {
+	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql", "004_durable_lifecycle.sql"} {
 		mig, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -420,8 +420,9 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 	tools := app.MCPTools()
 	want := []string{
 		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
-		"checkout_start", "checkout_update", "checkout_set_adjustments", "checkout_pay",
-		"checkout_get", "checkout_cancel",
+		"checkout_start", "checkout_update", "checkout_bootstrap", "checkout_advance",
+		"checkout_restart", "checkout_set_adjustments", "checkout_pay", "checkout_get",
+		"checkout_cancel",
 	}
 	if len(tools) != len(want) {
 		t.Errorf("MCPTools count = %d, want %d", len(tools), len(want))

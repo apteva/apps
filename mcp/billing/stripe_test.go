@@ -97,8 +97,56 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"pm_test_123","type":"card","customer":"cus_test_123","card":{"brand":"visa","last4":"4242","exp_month":12,"exp_year":2030,"country":"US"}}`),
 		}, nil
+	case "create_refund":
+		return &sdk.ExecuteResult{
+			Success: true, Status: http.StatusOK,
+			Data: json.RawMessage(`{"id":"re_test_123","status":"pending"}`),
+		}, nil
 	default:
 		return nil, fmt.Errorf("unexpected Stripe tool %q", tool)
+	}
+}
+
+func TestInvoicesRefundIsDurableAndIdempotent(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	customer := mustCustomer(t, ctx, "refund-tool@example.com", "Refund Buyer")
+	invoice := mustFinalize(t, ctx, mustDraft(t, ctx, customer.ID, []any{line("Order", 1, 2400, 0)}).ID)
+	if _, err := app.toolPaymentsRecord(ctx, map[string]any{
+		"invoice_id": invoice.ID, "amount_cents": int64(2400),
+		"method": "stripe", "external_id": "pi_refund_tool",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{
+		"invoice_id": invoice.ID, "amount_cents": int64(900),
+		"reason": "requested_by_customer", "idempotency_key": "return-42",
+	}
+	first, err := app.toolInvoicesRefund(ctx, args)
+	if err != nil {
+		t.Fatalf("request refund: %v", err)
+	}
+	second, err := app.toolInvoicesRefund(ctx, args)
+	if err != nil {
+		t.Fatalf("replay refund: %v", err)
+	}
+	firstRefund := first.(map[string]any)["refund"].(*RefundRequest)
+	secondRefund := second.(map[string]any)["refund"].(*RefundRequest)
+	if firstRefund.ID != secondRefund.ID || firstRefund.ProviderRefundID != "re_test_123" {
+		t.Fatalf("refund replay mismatch: first=%+v second=%+v", firstRefund, secondRefund)
+	}
+	var refundCalls int
+	for _, call := range platform.toolCalls {
+		if call.Tool == "create_refund" {
+			refundCalls++
+			if call.Input["payment_intent"] != "pi_refund_tool" || call.Input["amount"] != int64(900) {
+				t.Fatalf("unexpected refund request: %#v", call.Input)
+			}
+		}
+	}
+	if refundCalls != 1 {
+		t.Fatalf("create_refund calls=%d, want 1", refundCalls)
 	}
 }
 

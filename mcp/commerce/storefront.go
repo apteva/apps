@@ -9,7 +9,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "5"
+const commerceStorefrontExtensionVersion = "6"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -59,6 +59,7 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 		"city", "region", "postal_code", "country_code", "phone",
 		"billing_name", "billing_company", "billing_address_line1", "billing_address_line2",
 		"billing_city", "billing_region", "billing_postal_code", "billing_country_code",
+		"discount_code", "shipping_option_id",
 	}
 	return map[string]any{
 		"name":    store.Name,
@@ -114,26 +115,36 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 					map[string]any{"tool": "commerce_cart_set_quantity", "args": map[string]any{"cart_id": "{{ steps.0.cart.id }}", "item_id": "{{ input.item_id }}", "quantity": "{{ input.quantity }}"}},
 				},
 			},
+			"checkout_bootstrap": map[string]any{
+				"steps": []any{map[string]any{
+					"tool": "commerce_checkout_bootstrap",
+					"args": mergeMaps(fixedStore, map[string]any{
+						"session_token": "{{ session.token }}", "include_payment": true,
+					}),
+				}},
+			},
 			"checkout_quote": map[string]any{
 				"allowed_input": checkoutInput,
 				"steps": []any{
 					map[string]any{"tool": "commerce_cart_create", "args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"})},
-					map[string]any{"tool": "commerce_shipping_quote", "args": map[string]any{
-						"cart_id":          "{{ steps.0.cart.id }}",
-						"shipping_address": shippingAddress,
-						"apply":            true,
+					map[string]any{"tool": "commerce_checkout_quote", "args": map[string]any{
+						"cart_id":            "{{ steps.0.cart.id }}",
+						"shipping_address":   shippingAddress,
+						"shipping_option_id": "{{ input.shipping_option_id }}",
+						"discount_code":      "{{ input.discount_code }}",
 					}},
 				},
 			},
-			"checkout_submit": map[string]any{
+			"checkout_reserve": map[string]any{
 				"allowed_input":             checkoutInput,
 				"rotate_session_on_success": false,
 				"steps": []any{
 					map[string]any{"tool": "commerce_cart_create", "args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"})},
-					map[string]any{"tool": "commerce_shipping_quote", "args": map[string]any{
-						"cart_id":          "{{ steps.0.cart.id }}",
-						"shipping_address": shippingAddress,
-						"apply":            true,
+					map[string]any{"tool": "commerce_checkout_quote", "args": map[string]any{
+						"cart_id":            "{{ steps.0.cart.id }}",
+						"shipping_address":   shippingAddress,
+						"shipping_option_id": "{{ input.shipping_option_id }}",
+						"discount_code":      "{{ input.discount_code }}",
 					}},
 					map[string]any{"tool": "commerce_checkout_start", "args": map[string]any{"cart_id": "{{ steps.1.cart.id }}"}},
 					map[string]any{"tool": "commerce_checkout_update", "args": map[string]any{
@@ -142,10 +153,30 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 							"email":            "{{ input.email }}",
 							"customer_name":    "{{ input.customer_name }}",
 							"shipping_address": shippingAddress,
-							"billing_address":  billingAddress,
+							"current_step":     "shipping",
+							"buyer_details": map[string]any{
+								"email": "{{ input.email }}", "phone": "{{ input.phone }}",
+							},
 						},
 					}},
-					map[string]any{"tool": "commerce_checkout_pay", "args": map[string]any{"checkout_id": "{{ steps.2.checkout.id }}"}},
+				},
+			},
+			"checkout_payment": map[string]any{
+				"allowed_input":             checkoutInput,
+				"rotate_session_on_success": false,
+				"steps": []any{
+					map[string]any{"tool": "commerce_checkout_bootstrap", "args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"})},
+					map[string]any{"tool": "commerce_checkout_update", "args": map[string]any{
+						"checkout_id": "{{ steps.0.checkout.id }}",
+						"patch": map[string]any{
+							"billing_address": billingAddress,
+							"current_step":    "payment",
+							"buyer_details": map[string]any{
+								"email": "{{ input.email }}", "phone": "{{ input.phone }}",
+							},
+						},
+					}},
+					map[string]any{"tool": "commerce_checkout_pay", "args": map[string]any{"checkout_id": "{{ steps.0.checkout.id }}"}},
 				},
 			},
 			"checkout_status": map[string]any{
@@ -326,8 +357,10 @@ const checkoutStorefrontBody = `
       </nav>
       <div class="checkout-error" data-checkout-error role="alert" hidden></div>
       <form class="checkout-form" data-checkout-form
-        data-storefront-action="{{action "checkout_submit"}}"
+        data-reserve-action="{{action "checkout_reserve"}}"
+        data-payment-action="{{action "checkout_payment"}}"
         data-quote-action="{{action "checkout_quote"}}"
+        data-bootstrap-action="{{action "checkout_bootstrap"}}"
         data-cart-action="{{action "cart"}}"
         data-cart-url="{{href "/cart"}}">
         <div class="checkout-review" data-checkout-review hidden>
@@ -368,6 +401,23 @@ const checkoutStorefrontBody = `
               <label class="field"><span>State or region <small>Where applicable</small></span><input type="text" name="region" autocomplete="address-level1"></label>
               <label class="field full"><span>Postal code</span><input type="text" name="postal_code" autocomplete="postal-code" required></label>
             </div>
+          </section>
+          <section class="checkout-section">
+            <div class="checkout-section-heading"><div><h2>Discount code</h2><p>Eligible automatic promotions are applied without a code.</p></div></div>
+            <label class="field full"><span>Code <small>Optional</small></span><input type="text" name="discount_code" autocomplete="off" autocapitalize="characters"></label>
+          </section>
+        </div>
+
+        <div data-checkout-step="2" hidden>
+          <section class="checkout-section shipping-review">
+            <div class="checkout-section-heading"><div><h2>Shipping method</h2><p data-shipping-message>Select the delivery speed that works for you.</p></div></div>
+            <div class="shipping-methods" data-shipping-methods></div>
+          </section>
+        </div>
+
+        <div data-checkout-step="3" hidden>
+          <section class="checkout-section payment-section">
+            <div class="checkout-section-heading"><div><h2>Payment</h2><p>All transactions are secure and encrypted.</p></div></div>
             <label class="billing-toggle"><input type="checkbox" data-billing-same checked><span>Use delivery address as billing address</span></label>
             <div class="billing-fields" data-billing-fields hidden>
               <div class="checkout-fields">
@@ -381,33 +431,17 @@ const checkoutStorefrontBody = `
                 <label class="field full"><span>Postal code</span><input type="text" name="billing_postal_code" autocomplete="billing postal-code" disabled required></label>
               </div>
             </div>
-          </section>
-        </div>
-
-        <div data-checkout-step="2" hidden>
-          <section class="checkout-section shipping-review">
-            <div class="checkout-section-heading"><div><h2>Shipping method</h2><p data-shipping-message>Your available shipping method is shown below.</p></div></div>
-            <div class="shipping-method" data-shipping-method>
-              <span><strong>Standard delivery</strong><small>Best available rate for your order</small></span>
-              <strong data-shipping-price>Calculated</strong>
-            </div>
-          </section>
-        </div>
-
-        <div data-checkout-step="3" hidden>
-          <section class="checkout-section payment-section">
-            <div class="checkout-section-heading"><div><h2>Payment</h2><p>All transactions are secure and encrypted.</p></div></div>
-            <div class="payment-security"><span aria-hidden="true"></span><p><strong>Secure payment</strong><small>Your card details are sent directly to Stripe and never touch this store.</small></p></div>
+            <div class="payment-security"><span aria-hidden="true"></span><p><strong>Secure payment</strong><small>Your payment details are sent directly to Stripe and never touch this store.</small></p></div>
             <div class="payment-element-shell" data-payment-stage hidden>
               <div id="payment-element"></div>
               <div class="payment-element-error" data-payment-error role="alert" hidden></div>
-              <button class="button checkout-submit" type="button" data-payment-submit disabled>Pay now</button>
+              <button class="button checkout-submit" type="button" data-payment-submit disabled><span data-payment-label>Pay now</span></button>
             </div>
           </section>
         </div>
 
         <div class="checkout-actions" data-checkout-actions>
-          <button class="checkout-secondary" type="button" data-step-back hidden>Back to information</button>
+          <button class="checkout-secondary" type="button" data-step-back hidden>Back</button>
           <button class="button checkout-submit" type="submit" data-order-submit><span data-submit-label>Continue to shipping</span></button>
         </div>
         <p class="checkout-note">Inventory and totals are verified before your order is reserved.</p>
@@ -435,7 +469,7 @@ const checkoutReturnStorefrontBody = `
 
 const storefrontCSS = `
 *{box-sizing:border-box}html{color:#171a17;background:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:0}body{margin:0}a{color:inherit;text-decoration:none}img{display:block;max-width:100%;height:auto}.announcement{background:#171a17;color:#fff;padding:9px 20px;text-align:center;font-size:12px}.site-header{height:72px;padding:0 clamp(20px,5vw,72px);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e7e9e6;position:sticky;top:0;background:rgba(255,255,255,.96);z-index:20}.brand{font-family:Georgia,serif;font-size:23px;font-weight:700}.site-header nav{display:flex;gap:24px;align-items:center;font-size:14px}.site-header nav a:hover{color:var(--accent)}main{min-height:70vh}.hero{min-height:min(70vh,680px);padding:clamp(64px,9vw,128px) clamp(20px,8vw,120px);display:flex;align-items:center;position:relative;overflow:hidden;background:#edf2ec;border-bottom:1px solid #dce3dc}.hero-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.hero-with-image:after{content:"";position:absolute;inset:0;background:rgba(17,20,17,.58)}.hero-copy{position:relative;z-index:1;max-width:900px}.hero h1{font-family:Georgia,serif;font-size:clamp(48px,7vw,96px);line-height:.98;margin:12px 0 24px}.hero-copy>p:not(.eyebrow){font-size:18px;line-height:1.6;max-width:560px;margin:0 0 30px;color:#4d554e}.hero-with-image .hero-copy,.hero-with-image .hero-copy>p,.hero-with-image .eyebrow{color:#fff}.eyebrow{text-transform:uppercase;font-size:11px;letter-spacing:1.6px;font-weight:700;color:var(--accent);margin:0 0 8px}.button{display:inline-flex;min-height:44px;padding:0 20px;border:0;background:var(--accent);color:#fff;align-items:center;justify-content:center;font:600 14px inherit;cursor:pointer;width:max-content}.button:hover{filter:brightness(.92)}.button.wide{width:100%}.section{padding:72px clamp(20px,5vw,72px)}.section-heading{display:flex;justify-content:space-between;align-items:end;margin-bottom:30px}.section-heading h2,.page-header h1{font-family:Georgia,serif;font-size:clamp(36px,5vw,62px);margin:0}.section-heading>a{font-size:13px;border-bottom:1px solid}.product-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px 18px}.product-media{display:block;aspect-ratio:1;background:#f2f3f1;overflow:hidden}.product-media img,.detail-media img{width:100%;height:100%;object-fit:cover;transition:transform .35s}.product-card:hover img{transform:scale(1.02)}.media-placeholder{display:flex;width:100%;height:100%;align-items:center;justify-content:center;padding:30px;color:#778078;text-align:center}.product-copy{padding-top:14px}.product-copy h2{font-size:15px;margin:3px 0 8px;font-weight:600}.price{font-size:14px;margin:0;color:#505650}.page-header{padding:72px clamp(20px,8vw,120px) 42px;border-bottom:1px solid #e7e9e6}.lede{max-width:700px;color:#525a53;line-height:1.7}.collection-grid{padding:36px clamp(20px,5vw,72px) 80px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.collection-card{min-height:180px;padding:28px;background:#edf2ec;display:flex;flex-direction:column;justify-content:end}.collection-card span{font:600 28px Georgia,serif}.collection-card small{margin-top:8px;color:#5c655e}.product-detail{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(340px,.75fr);min-height:calc(100vh - 105px)}.detail-media{background:#f2f3f1;min-height:620px}.detail-copy{padding:clamp(46px,7vw,100px);align-self:center}.detail-copy h1{font:500 clamp(42px,5vw,70px)/1 Georgia,serif;margin:10px 0 20px}.detail-price{font-size:20px;font-weight:650}.description{line-height:1.7;color:#505750;margin:28px 0}.quantity{display:grid;gap:8px;font-size:12px;margin-bottom:12px}.quantity input{height:44px;border:1px solid #cfd4cf;padding:0 12px;width:100%}.assurances{list-style:none;padding:22px 0 0;margin:22px 0 0;border-top:1px solid #e1e4e1;display:grid;gap:8px;font-size:12px;color:#606860}.search-form{display:flex;gap:10px;max-width:680px;margin-top:28px}.search-form input{height:48px;flex:1;border:1px solid #cbd0cb;padding:0 15px;font-size:16px}.cart-shell{padding:0 clamp(20px,8vw,120px) 90px;max-width:1100px}.cart-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 132px;gap:20px;padding:20px 0;border-bottom:1px solid #e3e6e3;align-items:center}.cart-row input{width:72px;height:40px;border:1px solid #ccd1cc;padding:8px;justify-self:end}.line-total{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.cart-total{display:flex;justify-content:space-between;font-size:20px;font-weight:700;padding:28px 0}.cart-total span:last-child{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.empty,.cart-loading{padding:40px 0;color:#667067}.site-footer{border-top:1px solid #e1e4e1;padding:34px clamp(20px,5vw,72px);display:flex;justify-content:space-between;color:#606760;font-size:12px}.toast{position:fixed;right:20px;bottom:20px;background:#171a17;color:#fff;padding:13px 18px;opacity:0;transform:translateY(12px);transition:.2s;pointer-events:none;z-index:50}.toast.visible{opacity:1;transform:none}
-.checkout-page{background:#fff;color:#202420}.checkout-page main{min-height:0}.checkout-header{height:76px;border-bottom:1px solid #dfe3df;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(24px,5vw,72px)}.checkout-brand{font:700 24px Georgia,serif}.secure-label{color:#5e665f;font-size:13px}.checkout-layout{display:grid;grid-template-columns:minmax(0,700px) minmax(380px,1fr);max-width:1320px;margin:0 auto;min-height:calc(100vh - 132px)}.checkout-form-column{padding:42px clamp(28px,5vw,72px) 72px}.checkout-back{display:inline-block;color:#59615a;font-size:13px;margin-bottom:34px;border-bottom:1px solid #aeb5af}.checkout-intro{margin-bottom:38px}.checkout-intro h1{font:600 42px/1.05 Georgia,serif;margin:8px 0 0}.checkout-error{border-left:3px solid #a83b2f;background:#fbf3f1;color:#792b23;padding:14px 16px;margin:0 0 24px;font-size:14px;line-height:1.5}.checkout-form{display:grid}.checkout-section{padding:0 0 34px;margin:0 0 34px;border-bottom:1px solid #dfe3df}.checkout-section-heading{display:grid;grid-template-columns:30px minmax(0,1fr);gap:12px;align-items:start;margin-bottom:22px}.step-number{width:28px;height:28px;border:1px solid #aeb5af;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.checkout-section-heading h2{font-size:19px;margin:2px 0 4px}.checkout-section-heading p{color:#677068;font-size:13px;line-height:1.5;margin:0}.checkout-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{display:grid;gap:7px;color:#454c46;font-size:12px;font-weight:600}.field.full{grid-column:1/-1}.field small{color:#7a827b;font-weight:400}.field input,.field select{width:100%;height:50px;border:1px solid #bac1bb;border-radius:4px;background:#fff;color:#202420;padding:0 13px;font-family:inherit;font-size:15px;font-weight:400}.field select{appearance:auto}.field input:hover,.field select:hover{border-color:#8f9991}.field input:focus,.field select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}.field input:user-invalid,.field select:user-invalid{border-color:#a83b2f}.shipping-method,.payment-method{min-height:68px;border:1px solid #aeb5af;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:18px}.shipping-method>span,.payment-method>span:last-child{display:grid;gap:4px}.shipping-method small,.payment-method small{color:#677068;font-size:12px;line-height:1.4;font-weight:400}.shipping-method>strong{font-variant-numeric:tabular-nums;white-space:nowrap}.payment-method{justify-content:flex-start;border-color:var(--accent);background:#f5f9f6}.payment-radio{width:16px;height:16px;border:5px solid var(--accent);border-radius:50%;flex:0 0 auto}.billing-toggle{display:flex;align-items:center;gap:10px;font-size:13px;margin-top:16px;cursor:pointer}.billing-toggle input{width:17px;height:17px;accent-color:var(--accent)}.billing-fields{padding-top:20px}.payment-element-shell{margin-top:22px;padding-top:22px;border-top:1px solid #dfe3df}.payment-element-shell .checkout-submit{margin-top:22px}.payment-element-error{color:#792b23;font-size:13px;line-height:1.5;margin-top:12px}.checkout-submit{width:100%;min-height:54px;justify-content:space-between;padding:0 20px;font-size:15px}.checkout-submit:disabled{cursor:wait;opacity:.7}.checkout-note{margin:14px 0 0;color:#69716a;font-size:12px;line-height:1.55;text-align:center}.checkout-result{padding:36px 0;border-top:1px solid #dfe3df}.checkout-result h2{font:600 36px/1.1 Georgia,serif;margin:8px 0 14px}.checkout-result p{color:#535c54;line-height:1.65}.checkout-result .confirmation-number{color:#202420;font-size:14px;font-weight:700}.status-pill{display:inline-flex;background:#edf2ec;color:#345443;padding:6px 9px;border-radius:4px;text-transform:uppercase;font-size:10px;font-weight:800;letter-spacing:1px}.checkout-return{max-width:620px;margin:0 auto;padding:clamp(72px,12vw,150px) 24px;min-height:calc(100vh - 132px);text-align:center}.checkout-return h1{font:600 42px/1.1 Georgia,serif;margin:18px 0 14px}.checkout-return p{color:#535c54;line-height:1.65;margin:0 auto 28px;max-width:520px}.checkout-return .button{margin:0 auto}.checkout-summary-column{background:#f5f6f4;border-left:1px solid #dfe3df;padding:62px clamp(28px,4vw,56px)}.order-summary{position:sticky;top:28px}.order-summary summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;padding-bottom:24px;cursor:default}.order-summary summary::-webkit-details-marker{display:none}.order-summary summary strong{font-size:18px;font-variant-numeric:tabular-nums}.summary-items{display:grid;gap:18px;padding:0 0 24px;border-bottom:1px solid #d7dbd7}.summary-item{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:14px;align-items:center}.summary-media{width:64px;height:64px;border:1px solid #d9ddd9;border-radius:6px;background:#fff;position:relative;display:grid;place-items:center;overflow:visible;color:#777f78;font:600 11px Georgia,serif;text-align:center;padding:5px}.summary-media img{width:100%;height:100%;object-fit:cover;border-radius:5px}.summary-quantity{position:absolute;right:-7px;top:-8px;min-width:22px;height:22px;border-radius:50%;background:#646c65;color:#fff;display:grid;place-items:center;padding:0 5px;font-size:11px}.summary-copy{min-width:0}.summary-copy strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.summary-copy small{display:block;color:#747c75;font-size:11px;margin-top:4px}.summary-price{justify-self:end;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-totals{display:grid;grid-template-columns:1fr auto;gap:10px 24px;padding:24px 0;font-size:13px}.summary-totals span:nth-child(even){justify-self:end;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-total-label,.summary-total-value{border-top:1px solid #d7dbd7;padding-top:18px;margin-top:8px;font-size:17px;font-weight:750}.summary-total-value{font-size:21px}.summary-loading{color:#69716a;font-size:13px;padding:12px 0}.checkout-footer{min-height:56px;border-top:1px solid #dfe3df;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:16px clamp(24px,5vw,72px);color:#69716a;font-size:11px}
+.checkout-page{background:#fff;color:#202420}.checkout-page main{min-height:0}.checkout-header{height:76px;border-bottom:1px solid #dfe3df;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(24px,5vw,72px)}.checkout-brand{font:700 24px Georgia,serif}.secure-label{color:#5e665f;font-size:13px}.checkout-layout{display:grid;grid-template-columns:minmax(0,700px) minmax(380px,1fr);max-width:1320px;margin:0 auto;min-height:calc(100vh - 132px)}.checkout-form-column{padding:42px clamp(28px,5vw,72px) 72px}.checkout-back{display:inline-block;color:#59615a;font-size:13px;margin-bottom:34px;border-bottom:1px solid #aeb5af}.checkout-intro{margin-bottom:38px}.checkout-intro h1{font:600 42px/1.05 Georgia,serif;margin:8px 0 0}.checkout-error{border-left:3px solid #a83b2f;background:#fbf3f1;color:#792b23;padding:14px 16px;margin:0 0 24px;font-size:14px;line-height:1.5}.checkout-form{display:grid}.checkout-section{padding:0 0 34px;margin:0 0 34px;border-bottom:1px solid #dfe3df}.checkout-section-heading{display:grid;grid-template-columns:30px minmax(0,1fr);gap:12px;align-items:start;margin-bottom:22px}.step-number{width:28px;height:28px;border:1px solid #aeb5af;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.checkout-section-heading h2{font-size:19px;margin:2px 0 4px}.checkout-section-heading p{color:#677068;font-size:13px;line-height:1.5;margin:0}.checkout-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{display:grid;gap:7px;color:#454c46;font-size:12px;font-weight:600}.field.full{grid-column:1/-1}.field small{color:#7a827b;font-weight:400}.field input,.field select{width:100%;height:50px;border:1px solid #bac1bb;border-radius:4px;background:#fff;color:#202420;padding:0 13px;font-family:inherit;font-size:15px;font-weight:400}.field select{appearance:auto}.field input:hover,.field select:hover{border-color:#8f9991}.field input:focus,.field select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}.field input:user-invalid,.field select:user-invalid{border-color:#a83b2f}.shipping-methods{display:grid;gap:10px}.shipping-method{min-height:72px;border:1px solid #aeb5af;border-radius:6px;padding:14px 16px;display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:14px;cursor:pointer}.shipping-method:has(input:checked){border-color:var(--accent);background:#f7faf8;box-shadow:0 0 0 1px var(--accent)}.shipping-method input{width:17px;height:17px;margin:0;accent-color:var(--accent)}.shipping-method-copy{display:grid;gap:4px}.shipping-method small{color:#677068;font-size:12px;line-height:1.4;font-weight:400}.shipping-method-price{font-variant-numeric:tabular-nums;white-space:nowrap}.billing-toggle{display:flex;align-items:center;gap:10px;font-size:13px;margin:0 0 18px;cursor:pointer}.billing-toggle input{width:17px;height:17px;accent-color:var(--accent)}.billing-fields{padding:0 0 22px}.payment-security{margin-top:22px}.payment-element-shell{margin-top:22px;padding-top:22px;border-top:1px solid #dfe3df}.payment-element-shell .checkout-submit{margin-top:22px}.payment-element-error{color:#792b23;font-size:13px;line-height:1.5;margin-top:12px}.checkout-submit{width:100%;min-height:54px;justify-content:space-between;padding:0 20px;font-size:15px}.checkout-submit:disabled{cursor:wait;opacity:.7}.checkout-note{margin:14px 0 0;color:#69716a;font-size:12px;line-height:1.55;text-align:center}.checkout-result{padding:36px 0;border-top:1px solid #dfe3df}.checkout-result h2{font:600 36px/1.1 Georgia,serif;margin:8px 0 14px}.checkout-result p{color:#535c54;line-height:1.65}.checkout-result .confirmation-number{color:#202420;font-size:14px;font-weight:700}.status-pill{display:inline-flex;background:#edf2ec;color:#345443;padding:6px 9px;border-radius:4px;text-transform:uppercase;font-size:10px;font-weight:800;letter-spacing:1px}.checkout-return{max-width:620px;margin:0 auto;padding:clamp(72px,12vw,150px) 24px;min-height:calc(100vh - 132px);text-align:center}.checkout-return h1{font:600 42px/1.1 Georgia,serif;margin:18px 0 14px}.checkout-return p{color:#535c54;line-height:1.65;margin:0 auto 28px;max-width:520px}.checkout-return .button{margin:0 auto}.checkout-summary-column{background:#f5f6f4;border-left:1px solid #dfe3df;padding:62px clamp(28px,4vw,56px)}.order-summary{position:sticky;top:28px}.order-summary summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;padding-bottom:24px;cursor:default}.order-summary summary::-webkit-details-marker{display:none}.order-summary summary strong{font-size:18px;font-variant-numeric:tabular-nums}.summary-items{display:grid;gap:18px;padding:0 0 24px;border-bottom:1px solid #d7dbd7}.summary-item{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:14px;align-items:center}.summary-media{width:64px;height:64px;border:1px solid #d9ddd9;border-radius:6px;background:#fff;position:relative;display:grid;place-items:center;overflow:visible;color:#777f78;font:600 11px Georgia,serif;text-align:center;padding:5px}.summary-media img{width:100%;height:100%;object-fit:cover;border-radius:5px}.summary-quantity{position:absolute;right:-7px;top:-8px;min-width:22px;height:22px;border-radius:50%;background:#646c65;color:#fff;display:grid;place-items:center;padding:0 5px;font-size:11px}.summary-copy{min-width:0}.summary-copy strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.summary-copy small{display:block;color:#747c75;font-size:11px;margin-top:4px}.summary-price{justify-self:end;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-totals{display:grid;grid-template-columns:1fr auto;gap:10px 24px;padding:24px 0;font-size:13px}.summary-totals span:nth-child(even){justify-self:end;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-total-label,.summary-total-value{border-top:1px solid #d7dbd7;padding-top:18px;margin-top:8px;font-size:17px;font-weight:750}.summary-total-value{font-size:21px}.summary-loading{color:#69716a;font-size:13px;padding:12px 0}.checkout-footer{min-height:56px;border-top:1px solid #dfe3df;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:16px clamp(24px,5vw,72px);color:#69716a;font-size:11px}
 [hidden]{display:none!important}
 .checkout-intro{margin-bottom:28px}
 .checkout-progress{margin:0 0 36px}
@@ -456,7 +490,6 @@ const storefrontCSS = `
 .checkout-review-row>button{appearance:none;border:0;background:transparent;color:var(--accent);cursor:pointer;font:600 12px/1.4 inherit;padding:1px 0;border-bottom:1px solid currentColor}
 .checkout-section-heading{display:block;margin-bottom:22px}
 .checkout-section-heading h2{font-size:21px;margin:0 0 5px}
-.shipping-method{border-color:var(--accent);background:#f7faf8}
 .payment-section{border-bottom:0;padding-bottom:0}
 .payment-security{display:flex;align-items:center;gap:14px;border:1px solid #d7dcd8;border-radius:6px;padding:14px 16px;background:#fafbfa}
 .payment-security>span{width:16px;height:13px;border:2px solid var(--accent);border-radius:3px;position:relative;flex:0 0 auto}
@@ -478,7 +511,7 @@ const storefrontJS = `
 const qs=(s,r=document)=>r.querySelector(s),qsa=(s,r=document)=>[...r.querySelectorAll(s)];
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const toast=(message)=>{const el=qs('[data-toast]');if(!el)return;el.textContent=message;el.classList.add('visible');setTimeout(()=>el.classList.remove('visible'),2200)};
-async function call(url,input={}){const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'storefront'},body:JSON.stringify(input)});const body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.error||'Request failed');return body}
+async function call(url,input={}){const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'storefront'},body:JSON.stringify(input)});const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.error||'Request failed');error.code=body.code||'';error.retryable=Boolean(body.retryable);throw error}return body}
 function cartFrom(body){return body?.result?.cart||body?.result||body?.steps?.at(-1)?.cart||null}
 function updateCount(cart){qsa('[data-cart-count]').forEach(el=>el.textContent=cart?.items?.length?'('+cart.items.length+')':'')}
 function cartTitle(item){const title=String(item?.title_snapshot??'');const parts=title.split(' - ');return parts.length===2&&parts[0]===parts[1]?parts[0]:title}
@@ -491,9 +524,10 @@ const cartRoot=qs('[data-cart]');if(cartRoot){const render=cart=>{updateCount(ca
 const checkoutForm=qs('[data-checkout-form]');
 if(checkoutForm){
   const countryCodes='AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ');
-  const names=typeof Intl.DisplayNames==='function'?new Intl.DisplayNames([navigator.language||'en'],{type:'region'}):null;
-  const countries=countryCodes.map(code=>({code,label:names?.of(code)||code})).sort((a,b)=>a.label.localeCompare(b.label));
-  qsa('[data-country-select]',checkoutForm).forEach(select=>{countries.forEach(country=>{const option=document.createElement('option');option.value=country.code;option.textContent=country.label;select.append(option)})});
+  const regionNames=typeof Intl.DisplayNames==='function'?new Intl.DisplayNames([navigator.language||'en'],{type:'region'}):null;
+  const countries=countryCodes.map(code=>({code,label:regionNames?.of(code)||code})).sort((a,b)=>a.label.localeCompare(b.label));
+  qsa('[data-country-select]',checkoutForm).forEach(select=>countries.forEach(country=>{const option=document.createElement('option');option.value=country.code;option.textContent=country.label;select.append(option)}));
+
   const billingSame=qs('[data-billing-same]',checkoutForm);
   const billingFields=qs('[data-billing-fields]',checkoutForm);
   const checkoutError=qs('[data-checkout-error]');
@@ -502,9 +536,8 @@ if(checkoutForm){
   const summaryTotal=qs('[data-summary-total]');
   const submitButton=qs('[data-order-submit]',checkoutForm);
   const submitLabel=qs('[data-submit-label]',submitButton);
-  const shippingMethod=qs('[data-shipping-method]');
+  const shippingMethods=qs('[data-shipping-methods]');
   const shippingMessage=qs('[data-shipping-message]');
-  const shippingPrice=qs('[data-shipping-price]');
   const checkoutReview=qs('[data-checkout-review]',checkoutForm);
   const reviewContact=qs('[data-review-contact]',checkoutForm);
   const reviewDelivery=qs('[data-review-delivery]',checkoutForm);
@@ -514,92 +547,95 @@ if(checkoutForm){
   const stepBack=qs('[data-step-back]',checkoutForm);
   const paymentStage=qs('[data-payment-stage]');
   const paymentButton=qs('[data-payment-submit]');
+  const paymentLabel=qs('[data-payment-label]');
   const paymentError=qs('[data-payment-error]');
-  const orderButton=qs('[data-order-submit]');
-  let latestCart=null;
-  let quoteReady=false;
-  let checkoutStep=1;
-  let orderReserved=false;
-  let stripeActions=null;
-
-  const shippingNames=['customer_name','company','address_line1','address_line2','city','region','postal_code','country_code','phone'];
+  const persistedKey='apteva-checkout:'+location.pathname;
   const billingMap={billing_name:'customer_name',billing_company:'company',billing_address_line1:'address_line1',billing_address_line2:'address_line2',billing_city:'city',billing_region:'region',billing_postal_code:'postal_code',billing_country_code:'country_code'};
+  const quoteFields=['customer_name','company','address_line1','address_line2','city','region','postal_code','country_code','phone','discount_code'];
+  let latestCart=null,latestQuote=null,checkoutStep=1,stripeActions=null;
+  let quoteReady=false,orderReserved=false,paymentMounted=false;
+
   function checkoutInput(){
     const input=Object.fromEntries(new FormData(checkoutForm));
-    if(billingSame.checked){Object.entries(billingMap).forEach(([billing,shipping])=>{input[billing]=input[shipping]||''})}
+    if(billingSame.checked)Object.entries(billingMap).forEach(([billing,shipping])=>{input[billing]=input[shipping]||''});
     input.country_code=String(input.country_code||'').toUpperCase();
     input.billing_country_code=String(input.billing_country_code||'').toUpperCase();
     delete input.billing_same;
     return input;
   }
   function setBillingMode(){
-    const same=billingSame.checked;
-    billingFields.hidden=same;
-    qsa('input,select',billingFields).forEach(field=>field.disabled=same);
+    billingFields.hidden=billingSame.checked;
+    qsa('input,select',billingFields).forEach(field=>field.disabled=billingSame.checked);
+  }
+  function restoreForm(){
+    try{
+      const values=JSON.parse(sessionStorage.getItem(persistedKey)||'{}');
+      Object.entries(values).forEach(([name,value])=>{const field=checkoutForm.elements.namedItem(name);if(field&&typeof value==='string')field.value=value});
+    }catch{}
+  }
+  function persistForm(){
+    const values=checkoutInput();
+    delete values.shipping_option_id;
+    try{sessionStorage.setItem(persistedKey,JSON.stringify(values))}catch{}
   }
   function primaryLabel(){
     if(checkoutStep===1)return 'Continue to shipping';
-    return orderReserved?'Try payment again':'Continue to payment';
+    if(checkoutStep===2)return 'Continue to payment';
+    return 'Load secure payment';
   }
   function updateReview(){
     const input=checkoutInput();
     const country=qs('[name=country_code]',checkoutForm);
-    const countryLabel=country?.selectedOptions?.[0]?.textContent||input.country_code;
     reviewContact.textContent=[input.email,input.phone].filter(Boolean).join(' · ');
-    reviewDelivery.textContent=[
-      input.customer_name,input.company,input.address_line1,input.address_line2,
-      [input.postal_code,input.city].filter(Boolean).join(' '),input.region,countryLabel
-    ].filter(Boolean).join(', ');
+    reviewDelivery.textContent=[input.customer_name,input.company,input.address_line1,input.address_line2,[input.postal_code,input.city].filter(Boolean).join(' '),input.region,country?.selectedOptions?.[0]?.textContent||input.country_code].filter(Boolean).join(', ');
   }
   function setStep(next,scroll=true){
     checkoutStep=next;
     qsa('[data-checkout-step]',checkoutForm).forEach(panel=>{panel.hidden=Number(panel.dataset.checkoutStep)!==next});
     checkoutReview.hidden=next===1;
     reviewShippingRow.hidden=next<3;
-    qsa('[data-edit-step]',checkoutReview).forEach(button=>{button.hidden=next===3||orderReserved});
+    qsa('[data-edit-step]',checkoutReview).forEach(button=>{button.hidden=orderReserved});
     qsa('[data-progress-step]').forEach(item=>{
       const step=Number(item.dataset.progressStep);
       item.classList.toggle('is-active',step===next);
       item.classList.toggle('is-complete',step<next);
-      const button=qs('button',item);
-      button.disabled=orderReserved||step>next||step===next;
+      qs('button',item).disabled=orderReserved||step>=next;
     });
-    checkoutActions.hidden=next===3;
-    stepBack.hidden=next!==2||orderReserved;
+    checkoutActions.hidden=paymentMounted;
+    stepBack.hidden=next===1||orderReserved;
+    stepBack.textContent=next===2?'Back to information':'Back to shipping';
     submitLabel.textContent=primaryLabel();
     updateReview();
     if(scroll)qs('.checkout-progress').scrollIntoView({behavior:'smooth',block:'start'});
   }
-  function setBusy(busy,label){
+  function setBusy(busy,label=''){
     submitButton.disabled=busy;
     checkoutForm.setAttribute('aria-busy',String(busy));
     submitLabel.textContent=busy?label:primaryLabel();
   }
   function showError(message){
-    checkoutError.textContent=message==='storefront action unavailable'?'We could not update checkout. Review your details and try again.':message;
+    checkoutError.textContent=message==='storefront action unavailable'?'We could not update checkout. Your information is saved in this browser; try again in a moment.':message;
     checkoutError.hidden=false;
     checkoutError.scrollIntoView({behavior:'smooth',block:'center'});
   }
-  async function mountStripePayment(payment){
-    if(typeof window.Stripe!=='function')throw new Error('The secure payment form could not be loaded');
-    if(!payment?.publishable_key||!payment?.client_secret)throw new Error('Secure payment configuration is unavailable');
-    const stripe=window.Stripe(payment.publishable_key);
-    const checkout=stripe.initCheckout({
-      clientSecret:payment.client_secret,
-      elementsOptions:{appearance:{theme:'stripe',variables:{colorPrimary:getComputedStyle(document.body).getPropertyValue('--accent').trim()||'#176b45',borderRadius:'4px'}}}
-    });
-    checkout.on('change',session=>{paymentButton.disabled=!session.canConfirm});
-    const loaded=await checkout.loadActions();
-    if(loaded.type!=='success')throw new Error(loaded.error?.message||'The secure payment form could not be initialized');
-    stripeActions=loaded.actions;
-    checkout.createPaymentElement().mount('#payment-element');
-    paymentStage.hidden=false;
-    orderButton.hidden=true;
-    paymentButton.disabled=!loaded.actions.getSession().canConfirm;
-    paymentStage.scrollIntoView({behavior:'smooth',block:'center'});
+  function quoteFrom(body){return body?.result?.quote||body?.steps?.at(-1)?.quote||null}
+  function renderShippingOptions(quote){
+    const options=quote?.shipping_options||[];
+    const selected=quote?.selected_shipping?.id||'';
+    shippingMethods.innerHTML=options.map(option=>{
+      const estimate=option.estimated_days_min?(option.estimated_days_min===option.estimated_days_max?option.estimated_days_min+' business days':option.estimated_days_min+'-'+option.estimated_days_max+' business days'):'Delivery estimate shown after dispatch';
+      return '<label class="shipping-method"><input type="radio" name="shipping_option_id" value="'+esc(option.id)+'" '+(option.id===selected?'checked':'')+' required><span class="shipping-method-copy"><strong>'+esc(option.name)+'</strong><small>'+esc(estimate)+'</small></span><strong class="shipping-method-price">'+esc(option.amount_cents?money(option.amount_cents,option.currency):'Free')+'</strong></label>';
+    }).join('');
+    qsa('input[name=shipping_option_id]',shippingMethods).forEach(input=>input.addEventListener('change',async()=>{
+      setBusy(true,'Updating total...');
+      try{renderQuote(await call(checkoutForm.dataset.quoteAction,checkoutInput()))}
+      catch(error){showError(error.message)}
+      finally{setBusy(false)}
+    }));
   }
-  function renderSummary(cart,quoted){
+  function renderSummary(cart,quote){
     latestCart=cart;
+    latestQuote=quote||null;
     if(!cart?.items?.length){
       summaryRoot.innerHTML='<p class="empty">Your cart is empty. <a href="'+esc(checkoutForm.dataset.cartUrl)+'">Return to cart</a>.</p>';
       summaryTotal.textContent=money(0,cart?.currency||'USD');
@@ -611,35 +647,69 @@ if(checkoutForm){
       const media=image?'<img src="'+esc(image)+'" alt="">':esc(cartTitle(item).slice(0,2).toUpperCase());
       return '<div class="summary-item"><div class="summary-media">'+media+'<span class="summary-quantity">'+esc(item.quantity)+'</span></div><div class="summary-copy"><strong>'+esc(cartTitle(item))+'</strong><small>'+esc(item.sku)+'</small></div><span class="summary-price">'+esc(money(item.unit_amount_cents*item.quantity,item.currency))+'</span></div>';
     }).join('');
-    const baseTotal=cart.subtotal_cents-cart.discount_cents+cart.tax_cents;
-    const visibleTotal=quoted?cart.total_cents:baseTotal;
+    const quoted=Boolean(quote);
+    const visibleTotal=quoted?cart.total_cents:cart.subtotal_cents;
     const shipping=quoted?(cart.shipping_cents?money(cart.shipping_cents,cart.currency):'Free'):'Calculated after address';
     const discount=cart.discount_cents?'<span>Discount</span><span>-'+esc(money(cart.discount_cents,cart.currency))+'</span>':'';
     const tax=cart.tax_cents?'<span>Tax</span><span>'+esc(money(cart.tax_cents,cart.currency))+'</span>':'';
     summaryRoot.innerHTML='<div class="summary-items">'+items+'</div><div class="summary-totals"><span>Subtotal</span><span>'+esc(money(cart.subtotal_cents,cart.currency))+'</span>'+discount+'<span>Shipping</span><span>'+esc(shipping)+'</span>'+tax+'<span class="summary-total-label">Total</span><span class="summary-total-value">'+esc(money(visibleTotal,cart.currency))+'</span></div>';
     summaryTotal.textContent=money(visibleTotal,cart.currency);
-    shippingMethod.hidden=!quoted;
-    shippingMessage.textContent=quoted?'Shipping is confirmed for this address.':'Enter your delivery address to review shipping.';
-    shippingPrice.textContent=quoted?(cart.shipping_cents?money(cart.shipping_cents,cart.currency):'Free'):'Calculated';
-    reviewShipping.textContent='Standard delivery · '+shippingPrice.textContent;
+    if(quote){
+      renderShippingOptions(quote);
+      const method=quote.selected_shipping||{};
+      shippingMessage.textContent=(quote.shipping_options||[]).length>1?'Choose one of the available delivery methods.':'The available delivery method is selected.';
+      reviewShipping.textContent=(method.name||'Delivery')+' · '+(method.amount_cents?money(method.amount_cents,method.currency):'Free');
+    }
   }
+  function renderQuote(body){
+    const cart=cartFrom(body),quote=quoteFrom(body);
+    if(!cart||!quote)throw new Error('Order totals are unavailable');
+    quoteReady=true;
+    renderSummary(cart,quote);
+  }
+  function hydrateCheckout(checkout){
+    if(!checkout)return;
+    const shipping=checkout.shipping_address||{},billing=checkout.billing_address||{};
+    const values={email:checkout.customer_email||'',customer_name:checkout.customer_name||'',company:shipping.company||'',address_line1:shipping.line1||'',address_line2:shipping.line2||'',city:shipping.city||'',region:shipping.region||'',postal_code:shipping.postal_code||'',country_code:shipping.country_code||shipping.country||'',phone:shipping.phone||'',billing_name:billing.name||'',billing_company:billing.company||'',billing_address_line1:billing.line1||'',billing_address_line2:billing.line2||'',billing_city:billing.city||'',billing_region:billing.region||'',billing_postal_code:billing.postal_code||'',billing_country_code:billing.country_code||billing.country||''};
+    Object.entries(values).forEach(([name,value])=>{const field=checkoutForm.elements.namedItem(name);if(field&&!field.value)field.value=value});
+  }
+  function showSale(sale){
+    checkoutForm.hidden=true;
+    checkoutResult.hidden=false;
+    const paid=sale?.payment_status==='paid';
+    checkoutResult.innerHTML='<span class="status-pill">'+(paid?'Paid':'Payment pending')+'</span><h2>Order received</h2>'+(sale?.invoice_number?'<p class="confirmation-number">Invoice '+esc(sale.invoice_number)+'</p>':'')+'<p>'+(paid?'Payment is confirmed and your order is being prepared.':'Your order is reserved. Follow the merchant payment instructions to complete payment.')+'</p>';
+    try{sessionStorage.removeItem(persistedKey)}catch{}
+    checkoutResult.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+  async function mountStripePayment(payment){
+    if(paymentMounted)return;
+    if(typeof window.Stripe!=='function')throw new Error('The secure payment form could not be loaded');
+    if(!payment?.publishable_key||!payment?.client_secret)throw new Error('Secure payment configuration is unavailable');
+    const stripe=window.Stripe(payment.publishable_key);
+    const checkout=stripe.initCheckout({clientSecret:payment.client_secret,elementsOptions:{appearance:{theme:'stripe',variables:{colorPrimary:getComputedStyle(document.body).getPropertyValue('--accent').trim()||'#176b45',borderRadius:'4px'}}}});
+    checkout.on('change',session=>{paymentButton.disabled=!session.canConfirm});
+    const loaded=await checkout.loadActions();
+    if(loaded.type!=='success')throw new Error(loaded.error?.message||'The secure payment form could not be initialized');
+    stripeActions=loaded.actions;
+    checkout.createPaymentElement().mount('#payment-element');
+    paymentMounted=true;
+    paymentStage.hidden=false;
+    checkoutActions.hidden=true;
+    paymentButton.disabled=!loaded.actions.getSession().canConfirm;
+    paymentLabel.textContent=latestCart?'Pay '+money(latestCart.total_cents,latestCart.currency):'Pay now';
+    paymentStage.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+
+  restoreForm();
   setBillingMode();
   setStep(1,false);
-  billingSame.addEventListener('change',setBillingMode);
-  qsa('[data-go-step]').forEach(button=>button.addEventListener('click',()=>{
-    const target=Number(button.dataset.goStep);
-    if(!orderReserved&&target<checkoutStep)setStep(target);
-  }));
-  qsa('[data-edit-step]',checkoutReview).forEach(button=>button.addEventListener('click',()=>{
-    if(!orderReserved)setStep(Number(button.dataset.editStep));
-  }));
-  stepBack.addEventListener('click',()=>{if(!orderReserved)setStep(1)});
+  billingSame.addEventListener('change',()=>{setBillingMode();persistForm()});
+  qsa('[data-go-step]').forEach(button=>button.addEventListener('click',()=>{const target=Number(button.dataset.goStep);if(!orderReserved&&target<checkoutStep)setStep(target)}));
+  qsa('[data-edit-step]',checkoutReview).forEach(button=>button.addEventListener('click',()=>{if(!orderReserved)setStep(Number(button.dataset.editStep))}));
+  stepBack.addEventListener('click',()=>{if(!orderReserved)setStep(Math.max(1,checkoutStep-1))});
   checkoutForm.addEventListener('input',event=>{
-    if(quoteReady&&shippingNames.includes(event.target.name)){
-      quoteReady=false;
-      renderSummary(latestCart,false);
-      submitLabel.textContent=primaryLabel();
-    }
+    persistForm();
+    if(quoteReady&&quoteFields.includes(event.target.name)){quoteReady=false;renderSummary(latestCart,null)}
     checkoutError.hidden=true;
   });
   checkoutForm.addEventListener('submit',async event=>{
@@ -648,53 +718,36 @@ if(checkoutForm){
     if(!checkoutForm.reportValidity())return;
     const input=checkoutInput();
     if(checkoutStep===1){
-      if(quoteReady){
-        setStep(2);
-        return;
-      }
       setBusy(true,'Calculating shipping...');
-      try{
-        const body=await call(checkoutForm.dataset.quoteAction,input);
-        const cart=cartFrom(body);
-        if(!cart)throw new Error('Order totals are unavailable');
-        quoteReady=true;
-        renderSummary(cart,true);
-        setStep(2);
-      }catch(error){showError(error.message)}
-      finally{setBusy(false,'')}
+      try{renderQuote(await call(checkoutForm.dataset.quoteAction,input));setStep(2)}
+      catch(error){showError(error.message)}
+      finally{setBusy(false)}
       return;
     }
-    if(checkoutStep!==2)return;
-    setBusy(true,orderReserved?'Loading payment...':'Reserving your order...');
-    try{
-      const body=await call(checkoutForm.dataset.storefrontAction,input);
-      const confirmedCart=body?.steps?.[1]?.cart;
-      if(confirmedCart)renderSummary(confirmedCart,true);
-      const sale=body?.result?.sale;
-      if(!sale)throw new Error('Order confirmation is unavailable');
-      orderReserved=true;
-      checkoutError.hidden=true;
-      const payment=body?.result?.payment||{};
-      if(payment.presentation==='hosted'){
-        if(!payment.url)throw new Error('The hosted payment page is unavailable');
-        location.assign(payment.url);
-        return;
-      }
-      if(payment.presentation==='elements'){
+    if(checkoutStep===2){
+      setBusy(true,'Reserving your order...');
+      try{
+        const body=await call(checkoutForm.dataset.reserveAction,input);
+        if(body?.steps?.[1]?.cart&&body?.steps?.[1]?.quote)renderSummary(body.steps[1].cart,body.steps[1].quote);
+        if(!body?.result?.checkout)throw new Error('Checkout could not be reserved');
+        orderReserved=true;
         setStep(3);
-        await mountStripePayment(payment);
-        return;
-      }
-      checkoutForm.hidden=true;
-      const paid=sale.payment_status==='paid';
-      checkoutResult.hidden=false;
-      checkoutResult.innerHTML='<span class="status-pill">'+(paid?'Paid':'Payment pending')+'</span><h2>Order received</h2>'+(sale.invoice_number?'<p class="confirmation-number">Invoice '+esc(sale.invoice_number)+'</p>':'')+'<p>'+(paid?'Payment is confirmed and your order is being prepared.':'Your order is reserved. Follow the invoice payment instructions from the merchant to complete payment.')+'</p>';
-      checkoutResult.scrollIntoView({behavior:'smooth',block:'start'});
-    }catch(error){
-      if(orderReserved&&checkoutStep===3)setStep(2,false);
-      showError(error.message);
+      }catch(error){showError(error.message)}
+      finally{setBusy(false)}
+      return;
     }
-    finally{setBusy(false,'')}
+    if(checkoutStep===3&&!paymentMounted){
+      setBusy(true,'Loading secure payment...');
+      try{
+        const body=await call(checkoutForm.dataset.paymentAction,input);
+        const sale=body?.result?.sale,payment=body?.result?.payment||{};
+        if(payment.presentation==='hosted'){if(!payment.url)throw new Error('The hosted payment page is unavailable');location.assign(payment.url);return}
+        if(payment.presentation==='elements'){await mountStripePayment(payment);return}
+        if(!sale)throw new Error('Order confirmation is unavailable');
+        showSale(sale);
+      }catch(error){showError(error.message)}
+      finally{setBusy(false)}
+    }
   });
   paymentButton.addEventListener('click',async()=>{
     if(!stripeActions)return;
@@ -707,14 +760,25 @@ if(checkoutForm){
       checkoutForm.hidden=true;
       checkoutResult.hidden=false;
       checkoutResult.innerHTML='<span class="status-pill">Payment processing</span><h2>Confirming your order</h2><p>Payment was submitted. Confirmation can take a moment.</p>';
+      try{sessionStorage.removeItem(persistedKey)}catch{}
       checkoutResult.scrollIntoView({behavior:'smooth',block:'start'});
-    }catch(error){
-      paymentError.textContent=error.message;
-      paymentError.hidden=false;
-      paymentButton.disabled=false;
-    }
+    }catch(error){paymentError.textContent=error.message;paymentError.hidden=false;paymentButton.disabled=false}
   });
-  call(checkoutForm.dataset.cartAction).then(body=>renderSummary(cartFrom(body),false)).catch(error=>showError(error.message));
+  call(checkoutForm.dataset.bootstrapAction).then(async body=>{
+    const state=body?.result||{};
+    if(state.status==='not_found'||!state.cart){renderSummary(cartFrom(await call(checkoutForm.dataset.cartAction)),null);return}
+    hydrateCheckout(state.checkout);
+    const quote=state.quote&&Object.keys(state.quote).length?state.quote:null;
+    renderSummary(state.cart,quote);
+    quoteReady=Boolean(quote);
+    if(state.sale?.payment_status==='paid'){showSale(state.sale);return}
+    if(state.checkout&&['started','awaiting_payment'].includes(state.checkout.status)){
+      orderReserved=true;
+      setStep(3,false);
+      if(state.payment?.presentation==='hosted'&&state.payment.url){location.assign(state.payment.url);return}
+      if(state.payment?.presentation==='elements')await mountStripePayment(state.payment);
+    }
+  }).catch(async error=>{try{renderSummary(cartFrom(await call(checkoutForm.dataset.cartAction)),null)}catch{showError(error.message)}});
   const orderSummary=qs('[data-order-summary]');
   const mobile=matchMedia('(max-width:900px)');
   const syncSummary=()=>{if(mobile.matches)orderSummary.removeAttribute('open');else orderSummary.setAttribute('open','')};

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ExternalLink, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 
 const API = "/api/apps/commerce";
 
@@ -173,7 +174,31 @@ interface StorefrontStatus {
   error?: string;
 }
 
-type View = "products" | "collections" | "providers" | "storefront" | "stores" | "carts" | "sales";
+interface ShippingMethod {
+  id: string;
+  name: string;
+  amount_cents: number;
+  currency: string;
+  estimated_days_min?: number;
+  estimated_days_max?: number;
+  minimum_subtotal_cents?: number;
+}
+
+interface ShippingZone {
+  id: string;
+  name: string;
+  countries: string[];
+  methods: ShippingMethod[];
+}
+
+interface StoreSettings {
+  shipping: { zones: ShippingZone[] };
+  tax: { default_rate_bps: number; country_rates: Record<string, number>; prices_include_tax: boolean; shipping_taxable: boolean };
+  markets: { enabled: string[] };
+  payments: { payment_method_types?: string[]; save_payment_method?: boolean; set_default_payment_method?: boolean };
+}
+
+type View = "products" | "collections" | "providers" | "storefront" | "stores" | "settings" | "carts" | "sales";
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
@@ -192,6 +217,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [sources, setSources] = useState<VariantSource[]>([]);
   const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
   const [storefront, setStorefront] = useState<StorefrontStatus | null>(null);
+  const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null);
   const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
   const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
   const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
@@ -240,7 +266,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setLoading(true);
     const filter = selectedStore ? `?store_id=${encodeURIComponent(selectedStore)}` : "";
     try {
-      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches, nextStorefront] = await Promise.all([
+      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches, nextStorefront, nextSettings] = await Promise.all([
         api<Summary>("/admin/summary"),
         api<Store[]>("/admin/stores"),
         api<Product[]>(`/admin/products${filter}`),
@@ -251,6 +277,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
         api<VariantSource[]>(`/admin/variant-sources${filter}`),
         api<DispatchJob[]>(`/admin/dispatches${filter ? `${filter}&limit=100` : "?limit=100"}`),
         selectedStore ? api<StorefrontStatus>(`/admin/storefront?store_id=${encodeURIComponent(selectedStore)}`) : Promise.resolve(null),
+        selectedStore ? api<{ settings: StoreSettings }>(`/admin/store-settings?store_id=${encodeURIComponent(selectedStore)}`) : Promise.resolve(null),
       ]);
       if (sequence !== loadSequence.current) return;
       setSummary(nextSummary);
@@ -263,6 +290,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       setSources(nextSources || []);
       setDispatches(nextDispatches || []);
       setStorefront(nextStorefront);
+      setStoreSettings(nextSettings?.settings || null);
       setProviderDrafts(Object.fromEntries((nextProviders || []).map((provider) => [provider.connection_id, {
         ...provider, settings: { ...(provider.settings || {}) },
       }])));
@@ -466,10 +494,53 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setStorefront(status);
   }
 
+  function updateShippingMethod(zoneIndex: number, methodIndex: number, patch: Partial<ShippingMethod>) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone,
+        methods: zone.methods.map((method, currentMethod) => currentMethod === methodIndex ? { ...method, ...patch } : method),
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  function addShippingMethod(zoneIndex: number) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone,
+        methods: [...zone.methods, {
+          id: `method-${Date.now()}`, name: "New shipping method", amount_cents: 0,
+          currency: currentStore?.default_currency || "USD", estimated_days_min: 3, estimated_days_max: 7,
+        }],
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  function removeShippingMethod(zoneIndex: number, methodIndex: number) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone, methods: zone.methods.filter((_, currentMethod) => currentMethod !== methodIndex),
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  async function saveStoreSettings() {
+    if (!selectedStore || !storeSettings) throw new Error("Select a store before changing settings");
+    await api(`/admin/store-settings?store_id=${encodeURIComponent(selectedStore)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ patch: storeSettings }),
+    });
+  }
+
   const tabs: Array<{ id: View; label: string }> = [
     { id: "products", label: "Products" }, { id: "collections", label: "Collections" },
     { id: "providers", label: "Providers" }, { id: "storefront", label: "Storefront" },
-    { id: "stores", label: "Stores" },
+    { id: "stores", label: "Stores" }, { id: "settings", label: "Settings" },
     { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
   ];
 
@@ -482,7 +553,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
             <option value="">All stores</option>
             {stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}
           </select>
-          <button type="button" onClick={() => void load()} disabled={loading} className="h-8 px-3 rounded-md border border-border text-sm hover:bg-bg-input disabled:opacity-50">Refresh</button>
+          <button type="button" onClick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh" className="grid h-8 w-8 place-items-center rounded-md border border-border hover:bg-bg-input disabled:opacity-50"><RefreshCw size={15} className={loading ? "animate-spin" : ""} /></button>
         </div>
         <nav className="basis-full flex overflow-x-auto border-t border-border -mx-4 md:-mx-5 px-4 md:px-5 pt-2 gap-1" aria-label="Commerce sections">
           {tabs.map((tab) => (
@@ -647,6 +718,65 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
           </section>
         )}
 
+        {view === "settings" && (
+          <section className="max-w-5xl space-y-6">
+            <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
+              <div><h2 className="text-base font-semibold">Store settings</h2><p className="mt-1 text-sm text-text-muted">{currentStore?.name || "Select a store"}</p></div>
+              <button type="button" disabled={!storeSettings || busy} onClick={() => void run(saveStoreSettings, "Store settings saved")} className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-medium text-bg disabled:opacity-50"><Save size={15} />Save</button>
+            </div>
+            {!selectedStore || !storeSettings ? (
+              <div className="border-y border-border px-4 py-12 text-center text-sm text-text-muted">Select a store to configure checkout settings.</div>
+            ) : (
+              <>
+                <div className="space-y-4">
+                  <div><h3 className="text-sm font-semibold">Shipping profiles</h3><p className="mt-1 text-xs text-text-muted">Rates are evaluated by destination and combined with supplier rates.</p></div>
+                  {storeSettings.shipping.zones.map((zone, zoneIndex) => (
+                    <section key={zone.id} className="border-y border-border">
+                      <div className="grid gap-3 border-b border-border bg-bg-subtle px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,1fr)_auto]">
+                        <Field label="Zone name"><input value={zone.name} onChange={(event) => setStoreSettings((current) => current ? { ...current, shipping: { zones: current.shipping.zones.map((row, index) => index === zoneIndex ? { ...row, name: event.target.value } : row) } } : current)} className={inputClass} /></Field>
+                        <Field label="Countries"><input value={zone.countries.join(", ")} onChange={(event) => setStoreSettings((current) => current ? { ...current, shipping: { zones: current.shipping.zones.map((row, index) => index === zoneIndex ? { ...row, countries: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) } : row) } } : current)} placeholder="US, CA or *" className={inputClass} /></Field>
+                        <button type="button" onClick={() => addShippingMethod(zoneIndex)} className="mt-auto inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border px-3 text-sm hover:bg-bg-input"><Plus size={15} />Method</button>
+                      </div>
+                      <div className="divide-y divide-border">
+                        {zone.methods.map((method, methodIndex) => (
+                          <div key={method.id} className="grid gap-3 px-3 py-3 md:grid-cols-[minmax(180px,1fr)_110px_90px_90px_40px]">
+                            <Field label="Method"><input value={method.name} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { name: event.target.value })} className={inputClass} /></Field>
+                            <Field label={`Price (${method.currency})`}><input type="number" min="0" step="0.01" value={(method.amount_cents / 100).toString()} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { amount_cents: Math.max(0, Math.round(Number(event.target.value) * 100)) })} className={inputClass} /></Field>
+                            <Field label="Min days"><input type="number" min="0" value={method.estimated_days_min || 0} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { estimated_days_min: Math.max(0, Number(event.target.value)) })} className={inputClass} /></Field>
+                            <Field label="Max days"><input type="number" min="0" value={method.estimated_days_max || 0} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { estimated_days_max: Math.max(0, Number(event.target.value)) })} className={inputClass} /></Field>
+                            <button type="button" title="Remove shipping method" aria-label="Remove shipping method" disabled={zone.methods.length === 1} onClick={() => removeShippingMethod(zoneIndex, methodIndex)} className="mt-auto grid h-9 w-9 place-items-center rounded-md text-red-600 hover:bg-red-500/10 disabled:opacity-30"><Trash2 size={15} /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+
+                <div className="grid gap-8 border-t border-border pt-6 lg:grid-cols-2">
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-semibold">Transactional tax</h3>
+                    <Field label="Default rate (%)"><input type="number" min="0" max="100" step="0.01" value={(storeSettings.tax.default_rate_bps / 100).toString()} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, default_rate_bps: Math.max(0, Math.min(10000, Math.round(Number(event.target.value) * 100))) } })} className={inputClass} /></Field>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={storeSettings.tax.prices_include_tax} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, prices_include_tax: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Product prices include tax</span></label>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={storeSettings.tax.shipping_taxable} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, shipping_taxable: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Apply tax to shipping</span></label>
+                  </section>
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-semibold">Markets</h3>
+                    <Field label="Enabled countries"><input value={(storeSettings.markets.enabled || []).join(", ")} onChange={(event) => setStoreSettings({ ...storeSettings, markets: { enabled: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) } })} placeholder="US, CA, GB" className={inputClass} /></Field>
+                    <h3 className="pt-3 text-sm font-semibold">Stripe methods</h3>
+                    <div className="grid grid-cols-2 gap-x-4">
+                      {["card", "link", "paypal", "cashapp"].map((method) => {
+                        const methods = storeSettings.payments.payment_method_types || [];
+                        return <label key={method} className="flex items-center gap-3 border-b border-border py-3 text-sm capitalize"><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setStoreSettings({ ...storeSettings, payments: { ...storeSettings.payments, payment_method_types: event.target.checked ? [...methods, method] : methods.filter((value) => value !== method) } })} className="h-4 w-4 accent-accent" />{method}</label>;
+                      })}
+                    </div>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={Boolean(storeSettings.payments.save_payment_method)} onChange={(event) => setStoreSettings({ ...storeSettings, payments: { ...storeSettings.payments, save_payment_method: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Save payment method with consent</span></label>
+                  </section>
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
         {view === "storefront" && (
           <section className="max-w-4xl space-y-5">
             <div>
@@ -673,7 +803,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                   <button type="button" disabled={busy} onClick={() => void run(configureStorefront, storefront?.configured ? "Storefront refreshed" : "Storefront configured")} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">
                     {storefront?.configured ? "Refresh configuration" : "Configure with Content"}
                   </button>
-                  {storefront?.preview_url && <a href={storefront.preview_url} target="_blank" rel="noreferrer" className="flex h-9 items-center justify-center rounded-md border border-border text-sm hover:bg-bg-input">Open storefront</a>}
+                  {storefront?.preview_url && <a href={storefront.preview_url} target="_blank" rel="noreferrer" className="flex h-9 items-center justify-center gap-2 rounded-md border border-border text-sm hover:bg-bg-input">Open storefront<ExternalLink size={14} /></a>}
                   {storefront?.configured && <a href="/apps/content/page" className="flex h-9 items-center justify-center rounded-md border border-border text-sm hover:bg-bg-input">Customize in Content</a>}
                   <p className="text-xs leading-5 text-text-muted">Without Content installed, Commerce remains available for merchant operations but exposes no public storefront.</p>
                 </aside>

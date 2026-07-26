@@ -99,7 +99,7 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 		"invoices_render_pdf", "invoices_create_payment_session", "invoices_send_payment_link", "invoices_collect",
 		"payment_method_setup_create", "payment_methods_list",
 		"payment_method_default_set", "payment_method_detach",
-		"payments_record", "payments_list",
+		"payments_record", "payments_list", "invoices_refund",
 		"issuer_get", "issuer_set",
 	}
 	for _, name := range want {

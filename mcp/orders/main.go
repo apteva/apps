@@ -128,10 +128,10 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker          { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
-	return []sdk.EventHandler{{
-		Topic:   "invoice.paid",
-		Handler: a.handleInvoicePaidEvent,
-	}}
+	return []sdk.EventHandler{
+		{Topic: "invoice.paid", Handler: a.handleInvoicePaidEvent},
+		{Topic: "invoice.refunded", Handler: a.handleInvoiceRefundedEvent},
+	}
 }
 
 // HTTP routes.
@@ -429,13 +429,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "returns_create",
-			Description: "Create a return record. Args: order_id, provider, reason, payload, metadata.",
+			Description: "Create an idempotent full or partial return request. Args: order_id, items? [{order_item_id, quantity, inventory_item_id?}], provider?, reason?, idempotency_key?, restock_location_id?, payload?, metadata?.",
 			InputSchema: schemaObject(map[string]any{
-				"order_id": map[string]any{"type": "integer"},
-				"provider": map[string]any{"type": "string"},
-				"reason":   map[string]any{"type": "string"},
-				"payload":  map[string]any{"type": "object"},
-				"metadata": map[string]any{"type": "object"},
+				"order_id":            map[string]any{"type": "integer"},
+				"provider":            map[string]any{"type": "string"},
+				"reason":              map[string]any{"type": "string"},
+				"idempotency_key":     map[string]any{"type": "string"},
+				"restock_location_id": map[string]any{"type": "integer"},
+				"items":               map[string]any{"type": "array"},
+				"payload":             map[string]any{"type": "object"},
+				"metadata":            map[string]any{"type": "object"},
 			}, []string{"order_id"}),
 			Handler: a.toolReturnsCreate,
 		},
@@ -446,6 +449,27 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolReturnsGet,
+		},
+		{
+			Name:        "returns_update",
+			Description: "Move a return through requested, approved, in_transit, received, rejected, or cancelled. Args: id, status, provider_return_id?, response_payload?, actor?, note?.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"},
+				"provider_return_id": map[string]any{"type": "string"}, "response_payload": map[string]any{"type": "object"},
+				"actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
+			}, []string{"id", "status"}),
+			Handler: a.toolReturnsUpdate,
+		},
+		{
+			Name:        "returns_complete",
+			Description: "Complete a received return, optionally restock Inventory and request a Billing refund. Args: id, refund?, refund_amount_cents?, refund_reason?, restock?, restock_location_id?, exchange_order_id?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "refund": map[string]any{"type": "boolean"},
+				"refund_amount_cents": map[string]any{"type": "integer"}, "refund_reason": map[string]any{"type": "string"},
+				"restock": map[string]any{"type": "boolean"}, "restock_location_id": map[string]any{"type": "integer"},
+				"exchange_order_id": map[string]any{"type": "integer"}, "actor": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: a.toolReturnsComplete,
 		},
 		{
 			Name:        "order_events_list",
@@ -510,6 +534,42 @@ func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+func (a *App) handleInvoiceRefundedEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := firstNonEmpty(event.ProjectID, strArg(event.Data, "_project_id"))
+	invoiceID := firstNonZero(int64Arg(event.Data, "id"), int64Arg(event.Data, "invoice_id"))
+	if pid == "" || invoiceID == 0 || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	var response struct {
+		Invoice map[string]any `json:"invoice"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{
+		"_project_id": pid, "id": invoiceID,
+	}, &response); err != nil {
+		return fmt.Errorf("reconcile refunded invoice %d: %w", invoiceID, err)
+	}
+	if response.Invoice == nil {
+		return nil
+	}
+	paymentStatus := "partially_refunded"
+	if int64Arg(response.Invoice, "amount_paid_cents") <= 0 {
+		paymentStatus = "refunded"
+	}
+	result, err := ctx.AppDB().Exec(
+		`UPDATE orders SET payment_status=?, updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND invoice_id=? AND payment_status IN ('paid','refund_pending','partially_refunded')`,
+		paymentStatus, pid, invoiceID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 {
+		ctx.EmitWithProject("order.payment_updated", pid, map[string]any{
+			"invoice_id": invoiceID, "payment_status": paymentStatus,
+		})
 	}
 	return nil
 }
@@ -1250,20 +1310,35 @@ type Shipment struct {
 }
 
 type Return struct {
-	ID               int64           `json:"id"`
-	ProjectID        string          `json:"project_id"`
-	OrderID          int64           `json:"order_id"`
-	Provider         string          `json:"provider,omitempty"`
-	ProviderReturnID string          `json:"provider_return_id,omitempty"`
-	Status           string          `json:"status"`
-	Reason           string          `json:"reason,omitempty"`
-	RequestPayload   json.RawMessage `json:"request_payload,omitempty"`
-	ResponsePayload  json.RawMessage `json:"response_payload,omitempty"`
-	Metadata         json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt        string          `json:"created_at"`
-	UpdatedAt        string          `json:"updated_at"`
-	ReceivedAt       string          `json:"received_at,omitempty"`
-	CompletedAt      string          `json:"completed_at,omitempty"`
+	ID                int64           `json:"id"`
+	ProjectID         string          `json:"project_id"`
+	OrderID           int64           `json:"order_id"`
+	Provider          string          `json:"provider,omitempty"`
+	ProviderReturnID  string          `json:"provider_return_id,omitempty"`
+	Status            string          `json:"status"`
+	Reason            string          `json:"reason,omitempty"`
+	RequestPayload    json.RawMessage `json:"request_payload,omitempty"`
+	ResponsePayload   json.RawMessage `json:"response_payload,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
+	RefundRequestID   *int64          `json:"refund_request_id,omitempty"`
+	RefundAmountCents int64           `json:"refund_amount_cents,omitempty"`
+	ExchangeOrderID   *int64          `json:"exchange_order_id,omitempty"`
+	RestockLocationID *int64          `json:"restock_location_id,omitempty"`
+	ProcessingError   string          `json:"processing_error,omitempty"`
+	Items             []*ReturnItem   `json:"items,omitempty"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+	ReceivedAt        string          `json:"received_at,omitempty"`
+	CompletedAt       string          `json:"completed_at,omitempty"`
+}
+
+type ReturnItem struct {
+	ReturnID        int64   `json:"return_id"`
+	OrderItemID     int64   `json:"order_item_id"`
+	Quantity        float64 `json:"quantity"`
+	InventoryItemID *int64  `json:"inventory_item_id,omitempty"`
+	RestockedAt     string  `json:"restocked_at,omitempty"`
 }
 
 type OrderEvent struct {
@@ -1911,6 +1986,22 @@ func dbReturnCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Return, 
 	if order == nil {
 		return nil, nil, errors.New("order not found")
 	}
+	if key := strArg(args, "idempotency_key"); key != "" {
+		var existingID int64
+		err := ctx.AppDB().QueryRow(
+			`SELECT id FROM returns WHERE project_id=? AND idempotency_key=?`, pid, key).Scan(&existingID)
+		if err == nil {
+			ret, getErr := dbReturnGet(ctx.AppDB(), pid, existingID)
+			return ret, order, getErr
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, err
+		}
+	}
+	items, err := normalizeReturnItems(ctx.AppDB(), order, arrayArg(args, "items"))
+	if err != nil {
+		return nil, nil, err
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, nil, err
@@ -1919,17 +2010,26 @@ func dbReturnCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Return, 
 	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO returns
-		   (project_id, order_id, provider, status, reason, request_payload, metadata)
-		 VALUES (?, ?, ?, 'requested', ?, ?, ?)
+		   (project_id, order_id, provider, status, reason, request_payload, metadata, idempotency_key, restock_location_id)
+		 VALUES (?, ?, ?, 'requested', ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, orderID, nullStr(strArg(args, "provider")), nullStr(strArg(args, "reason")),
 		jsonOrEmpty(args["payload"], "{}"), jsonOrEmpty(args["metadata"], "{}"),
+		nullStr(strArg(args, "idempotency_key")), nullableInt64(int64Arg(args, "restock_location_id")),
 	).Scan(&id)
 	if err != nil {
 		return nil, nil, err
 	}
+	for _, item := range items {
+		if _, err := tx.Exec(
+			`INSERT INTO return_items(return_id, order_item_id, quantity, inventory_item_id)
+			 VALUES (?, ?, ?, ?)`,
+			id, item.OrderItemID, item.Quantity, nullablePtr(item.InventoryItemID)); err != nil {
+			return nil, nil, err
+		}
+	}
 	if _, err := tx.Exec(
-		`UPDATE orders SET order_status = 'returned', fulfillment_status = 'returned', updated_at = CURRENT_TIMESTAMP
+		`UPDATE orders SET order_status = 'return_requested', updated_at = CURRENT_TIMESTAMP
 		  WHERE id = ? AND project_id = ?`, orderID, pid); err != nil {
 		return nil, nil, err
 	}
@@ -2263,11 +2363,17 @@ func dbReturnGet(db *sql.DB, pid string, id int64) (*Return, error) {
 	ret, err := scanReturn(db.QueryRow(
 		`SELECT id, project_id, order_id, COALESCE(provider,''), COALESCE(provider_return_id,''),
 		        status, COALESCE(reason,''), request_payload, response_payload, metadata,
+		        COALESCE(idempotency_key,''), refund_request_id, refund_amount_cents,
+		        exchange_order_id, restock_location_id, processing_error,
 		        created_at, updated_at, received_at, completed_at
 		   FROM returns WHERE id = ? AND project_id = ?`, id, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err != nil || ret == nil {
+		return ret, err
+	}
+	ret.Items, err = dbReturnItems(db, ret.ID)
 	return ret, err
 }
 
@@ -2275,6 +2381,8 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, order_id, COALESCE(provider,''), COALESCE(provider_return_id,''),
 		        status, COALESCE(reason,''), request_payload, response_payload, metadata,
+		        COALESCE(idempotency_key,''), refund_request_id, refund_amount_cents,
+		        exchange_order_id, restock_location_id, processing_error,
 		        created_at, updated_at, received_at, completed_at
 		   FROM returns WHERE order_id = ? AND project_id = ? ORDER BY updated_at DESC`, orderID, pid)
 	if err != nil {
@@ -2287,6 +2395,10 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 		if err != nil {
 			return nil, err
 		}
+		ret.Items, err = dbReturnItems(db, ret.ID)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, ret)
 	}
 	return out, rows.Err()
@@ -2295,9 +2407,12 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 func scanReturn(row rowScanner) (*Return, error) {
 	var ret Return
 	var receivedAt, completedAt sql.NullString
+	var refundRequestID, exchangeOrderID, restockLocationID sql.NullInt64
 	var requestPayload, responsePayload, metadata string
 	err := row.Scan(&ret.ID, &ret.ProjectID, &ret.OrderID, &ret.Provider, &ret.ProviderReturnID,
 		&ret.Status, &ret.Reason, &requestPayload, &responsePayload, &metadata,
+		&ret.IdempotencyKey, &refundRequestID, &ret.RefundAmountCents,
+		&exchangeOrderID, &restockLocationID, &ret.ProcessingError,
 		&ret.CreatedAt, &ret.UpdatedAt, &receivedAt, &completedAt)
 	if err != nil {
 		return nil, err
@@ -2305,6 +2420,9 @@ func scanReturn(row rowScanner) (*Return, error) {
 	ret.RequestPayload = json.RawMessage(requestPayload)
 	ret.ResponsePayload = json.RawMessage(responsePayload)
 	ret.Metadata = json.RawMessage(metadata)
+	ret.RefundRequestID = ptrIfValid(refundRequestID)
+	ret.ExchangeOrderID = ptrIfValid(exchangeOrderID)
+	ret.RestockLocationID = ptrIfValid(restockLocationID)
 	if receivedAt.Valid {
 		ret.ReceivedAt = receivedAt.String
 	}
@@ -2569,12 +2687,14 @@ func validateStatuses(orderStatus, paymentStatus, fulfillmentStatus string) erro
 var validOrderStatuses = map[string]bool{
 	"draft": true, "pending_payment": true, "paid": true, "ready_to_fulfill": true,
 	"fulfilling": true, "partially_fulfilled": true, "fulfilled": true, "delivered": true,
-	"active": true, "completed": true, "cancelled": true, "returned": true, "error": true, "failed": true,
+	"active": true, "completed": true, "cancelled": true, "returned": true, "partially_returned": true,
+	"return_requested": true, "return_approved": true, "return_in_transit": true, "return_received": true,
+	"error": true, "failed": true,
 }
 
 var validPaymentStatuses = map[string]bool{
 	"unpaid": true, "authorized": true, "paid": true, "partially_refunded": true,
-	"refunded": true, "failed": true,
+	"refund_pending": true, "refunded": true, "failed": true,
 }
 
 var validFulfillmentStatuses = map[string]bool{

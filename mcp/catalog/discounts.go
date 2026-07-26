@@ -67,21 +67,42 @@ type DiscountCode struct {
 }
 
 type DiscountQuote struct {
-	Eligible      bool                `json:"eligible"`
-	Reason        string              `json:"reason,omitempty"`
-	DiscountID    int64               `json:"discount_id,omitempty"`
-	CodeID        int64               `json:"code_id,omitempty"`
-	Code          string              `json:"code,omitempty"`
-	CustomerRef   string              `json:"customer_ref,omitempty"`
-	ContextRef    string              `json:"context_ref,omitempty"`
-	ProductID     int64               `json:"product_id,omitempty"`
-	PriceID       int64               `json:"price_id,omitempty"`
-	Quantity      int64               `json:"quantity"`
-	Currency      string              `json:"currency,omitempty"`
-	SubtotalCents int64               `json:"subtotal_cents"`
-	DiscountCents int64               `json:"discount_cents"`
-	TotalCents    int64               `json:"total_cents"`
-	Application   DiscountApplication `json:"application,omitempty"`
+	Eligible                 bool                 `json:"eligible"`
+	Reason                   string               `json:"reason,omitempty"`
+	DiscountID               int64                `json:"discount_id,omitempty"`
+	CodeID                   int64                `json:"code_id,omitempty"`
+	Code                     string               `json:"code,omitempty"`
+	CustomerRef              string               `json:"customer_ref,omitempty"`
+	ContextRef               string               `json:"context_ref,omitempty"`
+	ProductID                int64                `json:"product_id,omitempty"`
+	PriceID                  int64                `json:"price_id,omitempty"`
+	Quantity                 int64                `json:"quantity"`
+	Currency                 string               `json:"currency,omitempty"`
+	SubtotalCents            int64                `json:"subtotal_cents"`
+	EligibleSubtotalCents    int64                `json:"eligible_subtotal_cents,omitempty"`
+	ShippingCents            int64                `json:"shipping_cents,omitempty"`
+	MerchandiseDiscountCents int64                `json:"merchandise_discount_cents,omitempty"`
+	ShippingDiscountCents    int64                `json:"shipping_discount_cents,omitempty"`
+	DiscountCents            int64                `json:"discount_cents"`
+	TotalCents               int64                `json:"total_cents"`
+	Allocations              []DiscountAllocation `json:"allocations,omitempty"`
+	Application              DiscountApplication  `json:"application,omitempty"`
+}
+
+type DiscountAllocation struct {
+	ProductID     int64 `json:"product_id,omitempty"`
+	PriceID       int64 `json:"price_id,omitempty"`
+	Quantity      int64 `json:"quantity"`
+	SubtotalCents int64 `json:"subtotal_cents"`
+	DiscountCents int64 `json:"discount_cents"`
+}
+
+type discountLine struct {
+	ProductID     int64
+	PriceID       int64
+	Quantity      int64
+	SubtotalCents int64
+	Currency      string
 }
 
 type DiscountApplication struct {
@@ -131,6 +152,7 @@ func (a *App) discountTools() []sdk.Tool {
 	boolean := map[string]any{"type": "boolean"}
 	object := map[string]any{"type": "object"}
 	integerArray := map[string]any{"type": "array", "items": integer}
+	stringArray := map[string]any{"type": "array", "items": stringValue}
 	discountFields := map[string]any{
 		"name": stringValue, "description": stringValue, "discount_type": stringValue,
 		"percentage_bps": integer, "value_cents": integer, "currency": stringValue,
@@ -139,11 +161,16 @@ func (a *App) discountTools() []sdk.Tool {
 		"max_redemptions": integer, "max_redemptions_per_customer": integer,
 		"minimum_subtotal_cents": integer, "active": boolean, "metadata": object,
 		"all_products": boolean, "product_ids": integerArray, "price_ids": integerArray,
+		"automatic": boolean, "benefit_type": stringValue, "buy_quantity": integer,
+		"get_quantity": integer, "minimum_quantity": integer, "combinable": boolean,
+		"priority": integer, "markets": stringArray, "customer_refs": stringArray,
 	}
 	quoteFields := map[string]any{
 		"discount_id": integer, "code": stringValue, "customer_ref": stringValue,
 		"context_ref": stringValue, "product_id": integer, "price_id": integer,
-		"quantity": integer, "subtotal_cents": integer, "currency": stringValue,
+		"quantity": integer, "subtotal_cents": integer, "shipping_cents": integer,
+		"currency": stringValue, "market": stringValue,
+		"lines": map[string]any{"type": "array", "items": object},
 	}
 	return []sdk.Tool{
 		{Name: "catalog_discounts_list", Description: "List generic Catalog discounts. Args: active, archived, limit.", InputSchema: schemaObject(map[string]any{"active": boolean, "archived": boolean, "limit": integer}, nil), Handler: a.toolDiscountsList},
@@ -380,7 +407,7 @@ func dbDiscountUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*
 	if current == nil || current.ArchivedAt != "" {
 		return nil, errors.New("discount not found or archived")
 	}
-	allowed := map[string]bool{"name": true, "description": true, "discount_type": true, "percentage_bps": true, "value_cents": true, "currency": true, "duration": true, "duration_cycles": true, "starts_at": true, "ends_at": true, "max_redemptions": true, "max_redemptions_per_customer": true, "minimum_subtotal_cents": true, "active": true, "metadata": true, "all_products": true, "product_ids": true, "price_ids": true}
+	allowed := map[string]bool{"name": true, "description": true, "discount_type": true, "percentage_bps": true, "value_cents": true, "currency": true, "duration": true, "duration_cycles": true, "starts_at": true, "ends_at": true, "max_redemptions": true, "max_redemptions_per_customer": true, "minimum_subtotal_cents": true, "active": true, "metadata": true, "all_products": true, "product_ids": true, "price_ids": true, "automatic": true, "benefit_type": true, "buy_quantity": true, "get_quantity": true, "minimum_quantity": true, "combinable": true, "priority": true, "markets": true, "customer_refs": true}
 	for k := range patch {
 		if !allowed[k] {
 			return nil, fmt.Errorf("unsupported discount field %q", k)
@@ -516,6 +543,7 @@ func scanDiscount(s rowScanner) (*Discount, error) {
 }
 
 func discountFromArgs(args map[string]any, current *Discount) (*Discount, error) {
+	metadata := promotionMetadataFromArgs(args)
 	d := &Discount{
 		Name: strings.TrimSpace(strArg(args, "name")), Description: strings.TrimSpace(strArg(args, "description")),
 		DiscountType:  strings.ToLower(strings.TrimSpace(strArg(args, "discount_type"))),
@@ -525,7 +553,7 @@ func discountFromArgs(args map[string]any, current *Discount) (*Discount, error)
 		StartsAt: strings.TrimSpace(strArg(args, "starts_at")), EndsAt: strings.TrimSpace(strArg(args, "ends_at")),
 		MaxRedemptions: int64Arg(args, "max_redemptions"), MaxRedemptionsPerCustomer: int64Arg(args, "max_redemptions_per_customer"),
 		MinimumSubtotalCents: int64Arg(args, "minimum_subtotal_cents"), Active: boolArg(args, "active", true),
-		Metadata: json.RawMessage(jsonOrEmpty(args["metadata"], "{}")),
+		Metadata: json.RawMessage(jsonOrEmpty(metadata, "{}")),
 	}
 	if d.Name == "" {
 		return nil, errors.New("name required")
@@ -586,6 +614,17 @@ func discountFromArgs(args map[string]any, current *Discount) (*Discount, error)
 	}
 	if startSet && endSet && !end.After(start) {
 		return nil, errors.New("ends_at must be after starts_at")
+	}
+	meta := discountMetadata(d)
+	switch benefit := strings.ToLower(stringMetadata(meta, "benefit_type")); benefit {
+	case "", "merchandise":
+	case "free_shipping":
+	case "buy_x_get_y":
+		if int64Metadata(meta, "buy_quantity") < 1 || int64Metadata(meta, "get_quantity") < 1 {
+			return nil, errors.New("buy_x_get_y requires buy_quantity and get_quantity >= 1")
+		}
+	default:
+		return nil, errors.New("benefit_type must be merchandise, free_shipping, or buy_x_get_y")
 	}
 	return d, nil
 }
@@ -815,6 +854,10 @@ func dbDiscountCodeUpdate(db *sql.DB, pid string, id int64, patch map[string]any
 
 func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time) (*DiscountQuote, *Discount, *DiscountCode, error) {
 	quote := &DiscountQuote{CustomerRef: strings.TrimSpace(strArg(args, "customer_ref")), ContextRef: strings.TrimSpace(strArg(args, "context_ref")), ProductID: int64Arg(args, "product_id"), PriceID: int64Arg(args, "price_id"), Quantity: int64Arg(args, "quantity")}
+	quote.ShippingCents = int64Arg(args, "shipping_cents")
+	if quote.ShippingCents < 0 {
+		return nil, nil, nil, errors.New("shipping_cents must be >= 0")
+	}
 	if quote.Quantity == 0 {
 		quote.Quantity = 1
 	}
@@ -861,6 +904,36 @@ func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time)
 	if t, set, _ := parseDiscountTime(d.EndsAt); set && !now.Before(t) {
 		return ineligibleQuote(quote, "expired"), d, code, nil
 	}
+	metadata := discountMetadata(d)
+	if !discountMetadataEligible(metadata, quote.CustomerRef, strArg(args, "market")) {
+		return ineligibleQuote(quote, "customer_or_market_not_eligible"), d, code, nil
+	}
+	lines, err := discountLinesArg(args)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var eligibleLines []discountLine
+	if len(lines) > 0 {
+		quote.Quantity = 0
+		quote.SubtotalCents = 0
+		for _, line := range lines {
+			if quote.Currency == "" {
+				quote.Currency = line.Currency
+			} else if quote.Currency != line.Currency {
+				return nil, nil, nil, errors.New("discount basket contains mixed currencies")
+			}
+			quote.Quantity += line.Quantity
+			quote.SubtotalCents += line.SubtotalCents
+			matched, err := dbDiscountScopeMatches(db, pid, d.ID, line.ProductID, line.PriceID)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if matched {
+				eligibleLines = append(eligibleLines, line)
+				quote.EligibleSubtotalCents += line.SubtotalCents
+			}
+		}
+	}
 	if quote.PriceID != 0 {
 		p, err := dbPriceGet(db, pid, quote.PriceID)
 		if err != nil {
@@ -878,6 +951,7 @@ func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time)
 			return nil, nil, nil, errors.New("price quantity overflows cents")
 		}
 		quote.SubtotalCents = p.UnitAmountCents * quote.Quantity
+		quote.EligibleSubtotalCents = quote.SubtotalCents
 	}
 	if requested := strings.ToUpper(strings.TrimSpace(strArg(args, "currency"))); requested != "" {
 		if !looksLikeISO4217(requested) {
@@ -888,8 +962,9 @@ func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time)
 		}
 		quote.Currency = requested
 	}
-	if subtotal, ok := optionalInt64(args, "subtotal_cents"); ok {
+	if subtotal, ok := optionalInt64(args, "subtotal_cents"); ok && len(lines) == 0 {
 		quote.SubtotalCents = subtotal
+		quote.EligibleSubtotalCents = subtotal
 	}
 	if quote.SubtotalCents <= 0 {
 		return nil, nil, nil, errors.New("subtotal_cents must be > 0 or derivable from price_id")
@@ -906,11 +981,15 @@ func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time)
 			return ineligibleQuote(quote, "product_not_available"), d, code, nil
 		}
 	}
-	matched, err := dbDiscountScopeMatches(db, pid, d.ID, quote.ProductID, quote.PriceID)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if !matched {
+	if len(lines) == 0 {
+		matched, err := dbDiscountScopeMatches(db, pid, d.ID, quote.ProductID, quote.PriceID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if !matched {
+			return ineligibleQuote(quote, "scope_mismatch"), d, code, nil
+		}
+	} else if len(eligibleLines) == 0 {
 		return ineligibleQuote(quote, "scope_mismatch"), d, code, nil
 	}
 	if quote.SubtotalCents < d.MinimumSubtotalCents {
@@ -947,28 +1026,52 @@ func dbDiscountQuote(db *sql.DB, pid string, args map[string]any, now time.Time)
 	if d.DiscountType != "percentage" && d.Currency != quote.Currency {
 		return ineligibleQuote(quote, "currency_mismatch"), d, code, nil
 	}
+	if minimumQuantity := int64Metadata(metadata, "minimum_quantity"); minimumQuantity > 0 && quote.Quantity < minimumQuantity {
+		return ineligibleQuote(quote, "minimum_quantity_not_met"), d, code, nil
+	}
+	benefitType := strings.ToLower(stringMetadata(metadata, "benefit_type"))
+	var merchandiseDiscount, shippingDiscount int64
+	discountBase := quote.EligibleSubtotalCents
+	if discountBase == 0 {
+		discountBase = quote.SubtotalCents
+	}
+	if benefitType == "free_shipping" {
+		shippingDiscount = quote.ShippingCents
+	} else if benefitType == "buy_x_get_y" {
+		merchandiseDiscount = buyXGetYDiscount(eligibleLines, int64Metadata(metadata, "buy_quantity"), int64Metadata(metadata, "get_quantity"))
+		if merchandiseDiscount == 0 {
+			return ineligibleQuote(quote, "buy_x_get_y_quantity_not_met"), d, code, nil
+		}
+	}
 	var discount int64
 	switch d.DiscountType {
 	case "percentage":
-		if quote.SubtotalCents > (math.MaxInt64-5000)/d.PercentageBPS {
+		if discountBase > (math.MaxInt64-5000)/d.PercentageBPS {
 			return nil, nil, nil, errors.New("subtotal too large")
 		}
-		discount = (quote.SubtotalCents*d.PercentageBPS + 5000) / 10000
+		discount = (discountBase*d.PercentageBPS + 5000) / 10000
 	case "amount":
-		discount = minInt64(d.ValueCents, quote.SubtotalCents)
+		discount = minInt64(d.ValueCents, discountBase)
 	case "price_override":
 		if d.ValueCents > 0 && quote.Quantity > math.MaxInt64/d.ValueCents {
 			return nil, nil, nil, errors.New("price override quantity overflows cents")
 		}
 		overrideTotal := d.ValueCents * quote.Quantity
-		if overrideTotal >= quote.SubtotalCents {
+		if overrideTotal >= discountBase {
 			return ineligibleQuote(quote, "override_not_lower_than_subtotal"), d, code, nil
 		}
-		discount = quote.SubtotalCents - overrideTotal
+		discount = discountBase - overrideTotal
 	}
+	if benefitType == "free_shipping" || benefitType == "buy_x_get_y" {
+		discount = 0
+	}
+	merchandiseDiscount += discount
 	quote.Eligible = true
-	quote.DiscountCents = discount
-	quote.TotalCents = quote.SubtotalCents - discount
+	quote.MerchandiseDiscountCents = merchandiseDiscount
+	quote.ShippingDiscountCents = shippingDiscount
+	quote.DiscountCents = merchandiseDiscount + shippingDiscount
+	quote.TotalCents = quote.SubtotalCents + quote.ShippingCents - quote.DiscountCents
+	quote.Allocations = discountAllocations(eligibleLines, merchandiseDiscount)
 	quote.Application = discountApplication(d, code)
 	return quote, d, code, nil
 }
@@ -1213,7 +1316,9 @@ func ineligibleQuote(q *DiscountQuote, reason string) *DiscountQuote {
 	q.Eligible = false
 	q.Reason = reason
 	q.DiscountCents = 0
-	q.TotalCents = q.SubtotalCents
+	q.MerchandiseDiscountCents = 0
+	q.ShippingDiscountCents = 0
+	q.TotalCents = q.SubtotalCents + q.ShippingCents
 	return q
 }
 func parseDiscountTime(value string) (time.Time, bool, error) {
@@ -1305,7 +1410,7 @@ func normalizeDiscountCode(value string) (string, string, error) {
 
 func discountRequestFingerprint(args map[string]any) (string, error) {
 	normalized := map[string]any{}
-	for _, key := range []string{"discount_id", "code", "customer_ref", "context_ref", "product_id", "price_id", "quantity", "subtotal_cents", "currency", "expires_in_seconds"} {
+	for _, key := range []string{"discount_id", "code", "customer_ref", "context_ref", "product_id", "price_id", "quantity", "subtotal_cents", "shipping_cents", "currency", "market", "lines", "expires_in_seconds"} {
 		if value, ok := args[key]; ok {
 			normalized[key] = value
 		}
@@ -1323,6 +1428,185 @@ func discountRequestFingerprint(args map[string]any) (string, error) {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:]), nil
 }
+
+func promotionMetadataFromArgs(args map[string]any) map[string]any {
+	metadata := map[string]any{}
+	switch value := args["metadata"].(type) {
+	case map[string]any:
+		for key, item := range value {
+			metadata[key] = item
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(value, &metadata)
+	case string:
+		_ = json.Unmarshal([]byte(value), &metadata)
+	}
+	for _, key := range []string{
+		"automatic", "benefit_type", "buy_quantity", "get_quantity",
+		"minimum_quantity", "combinable", "priority", "markets", "customer_refs",
+	} {
+		if value, ok := args[key]; ok {
+			metadata[key] = value
+		}
+	}
+	return metadata
+}
+
+func discountMetadata(d *Discount) map[string]any {
+	out := map[string]any{}
+	if d != nil && len(d.Metadata) > 0 {
+		_ = json.Unmarshal(d.Metadata, &out)
+	}
+	return out
+}
+
+func discountMetadataEligible(metadata map[string]any, customerRef, market string) bool {
+	if allowed := stringListMetadata(metadata, "customer_refs"); len(allowed) > 0 {
+		found := false
+		for _, value := range allowed {
+			if value == customerRef {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if allowed := stringListMetadata(metadata, "markets"); len(allowed) > 0 {
+		found := false
+		for _, value := range allowed {
+			if strings.EqualFold(value, market) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func discountLinesArg(args map[string]any) ([]discountLine, error) {
+	raw, ok := args["lines"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	values, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("lines must be an array")
+	}
+	out := make([]discountLine, 0, len(values))
+	for index, value := range values {
+		line, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("lines[%d] must be an object", index)
+		}
+		item := discountLine{
+			ProductID: int64Arg(line, "product_id"), PriceID: int64Arg(line, "price_id"),
+			Quantity: int64Arg(line, "quantity"), SubtotalCents: int64Arg(line, "subtotal_cents"),
+			Currency: strings.ToUpper(strings.TrimSpace(strArg(line, "currency"))),
+		}
+		if item.Quantity < 1 || item.SubtotalCents <= 0 {
+			return nil, fmt.Errorf("lines[%d] requires quantity >= 1 and subtotal_cents > 0", index)
+		}
+		if item.ProductID == 0 && item.PriceID == 0 {
+			return nil, fmt.Errorf("lines[%d] requires product_id or price_id", index)
+		}
+		if !looksLikeISO4217(item.Currency) {
+			return nil, fmt.Errorf("lines[%d].currency must be a 3-letter ISO 4217 code", index)
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil, errors.New("lines cannot be empty")
+	}
+	return out, nil
+}
+
+func buyXGetYDiscount(lines []discountLine, buyQuantity, getQuantity int64) int64 {
+	if buyQuantity < 1 || getQuantity < 1 {
+		return 0
+	}
+	var unitPrices []int64
+	for _, line := range lines {
+		if line.Quantity < 1 {
+			continue
+		}
+		unit := line.SubtotalCents / line.Quantity
+		for count := int64(0); count < line.Quantity && len(unitPrices) < 10000; count++ {
+			unitPrices = append(unitPrices, unit)
+		}
+	}
+	groupSize := buyQuantity + getQuantity
+	freeUnits := int64(len(unitPrices)) / groupSize * getQuantity
+	if freeUnits == 0 {
+		return 0
+	}
+	sort.Slice(unitPrices, func(i, j int) bool { return unitPrices[i] < unitPrices[j] })
+	var total int64
+	for index := int64(0); index < freeUnits && index < int64(len(unitPrices)); index++ {
+		total += unitPrices[index]
+	}
+	return total
+}
+
+func discountAllocations(lines []discountLine, discount int64) []DiscountAllocation {
+	if discount <= 0 || len(lines) == 0 {
+		return nil
+	}
+	var subtotal int64
+	for _, line := range lines {
+		subtotal += line.SubtotalCents
+	}
+	if subtotal <= 0 {
+		return nil
+	}
+	out := make([]DiscountAllocation, 0, len(lines))
+	var allocated int64
+	for index, line := range lines {
+		amount := discount * line.SubtotalCents / subtotal
+		if index == len(lines)-1 {
+			amount = discount - allocated
+		}
+		allocated += amount
+		out = append(out, DiscountAllocation{
+			ProductID: line.ProductID, PriceID: line.PriceID, Quantity: line.Quantity,
+			SubtotalCents: line.SubtotalCents, DiscountCents: amount,
+		})
+	}
+	return out
+}
+
+func stringMetadata(metadata map[string]any, key string) string {
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func int64Metadata(metadata map[string]any, key string) int64 {
+	return int64Arg(metadata, key)
+}
+
+func stringListMetadata(metadata map[string]any, key string) []string {
+	var out []string
+	switch values := metadata[key].(type) {
+	case []any:
+		for _, value := range values {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				out = append(out, text)
+			}
+		}
+	case []string:
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				out = append(out, value)
+			}
+		}
+	}
+	return out
+}
+
 func newDiscountReservationID() (string, error) {
 	raw := make([]byte, 16)
 	if _, err := rand.Read(raw); err != nil {

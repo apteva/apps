@@ -247,6 +247,14 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+func httpActionErr(w http.ResponseWriter, code int, errorCode, msg string, retryable bool) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": msg, "code": errorCode, "retryable": retryable,
+	})
+}
+
 // globalCtx is stashed at OnMount time so HTTP handlers (which the SDK
 // invokes with just (w, r)) can reach the AppDB and PlatformAPI. CRM
 // uses the same pattern — see CRM main.go's globalCtx for the rationale.
