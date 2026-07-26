@@ -690,7 +690,7 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if args["return_url"] != "https://shop.example/checkout/return" ||
-		args["idempotency_key"] != "commerce-payment-args-12" {
+		args["idempotency_key"] != "commerce-stripe-elements-v1-payment-args-12" {
 		t.Fatalf("unexpected payment args: %#v", args)
 	}
 	if methods := anySlice(args["payment_method_types"]); len(methods) != 1 || methods[0] != "card" {
@@ -703,8 +703,12 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if args["success_url"] != "https://shop.example/checkout/return" ||
-		args["cancel_url"] != "https://shop.example/checkout" {
+		args["cancel_url"] != "https://shop.example/checkout" ||
+		args["idempotency_key"] != "commerce-stripe-hosted-v1-payment-args-12" {
 		t.Fatalf("unexpected hosted URLs: %#v", args)
+	}
+	if _, exists := args["expires_at"]; exists {
+		t.Fatalf("payment args contain a retry-unstable expiry: %#v", args)
 	}
 }
 

@@ -1200,9 +1200,8 @@ func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *Ch
 	out := map[string]any{
 		"provider":             provider,
 		"presentation":         presentation,
-		"idempotency_key":      fmt.Sprintf("commerce-%s-%d", pid, checkout.ID),
+		"idempotency_key":      fmt.Sprintf("commerce-stripe-%s-v1-%s-%d", presentation, pid, checkout.ID),
 		"payment_method_types": []any{"card"},
-		"expires_at":           time.Now().UTC().Add(60 * time.Minute).Unix(),
 	}
 	if presentation == "elements" {
 		out["return_url"] = returnURL
