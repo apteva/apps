@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,22 +20,24 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "deploy_init", Handler: a.toolInit,
-			Description: "Bind a source to a new service, Android, or iOS deployment. Args: name, source_kind, source_ref, target_kind? (service|android|ios), framework?, target_config_json?, build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
+			Description: "Bind a source to a new service, Android, or iOS deployment. Builds default to local; set build_backend and build_backend_config_json for Codemagic or GitHub Actions.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":               map[string]any{"type": "string"},
-					"source_kind":        map[string]any{"type": "string", "enum": []string{"code", "local"}},
-					"source_ref":         map[string]any{"type": "string"},
-					"target_kind":        map[string]any{"type": "string", "enum": []string{"service", "android", "ios"}},
-					"framework":          map[string]any{"type": "string"},
-					"target_config_json": map[string]any{"type": "string"},
-					"build_cmd":          map[string]any{"type": "string"},
-					"start_cmd":          map[string]any{"type": "string"},
-					"port_hint":          map[string]any{"type": "integer"},
-					"env_json":           map[string]any{"type": "string"},
-					"domain":             map[string]any{"type": "string"},
-					"description":        map[string]any{"type": "string"},
+					"name":                      map[string]any{"type": "string"},
+					"source_kind":               map[string]any{"type": "string", "enum": []string{"code", "local"}},
+					"source_ref":                map[string]any{"type": "string"},
+					"target_kind":               map[string]any{"type": "string", "enum": []string{"service", "android", "ios"}},
+					"framework":                 map[string]any{"type": "string"},
+					"target_config_json":        map[string]any{"type": "string"},
+					"build_cmd":                 map[string]any{"type": "string"},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend_config_json": map[string]any{"type": "string"},
+					"start_cmd":                 map[string]any{"type": "string"},
+					"port_hint":                 map[string]any{"type": "integer"},
+					"env_json":                  map[string]any{"type": "string"},
+					"domain":                    map[string]any{"type": "string"},
+					"description":               map[string]any{"type": "string"},
 				},
 				"required": []string{"name", "source_kind", "source_ref"},
 			},
@@ -79,20 +82,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":               map[string]any{"type": "string"},
-					"id":                 map[string]any{"type": "integer"},
-					"environment":        map[string]any{"type": "string"},
-					"from_environment":   map[string]any{"type": "string"},
-					"description":        map[string]any{"type": "string"},
-					"source_ref":         map[string]any{"type": "string"},
-					"source_extra_json":  map[string]any{"type": "string"},
-					"framework":          map[string]any{"type": "string"},
-					"build_cmd":          map[string]any{"type": "string"},
-					"start_cmd":          map[string]any{"type": "string"},
-					"port_hint":          map[string]any{"type": "integer"},
-					"env_json":           map[string]any{"type": "string"},
-					"target_config_json": map[string]any{"type": "string"},
-					"domain":             map[string]any{"type": "string"},
+					"name":                      map[string]any{"type": "string"},
+					"id":                        map[string]any{"type": "integer"},
+					"environment":               map[string]any{"type": "string"},
+					"from_environment":          map[string]any{"type": "string"},
+					"description":               map[string]any{"type": "string"},
+					"source_ref":                map[string]any{"type": "string"},
+					"source_extra_json":         map[string]any{"type": "string"},
+					"framework":                 map[string]any{"type": "string"},
+					"build_cmd":                 map[string]any{"type": "string"},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend_config_json": map[string]any{"type": "string"},
+					"start_cmd":                 map[string]any{"type": "string"},
+					"port_hint":                 map[string]any{"type": "integer"},
+					"env_json":                  map[string]any{"type": "string"},
+					"target_config_json":        map[string]any{"type": "string"},
+					"domain":                    map[string]any{"type": "string"},
 				},
 				"required": []string{"environment"},
 			},
@@ -103,18 +108,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":               map[string]any{"type": "string"},
-					"id":                 map[string]any{"type": "integer"},
-					"environment":        map[string]any{"type": "string"},
-					"description":        map[string]any{"type": "string"},
-					"source_ref":         map[string]any{"type": "string"},
-					"source_extra_json":  map[string]any{"type": "string"},
-					"framework":          map[string]any{"type": "string"},
-					"build_cmd":          map[string]any{"type": "string"},
-					"start_cmd":          map[string]any{"type": "string"},
-					"port_hint":          map[string]any{"type": "integer"},
-					"env_json":           map[string]any{"type": "string"},
-					"target_config_json": map[string]any{"type": "string"},
+					"name":                      map[string]any{"type": "string"},
+					"id":                        map[string]any{"type": "integer"},
+					"environment":               map[string]any{"type": "string"},
+					"description":               map[string]any{"type": "string"},
+					"source_ref":                map[string]any{"type": "string"},
+					"source_extra_json":         map[string]any{"type": "string"},
+					"framework":                 map[string]any{"type": "string"},
+					"build_cmd":                 map[string]any{"type": "string"},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend_config_json": map[string]any{"type": "string"},
+					"start_cmd":                 map[string]any{"type": "string"},
+					"port_hint":                 map[string]any{"type": "integer"},
+					"env_json":                  map[string]any{"type": "string"},
+					"target_config_json":        map[string]any{"type": "string"},
 				},
 				"required": []string{"environment"},
 			},
@@ -134,7 +141,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_build", Handler: a.toolBuild,
-			Description: "Fetch source and build a service binary/site, Android AAB, or iOS IPA. Args: name OR id, environment?, release?, channel? (mobile auto-release default internal).",
+			Description: "Create a build using the environment's local or cloud backend. Cloud builds return immediately and are reconciled asynchronously. release=true requests release after success.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -148,6 +155,17 @@ func (a *App) MCPTools() []sdk.Tool {
 					"submit_for_review": map[string]any{"type": "boolean"},
 					"beta_group_id":     map[string]any{"type": "string"},
 				},
+			},
+		},
+		{
+			Name: "deploy_build_cancel", Handler: a.toolBuildCancel,
+			Description: "Cancel a pending or running cloud build. Args: build_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id": map[string]any{"type": "integer"},
+				},
+				"required": []string{"build_id"},
 			},
 		},
 		{
@@ -294,22 +312,24 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_update", Handler: a.toolUpdate,
-			Description: "Mutate deployment config (env_json, build_cmd, start_cmd, port_hint, description, framework, source_extra_json) without delete+recreate. New values take effect on the next build/release; call deploy_restart to apply immediately without rebuilding. Unknown fields are silently ignored — pass only what you want to change. Args: name OR id, plus any subset of the mutable fields.",
+			Description: "Mutate deployment environment config, including build_backend and build_backend_config_json, without recreating it. New values apply to the next build.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":               map[string]any{"type": "string"},
-					"id":                 map[string]any{"type": "integer"},
-					"environment":        map[string]any{"type": "string"},
-					"description":        map[string]any{"type": "string"},
-					"source_ref":         map[string]any{"type": "string"},
-					"framework":          map[string]any{"type": "string"},
-					"build_cmd":          map[string]any{"type": "string"},
-					"start_cmd":          map[string]any{"type": "string"},
-					"port_hint":          map[string]any{"type": "integer"},
-					"env_json":           map[string]any{"type": "string"},
-					"source_extra_json":  map[string]any{"type": "string"},
-					"target_config_json": map[string]any{"type": "string"},
+					"name":                      map[string]any{"type": "string"},
+					"id":                        map[string]any{"type": "integer"},
+					"environment":               map[string]any{"type": "string"},
+					"description":               map[string]any{"type": "string"},
+					"source_ref":                map[string]any{"type": "string"},
+					"framework":                 map[string]any{"type": "string"},
+					"build_cmd":                 map[string]any{"type": "string"},
+					"build_backend":             map[string]any{"type": "string", "enum": []string{"local", "codemagic", "github_actions"}},
+					"build_backend_config_json": map[string]any{"type": "string"},
+					"start_cmd":                 map[string]any{"type": "string"},
+					"port_hint":                 map[string]any{"type": "integer"},
+					"env_json":                  map[string]any{"type": "string"},
+					"source_extra_json":         map[string]any{"type": "string"},
+					"target_config_json":        map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -363,10 +383,15 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		SourceRef:        strArg(args, "source_ref"),
 		Framework:        strArg(args, "framework"),
 		BuildCmd:         strArg(args, "build_cmd"),
+		BuildBackend:     normalizeBuildBackend(strArg(args, "build_backend")),
+		BuildBackendJSON: strArg(args, "build_backend_config_json"),
 		StartCmd:         strArg(args, "start_cmd"),
 		PortHint:         intArg(args, "port_hint"),
 		EnvJSON:          strArg(args, "env_json"),
 		TargetConfigJSON: strArg(args, "target_config_json"),
+	}
+	if err := validateBuildBackendSelection(in.BuildBackend, defaultStr(in.BuildBackendJSON, "{}")); err != nil {
+		return nil, err
 	}
 	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
 		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios)", in.TargetKind)
@@ -486,10 +511,15 @@ func (a *App) toolEnvCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	in := CreateEnvironmentInput{
 		Name: name, Description: from.Description,
 		SourceRef: from.SourceRef, SourceExtraJSON: from.SourceExtraJSON,
-		Framework: from.Framework, BuildCmd: from.BuildCmd, StartCmd: from.StartCmd,
+		Framework: from.Framework, BuildCmd: from.BuildCmd,
+		BuildBackend: from.BuildBackend, BuildBackendJSON: from.BuildBackendJSON,
+		StartCmd: from.StartCmd,
 		PortHint: from.PortHint, EnvJSON: from.EnvJSON, TargetConfigJSON: from.TargetConfigJSON,
 	}
 	applyEnvironmentInputOverrides(&in, args)
+	if err := validateBuildBackendSelection(in.BuildBackend, defaultStr(in.BuildBackendJSON, "{}")); err != nil {
+		return nil, err
+	}
 	env, err := dbCreateEnvironment(ctx.AppDB(), d.ID, in)
 	if err != nil {
 		return nil, err
@@ -506,6 +536,18 @@ func (a *App) toolEnvUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	fields := environmentFieldsFromArgs(args)
 	if len(fields) == 0 {
 		return nil, errors.New("no mutable fields supplied")
+	}
+	nextBackend := env.BuildBackend
+	nextBackendJSON := env.BuildBackendJSON
+	if value, ok := fields["build_backend"].(string); ok {
+		nextBackend = normalizeBuildBackend(value)
+		fields["build_backend"] = nextBackend
+	}
+	if value, ok := fields["build_backend_config_json"].(string); ok {
+		nextBackendJSON = value
+	}
+	if err := validateBuildBackendSelection(nextBackend, nextBackendJSON); err != nil {
+		return nil, err
 	}
 	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, fields); err != nil {
 		return nil, err
@@ -550,16 +592,51 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	res := map[string]any{"build": build}
-	if boolArg(args, "release") && build.Status == "succeeded" {
-		rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(args))
-		if err != nil {
-			res["release_error"] = err.Error()
-		} else {
-			res["release"] = rel
-			res["url"] = a.deploymentURL(d, rel)
+	if boolArg(args, "release") {
+		opts := releaseOptionsFromArgs(args)
+		if build.Status == "succeeded" {
+			rel, err := a.runReleaseWithOptions(d, build, opts)
+			if err != nil {
+				res["release_error"] = err.Error()
+			} else {
+				res["release"] = rel
+				res["url"] = a.deploymentURL(d, rel)
+			}
+		} else if normalizeBuildBackend(build.BuildBackend) != buildBackendLocal {
+			body, _ := json.Marshal(opts)
+			_ = dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
+				"release_requested": true, "release_options_json": string(body),
+			})
+			build, _ = dbGetBuild(ctx.AppDB(), build.ID)
+			res["build"] = build
+			res["release_requested"] = true
 		}
 	}
 	return res, nil
+}
+
+func (a *App) toolBuildCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	buildID := int64(intArg(args, "build_id"))
+	if buildID == 0 {
+		return nil, errors.New("build_id required")
+	}
+	build, err := dbGetBuild(ctx.AppDB(), buildID)
+	if err != nil || build == nil {
+		return nil, fmt.Errorf("build %d not found", buildID)
+	}
+	d, err := dbGetDeployment(ctx.AppDB(), pid, build.DeploymentID)
+	if err != nil || d == nil {
+		return nil, fmt.Errorf("build %d not found in this project", buildID)
+	}
+	cancelled, err := a.cancelCloudBuild(context.Background(), build)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"}, nil
 }
 
 func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -943,9 +1020,42 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	retention, _ := a.retentionStatus(ctx.AppDB())
+	type cloudBuildEntry struct {
+		BuildID       int64  `json:"build_id"`
+		DeploymentID  int64  `json:"deployment_id"`
+		EnvironmentID int64  `json:"environment_id,omitempty"`
+		Backend       string `json:"backend"`
+		ExternalJobID string `json:"external_job_id,omitempty"`
+		Status        string `json:"status"`
+		RunningForS   int    `json:"running_for_s"`
+		Stuck         bool   `json:"stuck"`
+	}
+	activeCloudBuilds := []cloudBuildEntry{}
+	pending, _ := dbListPendingCloudBuilds(ctx.AppDB(), 100)
+	for _, build := range pending {
+		deployment, getErr := dbGetDeploymentByID(ctx.AppDB(), build.DeploymentID)
+		if getErr != nil || deployment == nil || deployment.ProjectID != pid {
+			continue
+		}
+		startedAt, _ := time.Parse(time.RFC3339, defaultStr(build.StartedAt, build.CreatedAt))
+		runningFor := 0
+		if !startedAt.IsZero() {
+			runningFor = int(now.Sub(startedAt).Seconds())
+		}
+		activeCloudBuilds = append(activeCloudBuilds, cloudBuildEntry{
+			BuildID: build.ID, DeploymentID: build.DeploymentID,
+			EnvironmentID: build.EnvironmentID, Backend: build.BuildBackend,
+			ExternalJobID: build.ExternalJobID, Status: build.ExternalStatus,
+			RunningForS: runningFor, Stuck: runningFor > int((2 * time.Hour).Seconds()),
+		})
+	}
 	return map[string]any{
-		"unhealthy":  out,
-		"count":      len(out),
+		"unhealthy": out,
+		"count":     len(out),
+		"cloud_builds": map[string]any{
+			"active": activeCloudBuilds,
+			"count":  len(activeCloudBuilds),
+		},
 		"retention":  retention,
 		"checked_at": now,
 	}, nil
@@ -961,7 +1071,19 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	fields := environmentFieldsFromArgs(args)
 	if len(fields) == 0 {
-		return nil, errors.New("no mutable fields supplied (allowed: description, framework, build_cmd, start_cmd, port_hint, env_json, source_extra_json)")
+		return nil, errors.New("no mutable fields supplied")
+	}
+	nextBackend := d.BuildBackend
+	nextBackendJSON := d.BuildBackendJSON
+	if value, ok := fields["build_backend"].(string); ok {
+		nextBackend = normalizeBuildBackend(value)
+		fields["build_backend"] = nextBackend
+	}
+	if value, ok := fields["build_backend_config_json"].(string); ok {
+		nextBackendJSON = value
+	}
+	if err := validateBuildBackendSelection(nextBackend, nextBackendJSON); err != nil {
+		return nil, err
 	}
 	if d.EnvironmentID > 0 {
 		if err := dbUpdateEnvironment(ctx.AppDB(), d.EnvironmentID, fields); err != nil {
@@ -1186,6 +1308,12 @@ func applyEnvironmentInputOverrides(in *CreateEnvironmentInput, args map[string]
 	if v, ok := args["build_cmd"].(string); ok {
 		in.BuildCmd = v
 	}
+	if v, ok := args["build_backend"].(string); ok {
+		in.BuildBackend = normalizeBuildBackend(v)
+	}
+	if v, ok := args["build_backend_config_json"].(string); ok {
+		in.BuildBackendJSON = v
+	}
 	if v, ok := args["start_cmd"].(string); ok {
 		in.StartCmd = v
 	}
@@ -1212,7 +1340,8 @@ func environmentFieldsFromArgs(args map[string]any) map[string]any {
 	fields := map[string]any{}
 	for _, k := range []string{
 		"description", "source_ref", "source_extra_json",
-		"framework", "build_cmd", "start_cmd", "env_json", "target_config_json",
+		"framework", "build_cmd", "build_backend", "build_backend_config_json",
+		"start_cmd", "env_json", "target_config_json",
 	} {
 		if v, ok := args[k].(string); ok {
 			fields[k] = v

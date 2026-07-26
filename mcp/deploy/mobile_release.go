@@ -24,11 +24,11 @@ import (
 var googlePlayUploadBaseURL = "https://androidpublisher.googleapis.com/upload/androidpublisher/v3"
 
 type releaseOptions struct {
-	Channel         string
-	RolloutFraction float64
-	ReleaseNotes    map[string]string
-	SubmitForReview bool
-	BetaGroupID     string
+	Channel         string            `json:"channel,omitempty"`
+	RolloutFraction float64           `json:"rollout_fraction,omitempty"`
+	ReleaseNotes    map[string]string `json:"release_notes,omitempty"`
+	SubmitForReview bool              `json:"submit_for_review,omitempty"`
+	BetaGroupID     string            `json:"beta_group_id,omitempty"`
 }
 
 type mobileReleaseMeta struct {
@@ -113,6 +113,32 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 		"release_meta_json": metaJSON, "started_at": nowUTC(), "log_path": logPath,
 	})
 	fmt.Fprintf(logFile, "=== publish build %d to %s/%s ===\n", b.ID, provider, channel)
+
+	if manifest.ExternalProvider != "" {
+		if manifest.ExternalProvider != provider {
+			err := fmt.Errorf("cloud artifact provider %q does not match release provider %q", manifest.ExternalProvider, provider)
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "error": err.Error(), "external_status": "failed",
+			})
+			return nil, err
+		}
+		externalID := strings.TrimSpace(manifest.ExternalID)
+		if externalID == "" {
+			externalID = strconv.FormatInt(b.ID, 10)
+		}
+		if !strings.HasPrefix(externalID, "uploaded-") {
+			externalID = "uploaded-" + externalID
+		}
+		externalStatus := defaultStr(manifest.ExternalStatus, "uploaded_processing")
+		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+			"status": "starting", "external_id": externalID, "external_status": externalStatus,
+		})
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "upload_adopted", mustJSON(map[string]any{
+			"provider": provider, "build_backend": b.BuildBackend, "external_job_id": b.ExternalJobID,
+		}))
+		fmt.Fprintf(logFile, "cloud backend already uploaded artifact; waiting for store processing\n")
+		return dbGetRelease(globalCtx.AppDB(), rel.ID)
+	}
 
 	switch platform {
 	case "android":

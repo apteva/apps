@@ -27,12 +27,18 @@ func TestExistingDeploymentDefaultsToServiceTarget(t *testing.T) {
 	if d.TargetKind != "service" {
 		t.Fatalf("target_kind=%q, want service", d.TargetKind)
 	}
+	if d.BuildBackend != "local" || d.BuildBackendJSON != "{}" {
+		t.Fatalf("build backend=%q config=%q, want local/{}", d.BuildBackend, d.BuildBackendJSON)
+	}
 	env, err := dbEnsureProductionEnvironment(db, d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if env.TargetConfigJSON != "{}" {
 		t.Fatalf("target_config_json=%q, want {}", env.TargetConfigJSON)
+	}
+	if env.BuildBackend != "local" || env.BuildBackendJSON != "{}" {
+		t.Fatalf("environment build backend=%q config=%q, want local/{}", env.BuildBackend, env.BuildBackendJSON)
 	}
 }
 

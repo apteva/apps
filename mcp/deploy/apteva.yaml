@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.16.4
+version: 0.17.0
 description: |
   Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -64,6 +64,14 @@ requires:
       capabilities: []
       label: App Store Connect
       hint: Required to sign, upload, publish, and monitor iOS releases.
+    - role: cloud_build
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [codemagic, github]
+      capabilities: [build.submit, build.status, build.cancel, build.artifacts]
+      label: Cloud build providers
+      hint: Optional Codemagic or GitHub connections for builds on hosted runners.
 
 provides:
   http_routes:
@@ -85,6 +93,8 @@ provides:
       description: Archive a non-production environment.
     - name: deploy_build
       description: Build a service artifact, Android AAB, or iOS IPA.
+    - name: deploy_build_cancel
+      description: Cancel a pending or running cloud build.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote
@@ -123,6 +133,8 @@ provides:
   workers:
     - name: mobile_release_sync
       schedule: "@every 1m"
+    - name: cloud_build_sync
+      schedule: "@every 15s"
 
 runtime:
   kind: source

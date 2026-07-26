@@ -2,10 +2,9 @@
 
 Build and release services, Android apps, and iOS apps for Apteva projects.
 
-Takes a code repo (from the **Code** app, a local path, or — later —
-git/zip) and turns it into a built, supervised, URL-addressable
-process running on the same host as Apteva. No external orchestrator,
-no Docker required.
+Takes a code repo (from the **Code** app or a local path) and turns it
+into a built, supervised, URL-addressable process. Builds can run on
+the Deploy host, Codemagic, or GitHub Actions.
 
 ## Surfaces
 
@@ -15,7 +14,7 @@ no Docker required.
 - **Deploy panel** — list of deployments, status cards, log tail,
   build/release/stop/destroy buttons
 - **Event bus** — `deploy.created`, `deploy.build.{started,
-  succeeded, failed}`, `deploy.release.{live, stopped, crashed,
+  succeeded, failed, cancelled}`, `deploy.release.{live, stopped, crashed,
   failed}`, `deploy.destroyed`
 
 ## Source kinds (pluggable)
@@ -92,6 +91,59 @@ Use `deploy_promote` to move the same Android version code or iOS build
 from a test channel to production without rebuilding. `deploy_rollout`
 changes a staged Google Play production fraction; `deploy_halt` halts a
 Play rollout or expires a TestFlight build.
+
+## Cloud build backends
+
+Build execution is selected per environment and snapshotted onto each
+build. Existing deployments default to `local`. Bind one or more
+Codemagic/GitHub integrations to the `cloud_build` role, then set
+`build_backend` and `build_backend_config_json`.
+
+Codemagic example:
+
+```json
+{
+  "app_id": "codemagic-app-id",
+  "workflow_id": "ios-release",
+  "branch": "main",
+  "instance_type": "mac_mini_m4",
+  "artifact_mode": "store_upload",
+  "groups": ["ios-signing", "app-store"]
+}
+```
+
+GitHub Actions example:
+
+```json
+{
+  "owner": "acme",
+  "repo": "mobile-app",
+  "workflow_id": "build.yml",
+  "ref": "main",
+  "artifact_mode": "file",
+  "artifact_name": "apteva-build",
+  "artifact_file": "app-release.aab",
+  "inputs": {"configuration": "release"}
+}
+```
+
+`artifact_mode` defines the provider-neutral output contract:
+
+| Mode | Contract |
+|------|----------|
+| `bundle` | The named ZIP artifact is unpacked as the service/static build output. |
+| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. |
+| `store_upload` | The workflow signs and uploads iOS to App Store Connect; Deploy adopts it and continues TestFlight/App Store processing. |
+| `none` | The workflow has no deployable output. |
+
+Codemagic reads short-lived artifact URLs from the completed build.
+GitHub Actions expects a workflow artifact named `apteva-build` unless
+overridden. GitHub workflow inputs are passed exactly as configured, so
+the workflow must declare each configured `workflow_dispatch` input.
+The `cloud_build_sync` worker polls providers, persists provider job
+IDs/status, stages outputs, and performs a requested release only after
+the build succeeds. `deploy_build_cancel` and
+`POST /api/builds/:id/cancel` cancel active provider jobs.
 
 ## Runtime targets (pluggable)
 

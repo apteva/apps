@@ -124,6 +124,17 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 		body, _ := tailFile(build.LogPath, queryInt(r, "tail", 200))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
+	case "cancel":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		cancelled, err := a.cancelCloudBuild(r.Context(), build)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"})
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -218,6 +229,8 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		SourceRef        string `json:"source_ref"`
 		Framework        string `json:"framework"`
 		BuildCmd         string `json:"build_cmd"`
+		BuildBackend     string `json:"build_backend"`
+		BuildBackendJSON string `json:"build_backend_config_json"`
 		StartCmd         string `json:"start_cmd"`
 		PortHint         int    `json:"port_hint"`
 		EnvJSON          string `json:"env_json"`
@@ -238,8 +251,13 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		Name: body.Name, TargetKind: normalizeTargetKind(body.TargetKind), Description: body.Description,
 		SourceKind: body.SourceKind, SourceRef: body.SourceRef,
 		Framework: body.Framework,
-		BuildCmd:  body.BuildCmd, StartCmd: body.StartCmd,
+		BuildCmd:  body.BuildCmd, BuildBackend: normalizeBuildBackend(body.BuildBackend),
+		BuildBackendJSON: body.BuildBackendJSON, StartCmd: body.StartCmd,
 		PortHint: body.PortHint, EnvJSON: body.EnvJSON, TargetConfigJSON: body.TargetConfigJSON,
+	}
+	if err := validateBuildBackendSelection(in.BuildBackend, defaultStr(in.BuildBackendJSON, "{}")); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
 		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, or ios")
@@ -357,6 +375,19 @@ func (a *App) httpDeploymentPatch(w http.ResponseWriter, r *http.Request, d *Dep
 		httpErr(w, http.StatusBadRequest, "no mutable fields in body")
 		return
 	}
+	nextBackend := d.BuildBackend
+	nextBackendJSON := d.BuildBackendJSON
+	if value, ok := body["build_backend"].(string); ok {
+		nextBackend = normalizeBuildBackend(value)
+		body["build_backend"] = nextBackend
+	}
+	if value, ok := body["build_backend_config_json"].(string); ok {
+		nextBackendJSON = value
+	}
+	if err := validateBuildBackendSelection(nextBackend, nextBackendJSON); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if d.EnvironmentID > 0 {
 		if err := dbUpdateEnvironment(globalCtx.AppDB(), d.EnvironmentID, body); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
@@ -443,6 +474,7 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 	allow := map[string]bool{
 		"description": true, "framework": true,
 		"build_cmd": true, "start_cmd": true,
+		"build_backend": true, "build_backend_config_json": true,
 		"port_hint": true, "env_json": true, "source_ref": true,
 		"source_extra_json":  true,
 		"target_config_json": true,
@@ -484,13 +516,24 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 		return
 	}
 	res := map[string]any{"build": build}
-	if boolArg(body, "release") && build.Status == "succeeded" {
-		rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(body))
-		if err != nil {
-			res["release_error"] = err.Error()
-		} else {
-			res["release"] = rel
-			res["url"] = a.deploymentURL(d, rel)
+	if boolArg(body, "release") {
+		opts := releaseOptionsFromArgs(body)
+		if build.Status == "succeeded" {
+			rel, err := a.runReleaseWithOptions(d, build, opts)
+			if err != nil {
+				res["release_error"] = err.Error()
+			} else {
+				res["release"] = rel
+				res["url"] = a.deploymentURL(d, rel)
+			}
+		} else if normalizeBuildBackend(build.BuildBackend) != buildBackendLocal {
+			optsJSON, _ := json.Marshal(opts)
+			_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
+				"release_requested": true, "release_options_json": string(optsJSON),
+			})
+			build, _ = dbGetBuild(globalCtx.AppDB(), build.ID)
+			res["build"] = build
+			res["release_requested"] = true
 		}
 	}
 	httpJSON(w, res)

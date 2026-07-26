@@ -59,6 +59,7 @@ type App struct {
 
 	buildSem     chan struct{} // throttle concurrent builds
 	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
+	cloudBuildMu sync.Mutex
 
 	// Auto-restart bookkeeping. In-memory: a sidecar restart resets
 	// the counter, which is fine — reconcileReleases will re-adopt
@@ -206,10 +207,16 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name: "mobile_release_sync", Schedule: "@every 1m",
-		Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
-	}}
+	return []sdk.Worker{
+		{
+			Name: "mobile_release_sync", Schedule: "@every 1m",
+			Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
+		},
+		{
+			Name: "cloud_build_sync", Schedule: "@every 15s",
+			Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingCloudBuilds(ctx) },
+		},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -497,6 +504,13 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // failure). The caller decides whether to release immediately.
 
 func (a *App) runBuild(d *Deployment) (*Build, error) {
+	if normalizeBuildBackend(d.BuildBackend) != buildBackendLocal {
+		return a.submitCloudBuild(context.Background(), d)
+	}
+	return a.runLocalBuild(d)
+}
+
+func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	// Pick framework.
 	fw := d.Framework
 

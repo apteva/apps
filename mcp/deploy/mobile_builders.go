@@ -41,13 +41,16 @@ type mobileTargetConfig struct {
 }
 
 type artifactManifest struct {
-	Platform    string         `json:"platform"`
-	Primary     string         `json:"primary"`
-	PackageName string         `json:"package_name,omitempty"`
-	BundleID    string         `json:"bundle_id,omitempty"`
-	VersionName string         `json:"version_name,omitempty"`
-	BuildNumber string         `json:"build_number,omitempty"`
-	Files       []artifactFile `json:"files"`
+	Platform         string         `json:"platform"`
+	Primary          string         `json:"primary,omitempty"`
+	PackageName      string         `json:"package_name,omitempty"`
+	BundleID         string         `json:"bundle_id,omitempty"`
+	VersionName      string         `json:"version_name,omitempty"`
+	BuildNumber      string         `json:"build_number,omitempty"`
+	ExternalProvider string         `json:"external_provider,omitempty"`
+	ExternalID       string         `json:"external_id,omitempty"`
+	ExternalStatus   string         `json:"external_status,omitempty"`
+	Files            []artifactFile `json:"files,omitempty"`
 }
 
 type artifactFile struct {
@@ -402,7 +405,7 @@ func readArtifactManifest(build *Build) (artifactManifest, error) {
 	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
 		return manifest, fmt.Errorf("decode artifact manifest: %w", err)
 	}
-	if manifest.Primary == "" {
+	if manifest.Primary == "" && manifest.ExternalProvider == "" {
 		return manifest, errors.New("artifact manifest has no primary file")
 	}
 	return manifest, nil

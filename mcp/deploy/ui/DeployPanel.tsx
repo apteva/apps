@@ -96,6 +96,8 @@ interface Deployment {
   source_ref: string;
   framework: string;
   build_cmd: string;
+  build_backend: "local" | "codemagic" | "github_actions";
+  build_backend_config_json: string;
   start_cmd: string;
   port_hint: number;
   env_json: string;
@@ -127,6 +129,9 @@ interface Build {
   deployment_id: number;
   source_sha: string;
   framework: string;
+  build_backend: "local" | "codemagic" | "github_actions";
+  external_job_id: string;
+  external_status: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   duration_ms: number;
   exit_code: number;
@@ -190,6 +195,7 @@ const API = "/api/apps/deploy/api";
 const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 const TARGET_KINDS = ["service", "android", "ios"] as const;
+const BUILD_BACKENDS = ["local", "codemagic", "github_actions"] as const;
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -423,6 +429,16 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       setLogTargetId(r.release.id);
     } catch (e) {
       setError("Release failed: " + (e as Error).message);
+    }
+  };
+
+  const handleCancelBuild = async (buildId: number) => {
+    if (!detail) return;
+    try {
+      await api("POST", `/builds/${buildId}/cancel`);
+      await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Cancel build failed: " + (e as Error).message);
     }
   };
 
@@ -772,6 +788,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     </div>
                     <div className="text-text-dim truncate">
                       built as: {detail.builds[0].framework}
+                      {detail.builds[0].build_backend !== "local"
+                        && ` · ${detail.builds[0].build_backend}:${detail.builds[0].external_status || "queued"}`}
                       {detail.builds[0].framework !== detail.deployment.framework
                         && detail.deployment.framework !== ""
                         && (
@@ -886,6 +904,13 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                             onClick={() => handleReleaseBuild(b.id)}
                             className="text-accent hover:underline"
                           >{mobile ? "publish" : "release"}</button>
+                        )}
+                        {(b.status === "pending" || b.status === "running") && b.build_backend !== "local" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancelBuild(b.id)}
+                            className="text-red hover:underline"
+                          >cancel</button>
                         )}
                       </td>
                     </tr>
@@ -1040,6 +1065,8 @@ function CreateDeploymentDialog({
   const [sourceRef, setSourceRef] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>("");
   const [buildCmd, setBuildCmd] = useState("");
+  const [buildBackend, setBuildBackend] = useState<(typeof BUILD_BACKENDS)[number]>("local");
+  const [buildBackendConfig, setBuildBackendConfig] = useState("{}");
   const [startCmd, setStartCmd] = useState("");
   const [env, setEnv] = useState("");
   const [targetConfig, setTargetConfig] = useState("");
@@ -1081,6 +1108,17 @@ function CreateDeploymentDialog({
       setErr("name and source_ref required");
       return;
     }
+    const backendConfig = buildBackendConfig.trim() || "{}";
+    try {
+      const parsed = JSON.parse(backendConfig);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        setErr("Build backend config must be a JSON object");
+        return;
+      }
+    } catch (e) {
+      setErr("Build backend config: " + (e as Error).message);
+      return;
+    }
     setBusy(true);
     try {
       let domain = "";
@@ -1096,6 +1134,8 @@ function CreateDeploymentDialog({
         source_ref: sourceRef.trim(),
         framework,
         build_cmd: buildCmd.trim(),
+        build_backend: buildBackend,
+        build_backend_config_json: backendConfig,
         start_cmd: startCmd.trim(),
         env_json: env.trim() || "{}",
         target_config_json: targetConfig.trim() || "{}",
@@ -1120,7 +1160,7 @@ function CreateDeploymentDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(); }}
-        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">New deployment</h2>
         <div className="grid grid-cols-2 gap-3">
@@ -1172,6 +1212,32 @@ function CreateDeploymentDialog({
               ))}
             </select>
           </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Build backend</label>
+            <select
+              value={buildBackend}
+              onChange={(e) => setBuildBackend(e.target.value as (typeof BUILD_BACKENDS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              <option value="local">Local</option>
+              <option value="codemagic">Codemagic</option>
+              <option value="github_actions">GitHub Actions</option>
+            </select>
+          </div>
+          {buildBackend !== "local" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <textarea
+                value={buildBackendConfig}
+                onChange={(e) => setBuildBackendConfig(e.target.value)}
+                placeholder={buildBackend === "codemagic"
+                  ? '{"app_id":"...","workflow_id":"ios-release","branch":"main","artifact_mode":"store_upload"}'
+                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"bundle"}'}
+                rows={4}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">
               Source ref ({sourceKind === "code" ? "repository from Code app" : "absolute path on host"})
@@ -1578,6 +1644,12 @@ function EditConfigDialog({
       : "",
   );
   const [buildCmd, setBuildCmd] = useState(deployment.build_cmd ?? "");
+  const [buildBackend, setBuildBackend] = useState<(typeof BUILD_BACKENDS)[number]>(
+    deployment.build_backend ?? "local",
+  );
+  const [buildBackendConfig, setBuildBackendConfig] = useState(
+    deployment.build_backend_config_json ?? "{}",
+  );
   const [startCmd, setStartCmd] = useState(deployment.start_cmd ?? "");
   const [portHint, setPortHint] = useState(
     deployment.port_hint ? String(deployment.port_hint) : "",
@@ -1614,6 +1686,17 @@ function EditConfigDialog({
         return;
       }
     }
+    const backendConfig = buildBackendConfig.trim() || "{}";
+    try {
+      const parsed = JSON.parse(backendConfig);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        setErr("build_backend_config_json must be a JSON object");
+        return;
+      }
+    } catch (e) {
+      setErr("build_backend_config_json: " + (e as Error).message);
+      return;
+    }
     setBusy(true);
     try {
       // Diff against current values — sending only-changed keys keeps
@@ -1623,6 +1706,10 @@ function EditConfigDialog({
       if (description !== (deployment.description ?? "")) body.description = description;
       if (framework !== deployment.framework) body.framework = framework;
       if (buildCmd !== (deployment.build_cmd ?? "")) body.build_cmd = buildCmd;
+      if (buildBackend !== (deployment.build_backend ?? "local")) body.build_backend = buildBackend;
+      if (backendConfig !== (deployment.build_backend_config_json ?? "{}")) {
+        body.build_backend_config_json = backendConfig;
+      }
       if (startCmd !== (deployment.start_cmd ?? "")) body.start_cmd = startCmd;
       if (portN !== deployment.port_hint) body.port_hint = portN;
       if (env !== (deployment.env_json ?? "")) body.env_json = env;
@@ -1658,7 +1745,7 @@ function EditConfigDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(false); }}
-        className="w-[520px] bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">Edit deployment config</h2>
         <p className="text-xs text-text-dim">
@@ -1710,6 +1797,29 @@ function EditConfigDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Build backend</label>
+            <select
+              value={buildBackend}
+              onChange={(e) => setBuildBackend(e.target.value as (typeof BUILD_BACKENDS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              <option value="local">Local</option>
+              <option value="codemagic">Codemagic</option>
+              <option value="github_actions">GitHub Actions</option>
+            </select>
+          </div>
+          {buildBackend !== "local" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <textarea
+                value={buildBackendConfig}
+                onChange={(e) => setBuildBackendConfig(e.target.value)}
+                rows={4}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Start cmd</label>
             <input

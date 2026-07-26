@@ -492,7 +492,13 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql", "migrations/003_environments.sql", "migrations/004_mobile_targets.sql"} {
+	for _, mig := range []string{
+		"migrations/001_init.sql",
+		"migrations/002_domain_link.sql",
+		"migrations/003_environments.sql",
+		"migrations/004_mobile_targets.sql",
+		"migrations/005_build_backends.sql",
+	} {
 		body, err := os.ReadFile(mig)
 		if err != nil {
 			t.Fatal(err)
