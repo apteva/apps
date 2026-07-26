@@ -29,12 +29,14 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatalf("enable foreign_keys: %v", err)
 	}
-	mig, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(mig)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, name := range []string{"001_init.sql", "002_adjustments.sql"} {
+		mig, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.Exec(string(mig)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
@@ -300,7 +302,7 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 	tools := app.MCPTools()
 	want := []string{
 		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
-		"checkout_start", "checkout_update", "checkout_pay",
+		"checkout_start", "checkout_update", "checkout_set_adjustments", "checkout_pay",
 		"checkout_get", "checkout_cancel",
 	}
 	if len(tools) != len(want) {
@@ -320,6 +322,34 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 		if !implemented[name] {
 			t.Errorf("expected tool %q not registered", name)
 		}
+	}
+}
+
+func TestCheckoutSetAdjustmentsFreezesTotal(t *testing.T) {
+	db := newTestDB(t)
+	cartID := seedCart(t, db, testPID, "adjusted", 0, "checkout")
+	res, err := db.Exec(
+		`INSERT INTO checkout_sessions
+		    (project_id, cart_id, provider, status, subtotal_cents, total_cents, currency)
+		 VALUES (?, ?, 'manual', 'started', 5000, 5000, 'USD')`, testPID, cartID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := res.LastInsertId()
+	session, err := dbCheckoutSetAdjustments(db, testPID, sessionID, map[string]any{
+		"shipping_cents": int64(700),
+		"discount_cents": int64(200),
+		"tax_cents":      int64(450),
+		"adjustments":    map[string]any{"shipping_quote_id": "quote-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.TotalCents != 5950 || session.ShippingCents != 700 || session.DiscountCents != 200 || session.TaxCents != 450 {
+		t.Fatalf("unexpected adjusted session: %#v", session)
+	}
+	if !strings.Contains(string(session.Adjustments), "quote-1") {
+		t.Fatalf("adjustment metadata not persisted: %s", session.Adjustments)
 	}
 }
 

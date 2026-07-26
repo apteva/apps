@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.4
+version: 0.1.5
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
@@ -52,6 +52,8 @@ provides:
       description: Lock a cart and create a checkout_session. Cart becomes immutable until session terminates.
     - name: checkout_update
       description: Capture or update email / name / addresses on a started session.
+    - name: checkout_set_adjustments
+      description: Replace frozen shipping, discount, tax, and adjustment metadata before payment.
     - name: checkout_pay
       description: |
         Submit the session for payment. v0.1.0 creates a draft → finalized invoice in
@@ -82,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: checkout/v0.1.5
     entry: mcp/checkout
   port: 8080
   health_check: /health

@@ -268,6 +268,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolCheckoutUpdate,
 		},
 		{
+			Name:        "checkout_set_adjustments",
+			Description: "Replace frozen checkout adjustments before payment. Intended for trusted commerce orchestrators. Args: session_id, shipping_cents?, discount_cents?, tax_cents?, adjustments?.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id":     map[string]any{"type": "integer"},
+				"shipping_cents": map[string]any{"type": "integer"},
+				"discount_cents": map[string]any{"type": "integer"},
+				"tax_cents":      map[string]any{"type": "integer"},
+				"adjustments":    map[string]any{"type": "object"},
+			}, []string{"session_id"}),
+			Handler: a.toolCheckoutSetAdjustments,
+		},
+		{
 			Name:        "checkout_pay",
 			Description: "Submit a session for payment. v0.1.0 creates a finalized invoice in billing (provider='manual') and returns it; payment is recorded manually in billing once received. v0.2.0 will branch on provider='stripe' to return a Stripe Checkout Session URL. Args: session_id.",
 			InputSchema: schemaObject(map[string]any{
@@ -366,9 +378,12 @@ type CheckoutSession struct {
 	Status            string          `json:"status"`
 	InvoiceID         *int64          `json:"invoice_id,omitempty"`
 	SubtotalCents     int64           `json:"subtotal_cents"`
+	ShippingCents     int64           `json:"shipping_cents"`
+	DiscountCents     int64           `json:"discount_cents"`
 	TaxCents          int64           `json:"tax_cents"`
 	TotalCents        int64           `json:"total_cents"`
 	Currency          string          `json:"currency"`
+	Adjustments       json.RawMessage `json:"adjustments,omitempty"`
 	Metadata          json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt         string          `json:"created_at,omitempty"`
 	UpdatedAt         string          `json:"updated_at,omitempty"`
@@ -505,6 +520,23 @@ func (a *App) toolCheckoutUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	emitSession(ctx, "checkout.contact_captured", session)
+	return map[string]any{"session": session}, nil
+}
+
+func (a *App) toolCheckoutSetAdjustments(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := int64Arg(args, "session_id")
+	if sessionID == 0 {
+		return nil, errors.New("session_id required")
+	}
+	session, err := dbCheckoutSetAdjustments(ctx.AppDB(), pid, sessionID, args)
+	if err != nil {
+		return nil, err
+	}
+	emitSession(ctx, "checkout.adjustments_updated", session)
 	return map[string]any{"session": session}, nil
 }
 
@@ -1285,8 +1317,8 @@ func dbSessionsList(db *sql.DB, pid string, f sessionFilters) ([]*CheckoutSessio
 		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''),
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
-		        subtotal_cents, tax_cents, total_cents, currency,
-		        metadata, created_at, updated_at, completed_at, expires_at
+		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
+		        adjustments_json, metadata, created_at, updated_at, completed_at, expires_at
 		 FROM checkout_sessions
 		 WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY updated_at DESC
@@ -1311,8 +1343,8 @@ func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''),
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
-		        subtotal_cents, tax_cents, total_cents, currency,
-		        metadata, created_at, updated_at, completed_at, expires_at
+		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
+		        adjustments_json, metadata, created_at, updated_at, completed_at, expires_at
 		 FROM checkout_sessions WHERE id = ? AND project_id = ?`, id, pid)
 	s, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1427,6 +1459,38 @@ func dbCheckoutUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*
 	return dbCheckoutGet(db, pid, id)
 }
 
+func dbCheckoutSetAdjustments(db *sql.DB, pid string, id int64, args map[string]any) (*CheckoutSession, error) {
+	session, err := dbCheckoutGet(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, fmt.Errorf("session %d not found", id)
+	}
+	if session.Status != "started" {
+		return nil, fmt.Errorf("session %d is %s - only 'started' sessions accept adjustments", id, session.Status)
+	}
+	shipping := int64Arg(args, "shipping_cents")
+	discount := int64Arg(args, "discount_cents")
+	tax := int64Arg(args, "tax_cents")
+	if shipping < 0 || discount < 0 || tax < 0 {
+		return nil, errors.New("shipping_cents, discount_cents, and tax_cents must be non-negative")
+	}
+	total := session.SubtotalCents + shipping + tax - discount
+	if total < 0 {
+		return nil, errors.New("discount_cents cannot exceed subtotal plus shipping and tax")
+	}
+	if _, err := db.Exec(
+		`UPDATE checkout_sessions
+		    SET shipping_cents=?, discount_cents=?, tax_cents=?, total_cents=?,
+		        adjustments_json=?, updated_at=CURRENT_TIMESTAMP
+		  WHERE id=? AND project_id=?`,
+		shipping, discount, tax, total, jsonOrEmpty(args["adjustments"], "{}"), id, pid); err != nil {
+		return nil, err
+	}
+	return dbCheckoutGet(db, pid, id)
+}
+
 // dbCheckoutPay is the v0.1.0 manual-payment path: upserts the
 // customer in billing, creates + finalizes an invoice, links it to
 // the session, marks the cart converted. Returns the session, the
@@ -1496,6 +1560,24 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSessi
 			"unit_price_cents": it.UnitAmountCents,
 			"price_id":         it.PriceID,
 			"product_id":       it.ProductID,
+		})
+	}
+	if session.ShippingCents > 0 {
+		lineItems = append(lineItems, map[string]any{
+			"description": "Shipping", "quantity": 1, "unit_price_cents": session.ShippingCents,
+			"metadata": map[string]any{"checkout_adjustment": "shipping"},
+		})
+	}
+	if session.TaxCents > 0 {
+		lineItems = append(lineItems, map[string]any{
+			"description": "Tax", "quantity": 1, "unit_price_cents": session.TaxCents,
+			"metadata": map[string]any{"checkout_adjustment": "tax"},
+		})
+	}
+	if session.DiscountCents > 0 {
+		lineItems = append(lineItems, map[string]any{
+			"description": "Discount", "quantity": 1, "unit_price_cents": -session.DiscountCents,
+			"metadata": map[string]any{"checkout_adjustment": "discount"},
 		})
 	}
 
@@ -1608,15 +1690,15 @@ func dbCheckoutCancel(db *sql.DB, pid string, id int64) (*CheckoutSession, error
 
 func scanSession(s rowScanner) (*CheckoutSession, error) {
 	var sess CheckoutSession
-	var shipping, billing, meta sql.NullString
+	var shipping, billing, adjustments, meta sql.NullString
 	var invoiceID sql.NullInt64
 	var completedAt, expiresAt sql.NullString
 	if err := s.Scan(
 		&sess.ID, &sess.ProjectID, &sess.CartID, &sess.Provider, &sess.ProviderSessionID,
 		&sess.Email, &sess.CustomerName,
 		&shipping, &billing, &sess.Status, &invoiceID,
-		&sess.SubtotalCents, &sess.TaxCents, &sess.TotalCents, &sess.Currency,
-		&meta, &sess.CreatedAt, &sess.UpdatedAt, &completedAt, &expiresAt); err != nil {
+		&sess.SubtotalCents, &sess.ShippingCents, &sess.DiscountCents, &sess.TaxCents, &sess.TotalCents, &sess.Currency,
+		&adjustments, &meta, &sess.CreatedAt, &sess.UpdatedAt, &completedAt, &expiresAt); err != nil {
 		return nil, err
 	}
 	if shipping.Valid {
@@ -1627,6 +1709,9 @@ func scanSession(s rowScanner) (*CheckoutSession, error) {
 	}
 	if meta.Valid {
 		sess.Metadata = json.RawMessage(meta.String)
+	}
+	if adjustments.Valid {
+		sess.Adjustments = json.RawMessage(adjustments.String)
 	}
 	if invoiceID.Valid {
 		v := invoiceID.Int64
