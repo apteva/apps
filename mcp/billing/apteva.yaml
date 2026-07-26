@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.11.0
+version: 0.11.1
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -20,6 +20,7 @@ description: |
   v0.11.0 adds durable hosted or custom Stripe Checkout Sessions for
   product apps. Custom sessions return only a short-lived client secret
   and the catalog-marked public publishable key.
+  v0.11.1 provider-encodes Stripe payment method arrays correctly.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -315,7 +316,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.11.0
+    ref: billing/v0.11.1
     entry: mcp/billing
   port: 8080
   health_check: /health

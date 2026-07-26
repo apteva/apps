@@ -354,8 +354,14 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 		}
 		input["expires_at"] = expiresAt
 	}
-	if methods, ok := args["payment_method_types"].([]any); ok && len(methods) > 0 {
-		input["payment_method_types"] = methods
+	for index, method := range stringSliceArg(args, "payment_method_types") {
+		method = strings.TrimSpace(method)
+		if method == "" {
+			return nil, errors.New("payment_method_types cannot contain empty values")
+		}
+		// Stripe's form API requires indexed array keys. Repeated bare keys
+		// are rejected as "Invalid array".
+		input[fmt.Sprintf("payment_method_types[%d]", index)] = method
 	}
 	if presentation == "elements" {
 		returnURL := strings.TrimSpace(strArg(args, "return_url"))

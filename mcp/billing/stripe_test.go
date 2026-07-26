@@ -159,10 +159,11 @@ func TestCreateElementsPaymentSessionReturnsOnlyPublicBrowserConfig(t *testing.T
 	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Order", 1, 2400, 0)}).ID)
 
 	out, err := app.toolInvoicesCreatePaymentSession(ctx, map[string]any{
-		"invoice_id":      inv.ID,
-		"presentation":    "elements",
-		"idempotency_key": "checkout-42",
-		"return_url":      "https://store.example/checkout/return",
+		"invoice_id":           inv.ID,
+		"presentation":         "elements",
+		"idempotency_key":      "checkout-42",
+		"return_url":           "https://store.example/checkout/return",
+		"payment_method_types": []any{"card", "sepa_debit"},
 	})
 	if err != nil {
 		t.Fatalf("create elements payment session: %v", err)
@@ -189,6 +190,12 @@ func TestCreateElementsPaymentSessionReturnsOnlyPublicBrowserConfig(t *testing.T
 	}
 	if _, exists := input["cancel_url"]; exists {
 		t.Fatalf("elements input unexpectedly has cancel_url: %#v", input)
+	}
+	if input["payment_method_types[0]"] != "card" || input["payment_method_types[1]"] != "sepa_debit" {
+		t.Fatalf("Stripe payment method array is not provider-encoded: %#v", input)
+	}
+	if _, exists := input["payment_method_types"]; exists {
+		t.Fatalf("Stripe input contains an invalid unindexed payment method array: %#v", input)
 	}
 	var presentation, key string
 	if err := ctx.AppDB().QueryRow(
