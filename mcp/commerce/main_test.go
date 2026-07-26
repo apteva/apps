@@ -231,6 +231,27 @@ func TestCartUsesCanonicalPriceAndKeepsCheckoutInSync(t *testing.T) {
 	}
 }
 
+func TestCartItemTitle(t *testing.T) {
+	tests := []struct {
+		name         string
+		productTitle string
+		variantTitle string
+		want         string
+	}{
+		{name: "default variant", productTitle: "Quiet Morning Mug", variantTitle: "Default", want: "Quiet Morning Mug"},
+		{name: "repeated title", productTitle: "Quiet Morning Mug", variantTitle: "Quiet Morning Mug", want: "Quiet Morning Mug"},
+		{name: "repeated title ignores case", productTitle: "Quiet Morning Mug", variantTitle: "quiet morning mug", want: "Quiet Morning Mug"},
+		{name: "named variant", productTitle: "Apteva Hoodie", variantTitle: "Black / M", want: "Apteva Hoodie - Black / M"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := cartItemTitle(tt.productTitle, tt.variantTitle); got != tt.want {
+				t.Fatalf("cartItemTitle(%q, %q)=%q, want %q", tt.productTitle, tt.variantTitle, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckoutStartReleasesPartialReservations(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["inventory:inventory_reservations_list"] = map[string]any{"reservations": []any{}}
@@ -522,8 +543,19 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		}
 	}
 	assets := manifest["assets"].(map[string]any)
-	if strings.Contains(assets["store.js"].(string), "{{") {
+	js := assets["store.js"].(string)
+	if strings.Contains(js, "{{") {
 		t.Fatal("static storefront JavaScript contains an unrendered template expression")
+	}
+	if !strings.Contains(js, "cartTitle(item)") {
+		t.Fatal("storefront cart does not normalize repeated snapshot titles")
+	}
+	css := assets["store.css"].(string)
+	if !strings.Contains(css, ".line-total{text-align:right") {
+		t.Fatal("storefront line totals are not right-aligned")
+	}
+	if !strings.Contains(css, ".cart-total span:last-child{text-align:right") {
+		t.Fatal("storefront cart total is not right-aligned")
 	}
 }
 

@@ -1893,21 +1893,27 @@ func dbCartAddItem(db *sql.DB, pid string, cartID int64, v *Variant, qty float64
 	if err != nil || listing == nil {
 		return firstErr(err, errors.New("listing not found"))
 	}
-	title := listing.Title
-	if v.Title != "" && v.Title != "Default" {
-		title += " - " + v.Title
-	}
+	title := cartItemTitle(listing.Title, v.Title)
 	_, err = db.Exec(`INSERT INTO commerce_cart_items
 		(project_id, cart_id, checkout_item_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cart_id, variant_id) DO UPDATE SET quantity=quantity+excluded.quantity,
 		checkout_item_id=excluded.checkout_item_id, unit_amount_cents=excluded.unit_amount_cents,
-		currency=excluded.currency, updated_at=CURRENT_TIMESTAMP`,
+		currency=excluded.currency, title_snapshot=excluded.title_snapshot, updated_at=CURRENT_TIMESTAMP`,
 		pid, cartID, nullableInt(checkoutItemID), v.ID, v.ListingID, nullablePtrInt(v.InventoryItemID), nullablePtrInt(v.CatalogPriceID), v.SKU, title, v.PriceCents, v.Currency, qty)
 	if err != nil {
 		return err
 	}
 	return recomputeCart(db, pid, cartID)
+}
+
+func cartItemTitle(productTitle, variantTitle string) string {
+	productTitle = strings.TrimSpace(productTitle)
+	variantTitle = strings.TrimSpace(variantTitle)
+	if variantTitle == "" || strings.EqualFold(variantTitle, "Default") || strings.EqualFold(variantTitle, productTitle) {
+		return productTitle
+	}
+	return productTitle + " - " + variantTitle
 }
 
 func dbCartSetQuantity(db *sql.DB, pid string, cartID, itemID int64, qty float64) error {
