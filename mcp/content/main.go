@@ -131,10 +131,14 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/templates/", Handler: a.handleHTTPTemplateItem},
 		{Pattern: "/admin/sites", Handler: a.handleHTTPSites},
 		{Pattern: "/admin/sites/", Handler: a.handleHTTPSiteItem},
+		{Pattern: "/admin/extensions", Handler: a.handleHTTPExtensions},
+		{Pattern: "/admin/extensions/", Handler: a.handleHTTPExtensionItem},
 
 		// ── public render surface ───────────────────────────────
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},
 		{Pattern: "/_media/", Handler: a.handleMediaAsset, NoAuth: true},
+		{Pattern: "/_extensions/", Handler: a.handleExtensionAsset, NoAuth: true},
+		{Pattern: "/_actions/", Handler: a.handleExtensionAction, NoAuth: true},
 		{Pattern: "/_forms/submit/", Handler: a.handleFormSubmit, NoAuth: true},
 		{Pattern: "/preview/", Handler: a.handlePreview, NoAuth: true},
 		{Pattern: "/feed.xml", Handler: a.handleFeed, NoAuth: true},

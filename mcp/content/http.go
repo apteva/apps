@@ -52,6 +52,13 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// App-provided public surfaces are resolved before native CMS pages.
+	// Their route manifests are generic; Content has no provider-specific
+	// routing or rendering code.
+	if a.tryHandleExtensionRoute(w, r, ctx, pid, siteID) {
+		return
+	}
+
 	// Page cache. Site segments the key alongside prefix/host/path so
 	// no two sites can return each other's cached body.
 	prefix := computeURLPrefix(r)

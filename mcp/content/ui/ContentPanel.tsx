@@ -178,6 +178,19 @@ const PANEL_STYLES = `
 .cp-status-pill.cp-status-scheduled { background: rgba(245,158,11,0.20);  color: rgb(180,83,9); }
 .cp-status-pill.cp-status-published { background: rgba(16,185,129,0.22);  color: rgb(4,120,87); }
 .cp-status-pill.cp-status-archived  { background: rgba(220,38,38,0.18);   color: rgb(185,28,28); }
+.cp-extensions-grid { display: grid; min-height: 560px; }
+.cp-extension-preview-shell { min-height: 500px; }
+.cp-extension-preview-frame { height: 620px; border: 0; background: white; transition: width 180ms ease; }
+.cp-tabs-shell { display: flex; align-items: center; justify-content: space-between; min-width: 0; }
+.cp-tabs-list { display: flex; gap: 0.25rem; min-width: 0; overflow-x: auto; }
+@media (max-width: 639px) {
+  .cp-tabs-shell { align-items: stretch; flex-direction: column; }
+  .cp-tabs-list { margin-right: -1rem; padding-right: 1rem; }
+  .cp-tabs-actions { justify-content: flex-end; padding-top: 0.25rem; }
+}
+@media (min-width: 1024px) {
+  .cp-extensions-grid { grid-template-columns: 220px 280px minmax(360px, 1fr); }
+}
 @media (prefers-color-scheme: dark) {
   .cp-status-pill.cp-status-draft     { color: rgb(156,163,175); }
   .cp-status-pill.cp-status-scheduled { color: rgb(251,191,36); }
@@ -249,7 +262,36 @@ function defaultAttrs(type: string): Record<string, any> {
 // Switching between list and templates is via the top tab bar;
 // opening the editor replaces the view entirely (own back button).
 
-type View = "list" | "templates" | "themes" | "blocks";
+type View = "list" | "templates" | "themes" | "blocks" | "extensions";
+
+interface ExtensionSetting {
+  key: string;
+  label: string;
+  type: "text" | "color" | "number" | "boolean" | string;
+  default?: unknown;
+}
+
+interface ExtensionManifest {
+  name: string;
+  version: string;
+  routes: Array<{ name: string; pattern: string; template: string }>;
+  settings?: Record<string, unknown>;
+  settings_schema?: ExtensionSetting[];
+  [key: string]: unknown;
+}
+
+interface ContentExtension {
+  id: number;
+  key: string;
+  provider_app: string;
+  display_name: string;
+  version: string;
+  status: string;
+  has_draft_changes: boolean;
+  draft_manifest: ExtensionManifest;
+  published_manifest: ExtensionManifest;
+  updated_at: string;
+}
 
 interface SiteSummary {
   id: number;
@@ -321,6 +363,7 @@ export default function ContentPanel({ projectId }: NativePanelProps) {
       )}
       {view === "themes" && <ThemesView api={api} />}
       {view === "blocks" && <BlocksView api={api} />}
+      {view === "extensions" && <ExtensionsView api={api} projectId={projectId} siteSlug={activeSite} />}
     </div>
   );
 }
@@ -356,16 +399,17 @@ function Tabs({
     </button>
   );
   return (
-    <div className="flex items-center justify-between border-b border-border px-4 pt-2 bg-bg">
-      <div className="flex gap-1">
+    <div className="cp-tabs-shell border-b border-border px-4 pt-2 bg-bg">
+      <div className="cp-tabs-list">
         {tab("list", "Content")}
         {tab("templates", "Templates")}
         {tab("themes", "Themes")}
         {tab("blocks", "Blocks")}
+        {tab("extensions", "Extensions")}
       </div>
       {/* Site switcher — hidden when only one site exists (single-site UX). */}
       {sites.length >= 2 ? (
-        <div className="flex items-center gap-2 pb-2">
+        <div className="cp-tabs-actions flex items-center gap-2 pb-2">
           <span className="text-xs text-text-muted">Site</span>
           <select
             value={activeSite ?? ""}
@@ -396,7 +440,7 @@ function Tabs({
       ) : (
         // Single-site mode: show a discreet "+ Add second site" button
         // so users can discover multi-site without it being noisy.
-        <div className="pb-2 flex items-center gap-3">
+        <div className="cp-tabs-actions pb-2 flex items-center gap-3">
           <button
             onClick={() => setConnectingDomain(true)}
             className="text-xs text-text-muted hover:text-text"
@@ -435,6 +479,164 @@ function Tabs({
         />
       )}
     </div>
+  );
+}
+
+function ExtensionsView({
+  api,
+  projectId,
+  siteSlug,
+}: {
+  api: ReturnType<typeof makeAPI>;
+  projectId: string;
+  siteSlug: string | null;
+}) {
+  const [extensions, setExtensions] = useState<ContentExtension[]>([]);
+  const [selectedKey, setSelectedKey] = useState("");
+  const [settings, setSettings] = useState<Record<string, unknown>>({});
+  const [device, setDevice] = useState<"desktop" | "mobile">("desktop");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setError(null);
+    try {
+      const result = await api<{ extensions: ContentExtension[] | null }>("/admin/extensions");
+      const rows = result.extensions ?? [];
+      setExtensions(rows);
+      setSelectedKey((current) => current && rows.some((row) => row.key === current) ? current : rows[0]?.key ?? "");
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const selected = extensions.find((extension) => extension.key === selectedKey) ?? null;
+  useEffect(() => {
+    setSettings({ ...(selected?.draft_manifest.settings ?? {}) });
+  }, [selectedKey, selected?.updated_at]);
+
+  const previewPath = selected?.draft_manifest.routes.find((route) => route.pattern === "/")?.pattern
+    ?? selected?.draft_manifest.routes.find((route) => !route.pattern.includes(":"))?.pattern
+    ?? "/";
+  const previewParams = new URLSearchParams({ project_id: projectId });
+  if (siteSlug) previewParams.set("site", siteSlug);
+  const previewURL = `/api/apps/content${previewPath}?${previewParams.toString()}`;
+
+  async function saveSettings(publish: boolean) {
+    if (!selected) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api(`/admin/extensions`, {
+        method: "POST",
+        body: JSON.stringify({ key: selected.key, settings }),
+      });
+      if (publish) {
+        await api(`/admin/extensions/${encodeURIComponent(selected.key)}/publish`, { method: "POST" });
+      }
+      setNotice(publish ? "Changes published" : "Draft saved");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!siteSlug) {
+    return <div className="p-8 text-center text-sm text-text-muted">Create or select a site before managing extensions.</div>;
+  }
+
+  return (
+    <div className="min-h-[620px]">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <div>
+          <h2 className="text-sm font-semibold">Site extensions</h2>
+          <p className="text-xs text-text-muted">Public experiences installed and supplied by other apps.</p>
+        </div>
+        <button type="button" onClick={() => void refresh()} className="h-8 rounded border border-border px-3 text-xs hover:bg-bg-input">Refresh</button>
+      </header>
+      {error && <div className="mx-4 mt-3 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-700">{error}</div>}
+      {notice && <div className="mx-4 mt-3 rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700">{notice}</div>}
+      {extensions.length === 0 ? (
+        <div className="px-4 py-20 text-center">
+          <p className="text-sm font-medium">No extensions installed</p>
+          <p className="mt-1 text-xs text-text-muted">Configure a public experience from its provider app.</p>
+        </div>
+      ) : (
+        <div className="cp-extensions-grid">
+          <aside className="border-r border-border p-3">
+            <p className="mb-2 px-2 text-xs font-medium text-text-muted">Installed</p>
+            <div className="space-y-1">
+              {extensions.map((extension) => (
+                <button key={extension.key} type="button" onClick={() => setSelectedKey(extension.key)} className={`w-full rounded px-2 py-2 text-left ${selectedKey === extension.key ? "bg-bg-input" : "hover:bg-bg-input/60"}`}>
+                  <span className="block truncate text-sm font-medium">{extension.display_name}</span>
+                  <span className="mt-0.5 flex items-center justify-between gap-2 text-xs text-text-muted"><span className="truncate">{extension.provider_app}</span><span>{extension.has_draft_changes ? "unpublished" : extension.status}</span></span>
+                </button>
+              ))}
+            </div>
+          </aside>
+          <section className="border-r border-border p-4">
+            {selected && (
+              <>
+                <div className="mb-5">
+                  <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{selected.display_name}</h3><span className="text-xs text-text-muted">v{selected.version}</span></div>
+                  <p className="mt-1 text-xs text-text-muted">{selected.draft_manifest.routes.length} routes from {selected.provider_app}</p>
+                </div>
+                <div className="space-y-4">
+                  {(selected.draft_manifest.settings_schema ?? []).map((setting) => (
+                    <ExtensionSettingField key={setting.key} setting={setting} value={settings[setting.key] ?? setting.default ?? ""} onChange={(value) => setSettings((current) => ({ ...current, [setting.key]: value }))} />
+                  ))}
+                  {(selected.draft_manifest.settings_schema ?? []).length === 0 && <p className="text-xs text-text-muted">This extension has no configurable theme settings.</p>}
+                </div>
+                <div className="mt-6 grid grid-cols-2 gap-2">
+                  <button type="button" disabled={busy} onClick={() => void saveSettings(false)} className="h-9 rounded border border-border text-sm disabled:opacity-50">Save draft</button>
+                  <button type="button" disabled={busy} onClick={() => void saveSettings(true)} className="h-9 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50">Publish</button>
+                </div>
+              </>
+            )}
+          </section>
+          <section className="min-w-0 bg-bg-input/40 p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <span className="text-xs font-medium text-text-muted">Published preview</span>
+              <div className="flex overflow-hidden rounded border border-border bg-bg">
+                <button type="button" onClick={() => setDevice("desktop")} className={`h-8 px-3 text-xs ${device === "desktop" ? "bg-bg-input font-semibold" : ""}`}>Desktop</button>
+                <button type="button" onClick={() => setDevice("mobile")} className={`h-8 border-l border-border px-3 text-xs ${device === "mobile" ? "bg-bg-input font-semibold" : ""}`}>Mobile</button>
+              </div>
+            </div>
+            <div className="cp-extension-preview-shell flex justify-center overflow-hidden rounded border border-border bg-white">
+              <iframe key={`${selectedKey}-${selected?.updated_at}`} title={`${selected?.display_name ?? "Extension"} preview`} src={previewURL} className="cp-extension-preview-frame" style={{ width: device === "mobile" ? 390 : "100%" }} />
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExtensionSettingField({
+  setting,
+  value,
+  onChange,
+}: {
+  setting: ExtensionSetting;
+  value: unknown;
+  onChange: (value: unknown) => void;
+}) {
+  if (setting.type === "boolean") {
+    return <label className="flex items-center justify-between gap-3 text-sm"><span>{setting.label}</span><input type="checkbox" checked={Boolean(value)} onChange={(event) => onChange(event.target.checked)} /></label>;
+  }
+  return (
+    <label className="block space-y-1">
+      <span className="text-xs font-medium text-text-muted">{setting.label}</span>
+      <input type={setting.type === "color" || setting.type === "number" ? setting.type : "text"} value={String(value ?? "")} onChange={(event) => onChange(setting.type === "number" ? Number(event.target.value) : event.target.value)} className={`w-full rounded border border-border bg-bg-input text-sm ${setting.type === "color" ? "h-10 p-1" : "px-3 py-2"}`} />
+    </label>
   );
 }
 

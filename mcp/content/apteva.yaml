@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.11.2
+version: 2.12.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -20,6 +20,7 @@ scopes: [project, global]
 min_apteva_version: "0.10.0"
 
 requires:
+  dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.instances.read
@@ -204,6 +205,13 @@ provides:
       description: List installed themes (always includes the embedded default).
     - name: themes_set_active
       description: Switch the active theme by slug.
+    # Generic app-provided public surfaces
+    - name: extensions_upsert
+      description: Install or update a generic provider extension with routes, templates, assets, data sources, actions, and editor schemas.
+    - name: extensions_remove
+      description: Remove a generic provider extension from a Content site.
+    - name: extensions_invalidate
+      description: Invalidate a site's rendered provider output after source data changes.
     # Forms (core/form block)
     - name: forms_list
       description: List every core/form block across the project, with submission counts.
@@ -216,12 +224,15 @@ provides:
       label: Content
       icon: edit-3
       entry: /ui/ContentPanel.mjs
+  publishes:
+    - name: content.extension.updated
+      description: A generic provider extension was installed or updated.
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: content/v2.12.0
     entry: mcp/content
   port: 8080
   health_check: /health
