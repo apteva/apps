@@ -97,6 +97,39 @@ func TestEnsureGenericFulfillmentSchemaIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestFulfillmentItemsMigrationReconcilesDuplicateProviderShipments(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base, _ := os.ReadFile("migrations/001_init.sql")
+	if _, err := db.Exec(string(base)); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := db.Exec(`INSERT INTO shipments
+			(project_id, order_id, provider, provider_shipment_id)
+			VALUES ('upgrade', 1, 'printful', 'duplicate-shipment')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	migration, _ := os.ReadFile("migrations/003_fulfillment_items.sql")
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
+	var preserved, cleared int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shipments WHERE provider_shipment_id='duplicate-shipment'`).Scan(&preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shipments WHERE provider_shipment_id IS NULL`).Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if preserved != 1 || cleared != 1 {
+		t.Fatalf("duplicate reconciliation preserved=%d cleared=%d", preserved, cleared)
+	}
+}
+
 func TestEnsureGenericFulfillmentSchemaAddsMissingColumns(t *testing.T) {
 	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders-legacy.db"))
 	if err != nil {
@@ -195,6 +228,66 @@ func TestOrderLifecycle(t *testing.T) {
 	}
 	if cancelled.OrderStatus != "cancelled" || cancelled.FulfillmentStatus != "cancelled" {
 		t.Fatalf("unexpected cancelled statuses: %+v", cancelled)
+	}
+}
+
+func TestSplitFulfillmentMembershipAndShipmentUpsert(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-split"))
+	order, err := dbOrderCreate(ctx, "proj-split", map[string]any{
+		"source": "commerce", "source_ref": "sale:split", "currency": "EUR", "payment_status": "paid",
+		"items": []any{
+			map[string]any{"title": "POD shirt", "sku": "POD-1", "quantity": 1, "unit_amount_cents": 2500},
+			map[string]any{"title": "Dropship lamp", "sku": "DROP-1", "quantity": 2, "unit_amount_cents": 4000},
+		},
+	}, "order.created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := dbFulfillmentCreate(ctx, "proj-split", map[string]any{
+		"order_id": order.ID, "provider": "printful", "idempotency_key": "sale:split:printful",
+		"items": []any{map[string]any{"order_item_id": order.Items[0].ID, "quantity": 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := dbFulfillmentCreate(ctx, "proj-split", map[string]any{
+		"order_id": order.ID, "provider": "bigbuy", "idempotency_key": "sale:split:bigbuy",
+		"items": []any{map[string]any{"order_item_id": order.Items[1].ID, "quantity": 2}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 1 || len(second.Items) != 1 {
+		t.Fatalf("fulfillment membership missing: first=%+v second=%+v", first.Items, second.Items)
+	}
+	shipment, _, err := dbShipmentUpsert(ctx.AppDB(), "proj-split", map[string]any{
+		"order_id": order.ID, "fulfillment_id": first.ID, "provider": "printful",
+		"provider_shipment_id": "pf-ship-1", "carrier": "DHL", "tracking_number": "TRACK-1", "status": "shipped",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, partiallyFulfilled, err := dbShipmentUpsert(ctx.AppDB(), "proj-split", map[string]any{
+		"order_id": order.ID, "fulfillment_id": first.ID, "provider": "printful",
+		"provider_shipment_id": "pf-ship-1", "tracking_number": "TRACK-1", "status": "delivered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shipment.ID != updated.ID || updated.Status != "delivered" || updated.Carrier != "DHL" {
+		t.Fatalf("shipment upsert was not idempotent: before=%+v after=%+v", shipment, updated)
+	}
+	if partiallyFulfilled.FulfillmentStatus != "partially_fulfilled" {
+		t.Fatalf("split order status=%q, want partially_fulfilled", partiallyFulfilled.FulfillmentStatus)
+	}
+	_, fullyFulfilled, err := dbFulfillmentUpdate(ctx.AppDB(), "proj-split", map[string]any{
+		"id": second.ID, "status": "delivered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fullyFulfilled.FulfillmentStatus != "delivered" || fullyFulfilled.OrderStatus != "fulfilled" {
+		t.Fatalf("completed split order has unexpected state: %+v", fullyFulfilled)
 	}
 }
 
