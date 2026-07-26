@@ -637,10 +637,13 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		t.Fatal("storefront cart total is not right-aligned")
 	}
 	checkout := templates["checkout"].(string)
-	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action", "https://js.stripe.com/clover/stripe.js", "payment-element"} {
+	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action", "https://js.stripe.com/clover/stripe.js", "payment-element", "data-checkout-step=\"1\"", "data-checkout-step=\"2\"", "data-checkout-step=\"3\"", "Continue to shipping"} {
 		if !strings.Contains(checkout, expected) {
 			t.Fatalf("checkout template missing %q", expected)
 		}
+	}
+	if strings.Contains(checkout, "-&gt;") {
+		t.Fatal("checkout primary actions use raw text arrows")
 	}
 	if strings.Contains(checkout, "site-header") || strings.Contains(checkout, "announcement") {
 		t.Fatal("checkout uses the distraction-heavy storefront chrome")
@@ -675,12 +678,12 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 			t.Fatalf("checkout submit step %d=%v, want %s", index, got, want)
 		}
 	}
-	for _, expected := range []string{"renderSummary", "Review order", "Placing order", "data-country-select", "initCheckout", "createPaymentElement", "stripeActions.confirm", "data-payment-return"} {
+	for _, expected := range []string{"renderSummary", "setStep", "Continue to payment", "Calculating shipping", "Reserving your order", "data-country-select", "initCheckout", "createPaymentElement", "stripeActions.confirm", "data-payment-return"} {
 		if !strings.Contains(js, expected) {
 			t.Fatalf("checkout JavaScript missing %q", expected)
 		}
 	}
-	for _, expected := range []string{".checkout-layout{display:grid", ".checkout-summary-column", "@media(max-width:900px)"} {
+	for _, expected := range []string{".checkout-layout{display:grid", ".checkout-summary-column", ".checkout-progress", "[hidden]{display:none!important}", "@media(max-width:900px)"} {
 		if !strings.Contains(css, expected) {
 			t.Fatalf("checkout CSS missing %q", expected)
 		}
