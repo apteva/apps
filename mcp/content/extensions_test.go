@@ -111,6 +111,21 @@ func TestExtensionManifestValidationRejectsReservedRoutes(t *testing.T) {
 	}
 }
 
+func TestExtensionManifestValidatesBrowserPolicyOrigins(t *testing.T) {
+	manifest := testExtensionManifest()
+	manifest.BrowserPolicy = ExtensionBrowserPolicy{
+		ScriptOrigins: []string{"https://js.stripe.com"},
+		ImageOrigins:  []string{"https://*.stripe.com"},
+	}
+	if err := validateExtensionManifest("store", "provider", manifest); err != nil {
+		t.Fatalf("valid browser policy rejected: %v", err)
+	}
+	manifest.BrowserPolicy.ScriptOrigins = []string{"http://scripts.example.com"}
+	if err := validateExtensionManifest("store", "provider", manifest); err == nil {
+		t.Fatal("insecure browser policy origin accepted")
+	}
+}
+
 func TestExtensionRegistrationRejectsRouteCollisions(t *testing.T) {
 	db := hardeningTestDB(t)
 	site, _ := dbCreateSite(db, "p1", "main", "Main", "")
@@ -132,7 +147,13 @@ func TestPublishedExtensionRendersConfiguredProviderData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ext, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true)
+	extensionManifest := testExtensionManifest()
+	extensionManifest.BrowserPolicy = ExtensionBrowserPolicy{
+		ScriptOrigins:  []string{"https://js.stripe.com"},
+		FrameOrigins:   []string{"https://checkout.stripe.com"},
+		ConnectOrigins: []string{"https://api.stripe.com"},
+	}
+	ext, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,6 +170,12 @@ func TestPublishedExtensionRendersConfiguredProviderData(t *testing.T) {
 	}
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>Desk Lamp</title>") {
 		t.Fatalf("render = %d %s", rec.Code, rec.Body.String())
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, expected := range []string{"script-src 'self' https://js.stripe.com", "frame-src https://checkout.stripe.com", "connect-src 'self' https://api.stripe.com"} {
+		if !strings.Contains(csp, expected) {
+			t.Fatalf("CSP %q missing %q", csp, expected)
+		}
 	}
 	if len(platform.calls) != 1 || platform.calls[0].app != "commerce" ||
 		platform.calls[0].tool != "products_get" ||

@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.10.0
+version: 0.11.0
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -54,6 +54,7 @@ requires:
     - db.write.app
     - platform.apps.call
     - platform.connections.execute
+    - platform.connections.read_public_config
   apps:
     - name: catalog
       optional: true
@@ -61,11 +62,12 @@ requires:
     - role: payment_processor
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create: create_customer
         customers.search: search_customers
         checkout_sessions.create: create_checkout_session
+        checkout_sessions.get: get_checkout_session
         payment_intents.create: create_payment_intent
         payment_intents.get: get_payment_intent
         refunds.create: create_refund
@@ -82,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: billing/v0.11.0
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -121,7 +123,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.10.0",
+		"version", "0.11.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -434,6 +436,23 @@ func (a *App) MCPTools() []sdk.Tool {
 				"folder":          map[string]any{"type": "string"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesRenderPDF,
+		},
+		{
+			Name:        "invoices_create_payment_session",
+			Description: "Create or recover a Stripe payment session for an open invoice. Product-app API: presentation='elements' returns publishable_key + client_secret; presentation='hosted' returns url. Requires a stable idempotency_key for retry-safe use. Billing owns amount/currency validation and webhook reconciliation. Args: invoice_id, presentation, idempotency_key, return_url, success_url, cancel_url, expires_at, payment_method_types, save_payment_method, set_default_payment_method.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":                 map[string]any{"type": "integer"},
+				"presentation":               map[string]any{"type": "string", "enum": []string{"elements", "hosted"}},
+				"idempotency_key":            map[string]any{"type": "string"},
+				"return_url":                 map[string]any{"type": "string"},
+				"success_url":                map[string]any{"type": "string"},
+				"cancel_url":                 map[string]any{"type": "string"},
+				"expires_at":                 map[string]any{"type": "integer"},
+				"payment_method_types":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"save_payment_method":        map[string]any{"type": "boolean"},
+				"set_default_payment_method": map[string]any{"type": "boolean"},
+			}, []string{"invoice_id", "presentation", "idempotency_key"}),
+			Handler: a.toolInvoicesCreatePaymentSession,
 		},
 		{
 			Name:        "invoices_send_payment_link",

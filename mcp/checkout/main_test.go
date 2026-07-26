@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -12,15 +13,38 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Tier-1: pure-DB tests. Cross-app flows (cart_add_item, checkout_pay)
-// need catalog + billing and a stub PlatformAPI — exercised by the
-// real deployed apps, not here. The state-machine and schema
-// guarantees ARE all testable in-process.
-
 const testPID = "test-project"
 
 type wrappedCatalogPlatform struct {
 	tk.BasePlatformClient
+}
+
+type checkoutPaymentPlatform struct {
+	tk.BasePlatformClient
+	calls []string
+}
+
+func (p *checkoutPaymentPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.calls = append(p.calls, app+":"+tool)
+	var result any
+	switch app + ":" + tool {
+	case "billing:customers_upsert_by_email":
+		result = map[string]any{"customer": map[string]any{"id": 41}}
+	case "billing:invoices_create":
+		result = map[string]any{"invoice": map[string]any{"id": 91}}
+	case "billing:invoices_finalize":
+		result = map[string]any{"invoice": map[string]any{"id": 91, "number": "INV-91"}}
+	case "billing:invoices_create_payment_session":
+		result = map[string]any{
+			"provider": "stripe", "presentation": "elements",
+			"stripe_session_id": "cs_test_91", "client_secret": "cs_test_91_secret_x",
+			"publishable_key": "pk_test_public",
+		}
+	default:
+		return errors.New("unexpected app call: " + app + ":" + tool)
+	}
+	body, _ := json.Marshal(result)
+	return json.Unmarshal(body, out)
 }
 
 func (wrappedCatalogPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -71,7 +95,7 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatalf("enable foreign_keys: %v", err)
 	}
-	for _, name := range []string{"001_init.sql", "002_adjustments.sql"} {
+	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql"} {
 		mig, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -301,6 +325,58 @@ func TestCheckoutUpdate_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(string(patched.ShippingAddress), "Madrid") {
 		t.Errorf("shipping_address not persisted: %s", patched.ShippingAddress)
+	}
+}
+
+func TestCheckoutPayCreatesElementsSessionAndReusesInvoice(t *testing.T) {
+	platform := &checkoutPaymentPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(platform))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "stripe-elements"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedItem(t, ctx.AppDB(), cart.ID, 100, 10, 2400, 1)
+	tx, _ := ctx.AppDB().Begin()
+	if err := recomputeCartTotalsTx(tx, cart.ID, "USD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ctx.AppDB().Exec(`INSERT INTO checkout_sessions
+		(project_id, cart_id, provider, status, email, subtotal_cents, total_cents, currency)
+		VALUES (?, ?, 'manual', 'started', 'buyer@example.com', 2400, 2400, 'USD')`, testPID, cart.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	args := map[string]any{
+		"provider": "stripe", "presentation": "elements",
+		"idempotency_key":      "checkout-elements-1",
+		"return_url":           "https://shop.example/checkout/return",
+		"payment_method_types": []any{"card"},
+	}
+	session, invoiceID, invoiceNumber, payment, err := dbCheckoutPay(ctx, testPID, sessionID, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "awaiting_payment" || session.Provider != "stripe" || session.Presentation != "elements" {
+		t.Fatalf("unexpected session: %#v", session)
+	}
+	if invoiceID != 91 || invoiceNumber != "INV-91" || payment["client_secret"] == "" || payment["publishable_key"] != "pk_test_public" {
+		t.Fatalf("unexpected payment result: invoice=%d/%q payment=%#v", invoiceID, invoiceNumber, payment)
+	}
+	if _, _, _, _, err := dbCheckoutPay(ctx, testPID, sessionID, args); err != nil {
+		t.Fatalf("retry payment: %v", err)
+	}
+	createCalls := 0
+	for _, call := range platform.calls {
+		if call == "billing:invoices_create" {
+			createCalls++
+		}
+	}
+	if createCalls != 1 {
+		t.Fatalf("invoice create calls=%d, want 1: %v", createCalls, platform.calls)
 	}
 }
 

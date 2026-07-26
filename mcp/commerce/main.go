@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -110,7 +111,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_checkout_start", Description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer")}, []string{"cart_id"}), Handler: a.toolCheckoutStart},
 		{Name: "commerce_checkout_update", Description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer"), "patch": typ("object")}, []string{"checkout_id", "patch"}), Handler: a.toolCheckoutUpdate},
 		{Name: "commerce_checkout_cancel", Description: "Cancel a checkout and release active inventory reservations. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutCancel},
-		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
+		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session using the store payment configuration and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
+		{Name: "commerce_checkout_status", Description: "Return the browser-safe checkout status for a storefront session. Args: store_id, session_token.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "session_token": typ("string")}, []string{"store_id", "session_token"}), Handler: a.toolCheckoutStatus},
 		{Name: "commerce_checkout_mark_paid", Description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "commerce_sales_list", Description: "List sales. Args: store_id?, status?, payment_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
 		{Name: "commerce_sales_get", Description: "Fetch one sale. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolSalesGet},
@@ -129,19 +131,21 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 type Store struct {
-	ID                int64          `json:"id"`
-	Slug              string         `json:"slug"`
-	Name              string         `json:"name"`
-	Status            string         `json:"status"`
-	PublicBaseURL     string         `json:"public_base_url"`
-	DefaultCurrency   string         `json:"default_currency"`
-	DefaultLocale     string         `json:"default_locale"`
-	Timezone          string         `json:"timezone"`
-	OrderNumberFormat string         `json:"order_number_format"`
-	CheckoutMode      string         `json:"checkout_mode"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	ID                  int64          `json:"id"`
+	Slug                string         `json:"slug"`
+	Name                string         `json:"name"`
+	Status              string         `json:"status"`
+	PublicBaseURL       string         `json:"public_base_url"`
+	DefaultCurrency     string         `json:"default_currency"`
+	DefaultLocale       string         `json:"default_locale"`
+	Timezone            string         `json:"timezone"`
+	OrderNumberFormat   string         `json:"order_number_format"`
+	CheckoutMode        string         `json:"checkout_mode"`
+	PaymentProvider     string         `json:"payment_provider"`
+	PaymentPresentation string         `json:"payment_presentation"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
 }
 
 type Listing struct {
@@ -645,11 +649,45 @@ func (a *App) toolCheckoutCancel(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolCheckoutPay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	sale, checkout, err := a.checkoutPay(ctx, args)
+	sale, checkout, payment, err := a.checkoutPay(ctx, args)
 	if err == nil {
 		ctx.Emit("commerce.sale.created", map[string]any{"sale_id": sale.ID, "checkout_id": checkout.ID, "store_id": sale.StoreID})
 	}
-	return map[string]any{"sale": sale, "checkout": checkout}, err
+	return map[string]any{"sale": sale, "checkout": checkout, "payment": payment}, err
+}
+
+func (a *App) toolCheckoutStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(strArg(args, "session_token"))
+	if token == "" {
+		return nil, errors.New("session_token required")
+	}
+	cart, err := dbCartGetBySession(ctx.AppDB(), pid, intArg(args, "store_id"), token)
+	if err != nil || cart == nil {
+		return map[string]any{"status": "not_found"}, err
+	}
+	checkout, err := dbCheckoutGetByCart(ctx.AppDB(), pid, cart.ID)
+	if err != nil || checkout == nil {
+		return map[string]any{"status": cart.Status, "payment_status": "unpaid"}, err
+	}
+	sale, err := dbSaleGetByCheckout(ctx.AppDB(), pid, checkout.ID)
+	if err != nil {
+		return nil, err
+	}
+	if sale == nil {
+		return map[string]any{
+			"status": checkout.Status, "payment_status": "unpaid",
+		}, nil
+	}
+	return map[string]any{
+		"status":             sale.Status,
+		"payment_status":     sale.PaymentStatus,
+		"fulfillment_status": sale.FulfillmentStatus,
+		"invoice_number":     sale.InvoiceNumber,
+	}, nil
 }
 
 func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1053,50 +1091,66 @@ func checkoutPatchMatches(ch *CheckoutSession, patch map[string]any) bool {
 	return true
 }
 
-func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, error) {
+func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, map[string]any, error) {
 	pid, err := requireProject(ctx, args)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ch, err := dbCheckoutGet(ctx.AppDB(), pid, intArg(args, "checkout_id"))
 	if err != nil || ch == nil {
-		return nil, nil, firstErr(err, errors.New("checkout not found"))
+		return nil, nil, nil, firstErr(err, errors.New("checkout not found"))
 	}
 	if ch.CheckoutSessionID == nil || ctx.PlatformAPI() == nil {
-		return nil, nil, errors.New("checkout is not linked to Checkout")
+		return nil, nil, nil, errors.New("checkout is not linked to Checkout")
 	}
-	if existing, err := dbSaleGetByCheckout(ctx.AppDB(), pid, ch.ID); err != nil {
-		return nil, nil, err
-	} else if existing != nil {
-		return existing, ch, nil
+	existing, err := dbSaleGetByCheckout(ctx.AppDB(), pid, ch.ID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	var checkoutResponse map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
-		return nil, nil, fmt.Errorf("checkout_get: %w", err)
+		return nil, nil, nil, fmt.Errorf("checkout_get: %w", err)
 	}
 	external := unwrap(checkoutResponse, "session")
 	externalStatus := strArg(external, "status")
 	if externalStatus != "started" && externalStatus != "awaiting_payment" && externalStatus != "paid" && externalStatus != "completed" {
-		return nil, nil, fmt.Errorf("Checkout session cannot be paid from status %q", externalStatus)
+		return nil, nil, nil, fmt.Errorf("Checkout session cannot be paid from status %q", externalStatus)
 	}
 	cart, err := dbCartGet(ctx.AppDB(), pid, ch.CartID, true)
 	if err != nil || cart == nil {
-		return nil, nil, firstErr(err, errors.New("cart not found"))
+		return nil, nil, nil, firstErr(err, errors.New("cart not found"))
 	}
 	if intArg(external, "total_cents") != cart.TotalCents || strings.ToUpper(strArg(external, "currency")) != cart.Currency {
-		return nil, nil, errors.New("Commerce and Checkout totals do not match")
+		return nil, nil, nil, errors.New("Commerce and Checkout totals do not match")
 	}
-	if strArg(external, "status") == "started" {
+	store, err := dbStoreGetByID(ctx.AppDB(), pid, ch.StoreID)
+	if err != nil || store == nil {
+		return nil, nil, nil, firstErr(err, errors.New("store not found"))
+	}
+	payment := map[string]any{
+		"provider": store.PaymentProvider, "presentation": store.PaymentPresentation,
+	}
+	if externalStatus == "started" || externalStatus == "awaiting_payment" {
+		paymentArgs, err := commercePaymentArgs(ctx, pid, store, ch)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		checkoutResponse = nil
-		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
-			return nil, nil, fmt.Errorf("checkout_pay: %w", err)
+		paymentArgs["_project_id"] = pid
+		paymentArgs["session_id"] = *ch.CheckoutSessionID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", paymentArgs, &checkoutResponse); err != nil {
+			return nil, nil, nil, fmt.Errorf("checkout_pay: %w", err)
 		}
 		external = unwrap(checkoutResponse, "session")
+		externalStatus = strArg(external, "status")
+		if value := mapArg(checkoutResponse, "payment"); len(value) > 0 {
+			payment = value
+		}
 	}
 	invoiceID := firstNonZero(intArg(checkoutResponse, "invoice_id"), intArg(external, "invoice_id"))
 	invoiceNumber := strArg(checkoutResponse, "invoice_number")
 	if invoiceID == 0 {
-		return nil, nil, errors.New("Checkout has not produced an invoice")
+		return nil, nil, nil, errors.New("Checkout has not produced an invoice")
 	}
 	if invoiceNumber == "" {
 		var billingResponse map[string]any
@@ -1105,17 +1159,78 @@ func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *Checkou
 		}
 	}
 	if err := dbCheckoutInvoice(ctx.AppDB(), pid, ch.ID, invoiceID, invoiceNumber); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ch, err = dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
 	if err != nil || ch == nil {
-		return nil, nil, firstErr(err, errors.New("checkout disappeared after invoice creation"))
+		return nil, nil, nil, firstErr(err, errors.New("checkout disappeared after invoice creation"))
 	}
-	sale, err := dbSaleCreateFromCheckout(ctx.AppDB(), pid, ch)
+	sale := existing
+	if sale == nil {
+		sale, err = dbSaleCreateFromCheckout(ctx.AppDB(), pid, ch)
+	}
 	if err == nil && (externalStatus == "paid" || externalStatus == "completed") {
 		sale, err = a.completePaidSale(ctx, sale, true)
 	}
-	return sale, ch, err
+	return sale, ch, payment, err
+}
+
+func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *CheckoutSession) (map[string]any, error) {
+	provider := strings.ToLower(strings.TrimSpace(store.PaymentProvider))
+	if provider == "" {
+		provider = "manual"
+	}
+	if provider == "manual" {
+		return map[string]any{"provider": "manual", "presentation": "manual"}, nil
+	}
+	if provider != "stripe" {
+		return nil, fmt.Errorf("unsupported store payment provider %q", provider)
+	}
+	presentation := strings.ToLower(strings.TrimSpace(store.PaymentPresentation))
+	if presentation == "" {
+		presentation = "elements"
+	}
+	if presentation != "elements" && presentation != "hosted" {
+		return nil, fmt.Errorf("unsupported Stripe presentation %q", presentation)
+	}
+	returnURL, err := commerceReturnURL(ctx, pid, store)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"provider":             provider,
+		"presentation":         presentation,
+		"idempotency_key":      fmt.Sprintf("commerce-%s-%d", pid, checkout.ID),
+		"payment_method_types": []any{"card"},
+		"expires_at":           time.Now().UTC().Add(60 * time.Minute).Unix(),
+	}
+	if presentation == "elements" {
+		out["return_url"] = returnURL
+	} else {
+		out["success_url"] = returnURL
+		out["cancel_url"] = strings.TrimSuffix(returnURL, "/checkout/return") + "/checkout"
+	}
+	return out, nil
+}
+
+func commerceReturnURL(ctx *sdk.AppCtx, pid string, store *Store) (string, error) {
+	if base := strings.TrimRight(strings.TrimSpace(store.PublicBaseURL), "/"); base != "" {
+		u, err := url.Parse(base)
+		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+			return "", errors.New("store public_base_url must be an absolute http(s) URL")
+		}
+		return base + "/checkout/return", nil
+	}
+	info, err := ctx.PlatformInfo()
+	if err != nil || info == nil || strings.TrimSpace(info.PublicURL) == "" {
+		return "", errors.New("Stripe checkout requires the store public_base_url or the platform public_url")
+	}
+	siteSlug := strArg(store.Metadata, "content_site_slug")
+	if siteSlug == "" {
+		return "", errors.New("Stripe checkout requires a configured Content storefront")
+	}
+	query := url.Values{"project_id": []string{pid}, "site": []string{siteSlug}}
+	return strings.TrimRight(info.PublicURL, "/") + "/api/apps/content/public/checkout/return?" + query.Encode(), nil
 }
 
 func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {
@@ -1384,11 +1499,17 @@ func dbStoreCreate(db *sql.DB, pid string, args map[string]any) (*Store, error) 
 	if !looksLikeCurrency(currency) {
 		return nil, errors.New("default_currency must be a 3-letter ISO code")
 	}
+	paymentProvider := strings.ToLower(firstNonEmpty(strArg(args, "payment_provider"), "manual"))
+	paymentPresentation := strings.ToLower(firstNonEmpty(strArg(args, "payment_presentation"), "elements"))
+	if err := validateStorePayment(paymentProvider, paymentPresentation); err != nil {
+		return nil, err
+	}
 	res, err := db.Exec(`INSERT INTO commerce_stores
-		(project_id, slug, name, public_base_url, default_currency, default_locale, timezone, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(project_id, slug, name, public_base_url, default_currency, default_locale, timezone, payment_provider, payment_presentation, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, slug, name, strArg(args, "public_base_url"), currency,
-		firstNonEmpty(strArg(args, "default_locale"), "en"), firstNonEmpty(strArg(args, "timezone"), "UTC"), jsonText(args["metadata"], "{}"))
+		firstNonEmpty(strArg(args, "default_locale"), "en"), firstNonEmpty(strArg(args, "timezone"), "UTC"),
+		paymentProvider, paymentPresentation, jsonText(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -1485,6 +1606,17 @@ func dbStoreUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Sto
 		}
 		sets = append(sets, "default_currency=?")
 		vals = append(vals, v)
+	}
+	paymentProvider := firstNonEmpty(strArg(patch, "payment_provider"), store.PaymentProvider)
+	paymentPresentation := firstNonEmpty(strArg(patch, "payment_presentation"), store.PaymentPresentation)
+	if hasKey(patch, "payment_provider") || hasKey(patch, "payment_presentation") {
+		paymentProvider = strings.ToLower(paymentProvider)
+		paymentPresentation = strings.ToLower(paymentPresentation)
+		if err := validateStorePayment(paymentProvider, paymentPresentation); err != nil {
+			return nil, err
+		}
+		sets = append(sets, "payment_provider=?", "payment_presentation=?")
+		vals = append(vals, paymentProvider, paymentPresentation)
 	}
 	if _, ok := patch["metadata"]; ok {
 		sets = append(sets, "metadata_json=?")
@@ -2242,7 +2374,7 @@ func dbSalesList(db *sql.DB, pid string, args map[string]any) ([]*Sale, error) {
 }
 
 func storeSelect() string {
-	return `SELECT id, slug, name, status, public_base_url, default_currency, default_locale, timezone, order_number_format, checkout_mode, metadata_json, created_at, updated_at FROM commerce_stores`
+	return `SELECT id, slug, name, status, public_base_url, default_currency, default_locale, timezone, order_number_format, checkout_mode, payment_provider, payment_presentation, metadata_json, created_at, updated_at FROM commerce_stores`
 }
 
 func listingSelect() string {
@@ -2272,7 +2404,7 @@ type scanner interface{ Scan(dest ...any) error }
 func scanStore(s scanner) (*Store, error) {
 	var st Store
 	var meta string
-	if err := s.Scan(&st.ID, &st.Slug, &st.Name, &st.Status, &st.PublicBaseURL, &st.DefaultCurrency, &st.DefaultLocale, &st.Timezone, &st.OrderNumberFormat, &st.CheckoutMode, &meta, &st.CreatedAt, &st.UpdatedAt); err != nil {
+	if err := s.Scan(&st.ID, &st.Slug, &st.Name, &st.Status, &st.PublicBaseURL, &st.DefaultCurrency, &st.DefaultLocale, &st.Timezone, &st.OrderNumberFormat, &st.CheckoutMode, &st.PaymentProvider, &st.PaymentPresentation, &meta, &st.CreatedAt, &st.UpdatedAt); err != nil {
 		return nil, err
 	}
 	st.Metadata = jsonMap(meta)
@@ -2672,7 +2804,17 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 func typ(t string) map[string]any { return map[string]any{"type": t} }
 func storeProps() map[string]any {
-	return map[string]any{"slug": typ("string"), "name": typ("string"), "public_base_url": typ("string"), "default_currency": typ("string"), "default_locale": typ("string"), "timezone": typ("string"), "metadata": typ("object")}
+	return map[string]any{"slug": typ("string"), "name": typ("string"), "public_base_url": typ("string"), "default_currency": typ("string"), "default_locale": typ("string"), "timezone": typ("string"), "payment_provider": typ("string"), "payment_presentation": typ("string"), "metadata": typ("object")}
+}
+
+func validateStorePayment(provider, presentation string) error {
+	if provider != "manual" && provider != "stripe" {
+		return errors.New("payment_provider must be 'manual' or 'stripe'")
+	}
+	if presentation != "elements" && presentation != "hosted" {
+		return errors.New("payment_presentation must be 'elements' or 'hosted'")
+	}
+	return nil
 }
 func productCreateProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "title": typ("string"), "handle": typ("string"), "description_html": typ("string"), "vendor": typ("string"), "product_type": typ("string"), "catalog_product_id": typ("integer"), "catalog_price_id": typ("integer"), "price_cents": typ("integer"), "currency": typ("string"), "sku": typ("string"), "inventory_item_id": typ("integer"), "metadata": typ("object")}

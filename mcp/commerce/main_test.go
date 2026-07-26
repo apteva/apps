@@ -629,7 +629,7 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		t.Fatal("storefront cart total is not right-aligned")
 	}
 	checkout := templates["checkout"].(string)
-	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action"} {
+	for _, expected := range []string{"checkout-layout", "data-checkout-summary", "data-billing-same", "data-quote-action", "https://js.stripe.com/clover/stripe.js", "payment-element"} {
 		if !strings.Contains(checkout, expected) {
 			t.Fatalf("checkout template missing %q", expected)
 		}
@@ -638,6 +638,13 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		t.Fatal("checkout uses the distraction-heavy storefront chrome")
 	}
 	actions := manifest["actions"].(map[string]any)
+	if _, ok := actions["checkout_status"]; !ok {
+		t.Fatal("storefront is missing the session-bound checkout status action")
+	}
+	policy := manifest["browser_policy"].(map[string]any)
+	if !strings.Contains(fmt.Sprint(policy["script_origins"]), "js.stripe.com") {
+		t.Fatalf("storefront browser policy does not allow Stripe.js: %#v", policy)
+	}
 	quote := actions["checkout_quote"].(map[string]any)
 	quoteSteps := quote["steps"].([]any)
 	if len(quoteSteps) != 2 || quoteSteps[1].(map[string]any)["tool"] != "commerce_shipping_quote" {
@@ -660,7 +667,7 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 			t.Fatalf("checkout submit step %d=%v, want %s", index, got, want)
 		}
 	}
-	for _, expected := range []string{"renderSummary", "Review order", "Placing order", "data-country-select"} {
+	for _, expected := range []string{"renderSummary", "Review order", "Placing order", "data-country-select", "initCheckout", "createPaymentElement", "stripeActions.confirm", "data-payment-return"} {
 		if !strings.Contains(js, expected) {
 			t.Fatalf("checkout JavaScript missing %q", expected)
 		}
@@ -672,6 +679,25 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	}
 }
 
+func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("payment-args"))
+	store := &Store{
+		ID: 7, PublicBaseURL: "https://shop.example/",
+		PaymentProvider: "stripe", PaymentPresentation: "elements",
+	}
+	args, err := commercePaymentArgs(ctx, "payment-args", store, &CheckoutSession{ID: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if args["return_url"] != "https://shop.example/checkout/return" ||
+		args["idempotency_key"] != "commerce-payment-args-12" {
+		t.Fatalf("unexpected payment args: %#v", args)
+	}
+	if methods := anySlice(args["payment_method_types"]); len(methods) != 1 || methods[0] != "card" {
+		t.Fatalf("payment methods are not constrained to card: %#v", methods)
+	}
+}
+
 func TestHardeningMigrationReconcilesExistingDuplicates(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -679,6 +705,7 @@ func TestHardeningMigrationReconcilesExistingDuplicates(t *testing.T) {
 	}
 	defer db.Close()
 	execMigration(t, db, "migrations/001_init.sql")
+	execMigration(t, db, "migrations/004_store_payments.sql")
 	store, err := dbStoreCreate(db, "upgrade", map[string]any{"slug": "main", "name": "Main"})
 	if err != nil {
 		t.Fatal(err)

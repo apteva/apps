@@ -96,6 +96,9 @@ func ensureStripeWebhook(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) error {
 		CallbackPath: "/webhooks/stripe",
 		Events: []string{
 			"checkout.session.completed",
+			"checkout.session.async_payment_succeeded",
+			"checkout.session.async_payment_failed",
+			"checkout.session.expired",
 			"payment_intent.succeeded",
 			"payment_intent.payment_failed",
 			"setup_intent.succeeded",
@@ -237,16 +240,21 @@ func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sd
 // ─── Send payment link ──────────────────────────────────────────────
 
 // toolInvoicesSendPaymentLink implements the v0.8.0 "agent shares a
-// Stripe URL the customer pays at" flow. Creates a Stripe Checkout
-// Session whose line items mirror our invoice, returns the hosted
-// payment URL. The customer's eventual payment fires a
-// checkout.session.completed webhook → handleStripeWebhook records
-// the payment + transitions our invoice to 'paid' idempotently.
-//
-// Stripe Checkout Sessions have a 24h max lifetime. Calling this
-// tool again on the same invoice creates a fresh session; the
-// previous URL keeps working until its own expiry.
 func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	input := make(map[string]any, len(args)+1)
+	for key, value := range args {
+		input[key] = value
+	}
+	input["presentation"] = "hosted"
+	return a.toolInvoicesCreatePaymentSession(ctx, input)
+}
+
+// toolInvoicesCreatePaymentSession creates one Stripe Checkout Session for an
+// existing invoice. Hosted sessions return a redirect URL; Elements sessions
+// return a short-lived client secret and the connection's explicitly-public
+// publishable key. Both presentations reconcile through the same verified
+// checkout.session.* webhook path.
+func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -281,6 +289,20 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if setDefaultPaymentMethod {
 		savePaymentMethod = true
 	}
+	presentation := strings.ToLower(strings.TrimSpace(strArg(args, "presentation")))
+	if presentation == "" {
+		presentation = "hosted"
+	}
+	if presentation != "hosted" && presentation != "elements" {
+		return nil, errors.New("presentation must be 'hosted' or 'elements'")
+	}
+	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key"))
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("invoice-%d-%d", inv.ID, time.Now().UTC().UnixNano())
+	}
+	if len(idempotencyKey) > 255 {
+		return nil, errors.New("idempotency_key must be at most 255 characters")
+	}
 
 	amountDue := inv.TotalCents - inv.AmountPaidCents
 	if amountDue <= 0 {
@@ -304,46 +326,72 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		"quantity": 1,
 	}}
 
-	successURL := strArg(args, "success_url")
-	if successURL == "" {
-		successURL = configString(ctx, "stripe_success_url", "")
-	}
-	if successURL == "" {
-		// Sensible default — the dashboard's billing panel deep link
-		// for this invoice. {CHECKOUT_SESSION_ID} is replaced by
-		// Stripe at redirect time.
-		successURL = stripePublicBaseURL(ctx) + fmt.Sprintf(
-			"/dashboard?app=billing&invoice_id=%d&stripe_session={CHECKOUT_SESSION_ID}", inv.ID)
-	}
-	cancelURL := strArg(args, "cancel_url")
-	if cancelURL == "" {
-		cancelURL = configString(ctx, "stripe_cancel_url", "")
-	}
-	if cancelURL == "" {
-		cancelURL = stripePublicBaseURL(ctx) + fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
-	}
-	for name, raw := range map[string]string{"success_url": successURL, "cancel_url": cancelURL} {
+	validateURL := func(name, raw string) error {
 		u, err := neturl.Parse(raw)
 		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
-			return nil, fmt.Errorf("%s must be an absolute http(s) URL", name)
+			return fmt.Errorf("%s must be an absolute http(s) URL", name)
 		}
+		return nil
 	}
 
-	// metadata.invoice_id is THE join key — the webhook handler reads
-	// it back to find our invoice. project_id mirrors the integration
-	// global-call convention so cross-project routing works.
 	input := map[string]any{
 		"mode":                "payment",
 		"line_items":          lineItems,
-		"success_url":         successURL,
-		"cancel_url":          cancelURL,
 		"client_reference_id": fmt.Sprintf("inv_%d", inv.ID),
+		"idempotency_key":     idempotencyKey,
 		"metadata": map[string]any{
 			"apteva_invoice_id":     fmt.Sprintf("%d", inv.ID),
 			"apteva_customer_id":    fmt.Sprintf("%d", inv.CustomerID),
 			"apteva_project_id":     pid,
 			"apteva_invoice_number": inv.Number,
 		},
+	}
+	if expiresAt := int64Arg(args, "expires_at"); expiresAt > 0 {
+		now := time.Now().UTC()
+		expires := time.Unix(expiresAt, 0).UTC()
+		if expires.Before(now.Add(30*time.Minute)) || expires.After(now.Add(24*time.Hour)) {
+			return nil, errors.New("expires_at must be between 30 minutes and 24 hours from now")
+		}
+		input["expires_at"] = expiresAt
+	}
+	if methods, ok := args["payment_method_types"].([]any); ok && len(methods) > 0 {
+		input["payment_method_types"] = methods
+	}
+	if presentation == "elements" {
+		returnURL := strings.TrimSpace(strArg(args, "return_url"))
+		if returnURL == "" {
+			returnURL = stripePublicBaseURL(ctx) + fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
+		}
+		if err := validateURL("return_url", returnURL); err != nil {
+			return nil, err
+		}
+		input["ui_mode"] = "custom"
+		input["return_url"] = returnURL
+	} else {
+		successURL := strings.TrimSpace(strArg(args, "success_url"))
+		if successURL == "" {
+			successURL = configString(ctx, "stripe_success_url", "")
+		}
+		if successURL == "" {
+			successURL = stripePublicBaseURL(ctx) + fmt.Sprintf(
+				"/dashboard?app=billing&invoice_id=%d&stripe_session={CHECKOUT_SESSION_ID}", inv.ID)
+		}
+		cancelURL := strings.TrimSpace(strArg(args, "cancel_url"))
+		if cancelURL == "" {
+			cancelURL = configString(ctx, "stripe_cancel_url", "")
+		}
+		if cancelURL == "" {
+			cancelURL = stripePublicBaseURL(ctx) + fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
+		}
+		if err := validateURL("success_url", successURL); err != nil {
+			return nil, err
+		}
+		if err := validateURL("cancel_url", cancelURL); err != nil {
+			return nil, err
+		}
+		input["ui_mode"] = "hosted"
+		input["success_url"] = successURL
+		input["cancel_url"] = cancelURL
 	}
 	if savePaymentMethod {
 		stripeCustomerID, err := ensureStripeCustomer(ctx, pid, cust, bound)
@@ -360,9 +408,10 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	}
 
 	var sess struct {
-		ID        string `json:"id"`
-		URL       string `json:"url"`
-		ExpiresAt int64  `json:"expires_at"`
+		ID           string `json:"id"`
+		URL          string `json:"url"`
+		ClientSecret string `json:"client_secret"`
+		ExpiresAt    int64  `json:"expires_at"`
 	}
 	if err := ensureStripeWebhook(ctx, bound); err != nil {
 		return nil, fmt.Errorf("stripe webhook setup: %w", err)
@@ -370,8 +419,26 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
 		return nil, err
 	}
-	if sess.URL == "" {
+	if sess.ID == "" {
+		return nil, errors.New("Stripe returned no checkout session id")
+	}
+	if presentation == "hosted" && sess.URL == "" {
 		return nil, errors.New("Stripe returned no payment URL")
+	}
+	if presentation == "elements" && sess.ClientSecret == "" {
+		return nil, errors.New("Stripe returned no Checkout Session client secret")
+	}
+
+	publishableKey := ""
+	if presentation == "elements" {
+		publicConfig, err := sdk.GetConnectionPublicConfig(ctx.PlatformAPI(), bound.ConnectionID)
+		if err != nil {
+			return nil, fmt.Errorf("stripe public config: %w", err)
+		}
+		publishableKey = strings.TrimSpace(publicConfig.Fields["publishableKey"])
+		if !strings.HasPrefix(publishableKey, "pk_") {
+			return nil, errors.New("Stripe connection has no valid public publishable key")
+		}
 	}
 
 	// Persist the exact expected amount/currency before exposing the URL. The
@@ -388,25 +455,27 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(
-		`INSERT INTO billing_checkout_sessions
+		`INSERT OR IGNORE INTO billing_checkout_sessions
 		   (project_id, invoice_id, provider, provider_session_id,
 		    amount_cents, currency, status, expires_at, created_at,
-		    save_payment_method, set_default_payment_method)
-		 VALUES (?, ?, 'stripe', ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+		    save_payment_method, set_default_payment_method, presentation,
+		    idempotency_key, url)
+		 VALUES (?, ?, 'stripe', ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
 		pid, inv.ID, sess.ID, amountDue, inv.Currency,
-		nullStr(expiresAt), now, boolInt(savePaymentMethod), boolInt(setDefaultPaymentMethod)); err != nil {
+		nullStr(expiresAt), now, boolInt(savePaymentMethod), boolInt(setDefaultPaymentMethod),
+		presentation, idempotencyKey, nullStr(sess.URL)); err != nil {
 		return nil, fmt.Errorf("persist checkout session: %w", err)
 	}
 	if _, err := tx.Exec(
 		`UPDATE invoices
 		 SET external_id = ?, external_url = ?, last_synced_at = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
-		sess.ID, sess.URL, now, inv.ID, pid); err != nil {
+		sess.ID, nullStr(sess.URL), now, inv.ID, pid); err != nil {
 		return nil, fmt.Errorf("persist payment link: %w", err)
 	}
-	if err := writeAuditTx(tx, inv.ID, callerActor(args), "payment_link_sent", map[string]any{
+	if err := writeAuditTx(tx, inv.ID, callerActor(args), "payment_session_created", map[string]any{
 		"stripe_session_id": sess.ID,
-		"stripe_url":        sess.URL,
+		"presentation":      presentation,
 		"amount_cents":      amountDue,
 		"currency":          inv.Currency,
 	}); err != nil {
@@ -417,7 +486,11 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	}
 
 	return map[string]any{
+		"provider":                   "stripe",
+		"presentation":               presentation,
 		"url":                        sess.URL,
+		"client_secret":              sess.ClientSecret,
+		"publishable_key":            publishableKey,
 		"stripe_session_id":          sess.ID,
 		"expires_at":                 sess.ExpiresAt,
 		"save_payment_method":        savePaymentMethod,
@@ -500,6 +573,12 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 	switch eventType {
 	case "checkout.session.completed":
 		return a.handleCheckoutCompleted(ctx, obj)
+	case "checkout.session.async_payment_succeeded":
+		return a.handleCheckoutCompleted(ctx, obj)
+	case "checkout.session.async_payment_failed":
+		return a.handleCheckoutSessionTerminal(ctx, obj, "failed")
+	case "checkout.session.expired":
+		return a.handleCheckoutSessionTerminal(ctx, obj, "expired")
 	case "payment_intent.succeeded":
 		return a.handleCollectionPaymentIntent(ctx, obj)
 	case "payment_intent.payment_failed":
@@ -520,6 +599,25 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 		ctx.Logger().Info("stripe event not handled by billing", "type", eventType, "event_id", eventID)
 		return nil
 	}
+}
+
+func (a *App) handleCheckoutSessionTerminal(ctx *sdk.AppCtx, obj json.RawMessage, status string) error {
+	var sess struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(obj, &sess); err != nil {
+		return fmt.Errorf("decode checkout session: %w", err)
+	}
+	if sess.ID == "" {
+		return nil
+	}
+	_, err := ctx.AppDB().Exec(
+		`UPDATE billing_checkout_sessions
+		 SET status = ?
+		 WHERE provider = 'stripe' AND provider_session_id = ? AND status = 'pending'`,
+		status, sess.ID,
+	)
+	return err
 }
 
 // handleCheckoutCompleted is the payment-confirmation path. The

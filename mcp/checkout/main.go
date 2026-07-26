@@ -281,9 +281,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "checkout_pay",
-			Description: "Submit a session for payment. v0.1.0 creates a finalized invoice in billing (provider='manual') and returns it; payment is recorded manually in billing once received. v0.2.0 will branch on provider='stripe' to return a Stripe Checkout Session URL. Args: session_id.",
+			Description: "Freeze a session into a finalized Billing invoice and prepare its configured payment session. provider='manual' returns the invoice; provider='stripe' calls Billing and returns hosted or Elements browser configuration. Retry with the same idempotency_key reuses the invoice and Stripe session. Args: session_id, provider, presentation, idempotency_key, return_url, success_url, cancel_url, expires_at, payment_method_types.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id": map[string]any{"type": "integer"},
+				"session_id":           map[string]any{"type": "integer"},
+				"provider":             map[string]any{"type": "string", "enum": []string{"manual", "stripe"}},
+				"presentation":         map[string]any{"type": "string", "enum": []string{"elements", "hosted"}},
+				"idempotency_key":      map[string]any{"type": "string"},
+				"return_url":           map[string]any{"type": "string"},
+				"success_url":          map[string]any{"type": "string"},
+				"cancel_url":           map[string]any{"type": "string"},
+				"expires_at":           map[string]any{"type": "integer"},
+				"payment_method_types": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			}, []string{"session_id"}),
 			Handler: a.toolCheckoutPay,
 		},
@@ -371,6 +379,7 @@ type CheckoutSession struct {
 	CartID            int64           `json:"cart_id"`
 	Provider          string          `json:"provider"`
 	ProviderSessionID string          `json:"provider_session_id,omitempty"`
+	Presentation      string          `json:"presentation,omitempty"`
 	Email             string          `json:"email,omitempty"`
 	CustomerName      string          `json:"customer_name,omitempty"`
 	ShippingAddress   json.RawMessage `json:"shipping_address,omitempty"`
@@ -549,17 +558,19 @@ func (a *App) toolCheckoutPay(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if sessionID == 0 {
 		return nil, errors.New("session_id required")
 	}
-	session, invoiceID, invoiceNumber, err := dbCheckoutPay(ctx, pid, sessionID)
+	session, invoiceID, invoiceNumber, payment, err := dbCheckoutPay(ctx, pid, sessionID, args)
 	if err != nil {
 		return nil, err
 	}
 	emitSession(ctx, "checkout.payment_started", session)
 	return map[string]any{
-		"session":        session,
-		"invoice_id":     invoiceID,
-		"invoice_number": invoiceNumber,
-		// v0.2.0 will return Stripe redirect_url here when provider='stripe'.
-		"redirect_url": "",
+		"session":         session,
+		"invoice_id":      invoiceID,
+		"invoice_number":  invoiceNumber,
+		"payment":         payment,
+		"redirect_url":    strArg(payment, "url"),
+		"client_secret":   strArg(payment, "client_secret"),
+		"publishable_key": strArg(payment, "publishable_key"),
 	}, nil
 }
 
@@ -891,7 +902,11 @@ func (a *App) handleHTTPSessionPay(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	session, invoiceID, invoiceNumber, err := dbCheckoutPay(ctx, pid, id)
+	args := map[string]any{}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&args)
+	}
+	session, invoiceID, invoiceNumber, payment, err := dbCheckoutPay(ctx, pid, id, args)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -901,6 +916,7 @@ func (a *App) handleHTTPSessionPay(w http.ResponseWriter, r *http.Request) {
 		"session":        session,
 		"invoice_id":     invoiceID,
 		"invoice_number": invoiceNumber,
+		"payment":        payment,
 	})
 }
 
@@ -1320,7 +1336,7 @@ func dbSessionsList(db *sql.DB, pid string, f sessionFilters) ([]*CheckoutSessio
 	}
 	args = append(args, limit)
 	rows, err := db.Query(
-		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''),
+		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''), presentation,
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
 		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
@@ -1346,7 +1362,7 @@ func dbSessionsList(db *sql.DB, pid string, f sessionFilters) ([]*CheckoutSessio
 
 func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''),
+		`SELECT id, project_id, cart_id, provider, COALESCE(provider_session_id,''), presentation,
 		        COALESCE(email,''), COALESCE(customer_name,''),
 		        shipping_address, billing_address, status, invoice_id,
 		        subtotal_cents, shipping_cents, discount_cents, tax_cents, total_cents, currency,
@@ -1505,31 +1521,41 @@ func dbCheckoutSetAdjustments(db *sql.DB, pid string, id int64, args map[string]
 // v0.2.0 will branch on provider here: 'stripe' creates a Stripe
 // Checkout Session and returns a redirect URL; the actual invoice
 // is created by the webhook handler on payment success.
-func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSession, int64, string, error) {
+func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64, paymentArgs map[string]any) (*CheckoutSession, int64, string, map[string]any, error) {
 	db := ctx.AppDB()
 	session, err := dbCheckoutGet(db, pid, sessionID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", nil, err
 	}
 	if session == nil {
-		return nil, 0, "", fmt.Errorf("session %d not found", sessionID)
+		return nil, 0, "", nil, fmt.Errorf("session %d not found", sessionID)
+	}
+	provider, presentation, err := checkoutPaymentConfig(paymentArgs)
+	if err != nil {
+		return nil, 0, "", nil, err
+	}
+	if session.Status == "awaiting_payment" && session.InvoiceID != nil {
+		if session.Provider != provider || session.Presentation != presentation {
+			return nil, 0, "", nil, errors.New("payment provider and presentation cannot change after payment preparation")
+		}
+		return prepareCheckoutPayment(ctx, pid, session, *session.InvoiceID, "", paymentArgs)
 	}
 	if session.Status != "started" {
-		return nil, 0, "", fmt.Errorf("session %d is %s — only 'started' sessions can be paid", sessionID, session.Status)
+		return nil, 0, "", nil, fmt.Errorf("session %d is %s — only 'started' or 'awaiting_payment' sessions can be paid", sessionID, session.Status)
 	}
 	if strings.TrimSpace(session.Email) == "" {
-		return nil, 0, "", errors.New("session requires email before payment (call checkout_update)")
+		return nil, 0, "", nil, errors.New("session requires email before payment (call checkout_update)")
 	}
 	cart, err := dbCartGetByID(db, pid, session.CartID)
 	if err != nil || cart == nil {
-		return nil, 0, "", errors.New("cart no longer exists")
+		return nil, 0, "", nil, errors.New("cart no longer exists")
 	}
 	if len(cart.Items) == 0 {
-		return nil, 0, "", errors.New("cart is empty")
+		return nil, 0, "", nil, errors.New("cart is empty")
 	}
 	api := ctx.PlatformAPI()
 	if api == nil {
-		return nil, 0, "", errors.New("platform API unavailable (billing app must be installed)")
+		return nil, 0, "", nil, errors.New("platform API unavailable (billing app must be installed)")
 	}
 
 	// 1. Upsert the billing customer by email.
@@ -1554,7 +1580,7 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSessi
 		"defaults":    defaults,
 		"_project_id": pid,
 	}, &custResp); err != nil {
-		return nil, 0, "", fmt.Errorf("billing customer upsert failed (is the billing app installed?): %w", err)
+		return nil, 0, "", nil, fmt.Errorf("billing customer upsert failed (is the billing app installed?): %w", err)
 	}
 
 	// 2. Build line items from cart snapshots.
@@ -1614,7 +1640,7 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSessi
 		invoiceBody["metadata"] = invMeta
 	}
 	if err := api.CallAppResult("billing", "invoices_create", invoiceBody, &invResp); err != nil {
-		return nil, 0, "", fmt.Errorf("billing invoice create failed: %w", err)
+		return nil, 0, "", nil, fmt.Errorf("billing invoice create failed: %w", err)
 	}
 
 	// 4. Finalize → mints invoice number, transitions to 'open'.
@@ -1628,36 +1654,100 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSessi
 		"invoice_id":  invResp.Invoice.ID,
 		"_project_id": pid,
 	}, &finalResp); err != nil {
-		return nil, 0, "", fmt.Errorf("billing invoice finalize failed: %w", err)
+		return nil, 0, "", nil, fmt.Errorf("billing invoice finalize failed: %w", err)
 	}
 
 	// 5. Update our session + cart in one tx.
 	now := nowRFC3339()
 	tx, err := db.Begin()
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", nil, err
 	}
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`UPDATE checkout_sessions
-		 SET status = 'awaiting_payment', invoice_id = ?, updated_at = ?
-		 WHERE id = ?`, invResp.Invoice.ID, now, sessionID); err != nil {
-		return nil, 0, "", err
+		 SET status = 'awaiting_payment', invoice_id = ?, provider = ?, presentation = ?, updated_at = ?
+		 WHERE id = ?`, invResp.Invoice.ID, provider, presentation, now, sessionID); err != nil {
+		return nil, 0, "", nil, err
 	}
 	if _, err := tx.Exec(
 		`UPDATE carts SET status = 'converted', invoice_id = ?, updated_at = ?
 		 WHERE id = ?`, invResp.Invoice.ID, now, session.CartID); err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", nil, err
 	}
 
 	updated, err := dbCheckoutGet(db, pid, sessionID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, 0, "", nil, err
 	}
-	return updated, invResp.Invoice.ID, finalResp.Invoice.Number, nil
+	return prepareCheckoutPayment(ctx, pid, updated, invResp.Invoice.ID, finalResp.Invoice.Number, paymentArgs)
+}
+
+func checkoutPaymentConfig(args map[string]any) (string, string, error) {
+	provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider")))
+	if provider == "" {
+		provider = "manual"
+	}
+	if provider != "manual" && provider != "stripe" {
+		return "", "", errors.New("provider must be 'manual' or 'stripe'")
+	}
+	presentation := strings.ToLower(strings.TrimSpace(strArg(args, "presentation")))
+	if provider == "manual" {
+		presentation = "manual"
+	} else if presentation == "" {
+		presentation = "elements"
+	}
+	if provider == "stripe" && presentation != "elements" && presentation != "hosted" {
+		return "", "", errors.New("Stripe presentation must be 'elements' or 'hosted'")
+	}
+	return provider, presentation, nil
+}
+
+func prepareCheckoutPayment(ctx *sdk.AppCtx, pid string, session *CheckoutSession, invoiceID int64, invoiceNumber string, args map[string]any) (*CheckoutSession, int64, string, map[string]any, error) {
+	if session.Provider != "stripe" {
+		return session, invoiceID, invoiceNumber, map[string]any{
+			"provider": "manual", "presentation": "manual",
+		}, nil
+	}
+	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key"))
+	if idempotencyKey == "" {
+		idempotencyKey = fmt.Sprintf("checkout-%s-%d", pid, session.ID)
+	}
+	billingArgs := map[string]any{
+		"_project_id":     pid,
+		"invoice_id":      invoiceID,
+		"presentation":    session.Presentation,
+		"idempotency_key": idempotencyKey,
+	}
+	for _, name := range []string{"return_url", "success_url", "cancel_url", "expires_at", "payment_method_types", "save_payment_method", "set_default_payment_method"} {
+		if value, ok := args[name]; ok {
+			billingArgs[name] = value
+		}
+	}
+	var payment map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_create_payment_session", billingArgs, &payment); err != nil {
+		return nil, 0, "", nil, fmt.Errorf("billing payment session failed: %w", err)
+	}
+	providerSessionID := strings.TrimSpace(strArg(payment, "stripe_session_id"))
+	if providerSessionID == "" {
+		return nil, 0, "", nil, errors.New("Billing returned no Stripe session id")
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE checkout_sessions
+		 SET provider_session_id=?, updated_at=CURRENT_TIMESTAMP
+		 WHERE project_id=? AND id=?`,
+		providerSessionID, pid, session.ID,
+	); err != nil {
+		return nil, 0, "", nil, err
+	}
+	updated, err := dbCheckoutGet(ctx.AppDB(), pid, session.ID)
+	if err != nil {
+		return nil, 0, "", nil, err
+	}
+	return updated, invoiceID, invoiceNumber, payment, nil
 }
 
 func dbCheckoutCancel(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
@@ -1702,6 +1792,7 @@ func scanSession(s rowScanner) (*CheckoutSession, error) {
 	var completedAt, expiresAt sql.NullString
 	if err := s.Scan(
 		&sess.ID, &sess.ProjectID, &sess.CartID, &sess.Provider, &sess.ProviderSessionID,
+		&sess.Presentation,
 		&sess.Email, &sess.CustomerName,
 		&shipping, &billing, &sess.Status, &invoiceID,
 		&sess.SubtotalCents, &sess.ShippingCents, &sess.DiscountCents, &sess.TaxCents, &sess.TotalCents, &sess.Currency,

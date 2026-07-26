@@ -27,6 +27,14 @@ type stripePlatformStub struct {
 	intent      json.RawMessage
 }
 
+func (s *stripePlatformStub) GetConnectionPublicConfig(id int64) (*sdk.ConnectionPublicConfig, error) {
+	return &sdk.ConnectionPublicConfig{
+		ConnectionID: id,
+		Slug:         "stripe",
+		Fields:       map[string]string{"publishableKey": "pk_test_public"},
+	}, nil
+}
+
 func (s *stripePlatformStub) WhoAmI() (*sdk.InstallIdentity, error) {
 	return &sdk.InstallIdentity{
 		AppName: "billing", InstallID: 1, ProjectID: "test-proj",
@@ -63,6 +71,12 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 			Data: json.RawMessage(`{"id":"cus_test_123"}`),
 		}, nil
 	case "create_checkout_session":
+		if input["ui_mode"] == "custom" {
+			return &sdk.ExecuteResult{
+				Success: true, Status: http.StatusOK,
+				Data: json.RawMessage(`{"id":"cs_test_123","client_secret":"cs_test_123_secret_abc","expires_at":1893456000}`),
+			}, nil
+		}
 		return &sdk.ExecuteResult{
 			Success: true, Status: http.StatusOK,
 			Data: json.RawMessage(`{"id":"cs_test_123","url":"https://checkout.stripe.com/c/pay/cs_test_123","expires_at":1893456000}`),
@@ -134,6 +148,57 @@ func TestStripeIntegrationEnsuresWebhookBeforeCheckoutSession(t *testing.T) {
 	}
 	if expectedAmount != 1650 {
 		t.Fatalf("persisted checkout amount=%d, want 1650", expectedAmount)
+	}
+}
+
+func TestCreateElementsPaymentSessionReturnsOnlyPublicBrowserConfig(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	cust := mustCustomer(t, ctx, "elements@example.com", "Elements Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Order", 1, 2400, 0)}).ID)
+
+	out, err := app.toolInvoicesCreatePaymentSession(ctx, map[string]any{
+		"invoice_id":      inv.ID,
+		"presentation":    "elements",
+		"idempotency_key": "checkout-42",
+		"return_url":      "https://store.example/checkout/return",
+	})
+	if err != nil {
+		t.Fatalf("create elements payment session: %v", err)
+	}
+	got := out.(map[string]any)
+	if got["publishable_key"] != "pk_test_public" {
+		t.Fatalf("publishable_key=%v", got["publishable_key"])
+	}
+	if got["client_secret"] != "cs_test_123_secret_abc" {
+		t.Fatalf("client_secret=%v", got["client_secret"])
+	}
+	if got["url"] != "" {
+		t.Fatalf("elements url=%v, want empty", got["url"])
+	}
+	if len(platform.toolCalls) != 1 {
+		t.Fatalf("tool calls=%#v", platform.toolCalls)
+	}
+	input := platform.toolCalls[0].Input
+	if input["ui_mode"] != "custom" || input["return_url"] != "https://store.example/checkout/return" {
+		t.Fatalf("custom checkout input=%#v", input)
+	}
+	if _, exists := input["success_url"]; exists {
+		t.Fatalf("elements input unexpectedly has success_url: %#v", input)
+	}
+	if _, exists := input["cancel_url"]; exists {
+		t.Fatalf("elements input unexpectedly has cancel_url: %#v", input)
+	}
+	var presentation, key string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT presentation, idempotency_key
+		 FROM billing_checkout_sessions WHERE provider_session_id='cs_test_123'`,
+	).Scan(&presentation, &key); err != nil {
+		t.Fatal(err)
+	}
+	if presentation != "elements" || key != "checkout-42" {
+		t.Fatalf("persisted presentation=%q key=%q", presentation, key)
 	}
 }
 

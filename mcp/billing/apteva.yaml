@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.10.0
+version: 0.11.0
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -17,6 +17,9 @@ description: |
   to paid automatically.
   v0.10.0 adds durable, idempotent off-session invoice collection for
   product apps while keeping recurring schedules out of Billing.
+  v0.11.0 adds durable hosted or custom Stripe Checkout Sessions for
+  product apps. Custom sessions return only a short-lived client secret
+  and the catalog-marked public publishable key.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -32,6 +35,7 @@ requires:
     - db.write.app
     - platform.apps.call                       # billing calls catalog when line items reference price_id
     - platform.connections.execute             # run Stripe tools and reconcile its webhook via the bound connection
+    - platform.connections.read_public_config  # expose only Stripe's catalog-marked publishable key to Elements
   apps:
     - name: catalog
       optional: true                           # free-form line items keep working without catalog
@@ -39,11 +43,12 @@ requires:
     - role: payment_processor                  # Stripe (or any future processor) for card-payable invoices
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create:         create_customer
         customers.search:         search_customers
         checkout_sessions.create: create_checkout_session
+        checkout_sessions.get:    get_checkout_session
         payment_intents.create:    create_payment_intent
         payment_intents.get:       get_payment_intent
         refunds.create:           create_refund
@@ -102,6 +107,12 @@ provides:
         {url, stripe_session_id, expires_at}. Sharing it requires a separate,
         explicitly requested channel or email action. Uses only the bound
         payment_processor integration; Billing never receives Stripe keys.
+    - name: invoices_create_payment_session
+      description: |
+        Product-app payment primitive for an open invoice. presentation=elements
+        returns Stripe publishable_key + Checkout Session client_secret;
+        presentation=hosted returns a redirect URL. Requires a caller-stable
+        idempotency_key. Payment completion remains webhook-driven.
         On payment success, the platform-verified webhook records the payment
         and transitions the invoice to paid.
     - name: invoices_collect
@@ -304,7 +315,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: billing/v0.11.0
     entry: mcp/billing
   port: 8080
   health_check: /health

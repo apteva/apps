@@ -9,7 +9,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "3"
+const commerceStorefrontExtensionVersion = "4"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -73,6 +73,12 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			map[string]any{"key": "accent", "label": "Accent color", "type": "color", "default": "#176b45"},
 			map[string]any{"key": "logo_text", "label": "Store name", "type": "text", "default": store.Name},
 		},
+		"browser_policy": map[string]any{
+			"script_origins":  []any{"https://js.stripe.com", "https://checkout.stripe.com"},
+			"frame_origins":   []any{"https://js.stripe.com", "https://hooks.stripe.com", "https://checkout.stripe.com"},
+			"connect_origins": []any{"https://api.stripe.com", "https://checkout.stripe.com"},
+			"image_origins":   []any{"https://*.stripe.com"},
+		},
 		"routes": []any{
 			map[string]any{"name": "home", "pattern": "/", "template": "home", "data_sources": []any{"products", "collections"}},
 			map[string]any{"name": "product", "pattern": "/products/:handle", "template": "product", "data_sources": []any{"product"}},
@@ -81,6 +87,7 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			map[string]any{"name": "search", "pattern": "/search", "template": "search", "data_sources": []any{"search"}},
 			map[string]any{"name": "cart", "pattern": "/cart", "template": "cart"},
 			map[string]any{"name": "checkout", "pattern": "/checkout", "template": "checkout"},
+			map[string]any{"name": "checkout_return", "pattern": "/checkout/return", "template": "checkout_return"},
 		},
 		"data_sources": map[string]any{
 			"products":    map[string]any{"tool": "commerce_products_list", "args": mergeMaps(activeStore, map[string]any{"limit": 24})},
@@ -120,7 +127,7 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			},
 			"checkout_submit": map[string]any{
 				"allowed_input":             checkoutInput,
-				"rotate_session_on_success": true,
+				"rotate_session_on_success": false,
 				"steps": []any{
 					map[string]any{"tool": "commerce_cart_create", "args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"})},
 					map[string]any{"tool": "commerce_shipping_quote", "args": map[string]any{
@@ -141,15 +148,22 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 					map[string]any{"tool": "commerce_checkout_pay", "args": map[string]any{"checkout_id": "{{ steps.2.checkout.id }}"}},
 				},
 			},
+			"checkout_status": map[string]any{
+				"steps": []any{map[string]any{
+					"tool": "commerce_checkout_status",
+					"args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"}),
+				}},
+			},
 		},
 		"templates": map[string]any{
-			"home":        storefrontDocument(homeStorefrontBody),
-			"product":     storefrontDocument(productStorefrontBody),
-			"collections": storefrontDocument(collectionsStorefrontBody),
-			"collection":  storefrontDocument(collectionStorefrontBody),
-			"search":      storefrontDocument(searchStorefrontBody),
-			"cart":        storefrontDocument(cartStorefrontBody),
-			"checkout":    checkoutStorefrontDocument(checkoutStorefrontBody),
+			"home":            storefrontDocument(homeStorefrontBody),
+			"product":         storefrontDocument(productStorefrontBody),
+			"collections":     storefrontDocument(collectionsStorefrontBody),
+			"collection":      storefrontDocument(collectionStorefrontBody),
+			"search":          storefrontDocument(searchStorefrontBody),
+			"cart":            storefrontDocument(cartStorefrontBody),
+			"checkout":        checkoutStorefrontDocument(checkoutStorefrontBody),
+			"checkout_return": checkoutStorefrontDocument(checkoutReturnStorefrontBody),
 		},
 		"assets": map[string]any{
 			"store.css": storefrontCSS,
@@ -206,6 +220,7 @@ func checkoutStorefrontDocument(body string) string {
   <meta name="theme-color" content="#ffffff">
   <title>Checkout | {{default .SiteTitle (get .Settings "logo_text")}}</title>
   <link rel="stylesheet" href="{{asset "store.css"}}">
+  <script src="https://js.stripe.com/clover/stripe.js"></script>
   <script defer src="{{asset "store.js"}}"></script>
 </head>
 <body class="checkout-page" style="--accent:{{default "#176b45" (get .Settings "accent")}}">
@@ -342,7 +357,7 @@ const checkoutStorefrontBody = `
           <div class="checkout-section-heading"><span class="step-number">4</span><div><h2>Payment</h2><p>Payment details are handled by the store's secure billing provider.</p></div></div>
           <div class="payment-method">
             <span class="payment-radio" aria-hidden="true"></span>
-            <span><strong>Secure invoice</strong><small>Payment instructions are provided after your order is placed.</small></span>
+            <span><strong>Secure payment</strong><small>Your payment details are encrypted and sent directly to the payment provider.</small></span>
           </div>
           <label class="billing-toggle"><input type="checkbox" data-billing-same checked><span>Use delivery address as billing address</span></label>
           <div class="billing-fields" data-billing-fields hidden>
@@ -357,9 +372,14 @@ const checkoutStorefrontBody = `
               <label class="field full"><span>Postal code</span><input type="text" name="billing_postal_code" autocomplete="billing postal-code" disabled required></label>
             </div>
           </div>
+          <div class="payment-element-shell" data-payment-stage hidden>
+            <div id="payment-element"></div>
+            <div class="payment-element-error" data-payment-error role="alert" hidden></div>
+            <button class="button checkout-submit" type="button" data-payment-submit disabled><span>Pay now</span><span aria-hidden="true">-&gt;</span></button>
+          </div>
         </section>
 
-        <button class="button checkout-submit" type="submit"><span data-submit-label>Review order</span><span aria-hidden="true">-></span></button>
+        <button class="button checkout-submit" type="submit" data-order-submit><span data-submit-label>Review order</span><span aria-hidden="true">-&gt;</span></button>
         <p class="checkout-note">Inventory and totals are verified before the order is placed. Your cart is reserved when checkout begins.</p>
       </form>
       <div class="checkout-result" data-checkout-result hidden></div>
@@ -375,9 +395,17 @@ const checkoutStorefrontBody = `
     </aside>
   </div>`
 
+const checkoutReturnStorefrontBody = `
+  <section class="checkout-return" data-payment-return data-status-action="{{action "checkout_status"}}">
+    <span class="status-pill" data-return-pill>Payment processing</span>
+    <h1 data-return-title>Confirming your order</h1>
+    <p data-return-message>Payment confirmation can take a moment. You can safely keep this page open.</p>
+    <a class="button" href="{{href "/"}}" data-return-link hidden>Continue shopping</a>
+  </section>`
+
 const storefrontCSS = `
 *{box-sizing:border-box}html{color:#171a17;background:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:0}body{margin:0}a{color:inherit;text-decoration:none}img{display:block;max-width:100%;height:auto}.announcement{background:#171a17;color:#fff;padding:9px 20px;text-align:center;font-size:12px}.site-header{height:72px;padding:0 clamp(20px,5vw,72px);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e7e9e6;position:sticky;top:0;background:rgba(255,255,255,.96);z-index:20}.brand{font-family:Georgia,serif;font-size:23px;font-weight:700}.site-header nav{display:flex;gap:24px;align-items:center;font-size:14px}.site-header nav a:hover{color:var(--accent)}main{min-height:70vh}.hero{min-height:min(70vh,680px);padding:clamp(64px,9vw,128px) clamp(20px,8vw,120px);display:flex;align-items:center;position:relative;overflow:hidden;background:#edf2ec;border-bottom:1px solid #dce3dc}.hero-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.hero-with-image:after{content:"";position:absolute;inset:0;background:rgba(17,20,17,.58)}.hero-copy{position:relative;z-index:1;max-width:900px}.hero h1{font-family:Georgia,serif;font-size:clamp(48px,7vw,96px);line-height:.98;margin:12px 0 24px}.hero-copy>p:not(.eyebrow){font-size:18px;line-height:1.6;max-width:560px;margin:0 0 30px;color:#4d554e}.hero-with-image .hero-copy,.hero-with-image .hero-copy>p,.hero-with-image .eyebrow{color:#fff}.eyebrow{text-transform:uppercase;font-size:11px;letter-spacing:1.6px;font-weight:700;color:var(--accent);margin:0 0 8px}.button{display:inline-flex;min-height:44px;padding:0 20px;border:0;background:var(--accent);color:#fff;align-items:center;justify-content:center;font:600 14px inherit;cursor:pointer;width:max-content}.button:hover{filter:brightness(.92)}.button.wide{width:100%}.section{padding:72px clamp(20px,5vw,72px)}.section-heading{display:flex;justify-content:space-between;align-items:end;margin-bottom:30px}.section-heading h2,.page-header h1{font-family:Georgia,serif;font-size:clamp(36px,5vw,62px);margin:0}.section-heading>a{font-size:13px;border-bottom:1px solid}.product-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px 18px}.product-media{display:block;aspect-ratio:1;background:#f2f3f1;overflow:hidden}.product-media img,.detail-media img{width:100%;height:100%;object-fit:cover;transition:transform .35s}.product-card:hover img{transform:scale(1.02)}.media-placeholder{display:flex;width:100%;height:100%;align-items:center;justify-content:center;padding:30px;color:#778078;text-align:center}.product-copy{padding-top:14px}.product-copy h2{font-size:15px;margin:3px 0 8px;font-weight:600}.price{font-size:14px;margin:0;color:#505650}.page-header{padding:72px clamp(20px,8vw,120px) 42px;border-bottom:1px solid #e7e9e6}.lede{max-width:700px;color:#525a53;line-height:1.7}.collection-grid{padding:36px clamp(20px,5vw,72px) 80px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.collection-card{min-height:180px;padding:28px;background:#edf2ec;display:flex;flex-direction:column;justify-content:end}.collection-card span{font:600 28px Georgia,serif}.collection-card small{margin-top:8px;color:#5c655e}.product-detail{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(340px,.75fr);min-height:calc(100vh - 105px)}.detail-media{background:#f2f3f1;min-height:620px}.detail-copy{padding:clamp(46px,7vw,100px);align-self:center}.detail-copy h1{font:500 clamp(42px,5vw,70px)/1 Georgia,serif;margin:10px 0 20px}.detail-price{font-size:20px;font-weight:650}.description{line-height:1.7;color:#505750;margin:28px 0}.quantity{display:grid;gap:8px;font-size:12px;margin-bottom:12px}.quantity input{height:44px;border:1px solid #cfd4cf;padding:0 12px;width:100%}.assurances{list-style:none;padding:22px 0 0;margin:22px 0 0;border-top:1px solid #e1e4e1;display:grid;gap:8px;font-size:12px;color:#606860}.search-form{display:flex;gap:10px;max-width:680px;margin-top:28px}.search-form input{height:48px;flex:1;border:1px solid #cbd0cb;padding:0 15px;font-size:16px}.cart-shell{padding:0 clamp(20px,8vw,120px) 90px;max-width:1100px}.cart-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 132px;gap:20px;padding:20px 0;border-bottom:1px solid #e3e6e3;align-items:center}.cart-row input{width:72px;height:40px;border:1px solid #ccd1cc;padding:8px;justify-self:end}.line-total{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.cart-total{display:flex;justify-content:space-between;font-size:20px;font-weight:700;padding:28px 0}.cart-total span:last-child{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.empty,.cart-loading{padding:40px 0;color:#667067}.site-footer{border-top:1px solid #e1e4e1;padding:34px clamp(20px,5vw,72px);display:flex;justify-content:space-between;color:#606760;font-size:12px}.toast{position:fixed;right:20px;bottom:20px;background:#171a17;color:#fff;padding:13px 18px;opacity:0;transform:translateY(12px);transition:.2s;pointer-events:none;z-index:50}.toast.visible{opacity:1;transform:none}
-.checkout-page{background:#fff;color:#202420}.checkout-page main{min-height:0}.checkout-header{height:76px;border-bottom:1px solid #dfe3df;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(24px,5vw,72px)}.checkout-brand{font:700 24px Georgia,serif}.secure-label{color:#5e665f;font-size:13px}.checkout-layout{display:grid;grid-template-columns:minmax(0,700px) minmax(380px,1fr);max-width:1320px;margin:0 auto;min-height:calc(100vh - 132px)}.checkout-form-column{padding:42px clamp(28px,5vw,72px) 72px}.checkout-back{display:inline-block;color:#59615a;font-size:13px;margin-bottom:34px;border-bottom:1px solid #aeb5af}.checkout-intro{margin-bottom:38px}.checkout-intro h1{font:600 42px/1.05 Georgia,serif;margin:8px 0 0}.checkout-error{border-left:3px solid #a83b2f;background:#fbf3f1;color:#792b23;padding:14px 16px;margin:0 0 24px;font-size:14px;line-height:1.5}.checkout-form{display:grid}.checkout-section{padding:0 0 34px;margin:0 0 34px;border-bottom:1px solid #dfe3df}.checkout-section-heading{display:grid;grid-template-columns:30px minmax(0,1fr);gap:12px;align-items:start;margin-bottom:22px}.step-number{width:28px;height:28px;border:1px solid #aeb5af;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.checkout-section-heading h2{font-size:19px;margin:2px 0 4px}.checkout-section-heading p{color:#677068;font-size:13px;line-height:1.5;margin:0}.checkout-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{display:grid;gap:7px;color:#454c46;font-size:12px;font-weight:600}.field.full{grid-column:1/-1}.field small{color:#7a827b;font-weight:400}.field input,.field select{width:100%;height:50px;border:1px solid #bac1bb;border-radius:4px;background:#fff;color:#202420;padding:0 13px;font-family:inherit;font-size:15px;font-weight:400}.field select{appearance:auto}.field input:hover,.field select:hover{border-color:#8f9991}.field input:focus,.field select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}.field input:user-invalid,.field select:user-invalid{border-color:#a83b2f}.shipping-method,.payment-method{min-height:68px;border:1px solid #aeb5af;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:18px}.shipping-method>span,.payment-method>span:last-child{display:grid;gap:4px}.shipping-method small,.payment-method small{color:#677068;font-size:12px;line-height:1.4;font-weight:400}.shipping-method>strong{font-variant-numeric:tabular-nums;white-space:nowrap}.payment-method{justify-content:flex-start;border-color:var(--accent);background:#f5f9f6}.payment-radio{width:16px;height:16px;border:5px solid var(--accent);border-radius:50%;flex:0 0 auto}.billing-toggle{display:flex;align-items:center;gap:10px;font-size:13px;margin-top:16px;cursor:pointer}.billing-toggle input{width:17px;height:17px;accent-color:var(--accent)}.billing-fields{padding-top:20px}.checkout-submit{width:100%;min-height:54px;justify-content:space-between;padding:0 20px;font-size:15px}.checkout-submit:disabled{cursor:wait;opacity:.7}.checkout-note{margin:14px 0 0;color:#69716a;font-size:12px;line-height:1.55;text-align:center}.checkout-result{padding:36px 0;border-top:1px solid #dfe3df}.checkout-result h2{font:600 36px/1.1 Georgia,serif;margin:8px 0 14px}.checkout-result p{color:#535c54;line-height:1.65}.checkout-result .confirmation-number{color:#202420;font-size:14px;font-weight:700}.status-pill{display:inline-flex;background:#edf2ec;color:#345443;padding:6px 9px;border-radius:4px;text-transform:uppercase;font-size:10px;font-weight:800;letter-spacing:1px}.checkout-summary-column{background:#f5f6f4;border-left:1px solid #dfe3df;padding:62px clamp(28px,4vw,56px)}.order-summary{position:sticky;top:28px}.order-summary summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;padding-bottom:24px;cursor:default}.order-summary summary::-webkit-details-marker{display:none}.order-summary summary strong{font-size:18px;font-variant-numeric:tabular-nums}.summary-items{display:grid;gap:18px;padding:0 0 24px;border-bottom:1px solid #d7dbd7}.summary-item{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:14px;align-items:center}.summary-media{width:64px;height:64px;border:1px solid #d9ddd9;border-radius:6px;background:#fff;position:relative;display:grid;place-items:center;overflow:visible;color:#777f78;font:600 11px Georgia,serif;text-align:center;padding:5px}.summary-media img{width:100%;height:100%;object-fit:cover;border-radius:5px}.summary-quantity{position:absolute;right:-7px;top:-8px;min-width:22px;height:22px;border-radius:50%;background:#646c65;color:#fff;display:grid;place-items:center;padding:0 5px;font-size:11px}.summary-copy{min-width:0}.summary-copy strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.summary-copy small{display:block;color:#747c75;font-size:11px;margin-top:4px}.summary-price{font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-totals{display:grid;grid-template-columns:1fr auto;gap:10px 24px;padding:24px 0;font-size:13px}.summary-totals span:nth-child(even){text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-total-label,.summary-total-value{border-top:1px solid #d7dbd7;padding-top:18px;margin-top:8px;font-size:17px;font-weight:750}.summary-total-value{font-size:21px}.summary-loading{color:#69716a;font-size:13px;padding:12px 0}.checkout-footer{min-height:56px;border-top:1px solid #dfe3df;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:16px clamp(24px,5vw,72px);color:#69716a;font-size:11px}
+.checkout-page{background:#fff;color:#202420}.checkout-page main{min-height:0}.checkout-header{height:76px;border-bottom:1px solid #dfe3df;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(24px,5vw,72px)}.checkout-brand{font:700 24px Georgia,serif}.secure-label{color:#5e665f;font-size:13px}.checkout-layout{display:grid;grid-template-columns:minmax(0,700px) minmax(380px,1fr);max-width:1320px;margin:0 auto;min-height:calc(100vh - 132px)}.checkout-form-column{padding:42px clamp(28px,5vw,72px) 72px}.checkout-back{display:inline-block;color:#59615a;font-size:13px;margin-bottom:34px;border-bottom:1px solid #aeb5af}.checkout-intro{margin-bottom:38px}.checkout-intro h1{font:600 42px/1.05 Georgia,serif;margin:8px 0 0}.checkout-error{border-left:3px solid #a83b2f;background:#fbf3f1;color:#792b23;padding:14px 16px;margin:0 0 24px;font-size:14px;line-height:1.5}.checkout-form{display:grid}.checkout-section{padding:0 0 34px;margin:0 0 34px;border-bottom:1px solid #dfe3df}.checkout-section-heading{display:grid;grid-template-columns:30px minmax(0,1fr);gap:12px;align-items:start;margin-bottom:22px}.step-number{width:28px;height:28px;border:1px solid #aeb5af;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.checkout-section-heading h2{font-size:19px;margin:2px 0 4px}.checkout-section-heading p{color:#677068;font-size:13px;line-height:1.5;margin:0}.checkout-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{display:grid;gap:7px;color:#454c46;font-size:12px;font-weight:600}.field.full{grid-column:1/-1}.field small{color:#7a827b;font-weight:400}.field input,.field select{width:100%;height:50px;border:1px solid #bac1bb;border-radius:4px;background:#fff;color:#202420;padding:0 13px;font-family:inherit;font-size:15px;font-weight:400}.field select{appearance:auto}.field input:hover,.field select:hover{border-color:#8f9991}.field input:focus,.field select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}.field input:user-invalid,.field select:user-invalid{border-color:#a83b2f}.shipping-method,.payment-method{min-height:68px;border:1px solid #aeb5af;border-radius:6px;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:18px}.shipping-method>span,.payment-method>span:last-child{display:grid;gap:4px}.shipping-method small,.payment-method small{color:#677068;font-size:12px;line-height:1.4;font-weight:400}.shipping-method>strong{font-variant-numeric:tabular-nums;white-space:nowrap}.payment-method{justify-content:flex-start;border-color:var(--accent);background:#f5f9f6}.payment-radio{width:16px;height:16px;border:5px solid var(--accent);border-radius:50%;flex:0 0 auto}.billing-toggle{display:flex;align-items:center;gap:10px;font-size:13px;margin-top:16px;cursor:pointer}.billing-toggle input{width:17px;height:17px;accent-color:var(--accent)}.billing-fields{padding-top:20px}.payment-element-shell{margin-top:22px;padding-top:22px;border-top:1px solid #dfe3df}.payment-element-shell .checkout-submit{margin-top:22px}.payment-element-error{color:#792b23;font-size:13px;line-height:1.5;margin-top:12px}.checkout-submit{width:100%;min-height:54px;justify-content:space-between;padding:0 20px;font-size:15px}.checkout-submit:disabled{cursor:wait;opacity:.7}.checkout-note{margin:14px 0 0;color:#69716a;font-size:12px;line-height:1.55;text-align:center}.checkout-result{padding:36px 0;border-top:1px solid #dfe3df}.checkout-result h2{font:600 36px/1.1 Georgia,serif;margin:8px 0 14px}.checkout-result p{color:#535c54;line-height:1.65}.checkout-result .confirmation-number{color:#202420;font-size:14px;font-weight:700}.status-pill{display:inline-flex;background:#edf2ec;color:#345443;padding:6px 9px;border-radius:4px;text-transform:uppercase;font-size:10px;font-weight:800;letter-spacing:1px}.checkout-return{max-width:620px;margin:0 auto;padding:clamp(72px,12vw,150px) 24px;min-height:calc(100vh - 132px);text-align:center}.checkout-return h1{font:600 42px/1.1 Georgia,serif;margin:18px 0 14px}.checkout-return p{color:#535c54;line-height:1.65;margin:0 auto 28px;max-width:520px}.checkout-return .button{margin:0 auto}.checkout-summary-column{background:#f5f6f4;border-left:1px solid #dfe3df;padding:62px clamp(28px,4vw,56px)}.order-summary{position:sticky;top:28px}.order-summary summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;padding-bottom:24px;cursor:default}.order-summary summary::-webkit-details-marker{display:none}.order-summary summary strong{font-size:18px;font-variant-numeric:tabular-nums}.summary-items{display:grid;gap:18px;padding:0 0 24px;border-bottom:1px solid #d7dbd7}.summary-item{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:14px;align-items:center}.summary-media{width:64px;height:64px;border:1px solid #d9ddd9;border-radius:6px;background:#fff;position:relative;display:grid;place-items:center;overflow:visible;color:#777f78;font:600 11px Georgia,serif;text-align:center;padding:5px}.summary-media img{width:100%;height:100%;object-fit:cover;border-radius:5px}.summary-quantity{position:absolute;right:-7px;top:-8px;min-width:22px;height:22px;border-radius:50%;background:#646c65;color:#fff;display:grid;place-items:center;padding:0 5px;font-size:11px}.summary-copy{min-width:0}.summary-copy strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.summary-copy small{display:block;color:#747c75;font-size:11px;margin-top:4px}.summary-price{justify-self:end;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-totals{display:grid;grid-template-columns:1fr auto;gap:10px 24px;padding:24px 0;font-size:13px}.summary-totals span:nth-child(even){justify-self:end;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-total-label,.summary-total-value{border-top:1px solid #d7dbd7;padding-top:18px;margin-top:8px;font-size:17px;font-weight:750}.summary-total-value{font-size:21px}.summary-loading{color:#69716a;font-size:13px;padding:12px 0}.checkout-footer{min-height:56px;border-top:1px solid #dfe3df;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:16px clamp(24px,5vw,72px);color:#69716a;font-size:11px}
 @media(max-width:900px){.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.product-detail{grid-template-columns:1fr}.detail-media{min-height:auto;aspect-ratio:1}.collection-grid{grid-template-columns:1fr 1fr}.site-header nav a:not(.cart-link){display:none}.checkout-layout{grid-template-columns:1fr}.checkout-summary-column{grid-row:1;border-left:0;border-bottom:1px solid #dfe3df;padding:20px clamp(24px,6vw,56px)}.checkout-form-column{grid-row:2;padding-top:36px}.order-summary{position:static}.order-summary summary{cursor:pointer;padding:4px 0}.order-summary[open] summary{padding-bottom:22px}.order-summary summary:after{content:"+";margin-left:12px;color:#687069}.order-summary[open] summary:after{content:"-"}.order-summary summary strong{margin-left:auto}.checkout-header{height:68px}}
 @media(max-width:560px){.hero{min-height:590px}.hero h1{font-size:52px}.product-grid{gap:24px 10px}.section{padding:52px 16px}.site-header{padding:0 16px}.collection-grid{grid-template-columns:1fr;padding:24px 16px 60px}.detail-copy{padding:40px 20px}.page-header{padding:52px 20px 30px}.cart-shell{padding:0 20px 60px}.cart-row{grid-template-columns:1fr 72px}.cart-row .line-total{grid-column:1/-1}.site-footer{padding:28px 20px;gap:20px;flex-direction:column}.checkout-header{padding:0 20px}.checkout-brand{font-size:21px}.secure-label{font-size:11px}.checkout-summary-column{padding:16px 20px}.checkout-form-column{padding:30px 20px 56px}.checkout-back{margin-bottom:26px}.checkout-intro{margin-bottom:32px}.checkout-intro h1{font-size:36px}.checkout-fields{grid-template-columns:1fr}.field.full{grid-column:auto}.checkout-section{padding-bottom:28px;margin-bottom:28px}.checkout-footer{align-items:flex-start;flex-direction:column;padding:20px}.summary-item{grid-template-columns:56px minmax(0,1fr) auto}.summary-media{width:56px;height:56px}}
 `
@@ -413,8 +441,13 @@ if(checkoutForm){
   const shippingMethod=qs('[data-shipping-method]');
   const shippingMessage=qs('[data-shipping-message]');
   const shippingPrice=qs('[data-shipping-price]');
+  const paymentStage=qs('[data-payment-stage]');
+  const paymentButton=qs('[data-payment-submit]');
+  const paymentError=qs('[data-payment-error]');
+  const orderButton=qs('[data-order-submit]');
   let latestCart=null;
   let quoteReady=false;
+  let stripeActions=null;
 
   const shippingNames=['customer_name','company','address_line1','address_line2','city','region','postal_code','country_code','phone'];
   const billingMap={billing_name:'customer_name',billing_company:'company',billing_address_line1:'address_line1',billing_address_line2:'address_line2',billing_city:'city',billing_region:'region',billing_postal_code:'postal_code',billing_country_code:'country_code'};
@@ -440,6 +473,24 @@ if(checkoutForm){
     checkoutError.textContent=message==='storefront action unavailable'?'We could not update checkout. Review your details and try again.':message;
     checkoutError.hidden=false;
     checkoutError.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+  async function mountStripePayment(payment){
+    if(typeof window.Stripe!=='function')throw new Error('The secure payment form could not be loaded');
+    if(!payment?.publishable_key||!payment?.client_secret)throw new Error('Secure payment configuration is unavailable');
+    const stripe=window.Stripe(payment.publishable_key);
+    const checkout=stripe.initCheckout({
+      clientSecret:payment.client_secret,
+      elementsOptions:{appearance:{theme:'stripe',variables:{colorPrimary:getComputedStyle(document.body).getPropertyValue('--accent').trim()||'#176b45',borderRadius:'4px'}}}
+    });
+    checkout.on('change',session=>{paymentButton.disabled=!session.canConfirm});
+    const loaded=await checkout.loadActions();
+    if(loaded.type!=='success')throw new Error(loaded.error?.message||'The secure payment form could not be initialized');
+    stripeActions=loaded.actions;
+    checkout.createPaymentElement().mount('#payment-element');
+    paymentStage.hidden=false;
+    orderButton.hidden=true;
+    paymentButton.disabled=false;
+    paymentStage.scrollIntoView({behavior:'smooth',block:'center'});
   }
   function renderSummary(cart,quoted){
     latestCart=cart;
@@ -501,8 +552,18 @@ if(checkoutForm){
       if(confirmedCart)renderSummary(confirmedCart,true);
       const sale=body?.result?.sale;
       if(!sale)throw new Error('Order confirmation is unavailable');
-      checkoutForm.hidden=true;
       checkoutError.hidden=true;
+      const payment=body?.result?.payment||{};
+      if(payment.presentation==='hosted'){
+        if(!payment.url)throw new Error('The hosted payment page is unavailable');
+        location.assign(payment.url);
+        return;
+      }
+      if(payment.presentation==='elements'){
+        await mountStripePayment(payment);
+        return;
+      }
+      checkoutForm.hidden=true;
       const paid=sale.payment_status==='paid';
       checkoutResult.hidden=false;
       checkoutResult.innerHTML='<span class="status-pill">'+(paid?'Paid':'Payment pending')+'</span><h2>Order received</h2>'+(sale.invoice_number?'<p class="confirmation-number">Invoice '+esc(sale.invoice_number)+'</p>':'')+'<p>'+(paid?'Payment is confirmed and your order is being prepared.':'Your order is reserved. Follow the invoice payment instructions from the merchant to complete payment.')+'</p>';
@@ -510,12 +571,70 @@ if(checkoutForm){
     }catch(error){showError(error.message)}
     finally{setBusy(false,'')}
   });
+  paymentButton.addEventListener('click',async()=>{
+    if(!stripeActions)return;
+    paymentError.hidden=true;
+    paymentButton.disabled=true;
+    try{
+      const result=await stripeActions.confirm();
+      if(result?.type==='error')throw new Error(result.error?.message||'Payment could not be confirmed');
+      paymentStage.hidden=true;
+      checkoutForm.hidden=true;
+      checkoutResult.hidden=false;
+      checkoutResult.innerHTML='<span class="status-pill">Payment processing</span><h2>Confirming your order</h2><p>Payment was submitted. Confirmation can take a moment.</p>';
+      checkoutResult.scrollIntoView({behavior:'smooth',block:'start'});
+    }catch(error){
+      paymentError.textContent=error.message;
+      paymentError.hidden=false;
+      paymentButton.disabled=false;
+    }
+  });
   call(checkoutForm.dataset.cartAction).then(body=>renderSummary(cartFrom(body),false)).catch(error=>showError(error.message));
   const orderSummary=qs('[data-order-summary]');
   const mobile=matchMedia('(max-width:900px)');
   const syncSummary=()=>{if(mobile.matches)orderSummary.removeAttribute('open');else orderSummary.setAttribute('open','')};
   syncSummary();
   mobile.addEventListener?.('change',syncSummary);
+}
+
+const paymentReturn=qs('[data-payment-return]');
+if(paymentReturn){
+  const pill=qs('[data-return-pill]',paymentReturn);
+  const title=qs('[data-return-title]',paymentReturn);
+  const message=qs('[data-return-message]',paymentReturn);
+  const link=qs('[data-return-link]',paymentReturn);
+  let attempts=0;
+  const refresh=async()=>{
+    attempts++;
+    try{
+      const body=await call(paymentReturn.dataset.statusAction);
+      const status=body?.result||{};
+      if(status.payment_status==='paid'){
+        pill.textContent='Paid';
+        title.textContent='Order confirmed';
+        message.textContent=status.invoice_number?'Payment is confirmed for invoice '+status.invoice_number+'. Your order is being prepared.':'Payment is confirmed and your order is being prepared.';
+        link.hidden=false;
+        return;
+      }
+      if(status.status==='not_found'){
+        pill.textContent='Session unavailable';
+        title.textContent='We could not find this checkout';
+        message.textContent='Return to the store and check your order again.';
+        link.hidden=false;
+        return;
+      }
+      if(attempts<20)setTimeout(refresh,1500);
+      else{
+        title.textContent='Payment is still processing';
+        message.textContent='Your order remains reserved. Payment confirmation may arrive later.';
+        link.hidden=false;
+      }
+    }catch{
+      if(attempts<8)setTimeout(refresh,2000);
+      else link.hidden=false;
+    }
+  };
+  refresh();
 }
 `
 

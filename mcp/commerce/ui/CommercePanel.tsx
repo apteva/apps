@@ -23,6 +23,8 @@ interface Store {
   default_currency: string;
   default_locale: string;
   timezone: string;
+  payment_provider: string;
+  payment_presentation: string;
 }
 
 interface Variant {
@@ -175,7 +177,7 @@ type View = "products" | "collections" | "providers" | "storefront" | "stores" |
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
-const emptyStore = { name: "", slug: "", default_currency: "USD", default_locale: "en", timezone: "UTC" };
+const emptyStore = { name: "", slug: "", default_currency: "USD", default_locale: "en", timezone: "UTC", payment_provider: "manual", payment_presentation: "elements" };
 const emptyCollection = { store_id: "", title: "", handle: "", description_html: "" };
 
 export default function CommercePanel({ projectId, installId }: NativePanelProps) {
@@ -628,7 +630,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
         {view === "stores" && (
           <section className="grid xl:grid-cols-[minmax(0,1fr)_360px] gap-5">
             <DataTable headers={["Store", "Currency", "Locale", "Timezone", "Status"]} empty={stores.length === 0} emptyLabel="No stores">
-              {stores.map((store) => <tr key={store.id} onClick={() => { setEditingStore(store); setStoreForm({ name: store.name, slug: store.slug, default_currency: store.default_currency, default_locale: store.default_locale, timezone: store.timezone }); }} className="border-t border-border cursor-pointer hover:bg-bg-input/50"><td className="px-3 py-2.5"><div className="font-medium">{store.name}</div><div className="text-xs text-text-muted">/{store.slug}</div></td><td className="px-3 py-2.5">{store.default_currency}</td><td className="px-3 py-2.5">{store.default_locale}</td><td className="px-3 py-2.5">{store.timezone}</td><td className="px-3 py-2.5"><Status value={store.status} /></td></tr>)}
+              {stores.map((store) => <tr key={store.id} onClick={() => { setEditingStore(store); setStoreForm({ name: store.name, slug: store.slug, default_currency: store.default_currency, default_locale: store.default_locale, timezone: store.timezone, payment_provider: store.payment_provider, payment_presentation: store.payment_presentation }); }} className="border-t border-border cursor-pointer hover:bg-bg-input/50"><td className="px-3 py-2.5"><div className="font-medium">{store.name}</div><div className="text-xs text-text-muted">/{store.slug}</div></td><td className="px-3 py-2.5">{store.default_currency}</td><td className="px-3 py-2.5">{store.default_locale}</td><td className="px-3 py-2.5">{store.timezone}</td><td className="px-3 py-2.5"><Status value={store.status} /></td></tr>)}
             </DataTable>
             <form onSubmit={(event) => { event.preventDefault(); void run(async () => { if (!storeForm.name.trim()) throw new Error("Store name is required"); if (editingStore) await api(`/admin/stores/${editingStore.id}`, { method: "PATCH", body: JSON.stringify(storeForm) }); else await api("/admin/stores", { method: "POST", body: JSON.stringify(storeForm) }); setEditingStore(null); setStoreForm(emptyStore); }, editingStore ? "Store updated" : "Store created"); }} className="xl:border-l xl:border-border xl:pl-5 space-y-3">
               <div className="flex items-center justify-between"><h2 className="text-sm font-semibold">{editingStore ? "Edit store" : "New store"}</h2>{editingStore && <button type="button" onClick={() => { setEditingStore(null); setStoreForm(emptyStore); }} className="text-sm text-text-muted hover:text-text">Cancel</button>}</div>
@@ -636,6 +638,10 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
               <Field label="Slug"><input value={storeForm.slug} disabled={Boolean(editingStore)} onChange={(event) => setStoreForm({ ...storeForm, slug: event.target.value })} className={inputClass} /></Field>
               <div className="grid grid-cols-2 gap-3"><Field label="Currency"><input value={storeForm.default_currency} maxLength={3} onChange={(event) => setStoreForm({ ...storeForm, default_currency: event.target.value.toUpperCase() })} className={inputClass} /></Field><Field label="Locale"><input value={storeForm.default_locale} onChange={(event) => setStoreForm({ ...storeForm, default_locale: event.target.value })} className={inputClass} /></Field></div>
               <Field label="Timezone"><input value={storeForm.timezone} onChange={(event) => setStoreForm({ ...storeForm, timezone: event.target.value })} className={inputClass} /></Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Payment provider"><select value={storeForm.payment_provider} onChange={(event) => setStoreForm({ ...storeForm, payment_provider: event.target.value })} className={inputClass}><option value="manual">Manual</option><option value="stripe">Stripe</option></select></Field>
+                <Field label="Checkout UI"><select value={storeForm.payment_presentation} disabled={storeForm.payment_provider !== "stripe"} onChange={(event) => setStoreForm({ ...storeForm, payment_presentation: event.target.value })} className={inputClass}><option value="elements">Embedded form</option><option value="hosted">Stripe hosted</option></select></Field>
+              </div>
               <button type="submit" disabled={busy} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">{editingStore ? "Save store" : "Create store"}</button>
             </form>
           </section>

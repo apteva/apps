@@ -53,6 +53,14 @@ type ExtensionManifest struct {
 	Assets         map[string]string          `json:"assets,omitempty"`
 	Settings       map[string]any             `json:"settings,omitempty"`
 	SettingsSchema []ExtensionSetting         `json:"settings_schema,omitempty"`
+	BrowserPolicy  ExtensionBrowserPolicy     `json:"browser_policy,omitempty"`
+}
+
+type ExtensionBrowserPolicy struct {
+	ScriptOrigins  []string `json:"script_origins,omitempty"`
+	FrameOrigins   []string `json:"frame_origins,omitempty"`
+	ConnectOrigins []string `json:"connect_origins,omitempty"`
+	ImageOrigins   []string `json:"image_origins,omitempty"`
 }
 
 type ExtensionRoute struct {
@@ -149,7 +157,57 @@ func validateExtensionManifest(key, provider string, manifest ExtensionManifest)
 			return fmt.Errorf("invalid asset path %q", name)
 		}
 	}
+	for directive, origins := range map[string][]string{
+		"script_origins":  manifest.BrowserPolicy.ScriptOrigins,
+		"frame_origins":   manifest.BrowserPolicy.FrameOrigins,
+		"connect_origins": manifest.BrowserPolicy.ConnectOrigins,
+		"image_origins":   manifest.BrowserPolicy.ImageOrigins,
+	} {
+		for _, origin := range origins {
+			if err := validateBrowserOrigin(origin); err != nil {
+				return fmt.Errorf("%s: %w", directive, err)
+			}
+		}
+	}
 	return nil
+}
+
+func validateBrowserOrigin(origin string) error {
+	parsed, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.Path != "" ||
+		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return fmt.Errorf("invalid HTTPS origin %q", origin)
+	}
+	host := parsed.Hostname()
+	if strings.Contains(host, "*") && !strings.HasPrefix(host, "*.") {
+		return fmt.Errorf("wildcard origin %q must use a leading *.", origin)
+	}
+	return nil
+}
+
+func extensionContentSecurityPolicy(policy ExtensionBrowserPolicy) string {
+	join := func(base string, origins []string) string {
+		if len(origins) == 0 {
+			return base
+		}
+		return base + " " + strings.Join(origins, " ")
+	}
+	frameSource := "frame-src 'none'"
+	if len(policy.FrameOrigins) > 0 {
+		frameSource = "frame-src " + strings.Join(policy.FrameOrigins, " ")
+	}
+	return strings.Join([]string{
+		"default-src 'self'",
+		join("script-src 'self'", policy.ScriptOrigins),
+		"style-src 'self' 'unsafe-inline'",
+		join("connect-src 'self'", policy.ConnectOrigins),
+		frameSource,
+		join("img-src 'self' data: https:", policy.ImageOrigins),
+		"font-src 'self' data:",
+		"object-src 'none'",
+		"base-uri 'self'",
+		"form-action 'self'",
+	}, "; ")
 }
 
 func dbExtensionsList(db *sql.DB, pid string, siteID int64) ([]Extension, error) {
@@ -601,6 +659,12 @@ func (a *App) tryHandleExtensionRoute(w http.ResponseWriter, r *http.Request, ct
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "private, no-cache")
+			if len(manifest.BrowserPolicy.ScriptOrigins)+len(manifest.BrowserPolicy.FrameOrigins)+
+				len(manifest.BrowserPolicy.ConnectOrigins)+len(manifest.BrowserPolicy.ImageOrigins) > 0 {
+				w.Header().Set("Content-Security-Policy", extensionContentSecurityPolicy(manifest.BrowserPolicy))
+			}
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if r.Method != http.MethodHead {
 				_, _ = w.Write([]byte(body))
 			}
@@ -762,6 +826,7 @@ func validActionOrigin(r *http.Request) bool {
 }
 
 func (a *App) handleExtensionAction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return

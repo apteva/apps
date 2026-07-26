@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.7
+version: 0.2.0
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
   manual-payment path (creates a draft → open invoice in billing for
-  wire / card-by-portal recording). Stripe Checkout Session and the
-  webhook-driven auto-paid flow land in v0.2.0 alongside billing's
-  Stripe integration.
+  wire / card-by-portal recording). v0.2.0 adds hosted and custom
+  Stripe Checkout Sessions through Billing, with retry-safe invoice
+  reuse and webhook-driven payment completion.
 
   Storefront blocks (add-to-cart, cart-summary, checkout-page) are
   added to the content app separately — checkout exposes the REST +
@@ -56,9 +56,9 @@ provides:
       description: Replace frozen shipping, discount, tax, and adjustment metadata before payment.
     - name: checkout_pay
       description: |
-        Submit the session for payment. v0.1.0 creates a draft → finalized invoice in
-        billing and returns it for manual payment recording. v0.2.0 will additionally
-        return a Stripe Checkout Session redirect URL when provider='stripe'.
+        Submit the session for payment. Manual mode returns a finalized Billing
+        invoice. Stripe mode returns either a hosted redirect URL or browser-safe
+        Elements configuration and reuses the same invoice on retries.
     - name: checkout_get
       description: Fetch a checkout_session by id, including the linked invoice_id when paid.
     - name: checkout_cancel
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: checkout/v0.1.7
+    ref: checkout/v0.2.0
     entry: mcp/checkout
   port: 8080
   health_check: /health
@@ -105,7 +105,7 @@ config_schema:
       set) never expire.
   - name: session_ttl_minutes
     type: text
-    default: "30"
+    default: "60"
     label: Checkout session TTL (minutes)
     description: |
       An awaiting-payment session that doesn't complete within this

@@ -96,7 +96,7 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 		"customers_upsert_by_email", "customers_update", "customers_merge",
 		"invoices_create", "invoices_create_from_prepared_lines", "invoices_add_line_item", "invoices_update",
 		"invoices_finalize", "invoices_void", "invoices_get", "invoices_search",
-		"invoices_render_pdf", "invoices_send_payment_link", "invoices_collect",
+		"invoices_render_pdf", "invoices_create_payment_session", "invoices_send_payment_link", "invoices_collect",
 		"payment_method_setup_create", "payment_methods_list",
 		"payment_method_default_set", "payment_method_detach",
 		"payments_record", "payments_list",
