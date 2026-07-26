@@ -1208,14 +1208,9 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 	}
 	if ch.Status != "started" {
 		if ch.Status == "awaiting_payment" && ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
-			var response map[string]any
-			if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{
-				"_project_id": pid,
-				"session_id":  *ch.CheckoutSessionID,
-			}, &response); err != nil {
-				return nil, fmt.Errorf("checkout_get: %w", err)
-			}
-			if checkoutExternalPatchMatches(unwrap(response, "session"), patch) {
+			if matches, err := checkoutRemotePatchMatches(ctx, pid, *ch.CheckoutSessionID, patch); err != nil {
+				return nil, err
+			} else if matches {
 				return ch, nil
 			}
 		}
@@ -1224,6 +1219,13 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
 		var out map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_update", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID, "patch": patch}, &out); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "awaiting_payment") {
+				if matches, matchErr := checkoutRemotePatchMatches(ctx, pid, *ch.CheckoutSessionID, patch); matchErr != nil {
+					return nil, matchErr
+				} else if matches {
+					return ch, nil
+				}
+			}
 			return nil, fmt.Errorf("checkout_update: %w", err)
 		}
 		if step := firstNonEmpty(strArg(patch, "current_step"), strArg(patch, "step")); step != "" {
@@ -1264,6 +1266,17 @@ func checkoutPatchMatches(ch *CheckoutSession, patch map[string]any) bool {
 		return false
 	}
 	return true
+}
+
+func checkoutRemotePatchMatches(ctx *sdk.AppCtx, pid string, sessionID int64, patch map[string]any) (bool, error) {
+	var response map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{
+		"_project_id": pid,
+		"session_id":  sessionID,
+	}, &response); err != nil {
+		return false, fmt.Errorf("checkout_get: %w", err)
+	}
+	return checkoutExternalPatchMatches(unwrap(response, "session"), patch), nil
 }
 
 func checkoutExternalPatchMatches(session, patch map[string]any) bool {
