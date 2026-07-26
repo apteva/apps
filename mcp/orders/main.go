@@ -35,11 +35,93 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("orders requires a db block")
 	}
+	if err := ensureGenericFulfillmentSchema(ctx.AppDB()); err != nil {
+		return fmt.Errorf("ensure generic fulfillment schema: %w", err)
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("orders mounted",
 		"version", a.Manifest().Version,
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
+}
+
+type schemaColumn struct {
+	table      string
+	name       string
+	definition string
+}
+
+var genericFulfillmentColumns = []schemaColumn{
+	{table: "orders", name: "order_type", definition: "TEXT NOT NULL DEFAULT 'physical'"},
+	{table: "order_items", name: "fulfillment_type", definition: "TEXT NOT NULL DEFAULT 'warehouse_shipment'"},
+	{table: "order_items", name: "fulfillment_app", definition: "TEXT NOT NULL DEFAULT 'orders'"},
+	{table: "fulfillments", name: "fulfillment_type", definition: "TEXT NOT NULL DEFAULT 'warehouse_shipment'"},
+	{table: "fulfillments", name: "fulfillment_app", definition: "TEXT NOT NULL DEFAULT 'orders'"},
+	{table: "fulfillments", name: "external_ref", definition: "TEXT"},
+	{table: "fulfillments", name: "idempotency_key", definition: "TEXT"},
+	{table: "fulfillments", name: "attempt_count", definition: "INTEGER NOT NULL DEFAULT 0"},
+}
+
+var genericFulfillmentIndexes = []string{
+	"CREATE INDEX IF NOT EXISTS ix_orders_type ON orders(project_id, order_type, updated_at DESC)",
+	"CREATE INDEX IF NOT EXISTS ix_order_items_fulfillment ON order_items(fulfillment_app, fulfillment_type)",
+	"CREATE INDEX IF NOT EXISTS ix_fulfillments_app ON fulfillments(project_id, fulfillment_app, fulfillment_type, status)",
+	"CREATE UNIQUE INDEX IF NOT EXISTS ux_fulfillments_idempotency ON fulfillments(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''",
+}
+
+func ensureGenericFulfillmentSchema(db *sql.DB) error {
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		statement := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", column.table, column.name, column.definition)
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("add %s.%s: %w", column.table, column.name, err)
+		}
+	}
+	for _, statement := range genericFulfillmentIndexes {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("create generic fulfillment index: %w", err)
+		}
+	}
+	return nil
+}
+
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	switch table {
+	case "orders", "order_items", "fulfillments":
+	default:
+		return false, fmt.Errorf("unsupported schema table %q", table)
+	}
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("scan %s schema: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	return false, nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }

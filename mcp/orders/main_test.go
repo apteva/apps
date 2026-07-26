@@ -1,7 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -49,6 +52,90 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 }
 
 var _ sdk.PlatformClient = (*platformStub)(nil)
+
+func TestEnsureGenericFulfillmentSchemaIsIdempotent(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	baseSchema, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("read base migration: %v", err)
+	}
+	if _, err := db.Exec(string(baseSchema)); err != nil {
+		t.Fatalf("apply base migration: %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := ensureGenericFulfillmentSchema(db); err != nil {
+			t.Fatalf("ensure schema attempt %d: %v", attempt, err)
+		}
+	}
+
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			t.Fatalf("inspect %s.%s: %v", column.table, column.name, err)
+		}
+		if !exists {
+			t.Errorf("missing column %s.%s", column.table, column.name)
+		}
+	}
+
+	for _, index := range []string{
+		"ix_orders_type",
+		"ix_order_items_fulfillment",
+		"ix_fulfillments_app",
+		"ux_fulfillments_idempotency",
+	} {
+		var found string
+		if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", index).Scan(&found); err != nil {
+			t.Errorf("missing index %s: %v", index, err)
+		}
+	}
+}
+
+func TestEnsureGenericFulfillmentSchemaAddsMissingColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders-legacy.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacySchema := `
+		CREATE TABLE orders (
+			id INTEGER PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE order_items (
+			id INTEGER PRIMARY KEY
+		);
+		CREATE TABLE fulfillments (
+			id INTEGER PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'queued'
+		);
+	`
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := ensureGenericFulfillmentSchema(db); err != nil {
+		t.Fatalf("ensure legacy schema: %v", err)
+	}
+
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			t.Fatalf("inspect %s.%s: %v", column.table, column.name, err)
+		}
+		if !exists {
+			t.Errorf("missing repaired column %s.%s", column.table, column.name)
+		}
+	}
+}
 
 func TestOrderLifecycle(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))

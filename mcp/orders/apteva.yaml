@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: orders
 display_name: Orders
-version: 0.2.2
+version: 0.2.3
 description: |
   Generic commerce fulfillment ledger. Orders sits after checkout/billing
   and before fulfillment: it records durable order state, line items,
@@ -12,6 +12,9 @@ description: |
   Catalog owns products/prices, Checkout owns buyer sessions, Billing
   owns invoices/payments, and Orders owns fulfillment workflow for
   physical, hosting, SaaS, digital, and service products.
+
+  v0.2.3 makes the generic fulfillment schema migration recover safely after
+  an interrupted upgrade.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/orders
@@ -113,7 +116,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: orders/v0.2.3
     entry: mcp/orders
   port: 8080
   health_check: /health
