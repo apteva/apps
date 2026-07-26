@@ -1560,24 +1560,25 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64) (*CheckoutSessi
 			"unit_price_cents": it.UnitAmountCents,
 			"price_id":         it.PriceID,
 			"product_id":       it.ProductID,
+			"tax_rate_bps":     0,
 		})
 	}
 	if session.ShippingCents > 0 {
 		lineItems = append(lineItems, map[string]any{
 			"description": "Shipping", "quantity": 1, "unit_price_cents": session.ShippingCents,
-			"metadata": map[string]any{"checkout_adjustment": "shipping"},
+			"tax_rate_bps": 0, "metadata": map[string]any{"checkout_adjustment": "shipping"},
 		})
 	}
 	if session.TaxCents > 0 {
 		lineItems = append(lineItems, map[string]any{
 			"description": "Tax", "quantity": 1, "unit_price_cents": session.TaxCents,
-			"metadata": map[string]any{"checkout_adjustment": "tax"},
+			"tax_rate_bps": 0, "metadata": map[string]any{"checkout_adjustment": "tax"},
 		})
 	}
 	if session.DiscountCents > 0 {
 		lineItems = append(lineItems, map[string]any{
 			"description": "Discount", "quantity": 1, "unit_price_cents": -session.DiscountCents,
-			"metadata": map[string]any{"checkout_adjustment": "discount"},
+			"tax_rate_bps": 0, "metadata": map[string]any{"checkout_adjustment": "discount"},
 		})
 	}
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.5
+version: 0.1.6
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: checkout/v0.1.5
+    ref: checkout/v0.1.6
     entry: mcp/checkout
   port: 8080
   health_check: /health
