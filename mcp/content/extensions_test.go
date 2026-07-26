@@ -73,6 +73,36 @@ func testExtensionManifest() ExtensionManifest {
 	}
 }
 
+func TestPublicGatewayIsTheOnlyAnonymousManifestRoute(t *testing.T) {
+	manifest, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundGateway := false
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if route.Prefix == "/public/" {
+			foundGateway = route.NoAuth
+			continue
+		}
+		if route.NoAuth {
+			t.Fatalf("unexpected anonymous manifest route: %#v", route)
+		}
+	}
+	if !foundGateway {
+		t.Fatal("/public/ must be declared as an anonymous manifest route")
+	}
+
+	foundRuntimeGateway := false
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.Pattern == "/public/" {
+			foundRuntimeGateway = route.NoAuth
+		}
+	}
+	if !foundRuntimeGateway {
+		t.Fatal("/public/ must be anonymous in the sidecar runtime")
+	}
+}
+
 func TestExtensionManifestValidationRejectsReservedRoutes(t *testing.T) {
 	manifest := testExtensionManifest()
 	manifest.Routes[0].Pattern = "/_actions/:name"

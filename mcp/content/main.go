@@ -135,6 +135,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/extensions/", Handler: a.handleHTTPExtensionItem},
 
 		// ── public render surface ───────────────────────────────
+		{Pattern: "/public/", Handler: a.handlePublicGateway, NoAuth: true},
 		{Pattern: "/_theme/", Handler: a.handleThemeAsset, NoAuth: true},
 		{Pattern: "/_media/", Handler: a.handleMediaAsset, NoAuth: true},
 		{Pattern: "/_extensions/", Handler: a.handleExtensionAsset, NoAuth: true},
@@ -144,6 +145,41 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/feed.xml", Handler: a.handleFeed, NoAuth: true},
 		{Pattern: "/sitemap.xml", Handler: a.handleSitemap, NoAuth: true},
 		{Pattern: "/", Handler: a.handlePublic, NoAuth: true},
+	}
+}
+
+// handlePublicGateway exposes a constrained anonymous path through the
+// platform app proxy. Custom domains still reach the public handlers at the
+// site root; local and dashboard previews use /api/apps/content/public/.
+func (a *App) handlePublicGateway(w http.ResponseWriter, r *http.Request) {
+	publicRequest := r.Clone(r.Context())
+	urlCopy := *r.URL
+	publicRequest.URL = &urlCopy
+	publicRequest.URL.Path = strings.TrimPrefix(publicRequest.URL.Path, "/public")
+	if publicRequest.URL.Path == "" {
+		publicRequest.URL.Path = "/"
+	}
+	publicRequest.Header.Set("X-Forwarded-Prefix", strings.TrimSuffix(computeURLPrefix(r), "/")+"/public/")
+
+	switch {
+	case strings.HasPrefix(publicRequest.URL.Path, "/_theme/"):
+		a.handleThemeAsset(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/_media/"):
+		a.handleMediaAsset(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/_extensions/"):
+		a.handleExtensionAsset(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/_actions/"):
+		a.handleExtensionAction(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/_forms/submit/"):
+		a.handleFormSubmit(w, publicRequest)
+	case strings.HasPrefix(publicRequest.URL.Path, "/preview/"):
+		a.handlePreview(w, publicRequest)
+	case publicRequest.URL.Path == "/feed.xml":
+		a.handleFeed(w, publicRequest)
+	case publicRequest.URL.Path == "/sitemap.xml":
+		a.handleSitemap(w, publicRequest)
+	default:
+		a.handlePublic(w, publicRequest)
 	}
 }
 

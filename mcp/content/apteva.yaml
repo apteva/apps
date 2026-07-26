@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.12.0
+version: 2.12.1
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -93,6 +93,8 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /public/
+      no_auth: true
     - prefix: /
   mcp_tools:
     # Sites (multi-site v2.0)
@@ -232,7 +234,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content/v2.12.0
+    ref: content/v2.12.1
     entry: mcp/content
   port: 8080
   health_check: /health
