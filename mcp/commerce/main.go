@@ -788,7 +788,7 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 	if existing, err := dbCartGetBySession(ctx.AppDB(), pid, store.ID, token); err != nil {
 		return nil, err
 	} else if existing != nil {
-		if existing.Status != "open" && existing.Status != "checkout" {
+		if existing.Status != "open" && existing.Status != "checkout" && existing.Status != "awaiting_payment" {
 			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
 		}
 		return existing, nil

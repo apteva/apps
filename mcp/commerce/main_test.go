@@ -596,6 +596,18 @@ func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
 	if calls := countPlatformCalls(platform.calls, "checkout", "cart_create"); calls != 1 {
 		t.Fatalf("checkout cart_create calls=%d, want 1", calls)
 	}
+	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='awaiting_payment' WHERE id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed, err := (&App{}).createCart(ctx, args); err != nil || resumed.ID != first.ID {
+		t.Fatalf("awaiting-payment storefront session was not resumed: cart=%#v err=%v", resumed, err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='converted' WHERE id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&App{}).createCart(ctx, args); err == nil {
+		t.Fatal("converted storefront session was reused")
+	}
 }
 
 func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
