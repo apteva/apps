@@ -328,7 +328,7 @@ func storefrontStatus(pid string, store *Store, site map[string]any, errorMessag
 	}
 	if siteSlug != "" {
 		query := url.Values{"project_id": []string{pid}, "site": []string{siteSlug}}
-		status.PreviewURL = "/api/apps/content/?" + query.Encode()
+		status.PreviewURL = "/api/apps/content/public/?" + query.Encode()
 	}
 	return status
 }

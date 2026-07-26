@@ -420,6 +420,9 @@ func TestConfigureStorefrontRegistersGenericContentExtension(t *testing.T) {
 	if !status.Configured || !status.ContentReady || status.SiteID != 81 || status.SiteSlug != "main" {
 		t.Fatalf("unexpected storefront status: %#v", status)
 	}
+	if !strings.HasPrefix(status.PreviewURL, "/api/apps/content/public/") {
+		t.Fatalf("preview URL must use Content's constrained public gateway: %q", status.PreviewURL)
+	}
 	call := findPlatformCall(platform.calls, "content", "extensions_upsert")
 	if call.Tool == "" {
 		t.Fatalf("Content extension was not registered: %#v", platform.calls)
