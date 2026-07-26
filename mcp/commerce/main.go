@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
@@ -1362,7 +1363,7 @@ func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *Ch
 	out := map[string]any{
 		"provider":        provider,
 		"presentation":    presentation,
-		"idempotency_key": fmt.Sprintf("commerce-stripe-%s-v1-%s-%d", presentation, pid, checkout.ID),
+		"idempotency_key": fmt.Sprintf("commerce-stripe-%s-v2-%s-%d-%s", presentation, pid, checkout.ID, checkoutPaymentFingerprint(checkout)),
 	}
 	paymentSettings := mapArg(store.Metadata, "payments")
 	if methods := providerRows(paymentSettings["payment_method_types"]); len(methods) > 0 {
@@ -1381,6 +1382,15 @@ func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *Ch
 		out["cancel_url"] = cancelURL
 	}
 	return out, nil
+}
+
+func checkoutPaymentFingerprint(checkout *CheckoutSession) string {
+	payload, _ := json.Marshal(map[string]any{
+		"checkout_session_id": checkout.CheckoutSessionID,
+		"quote":               checkout.Quote,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:8])
 }
 
 func commerceReturnURL(ctx *sdk.AppCtx, pid string, store *Store) (string, error) {

@@ -760,12 +760,13 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 		ID: 7, PublicBaseURL: "https://shop.example/",
 		PaymentProvider: "stripe", PaymentPresentation: "elements",
 	}
-	args, err := commercePaymentArgs(ctx, "payment-args", store, &CheckoutSession{ID: 12})
+	checkout := &CheckoutSession{ID: 12, Quote: map[string]any{"total_cents": 1200, "currency": "EUR"}}
+	args, err := commercePaymentArgs(ctx, "payment-args", store, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if args["return_url"] != "https://shop.example/checkout/return" ||
-		args["idempotency_key"] != "commerce-stripe-elements-v1-payment-args-12" {
+		args["idempotency_key"] != "commerce-stripe-elements-v2-payment-args-12-"+checkoutPaymentFingerprint(checkout) {
 		t.Fatalf("unexpected payment args: %#v", args)
 	}
 	if _, constrained := args["payment_method_types"]; constrained {
@@ -773,14 +774,23 @@ func TestCommercePaymentArgsUseTrustedStoreURL(t *testing.T) {
 	}
 
 	store.PaymentPresentation = "hosted"
-	args, err = commercePaymentArgs(ctx, "payment-args", store, &CheckoutSession{ID: 12})
+	args, err = commercePaymentArgs(ctx, "payment-args", store, checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if args["success_url"] != "https://shop.example/checkout/return" ||
 		args["cancel_url"] != "https://shop.example/checkout" ||
-		args["idempotency_key"] != "commerce-stripe-hosted-v1-payment-args-12" {
+		args["idempotency_key"] != "commerce-stripe-hosted-v2-payment-args-12-"+checkoutPaymentFingerprint(checkout) {
 		t.Fatalf("unexpected hosted URLs: %#v", args)
+	}
+	changed := *checkout
+	changed.Quote = map[string]any{"total_cents": 1400, "currency": "EUR"}
+	changedArgs, err := commercePaymentArgs(ctx, "payment-args", store, &changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedArgs["idempotency_key"] == args["idempotency_key"] {
+		t.Fatal("changed checkout quote reused its Stripe idempotency key")
 	}
 	if _, exists := args["expires_at"]; exists {
 		t.Fatalf("payment args contain a retry-unstable expiry: %#v", args)

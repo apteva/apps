@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.7.3
+version: 0.7.4
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -138,7 +138,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.7.3
+    ref: commerce/v0.7.4
     entry: mcp/commerce
   port: 8080
   health_check: /health
