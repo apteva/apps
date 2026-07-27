@@ -111,8 +111,8 @@ func decodeResponse[T any](t *testing.T, response *httptest.ResponseRecorder) T 
 
 func TestManifestExposesDashboardPanel(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.2.1" {
-		t.Fatalf("manifest version=%q, want 0.2.1", manifest.Version)
+	if manifest.Version != "0.3.0" {
+		t.Fatalf("manifest version=%q, want 0.3.0", manifest.Version)
 	}
 	if len(manifest.Provides.UIPanels) != 1 {
 		t.Fatalf("ui panels=%d, want 1", len(manifest.Provides.UIPanels))
@@ -152,6 +152,7 @@ func TestRegisterAndDeliver(t *testing.T) {
 		"device_id":       body.Device.ID,
 		"type":            "approval",
 		"item_id":         "approval-42",
+		"project_id":      "project-7",
 		"idempotency_key": "event-42",
 		"badge":           3,
 	})
@@ -161,6 +162,9 @@ func TestRegisterAndDeliver(t *testing.T) {
 	push := decodeResponse[delivery](t, delivered)
 	if push.Status != "sent" || push.ProviderID != "apns-test-id" {
 		t.Fatalf("unexpected delivery: %+v", push)
+	}
+	if push.ProjectID != "project-7" {
+		t.Fatalf("project routing not stored: %+v", push)
 	}
 	if len(h.caller.calls) != 1 || h.caller.calls[0].token != token {
 		t.Fatalf("provider calls: %+v", h.caller.calls)
@@ -234,6 +238,124 @@ func TestDeviceTokensAreEncryptedAtRest(t *testing.T) {
 	}
 }
 
+func TestRevokingCurrentGrantKeepsOtherInstanceConnected(t *testing.T) {
+	h := newHarness(t)
+	token := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	register := func(instance string) struct {
+		Device device `json:"device"`
+		Grant  string `json:"grant"`
+	} {
+		response := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
+			"provider_token": token,
+			"platform":       "ios",
+			"bundle_id":      "ai.apteva.mobile",
+			"environment":    "sandbox",
+			"instance_ref":   instance,
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("register %s status=%d body=%s", instance, response.Code, response.Body)
+		}
+		return decodeResponse[struct {
+			Device device `json:"device"`
+			Grant  string `json:"grant"`
+		}](t, response)
+	}
+
+	first := register("instance-one")
+	second := register("instance-two")
+	if first.Device.ID != second.Device.ID {
+		t.Fatalf("same APNs token created different devices: %q / %q", first.Device.ID, second.Device.ID)
+	}
+
+	revoked := h.request(t, http.MethodDelete, "/v1/grants/current", first.Grant, nil)
+	if revoked.Code != http.StatusOK {
+		t.Fatalf("revoke status=%d body=%s", revoked.Code, revoked.Body)
+	}
+	oldGrant := h.request(t, http.MethodGet, "/v1/deliveries/missing", first.Grant, nil)
+	if oldGrant.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked grant status=%d body=%s", oldGrant.Code, oldGrant.Body)
+	}
+
+	delivered := h.request(t, http.MethodPost, "/v1/deliveries", second.Grant, map[string]any{
+		"device_id":       second.Device.ID,
+		"type":            "alert",
+		"item_id":         "alert-1",
+		"idempotency_key": "instance-two-alert-1",
+	})
+	if delivered.Code != http.StatusCreated {
+		t.Fatalf("second grant delivery status=%d body=%s", delivered.Code, delivered.Body)
+	}
+	device, err := h.app.store.deviceByID(second.Device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if device.Status != "active" {
+		t.Fatalf("device status=%q after one grant revoked", device.Status)
+	}
+}
+
+func TestReregisteringRotatesGrantForSameInstance(t *testing.T) {
+	h := newHarness(t)
+	input := map[string]any{
+		"provider_token": "abababababababababababababababababababababababababababababababab",
+		"platform":       "ios",
+		"bundle_id":      "ai.apteva.mobile",
+		"environment":    "sandbox",
+		"instance_ref":   "same-instance",
+	}
+	firstResponse := h.request(t, http.MethodPost, "/v1/devices/register", "", input)
+	secondResponse := h.request(t, http.MethodPost, "/v1/devices/register", "", input)
+	if firstResponse.Code != http.StatusCreated || secondResponse.Code != http.StatusCreated {
+		t.Fatalf("register statuses=%d/%d", firstResponse.Code, secondResponse.Code)
+	}
+	first := decodeResponse[struct {
+		Device device `json:"device"`
+		Grant  string `json:"grant"`
+	}](t, firstResponse)
+	second := decodeResponse[struct {
+		Device device `json:"device"`
+		Grant  string `json:"grant"`
+	}](t, secondResponse)
+
+	oldGrant := h.request(t, http.MethodGet, "/v1/deliveries/missing", first.Grant, nil)
+	if oldGrant.Code != http.StatusUnauthorized {
+		t.Fatalf("rotated grant status=%d body=%s", oldGrant.Code, oldGrant.Body)
+	}
+	delivered := h.request(t, http.MethodPost, "/v1/deliveries", second.Grant, map[string]any{
+		"device_id":       second.Device.ID,
+		"type":            "report",
+		"item_id":         "report-1",
+		"idempotency_key": "same-instance-report-1",
+	})
+	if delivered.Code != http.StatusCreated {
+		t.Fatalf("replacement grant delivery status=%d body=%s", delivered.Code, delivered.Body)
+	}
+}
+
+func TestRegistrationRateLimitsRepeatedDeviceToken(t *testing.T) {
+	h := newHarness(t)
+	input := map[string]any{
+		"provider_token": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+		"platform":       "ios",
+		"bundle_id":      "ai.apteva.mobile",
+		"environment":    "sandbox",
+		"instance_ref":   "instance",
+	}
+	for attempt := 0; attempt < registrationTokenLimit; attempt++ {
+		response := h.request(t, http.MethodPost, "/v1/devices/register", "", input)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("attempt %d status=%d body=%s", attempt+1, response.Code, response.Body)
+		}
+	}
+	response := h.request(t, http.MethodPost, "/v1/devices/register", "", input)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limit status=%d body=%s", response.Code, response.Body)
+	}
+	if response.Header().Get("Retry-After") != "60" {
+		t.Fatalf("Retry-After=%q", response.Header().Get("Retry-After"))
+	}
+}
+
 func TestRegistrationRejectsInvalidRouting(t *testing.T) {
 	h := newHarness(t)
 	response := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
@@ -295,13 +417,17 @@ func TestConnectionEncryptionKeyComesFromBoundIntegration(t *testing.T) {
 	}
 }
 
-func TestAPNsProviderUsesDeviceRouting(t *testing.T) {
+func TestAPNsProviderUsesDeviceAndProjectRouting(t *testing.T) {
 	platform := &credentialPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
 	_, err := (apnsProvider{}).send(ctx, "device-token", &device{
 		BundleID:    "com.example.second-app",
 		Environment: "production",
-	}, &delivery{Type: "alert", ItemID: "alert-1"})
+	}, &delivery{
+		Type:      "alert",
+		ItemID:    "alert-1",
+		ProjectID: "project-7",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,5 +436,12 @@ func TestAPNsProviderUsesDeviceRouting(t *testing.T) {
 	}
 	if platform.executeInput["environment"] != "production" {
 		t.Fatalf("environment=%v", platform.executeInput["environment"])
+	}
+	data, ok := platform.executeInput["data"].(map[string]any)
+	if !ok {
+		t.Fatalf("data=%T, want map[string]any", platform.executeInput["data"])
+	}
+	if data["project_id"] != "project-7" {
+		t.Fatalf("project_id=%v", data["project_id"])
 	}
 }

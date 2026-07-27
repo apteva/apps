@@ -28,6 +28,7 @@ type deliveryRequest struct {
 	DeviceID       string `json:"device_id"`
 	Type           string `json:"type"`
 	ItemID         string `json:"item_id"`
+	ProjectID      string `json:"project_id"`
 	Badge          *int   `json:"badge"`
 	IdempotencyKey string `json:"idempotency_key"`
 }
@@ -37,6 +38,9 @@ func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !a.allowRegistration(w, r, "") {
+		return
+	}
 	var input registerRequest
 	if err := readJSON(w, r, &input); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -52,6 +56,9 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if input.Platform != "ios" || len(input.ProviderToken) < 32 || input.InstanceRef == "" ||
 		!validBundleID(input.BundleID) || !validEnvironment(input.Environment) {
 		writeError(w, http.StatusBadRequest, "provider_token, instance_ref, a valid bundle_id, and environment=sandbox|production are required")
+		return
+	}
+	if !a.allowRegistration(w, r, digest(input.ProviderToken)) {
 		return
 	}
 	encrypted, err := a.cipher.encrypt(input.ProviderToken)
@@ -92,6 +99,22 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"grant":      secret,
 		"expires_at": g.ExpiresAt,
 	})
+}
+
+func (a *App) handleRevokeCurrentGrant(w http.ResponseWriter, r *http.Request) {
+	g, ok := a.requireGrant(w, r)
+	if !ok {
+		return
+	}
+	if err := a.store.revokeGrant(g.ID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "grant not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not revoke grant")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revoked": true})
 }
 
 func (a *App) handleDeleteDevice(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +160,11 @@ func (a *App) handleCreateDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "grant does not belong to this device")
 		return
 	}
+	input.ProjectID = strings.TrimSpace(input.ProjectID)
+	if len(input.ProjectID) > 255 {
+		writeError(w, http.StatusBadRequest, "project_id is too long")
+		return
+	}
 	if !validDeliveryType(input.Type) || strings.TrimSpace(input.IdempotencyKey) == "" {
 		writeError(w, http.StatusBadRequest, "type and idempotency_key are required")
 		return
@@ -145,7 +173,14 @@ func (a *App) handleCreateDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "badge must be between 0 and 9999")
 		return
 	}
-	d, duplicate, err := a.store.createDelivery(g, input.Type, input.ItemID, input.Badge, input.IdempotencyKey)
+	d, duplicate, err := a.store.createDelivery(
+		g,
+		input.Type,
+		input.ItemID,
+		input.ProjectID,
+		input.Badge,
+		input.IdempotencyKey,
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create delivery")
 		return
@@ -171,7 +206,7 @@ func (a *App) handleTestDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create test delivery")
 		return
 	}
-	d, _, err := a.store.createDelivery(g, "test", "", nil, key)
+	d, _, err := a.store.createDelivery(g, "test", "", "", nil, key)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create test delivery")
 		return
@@ -209,7 +244,7 @@ func (a *App) handleAdminTestDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create test delivery")
 		return
 	}
-	push, _, err := a.store.createDelivery(&g, "test", "", nil, key)
+	push, _, err := a.store.createDelivery(&g, "test", "", "", nil, key)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create test delivery")
 		return

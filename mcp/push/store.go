@@ -38,6 +38,7 @@ type delivery struct {
 	IdempotencyKey string `json:"idempotency_key"`
 	Type           string `json:"type"`
 	ItemID         string `json:"item_id,omitempty"`
+	ProjectID      string `json:"project_id,omitempty"`
 	Badge          *int   `json:"badge,omitempty"`
 	Status         string `json:"status"`
 	ProviderID     string `json:"provider_id,omitempty"`
@@ -125,12 +126,27 @@ func (s *store) createGrant(deviceID, instanceRef, secretHash string, expires ti
 		InstanceRef: instanceRef,
 		ExpiresAt:   expires.UTC().Format(time.RFC3339Nano),
 	}
-	_, err = s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin grant rotation: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`
+		UPDATE grants SET revoked_at = ?
+		WHERE device_id = ? AND instance_ref = ? AND revoked_at IS NULL`,
+		now, g.DeviceID, g.InstanceRef,
+	); err != nil {
+		return nil, fmt.Errorf("revoke previous grant: %w", err)
+	}
+	_, err = tx.Exec(`
 		INSERT INTO grants (id, device_id, instance_ref, secret_hash, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		g.ID, g.DeviceID, g.InstanceRef, secretHash, g.ExpiresAt, now)
 	if err != nil {
 		return nil, fmt.Errorf("create grant: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit grant rotation: %w", err)
 	}
 	return g, nil
 }
@@ -150,6 +166,25 @@ func (s *store) authorizeGrant(secret string) (*grant, error) {
 		return nil, errors.New("grant is expired or revoked")
 	}
 	return &g, nil
+}
+
+func (s *store) revokeGrant(id string) error {
+	result, err := s.db.Exec(
+		`UPDATE grants SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *store) revokeDevice(id string) error {
@@ -180,7 +215,12 @@ func (s *store) markDeviceInvalid(id string) {
 	_, _ = s.db.Exec(`UPDATE devices SET status = 'invalid' WHERE id = ?`, id)
 }
 
-func (s *store) createDelivery(g *grant, typ, itemID string, badge *int, idempotencyKey string) (*delivery, bool, error) {
+func (s *store) createDelivery(
+	g *grant,
+	typ, itemID, projectID string,
+	badge *int,
+	idempotencyKey string,
+) (*delivery, bool, error) {
 	id, err := randomValue("del_", 16)
 	if err != nil {
 		return nil, false, err
@@ -188,9 +228,9 @@ func (s *store) createDelivery(g *grant, typ, itemID string, badge *int, idempot
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err = s.db.Exec(`
 		INSERT INTO deliveries
-			(id, grant_id, device_id, idempotency_key, type, item_id, badge, status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
-		id, g.ID, g.DeviceID, idempotencyKey, typ, itemID, badge, now)
+			(id, grant_id, device_id, idempotency_key, type, item_id, project_id, badge, status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+		id, g.ID, g.DeviceID, idempotencyKey, typ, itemID, projectID, badge, now)
 	if err != nil {
 		existing, getErr := s.deliveryByIdempotency(g.ID, idempotencyKey)
 		if getErr == nil {
@@ -204,14 +244,14 @@ func (s *store) createDelivery(g *grant, typ, itemID string, badge *int, idempot
 
 func (s *store) deliveryByIdempotency(grantID, key string) (*delivery, error) {
 	return scanDelivery(s.db.QueryRow(`
-		SELECT id, grant_id, device_id, idempotency_key, type, item_id, badge,
+		SELECT id, grant_id, device_id, idempotency_key, type, item_id, project_id, badge,
 		       status, provider_id, error, created_at, sent_at
 		FROM deliveries WHERE grant_id = ? AND idempotency_key = ?`, grantID, key))
 }
 
 func (s *store) deliveryByID(id string) (*delivery, error) {
 	return scanDelivery(s.db.QueryRow(`
-		SELECT id, grant_id, device_id, idempotency_key, type, item_id, badge,
+		SELECT id, grant_id, device_id, idempotency_key, type, item_id, project_id, badge,
 		       status, provider_id, error, created_at, sent_at
 		FROM deliveries WHERE id = ?`, id))
 }
@@ -221,7 +261,7 @@ func scanDelivery(row rowScanner) (*delivery, error) {
 	var badge sql.NullInt64
 	var sent sql.NullString
 	if err := row.Scan(
-		&d.ID, &d.GrantID, &d.DeviceID, &d.IdempotencyKey, &d.Type, &d.ItemID, &badge,
+		&d.ID, &d.GrantID, &d.DeviceID, &d.IdempotencyKey, &d.Type, &d.ItemID, &d.ProjectID, &badge,
 		&d.Status, &d.ProviderID, &d.Error, &d.CreatedAt, &sent,
 	); err != nil {
 		return nil, err
@@ -271,7 +311,7 @@ func (s *store) listDevices(limit int) ([]device, error) {
 
 func (s *store) listDeliveries(limit int) ([]delivery, error) {
 	rows, err := s.db.Query(`
-		SELECT id, grant_id, device_id, idempotency_key, type, item_id, badge,
+		SELECT id, grant_id, device_id, idempotency_key, type, item_id, project_id, badge,
 		       status, provider_id, error, created_at, sent_at
 		FROM deliveries ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {

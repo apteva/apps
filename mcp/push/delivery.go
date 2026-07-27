@@ -37,6 +37,13 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *deliv
 	if tool == "" || tool == "push.ios.send" {
 		tool = "send_notification"
 	}
+	data := map[string]any{
+		"type":    d.Type,
+		"item_id": d.ItemID,
+	}
+	if d.ProjectID != "" {
+		data["project_id"] = d.ProjectID
+	}
 	result, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, map[string]any{
 		"device_token": token,
 		"topic":        device.BundleID,
@@ -44,10 +51,7 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *deliv
 		"push_type":    "alert",
 		"priority":     10,
 		"aps":          aps,
-		"data": map[string]any{
-			"type":    d.Type,
-			"item_id": d.ItemID,
-		},
+		"data":         data,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("call APNs integration: %w", err)

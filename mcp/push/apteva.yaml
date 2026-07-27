@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: push
 display_name: Push
-version: 0.2.1
+version: 0.3.0
 description: Self-hostable Apple push notification relay for Apteva mobile clients.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/push
@@ -18,6 +18,8 @@ requires:
     - db.write.app
     - platform.connections.execute
     - platform.connections.read_credentials
+    - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: ios_provider
       kind: integration
@@ -28,6 +30,13 @@ requires:
       required: true
       label: Apple Push Notifications
       hint: Bind the APNs connection used to deliver notifications to the Apteva iOS app.
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.upsert_record]
+      required: false
+      label: Domains (relay DNS)
+      hint: Optional. When bound, Push can publish the relay hostname's DNS record. Server-native ingress owns the route and managed TLS certificate.
 
 provides:
   http_routes:
@@ -48,6 +57,10 @@ provides:
       description: A push notification was accepted by its provider.
     - name: delivery.failed
       description: A push notification delivery failed.
+    - name: relay.domain_configured
+      description: The public relay hostname, DNS, and managed TLS route were configured.
+    - name: relay.domain_detached
+      description: The public relay hostname was detached from platform ingress.
 
 runtime:
   kind: source

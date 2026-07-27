@@ -18,6 +18,7 @@ type App struct {
 	store    *store
 	cipher   *tokenCipher
 	provider pushProvider
+	limiter  *registerRateLimiter
 	// encryptionKey is set only by tests. Production always reads the
 	// server-generated relay secret from the bound APNs connection.
 	encryptionKey string
@@ -59,6 +60,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	if a.provider == nil {
 		a.provider = apnsProvider{}
+	}
+	if a.limiter == nil {
+		a.limiter = newRegisterRateLimiter()
 	}
 	return nil
 }
@@ -108,6 +112,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/health", Handler: a.handleHealth},
 		{Method: http.MethodPost, Pattern: "/v1/devices/register", Handler: a.handleRegister, NoAuth: true},
+		{Method: http.MethodDelete, Pattern: "/v1/grants/current", Handler: a.handleRevokeCurrentGrant, NoAuth: true},
 		{Method: http.MethodDelete, Pattern: "/v1/devices/{id}", Handler: a.handleDeleteDevice, NoAuth: true},
 		{Method: http.MethodPost, Pattern: "/v1/devices/{id}/test", Handler: a.handleTestDevice, NoAuth: true},
 		{Method: http.MethodPost, Pattern: "/v1/deliveries", Handler: a.handleCreateDelivery, NoAuth: true},
@@ -115,6 +120,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/stats", Handler: a.handleStats},
 		{Method: http.MethodGet, Pattern: "/devices", Handler: a.handleListDevices},
 		{Method: http.MethodGet, Pattern: "/deliveries", Handler: a.handleListDeliveries},
+		{Method: http.MethodGet, Pattern: "/admin/relay-domain", Handler: a.handleRelayDomainStatus},
+		{Method: http.MethodPost, Pattern: "/admin/relay-domain", Handler: a.handleConfigureRelayDomain},
+		{Method: http.MethodDelete, Pattern: "/admin/relay-domain", Handler: a.handleDetachRelayDomain},
 		{Method: http.MethodDelete, Pattern: "/admin/devices/{id}", Handler: a.handleAdminDeleteDevice},
 		{Method: http.MethodPost, Pattern: "/admin/devices/{id}/test", Handler: a.handleAdminTestDevice},
 	}
