@@ -145,6 +145,7 @@ func monikaDrunkProductionCadenceReelPath(t *testing.T, video string, duration, 
 		correctSmartCropStationaryRuns(samples, srcW, cropW)
 		refineSmartCropHeadSamples(samples, srcW, cropW)
 	}
+	correctSmartCropUnanchoredEdgeFurnitureScenes(samples, srcW, cropW)
 	correctSmartCropReelTemporalOutliers(samples, srcW, cropW)
 	refineSmartCropHeadSamples(samples, srcW, cropW)
 	correctSmartCropFaceTracks(samples, srcW, cropW)
@@ -190,7 +191,7 @@ func monikaDrunkRemoteScriptSamples(t *testing.T, video string, positions []int6
 		}
 		return samples
 	}
-	script, err := buildRemoteSmartCropSampleScript("ffmpeg", video, positions)
+	script, err := buildRemoteSmartCropSampleScript("ffmpeg", video, positions, 1280)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +325,9 @@ func localSmartCropStillX(t *testing.T, video string, duration, focus int64, src
 		absInt(x-faceTrackX) > maxInt(20, cropW/12) {
 		x = faceTrackX
 	}
+	if furnitureX, ok := smartCropUnanchoredEdgeFurnitureFallbackX(contextSamples, srcW, cropW); ok {
+		x = furnitureX
+	}
 	if sample := nearestSmartCropSample(samples, focus); sample != nil && sample.face == nil {
 		backgroundImages := localSmartCropBackgroundImages(t, video, duration, srcW, srcH)
 		if backgroundX, _, ok := backgroundAwareNarrowSmartCropX(sample.img, backgroundImages, x, srcW, cropW); ok {
@@ -356,6 +360,7 @@ func localSmartCropReelPath(t *testing.T, video string, duration, start, end int
 	markSmartCropSceneCuts(samples)
 	backgroundImages := localSmartCropBackgroundImages(t, video, duration, srcW, srcH)
 	correctSmartCropBackgroundSamples(samples, backgroundImages, srcW, cropW)
+	correctSmartCropUnanchoredEdgeFurnitureScenes(samples, srcW, cropW)
 	target := smartCropTarget{StartMs: start, EndMs: end}
 	postTrackingNeeded := smartCropReelNeedsTracking(samples, srcW, cropW)
 	postFaceTrackingNeeded := smartCropFaceTrackNeedsSourceSamples(samples, cropW)
@@ -383,8 +388,10 @@ func localSmartCropReelPath(t *testing.T, video string, duration, start, end int
 	promoteSmartCropDetailedFaces(samples, cropW, false)
 	filterSmartCropWeakFaceAnchors(samples, cropW)
 	filterSmartCropWeakFaceDirectionClusters(samples, srcW, cropW)
+	filterSmartCropIsolatedFaceExcursions(samples, cropW)
 	correctSmartCropWeakFaceExcursions(samples, srcW, cropW)
 	correctSmartCropFaceTracks(samples, srcW, cropW)
+	correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, srcW, cropW)
 	path := make([]cropPathPoint, len(samples))
 	for i := range samples {
 		path[i] = samples[i].point

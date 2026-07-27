@@ -405,6 +405,7 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 	// person or warm object elsewhere in the scene cannot pull the crop across
 	// the frame. At 1920 -> 9:16 this is about 150 source pixels.
 	edgeHalo := maxInt(6, thumbCropW/4)
+	extendedHalo := maxInt(edgeHalo, thumbCropW/2)
 
 	pixels := normalizedSmartCropRGB(img, w, h)
 	components := warmSubjectComponents(pixels, w, h, thumbCropW, 0, w-1)
@@ -425,10 +426,15 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 			componentH*10 >= componentW*11
 		originalFace := componentW >= maxInt(6, w*10/100) &&
 			componentH >= maxInt(10, h*15/100)
+		strongExtendedHead := srcW >= 3000 && component.score >= minScore*3 &&
+			componentH >= h*25/100 &&
+			component.maxX >= currentStart-extendedHalo && component.minX <= currentEnd+extendedHalo
 		if (!smallTallFace && !originalFace) || componentW > w*18/100 ||
 			componentH > h*35/100 ||
-			component.minY < h*30/100 || component.maxY > h*88/100 ||
-			component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo ||
+			component.minY < h*30/100 ||
+			(component.maxY > h*88/100 && (!strongExtendedHead || component.maxY > h*90/100)) ||
+			(!strongExtendedHead &&
+				(component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo)) ||
 			component.score < minScore {
 			continue
 		}
@@ -970,6 +976,28 @@ func bestColumnWindow(cols []float64, windowW, srcX, srcW int) (bestX int, bestS
 		if running > bestScore {
 			bestScore = running
 			bestX = x
+		}
+	}
+	// Coverage has a broad plateau when a person is narrower than the portrait
+	// window. The first maximum strands that person on the right edge. Among
+	// windows retaining 99% of the best evidence, choose the one that balances
+	// the evidence around its centre.
+	if srcW >= 3000 {
+		bestBalance := math.Inf(1)
+		for start, score := range scores {
+			if score < bestScore*0.99 || score <= 0 {
+				continue
+			}
+			center := float64(start) + float64(windowW-1)/2
+			distance := 0.0
+			for x := start; x < start+windowW; x++ {
+				distance += cols[x] * math.Abs(float64(x)-center)
+			}
+			distance /= math.Max(score, 1)
+			if distance < bestBalance {
+				bestBalance = distance
+				bestX = start
+			}
 		}
 	}
 	currentX := int(math.Round(float64(srcX) * float64(len(cols)) / float64(srcW)))

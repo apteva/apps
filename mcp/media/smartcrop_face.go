@@ -222,7 +222,11 @@ func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, srcH, cropW int)
 	if !smartCropFaceCandidateSupported(face, currentX, cropW, smartCropWeakFaceHasPixelSupport(img, primary)) {
 		return currentX, smartCropFace{}, false
 	}
-	if face.Quality >= 20 {
+	centerQuality := float32(20)
+	if srcW >= 3000 {
+		centerQuality = 12
+	}
+	if face.Quality >= centerQuality {
 		x := clampInt(roundEven(face.CenterX-cropW/2), 0, srcW-cropW)
 		return x, face, true
 	}
@@ -246,6 +250,20 @@ func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, srcH, cropW int)
 // filterSmartCropWeakFaceAnchors.
 func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, weakPixelSupport bool) bool {
 	if cropW <= 0 {
+		return false
+	}
+	// A threshold-level detection occupying most of a portrait window is a
+	// torso, curtain or furniture pattern, not a face. This specifically keeps
+	// a large rotated false positive from blocking the independent background
+	// model when a reclining person is elsewhere in the frame.
+	hugeLimit := cropW * 4 / 5
+	if cropW >= 1000 {
+		// On 4K landscape inputs a rotated furniture/torso hit can still be
+		// enormous in source pixels while remaining below the ordinary 80%
+		// cutoff. The 640 detector path used by HD close-ups remains unchanged.
+		hugeLimit = cropW * 2 / 3
+	}
+	if face.Quality < 12 && face.Scale > hugeLimit {
 		return false
 	}
 	if face.Quality >= 20 {
@@ -477,6 +495,65 @@ func filterSmartCropWeakFaceDirectionClusters(samples []smartCropV2Sample, srcW,
 	return filtered
 }
 
+// filterSmartCropIsolatedFaceExcursions removes one medium-confidence face vote
+// that appears far from a stable run of strong faces without motion or a
+// second nearby confirmation. It covers furniture/mirror patterns revealed
+// when a real face turns sideways; a genuine traversal either carries motion
+// evidence or produces another coherent medium/strong vote at the new place.
+func filterSmartCropIsolatedFaceExcursions(samples []smartCropV2Sample, cropW int) int {
+	if len(samples) < 5 || cropW <= 0 {
+		return 0
+	}
+	filtered := 0
+	for i := range samples {
+		face := samples[i].face
+		if face == nil || face.Quality >= 20 || samples[i].motionTracked ||
+			(cropW < 1000 && face.Quality < 12) {
+			continue
+		}
+		strongCenters := make([]int, 0, 6)
+		for j := i - 1; j >= 0 && samples[i].point.AtMs-samples[j].point.AtMs <= 15_000; j-- {
+			if samples[j].point.Cut {
+				break
+			}
+			if samples[j].face != nil && samples[j].face.Quality >= 20 {
+				strongCenters = append(strongCenters, samples[j].face.CenterX)
+			}
+		}
+		if len(strongCenters) < 3 {
+			continue
+		}
+		sort.Ints(strongCenters)
+		stableCenter := strongCenters[len(strongCenters)/2]
+		if strongCenters[len(strongCenters)-1]-strongCenters[0] > cropW/6 ||
+			absInt(face.CenterX-stableCenter) <= cropW/2 {
+			continue
+		}
+		confirmed := false
+		for direction := -1; direction <= 1 && !confirmed; direction += 2 {
+			for j := i + direction; j >= 0 && j < len(samples) &&
+				absInt64(samples[j].point.AtMs-samples[i].point.AtMs) <= 6_000; j += direction {
+				if (direction > 0 && samples[j].point.Cut) ||
+					(direction < 0 && samples[j+1].point.Cut) {
+					break
+				}
+				if samples[j].face != nil && samples[j].face.Quality >= 12 &&
+					absInt(samples[j].face.CenterX-face.CenterX) <= cropW/4 {
+					confirmed = true
+					break
+				}
+			}
+		}
+		if confirmed {
+			continue
+		}
+		samples[i].face = nil
+		samples[i].detailedFace = nil
+		filtered++
+	}
+	return filtered
+}
+
 // correctSmartCropWeakFaceExcursions rejects a short, isolated pair of weak
 // rotated-cascade hits when dense tracking says the subject stayed put. This
 // is the characteristic failure produced by a bent limb or patterned cushion:
@@ -691,7 +768,7 @@ func correctSmartCropFaceTracks(samples []smartCropV2Sample, srcW, cropW int) in
 				absInt(samples[right].point.X-samples[left].point.X) > cropW/3
 			handoffAt := samples[right].point.AtMs - 2500
 			for i := left + 1; i < right; i++ {
-				if samples[i].face != nil {
+				if samples[i].face != nil || samples[i].motionTracked {
 					continue
 				}
 				x := 0

@@ -214,3 +214,85 @@ func correctSmartCropBackgroundSamples(samples []smartCropV2Sample, references [
 	}
 	return corrected
 }
+
+// correctSmartCropBackgroundEdgeDeparturesFromFaces repairs a long, clustered
+// departure introduced by the background model immediately after several
+// stable strong face anchors disappear. Exact frame-edge runs are the common
+// case, but a furniture cluster can also sit one crop inside the edge. One
+// isolated motion vote is tolerated (a head drop commonly creates it), while
+// sustained motion or a newly detected face keeps the tracker authoritative.
+func correctSmartCropBackgroundEdgeDeparturesFromFaces(samples []smartCropV2Sample, srcW, cropW int) int {
+	if len(samples) < 6 || srcW <= cropW || cropW <= 0 {
+		return 0
+	}
+	maxX := srcW - cropW
+	edgeLimit := maxInt(24, cropW/12)
+	corrected := 0
+	for start := 0; start < len(samples); {
+		if !samples[start].backgroundTracked || samples[start].face != nil {
+			start++
+			continue
+		}
+		end := start + 1
+		motion := 0
+		runMinX, runMaxX := samples[start].point.X, samples[start].point.X
+		for end < len(samples) && !samples[end].point.Cut && samples[end].backgroundTracked {
+			if samples[end].face != nil {
+				break
+			}
+			if samples[end].motionTracked {
+				motion++
+			}
+			runMinX = minInt(runMinX, samples[end].point.X)
+			runMaxX = maxInt(runMaxX, samples[end].point.X)
+			end++
+		}
+		if end-start < 3 || motion > 1 {
+			start = end
+			continue
+		}
+		centers := make([]int, 0, 6)
+		for i := start - 1; i >= 0 && samples[start].point.AtMs-samples[i].point.AtMs <= 15_000; i-- {
+			if samples[i+1].point.Cut {
+				break
+			}
+			if samples[i].face != nil && samples[i].face.Quality >= 20 {
+				centers = append(centers, samples[i].face.CenterX)
+			}
+		}
+		if len(centers) < 3 {
+			start = end
+			continue
+		}
+		sort.Ints(centers)
+		if centers[len(centers)-1]-centers[0] > cropW/6 {
+			start = end
+			continue
+		}
+		anchorX := clampInt(roundEven(centers[len(centers)/2]-cropW/2), 0, maxX)
+		leftEdgeRun := runMaxX <= edgeLimit
+		rightEdgeRun := runMinX >= maxX-edgeLimit
+		farCluster := runMaxX-runMinX <= cropW/2
+		for i := start; i < end && farCluster; i++ {
+			if absInt(samples[i].point.X-anchorX) <= cropW/2 {
+				farCluster = false
+			}
+		}
+		if !leftEdgeRun && !rightEdgeRun && !farCluster {
+			start = end
+			continue
+		}
+		for i := start; i < end; i++ {
+			if samples[i].point.X != anchorX {
+				samples[i].point.X = anchorX
+				corrected++
+			}
+			samples[i].backgroundTracked = false
+			samples[i].motionTracked = false
+			samples[i].faceTracked = true
+			samples[i].temporalTrack = true
+		}
+		start = end
+	}
+	return corrected
+}

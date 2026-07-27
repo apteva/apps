@@ -443,6 +443,98 @@ func bestSmartCropTemporalConsensus(samples []smartCropV2Sample, srcW, cropW int
 	return smartCropTemporalResult{}, false
 }
 
+// smartCropUnanchoredEdgeFurnitureFallbackX rejects a repeated frame-edge
+// crop whose only persistent "subject" is a broad, low warm object such as a
+// dining table or couch. This is deliberately a scene-level decision:
+//
+//   - at least three frames and two thirds of the scene must agree;
+//   - there may be no face, motion, head, foreground or temporal track;
+//   - the crop must be parked at the same physical frame edge; and
+//   - a person-sized portrait window must be dominated by a wide lower-frame
+//     component rather than an upright subject.
+//
+// A single still cannot satisfy the gate. A real edge subject with any direct
+// human/motion evidence keeps its crop. The safe fallback is geometric centre,
+// which is preferable to returning a portrait containing only furniture.
+func smartCropUnanchoredEdgeFurnitureFallbackX(samples []smartCropV2Sample, srcW, cropW int) (int, bool) {
+	if len(samples) < 3 || srcW <= cropW || cropW <= 0 {
+		return 0, false
+	}
+	maxX := srcW - cropW
+	edgeLimit := maxInt(24, cropW/12)
+	left, right := 0, 0
+	for i := range samples {
+		sample := &samples[i]
+		if sample.face != nil || sample.detailedFace != nil || sample.faceTracked ||
+			sample.headTracked || sample.backgroundTracked || sample.motionTracked ||
+			sample.temporalTrack || sample.point.Cut {
+			return 0, false
+		}
+		switch {
+		case sample.point.X <= edgeLimit &&
+			smartCropEdgeWindowDominatedByLowFurniture(sample.img, sample.point.X, srcW, cropW):
+			left++
+		case sample.point.X >= maxX-edgeLimit &&
+			smartCropEdgeWindowDominatedByLowFurniture(sample.img, sample.point.X, srcW, cropW):
+			right++
+		}
+	}
+	required := maxInt(3, (2*len(samples)+2)/3)
+	if maxInt(left, right) < required {
+		return 0, false
+	}
+	return clampInt(roundEven(maxX/2), 0, maxX), true
+}
+
+func smartCropEdgeWindowDominatedByLowFurniture(img image.Image, srcX, srcW, cropW int) bool {
+	if img == nil || srcW <= cropW || cropW <= 0 {
+		return false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	start := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	end := start + thumbCropW - 1
+	components := warmSubjectComponents(normalizedSmartCropRGB(img, w, h), w, h, thumbCropW, start, end)
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		if component.centerX < float64(start) || component.centerX > float64(end) ||
+			componentW < thumbCropW/2 || componentH < h/6 ||
+			component.minY < h/2 || component.maxY < h*4/5 ||
+			component.score < 600.0*float64(w*h)/(320.0*180.0) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func correctSmartCropUnanchoredEdgeFurnitureScenes(samples []smartCropV2Sample, srcW, cropW int) int {
+	corrected := 0
+	for sceneStart := 0; sceneStart < len(samples); {
+		sceneEnd := sceneStart + 1
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		if x, ok := smartCropUnanchoredEdgeFurnitureFallbackX(samples[sceneStart:sceneEnd], srcW, cropW); ok {
+			for i := sceneStart; i < sceneEnd; i++ {
+				if samples[i].point.X != x {
+					samples[i].point.X = x
+					corrected++
+				}
+				samples[i].temporalTrack = true
+			}
+		}
+		sceneStart = sceneEnd
+	}
+	return corrected
+}
+
 func warmSubjectComponents(frame []uint8, w, h, cropW, regionMin, regionMax int) []warmSubjectComponent {
 	if len(frame) != w*h*3 {
 		return nil

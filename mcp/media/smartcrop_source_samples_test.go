@@ -71,7 +71,7 @@ func TestSmartCropSupplementPositionsClampAtSourceEdges(t *testing.T) {
 func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
 	url := "https://storage.example/video.mp4?signature=it's-safe&part=1"
 	script, err := buildRemoteSmartCropSampleScript("/opt/apteva/ffmpeg", url,
-		[]int64{187_410, 162_495, 174_000, 174_000})
+		[]int64{187_410, 162_495, 174_000, 174_000}, 1920)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,11 +91,18 @@ func TestBuildRemoteSmartCropSampleScript(t *testing.T) {
 			t.Errorf("remote sample script missing %q:\n%s", want, script)
 		}
 	}
-	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{1}); err == nil {
+	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{1}, 1920); err == nil {
 		t.Fatal("one remote sample position should be rejected")
 	}
-	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{-1, 2}); err == nil {
+	if _, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{-1, 2}, 1920); err == nil {
 		t.Fatal("negative remote sample position should be rejected")
+	}
+	fourKScript, err := buildRemoteSmartCropSampleScript("ffmpeg", url, []int64{1, 2}, 3840)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fourKScript, "scale=960:-2") || !strings.Contains(fourKScript, "-q:v 9") {
+		t.Fatalf("4K source did not select extended detail pass:\n%s", fourKScript)
 	}
 }
 
@@ -104,7 +111,7 @@ func TestBuildRemoteSmartCropSampleScriptKeepsTrackingCadence(t *testing.T) {
 	for i := range positions {
 		positions[i] = int64(i+1) * 1_000
 	}
-	script, err := buildRemoteSmartCropSampleScript("ffmpeg", "https://storage.example/video.mp4", positions)
+	script, err := buildRemoteSmartCropSampleScript("ffmpeg", "https://storage.example/video.mp4", positions, 1920)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -247,6 +247,11 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 			face: smartCropFace{CenterX: 1728, MinX: 1651, MaxX: 1805, Scale: 155, Quality: 25},
 			want: true,
 		},
+		{
+			name: "huge-threshold-level-room-pattern",
+			face: smartCropFace{CenterX: 1300, MinX: 850, MaxX: 1750, Scale: 900, Quality: 5.8},
+			want: false,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -254,6 +259,194 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 				t.Fatalf("supported=%v want=%v face=%+v", got, testCase.want, testCase.face)
 			}
 		})
+	}
+	fourKPattern := smartCropFace{CenterX: 2256, MinX: 1824, MaxX: 2688, Scale: 864, Quality: 7}
+	if smartCropFaceCandidateSupported(fourKPattern, 900, 1214, true) {
+		t.Fatalf("4K large rotated furniture pattern was accepted: %+v", fourKPattern)
+	}
+}
+
+func TestBestColumnWindowCentersNarrowEvidenceOnlyFor4K(t *testing.T) {
+	columns := make([]float64, 100)
+	for i := 70; i <= 74; i++ {
+		columns[i] = 10
+	}
+	fourKX, _, _, _, ok := bestColumnWindow(columns, 30, 0, 3840)
+	if !ok || fourKX < 57 || fourKX > 59 {
+		t.Fatalf("4K balanced window x=%d ok=%v want [57,59]", fourKX, ok)
+	}
+	hdX, _, _, _, ok := bestColumnWindow(columns, 30, 0, 1920)
+	if !ok || hdX != 45 {
+		t.Fatalf("HD compatibility window x=%d ok=%v want 45", hdX, ok)
+	}
+}
+
+func TestUnanchoredEdgeFurnitureFallsBackToCenter(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 92, G: 98, B: 104, A: 255})
+	// A broad low wooden table dominates the right-edge saliency crop.
+	fillSmartCropTestRect(img, image.Rect(255, 105, 317, 170), color.RGBA{R: 160, G: 110, B: 90, A: 255})
+	// A central subject is intentionally dark/neutral and supplies no warm or
+	// ML anchor; the scene-level furniture rejection must still avoid the room.
+	fillSmartCropTestRect(img, image.Rect(145, 45, 176, 166), color.RGBA{R: 45, G: 49, B: 54, A: 255})
+	samples := make([]smartCropV2Sample, 5)
+	for i := range samples {
+		samples[i] = smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * 5_000, X: 2626},
+			img:   img,
+		}
+	}
+	x, ok := smartCropUnanchoredEdgeFurnitureFallbackX(samples, 3840, 1214)
+	if !ok || x != 1312 {
+		t.Fatalf("fallback x=%d ok=%v want centered 1312", x, ok)
+	}
+}
+
+func TestIsolatedFaceExcursionAfterStableAnchorsIsRejected(t *testing.T) {
+	const cropW = 606
+	samples := make([]smartCropV2Sample, 6)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * 2_000, X: 700}
+	}
+	for i := 0; i < 4; i++ {
+		samples[i].face = &smartCropFace{CenterX: 1000 + i*4, Quality: 24}
+	}
+	samples[4].face = &smartCropFace{CenterX: 1600, Quality: 13}
+	samples[4].detailedFace = samples[4].face
+
+	if got := filterSmartCropIsolatedFaceExcursions(samples, cropW); got != 1 {
+		t.Fatalf("filtered=%d want=1; samples=%+v", got, samples)
+	}
+	if samples[4].face != nil || samples[4].detailedFace != nil {
+		t.Fatalf("isolated furniture face was retained: %+v", samples[4])
+	}
+}
+
+func TestIsolatedFaceExcursionPreservesConfirmedTraversal(t *testing.T) {
+	const cropW = 606
+	samples := make([]smartCropV2Sample, 7)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * 2_000, X: 700}
+	}
+	for i := 0; i < 4; i++ {
+		samples[i].face = &smartCropFace{CenterX: 1000 + i*4, Quality: 24}
+	}
+	samples[4].face = &smartCropFace{CenterX: 1600, Quality: 13}
+	samples[5].face = &smartCropFace{CenterX: 1620, Quality: 14}
+
+	if got := filterSmartCropIsolatedFaceExcursions(samples, cropW); got != 0 {
+		t.Fatalf("confirmed traversal filtered %d faces: %+v", got, samples)
+	}
+	if samples[4].face == nil {
+		t.Fatal("confirmed face traversal was removed")
+	}
+}
+
+func TestBackgroundEdgeDepartureReturnsToStableFaceTrack(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	samples := make([]smartCropV2Sample, 7)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * 2_000, X: 700}
+	}
+	for i := 0; i < 4; i++ {
+		samples[i].face = &smartCropFace{CenterX: 1000 + i*3, Quality: 24}
+	}
+	for i := 4; i < len(samples); i++ {
+		samples[i].point.X = srcW - cropW
+		samples[i].backgroundTracked = true
+	}
+
+	if got := correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, srcW, cropW); got != 3 {
+		t.Fatalf("corrected=%d want=3; samples=%+v", got, samples)
+	}
+	for i := 4; i < len(samples); i++ {
+		if samples[i].point.X < 690 || samples[i].point.X > 710 || !samples[i].faceTracked {
+			t.Fatalf("sample %d did not return to stable face track: %+v", i, samples[i])
+		}
+	}
+}
+
+func TestBackgroundEdgeDeparturePreservesSustainedMotion(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	samples := make([]smartCropV2Sample, 7)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * 2_000, X: 700}
+	}
+	for i := 0; i < 4; i++ {
+		samples[i].face = &smartCropFace{CenterX: 1000, Quality: 24}
+	}
+	for i := 4; i < len(samples); i++ {
+		samples[i].point.X = srcW - cropW
+		samples[i].backgroundTracked = true
+		samples[i].motionTracked = true
+	}
+
+	if got := correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, srcW, cropW); got != 0 {
+		t.Fatalf("sustained motion was overwritten: corrected=%d samples=%+v", got, samples)
+	}
+}
+
+func TestBackgroundFurnitureClusterReturnsToStableFaceTrack(t *testing.T) {
+	const srcW, cropW = 3840, 1214
+	samples := make([]smartCropV2Sample, 8)
+	for i := range samples {
+		samples[i].point = cropPathPoint{AtMs: int64(i) * 2_000, X: 710}
+	}
+	for i := 0; i < 4; i++ {
+		samples[i].face = &smartCropFace{CenterX: 1320 + i*3, Quality: 24}
+	}
+	for i, x := range []int{1330, 1500, 1640, 1580} {
+		samples[i+4].point.X = x
+		samples[i+4].backgroundTracked = true
+	}
+
+	if got := correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, srcW, cropW); got != 4 {
+		t.Fatalf("corrected=%d want=4; samples=%+v", got, samples)
+	}
+	for i := 4; i < len(samples); i++ {
+		if samples[i].point.X < 700 || samples[i].point.X > 730 {
+			t.Fatalf("sample %d remained on furniture cluster: %+v", i, samples[i])
+		}
+	}
+}
+
+func TestFaceTrackInterpolationPreservesCertifiedMotion(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	samples := []smartCropV2Sample{
+		{
+			point: cropPathPoint{AtMs: 0, X: 700},
+			face:  &smartCropFace{CenterX: 1000, MinX: 940, MaxX: 1060, Quality: 24},
+		},
+		{point: cropPathPoint{AtMs: 1_000, X: 300}, motionTracked: true},
+		{point: cropPathPoint{AtMs: 2_000, X: 350}, motionTracked: true},
+		{
+			point: cropPathPoint{AtMs: 3_000, X: 1100},
+			face:  &smartCropFace{CenterX: 1400, MinX: 1340, MaxX: 1460, Quality: 24},
+		},
+	}
+
+	correctSmartCropFaceTracks(samples, srcW, cropW)
+	if samples[1].point.X != 300 || samples[2].point.X != 350 {
+		t.Fatalf("face interpolation overwrote certified traversal: %+v", samples)
+	}
+	if samples[1].faceTracked || samples[2].faceTracked {
+		t.Fatalf("motion samples were mislabeled as face interpolations: %+v", samples)
+	}
+}
+
+func TestUnanchoredEdgeFurnitureKeepsTallEdgeSubject(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 92, G: 98, B: 104, A: 255})
+	fillSmartCropTestRect(img, image.Rect(265, 38, 290, 168), color.RGBA{R: 160, G: 110, B: 90, A: 255})
+	samples := make([]smartCropV2Sample, 5)
+	for i := range samples {
+		samples[i] = smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * 5_000, X: 2626},
+			img:   img,
+		}
+	}
+	if x, ok := smartCropUnanchoredEdgeFurnitureFallbackX(samples, 3840, 1214); ok {
+		t.Fatalf("tall edge subject incorrectly fell back to x=%d", x)
 	}
 }
 

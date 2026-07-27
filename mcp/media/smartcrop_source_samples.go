@@ -24,16 +24,25 @@ const (
 	remoteSmartCropMarker       = "APTEVA_SMARTCROP_FRAME:"
 	remoteSmartCropDetailMarker = "APTEVA_SMARTCROP_DETAIL:"
 	// 320 px is enough for generic saliency, but it drops small/profile faces
-	// during an upright-to-reclining transition. At 640 px the embedded CPU
-	// detector retains those anchors. Remote batches are split below so q7 JPEGs
-	// stay safely below the Instances output limit without losing face detail.
+	// during an upright-to-reclining transition. The released 640 px view stays
+	// unchanged for HD sources; 4K sources use 960 px so a similarly sized
+	// distant/profile face reaches the detector with equivalent detail.
 	remoteSmartCropAnalysisWidth   = 320
 	remoteSmartCropAnalysisQuality = 3
 	remoteSmartCropDetailWidth     = 640
 	remoteSmartCropDetailQuality   = 7
+	remoteSmartCropExtendedWidth   = 960
+	remoteSmartCropExtendedQuality = 9
 	remoteSmartCropBatchSize       = 10
 	remoteSmartCropMaxOutputBytes  = 900 * 1024
 )
+
+func smartCropDetailSpec(srcW int) (width, quality int) {
+	if srcW >= 3000 {
+		return remoteSmartCropExtendedWidth, remoteSmartCropExtendedQuality
+	}
+	return remoteSmartCropDetailWidth, remoteSmartCropDetailQuality
+}
 
 // smartCropSupplementPositions creates a dense, bounded local storyboard
 // around the requested output. Source duration does not affect the amount of
@@ -194,7 +203,7 @@ func analyzeSmartCropV2Remote(
 	positions = uniqueSortedSmartCropPositions(append([]int64(nil), positions...))
 	all := make([]smartCropV2Sample, 0, len(positions))
 	for batchIndex, batch := range smartCropRemotePositionBatches(positions) {
-		script, scriptErr := buildRemoteSmartCropSampleScript(paths.FFmpeg, signedURL, batch)
+		script, scriptErr := buildRemoteSmartCropSampleScript(paths.FFmpeg, signedURL, batch, srcW)
 		if scriptErr != nil {
 			return nil, scriptErr
 		}
@@ -236,7 +245,7 @@ func smartCropRemotePositionBatches(positions []int64) [][]int64 {
 	return batches
 }
 
-func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []int64) (string, error) {
+func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []int64, srcW int) (string, error) {
 	if strings.TrimSpace(ffmpegPath) == "" || strings.TrimSpace(signedURL) == "" {
 		return "", fmt.Errorf("remote smartcrop sampling requires ffmpeg and a signed URL")
 	}
@@ -250,6 +259,7 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 		}
 	}
 	var b strings.Builder
+	detailWidth, detailQuality := smartCropDetailSpec(srcW)
 	b.WriteString("set -u\n")
 	b.WriteString("WORK=$(mktemp -d /tmp/apteva-smartcrop-samples-XXXXXX)\n")
 	b.WriteString("trap 'rm -rf \"$WORK\"' EXIT\n")
@@ -259,8 +269,8 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 	b.WriteString("  POS_MS=$1\n")
 	b.WriteString("  POS_SEC=$(awk -v p=\"$POS_MS\" 'BEGIN{printf \"%.3f\", p/1000}')\n")
 	fmt.Fprintf(&b, "  \"$FFMPEG\" -nostdin -y -loglevel error -ss \"$POS_SEC\" -i \"$SIGNED_URL\" -filter_complex '[0:v]split=2[a][b];[a]scale=%d:-2[analysis];[b]scale=%d:-2[detail]' -map '[analysis]' -frames:v 1 -q:v %d \"$WORK/$POS_MS.analysis.jpg\" -map '[detail]' -frames:v 1 -q:v %d \"$WORK/$POS_MS.detail.jpg\" >/dev/null 2>&1 || true\n",
-		remoteSmartCropAnalysisWidth, remoteSmartCropDetailWidth,
-		remoteSmartCropAnalysisQuality, remoteSmartCropDetailQuality)
+		remoteSmartCropAnalysisWidth, detailWidth,
+		remoteSmartCropAnalysisQuality, detailQuality)
 	b.WriteString("}\n")
 	b.WriteString("ACTIVE=0\n")
 	b.WriteString("for POS_MS in")
@@ -284,7 +294,7 @@ func buildRemoteSmartCropSampleScript(ffmpegPath, signedURL string, positions []
 	b.WriteString("    SMALL=\"$SOURCE.small.jpg\"\n")
 	// Retain the pixels needed by the face detector; reducing JPEG quality is
 	// safer than shrinking back below the resolution that triggered this pass.
-	fmt.Fprintf(&b, "    \"$FFMPEG\" -nostdin -y -loglevel error -i \"$SOURCE\" -vf scale=%d:-2 -frames:v 1 -q:v 14 \"$SMALL\" >/dev/null 2>&1 && mv \"$SMALL\" \"$SOURCE\"\n", remoteSmartCropDetailWidth)
+	b.WriteString("    \"$FFMPEG\" -nostdin -y -loglevel error -i \"$SOURCE\" -frames:v 1 -q:v 14 \"$SMALL\" >/dev/null 2>&1 && mv \"$SMALL\" \"$SOURCE\"\n")
 	b.WriteString("  done\n")
 	b.WriteString("fi\n")
 	b.WriteString("COUNT=0\n")
@@ -365,7 +375,8 @@ func parseRemoteSmartCropSamples(
 	}
 	byTime := make(map[int64]smartCropV2Sample, len(pairs))
 	for position, pair := range pairs {
-		win, face, detailedFace, err := analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH, pair.analysis, pair.detail)
+		win, face, detailedFace, err := analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH,
+			pair.analysis, pair.detail)
 		if err != nil {
 			continue
 		}
@@ -416,7 +427,9 @@ func analyzeSmartCropV2Input(
 			defer func() { <-sem }()
 			analysisPath := filepath.Join(dir, fmt.Sprintf("%02d.analysis.jpg", i))
 			detailPath := filepath.Join(dir, fmt.Sprintf("%02d.detail.jpg", i))
-			if err := extractSmartCropFramePair(ctx, ffmpegPath, input, analysisPath, detailPath, float64(pos)/1000); err != nil {
+			detailWidth, detailQuality := smartCropDetailSpec(srcW)
+			if err := extractSmartCropFramePair(ctx, ffmpegPath, input,
+				analysisPath, detailPath, float64(pos)/1000, detailWidth, detailQuality); err != nil {
 				errs[i] = err
 				return
 			}
@@ -430,7 +443,8 @@ func analyzeSmartCropV2Input(
 				errs[i] = err
 				return
 			}
-			win, face, detailedFace, err := analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH, analysisImg, detailImg)
+			win, face, detailedFace, err := analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH,
+				analysisImg, detailImg)
 			if err != nil {
 				errs[i] = err
 				return
@@ -465,10 +479,13 @@ func analyzeSmartCropV2Input(
 
 // analyzeSmartCropSourceFrame feeds the released 320px/q3 frame unchanged to
 // generic saliency and temporal analysis while giving only the CPU face
-// detector a higher-resolution view. Resizing a 640px JPEG in Go is close but
+// detector a higher-resolution view. Resizing the detail JPEG in Go is close but
 // not pixel-identical to FFmpeg's original 320px frame and proved sufficient to
 // alter stable crops, so the two bounded views are extracted in one decode.
-func analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH int, analysisImg, detailImg image.Image) (*cropWindow, *smartCropFace, *smartCropFace, error) {
+func analyzeSmartCropSourceFrame(
+	srcW, srcH, targetW, targetH int,
+	analysisImg, detailImg image.Image,
+) (*cropWindow, *smartCropFace, *smartCropFace, error) {
 	if analysisImg == nil || detailImg == nil {
 		return nil, nil, nil, fmt.Errorf("invalid smartcrop source frame pair")
 	}
@@ -478,16 +495,23 @@ func analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH int, analysisImg, 
 	}
 	var detailedFace *smartCropFace
 	if _, detected, ok := faceAwareNarrowSmartCropX(detailImg, win.X, srcW, srcH, win.W); ok {
+		detailedFace = supportedSmartCropDetailedFace(detected, win)
+	}
+	return win, face, detailedFace, nil
+}
+
+func supportedSmartCropDetailedFace(detected smartCropFace, win *cropWindow) *smartCropFace {
+	if win != nil {
 		// The rotated cascade can weakly resemble a knee or torso. A real face
 		// entering/leaving a portrait crop is close to the generic subject window;
 		// an unrelated body false-positive is commonly another half-frame away.
 		// Admit a one-third-window halo so fast falls still reacquire the head.
 		halo := win.W / 3
 		if detected.CenterX >= win.X-halo && detected.CenterX <= win.X+win.W+halo {
-			detailedFace = &detected
+			return &detected
 		}
 	}
-	return win, face, detailedFace, nil
+	return nil
 }
 
 func decodeSmartCropFrame(path string) (image.Image, error) {
@@ -500,16 +524,20 @@ func decodeSmartCropFrame(path string) (image.Image, error) {
 	return img, err
 }
 
-func extractSmartCropFramePair(ctx context.Context, ffmpegPath, input, analysisOutput, detailOutput string, seekSeconds float64) error {
+func extractSmartCropFramePair(
+	ctx context.Context,
+	ffmpegPath, input, analysisOutput, detailOutput string,
+	seekSeconds float64, detailWidth, detailQuality int,
+) error {
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	filter := fmt.Sprintf("[0:v]split=2[a][b];[a]scale=%d:-2[analysis];[b]scale=%d:-2[detail]",
-		remoteSmartCropAnalysisWidth, remoteSmartCropDetailWidth)
+		remoteSmartCropAnalysisWidth, detailWidth)
 	args := []string{
 		"-y", "-loglevel", "error", "-ss", fmt.Sprintf("%.3f", seekSeconds), "-i", input,
 		"-filter_complex", filter,
 		"-map", "[analysis]", "-frames:v", "1", "-q:v", strconv.Itoa(remoteSmartCropAnalysisQuality), analysisOutput,
-		"-map", "[detail]", "-frames:v", "1", "-q:v", strconv.Itoa(remoteSmartCropDetailQuality), detailOutput,
+		"-map", "[detail]", "-frames:v", "1", "-q:v", strconv.Itoa(detailQuality), detailOutput,
 	}
 	out, err := exec.CommandContext(cctx, ffmpegPath, args...).CombinedOutput()
 	if err != nil {

@@ -250,6 +250,10 @@ func computeSmartCropStillV2(
 			method += "+face-track"
 		}
 	}
+	if furnitureX, ok := smartCropUnanchoredEdgeFurnitureFallbackX(contextSamples, row.Width, cw); ok {
+		x = furnitureX
+		method += "+edge-furniture-fallback"
+	}
 	if sample := nearestSmartCropSample(samples, target.FocusMs); sample != nil && sample.face == nil {
 		backgroundDerivs := selectSmartCropBackgroundDerivations(row.Derivations,
 			target.FocusMs-30_000, target.FocusMs+30_000, 12)
@@ -464,7 +468,7 @@ func computeSmartCropReelV2(
 	backgroundImages := downloadSmartCropBackgroundImages(ctx, sc, projectID, backgroundDerivs)
 	backgroundCorrections := correctSmartCropBackgroundSamples(samples, backgroundImages, row.Width, cw)
 	trackingFrames := 0
-	stationaryCorrections := 0
+	stationaryCorrections := correctSmartCropUnanchoredEdgeFurnitureScenes(samples, row.Width, cw)
 	if smartCropReelNeedsTracking(samples, row.Width, cw) ||
 		smartCropFaceTrackNeedsSourceSamples(samples, cw) ||
 		smartCropLateRefinementNeedsSourceSamples(samples, row.Width, cw) {
@@ -499,8 +503,10 @@ func computeSmartCropReelV2(
 	promoteSmartCropDetailedFaces(samples, cw, false)
 	faceFalsePositives := filterSmartCropWeakFaceAnchors(samples, cw)
 	faceFalsePositives += filterSmartCropWeakFaceDirectionClusters(samples, row.Width, cw)
+	faceFalsePositives += filterSmartCropIsolatedFaceExcursions(samples, cw)
 	faceFalsePositives += correctSmartCropWeakFaceExcursions(samples, row.Width, cw)
 	faceCorrections := correctSmartCropFaceTracks(samples, row.Width, cw)
+	backgroundCorrections += correctSmartCropBackgroundEdgeDeparturesFromFaces(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
