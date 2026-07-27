@@ -20,6 +20,7 @@ import (
 )
 
 const (
+	cloudBuildProtocolVersion = "apteva.build/v1"
 	buildBackendLocal         = "local"
 	buildBackendRunner        = "runner"
 	buildBackendCodemagic     = "codemagic"
@@ -40,6 +41,9 @@ type cloudBuildConfig struct {
 	ArtifactName        string            `json:"artifact_name,omitempty"`
 	ArtifactMode        string            `json:"artifact_mode,omitempty"`
 	ArtifactFile        string            `json:"artifact_file,omitempty"`
+	StoreChannel        string            `json:"store_channel,omitempty"`
+	Preflight           string            `json:"preflight,omitempty"`
+	ContractInputs      bool              `json:"contract_inputs,omitempty"`
 	Inputs              map[string]any    `json:"inputs,omitempty"`
 	Variables           map[string]string `json:"variables,omitempty"`
 	Groups              []string          `json:"groups,omitempty"`
@@ -109,6 +113,8 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	cfg.ArtifactName = strings.TrimSpace(cfg.ArtifactName)
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(cfg.ArtifactMode))
 	cfg.SourceMode = strings.ToLower(strings.TrimSpace(cfg.SourceMode))
+	cfg.StoreChannel = strings.ToLower(strings.TrimSpace(cfg.StoreChannel))
+	cfg.Preflight = strings.ToLower(strings.TrimSpace(cfg.Preflight))
 	if cfg.SourceMode == "" && normalizeBuildBackend(backend) == buildBackendRunner {
 		cfg.SourceMode = "bundle"
 	} else if cfg.SourceMode == "" {
@@ -119,6 +125,14 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	}
 	if cfg.SourceMode != "repository" && cfg.SourceMode != "bundle" {
 		return cfg, errors.New("source_mode must be repository or bundle")
+	}
+	if cfg.Preflight != "" && cfg.Preflight != "strict" && cfg.Preflight != "off" {
+		return cfg, errors.New("preflight must be strict or off")
+	}
+	switch cfg.ArtifactMode {
+	case "", "bundle", "file", "store_upload", "none":
+	default:
+		return cfg, errors.New("artifact_mode must be bundle, file, store_upload, or none")
 	}
 	maxTTLSeconds := int(maxSourceCapsuleTTL / time.Second)
 	if cfg.SourceURLTTLSeconds < 0 || cfg.SourceURLTTLSeconds > maxTTLSeconds {
@@ -148,8 +162,8 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 			return cfg, errors.New("codemagic backend accepts branch or tag, not both")
 		}
 	case buildBackendGitHubActions:
-		if cfg.SourceMode == "bundle" {
-			return cfg, errors.New("source_mode=bundle is supported by runner and Codemagic backends only")
+		if cfg.SourceMode == "bundle" && !cfg.ContractInputs {
+			return cfg, errors.New("github_actions source_mode=bundle requires contract_inputs=true and matching workflow_dispatch inputs")
 		}
 		if strings.TrimSpace(cfg.Owner) == "" || strings.TrimSpace(cfg.Repo) == "" || cfg.WorkflowID == "" || strings.TrimSpace(cfg.Ref) == "" {
 			return cfg, errors.New("github_actions backend requires owner, repo, workflow_id, and ref")
@@ -209,9 +223,29 @@ func cloudIntegrationFor(backend string) (*sdk.BoundIntegration, error) {
 }
 
 func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, error) {
+	return a.submitCloudBuildWithOptions(ctx, d, nil)
+}
+
+func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
 	backendName := normalizeBuildBackend(d.BuildBackend)
 	cfg, err := parseCloudBuildConfig(backendName, d.BuildBackendJSON)
 	if err != nil {
+		return nil, err
+	}
+	buildBackendJSON := d.BuildBackendJSON
+	if releaseOpts != nil && (d.TargetKind == "ios" || d.TargetKind == "android") {
+		channel, channelErr := normalizeMobileChannel(d.TargetKind, releaseOpts.Channel)
+		if channelErr != nil {
+			return nil, channelErr
+		}
+		cfg.StoreChannel = channel
+		body, marshalErr := json.Marshal(cfg)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		buildBackendJSON = string(body)
+	}
+	if err := validateMobileCloudContract(d, cfg); err != nil {
 		return nil, err
 	}
 	backend, err := cloudBackendFor(backendName)
@@ -224,7 +258,7 @@ func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, erro
 	}
 	build, err := dbCreateBuildForEnvBackend(
 		globalCtx.AppDB(), d.ID, d.EnvironmentID, d.Framework, d.BuildCmd,
-		backendName, d.BuildBackendJSON,
+		backendName, buildBackendJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -376,16 +410,7 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 		a.failBuild(build, "create artifact directory: "+err.Error())
 		return nil
 	}
-	mode := cfg.ArtifactMode
-	if mode == "" {
-		if d.TargetKind == "ios" && cfg.SourceMode == "bundle" {
-			mode = "file"
-		} else if d.TargetKind == "ios" {
-			mode = "store_upload"
-		} else {
-			mode = "bundle"
-		}
-	}
+	mode := resolvedCloudArtifactMode(cfg, d)
 	var manifestJSON string
 	switch mode {
 	case "store_upload":
@@ -536,23 +561,12 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 		input["instanceType"] = cfg.InstanceType
 	}
 	variables := cloneStringMap(cfg.Variables)
-	variables["APTEVA_BUILD_ID"] = strconv.FormatInt(build.ID, 10)
-	variables["APTEVA_DEPLOYMENT"] = d.Name
-	variables["APTEVA_ENVIRONMENT"] = d.EnvironmentName
-	if cfg.SourceMode == "bundle" {
-		if capsule == nil {
-			return nil, errors.New("codemagic bundle build requires a prepared source capsule")
-		}
-		variables["APTEVA_SOURCE_URL"] = capsule.URL
-		variables["APTEVA_SOURCE_SHA256"] = capsule.SHA256
-		variables["APTEVA_SOURCE_SIZE"] = strconv.FormatInt(capsule.Size, 10)
-		variables["APTEVA_SOURCE_FORMAT"] = capsule.Format
-		variables["APTEVA_SOURCE_FILENAME"] = sourceCapsuleFilename
-		variables["APTEVA_TARGET_KIND"] = d.TargetKind
-		variables["APTEVA_FRAMEWORK"] = d.Framework
-		variables["APTEVA_BUILD_CMD"] = d.BuildCmd
-		variables["APTEVA_TARGET_CONFIG_B64"] = base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}")))
-		variables["APTEVA_ENV_B64"] = base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}")))
+	contract, err := cloudBuildContractVariables(cfg, d, build, capsule)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range contract {
+		variables[key] = value
 	}
 	input["environment"] = map[string]any{"variables": variables, "groups": cfg.Groups}
 	data, err := executeIntegration(bound, "start_build", input)
@@ -578,11 +592,110 @@ func (codemagicBuildBackend) Inspect(_ context.Context, bound *sdk.BoundIntegrat
 	if status == "finished" {
 		status = "succeeded"
 	}
+	errorText := topLevelProviderError(data)
+	if isFailedCloudStatus(status) {
+		if actions, actionErr := executeIntegration(bound, "list_build_actions", map[string]any{
+			"build_id": build.ExternalJobID, "page_size": 100,
+		}); actionErr == nil {
+			errorText = defaultStr(codemagicFailedActionSummary(actions), errorText)
+		}
+		errorText = defaultStr(errorText, "Codemagic build failed")
+	}
 	return &externalBuildStatus{
 		Status: status, ProviderRaw: append(json.RawMessage(nil), data...),
 		SourceSHA: firstRecursiveString(data, "commitHash", "commit_hash", "head_sha"),
-		Error:     firstRecursiveString(data, "error", "message"),
+		Error:     errorText,
 	}, nil
+}
+
+func topLevelProviderError(raw json.RawMessage) string {
+	var value map[string]any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	for _, key := range []string{"error", "error_message", "failure_reason"} {
+		switch item := value[key].(type) {
+		case string:
+			if strings.TrimSpace(item) != "" {
+				return strings.TrimSpace(item)
+			}
+		case map[string]any:
+			for _, nested := range []string{"message", "detail", "reason"} {
+				if text, ok := item[nested].(string); ok && strings.TrimSpace(text) != "" {
+					return strings.TrimSpace(text)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func isFailedCloudStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "failed", "failure", "timed_out", "timeout", "action_required":
+		return true
+	default:
+		return false
+	}
+}
+
+func codemagicFailedActionSummary(raw json.RawMessage) string {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	var names []string
+	var visit func(any)
+	visit = func(current any) {
+		switch item := current.(type) {
+		case []any:
+			for _, child := range item {
+				visit(child)
+			}
+		case map[string]any:
+			status := ""
+			for _, key := range []string{"status", "conclusion"} {
+				if text, ok := item[key].(string); ok {
+					status = strings.ToLower(strings.TrimSpace(text))
+					if status != "" {
+						break
+					}
+				}
+			}
+			if isFailedCloudStatus(status) {
+				name := ""
+				for _, key := range []string{"name", "actionName", "displayName", "title"} {
+					if text, ok := item[key].(string); ok && strings.TrimSpace(text) != "" {
+						name = strings.TrimSpace(text)
+						break
+					}
+				}
+				if name != "" {
+					names = append(names, name)
+				}
+			}
+			for _, child := range item {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	if len(names) == 0 {
+		return ""
+	}
+	return "Codemagic failed action: " + strings.Join(uniqueCloudStrings(names), ", ")
+}
+
+func uniqueCloudStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if !seen[value] {
+			seen[value] = true
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func (codemagicBuildBackend) Cancel(_ context.Context, bound *sdk.BoundIntegration, _ cloudBuildConfig, build *Build) error {
@@ -604,8 +717,17 @@ type githubActionsBuildBackend struct{}
 
 func (githubActionsBuildBackend) Name() string { return buildBackendGitHubActions }
 
-func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, _ *Deployment, _ *Build, _ *sourceCapsule) (*externalBuildJob, error) {
+func (githubActionsBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegration, cfg cloudBuildConfig, d *Deployment, build *Build, capsule *sourceCapsule) (*externalBuildJob, error) {
 	inputs := cloneAnyMap(cfg.Inputs)
+	if cfg.ContractInputs {
+		contract, err := cloudBuildContractVariables(cfg, d, build, capsule)
+		if err != nil {
+			return nil, err
+		}
+		for key, value := range contract {
+			inputs[strings.ToLower(key)] = value
+		}
+	}
 	submittedAt := time.Now().UTC()
 	data, err := executeIntegration(bound, "trigger_workflow", map[string]any{
 		"owner": cfg.Owner, "repo": cfg.Repo, "workflow_id": cfg.WorkflowID,
@@ -761,15 +883,78 @@ func externalStoreArtifactManifest(d *Deployment, build *Build) (artifactManifes
 	if provider == "" {
 		return artifactManifest{}, errors.New("store_upload artifact mode requires an ios or android target")
 	}
-	if platform == "android" {
-		return artifactManifest{}, errors.New("android cloud builds should return an AAB bundle; store_upload is not supported yet")
+	if platform == "android" && strings.TrimSpace(cfg.VersionCode) == "" {
+		return artifactManifest{}, errors.New("Android store_upload requires target_config_json.version_code")
+	}
+	cloudCfg, err := parseCloudBuildConfig(build.BuildBackend, build.BuildBackendJSON)
+	if err != nil {
+		return artifactManifest{}, err
 	}
 	return artifactManifest{
 		Platform: platform, BundleID: cfg.BundleID, PackageName: cfg.PackageName,
-		VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber,
+		VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber, VersionCode: cfg.VersionCode,
+		Channel:          cloudCfg.StoreChannel,
 		ExternalProvider: provider, ExternalID: build.ExternalJobID,
-		ExternalStatus: "uploaded_processing",
+		ExternalStatus: map[string]string{"ios": "uploaded_processing", "android": "completed"}[platform],
 	}, nil
+}
+
+func cloudBuildContractVariables(cfg cloudBuildConfig, d *Deployment, build *Build, capsule *sourceCapsule) (map[string]string, error) {
+	if d == nil || build == nil {
+		return nil, errors.New("deployment and build are required")
+	}
+	mode := resolvedCloudArtifactMode(cfg, d)
+	spec := runnerBuildSpec{
+		BuildID: build.ID, ProjectID: d.ProjectID, Deployment: d.Name,
+		Environment: d.EnvironmentName, TargetKind: d.TargetKind,
+		Framework: d.Framework, BuildCmd: d.BuildCmd,
+		Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
+	values := map[string]string{
+		"APTEVA_PROTOCOL":          cloudBuildProtocolVersion,
+		"APTEVA_BUILD_ID":          strconv.FormatInt(build.ID, 10),
+		"APTEVA_DEPLOYMENT":        d.Name,
+		"APTEVA_ENVIRONMENT":       d.EnvironmentName,
+		"APTEVA_TARGET_KIND":       d.TargetKind,
+		"APTEVA_FRAMEWORK":         d.Framework,
+		"APTEVA_BUILD_CMD":         d.BuildCmd,
+		"APTEVA_SOURCE_MODE":       cfg.SourceMode,
+		"APTEVA_ARTIFACT_MODE":     mode,
+		"APTEVA_ARTIFACT_NAME":     cfg.ArtifactName,
+		"APTEVA_ARTIFACT_FILE":     cfg.ArtifactFile,
+		"APTEVA_STORE_CHANNEL":     cfg.StoreChannel,
+		"APTEVA_TARGET_CONFIG_B64": base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}"))),
+		"APTEVA_ENV_B64":           base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}"))),
+		"APTEVA_BUILD_SPEC_B64":    base64.StdEncoding.EncodeToString(specJSON),
+	}
+	if cfg.SourceMode == "bundle" {
+		if capsule == nil {
+			return nil, errors.New("bundle build requires a prepared source capsule")
+		}
+		values["APTEVA_SOURCE_URL"] = capsule.URL
+		values["APTEVA_SOURCE_SHA256"] = capsule.SHA256
+		values["APTEVA_SOURCE_SIZE"] = strconv.FormatInt(capsule.Size, 10)
+		values["APTEVA_SOURCE_FORMAT"] = capsule.Format
+		values["APTEVA_SOURCE_FILENAME"] = sourceCapsuleFilename
+	}
+	return values, nil
+}
+
+func resolvedCloudArtifactMode(cfg cloudBuildConfig, d *Deployment) string {
+	if cfg.ArtifactMode != "" {
+		return cfg.ArtifactMode
+	}
+	if d != nil && d.TargetKind == "ios" && cfg.SourceMode == "bundle" {
+		return "file"
+	}
+	if d != nil && d.TargetKind == "ios" {
+		return "store_upload"
+	}
+	return "bundle"
 }
 
 func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Deployment, build *Build, artifact *cloudArtifact, mode, distDir string) error {
@@ -837,7 +1022,8 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 		manifest := artifactManifest{
 			Platform: d.TargetKind, Primary: name, PackageName: cfg.PackageName,
 			BundleID: cfg.BundleID, VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber,
-			Files: []artifactFile{mobileArtifactFile(dst, strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))},
+			VersionCode: cfg.VersionCode,
+			Files:       []artifactFile{mobileArtifactFile(dst, strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))},
 		}
 		return writeArtifactManifest(distDir, manifest)
 	}

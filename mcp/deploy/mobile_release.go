@@ -91,7 +91,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	provider := map[string]string{"android": "google_play", "ios": "app_store_connect"}[platform]
 	meta := mobileReleaseMeta{
 		Platform: platform, PackageName: manifest.PackageName, BundleID: manifest.BundleID,
-		VersionName: manifest.VersionName, BuildNumber: manifest.BuildNumber,
+		VersionName: manifest.VersionName, BuildNumber: manifest.BuildNumber, VersionCode: manifest.VersionCode,
 		RolloutFraction: opts.RolloutFraction, ReleaseNotes: opts.ReleaseNotes,
 		SubmitForReview: opts.SubmitForReview, BetaGroupID: opts.BetaGroupID,
 	}
@@ -125,16 +125,39 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 			})
 			return nil, err
 		}
+		if manifest.Channel != "" && manifest.Channel != channel {
+			err := fmt.Errorf("cloud backend uploaded to channel %q, not requested channel %q", manifest.Channel, channel)
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "error": err.Error(), "external_status": "failed",
+			})
+			return nil, err
+		}
 		externalID := strings.TrimSpace(manifest.ExternalID)
-		if externalID == "" {
-			externalID = strconv.FormatInt(b.ID, 10)
+		externalStatus := manifest.ExternalStatus
+		releaseStatus := "starting"
+		if platform == "android" {
+			if meta.VersionCode == "" {
+				err := errors.New("Android store_upload result requires version_code")
+				_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+					"status": "failed", "error": err.Error(), "external_status": "failed",
+				})
+				return nil, err
+			}
+			externalID = meta.VersionCode
+			externalStatus = defaultStr(externalStatus, "completed")
+			releaseStatus = "live"
+		} else {
+			if externalID == "" {
+				externalID = strconv.FormatInt(b.ID, 10)
+			}
+			if !strings.HasPrefix(externalID, "uploaded-") {
+				externalID = "uploaded-" + externalID
+			}
+			externalStatus = defaultStr(externalStatus, "uploaded_processing")
 		}
-		if !strings.HasPrefix(externalID, "uploaded-") {
-			externalID = "uploaded-" + externalID
-		}
-		externalStatus := defaultStr(manifest.ExternalStatus, "uploaded_processing")
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-			"status": "starting", "external_id": externalID, "external_status": externalStatus,
+			"status": releaseStatus, "external_id": externalID, "external_status": externalStatus,
+			"release_meta_json": mustJSON(meta),
 		})
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "upload_adopted", mustJSON(map[string]any{
 			"provider": provider, "build_backend": b.BuildBackend, "external_job_id": b.ExternalJobID,

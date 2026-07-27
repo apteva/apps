@@ -169,6 +169,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_cloud_backend_setup", Handler: a.toolCloudBackendSetup,
+			Description: "Discover or create a provider's shared build adapter and configure this deployment environment. Codemagic setup uses Deploy's maintained iOS/Android capsule workflow. Args: name OR id, environment?, provider?, repository_url?, team_id?, workflow_id?, branch?, artifact_mode?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":           map[string]any{"type": "string"},
+					"id":             map[string]any{"type": "integer"},
+					"environment":    map[string]any{"type": "string"},
+					"provider":       map[string]any{"type": "string", "enum": []string{"codemagic"}},
+					"repository_url": map[string]any{"type": "string"},
+					"team_id":        map[string]any{"type": "string"},
+					"workflow_id":    map[string]any{"type": "string"},
+					"branch":         map[string]any{"type": "string"},
+					"artifact_mode":  map[string]any{"type": "string", "enum": []string{"file", "store_upload"}},
+				},
+			},
+		},
+		{
 			Name: "deploy_mobile_signing_setup", Handler: a.toolMobileSigningSetup,
 			Description: "Provision or rotate iOS distribution signing for the selected cloud build provider. Registers the Apple Bundle ID, creates the distribution certificate/profile, stores secrets at the provider, and wires the provider secret group into this environment. Args: name OR id, environment?, provider?, rotate?",
 			InputSchema: map[string]any{
@@ -613,13 +631,18 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	build, err := a.runBuild(d)
+	var releaseOpts *releaseOptions
+	if boolArg(args, "release") {
+		opts := releaseOptionsFromArgs(args)
+		releaseOpts = &opts
+	}
+	build, err := a.runBuildWithOptions(d, releaseOpts)
 	if err != nil {
 		return nil, err
 	}
 	res := map[string]any{"build": build}
 	if boolArg(args, "release") {
-		opts := releaseOptionsFromArgs(args)
+		opts := *releaseOpts
 		if build.Status == "succeeded" {
 			rel, err := a.runReleaseWithOptions(d, build, opts)
 			if err != nil {
@@ -663,6 +686,18 @@ func (a *App) toolBuildCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	return map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"}, nil
+}
+
+func (a *App) toolCloudBackendSetup(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	return a.setupCloudBackend(context.Background(), d, cloudBackendSetupInput{
+		Provider: strArg(args, "provider"), RepositoryURL: strArg(args, "repository_url"),
+		TeamID: strArg(args, "team_id"), WorkflowID: strArg(args, "workflow_id"),
+		Branch: strArg(args, "branch"), ArtifactMode: strArg(args, "artifact_mode"),
+	})
 }
 
 func (a *App) toolMobileSigningSetup(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -2,9 +2,10 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.18.0
+version: 0.19.0
 description: |
-  Build and release services, Android apps, and iOS apps.
+  Build and release services, Android apps, and iOS apps across local
+  and external build backends using a provider-neutral build contract.
   Takes a code repo (from the Code app, a local path, or a git URL),
   builds it with the framework's toolchain, and runs the result as
   a supervised child process bound to a local port. The Apteva
@@ -98,8 +99,10 @@ provides:
       description: Build a service artifact, Android AAB, or iOS IPA.
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
+    - name: deploy_cloud_backend_setup
+      description: Discover or create a provider's shared build adapter and configure a deployment environment.
     - name: deploy_mobile_signing_setup
-      description: Provision or rotate iOS distribution signing and deliver secrets to the selected cloud build provider.
+      description: Provision or rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
     - name: deploy_release

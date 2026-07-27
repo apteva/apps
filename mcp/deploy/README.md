@@ -147,6 +147,34 @@ Connect signing fields from Deploy's bound `app_store` connection. Android
 jobs receive upload-key fields from `android_signing` when available. Store
 publishing still happens through Deploy after it retrieves the IPA or AAB.
 
+### Provider-neutral cloud contract
+
+All cloud adapters use `apteva.build/v1`. The contract carries the immutable
+build ID, target kind, framework, build command, environment, target config,
+source mode, artifact mode, artifact name, and requested store channel.
+Bundle builds also carry a signed source URL, exact byte size, SHA-256, and
+format. The contract is encoded as normal provider variables for Codemagic and
+opt-in `workflow_dispatch` inputs for GitHub Actions.
+
+Mobile bundle builds run a strict source preflight before a provider job is
+created. iOS checks the project, populated AppIcon asset catalog, orientations,
+bundle ID, and store version. Android checks the Gradle/manifest structure,
+launcher icon, package name, and store version code. Set `"preflight":"off"`
+only for workflows that intentionally perform those checks themselves.
+
+The maintained Codemagic adapter is in `runners/codemagic/`. It contains one
+`apteva-mobile-capsule` workflow for iOS and Android. Codemagic still requires a
+Git-backed application, but that repository is a shared bootstrap containing
+only this adapter. User application source remains in Deploy's signed capsule;
+there is no per-application Git repository or workflow.
+
+`deploy_cloud_backend_setup` (or
+`POST /api/deployments/:id/cloud-backend/setup`) discovers or creates that
+shared Codemagic application and writes the environment's provider config.
+Provider bootstrapping is behind a separate adapter interface so another cloud
+builder can implement setup without changing deployment, build, or release
+records.
+
 ### Integration-backed providers
 
 Bind Codemagic or GitHub integrations to the `cloud_build` role before using
@@ -157,10 +185,12 @@ Codemagic example:
 ```json
 {
   "app_id": "codemagic-app-id",
-  "workflow_id": "ios-release",
+  "workflow_id": "apteva-mobile-capsule",
   "branch": "main",
   "instance_type": "mac_mini_m4",
+  "source_mode": "bundle",
   "artifact_mode": "store_upload",
+  "store_channel": "internal",
   "groups": ["ios-signing", "app-store"]
 }
 ```
@@ -192,10 +222,9 @@ Apple still requires an operator to accept agreements, create/download the
 initial App Store Connect API key, and create the App Store app record. App
 privacy, legal, review, and required store metadata also remain operator-owned.
 
-Codemagic builds remain repository-backed because Codemagic's API requires an
-application, workflow, and branch or tag. Its legacy `source_mode: bundle`
-option remains accepted for compatibility with operator-managed workflows,
-but the Git-independent path is the `runner` backend above.
+Codemagic's API still requires a bootstrap application, workflow, and branch
+or tag. The shared bootstrap is only an adapter host; `source_mode: bundle`
+keeps the actual application Git-independent.
 
 GitHub Actions example:
 
@@ -208,17 +237,22 @@ GitHub Actions example:
   "artifact_mode": "file",
   "artifact_name": "apteva-build",
   "artifact_file": "app-release.aab",
+  "contract_inputs": true,
   "inputs": {"configuration": "release"}
 }
 ```
+
+`contract_inputs` is opt-in because GitHub rejects undeclared
+`workflow_dispatch` inputs. A workflow using it must declare the lowercase
+`apteva_*` inputs corresponding to the standard `APTEVA_*` contract variables.
 
 `artifact_mode` defines the provider-neutral output contract:
 
 | Mode | Contract |
 |------|----------|
 | `bundle` | The named ZIP artifact is unpacked as the service/static build output. |
-| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. Runner/GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. |
-| `store_upload` | The workflow signs and uploads iOS to App Store Connect; Deploy adopts it and continues TestFlight/App Store processing. |
+| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. Runner/GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. Deploy can apply Android upload signing after retrieval. |
+| `store_upload` | The workflow signs and uploads iOS to App Store Connect or Android to Google Play. Deploy adopts the result. Android requires `target_config_json.version_code`; direct Play upload also records the exact `store_channel`. |
 | `none` | The workflow has no deployable output. |
 
 The capsule runner serves authenticated artifact and log routes directly.

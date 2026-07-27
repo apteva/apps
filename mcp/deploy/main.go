@@ -524,8 +524,12 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // failure). The caller decides whether to release immediately.
 
 func (a *App) runBuild(d *Deployment) (*Build, error) {
+	return a.runBuildWithOptions(d, nil)
+}
+
+func (a *App) runBuildWithOptions(d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
 	if normalizeBuildBackend(d.BuildBackend) != buildBackendLocal {
-		return a.submitCloudBuild(context.Background(), d)
+		return a.submitCloudBuildWithOptions(context.Background(), d, releaseOpts)
 	}
 	return a.runLocalBuild(d)
 }
@@ -585,6 +589,15 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	if err := fetchSource(globalCtx, d, srcDir, cfg); err != nil {
 		fmt.Fprintf(logF, "fetch source failed: %v\n", err)
 		return a.failBuild(build, "fetch source: "+err.Error()), nil
+	}
+	var localBuildCfg cloudBuildConfig
+	_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &localBuildCfg)
+	if localBuildCfg.Preflight != "off" && isMobileDeployment(d, build) {
+		localBuildCfg.SourceMode = "bundle"
+		localBuildCfg.ArtifactMode = "file"
+		if err := validateMobileSource(srcDir, d, localBuildCfg); err != nil {
+			return a.failBuild(build, "mobile source preflight: "+err.Error()), nil
+		}
 	}
 	sha, err := hashTree(srcDir)
 	if err != nil {

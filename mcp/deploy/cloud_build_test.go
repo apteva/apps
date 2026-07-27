@@ -27,6 +27,7 @@ type cloudBuildPlatform struct {
 	provider    string
 	artifactURL string
 	status      string
+	actionName  string
 	calls       []integrationCall
 }
 
@@ -54,7 +55,10 @@ func (p *cloudBuildPlatform) ExecuteIntegrationTool(_ int64, tool string, input 
 		}
 		payload := map[string]any{
 			"status": status,
-			"commit": map[string]any{"commitHash": "abc123"},
+			"commit": map[string]any{
+				"commitHash": "abc123",
+				"message":    "Add generic Apteva mobile capsule workflow",
+			},
 		}
 		if p.artifactURL != "" {
 			payload["artifacts"] = []any{map[string]any{
@@ -64,6 +68,12 @@ func (p *cloudBuildPlatform) ExecuteIntegrationTool(_ int64, tool string, input 
 		data, _ = json.Marshal(payload)
 	case "cancel_build":
 		data = []byte(`{}`)
+	case "list_build_actions":
+		data, _ = json.Marshal(map[string]any{
+			"actions": []map[string]any{{
+				"name": p.actionName, "status": "failed",
+			}},
+		})
 	case "trigger_workflow":
 		data = []byte(`{}`)
 	default:
@@ -103,6 +113,9 @@ func TestCloudBuildConfigValidation(t *testing.T) {
 	if err := validateBuildBackendSelection("github_actions", `{"owner":"acme","repo":"api","workflow_id":"deploy.yml","ref":"main","source_mode":"bundle"}`); err == nil {
 		t.Fatal("expected github bundle source validation error")
 	}
+	if err := validateBuildBackendSelection("github_actions", `{"owner":"acme","repo":"api","workflow_id":"deploy.yml","ref":"main","source_mode":"bundle","contract_inputs":true}`); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
@@ -122,7 +135,7 @@ func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
 	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
 		Name: "ios-source", TargetKind: "ios", SourceKind: "local", SourceRef: sourceDir,
 		Framework: "ios", BuildBackend: "codemagic",
-		BuildBackendJSON: `{"app_id":"runner","workflow_id":"apteva-ios-runner","branch":"main","source_mode":"bundle"}`,
+		BuildBackendJSON: `{"app_id":"runner","workflow_id":"apteva-ios-runner","branch":"main","source_mode":"bundle","preflight":"off"}`,
 		EnvJSON:          `{"API_URL":"https://staging.example.test"}`,
 		TargetConfigJSON: `{"bundle_id":"com.example.source"}`,
 	})
@@ -167,6 +180,7 @@ func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
 		t.Fatalf("source URL=%s", sourceURL.String())
 	}
 	if variables["APTEVA_SOURCE_FORMAT"] != sourceCapsuleFormat ||
+		variables["APTEVA_PROTOCOL"] != cloudBuildProtocolVersion ||
 		variables["APTEVA_TARGET_KIND"] != "ios" ||
 		variables["APTEVA_SOURCE_SHA256"] != build.SourceSHA {
 		t.Fatalf("source variables=%#v", variables)
@@ -462,7 +476,7 @@ func TestIOSCloudBuildAdoptsStoreUpload(t *testing.T) {
 		Name: "ios-app", TargetKind: "ios", SourceKind: "code", SourceRef: "repo-1",
 		Framework: "ios", BuildBackend: "codemagic",
 		BuildBackendJSON: `{"app_id":"cm-app","workflow_id":"ios-release","branch":"main","artifact_mode":"store_upload"}`,
-		TargetConfigJSON: `{"bundle_id":"com.example.app","app_store_app_id":"app-1","build_number":"42"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app","app_store_app_id":"app-1","version_name":"1.0.0","build_number":"42"}`,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -496,5 +510,84 @@ func TestIOSCloudBuildAdoptsStoreUpload(t *testing.T) {
 	if release.Status != "starting" || release.Provider != "app_store_connect" ||
 		release.ExternalID != "uploaded-cm-42" || release.ExternalStatus != "uploaded_processing" {
 		t.Fatalf("release=%+v", release)
+	}
+}
+
+func TestAndroidCloudBuildAdoptsStoreUpload(t *testing.T) {
+	platform := &cloudBuildPlatform{provider: "codemagic"}
+	ctx := withCloudBuildContext(t, platform)
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-app", TargetKind: "android", SourceKind: "code", SourceRef: "repo-1",
+		Framework: "android", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"cm-app","workflow_id":"android-release","branch":"main","artifact_mode":"store_upload"}`,
+		TargetConfigJSON: `{"package_name":"com.example.app","version_name":"1.2.3","version_code":"123"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	effective := effectiveDeploymentForEnvironment(d, env)
+	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	build, err := app.submitCloudBuildWithOptions(context.Background(), effective, &releaseOptions{Channel: "internal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buildCfg cloudBuildConfig
+	if err := json.Unmarshal([]byte(build.BuildBackendJSON), &buildCfg); err != nil {
+		t.Fatal(err)
+	}
+	if buildCfg.StoreChannel != "internal" {
+		t.Fatalf("build config store_channel=%q", buildCfg.StoreChannel)
+	}
+	startEnvironment := platform.calls[0].Input["environment"].(map[string]any)
+	startVariables := startEnvironment["variables"].(map[string]string)
+	if startVariables["APTEVA_TARGET_KIND"] != "android" ||
+		startVariables["APTEVA_STORE_CHANNEL"] != "internal" {
+		t.Fatalf("contract variables=%#v", startVariables)
+	}
+	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
+		"release_requested":    true,
+		"release_options_json": `{"channel":"internal"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	build, _ = dbGetBuild(ctx.AppDB(), build.ID)
+	if err := app.syncCloudBuild(context.Background(), build); err != nil {
+		t.Fatal(err)
+	}
+	releases, err := dbListReleasesForEnv(ctx.AppDB(), d.ID, env.ID, 1)
+	if err != nil || len(releases) != 1 {
+		t.Fatalf("releases=%+v err=%v", releases, err)
+	}
+	release := releases[0]
+	if release.Status != "live" || release.Provider != "google_play" ||
+		release.ExternalID != "123" || release.ExternalStatus != "completed" {
+		t.Fatalf("release=%+v", release)
+	}
+	var meta mobileReleaseMeta
+	if err := json.Unmarshal([]byte(release.ReleaseMetaJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.VersionCode != "123" || meta.PackageName != "com.example.app" {
+		t.Fatalf("meta=%+v", meta)
+	}
+}
+
+func TestCodemagicFailureUsesFailedActionNotCommitMessage(t *testing.T) {
+	platform := &cloudBuildPlatform{
+		provider: "codemagic", status: "failed", actionName: "Publishing",
+	}
+	withCloudBuildContext(t, platform)
+	status, err := (codemagicBuildBackend{}).Inspect(
+		context.Background(),
+		&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "codemagic"},
+		cloudBuildConfig{},
+		&Build{ExternalJobID: "cm-failed"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Error != "Codemagic failed action: Publishing" {
+		t.Fatalf("error=%q", status.Error)
 	}
 }

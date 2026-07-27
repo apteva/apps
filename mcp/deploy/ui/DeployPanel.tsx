@@ -1340,8 +1340,8 @@ function CreateDeploymentDialog({
                 value={buildBackendConfig}
                 onChange={(e) => setBuildBackendConfig(e.target.value)}
                 placeholder={buildBackend === "codemagic"
-                  ? '{"app_id":"...","workflow_id":"ios-release","branch":"main","artifact_mode":"store_upload"}'
-                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"bundle"}'}
+                  ? '{"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}'
+                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}'}
                 rows={4}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />

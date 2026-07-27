@@ -26,6 +26,7 @@ type mobileTargetConfig struct {
 	Module        string   `json:"module,omitempty"`
 	Variant       string   `json:"variant,omitempty"`
 	PackageName   string   `json:"package_name,omitempty"`
+	VersionCode   string   `json:"version_code,omitempty"`
 	GradleArgs    []string `json:"gradle_args,omitempty"`
 	ProjectPath   string   `json:"project_path,omitempty"`
 	WorkspacePath string   `json:"workspace_path,omitempty"`
@@ -48,6 +49,8 @@ type artifactManifest struct {
 	BundleID         string         `json:"bundle_id,omitempty"`
 	VersionName      string         `json:"version_name,omitempty"`
 	BuildNumber      string         `json:"build_number,omitempty"`
+	VersionCode      string         `json:"version_code,omitempty"`
+	Channel          string         `json:"channel,omitempty"`
 	ExternalProvider string         `json:"external_provider,omitempty"`
 	ExternalID       string         `json:"external_id,omitempty"`
 	ExternalStatus   string         `json:"external_status,omitempty"`
@@ -163,6 +166,7 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	}
 	manifest := artifactManifest{
 		Platform: "android", Primary: primary, PackageName: cfg.PackageName,
+		VersionName: cfg.VersionName, VersionCode: cfg.VersionCode,
 		Files: []artifactFile{mobileArtifactFile(dst, "aab")},
 	}
 	if err := writeArtifactManifest(artifactDir, manifest); err != nil {

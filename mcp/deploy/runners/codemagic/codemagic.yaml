@@ -1,0 +1,188 @@
+workflows:
+  apteva-mobile-capsule:
+    name: Apteva mobile capsule
+    instance_type: mac_mini_m4
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    scripts:
+      - name: Verify Apteva contract and source
+        script: |
+          set -euo pipefail
+          test "${APTEVA_PROTOCOL:-}" = "apteva.build/v1"
+          test -n "${APTEVA_TARGET_KIND:-}"
+
+          export APTEVA_SOURCE_DIR="$CM_BUILD_DIR"
+          if [[ "${APTEVA_SOURCE_MODE:-repository}" = "bundle" ]]; then
+            required=(APTEVA_SOURCE_URL APTEVA_SOURCE_SHA256 APTEVA_SOURCE_SIZE APTEVA_SOURCE_FORMAT)
+            for name in "${required[@]}"; do
+              test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
+            done
+            test "$APTEVA_SOURCE_FORMAT" = "zip-v1"
+            capsule="$CM_BUILD_DIR/apteva-source.zip"
+            export APTEVA_SOURCE_DIR="$CM_BUILD_DIR/apteva-source"
+            mkdir -p "$APTEVA_SOURCE_DIR"
+            curl --fail --location --retry 3 --output "$capsule" "$APTEVA_SOURCE_URL"
+            test "$(stat -f '%z' "$capsule")" = "$APTEVA_SOURCE_SIZE"
+            test "$(shasum -a 256 "$capsule" | awk '{print $1}')" = "$APTEVA_SOURCE_SHA256"
+            unzip -q "$capsule" -d "$APTEVA_SOURCE_DIR"
+          fi
+          echo "APTEVA_SOURCE_DIR=$APTEVA_SOURCE_DIR" >> "$CM_ENV"
+
+      - name: Decode mobile target
+        script: |
+          set -euo pipefail
+          python3 - <<'PY' >> "$CM_ENV"
+          import base64
+          import json
+          import os
+          import shlex
+
+          target = json.loads(base64.b64decode(os.environ.get("APTEVA_TARGET_CONFIG_B64", "e30=")))
+          values = {
+              "APTEVA_MODULE": target.get("module", "app").strip(":"),
+              "APTEVA_VARIANT": target.get("variant", "release"),
+              "APTEVA_PACKAGE_NAME": target.get("package_name", ""),
+              "APTEVA_VERSION_CODE": str(target.get("version_code", "")),
+              "APTEVA_BUNDLE_ID": target.get("bundle_id", ""),
+              "APTEVA_VERSION_NAME": str(target.get("version_name", "1.0.0")),
+              "APTEVA_BUILD_NUMBER": str(target.get("build_number", "1")),
+              "APTEVA_XCODE_PROJECT": target.get("project_path", ""),
+              "APTEVA_XCODE_WORKSPACE": target.get("workspace_path", ""),
+              "APTEVA_XCODE_SCHEME": target.get("scheme", ""),
+              "APTEVA_CONFIGURATION": target.get("configuration", "Release"),
+          }
+          for key, value in values.items():
+              print(f"{key}={shlex.quote(str(value))}")
+          PY
+
+      - name: Build mobile artifact
+        script: |
+          set -euo pipefail
+          output="$CM_BUILD_DIR/apteva-output"
+          mkdir -p "$output"
+          cd "$APTEVA_SOURCE_DIR"
+
+          if [[ -n "${APTEVA_BUILD_CMD:-}" ]]; then
+            sh -c "$APTEVA_BUILD_CMD"
+          elif [[ "$APTEVA_TARGET_KIND" = "ios" ]]; then
+            test -n "$APTEVA_BUNDLE_ID"
+            if [[ -f project.yml ]] && \
+              ! find . -maxdepth 1 \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -quit | grep -q .; then
+              xcodegen generate
+            fi
+            if [[ -z "$APTEVA_XCODE_SCHEME" ]]; then
+              echo "target_config_json.scheme is required" >&2
+              exit 1
+            fi
+            input=()
+            if [[ -n "$APTEVA_XCODE_WORKSPACE" ]]; then
+              input=(-workspace "$APTEVA_XCODE_WORKSPACE")
+            elif [[ -n "$APTEVA_XCODE_PROJECT" ]]; then
+              input=(-project "$APTEVA_XCODE_PROJECT")
+            else
+              project="$(find . -maxdepth 2 -name '*.xcodeproj' -print -quit)"
+              test -n "$project" || { echo "no Xcode project or workspace found" >&2; exit 1; }
+              input=(-project "$project")
+            fi
+
+            keychain initialize
+            app-store-connect fetch-signing-files "$APTEVA_BUNDLE_ID" --type IOS_APP_STORE --create
+            keychain add-certificates
+            xcode-project use-profiles
+            archive="$CM_BUILD_DIR/apteva.xcarchive"
+            ipa_dir="$CM_BUILD_DIR/apteva-ipa"
+            xcodebuild "${input[@]}" \
+              -scheme "$APTEVA_XCODE_SCHEME" \
+              -configuration "$APTEVA_CONFIGURATION" \
+              -archivePath "$archive" \
+              MARKETING_VERSION="$APTEVA_VERSION_NAME" \
+              CURRENT_PROJECT_VERSION="$APTEVA_BUILD_NUMBER" \
+              archive
+            xcodebuild -exportArchive \
+              -archivePath "$archive" \
+              -exportPath "$ipa_dir" \
+              -exportOptionsPlist "$HOME/export_options.plist"
+            cp "$(find "$ipa_dir" -name '*.ipa' -print -quit)" "$output/app.ipa"
+          elif [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
+            test -n "$APTEVA_PACKAGE_NAME"
+            chmod +x ./gradlew
+            task=":${APTEVA_MODULE}:bundle${APTEVA_VARIANT^}"
+            args=("$task" --console=plain --no-daemon)
+            [[ -n "$APTEVA_VERSION_CODE" ]] && args+=("-PversionCode=$APTEVA_VERSION_CODE")
+            [[ -n "$APTEVA_VERSION_NAME" ]] && args+=("-PversionName=$APTEVA_VERSION_NAME")
+            ./gradlew "${args[@]}"
+            cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/app.aab"
+            if [[ -n "${CM_KEYSTORE_PATH:-}" ]]; then
+              jarsigner \
+                -keystore "$CM_KEYSTORE_PATH" \
+                -storepass:env CM_KEYSTORE_PASSWORD \
+                -keypass:env CM_KEY_PASSWORD \
+                "$output/app.aab" "$CM_KEY_ALIAS"
+            fi
+          else
+            echo "unsupported APTEVA_TARGET_KIND=$APTEVA_TARGET_KIND" >&2
+            exit 1
+          fi
+
+      - name: Publish or package result
+        script: |
+          set -euo pipefail
+          output="$CM_BUILD_DIR/apteva-output"
+          mode="${APTEVA_ARTIFACT_MODE:-file}"
+          channel="${APTEVA_STORE_CHANNEL:-internal}"
+
+          if [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "ios" ]]; then
+            required=(APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_IDENTIFIER APP_STORE_CONNECT_PRIVATE_KEY)
+            for name in "${required[@]}"; do
+              test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
+            done
+            key="$CM_BUILD_DIR/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
+            printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key"
+            xcrun altool --upload-package "$output/app.ipa" \
+              --api-key "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+              --api-issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+              --p8-file-path "$key" \
+              --output-format json
+            rm -f "$key"
+          elif [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "android" ]]; then
+            test -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS:-}"
+            test -n "${CM_KEYSTORE_PATH:-}"
+            test -n "$APTEVA_VERSION_CODE"
+            fastlane supply \
+              --json_key_data "$GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS" \
+              --aab "$output/app.aab" \
+              --package_name "$APTEVA_PACKAGE_NAME" \
+              --track "$channel"
+          fi
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          platform = os.environ["APTEVA_TARGET_KIND"]
+          mode = os.environ.get("APTEVA_ARTIFACT_MODE", "file")
+          primary = "app.ipa" if platform == "ios" else "app.aab"
+          manifest = {
+              "platform": platform,
+              "primary": primary,
+              "package_name": os.environ.get("APTEVA_PACKAGE_NAME", ""),
+              "bundle_id": os.environ.get("APTEVA_BUNDLE_ID", ""),
+              "version_name": os.environ.get("APTEVA_VERSION_NAME", ""),
+              "build_number": os.environ.get("APTEVA_BUILD_NUMBER", ""),
+              "version_code": os.environ.get("APTEVA_VERSION_CODE", ""),
+          }
+          if mode == "store_upload":
+              manifest.update({
+                  "channel": os.environ.get("APTEVA_STORE_CHANNEL", ""),
+                  "external_provider": "app_store_connect" if platform == "ios" else "google_play",
+                  "external_status": "uploaded_processing" if platform == "ios" else "completed",
+              })
+          with open(os.path.join(os.environ["CM_BUILD_DIR"], "apteva-output", ".apteva-artifact.json"), "w") as f:
+              json.dump(manifest, f, separators=(",", ":"))
+          PY
+          cd "$output"
+          zip -q "$CM_BUILD_DIR/apteva-build.zip" .apteva-artifact.json app.*
+    artifacts:
+      - apteva-build.zip
+      - /tmp/xcodebuild_logs/*.log

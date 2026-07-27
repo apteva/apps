@@ -75,6 +75,8 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentMobileSigning(w, r, d)
 	case tail == "mobile-signing/setup":
 		a.httpDeploymentMobileSigningSetup(w, r, d)
+	case tail == "cloud-backend/setup":
+		a.httpDeploymentCloudBackendSetup(w, r, d)
 	case tail == "logs":
 		a.httpDeploymentLogs(w, r, d)
 	case tail == "attach-domain":
@@ -84,6 +86,28 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
+}
+
+func (a *App) httpDeploymentCloudBackendSetup(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	result, err := a.setupCloudBackend(r.Context(), d, cloudBackendSetupInput{
+		Provider: strArg(body, "provider"), RepositoryURL: strArg(body, "repository_url"),
+		TeamID: strArg(body, "team_id"), WorkflowID: strArg(body, "workflow_id"),
+		Branch: strArg(body, "branch"), ArtifactMode: strArg(body, "artifact_mode"),
+	})
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, result)
 }
 
 func (a *App) httpDeploymentMobileSigning(w http.ResponseWriter, r *http.Request, d *Deployment) {
@@ -558,14 +582,19 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 	}
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	build, err := a.runBuild(d)
+	var releaseOpts *releaseOptions
+	if boolArg(body, "release") {
+		opts := releaseOptionsFromArgs(body)
+		releaseOpts = &opts
+	}
+	build, err := a.runBuildWithOptions(d, releaseOpts)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	res := map[string]any{"build": build}
 	if boolArg(body, "release") {
-		opts := releaseOptionsFromArgs(body)
+		opts := *releaseOpts
 		if build.Status == "succeeded" {
 			rel, err := a.runReleaseWithOptions(d, build, opts)
 			if err != nil {

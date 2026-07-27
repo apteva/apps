@@ -71,6 +71,11 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 	if err := fetchSource(globalCtx, d, srcDir, sourceCfg); err != nil {
 		return nil, fmt.Errorf("fetch source capsule: %w", err)
 	}
+	if cfg.Preflight != "off" && isMobileDeployment(d, build) {
+		if err := validateMobileSource(srcDir, d, cfg); err != nil {
+			return nil, fmt.Errorf("mobile source preflight: %w", err)
+		}
+	}
 
 	capsulePath := filepath.Join(buildDir, sourceCapsuleFilename)
 	tmpPath := capsulePath + ".tmp"
