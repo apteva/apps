@@ -47,6 +47,7 @@ type mobileSigningProviderResult struct {
 // the Apple certificate/profile lifecycle.
 type mobileSigningProvider interface {
 	Name() string
+	SetupMatchesBuildConfig(cloudBuildConfig, *MobileSigningSetup) bool
 	ProvisionSigningSecrets(context.Context, *sdk.BoundIntegration, cloudBuildConfig, *Deployment, mobileSigningSecrets) (*mobileSigningProviderResult, error)
 }
 
@@ -131,7 +132,8 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		)
 	}
 	if existing != nil && existing.Status == mobileSigningStatusReady &&
-		existing.ProviderConnectionID == providerBound.ConnectionID && !rotate {
+		existing.ProviderConnectionID == providerBound.ConnectionID &&
+		provider.SetupMatchesBuildConfig(cfg, existing) && !rotate {
 		return &mobileSigningSetupResult{Setup: existing, Ready: true}, nil
 	}
 	previous := existing
@@ -390,6 +392,19 @@ type codemagicSigningProvider struct{}
 
 func (codemagicSigningProvider) Name() string { return buildBackendCodemagic }
 
+func (codemagicSigningProvider) SetupMatchesBuildConfig(cfg cloudBuildConfig, setup *MobileSigningSetup) bool {
+	if setup == nil || strings.TrimSpace(cfg.AppID) == "" {
+		return false
+	}
+	var providerConfig struct {
+		AppID string `json:"app_id"`
+	}
+	if json.Unmarshal([]byte(defaultStr(setup.ProviderConfigJSON, "{}")), &providerConfig) != nil {
+		return false
+	}
+	return strings.TrimSpace(providerConfig.AppID) == strings.TrimSpace(cfg.AppID)
+}
+
 func (codemagicSigningProvider) ProvisionSigningSecrets(
 	_ context.Context,
 	bound *sdk.BoundIntegration,
@@ -468,7 +483,9 @@ func (codemagicSigningProvider) ProvisionSigningSecrets(
 			return nil, err
 		}
 	}
-	configBody, _ := json.Marshal(map[string]any{"group_name": groupName, "group_id": groupID})
+	configBody, _ := json.Marshal(map[string]any{
+		"app_id": cfg.AppID, "group_name": groupName, "group_id": groupID,
+	})
 	return &mobileSigningProviderResult{
 		SecretRef: groupID, ConfigJSON: string(configBody), Groups: []string{groupName},
 	}, nil

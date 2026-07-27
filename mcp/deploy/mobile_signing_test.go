@@ -151,6 +151,13 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	if len(result.Setup.KeyFingerprint) != 64 {
 		t.Fatalf("fingerprint=%q", result.Setup.KeyFingerprint)
 	}
+	var providerConfig map[string]any
+	if err := json.Unmarshal([]byte(result.Setup.ProviderConfigJSON), &providerConfig); err != nil {
+		t.Fatal(err)
+	}
+	if providerConfig["app_id"] != "runner-app" {
+		t.Fatalf("provider config=%v", providerConfig)
+	}
 	if len(platform.variables) < 6 {
 		t.Fatalf("variables=%v", platform.variables)
 	}
@@ -188,6 +195,32 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	}
 	if len(platform.calls) != callCount {
 		t.Fatalf("idempotent setup made %d additional integration calls", len(platform.calls)-callCount)
+	}
+}
+
+func TestMobileSigningSetupReprovisionsWhenProviderAppChanges(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	_, d := newIOSSigningDeployment(t, platform)
+	app := &App{}
+
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.BuildBackendJSON = `{"app_id":"new-runner-app","workflow_id":"ios","branch":"main","source_mode":"bundle"}`
+	second, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Setup.AppleCertificateID == first.Setup.AppleCertificateID {
+		t.Fatalf("provider app change reused certificate: first=%+v second=%+v", first.Setup, second.Setup)
+	}
+	var providerConfig map[string]any
+	if err := json.Unmarshal([]byte(second.Setup.ProviderConfigJSON), &providerConfig); err != nil {
+		t.Fatal(err)
+	}
+	if providerConfig["app_id"] != "new-runner-app" {
+		t.Fatalf("provider config=%v", providerConfig)
 	}
 }
 
