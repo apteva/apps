@@ -3022,7 +3022,8 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
 
   if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
 
-  const estimatedSteps = estimateBacktestSteps(startAt, endAt, interval);
+  const estimatedSteps = estimateBacktestSteps(startAt, endAt, interval, selectedSymbols);
+  const estimatedRows = estimatedSteps * Math.max(selectedSymbols.length, 1);
 
   const create = async () => {
     setBusy(true);
@@ -3145,7 +3146,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
           </div>
         </div>
         <div className="mt-2 text-xs text-text-dim">
-          Estimated replay steps: {estimatedSteps.toLocaleString()}
+          Estimated replay: {estimatedSteps.toLocaleString()} steps · approximately {estimatedRows.toLocaleString()} stored market rows
         </div>
         {!portfolioAgentID(portfolio) && (
           <div className="mt-2 text-xs text-amber">Bind a portfolio agent before creating a backtest.</div>
@@ -3572,18 +3573,27 @@ const backtestIntervals = [
   { value: "1w", label: "1 week" },
 ];
 
-function estimateBacktestSteps(startAt: string, endAt: string, interval: string) {
+function estimateBacktestSteps(startAt: string, endAt: string, interval: string, symbols: string[]) {
   const start = new Date(`${startAt}T00:00:00Z`).getTime();
   const end = new Date(`${endAt}T00:00:00Z`).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
   const days = Math.floor((end - start) / 86400000) + 1;
+  const crypto = symbols.length > 0 && symbols.every((symbol) => inferAssetClass(symbol) === "crypto");
+  let sessions = days;
+  if (!crypto) {
+    sessions = 0;
+    for (let at = start; at <= end; at += 86400000) {
+      const weekday = new Date(at).getUTCDay();
+      if (weekday !== 0 && weekday !== 6) sessions += 1;
+    }
+  }
   switch (interval) {
-    case "5m": return days * 78;
-    case "15m": return days * 26;
-    case "1h": return days * 7;
-    case "4h": return days * 2;
+    case "5m": return sessions * (crypto ? 288 : 78);
+    case "15m": return sessions * (crypto ? 96 : 26);
+    case "1h": return sessions * (crypto ? 24 : 7);
+    case "4h": return sessions * (crypto ? 6 : 2);
     case "1w": return Math.ceil(days / 7);
-    default: return days;
+    default: return sessions;
   }
 }
 

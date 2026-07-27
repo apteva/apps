@@ -10,10 +10,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -128,6 +130,10 @@ func (b *binancePublic) Bars(symbol, rng string) ([]Bar, error) {
 }
 
 func (b *binancePublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	return b.BacktestBarsContext(context.Background(), symbol, interval, start, end, limit)
+}
+
+func (b *binancePublic) BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
 	wire, err := binanceWireSymbol(symbol)
 	if err != nil {
 		return nil, err
@@ -136,10 +142,64 @@ func (b *binancePublic) BacktestBars(symbol, interval string, start, end time.Ti
 	if err != nil {
 		return nil, err
 	}
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil, errors.New("binancePublic: valid backtest start and end required")
 	}
-	return b.klines(wire, binanceInterval, limit, start, end)
+	if limit <= 0 {
+		return nil, errors.New("binancePublic: positive backtest bar limit required")
+	}
+
+	pageSize := 1000
+	cursor := start.UTC()
+	effectiveEnd := end.UTC()
+	byTime := make(map[int64]Bar, min(limit, pageSize))
+	for len(byTime) < limit && !cursor.After(effectiveEnd) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		remaining := limit - len(byTime)
+		if remaining < pageSize {
+			pageSize = remaining
+		}
+		page, err := retryBacktestBars(ctx, func() ([]Bar, error) {
+			return b.klinesContext(ctx, wire, binanceInterval, pageSize, cursor, effectiveEnd)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		lastT := int64(0)
+		for _, bar := range page {
+			at := time.Unix(bar.T, 0).UTC()
+			if at.Before(start.UTC()) || at.After(effectiveEnd) || bar.C <= 0 {
+				continue
+			}
+			byTime[bar.T] = bar
+			if bar.T > lastT {
+				lastT = bar.T
+			}
+		}
+		if lastT <= 0 {
+			return nil, errors.New("binancePublic: kline page contained no usable timestamps")
+		}
+		next := time.Unix(lastT, 0).UTC().Add(backtestIntervalDuration(binanceInterval))
+		if !next.After(cursor) {
+			return nil, errors.New("binancePublic: kline pagination made no progress")
+		}
+		cursor = next
+		if len(page) < pageSize {
+			break
+		}
+	}
+
+	out := make([]Bar, 0, len(byTime))
+	for _, bar := range byTime {
+		out = append(out, bar)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].T < out[j].T })
+	return out, nil
 }
 
 func binanceWireSymbol(symbol string) (string, error) {
@@ -158,6 +218,10 @@ func binanceWireSymbol(symbol string) (string, error) {
 }
 
 func (b *binancePublic) klines(wire, interval string, limit int, start, end time.Time) ([]Bar, error) {
+	return b.klinesContext(context.Background(), wire, interval, limit, start, end)
+}
+
+func (b *binancePublic) klinesContext(ctx context.Context, wire, interval string, limit int, start, end time.Time) ([]Bar, error) {
 	q := url.Values{}
 	q.Set("symbol", wire)
 	q.Set("interval", interval)
@@ -168,7 +232,7 @@ func (b *binancePublic) klines(wire, interval string, limit int, start, end time
 	if !end.IsZero() {
 		q.Set("endTime", strconv.FormatInt(end.UTC().UnixMilli(), 10))
 	}
-	raw, err := b.fetch(b.base + "/klines?" + q.Encode())
+	raw, err := b.fetchContext(ctx, b.base+"/klines?"+q.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -247,7 +311,11 @@ func binanceIntervalForRange(rng string) (string, int) {
 // fetch wraps the HTTP call with a context deadline + status-code
 // check. Body is read in full; callers decode.
 func (b *binancePublic) fetch(u string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	return b.fetchContext(context.Background(), u)
+}
+
+func (b *binancePublic) fetchContext(parent context.Context, u string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("Accept", "application/json")

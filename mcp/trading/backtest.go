@@ -24,6 +24,9 @@ const (
 	backtestAgentMaxWait          = 90 * time.Second
 	backtestTelemetryPollInterval = 2 * time.Second
 	backtestTelemetryFallbackWait = 30 * time.Second
+	defaultBacktestMaxMarketRows  = 500_000
+	backtestHistoryFetchTimeout   = 5 * time.Minute
+	backtestHistoryConcurrency    = 4
 )
 
 var (
@@ -217,8 +220,12 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 400, err.Error())
 			return
 		}
-		startAt, endAt := defaultBacktestRange(body.StartAt, body.EndAt)
-		marketBars, steps, marketSource, err := captureBacktestMarketBars(symbols, interval, startAt, endAt)
+		startAt, endAt, err := resolveBacktestRange(body.StartAt, body.EndAt)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		marketBars, steps, marketSource, err := captureBacktestMarketBars(r.Context(), symbols, interval, startAt, endAt)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -259,6 +266,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			Summary: map[string]any{
 				"portfolio_name": pf.Name,
 				"market_source":  marketSource,
+				"market_data":    summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
 				"strategy_name": func() string {
 					if strategy != nil {
 						return strategy.Name
@@ -1136,10 +1144,13 @@ func backtestMarks(run *BacktestRun, step int) ([]map[string]any, error) {
 	return dbBacktestMarketMarks(globalCtx.AppDB(), run.ID, step, run.Symbols)
 }
 
-func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
+func captureBacktestMarketBars(parent context.Context, symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
 	symbols = cleanSymbols(symbols)
 	if len(symbols) == 0 {
 		return nil, 0, "", errors.New("at least one symbol required")
+	}
+	if endAt.Before(startAt) {
+		return nil, 0, "", errors.New("backtest end date must be on or after start date")
 	}
 	provider, source, err := backtestBarsProviderForSymbols(symbols)
 	if err != nil {
@@ -1149,16 +1160,69 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 	if limit <= 0 {
 		return nil, 0, "", errors.New("date range must contain at least one market bar")
 	}
-	if limit > 1000 {
-		return nil, 0, "", fmt.Errorf("backtest real market data is capped at 1000 bars per symbol for now; requested %d", limit)
+	estimatedRows := estimateBacktestMarketRows(source, startAt, endAt, interval, len(symbols))
+	if maxRows := configuredBacktestMaxMarketRows(); maxRows > 0 && estimatedRows > maxRows {
+		return nil, 0, "", fmt.Errorf(
+			"backtest would load approximately %d market rows, above this install's %d-row safety budget; shorten the range, reduce the universe, use a coarser interval, or raise backtest_max_market_rows",
+			estimatedRows, maxRows)
 	}
+
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, backtestHistoryFetchTimeout)
+	defer cancel()
+	type fetchResult struct {
+		symbol string
+		bars   []Bar
+		err    error
+	}
+	results := make(chan fetchResult, len(symbols))
+	sem := make(chan struct{}, backtestHistoryConcurrency)
+	var wg sync.WaitGroup
+	for _, symbol := range symbols {
+		symbol := symbol
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results <- fetchResult{symbol: symbol, err: ctx.Err()}
+				return
+			}
+			bars, err := provider.BacktestBarsContext(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+			if err == nil {
+				bars, err = validateBacktestHistory(symbol, source, interval, startAt, endAt, bars, time.Now().UTC())
+			}
+			results <- fetchResult{symbol: symbol, bars: bars, err: err}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	fetched := make(map[string][]Bar, len(symbols))
+	actualRows := 0
+	for result := range results {
+		if result.err != nil {
+			cancel()
+			return nil, 0, source, fmt.Errorf("fetch %s bars: %w", result.symbol, result.err)
+		}
+		actualRows += len(result.bars)
+		if maxRows := configuredBacktestMaxMarketRows(); maxRows > 0 && actualRows > maxRows {
+			cancel()
+			return nil, 0, source, fmt.Errorf("backtest fetched more than the %d-row market-data safety budget", maxRows)
+		}
+		fetched[result.symbol] = result.bars
+	}
+
 	bySymbol := map[string]map[int64]Bar{}
 	commonTimes := map[int64]bool{}
 	for i, symbol := range symbols {
-		bars, err := provider.BacktestBars(symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
-		if err != nil {
-			return nil, 0, source, fmt.Errorf("fetch %s bars: %w", symbol, err)
-		}
+		bars := fetched[symbol]
 		if len(bars) == 0 {
 			return nil, 0, source, fmt.Errorf("fetch %s bars: no bars returned", symbol)
 		}
@@ -1193,6 +1257,17 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 	if len(times) == 0 {
 		return nil, 0, source, errors.New("market bars have no common timestamps across symbols")
 	}
+	minRows := 0
+	for _, rows := range bySymbol {
+		if minRows == 0 || len(rows) < minRows {
+			minRows = len(rows)
+		}
+	}
+	if minRows > 0 && len(times)*100 < minRows*95 {
+		return nil, 0, source, fmt.Errorf(
+			"market histories are not sufficiently aligned across symbols: only %d of at least %d timestamps are common",
+			len(times), minRows)
+	}
 	out := make([]*BacktestMarketBar, 0, len(times)*len(symbols))
 	for step, t := range times {
 		for _, symbol := range symbols {
@@ -1208,7 +1283,33 @@ func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt
 }
 
 type historicalBacktestBarsProvider interface {
-	BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
+	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
+}
+
+func retryBacktestBars(ctx context.Context, fetch func() ([]Bar, error)) ([]Bar, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		bars, err := fetch()
+		if err == nil {
+			return bars, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if attempt == 2 {
+			break
+		}
+		delay := time.Duration(200*(1<<attempt)) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
 }
 
 func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsProvider, string, error) {
@@ -1251,6 +1352,143 @@ func estimateBacktestBarsLimit(startAt, endAt time.Time, interval string) int {
 	return int(end.Sub(startAt)/duration) + 1
 }
 
+func estimateBacktestMarketRows(source string, startAt, endAt time.Time, interval string, symbols int) int {
+	if symbols <= 0 {
+		return 0
+	}
+	perSymbol := estimateBacktestBarsLimit(startAt, endAt, interval)
+	if source == "yahoo-finance" {
+		perSymbol = estimateBacktestSteps(startAt, endAt, interval)
+	}
+	if perSymbol > math.MaxInt/symbols {
+		return math.MaxInt
+	}
+	return perSymbol * symbols
+}
+
+func configuredBacktestMaxMarketRows() int {
+	if globalCtx == nil {
+		return defaultBacktestMaxMarketRows
+	}
+	raw := strings.TrimSpace(globalCtx.Config().Get("backtest_max_market_rows"))
+	if raw == "" {
+		return defaultBacktestMaxMarketRows
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return defaultBacktestMaxMarketRows
+	}
+	return value
+}
+
+func validateBacktestHistory(symbol, source, interval string, startAt, endAt time.Time, bars []Bar, now time.Time) ([]Bar, error) {
+	duration := backtestIntervalDuration(interval)
+	if duration <= 0 {
+		return nil, fmt.Errorf("unsupported backtest interval %q", interval)
+	}
+	byTime := make(map[int64]Bar, len(bars))
+	for _, bar := range bars {
+		if bar.T <= 0 || bar.C <= 0 {
+			continue
+		}
+		byTime[bar.T] = bar
+	}
+	normalized := make([]Bar, 0, len(byTime))
+	for _, bar := range byTime {
+		normalized = append(normalized, bar)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i].T < normalized[j].T })
+	if source == "yahoo-finance" {
+		normalized = completedYahooStrategyBars(normalized, interval, now)
+	} else {
+		completed := normalized[:0]
+		for _, bar := range normalized {
+			if !time.Unix(bar.T, 0).UTC().Add(duration).After(now) {
+				completed = append(completed, bar)
+			}
+		}
+		normalized = completed
+	}
+	if len(normalized) == 0 {
+		return nil, errors.New("provider returned no completed priced bars")
+	}
+
+	first := time.Unix(normalized[0].T, 0).UTC()
+	last := time.Unix(normalized[len(normalized)-1].T, 0).UTC()
+	startTolerance := duration
+	endTolerance := duration
+	if source == "yahoo-finance" {
+		startTolerance = 7 * 24 * time.Hour
+		endTolerance = 7 * 24 * time.Hour
+		if interval == "1w" {
+			startTolerance = 14 * 24 * time.Hour
+			endTolerance = 14 * 24 * time.Hour
+		}
+	}
+	if first.After(startAt.UTC().Add(startTolerance)) {
+		return nil, fmt.Errorf(
+			"history begins at %s, later than requested start %s; this provider does not cover the full range",
+			first.Format(time.RFC3339), startAt.UTC().Format(time.RFC3339))
+	}
+	targetEnd := inclusiveBacktestEnd(endAt, interval)
+	if targetEnd.After(now) {
+		targetEnd = strategyClosedCandleBoundary(now, interval)
+	}
+	if last.Before(targetEnd.Add(-endTolerance)) {
+		return nil, fmt.Errorf(
+			"history ends at %s, earlier than requested end %s; this provider returned incomplete data",
+			last.Format(time.RFC3339), targetEnd.UTC().Format(time.RFC3339))
+	}
+	if source == "binance-public" {
+		for i := 1; i < len(normalized); i++ {
+			previous := time.Unix(normalized[i-1].T, 0).UTC()
+			current := time.Unix(normalized[i].T, 0).UTC()
+			if current.Sub(previous) > duration+time.Second {
+				return nil, fmt.Errorf(
+					"history has a gap between %s and %s",
+					previous.Format(time.RFC3339), current.Format(time.RFC3339))
+			}
+		}
+	}
+	return normalized, nil
+}
+
+func summarizeBacktestMarketCapture(bars []*BacktestMarketBar, symbols []string, requestedStart, requestedEnd time.Time) map[string]any {
+	summary := map[string]any{
+		"requested_start_at": requestedStart.UTC().Format(time.RFC3339),
+		"requested_end_at":   requestedEnd.UTC().Format(time.RFC3339),
+		"row_count":          len(bars),
+		"symbol_count":       len(cleanSymbols(symbols)),
+	}
+	counts := map[string]int{}
+	var first, last int64
+	maxStep := 0
+	for _, bar := range bars {
+		if bar == nil {
+			continue
+		}
+		counts[bar.Symbol]++
+		if first == 0 || bar.T < first {
+			first = bar.T
+		}
+		if bar.T > last {
+			last = bar.T
+		}
+		if bar.Step > maxStep {
+			maxStep = bar.Step
+		}
+	}
+	summary["bars_per_symbol"] = counts
+	summary["step_count"] = maxStep
+	if first > 0 {
+		summary["actual_start_at"] = time.Unix(first, 0).UTC().Format(time.RFC3339)
+	}
+	if last > 0 {
+		summary["actual_end_at"] = time.Unix(last, 0).UTC().Format(time.RFC3339)
+	}
+	return summary
+}
+
 func inclusiveBacktestEnd(endAt time.Time, interval string) time.Time {
 	switch strings.ToLower(strings.TrimSpace(interval)) {
 	case "5m", "15m", "1h", "4h":
@@ -1267,10 +1505,36 @@ func nonZeroBarPrice(value, fallback float64) float64 {
 	return fallback
 }
 
-func defaultBacktestRange(start, end string) (time.Time, time.Time) {
+func resolveBacktestRange(start, end string) (time.Time, time.Time, error) {
 	now := time.Now().UTC()
-	endAt := parseDateOr(end, now)
-	startAt := parseDateOr(start, endAt.AddDate(0, -3, 0))
+	endAt := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if strings.TrimSpace(end) != "" {
+		parsed, err := time.Parse("2006-01-02", strings.TrimSpace(end))
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid backtest end date %q; use YYYY-MM-DD", end)
+		}
+		endAt = parsed
+	}
+	startAt := endAt.AddDate(0, -3, 0)
+	if strings.TrimSpace(start) != "" {
+		parsed, err := time.Parse("2006-01-02", strings.TrimSpace(start))
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid backtest start date %q; use YYYY-MM-DD", start)
+		}
+		startAt = parsed
+	}
+	if endAt.Before(startAt) {
+		return time.Time{}, time.Time{}, errors.New("backtest end date must be on or after start date")
+	}
+	return startAt, endAt, nil
+}
+
+func defaultBacktestRange(start, end string) (time.Time, time.Time) {
+	startAt, endAt, err := resolveBacktestRange(start, end)
+	if err != nil {
+		now := time.Now().UTC()
+		return now.AddDate(0, -3, 0), now
+	}
 	return startAt, endAt
 }
 

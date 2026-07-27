@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.40
+version: 0.4.41
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 icon: /ui/icon.svg
