@@ -238,10 +238,12 @@ func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, srcH, cropW int)
 //
 // A strong detection remains authoritative anywhere. A medium detection may
 // protect a face whose bounds overlap the crop. A threshold-level detection
-// must either put its center inside the established subject window or overlap
-// that window with independent pixel support; otherwise the preceding non-ML
-// evidence wins. Reel processing applies the same principle across multiple
-// frames in filterSmartCropWeakFaceAnchors.
+// must either put its center inside the established subject window or carry
+// independent pixel support; otherwise the preceding non-ML evidence wins.
+// The latter case preserves a real profile/reclining face that saliency placed
+// outside the body-centred crop, while rejecting isolated furniture votes.
+// Reel processing applies the same principle across multiple frames in
+// filterSmartCropWeakFaceAnchors.
 func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, weakPixelSupport bool) bool {
 	if cropW <= 0 {
 		return false
@@ -254,7 +256,7 @@ func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, we
 		return true
 	}
 	if face.MaxX < currentX || face.MinX > cropEnd {
-		return false
+		return weakPixelSupport
 	}
 	return face.Quality >= 12 || weakPixelSupport
 }
@@ -263,9 +265,9 @@ func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, we
 // one independent check before it can move the crop. Genuine profile and
 // reclining fixtures contain a compact, connected skin/chroma region inside
 // the PICO box; the room patterns that create weak false votes do not. This is
-// deliberately only a rescue path for a face box that already overlaps the
-// established crop, so monochrome or dark-complexion subjects inside the crop
-// continue to be accepted without this colour cue.
+// It is only required when the candidate would move an established crop;
+// monochrome or dark-complexion subjects already inside the crop continue to
+// be accepted without this colour cue.
 func smartCropWeakFaceHasPixelSupport(img image.Image, face smartCropFace) bool {
 	if img == nil || face.Scale <= 0 {
 		return false
@@ -656,7 +658,8 @@ func correctSmartCropFaceTracks(samples []smartCropV2Sample, srcW, cropW int) in
 	if len(samples) == 0 || srcW <= cropW || cropW <= 0 {
 		return 0
 	}
-	corrected := correctSmartCropSingleFaceAlternatingFallbacks(samples, srcW, cropW)
+	corrected := promoteSmartCropCoherentDetailedFaceClusters(samples, cropW)
+	corrected += correctSmartCropSingleFaceAlternatingFallbacks(samples, srcW, cropW)
 	for sceneStart := 0; sceneStart < len(samples); {
 		sceneEnd := sceneStart + 1
 		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
@@ -799,6 +802,74 @@ func correctSmartCropFaceTracks(samples []smartCropV2Sample, srcW, cropW int) in
 		sceneStart = sceneEnd
 	}
 	return corrected
+}
+
+// promoteSmartCropCoherentDetailedFaceClusters recovers a profile or
+// horizontal face that the 640px detector sees repeatedly outside the
+// body-centred saliency crop. A single out-of-window result is deliberately
+// ignored: it may be furniture. A cluster needs at least three spatially
+// coherent detections and one strong member, while every off-crop member has
+// already passed the independent pixel-support check in
+// analyzeSmartCropSourceFrame.
+//
+// This is evaluated only after the ordinary weak-anchor filters. It therefore
+// restores a verified track as a group without reopening the isolated weak
+// detections those filters removed.
+func promoteSmartCropCoherentDetailedFaceClusters(samples []smartCropV2Sample, cropW int) int {
+	if len(samples) < 3 || cropW <= 0 {
+		return 0
+	}
+	promoted := 0
+	for sceneStart := 0; sceneStart < len(samples); {
+		sceneEnd := sceneStart + 1
+		for sceneEnd < len(samples) && !samples[sceneEnd].point.Cut {
+			sceneEnd++
+		}
+		cluster := make([]int, 0, sceneEnd-sceneStart)
+		flush := func() {
+			if len(cluster) < 3 {
+				cluster = cluster[:0]
+				return
+			}
+			strong := false
+			for _, index := range cluster {
+				if samples[index].detailedFace.Quality >= 20 {
+					strong = true
+					break
+				}
+			}
+			if !strong {
+				cluster = cluster[:0]
+				return
+			}
+			for _, index := range cluster {
+				candidate := samples[index].detailedFace
+				if samples[index].face == nil || candidate.Quality > samples[index].face.Quality {
+					copy := *candidate
+					samples[index].face = &copy
+					promoted++
+				}
+			}
+			cluster = cluster[:0]
+		}
+		for i := sceneStart; i < sceneEnd; i++ {
+			candidate := samples[i].detailedFace
+			if candidate == nil {
+				continue
+			}
+			if len(cluster) > 0 {
+				previous := cluster[len(cluster)-1]
+				if samples[i].point.AtMs-samples[previous].point.AtMs > smartCropV2MaxGapMs ||
+					absInt(candidate.CenterX-samples[previous].detailedFace.CenterX) > cropW/4 {
+					flush()
+				}
+			}
+			cluster = append(cluster, i)
+		}
+		flush()
+		sceneStart = sceneEnd
+	}
+	return promoted
 }
 
 // correctSmartCropSingleFaceAlternatingFallbacks handles a close profile or

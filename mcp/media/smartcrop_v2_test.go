@@ -216,6 +216,12 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 			want: false,
 		},
 		{
+			name:             "pixel-supported-distant-reclining-profile",
+			face:             smartCropFace{CenterX: 1728, MinX: 1651, MaxX: 1805, Scale: 155, Quality: 8},
+			weakPixelSupport: true,
+			want:             true,
+		},
+		{
 			name: "threshold-level-contained-profile",
 			face: smartCropFace{CenterX: 1480, MinX: 1410, MaxX: 1550, Scale: 140, Quality: 6},
 			want: true,
@@ -248,6 +254,38 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 				t.Fatalf("supported=%v want=%v face=%+v", got, testCase.want, testCase.face)
 			}
 		})
+	}
+}
+
+func TestPromoteSmartCropCoherentDetailedFaceClusters(t *testing.T) {
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 300}, detailedFace: &smartCropFace{CenterX: 1050, Quality: 9}},
+		{point: cropPathPoint{AtMs: 1000, X: 300}, detailedFace: &smartCropFace{CenterX: 1060, Quality: 12}},
+		{point: cropPathPoint{AtMs: 2000, X: 300}, detailedFace: &smartCropFace{CenterX: 1055, Quality: 24}},
+	}
+	if got := promoteSmartCropCoherentDetailedFaceClusters(samples, 500); got != 3 {
+		t.Fatalf("promoted=%d want 3", got)
+	}
+	for i := range samples {
+		if samples[i].face == nil || samples[i].face.CenterX < 1000 {
+			t.Fatalf("sample %d face=%+v want coherent right-side face", i, samples[i].face)
+		}
+	}
+}
+
+func TestPromoteSmartCropCoherentDetailedFaceClustersRejectsUnverifiedVotes(t *testing.T) {
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 0, X: 300}, detailedFace: &smartCropFace{CenterX: 1050, Quality: 9}},
+		{point: cropPathPoint{AtMs: 1000, X: 300}, detailedFace: &smartCropFace{CenterX: 1060, Quality: 12}},
+		{point: cropPathPoint{AtMs: 2000, X: 300}, detailedFace: &smartCropFace{CenterX: 1055, Quality: 11}},
+	}
+	if got := promoteSmartCropCoherentDetailedFaceClusters(samples, 500); got != 0 {
+		t.Fatalf("promoted=%d want 0 without a strong confirming detection", got)
+	}
+	for i := range samples {
+		if samples[i].face != nil {
+			t.Fatalf("sample %d unexpectedly promoted face=%+v", i, samples[i].face)
+		}
 	}
 }
 
