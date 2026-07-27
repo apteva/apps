@@ -109,6 +109,20 @@ func decodeResponse[T any](t *testing.T, response *httptest.ResponseRecorder) T 
 	return value
 }
 
+func TestManifestExposesDashboardPanel(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if manifest.Version != "0.2.1" {
+		t.Fatalf("manifest version=%q, want 0.2.1", manifest.Version)
+	}
+	if len(manifest.Provides.UIPanels) != 1 {
+		t.Fatalf("ui panels=%d, want 1", len(manifest.Provides.UIPanels))
+	}
+	panel := manifest.Provides.UIPanels[0]
+	if panel.Slot != "project.page" || panel.Entry != "/ui/PushPanel.mjs" {
+		t.Fatalf("unexpected dashboard panel: %+v", panel)
+	}
+}
+
 func TestRegisterAndDeliver(t *testing.T) {
 	h := newHarness(t)
 	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
