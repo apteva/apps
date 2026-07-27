@@ -93,6 +93,19 @@ from a test channel to production without rebuilding. `deploy_rollout`
 changes a staged Google Play production fraction; `deploy_halt` halts a
 Play rollout or expires a TestFlight build.
 
+Test audiences are managed through Deploy rather than by calling store
+integrations directly:
+
+- `deploy_distribution_status` reads the current provider-backed audience.
+- `deploy_distribution_update` idempotently adds audience members.
+- iOS channels accept individual tester emails and manage TestFlight groups.
+- Android test tracks accept Google Group email addresses. Google Play's
+  publishing API does not expose the Play Console's individual email lists.
+
+Deploy does not persist tester PII. App Store Connect and Google Play remain
+the source of truth, while the bound integrations provide credentialed API
+transport.
+
 ## Cloud build backends
 
 Build execution is selected per environment and snapshotted onto each

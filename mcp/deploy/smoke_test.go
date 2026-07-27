@@ -53,6 +53,15 @@ func TestEmbeddedManifestMatchesSource(t *testing.T) {
 	if !signedRoute {
 		t.Fatal("source capsule route must be declared GET + no_auth")
 	}
+	declaredTools := map[string]bool{}
+	for _, tool := range embedded.Provides.MCPTools {
+		declaredTools[tool.Name] = true
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if !declaredTools[tool.Name] {
+			t.Errorf("MCPTools exposes %q but the manifest does not declare it", tool.Name)
+		}
+	}
 }
 
 // Smoke test: bring up the schema in an in-memory DB, run the

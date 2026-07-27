@@ -192,6 +192,25 @@ interface MobileSigningSetup {
   updated_at: string;
 }
 
+interface DistributionAudienceMember {
+  kind: "individual" | "group";
+  email: string;
+  first_name?: string;
+  last_name?: string;
+  state?: string;
+}
+
+interface MobileDistributionState {
+  platform: "android" | "ios";
+  provider: string;
+  channel: string;
+  group_id?: string;
+  group_name?: string;
+  configured: boolean;
+  audience: DistributionAudienceMember[];
+  count: number;
+}
+
 interface AutoRestartInfo {
   Attempts: number;
   LastAt: string;
@@ -254,6 +273,10 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [submitForReview, setSubmitForReview] = useState(false);
   const [mobileSigning, setMobileSigning] = useState<MobileSigningSetup | null>(null);
   const [signingBusy, setSigningBusy] = useState(false);
+  const [distribution, setDistribution] = useState<MobileDistributionState | null>(null);
+  const [distributionError, setDistributionError] = useState("");
+  const [audienceEmail, setAudienceEmail] = useState("");
+  const [audienceBusy, setAudienceBusy] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -339,6 +362,35 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 
   useEffect(() => { loadDeployments(); }, [loadDeployments]);
 
+  useEffect(() => {
+    const deployment = detail?.deployment;
+    if (!deployment || deployment.target_kind === "service" || mobileChannel === "production") {
+      setDistribution(null);
+      setDistributionError("");
+      return;
+    }
+    let cancelled = false;
+    setDistribution(null);
+    setDistributionError("");
+    api<MobileDistributionState>(
+      "GET",
+      `/deployments/${deployment.id}/distribution`,
+      undefined,
+      { channel: mobileChannel },
+    ).then((state) => {
+      if (!cancelled) {
+        setDistribution(state);
+        setDistributionError("");
+      }
+    }).catch((e) => {
+      if (!cancelled) {
+        setDistribution(null);
+        setDistributionError((e as Error).message);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [api, detail?.deployment.id, detail?.deployment.target_kind, mobileChannel]);
+
   // Capabilities: whether the optional Domains app is installed +
   // the registered domains for the picker. Cheap one-shot per mount.
   useEffect(() => {
@@ -422,6 +474,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     setLogTargetId(null);
     setLogKind("release");
     setMobileSigning(null);
+    setDistribution(null);
+    setDistributionError("");
+    setAudienceEmail("");
     loadDetail(id);
   };
 
@@ -530,6 +585,31 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       tone: "warning",
       onConfirm: () => runMobileSigningSetup(true),
     });
+  };
+
+  const handleAddAudience = async () => {
+    if (!detail || !audienceEmail.trim() || mobileChannel === "production") return;
+    setAudienceBusy(true);
+    try {
+      const state = await api<MobileDistributionState>(
+        "POST",
+        `/deployments/${detail.deployment.id}/distribution`,
+        {
+          channel: mobileChannel,
+          audience: [{
+            kind: detail.deployment.target_kind === "android" ? "group" : "individual",
+            email: audienceEmail.trim(),
+          }],
+        },
+      );
+      setDistribution(state);
+      setDistributionError("");
+      setAudienceEmail("");
+    } catch (e) {
+      setDistributionError((e as Error).message);
+    } finally {
+      setAudienceBusy(false);
+    }
   };
 
   const handleStop = () => {
@@ -833,6 +913,58 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 >
                   {signingBusy ? "Provisioning..." : mobileSigning?.status === "ready" ? "Rotate" : "Configure"}
                 </button>
+              </section>
+            )}
+            {mobile && mobileChannel !== "production" && (
+              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
+                <span className="text-text-dim uppercase">Test audience</span>
+                <span className="text-text-muted">
+                  {distribution
+                    ? `${distribution.count} ${detail.deployment.target_kind === "android" ? "Google group" : "tester"}${distribution.count === 1 ? "" : "s"}`
+                    : "loading"}
+                </span>
+                {distribution?.group_name && (
+                  <span className="text-text-dim truncate">{distribution.group_name}</span>
+                )}
+                <div className="flex items-center gap-2 ml-auto min-w-0">
+                  <input
+                    type="email"
+                    value={audienceEmail}
+                    onChange={(e) => setAudienceEmail(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void handleAddAudience();
+                      }
+                    }}
+                    placeholder={detail.deployment.target_kind === "android"
+                      ? "Google Group email"
+                      : "Tester Apple ID email"}
+                    className="w-52 bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddAudience}
+                    disabled={audienceBusy || !audienceEmail.trim()}
+                    className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40"
+                  >
+                    {audienceBusy ? "Adding..." : "Add"}
+                  </button>
+                </div>
+                {distributionError && (
+                  <span className="basis-full text-red truncate" title={distributionError}>
+                    {distributionError}
+                  </span>
+                )}
+                {distribution && distribution.audience.length > 0 && (
+                  <div className="basis-full flex items-center gap-2 overflow-x-auto text-text-dim">
+                    {distribution.audience.map((member) => (
+                      <span key={`${member.kind}:${member.email}`} className="whitespace-nowrap">
+                        {member.email}{member.state ? ` (${member.state})` : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </section>
             )}
 

@@ -213,6 +213,52 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_distribution_status", Handler: a.toolDistributionStatus,
+			Description: "Read the provider-backed test audience for a mobile channel. Apple returns TestFlight testers; Google Play returns Google Groups. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":          map[string]any{"type": "string"},
+					"id":            map[string]any{"type": "integer"},
+					"environment":   map[string]any{"type": "string"},
+					"channel":       map[string]any{"type": "string"},
+					"release_id":    map[string]any{"type": "integer"},
+					"beta_group_id": map[string]any{"type": "string"},
+					"group_name":    map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
+			Name: "deploy_distribution_update", Handler: a.toolDistributionUpdate,
+			Description: "Idempotently add members to a mobile test audience. iOS accepts individual tester emails; Android accepts Google Group addresses because Google Play's API does not support individual email lists. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":          map[string]any{"type": "string"},
+					"id":            map[string]any{"type": "integer"},
+					"environment":   map[string]any{"type": "string"},
+					"channel":       map[string]any{"type": "string"},
+					"release_id":    map[string]any{"type": "integer"},
+					"beta_group_id": map[string]any{"type": "string"},
+					"group_name":    map[string]any{"type": "string"},
+					"audience": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"kind":       map[string]any{"type": "string", "enum": []string{"individual", "group"}},
+								"email":      map[string]any{"type": "string"},
+								"first_name": map[string]any{"type": "string"},
+								"last_name":  map[string]any{"type": "string"},
+							},
+							"required": []string{"kind", "email"},
+						},
+					},
+				},
+				"required": []string{"audience"},
+			},
+		},
+		{
 			Name: "deploy_release", Handler: a.toolRelease,
 			Description: "Release a build. Services start a process; mobile builds publish to a store channel. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?",
 			InputSchema: map[string]any{

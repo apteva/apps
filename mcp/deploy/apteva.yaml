@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.19.5
+version: 0.20.0
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -105,6 +105,10 @@ provides:
       description: Provision or rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
+    - name: deploy_distribution_status
+      description: Read the provider-backed TestFlight or Google Play test audience for a mobile channel.
+    - name: deploy_distribution_update
+      description: Idempotently add individual TestFlight testers or Google Groups to a mobile test channel.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote

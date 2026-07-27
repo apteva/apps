@@ -75,6 +75,8 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentMobileSigning(w, r, d)
 	case tail == "mobile-signing/setup":
 		a.httpDeploymentMobileSigningSetup(w, r, d)
+	case tail == "distribution":
+		a.httpDeploymentDistribution(w, r, d)
 	case tail == "cloud-backend/setup":
 		a.httpDeploymentCloudBackendSetup(w, r, d)
 	case tail == "logs":
@@ -85,6 +87,38 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentDetachDomain(w, r, d)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
+	}
+}
+
+func (a *App) httpDeploymentDistribution(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	args := map[string]any{}
+	switch r.Method {
+	case http.MethodGet:
+		args["channel"] = r.URL.Query().Get("channel")
+		args["beta_group_id"] = r.URL.Query().Get("beta_group_id")
+		args["group_name"] = r.URL.Query().Get("group_name")
+		if releaseID := queryInt(r, "release_id", 0); releaseID > 0 {
+			args["release_id"] = releaseID
+		}
+		state, err := a.mobileDistributionStatus(d, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, state)
+	case http.MethodPost:
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		state, err := a.updateMobileDistribution(d, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, state)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
 	}
 }
 
