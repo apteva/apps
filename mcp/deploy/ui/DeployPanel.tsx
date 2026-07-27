@@ -96,7 +96,7 @@ interface Deployment {
   source_ref: string;
   framework: string;
   build_cmd: string;
-  build_backend: "local" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions";
   build_backend_config_json: string;
   start_cmd: string;
   port_hint: number;
@@ -129,7 +129,7 @@ interface Build {
   deployment_id: number;
   source_sha: string;
   framework: string;
-  build_backend: "local" | "codemagic" | "github_actions";
+  build_backend: "local" | "runner" | "codemagic" | "github_actions";
   external_job_id: string;
   external_status: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
@@ -171,6 +171,25 @@ interface DeploymentDetail {
   releases: Release[];
   current_release: Release | null;
   url: string;
+}
+
+interface MobileSigningSetup {
+  id: number;
+  deployment_id: number;
+  environment_id?: number;
+  platform: string;
+  provider: string;
+  bundle_id: string;
+  status: "pending" | "provisioning" | "action_required" | "ready" | "failed";
+  app_store_app_id?: string;
+  apple_bundle_resource_id?: string;
+  apple_certificate_id?: string;
+  apple_profile_id?: string;
+  provider_secret_ref?: string;
+  provider_config_json: string;
+  key_fingerprint?: string;
+  last_error?: string;
+  updated_at: string;
 }
 
 interface AutoRestartInfo {
@@ -233,6 +252,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [health, setHealth] = useState<Record<number, UnhealthyEntry>>({});
   const [mobileChannel, setMobileChannel] = useState("internal");
   const [submitForReview, setSubmitForReview] = useState(false);
+  const [mobileSigning, setMobileSigning] = useState<MobileSigningSetup | null>(null);
+  const [signingBusy, setSigningBusy] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -282,6 +303,16 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       try {
         const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
         setDetail(d);
+        if (d.deployment.target_kind === "ios") {
+          const signing = await api<{ setups?: MobileSigningSetup[] }>("GET", `/deployments/${id}/mobile-signing`);
+          setMobileSigning(
+            (signing.setups || []).find((setup) => setup.provider === d.deployment.build_backend)
+              || signing.setups?.[0]
+              || null,
+          );
+        } else {
+          setMobileSigning(null);
+        }
         // Always re-anchor the log pane to THIS deployment, so
         // switching from a deployment with a live release to a
         // deployment without one doesn't leave the previous one's
@@ -390,6 +421,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     setLogs("");
     setLogTargetId(null);
     setLogKind("release");
+    setMobileSigning(null);
     loadDetail(id);
   };
 
@@ -462,6 +494,43 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
+
+  const runMobileSigningSetup = async (rotate: boolean) => {
+    if (!detail) return;
+    setSigningBusy(true);
+    try {
+      const result = await api<{ setup: MobileSigningSetup; ready: boolean; manual_actions?: string[] }>(
+        "POST",
+        `/deployments/${detail.deployment.id}/mobile-signing/setup`,
+        { provider: detail.deployment.build_backend, rotate },
+      );
+      setMobileSigning(result.setup);
+      if (!result.ready && result.manual_actions?.length) {
+        setError(result.manual_actions.join(" "));
+      } else {
+        setError("");
+      }
+      await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Signing setup failed: " + (e as Error).message);
+    } finally {
+      setSigningBusy(false);
+    }
+  };
+
+  const handleMobileSigningSetup = () => {
+    if (mobileSigning?.status !== "ready") {
+      void runMobileSigningSetup(false);
+      return;
+    }
+    setConfirmState({
+      title: "Rotate iOS signing",
+      body: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
+      confirmLabel: "Rotate",
+      tone: "warning",
+      onConfirm: () => runMobileSigningSetup(true),
+    });
+  };
 
   const handleStop = () => {
     if (!detail) return;
@@ -726,6 +795,45 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 onRestart={handleRestart}
                 busy={busy}
               />
+            )}
+            {detail.deployment.target_kind === "ios" && (
+              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs">
+                <span className="text-text-dim uppercase">iOS signing</span>
+                <span className={
+                  mobileSigning?.status === "ready"
+                    ? "text-green"
+                    : mobileSigning?.status === "action_required"
+                      ? "text-yellow"
+                      : mobileSigning?.status === "failed"
+                        ? "text-red"
+                        : "text-text-muted"
+                }>
+                  {mobileSigning?.status || "not configured"}
+                </span>
+                <span className="text-text-dim truncate">
+                  {detail.deployment.build_backend}
+                  {mobileSigning?.bundle_id ? ` · ${mobileSigning.bundle_id}` : ""}
+                  {mobileSigning?.provider_secret_ref ? ` · secret group ${mobileSigning.provider_secret_ref}` : ""}
+                </span>
+                {mobileSigning?.last_error && (
+                  <span className="text-yellow truncate" title={mobileSigning.last_error}>
+                    {mobileSigning.last_error}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleMobileSigningSetup}
+                  disabled={signingBusy || detail.deployment.build_backend !== "codemagic"}
+                  className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40"
+                  title={
+                    detail.deployment.build_backend === "codemagic"
+                      ? "Provision Apple distribution signing and store credentials securely at the build provider."
+                      : "This build provider does not yet expose a signing-secret adapter."
+                  }
+                >
+                  {signingBusy ? "Provisioning..." : mobileSigning?.status === "ready" ? "Rotate" : "Configure"}
+                </button>
+              </section>
             )}
 
             <section className="grid grid-cols-2 gap-4 p-4 border-b border-border text-xs">

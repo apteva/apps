@@ -57,9 +57,10 @@ type App struct {
 	maxBuilds       int
 	retainRollbacks int
 
-	buildSem     chan struct{} // throttle concurrent builds
-	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
-	cloudBuildMu sync.Mutex
+	buildSem        chan struct{} // throttle concurrent builds
+	watchdogStop    chan struct{} // closed on unmount; pid-owns-port poller
+	cloudBuildMu    sync.Mutex
+	mobileSigningMu sync.Mutex
 
 	sourceCapsuleKeyMu sync.Mutex
 	sourceCapsuleKey   []byte

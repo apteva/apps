@@ -169,6 +169,32 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_mobile_signing_setup", Handler: a.toolMobileSigningSetup,
+			Description: "Provision or rotate iOS distribution signing for the selected cloud build provider. Registers the Apple Bundle ID, creates the distribution certificate/profile, stores secrets at the provider, and wires the provider secret group into this environment. Args: name OR id, environment?, provider?, rotate?",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+					"provider":    map[string]any{"type": "string"},
+					"rotate":      map[string]any{"type": "boolean"},
+				},
+			},
+		},
+		{
+			Name: "deploy_mobile_signing_status", Handler: a.toolMobileSigningStatus,
+			Description: "Return non-secret mobile signing provisioning status for a deployment environment. Args: name OR id, environment?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+				},
+			},
+		},
+		{
 			Name: "deploy_release", Handler: a.toolRelease,
 			Description: "Release a build. Services start a process; mobile builds publish to a store channel. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?",
 			InputSchema: map[string]any{
@@ -637,6 +663,32 @@ func (a *App) toolBuildCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	return map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"}, nil
+}
+
+func (a *App) toolMobileSigningSetup(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	return a.setupMobileSigning(context.Background(), d, strArg(args, "provider"), boolArg(args, "rotate"))
+}
+
+func (a *App) toolMobileSigningStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	setups, err := dbListMobileSigningSetups(ctx.AppDB(), d.ID, d.EnvironmentID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"deployment_id":  d.ID,
+		"environment_id": d.EnvironmentID,
+		"environment":    d.EnvironmentName,
+		"setups":         setups,
+		"count":          len(setups),
+	}, nil
 }
 
 func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {

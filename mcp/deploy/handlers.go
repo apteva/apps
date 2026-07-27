@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,6 +71,10 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentStop(w, r, d)
 	case tail == "restart":
 		a.httpDeploymentRestart(w, r, d)
+	case tail == "mobile-signing":
+		a.httpDeploymentMobileSigning(w, r, d)
+	case tail == "mobile-signing/setup":
+		a.httpDeploymentMobileSigningSetup(w, r, d)
 	case tail == "logs":
 		a.httpDeploymentLogs(w, r, d)
 	case tail == "attach-domain":
@@ -78,6 +84,48 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
+}
+
+func (a *App) httpDeploymentMobileSigning(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	setups, err := dbListMobileSigningSetups(globalCtx.AppDB(), d.ID, d.EnvironmentID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{
+		"deployment_id":  d.ID,
+		"environment_id": d.EnvironmentID,
+		"environment":    d.EnvironmentName,
+		"setups":         setups,
+		"count":          len(setups),
+	})
+}
+
+func (a *App) httpDeploymentMobileSigningSetup(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		Provider string `json:"provider"`
+		Rotate   bool   `json:"rotate"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+	}
+	result, err := a.setupMobileSigning(r.Context(), d, body.Provider, body.Rotate)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, result)
 }
 
 func (a *App) httpDeploymentPromote(w http.ResponseWriter, r *http.Request, d *Deployment) {

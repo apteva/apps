@@ -165,6 +165,33 @@ Codemagic example:
 }
 ```
 
+For iOS, `deploy_mobile_signing_setup` automates the provider setup that can
+be automated:
+
+1. Register or reuse the Apple Bundle ID.
+2. Wait with `action_required` until the operator creates the App Store
+   Connect app record for that Bundle ID.
+3. Generate a new RSA key and CSR in memory.
+4. Create an Apple Distribution certificate and App Store provisioning
+   profile.
+5. Deliver the App Store Connect API key and certificate private key directly
+   to the selected build provider's secure secret store.
+6. Add the provider secret group to this environment's build configuration.
+
+Deploy stores only resource IDs, the provider secret reference, the public-key
+fingerprint, and status. Private keys are never written to Deploy's database.
+Calling setup again is idempotent; pass `rotate: true` to create and activate a
+replacement before removing the old Apple profile and certificate.
+
+Codemagic is the first `mobileSigningProvider` adapter. Additional build
+providers implement the same secret-delivery interface while reusing the
+provider-independent Apple lifecycle. A provider must expose secure secret
+CRUD through its integration before Deploy can automate signing for it.
+
+Apple still requires an operator to accept agreements, create/download the
+initial App Store Connect API key, and create the App Store app record. App
+privacy, legal, review, and required store metadata also remain operator-owned.
+
 Codemagic builds remain repository-backed because Codemagic's API requires an
 application, workflow, and branch or tag. Its legacy `source_mode: bundle`
 option remains accepted for compatibility with operator-managed workflows,

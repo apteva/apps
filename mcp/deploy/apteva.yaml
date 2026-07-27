@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.17.2
+version: 0.18.0
 description: |
   Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -98,6 +98,10 @@ provides:
       description: Build a service artifact, Android AAB, or iOS IPA.
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
+    - name: deploy_mobile_signing_setup
+      description: Provision or rotate iOS distribution signing and deliver secrets to the selected cloud build provider.
+    - name: deploy_mobile_signing_status
+      description: Return non-secret signing provisioning status for a mobile deployment environment.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote
