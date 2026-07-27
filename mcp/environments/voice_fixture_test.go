@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"slices"
 	"strings"
@@ -65,6 +67,28 @@ func TestVoiceMediaRelayInterruptDropsQueuedPlayback(t *testing.T) {
 	}
 	if frame, _, _, ok := relay.nextFrame(); ok || len(frame) != 0 {
 		t.Fatalf("interrupted relay produced frame bytes=%d ok=%v", len(frame), ok)
+	}
+}
+
+func TestVoiceMediaRelayRemainsPendingUntilBufferedAudioAndTailDrain(t *testing.T) {
+	var relay voiceMediaRelay
+	relay.append(voiceAudioChunk{audio: bytes.Repeat([]byte{0x24}, voiceFrameBytes*2)})
+	if !relay.hasPendingPlayback() {
+		t.Fatal("queued audio was not pending")
+	}
+	if _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
+		t.Fatal("relay stopped pending before queued audio drained")
+	}
+	if _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
+		t.Fatal("relay stopped pending before silence tail drained")
+	}
+	for relay.hasPendingPlayback() {
+		if _, _, _, ok := relay.nextFrame(); !ok {
+			t.Fatal("pending relay failed to produce its silence tail")
+		}
+	}
+	if _, _, _, ok := relay.nextFrame(); ok {
+		t.Fatal("drained relay still produced playback")
 	}
 }
 
@@ -137,6 +161,23 @@ func TestVoiceCallValidityAcceptsSettledConversation(t *testing.T) {
 		},
 		Metrics: VoiceCallMetrics{
 			EndedBy: "conversation_idle", ReceptionistAudioS: 1.2, CallerAudioS: 1,
+		},
+	}
+
+	validity := assessVoiceCall(call)
+	if validity.Status != "valid" || len(validity.Reasons) != 0 {
+		t.Fatalf("validity=%#v", validity)
+	}
+}
+
+func TestVoiceCallValidityAcceptsTargetCompletion(t *testing.T) {
+	call := &VoiceCall{
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Hello"},
+			{Speaker: "caller", Text: "Please call me tomorrow"},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "target_done", ReceptionistAudioS: 1.2, CallerAudioS: 1,
 		},
 	}
 
@@ -313,6 +354,124 @@ func TestVoiceCallerCompletedAcceptsDoneEvidence(t *testing.T) {
 		Data:     json.RawMessage(`{"name":"send"}`),
 	}}, threadID) {
 		t.Fatal("unrelated tool call was accepted as completion evidence")
+	}
+}
+
+func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
+	abnormal := errors.New("unexpected websocket closure")
+	tests := []struct {
+		name       string
+		exit       voiceBridgeExit
+		completion bool
+		want       string
+	}{
+		{
+			name:       "cached caller completion wins over target failure",
+			exit:       voiceBridgeExit{Endpoint: voiceBridgeTarget, Operation: "read", Err: abnormal},
+			completion: true,
+			want:       "caller_done",
+		},
+		{
+			name:       "caller failure with settled completion",
+			exit:       voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "read", Err: abnormal},
+			completion: true,
+			want:       "caller_done",
+		},
+		{
+			name: "caller normal close before completion",
+			exit: voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "read"},
+			want: "audio_disconnected",
+		},
+		{
+			name: "caller abnormal close before completion",
+			exit: voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "read", Err: abnormal},
+			want: "audio_disconnected",
+		},
+		{
+			name: "target normal close before completion",
+			exit: voiceBridgeExit{Endpoint: voiceBridgeTarget, Operation: "read"},
+			want: "audio_disconnected",
+		},
+		{
+			name: "carrier normal close before completion",
+			exit: voiceBridgeExit{Endpoint: voiceBridgeCarrier, Operation: "read"},
+			want: "audio_disconnected",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := voiceBridgeEndReason(test.exit, test.completion); got != test.want {
+				t.Fatalf("voiceBridgeEndReason() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWaitForVoiceCompletionEvidenceAllowsDelayedTelemetry(t *testing.T) {
+	probes := 0
+	if !waitForVoiceCompletionEvidence(context.Background(), 200*time.Millisecond, 5*time.Millisecond, func() bool {
+		probes++
+		return probes == 3
+	}) {
+		t.Fatal("delayed completion evidence was not accepted")
+	}
+
+	started := time.Now()
+	if waitForVoiceCompletionEvidence(context.Background(), 25*time.Millisecond, 5*time.Millisecond, func() bool {
+		return false
+	}) {
+		t.Fatal("missing completion evidence was accepted")
+	}
+	if time.Since(started) < 20*time.Millisecond {
+		t.Fatal("completion grace returned before its deadline")
+	}
+}
+
+func TestVoiceFinalExchangeSettledRequiresDeliveredInactiveConversation(t *testing.T) {
+	base := time.Date(2026, time.July, 27, 16, 0, 0, 0, time.UTC)
+	activity := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   base,
+	}
+	transcript := []VoiceTranscriptTurn{
+		{Speaker: "receptionist", Text: "When should we call?"},
+		{Speaker: "caller", Text: "Monday at four."},
+		{Speaker: "receptionist", Text: "Your callback is booked. Goodbye."},
+	}
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.assistant", Time: base},
+		{ThreadID: "target", Type: "realtime.user", Time: base.Add(3 * time.Second)},
+		{ThreadID: "target", Type: "realtime.state", Time: base.Add(4 * time.Second), Data: json.RawMessage(`{"state":"listening"}`)},
+	}
+	callerEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "caller", Type: "realtime.user", Time: base.Add(time.Second)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: base.Add(2 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.state", Time: base.Add(4 * time.Second), Data: json.RawMessage(`{"state":"disconnected"}`)},
+	}
+	if !voiceFinalExchangeSettled(
+		activity, transcript, targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("completed final exchange was not settled")
+	}
+
+	active := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": true, "caller": false},
+		last:   base,
+	}
+	if voiceFinalExchangeSettled(
+		active, transcript, targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("active media was accepted as a settled exchange")
+	}
+
+	pendingTool := append(slices.Clone(targetEvents), sdk.RuntimeTelemetryEvent{
+		ThreadID: "target", Type: "tool.call", Time: base.Add(5 * time.Second),
+		Data: json.RawMessage(`{"id":"call-one","name":"calendar_commit"}`),
+	})
+	if voiceFinalExchangeSettled(
+		activity, transcript, pendingTool, "target", callerEvents, "caller",
+	) {
+		t.Fatal("pending target tool was accepted as a settled exchange")
 	}
 }
 
