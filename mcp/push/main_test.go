@@ -25,6 +25,29 @@ func (p *providerStub) send(_ *sdk.AppCtx, token string, d *delivery) (*provider
 	return &providerResult{ID: "apns-test-id"}, nil
 }
 
+type credentialPlatform struct {
+	tk.BasePlatformClient
+}
+
+func (credentialPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{
+		AppName:  "push",
+		Bindings: map[string]any{"ios_provider": float64(7)},
+	}, nil
+}
+
+func (credentialPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "apple-push-notifications", Status: "active"}, nil
+}
+
+func (credentialPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	return &sdk.ConnectionCredentials{
+		ConnectionID: id,
+		Slug:         "apple-push-notifications",
+		Fields:       map[string]string{"relay_encryption_key": "connection-generated-secret-with-32-bytes"},
+	}, nil
+}
+
 type testHarness struct {
 	app    *App
 	mux    *http.ServeMux
@@ -33,11 +56,12 @@ type testHarness struct {
 
 func newHarness(t *testing.T) *testHarness {
 	t.Helper()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithConfig(map[string]string{
-		"token_encryption_key": "test-only-key-with-at-least-24-characters",
-	}))
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	provider := &providerStub{}
-	app := &App{provider: provider}
+	app := &App{
+		provider:      provider,
+		encryptionKey: "test-only-key-with-at-least-24-characters",
+	}
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -187,5 +211,16 @@ func TestManifestHasNoMCPTools(t *testing.T) {
 	}
 	if len(manifest.Provides.MCPTools) != 0 {
 		t.Fatalf("Push MVP should not expose MCP tools: %+v", manifest.Provides.MCPTools)
+	}
+}
+
+func TestConnectionEncryptionKeyComesFromBoundIntegration(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(credentialPlatform{}))
+	key, err := connectionEncryptionKey(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "connection-generated-secret-with-32-bytes" {
+		t.Fatalf("key=%q", key)
 	}
 }

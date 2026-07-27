@@ -10,7 +10,10 @@ private inbox content remains on the user's Apteva instance.
    Team ID, APNs Key ID, `.p8` private key, app bundle ID, and environment.
 2. Install Push globally and bind its `ios_provider` dependency to that
    connection.
-3. Set a private `token_encryption_key` of at least 24 characters.
+
+Apteva generates a relay encryption key inside the connection automatically.
+It is hidden from the setup form and Push reads it through the bound-connection
+credential gate. The operator never needs to generate or paste an app secret.
 
 ## Device flow
 

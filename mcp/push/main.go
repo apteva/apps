@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"errors"
+	"fmt"
 	"net/http"
 
 	sdk "github.com/apteva/app-sdk"
@@ -17,6 +18,9 @@ type App struct {
 	store    *store
 	cipher   *tokenCipher
 	provider pushProvider
+	// encryptionKey is set only by tests. Production always reads the
+	// server-generated relay secret from the bound APNs connection.
+	encryptionKey string
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -31,7 +35,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("Push requires its app database")
 	}
-	cipher, err := newTokenCipher(ctx.Config().Get("token_encryption_key"))
+	encryptionKey := a.encryptionKey
+	if encryptionKey == "" {
+		var err error
+		encryptionKey, err = connectionEncryptionKey(ctx)
+		if err != nil {
+			return err
+		}
+	}
+	cipher, err := newTokenCipher(encryptionKey)
 	if err != nil {
 		return err
 	}
@@ -42,6 +54,21 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.provider = apnsProvider{}
 	}
 	return nil
+}
+
+func connectionEncryptionKey(ctx *sdk.AppCtx) (string, error) {
+	bound := ctx.IntegrationFor("ios_provider")
+	if bound == nil || bound.ConnectionID == 0 {
+		return "", errors.New("Apple Push Notifications integration is not connected")
+	}
+	credentials, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return "", fmt.Errorf("read Apple Push Notifications connection credentials: %w", err)
+	}
+	if credentials == nil || credentials.Fields["relay_encryption_key"] == "" {
+		return "", errors.New("Apple Push Notifications connection is missing its generated relay encryption key; recreate the connection with Apteva Server v0.6.62 or later")
+	}
+	return credentials.Fields["relay_encryption_key"], nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
