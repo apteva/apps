@@ -266,28 +266,6 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		s.ctx.Emit(topic, voiceCallEvent(call))
 	}()
 
-	runtime, err := s.runtime().GetRuntime(run.RuntimeID)
-	if err != nil {
-		return call, fmt.Errorf("load runtime: %w", err)
-	}
-	mcpNames := make([]string, 0, len(runtime.Apps)+len(runtime.ManagedMCPs)+len(runtime.MCPAttachments))
-	for _, app := range runtime.Apps {
-		if app.Name != "" && app.Status == "running" {
-			mcpNames = append(mcpNames, app.Name)
-		}
-	}
-	for _, mcp := range runtime.ManagedMCPs {
-		if mcp.Name != "" && mcp.Status == "running" {
-			mcpNames = append(mcpNames, mcp.Name)
-		}
-	}
-	for _, attachment := range runtime.MCPAttachments {
-		if attachment.Name != "" {
-			mcpNames = append(mcpNames, attachment.Name)
-		}
-	}
-	sort.Strings(mcpNames)
-
 	callerDirective := voiceCallerDirective(spec)
 	if _, err = s.runtime().SpawnRuntimeAgent(run.RuntimeID, sdk.RuntimeAgentSpawnRequest{
 		Draft: &sdk.RuntimeAgentDraft{
@@ -304,7 +282,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 
 	target, err := s.runtime().SpawnRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, sdk.RuntimeRealtimeSpawnRequest{
 		ThreadID: call.TargetThreadID, Directive: voiceTargetDirective(spec), Provider: spec.Provider,
-		Voice: spec.Voice, MCP: mcpNames, Ephemeral: true,
+		Voice: spec.Voice, Ephemeral: true,
 		InitialMessage:             voiceOpeningCue(),
 		BridgeDisconnectTTLSeconds: 15,
 	})
