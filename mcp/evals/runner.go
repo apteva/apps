@@ -331,7 +331,7 @@ func voiceSimulationIssues(call *EnvironmentVoiceCall) []string {
 }
 
 func voiceCallEndedNormally(reason string) bool {
-	return reason == "caller_done" || reason == "conversation_idle"
+	return reason == "caller_done" || reason == "target_done" || reason == "conversation_idle"
 }
 
 func fallbackString(value, fallback string) string {

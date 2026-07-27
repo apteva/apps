@@ -190,6 +190,28 @@ func TestVoiceSimulationIssuesAcceptsConversationIdle(t *testing.T) {
 	}
 }
 
+func TestVoiceSimulationIssuesAcceptsTargetCompletion(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:   "completed",
+		Validity: VoiceCallValidity{Status: "valid"},
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "When should we call?"},
+			{Speaker: "caller", Text: "Monday at four."},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "target_done", ReceptionistAudioS: 1, CallerAudioS: 1,
+		},
+	}
+	if issues := voiceSimulationIssues(call); len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+	for _, result := range voiceAssertionResults(&VoiceCase{}, call) {
+		if result.Gating && !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
+	}
+}
+
 func TestEnvironmentTaskMessageIncludesFixtureContext(t *testing.T) {
 	task := "Join the creator's most affordable paid membership."
 	message := environmentTaskMessage(task, []EnvironmentWebFixture{{ID: "patreon", Pack: "patreon", TestURL: "http://gateway.test/fixture"}})
@@ -307,7 +329,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.1" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.2" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
