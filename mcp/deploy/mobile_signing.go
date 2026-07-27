@@ -247,7 +247,7 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	}
 
 	profile, err := executeIntegration(appleBound, "create_profile", map[string]any{
-		"name":            appleProfileName(d),
+		"name":            appleProfileName(d, fingerprint),
 		"profileType":     "IOS_APP_STORE",
 		"bundle_id":       bundleResourceID,
 		"certificate_ids": []string{certificateID},
@@ -384,8 +384,15 @@ func appleResourceName(d *Deployment) string {
 	return strings.TrimSpace(name)
 }
 
-func appleProfileName(d *Deployment) string {
-	return appleResourceName(d) + " App Store"
+func appleProfileName(d *Deployment, fingerprint string) string {
+	suffix := strings.TrimSpace(fingerprint)
+	if len(suffix) > 8 {
+		suffix = suffix[:8]
+	}
+	if suffix == "" {
+		return appleResourceName(d) + " App Store"
+	}
+	return appleResourceName(d) + " App Store " + suffix
 }
 
 type codemagicSigningProvider struct{}

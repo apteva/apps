@@ -281,6 +281,10 @@ func TestMobileSigningRotationReplacesThenCleansOldAppleResources(t *testing.T) 
 	if signingCallCount(platform.calls, "update_group_variable") < 6 {
 		t.Fatalf("rotation did not update existing provider variables: calls=%v", platform.calls)
 	}
+	profileCalls := signingCalls(platform.calls, "create_profile")
+	if len(profileCalls) != 2 || profileCalls[0].Input["name"] == profileCalls[1].Input["name"] {
+		t.Fatalf("rotation reused profile name: calls=%v", profileCalls)
+	}
 }
 
 func TestMobileSigningProviderFailureCleansNewAppleResources(t *testing.T) {
@@ -359,4 +363,14 @@ func signingCallCount(calls []integrationCall, tool string) int {
 		}
 	}
 	return count
+}
+
+func signingCalls(calls []integrationCall, tool string) []integrationCall {
+	var out []integrationCall
+	for _, call := range calls {
+		if call.Tool == tool {
+			out = append(out, call)
+		}
+	}
+	return out
 }
