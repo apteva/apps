@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -391,12 +392,48 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	if spawn.AgentID != route.AgentID || spawn.Directive != directiveWithCallContext(route.AutoDirective, call) || spawn.Voice != route.AutoVoice || spawn.InitialMessage != route.AutoGreeting {
 		t.Fatalf("unexpected realtime spawn: %+v", spawn)
 	}
+	if spawn.TurnDetection == nil || spawn.TurnDetection.Profile != "telephony" {
+		t.Fatalf("unexpected realtime turn detection: %+v", spawn.TurnDetection)
+	}
 	stored, err := a.db().findCall(call.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored.Status != "answered" || stored.ThreadID != "tel-"+call.ID || stored.AudioBridgeURL == "pending" {
 		t.Fatalf("call was not attached and answered: %+v", stored)
+	}
+}
+
+func TestOutboundCallSpawnsRealtimeThreadWithTelephonyProfile(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": int64(9)},
+		credentials: &sdk.ConnectionCredentials{
+			Slug: "twilio",
+			Fields: map[string]string{
+				"auth_token":   "test-auth-token",
+				"phone_number": "+14155550101",
+			},
+		},
+		integrationResponse: map[string]json.RawMessage{
+			"make_call": json.RawMessage(`{"sid":"CAoutbound"}`),
+		},
+	}
+	a, ctx := withTelephonyTestContext(t, platform)
+	callerCtx := sdk.WithCaller(context.Background(), &sdk.Caller{AgentID: 7})
+
+	_, err := a.toolPlaceCall(callerCtx, ctx, map[string]any{
+		"to":        "+14155550100",
+		"directive": "Confirm the appointment.",
+	})
+	if err != nil {
+		t.Fatalf("place outbound call: %v", err)
+	}
+	if len(platform.spawned) != 1 {
+		t.Fatalf("spawn count=%d, want 1", len(platform.spawned))
+	}
+	spawn := platform.spawned[0]
+	if spawn.TurnDetection == nil || spawn.TurnDetection.Profile != "telephony" {
+		t.Fatalf("unexpected realtime turn detection: %+v", spawn.TurnDetection)
 	}
 }
 

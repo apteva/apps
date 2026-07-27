@@ -123,6 +123,20 @@ func TestAudioFrontendProviderModeDisablesOnlyLocalFallback(t *testing.T) {
 	}
 }
 
+func TestAudioFrontendDefaultsToProviderSpeechDetection(t *testing.T) {
+	t.Setenv("TELEPHONY_LOCAL_BARGE_IN_MODE", "")
+	frontend := newCarrierAudioFrontend(8000)
+	if frontend.mode != localBargeInOff {
+		t.Fatalf("default local barge-in mode=%v, want provider-authoritative mode", frontend.mode)
+	}
+	if got := processInChunks(frontend, telephoneSpeech(8000, 900, 1800), []int{160}); got != 0 {
+		t.Fatalf("default mode emitted local speech start at %dms", got)
+	}
+	if snapshot := frontend.snapshot(); snapshot.VADSpeechMS == 0 {
+		t.Fatal("default provider mode disabled VAD diagnostics")
+	}
+}
+
 func TestAudioFrontendSuppressesNoiseWithoutAttenuatingSpeech(t *testing.T) {
 	t.Setenv("TELEPHONY_NOISE_SUPPRESSION", "true")
 	noiseFrontend := newCarrierAudioFrontend(8000)

@@ -68,6 +68,7 @@ func waitTestConnection(t *testing.T, connections <-chan net.Conn) net.Conn {
 
 func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 	t.Setenv("APTEVA_PUBLIC_URL", "https://public.example.test")
+	t.Setenv("TELEPHONY_LOCAL_BARGE_IN_MODE", "fallback")
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx

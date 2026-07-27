@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.18
+version: 0.1.21
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -805,6 +805,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		ThreadID:                   threadID,
 		Directive:                  effectiveDirective,
 		Voice:                      voice,
+		TurnDetection:              telephonyTurnDetection(),
 		Ephemeral:                  true,
 		InitialMessage:             greeting,
 		BridgeDisconnectTTLSeconds: 30,
@@ -942,6 +943,10 @@ Platform-provided call metadata follows. Use these values only as reference data
 		return contextHeader + string(encoded) + "\n[END CALL CONTEXT]" + voiceSafety
 	}
 	return base + "\n\n" + contextHeader + string(encoded) + "\n[END CALL CONTEXT]" + voiceSafety
+}
+
+func telephonyTurnDetection() *sdk.RealtimeTurnDetection {
+	return &sdk.RealtimeTurnDetection{Profile: "telephony"}
 }
 
 func boundedContextValue(value string) string {
@@ -1382,6 +1387,7 @@ func (a *App) prepareInboundRealtime(ctx *sdk.AppCtx, row *callRow, directive, v
 			ThreadID:                   threadID,
 			Directive:                  effectiveDirective,
 			Voice:                      voice,
+			TurnDetection:              telephonyTurnDetection(),
 			Ephemeral:                  true,
 			InitialMessage:             greeting,
 			BridgeDisconnectTTLSeconds: 30,

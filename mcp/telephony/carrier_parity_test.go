@@ -96,7 +96,9 @@ func TestPlivoImmediateInboundSpawnsRealtimeAndRecords(t *testing.T) {
 	if len(platform.spawned) != 1 ||
 		!strings.HasPrefix(platform.spawned[0].Directive, route.AutoDirective) ||
 		!strings.Contains(platform.spawned[0].Directive, `"direction": "inbound"`) ||
-		!strings.Contains(platform.spawned[0].Directive, `"from_number": "+14155550100"`) {
+		!strings.Contains(platform.spawned[0].Directive, `"from_number": "+14155550100"`) ||
+		platform.spawned[0].TurnDetection == nil ||
+		platform.spawned[0].TurnDetection.Profile != "telephony" {
 		t.Fatalf("realtime thread was not spawned from route config: %#v", platform.spawned)
 	}
 	call, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "plivo-call-1")
@@ -270,6 +272,7 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 		{provider: "plivo", codec: carrierCodecPCMU8, sampleRate: 8000, rawPacketBytes: 160},
 	} {
 		t.Run(tc.provider, func(t *testing.T) {
+			t.Setenv("TELEPHONY_LOCAL_BARGE_IN_MODE", "fallback")
 			a, _ := withTelephonyTestContext(t, &answerPlatform{})
 			coreBridge, coreServer := newFakeCoreAudioBridge(t)
 			call := testCall(tc.provider+"-media", "in-progress")

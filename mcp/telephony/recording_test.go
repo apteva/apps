@@ -44,8 +44,8 @@ func TestTwilioStreamTwiMLRecordingIsOptIn(t *testing.T) {
 
 func TestRecordingStorageDependencyIsOptional(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.18" {
-		t.Fatalf("manifest version=%q, want 0.1.18", manifest.Version)
+	if manifest.Version != "0.1.21" {
+		t.Fatalf("manifest version=%q, want 0.1.21", manifest.Version)
 	}
 	for _, dependency := range manifest.Requires.Apps {
 		if dependency.Name == "storage" {

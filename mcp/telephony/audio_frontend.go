@@ -31,10 +31,10 @@ const (
 
 func configuredLocalBargeInMode() localBargeInMode {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("TELEPHONY_LOCAL_BARGE_IN_MODE"))) {
-	case "off", "disabled", "provider":
-		return localBargeInOff
-	default:
+	case "fallback", "local":
 		return localBargeInFallback
+	default:
+		return localBargeInOff
 	}
 }
 
