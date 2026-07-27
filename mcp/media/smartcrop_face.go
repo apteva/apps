@@ -28,8 +28,11 @@ const (
 
 type smartCropFace struct {
 	CenterX int
+	CenterY int
 	MinX    int
+	MinY    int
 	MaxX    int
+	MaxY    int
 	Scale   int
 	Quality float32
 }
@@ -141,8 +144,11 @@ func detectSmartCropFaces(img image.Image) []smartCropFace {
 		half := detection.Scale / 2
 		faces = append(faces, smartCropFace{
 			CenterX: clampInt(detection.Col, 0, w-1),
+			CenterY: clampInt(detection.Row, 0, h-1),
 			MinX:    clampInt(detection.Col-half, 0, w-1),
+			MinY:    clampInt(detection.Row-half, 0, h-1),
 			MaxX:    clampInt(detection.Col+half, 0, w-1),
+			MaxY:    clampInt(detection.Row+half, 0, h-1),
 			Scale:   detection.Scale,
 			Quality: detection.Q,
 		})
@@ -153,14 +159,19 @@ func detectSmartCropFaces(img image.Image) []smartCropFace {
 			continue
 		}
 		centerX := detection.Row
+		centerY := h - 1 - detection.Col
 		if candidate.turn == 3 {
 			centerX = w - 1 - detection.Row
+			centerY = detection.Col
 		}
 		half := detection.Scale / 2
 		faces = append(faces, smartCropFace{
 			CenterX: clampInt(centerX, 0, w-1),
+			CenterY: clampInt(centerY, 0, h-1),
 			MinX:    clampInt(centerX-half, 0, w-1),
+			MinY:    clampInt(centerY-half, 0, h-1),
 			MaxX:    clampInt(centerX+half, 0, w-1),
+			MaxY:    clampInt(centerY+half, 0, h-1),
 			Scale:   detection.Scale,
 			Quality: detection.Q,
 		})
@@ -174,10 +185,12 @@ func detectSmartCropFaces(img image.Image) []smartCropFace {
 }
 
 // faceAwareNarrowSmartCropX keeps the strongest detected face inside a safe
-// portrait margin. The generic body/saliency crop remains authoritative when
-// that face is already contained.
-func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, cropW int) (int, smartCropFace, bool) {
-	if img == nil || srcW <= cropW || cropW <= 0 {
+// portrait margin. A strong detection is centered: for a single still that is
+// both more natural and protects the nearby torso/body extent. Weak profile
+// and reclining detections retain the minimal-movement behavior because their
+// main purpose is edge protection without introducing reel jitter.
+func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, srcH, cropW int) (int, smartCropFace, bool) {
+	if img == nil || srcW <= cropW || srcH <= 0 || cropW <= 0 {
 		return currentX, smartCropFace{}, false
 	}
 	bounds := img.Bounds()
@@ -193,15 +206,90 @@ func faceAwareNarrowSmartCropX(img image.Image, currentX, srcW, cropW int) (int,
 	toSource := func(v int) int {
 		return clampInt(int(math.Round(float64(v)*float64(srcW)/float64(tW))), 0, srcW)
 	}
+	toSourceY := func(v int) int {
+		return clampInt(int(math.Round(float64(v)*float64(srcH)/float64(bounds.Dy()))), 0, srcH)
+	}
 	face := smartCropFace{
 		CenterX: toSource(primary.CenterX),
+		CenterY: toSourceY(primary.CenterY),
 		MinX:    toSource(primary.MinX),
+		MinY:    toSourceY(primary.MinY),
 		MaxX:    toSource(primary.MaxX),
+		MaxY:    toSourceY(primary.MaxY),
 		Scale:   toSource(primary.Scale),
 		Quality: primary.Quality,
 	}
+	if !smartCropFaceCandidateSupported(face, currentX, cropW, smartCropWeakFaceHasPixelSupport(img, primary)) {
+		return currentX, smartCropFace{}, false
+	}
+	if face.Quality >= 20 {
+		x := clampInt(roundEven(face.CenterX-cropW/2), 0, srcW-cropW)
+		return x, face, true
+	}
 	x := containSmartCropFaceX(currentX, face, srcW, cropW)
 	return x, face, true
+}
+
+// smartCropFaceCandidateSupported prevents a weak, isolated cascade vote from
+// overriding the subject window already established by saliency, warm-subject,
+// silhouette, and head passes. Low-confidence PICO clusters are valuable for
+// profile and reclining faces, but on a large still image they can also fire
+// on a television edge, furniture seam, knee, or patterned wall.
+//
+// A strong detection remains authoritative anywhere. A medium detection may
+// protect a face whose bounds overlap the crop. A threshold-level detection
+// must either put its center inside the established subject window or overlap
+// that window with independent pixel support; otherwise the preceding non-ML
+// evidence wins. Reel processing applies the same principle across multiple
+// frames in filterSmartCropWeakFaceAnchors.
+func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, weakPixelSupport bool) bool {
+	if cropW <= 0 {
+		return false
+	}
+	if face.Quality >= 20 {
+		return true
+	}
+	cropEnd := currentX + cropW
+	if face.CenterX >= currentX && face.CenterX <= cropEnd {
+		return true
+	}
+	if face.MaxX < currentX || face.MinX > cropEnd {
+		return false
+	}
+	return face.Quality >= 12 || weakPixelSupport
+}
+
+// smartCropWeakFaceHasPixelSupport gives a threshold-level external face vote
+// one independent check before it can move the crop. Genuine profile and
+// reclining fixtures contain a compact, connected skin/chroma region inside
+// the PICO box; the room patterns that create weak false votes do not. This is
+// deliberately only a rescue path for a face box that already overlaps the
+// established crop, so monochrome or dark-complexion subjects inside the crop
+// continue to be accepted without this colour cue.
+func smartCropWeakFaceHasPixelSupport(img image.Image, face smartCropFace) bool {
+	if img == nil || face.Scale <= 0 {
+		return false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return false
+	}
+	minX := clampInt(face.MinX, 0, b.Dx()-1)
+	maxX := clampInt(face.MaxX, minX, b.Dx()-1)
+	minY := clampInt(face.MinY, 0, b.Dy()-1)
+	maxY := clampInt(face.MaxY, minY, b.Dy()-1)
+	stride := maxInt(1, maxInt(maxX-minX+1, maxY-minY+1)/64)
+	strict, total := 0, 0
+	for y := minY; y <= maxY; y += stride {
+		for x := minX; x <= maxX; x += stride {
+			r, g, blue := rgb8(img.At(b.Min.X+x, b.Min.Y+y))
+			if strictWarmSubjectPixel(r, g, blue) {
+				strict++
+			}
+			total++
+		}
+	}
+	return total > 0 && float64(strict)/float64(total) >= 0.45
 }
 
 func containSmartCropFaceX(currentX int, face smartCropFace, srcW, cropW int) int {

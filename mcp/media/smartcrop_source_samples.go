@@ -477,7 +477,7 @@ func analyzeSmartCropSourceFrame(srcW, srcH, targetW, targetH int, analysisImg, 
 		return nil, nil, nil, err
 	}
 	var detailedFace *smartCropFace
-	if _, detected, ok := faceAwareNarrowSmartCropX(detailImg, win.X, srcW, win.W); ok {
+	if _, detected, ok := faceAwareNarrowSmartCropX(detailImg, win.X, srcW, srcH, win.W); ok {
 		// The rotated cascade can weakly resemble a knee or torso. A real face
 		// entering/leaving a portrait crop is close to the generic subject window;
 		// an unrelated body false-positive is commonly another half-frame away.

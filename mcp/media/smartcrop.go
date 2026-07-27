@@ -331,6 +331,9 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 	currentThumbX := int(math.Round(float64(srcX) * float64(tW) / float64(srcW)))
 	currentThumbX = clampInt(currentThumbX, 0, windowN-1)
 	currentScore := scores[currentThumbX]
+	rawThumbX := int(math.Round(float64(rawSrcX) * float64(tW) / float64(srcW)))
+	rawThumbX = clampInt(rawThumbX, 0, windowN-1)
+	rawScore := scores[rawThumbX]
 	total := 0.0
 	for _, v := range smooth {
 		total += v
@@ -339,6 +342,9 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 		return srcX, false
 	}
 	if bestScore < currentScore*1.08 || bestScore < total*0.18 {
+		if rawX, ok := concentratedRawSubjectCropX(rawSrcX, srcX, srcW, cropW, rawScore, bestScore, total); ok {
+			return rawX, true
+		}
 		return srcX, false
 	}
 

@@ -391,6 +391,12 @@ func TestSmartCropSyntheticPhotographicFaceFixture(t *testing.T) {
 			if face.CenterX < window.X || face.CenterX > window.X+window.W {
 				t.Fatalf("detected edge face was clipped: face=%+v window=%+v", face, window)
 			}
+			if face.Quality >= 20 {
+				wantX := clampInt(roundEven(face.CenterX-window.W/2), 0, 1920-window.W)
+				if window.X != wantX {
+					t.Fatalf("strong face was not centered: face=%+v window=%+v want_x=%d", face, window, wantX)
+				}
+			}
 		})
 	}
 

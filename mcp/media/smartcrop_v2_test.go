@@ -202,6 +202,73 @@ func TestHeadAwareNarrowCropProtectsRecliningFace(t *testing.T) {
 	}
 }
 
+func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T) {
+	const cropX, cropW = 932, 606
+	testCases := []struct {
+		name             string
+		face             smartCropFace
+		weakPixelSupport bool
+		want             bool
+	}{
+		{
+			name: "threshold-level-distant-room-pattern",
+			face: smartCropFace{CenterX: 1728, MinX: 1651, MaxX: 1805, Scale: 155, Quality: 5.2},
+			want: false,
+		},
+		{
+			name: "threshold-level-contained-profile",
+			face: smartCropFace{CenterX: 1480, MinX: 1410, MaxX: 1550, Scale: 140, Quality: 6},
+			want: true,
+		},
+		{
+			name: "medium-overlapping-edge-face",
+			face: smartCropFace{CenterX: 1580, MinX: 1500, MaxX: 1660, Scale: 160, Quality: 14},
+			want: true,
+		},
+		{
+			name:             "supported-threshold-level-overlapping-profile",
+			face:             smartCropFace{CenterX: 1580, MinX: 1500, MaxX: 1660, Scale: 160, Quality: 6},
+			weakPixelSupport: true,
+			want:             true,
+		},
+		{
+			name: "unsupported-threshold-level-overlapping-pattern",
+			face: smartCropFace{CenterX: 1580, MinX: 1500, MaxX: 1660, Scale: 160, Quality: 6},
+			want: false,
+		},
+		{
+			name: "strong-detection-can-recover-outside-face",
+			face: smartCropFace{CenterX: 1728, MinX: 1651, MaxX: 1805, Scale: 155, Quality: 25},
+			want: true,
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := smartCropFaceCandidateSupported(testCase.face, cropX, cropW, testCase.weakPixelSupport); got != testCase.want {
+				t.Fatalf("supported=%v want=%v face=%+v", got, testCase.want, testCase.face)
+			}
+		})
+	}
+}
+
+func TestConcentratedRawSubjectCropProtectsOccludedRecliningPerson(t *testing.T) {
+	// Mirrors the score profile of the hand-covered reclining regression: the
+	// raw saliency window contains 37% of all subject evidence and remains
+	// within 82% of the best subject window.
+	x, changed := concentratedRawSubjectCropX(330, 520, 1920, 606, 37, 42, 100)
+	if !changed || x != 330 {
+		t.Fatalf("concentrated raw person crop was not retained: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestConcentratedRawSubjectCropRejectsUniformWarmRoom(t *testing.T) {
+	// A uniform 16:9 background contributes about one crop-width (31.5%) of
+	// its score to every portrait window and fails both concentration gates.
+	if x, changed := concentratedRawSubjectCropX(330, 520, 1920, 606, 31.5, 31.5, 100); changed || x != 520 {
+		t.Fatalf("uniform warm room defeated stabilization: x=%d changed=%v", x, changed)
+	}
+}
+
 func TestHeadAwareNarrowCropAcceptsSmallTallFace(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})

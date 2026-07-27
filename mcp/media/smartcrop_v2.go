@@ -592,11 +592,32 @@ func analyzeSmartCropV2FrameDetailed(srcW, srcH, targetW, targetH int, img image
 		x = recliningX
 	}
 	var face *smartCropFace
-	if faceX, detected, ok := faceAwareNarrowSmartCropX(img, x, srcW, cw); ok {
+	if faceX, detected, ok := faceAwareNarrowSmartCropX(img, x, srcW, srcH, cw); ok {
 		x = faceX
 		face = &detected
 	}
 	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, face, nil
+}
+
+// concentratedRawSubjectCropX preserves a strong generic-saliency answer when
+// the legacy geometric stabilizer would move a narrow portrait crop away from
+// a horizontally posed or face-occluded person. subjectAwareNarrowSmartCropX
+// calls it with the scores that pass already computed, avoiding another image
+// scan.
+//
+// The raw window must contain a concentrated share of all warm-subject
+// evidence and stay close to the best such window. A uniformly warm brick
+// wall, couch, or exposure cast spreads its evidence across the frame and
+// fails the concentration gates, retaining the safer center-stabilized crop.
+func concentratedRawSubjectCropX(rawX, stabilizedX, srcW, cropW int, rawScore, bestScore, total float64) (int, bool) {
+	if srcW <= cropW || cropW <= 0 || total <= 0 ||
+		absInt(rawX-stabilizedX) < maxInt(60, cropW/6) {
+		return stabilizedX, false
+	}
+	if rawScore/total < 0.36 || bestScore/total < 0.40 || rawScore < bestScore*0.82 {
+		return stabilizedX, false
+	}
+	return clampInt(roundEven(rawX), 0, srcW-cropW), true
 }
 
 func smartCropStillHasMotionEvidence(samples []smartCropV2Sample, focusMs int64) bool {
