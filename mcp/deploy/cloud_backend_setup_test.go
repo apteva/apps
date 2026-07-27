@@ -12,6 +12,7 @@ import (
 type cloudBootstrapPlatform struct {
 	tk.BasePlatformClient
 	existing bool
+	listed   json.RawMessage
 	calls    []integrationCall
 }
 
@@ -31,7 +32,9 @@ func (p *cloudBootstrapPlatform) ExecuteIntegrationTool(_ int64, tool string, in
 	var data []byte
 	switch tool {
 	case "list_personal_apps":
-		if p.existing {
+		if len(p.listed) > 0 {
+			data = p.listed
+		} else if p.existing {
 			data = []byte(`{"apps":[{"_id":"existing-app","repositoryUrl":"https://github.com/apteva/deploy-build-adapter.git"}]}`)
 		} else {
 			data = []byte(`{"apps":[]}`)
@@ -123,5 +126,34 @@ func TestCloudBackendSetupReusesExistingCodemagicAdapter(t *testing.T) {
 	}
 	if cfg.ArtifactMode != "file" || cfg.ArtifactFile != "app.aab" {
 		t.Fatalf("config=%+v", cfg)
+	}
+}
+
+func TestCloudBackendSetupReusesConfiguredAdapterWhenListOmitsRepository(t *testing.T) {
+	platform := &cloudBootstrapPlatform{}
+	platform.existing = true
+	ctx := withCloudBuildContext(t, platform)
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-app", TargetKind: "ios", SourceKind: "code", SourceRef: "ios-repo",
+		Framework: "ios", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"existing-app","workflow_id":"apteva-mobile-capsule","branch":"main"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app","version_name":"1.0","build_number":"1"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	platform.calls = nil
+	platform.existing = false
+	platform.listed = json.RawMessage(`{"data":[{"id":"existing-app","name":"deploy-build-adapter"}]}`)
+
+	result, err := (&App{}).setupCloudBackend(
+		t.Context(), effectiveDeploymentForEnvironment(d, env), cloudBackendSetupInput{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Created || result.AppID != "existing-app" {
+		t.Fatalf("result=%+v", result)
 	}
 }

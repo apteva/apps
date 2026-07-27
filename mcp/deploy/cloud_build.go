@@ -50,6 +50,7 @@ type cloudBuildConfig struct {
 	SourceMode          string            `json:"source_mode,omitempty"`
 	SourceBaseURL       string            `json:"source_base_url,omitempty"`
 	SourceURLTTLSeconds int               `json:"source_url_ttl_seconds,omitempty"`
+	AdapterRepository   string            `json:"adapter_repository,omitempty"`
 	RunnerURL           string            `json:"runner_url,omitempty"`
 	RunnerTokenEnv      string            `json:"runner_token_env,omitempty"`
 }

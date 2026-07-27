@@ -96,6 +96,10 @@ func (codemagicCloudBootstrapper) Setup(
 	if !strings.HasPrefix(repositoryURL, "https://") {
 		return nil, errors.New("Codemagic adapter repository_url must use https")
 	}
+	var cfg cloudBuildConfig
+	if normalizeBuildBackend(d.BuildBackend) == buildBackendCodemagic {
+		_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &cfg)
+	}
 
 	var listed json.RawMessage
 	var err error
@@ -111,7 +115,20 @@ func (codemagicCloudBootstrapper) Setup(
 	if err != nil {
 		return nil, err
 	}
-	appID := recursiveRepositoryAppID(listed, repositoryURL)
+	appID := ""
+	configuredRepository := normalizeRepositoryURL(cfg.AdapterRepository)
+	if cfg.AppID != "" && cfg.WorkflowID == workflowID &&
+		(configuredRepository == normalizeRepositoryURL(repositoryURL) ||
+			(configuredRepository == "" && strings.TrimSpace(input.RepositoryURL) == "")) &&
+		recursiveAppIDExists(listed, cfg.AppID) {
+		appID = cfg.AppID
+	}
+	if appID == "" {
+		appID = recursiveRepositoryAppID(listed, repositoryURL)
+	}
+	if appID == "" {
+		appID = recursiveNamedAppID(listed, repositoryName(repositoryURL))
+	}
 	created := false
 	if appID == "" {
 		addInput := map[string]any{"repositoryUrl": repositoryURL}
@@ -129,15 +146,12 @@ func (codemagicCloudBootstrapper) Setup(
 		created = true
 	}
 
-	var cfg cloudBuildConfig
-	if normalizeBuildBackend(d.BuildBackend) == buildBackendCodemagic {
-		_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &cfg)
-	}
 	cfg.AppID = appID
 	cfg.WorkflowID = workflowID
 	cfg.Branch = branch
 	cfg.Tag = ""
 	cfg.SourceMode = "bundle"
+	cfg.AdapterRepository = repositoryURL
 	cfg.Preflight = "strict"
 	cfg.InstanceType = defaultStr(cfg.InstanceType, "mac_mini_m4")
 	cfg.ArtifactName = defaultCloudArtifactName
@@ -201,6 +215,63 @@ func recursiveRepositoryAppID(raw json.RawMessage, repositoryURL string) string 
 	}
 	walk(value)
 	return found
+}
+
+func recursiveAppIDExists(raw json.RawMessage, appID string) bool {
+	return recursiveAppMatch(raw, func(item map[string]any) bool {
+		return firstMapString(item, "_id", "appId", "app_id", "id") == appID
+	}) != ""
+}
+
+func recursiveNamedAppID(raw json.RawMessage, name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return recursiveAppMatch(raw, func(item map[string]any) bool {
+		return strings.ToLower(firstMapString(item, "name", "appName", "app_name")) == name
+	})
+}
+
+func recursiveAppMatch(raw json.RawMessage, matches func(map[string]any) bool) string {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	first := ""
+	withBuild := ""
+	var walk func(any)
+	walk = func(current any) {
+		switch item := current.(type) {
+		case map[string]any:
+			id := firstMapString(item, "_id", "appId", "app_id", "id")
+			if id != "" && matches(item) {
+				if first == "" {
+					first = id
+				}
+				if firstMapString(item, "last_build_id", "lastBuildId") != "" {
+					withBuild = id
+				}
+			}
+			for _, child := range item {
+				walk(child)
+			}
+		case []any:
+			for _, child := range item {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	if withBuild != "" {
+		return withBuild
+	}
+	return first
+}
+
+func repositoryName(repositoryURL string) string {
+	normalized := normalizeRepositoryURL(repositoryURL)
+	if index := strings.LastIndex(normalized, "/"); index >= 0 {
+		return normalized[index+1:]
+	}
+	return normalized
 }
 
 func normalizeRepositoryURL(value string) string {
