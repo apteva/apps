@@ -68,19 +68,19 @@ workflows:
           if [[ -n "${APTEVA_BUILD_CMD:-}" ]]; then
             sh -c "$APTEVA_BUILD_CMD"
           elif [[ "$APTEVA_TARGET_KIND" = "ios" ]]; then
-            test -n "$APTEVA_BUNDLE_ID"
+            test -n "${APTEVA_BUNDLE_ID:-}"
             if [[ -f project.yml ]] && \
               ! find . -maxdepth 1 \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -quit | grep -q .; then
               xcodegen generate
             fi
-            if [[ -z "$APTEVA_XCODE_SCHEME" ]]; then
+            if [[ -z "${APTEVA_XCODE_SCHEME:-}" ]]; then
               echo "target_config_json.scheme is required" >&2
               exit 1
             fi
             input=()
-            if [[ -n "$APTEVA_XCODE_WORKSPACE" ]]; then
+            if [[ -n "${APTEVA_XCODE_WORKSPACE:-}" ]]; then
               input=(-workspace "$APTEVA_XCODE_WORKSPACE")
-            elif [[ -n "$APTEVA_XCODE_PROJECT" ]]; then
+            elif [[ -n "${APTEVA_XCODE_PROJECT:-}" ]]; then
               input=(-project "$APTEVA_XCODE_PROJECT")
             else
               project="$(find . -maxdepth 2 -name '*.xcodeproj' -print -quit)"
@@ -107,12 +107,12 @@ workflows:
               -exportOptionsPlist "$HOME/export_options.plist"
             cp "$(find "$ipa_dir" -name '*.ipa' -print -quit)" "$output/app.ipa"
           elif [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
-            test -n "$APTEVA_PACKAGE_NAME"
+            test -n "${APTEVA_PACKAGE_NAME:-}"
             chmod +x ./gradlew
             task=":${APTEVA_MODULE}:bundle${APTEVA_VARIANT^}"
             args=("$task" --console=plain --no-daemon)
-            [[ -n "$APTEVA_VERSION_CODE" ]] && args+=("-PversionCode=$APTEVA_VERSION_CODE")
-            [[ -n "$APTEVA_VERSION_NAME" ]] && args+=("-PversionName=$APTEVA_VERSION_NAME")
+            [[ -n "${APTEVA_VERSION_CODE:-}" ]] && args+=("-PversionCode=$APTEVA_VERSION_CODE")
+            [[ -n "${APTEVA_VERSION_NAME:-}" ]] && args+=("-PversionName=$APTEVA_VERSION_NAME")
             ./gradlew "${args[@]}"
             cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/app.aab"
             if [[ -n "${CM_KEYSTORE_PATH:-}" ]]; then
@@ -150,7 +150,7 @@ workflows:
           elif [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "android" ]]; then
             test -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS:-}"
             test -n "${CM_KEYSTORE_PATH:-}"
-            test -n "$APTEVA_VERSION_CODE"
+            test -n "${APTEVA_VERSION_CODE:-}"
             fastlane supply \
               --json_key_data "$GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS" \
               --aab "$output/app.aab" \

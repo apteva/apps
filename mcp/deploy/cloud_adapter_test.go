@@ -28,6 +28,8 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 		"google_play",
 		"apteva-build.zip",
 		`print(f"{key}={value}")`,
+		`${APTEVA_XCODE_WORKSPACE:-}`,
+		`${APTEVA_VERSION_CODE:-}`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Codemagic adapter is missing %q", required)
