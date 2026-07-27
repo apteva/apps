@@ -1368,17 +1368,26 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 10000 {
 		limit = 50
 	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	out, err := dbSearch(ctx.AppDB(), pid, searchOpts{
 		Q: q.Get("q"), Folder: q.Get("folder"),
 		ContentType: q.Get("content_type"), SHA256: q.Get("sha256"),
 		Tag: q.Get("tag"), Source: q.Get("source"),
-		Limit: limit,
+		Limit: limit, Offset: offset,
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"files": out})
+	httpJSON(w, map[string]any{
+		"files":       out,
+		"offset":      offset,
+		"next_offset": offset + len(out),
+		"has_more":    len(out) == limit,
+	})
 }
 
 // parseIDList splits "1,2,3" into a slice of int64. Bad entries are
@@ -1926,7 +1935,7 @@ func populateFileURL(f *File) *File {
 
 type searchOpts struct {
 	Q, Folder, ContentType, SHA256, Tag, Source string
-	Limit                                       int
+	Limit, Offset                               int
 }
 
 func dbSearch(db *sql.DB, pid string, opts searchOpts) ([]*File, error) {
@@ -1970,10 +1979,14 @@ func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File)
 		limit = 50
 	}
 	q := `SELECT ` + fileSelectColumns + ` FROM files WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY updated_at DESC`
+		` ORDER BY updated_at DESC, id DESC`
 	if allow == nil {
-		q += ` LIMIT ?`
-		args = append(args, limit)
+		q += ` LIMIT ? OFFSET ?`
+		offset := opts.Offset
+		if offset < 0 {
+			offset = 0
+		}
+		args = append(args, limit, offset)
 	}
 	rows, err := db.Query(q, args...)
 	if err != nil {

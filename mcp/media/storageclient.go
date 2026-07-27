@@ -81,17 +81,25 @@ type StorageFile struct {
 	URL string `json:"url"`
 }
 
-// SearchFiles asks storage for files matching contentType prefixes
-// (e.g. "video/", "audio/", "image/"). Returns up to limit rows from
-// the active project (env-pinned APTEVA_PROJECT_ID — storage handles
-// the scoping).
+// SearchFiles returns the first page of the active project's Storage
+// inventory. Call SearchAllFiles for a complete sweep.
 func (c *storageClient) SearchFiles(ctx context.Context, projectID string, limit int) ([]StorageFile, error) {
+	return c.SearchFilesPage(ctx, projectID, limit, 0)
+}
+
+// SearchFilesPage fetches one stable Storage inventory page. Offset is
+// supported by Storage v0.10.23+; Media's manifest pins that minimum so
+// a catalog can grow beyond any single response window.
+func (c *storageClient) SearchFilesPage(ctx context.Context, projectID string, limit, offset int) ([]StorageFile, error) {
 	q := url.Values{}
 	if projectID != "" {
 		q.Set("project_id", projectID)
 	}
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		q.Set("offset", strconv.Itoa(offset))
 	}
 	body, err := c.do(ctx, http.MethodGet, "/files?"+q.Encode(), nil, "")
 	if err != nil {
@@ -104,6 +112,40 @@ func (c *storageClient) SearchFiles(ctx context.Context, projectID string, limit
 		return nil, fmt.Errorf("parse files: %w (body=%s)", err, string(body))
 	}
 	return resp.Files, nil
+}
+
+// SearchAllFiles walks the complete Storage inventory without a fixed
+// catalog-size ceiling. IDs are de-duplicated defensively because uploads
+// can move the offset window while a sweep is in progress; a later tick
+// will pick up anything inserted concurrently.
+func (c *storageClient) SearchAllFiles(ctx context.Context, projectID string, pageSize int) ([]StorageFile, error) {
+	if pageSize <= 0 {
+		pageSize = 5000
+	}
+	all := make([]StorageFile, 0, pageSize)
+	seen := make(map[int64]struct{}, pageSize)
+	for offset := 0; ; {
+		page, err := c.SearchFilesPage(ctx, projectID, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		newRows := 0
+		for _, f := range page {
+			if _, ok := seen[f.ID]; ok {
+				continue
+			}
+			seen[f.ID] = struct{}{}
+			all = append(all, f)
+			newRows++
+		}
+		if len(page) < pageSize {
+			return all, nil
+		}
+		if newRows == 0 {
+			return nil, errors.New("storage inventory pagination made no progress; Storage v0.10.23+ is required")
+		}
+		offset += len(page)
+	}
 }
 
 // ResolveFiles batch-fetches storage metadata for a list of file ids.

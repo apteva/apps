@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.87
+version: 0.13.88
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -40,7 +40,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.10.20"
+      version: ">=0.10.23"
       reason: reads source bytes, writes destination-preserving render outputs, and batch-resolves URLs via GET /files?ids= for response enrichment
     - name: jobs
       version: ">=0.1.0"
@@ -121,7 +121,7 @@ provides:
     - name: media_get_waveform
       description: Same for the waveform PNG. Audio files only.
     - name: media_reindex
-      description: Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated. Args — file_id and force?, or failed_only=true.
+      description: Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. Exact file IDs are fetched directly from Storage, so reindexing does not depend on catalog position or inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated. Args — file_id and force?, or failed_only=true.
     - name: media_index_status
       description: Ops summary — counts of pending / ok / failed / unsupported / skipped_size.
 

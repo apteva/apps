@@ -16,7 +16,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("version empty")
 	}
-	if m.Version != "0.10.22" {
+	if m.Version != "0.10.23" {
 		t.Errorf("version=%q", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {

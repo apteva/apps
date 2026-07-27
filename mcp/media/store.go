@@ -1194,6 +1194,62 @@ func indexerCandidates(db *sql.DB, projectID string, all []StorageFile, limit in
 	return out
 }
 
+// pendingIndexerFileIDs returns already-known rows that need another probe.
+// The worker resolves these exact IDs through Storage before it performs the
+// background inventory sweep, so media_reindex(file_id) is independent of
+// both catalog ordering and Storage page size.
+func pendingIndexerFileIDs(db *sql.DB, projectID string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(`
+		SELECT file_id
+		FROM media
+		WHERE project_id=? AND probe_status IN ('pending', 'failed')
+		ORDER BY force_probe DESC,
+			CASE probe_status WHEN 'pending' THEN 0 ELSE 1 END,
+			updated_at ASC,
+			file_id ASC
+		LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]string, 0, limit)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// queueMediaReindex creates a durable pending row even when the file has
+// never appeared in Media's catalog. That lets an operator recover an exact
+// Storage ID after an outage without depending on a background inventory
+// scan to discover it first.
+func queueMediaReindex(db *sql.DB, projectID, fileID string, force bool) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := db.Exec(`
+		INSERT INTO media (
+			file_id, project_id, source_sha256, probe_status,
+			probe_error, force_probe, updated_at
+		) VALUES (?, ?, '', 'pending', '', ?, ?)
+		ON CONFLICT(file_id) DO UPDATE SET
+			project_id=excluded.project_id,
+			source_sha256='',
+			probe_status='pending',
+			probe_error='',
+			force_probe=excluded.force_probe,
+			updated_at=excluded.updated_at`,
+		fileID, projectID, boolInt(force), now,
+	)
+	return err
+}
+
 // boolInt / nullables — helpers because SQLite + database/sql typing
 // gets noisy when half the columns can be NULL.
 func boolInt(b bool) int {
