@@ -27,9 +27,13 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 		"app_store_connect",
 		"google_play",
 		"apteva-build.zip",
+		`print(f"{key}={value}")`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Codemagic adapter is missing %q", required)
 		}
+	}
+	if strings.Contains(text, "shlex.quote") {
+		t.Fatal("Codemagic CM_ENV values must not contain shell quote literals")
 	}
 }

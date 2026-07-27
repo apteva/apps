@@ -36,7 +36,6 @@ workflows:
           import base64
           import json
           import os
-          import shlex
 
           target = json.loads(base64.b64decode(os.environ.get("APTEVA_TARGET_CONFIG_B64", "e30=")))
           values = {
@@ -53,7 +52,10 @@ workflows:
               "APTEVA_CONFIGURATION": target.get("configuration", "Release"),
           }
           for key, value in values.items():
-              print(f"{key}={shlex.quote(str(value))}")
+              value = str(value)
+              if "\n" in value or "\r" in value:
+                  raise ValueError(f"{key} contains a newline")
+              print(f"{key}={value}")
           PY
 
       - name: Build mobile artifact
