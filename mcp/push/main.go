@@ -36,12 +36,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("Push requires its app database")
 	}
 	encryptionKey := a.encryptionKey
+	legacyBundleID := ""
+	legacyEnvironment := ""
 	if encryptionKey == "" {
-		var err error
-		encryptionKey, err = connectionEncryptionKey(ctx)
+		settings, err := readConnectionSettings(ctx)
 		if err != nil {
 			return err
 		}
+		encryptionKey = settings.EncryptionKey
+		legacyBundleID = settings.LegacyBundleID
+		legacyEnvironment = settings.LegacyEnvironment
 	}
 	cipher, err := newTokenCipher(encryptionKey)
 	if err != nil {
@@ -50,25 +54,46 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.ctx = ctx
 	a.store = &store{db: ctx.AppDB()}
 	a.cipher = cipher
+	if err := a.store.backfillDeviceRouting(legacyBundleID, legacyEnvironment); err != nil {
+		return fmt.Errorf("backfill device APNs routing: %w", err)
+	}
 	if a.provider == nil {
 		a.provider = apnsProvider{}
 	}
 	return nil
 }
 
-func connectionEncryptionKey(ctx *sdk.AppCtx) (string, error) {
+type connectionSettings struct {
+	EncryptionKey     string
+	LegacyBundleID    string
+	LegacyEnvironment string
+}
+
+func readConnectionSettings(ctx *sdk.AppCtx) (*connectionSettings, error) {
 	bound := ctx.IntegrationFor("ios_provider")
 	if bound == nil || bound.ConnectionID == 0 {
-		return "", errors.New("Apple Push Notifications integration is not connected")
+		return nil, errors.New("Apple Push Notifications integration is not connected")
 	}
 	credentials, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
 	if err != nil {
-		return "", fmt.Errorf("read Apple Push Notifications connection credentials: %w", err)
+		return nil, fmt.Errorf("read Apple Push Notifications connection credentials: %w", err)
 	}
 	if credentials == nil || credentials.Fields["relay_encryption_key"] == "" {
-		return "", errors.New("Apple Push Notifications connection is missing its generated relay encryption key; recreate the connection with Apteva Server v0.6.62 or later")
+		return nil, errors.New("Apple Push Notifications connection is missing its generated relay encryption key")
 	}
-	return credentials.Fields["relay_encryption_key"], nil
+	return &connectionSettings{
+		EncryptionKey:     credentials.Fields["relay_encryption_key"],
+		LegacyBundleID:    credentials.Fields["bundle_id"],
+		LegacyEnvironment: credentials.Fields["environment"],
+	}, nil
+}
+
+func connectionEncryptionKey(ctx *sdk.AppCtx) (string, error) {
+	settings, err := readConnectionSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	return settings.EncryptionKey, nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }

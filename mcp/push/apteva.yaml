@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: push
 display_name: Push
-version: 0.1.1
+version: 0.2.0
 description: Self-hostable Apple push notification relay for Apteva mobile clients.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/push

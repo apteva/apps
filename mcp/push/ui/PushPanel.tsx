@@ -9,6 +9,8 @@ interface PanelProps {
 interface Device {
   id: string;
   platform: string;
+  bundle_id: string;
+  environment: "sandbox" | "production";
   user_ref?: string;
   app_version?: string;
   status: "active" | "invalid" | "revoked";
@@ -152,9 +154,11 @@ export default function PushPanel({ projectId = "" }: PanelProps) {
               <div className="push-device" key={device.id}>
                 <div className="push-device-icon" aria-hidden="true"><span /></div>
                 <div className="push-device-copy">
-                  <strong>{device.user_ref || "Apteva for iPhone"}</strong>
+                  <strong>{device.user_ref || "iOS device"}</strong>
                   <span>
-                    {device.app_version ? `v${device.app_version} · ` : ""}
+                    {device.bundle_id} · {device.environment}
+                    {device.app_version ? ` · v${device.app_version}` : ""}
+                    {" · "}
                     {relativeTime(device.last_seen_at)}
                   </span>
                 </div>

@@ -15,12 +15,12 @@ type providerResult struct {
 }
 
 type pushProvider interface {
-	send(ctx *sdk.AppCtx, token string, d *delivery) (*providerResult, error)
+	send(ctx *sdk.AppCtx, token string, device *device, d *delivery) (*providerResult, error)
 }
 
 type apnsProvider struct{}
 
-func (apnsProvider) send(ctx *sdk.AppCtx, token string, d *delivery) (*providerResult, error) {
+func (apnsProvider) send(ctx *sdk.AppCtx, token string, device *device, d *delivery) (*providerResult, error) {
 	bound := ctx.IntegrationFor("ios_provider")
 	if bound == nil || bound.ConnectionID == 0 {
 		return nil, errors.New("Apple Push Notifications integration is not connected")
@@ -39,6 +39,8 @@ func (apnsProvider) send(ctx *sdk.AppCtx, token string, d *delivery) (*providerR
 	}
 	result, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, map[string]any{
 		"device_token": token,
+		"topic":        device.BundleID,
+		"environment":  device.Environment,
 		"push_type":    "alert",
 		"priority":     10,
 		"aps":          aps,

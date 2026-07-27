@@ -17,6 +17,8 @@ const maxBodyBytes = 64 << 10
 type registerRequest struct {
 	ProviderToken string `json:"provider_token"`
 	Platform      string `json:"platform"`
+	BundleID      string `json:"bundle_id"`
+	Environment   string `json:"environment"`
 	InstanceRef   string `json:"instance_ref"`
 	UserRef       string `json:"user_ref"`
 	AppVersion    string `json:"app_version"`
@@ -42,11 +44,14 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	input.ProviderToken = strings.TrimSpace(input.ProviderToken)
 	input.InstanceRef = strings.TrimSpace(input.InstanceRef)
+	input.BundleID = strings.TrimSpace(input.BundleID)
+	input.Environment = strings.ToLower(strings.TrimSpace(input.Environment))
 	if input.Platform == "" {
 		input.Platform = "ios"
 	}
-	if input.Platform != "ios" || len(input.ProviderToken) < 32 || input.InstanceRef == "" {
-		writeError(w, http.StatusBadRequest, "provider_token, platform=ios, and instance_ref are required")
+	if input.Platform != "ios" || len(input.ProviderToken) < 32 || input.InstanceRef == "" ||
+		!validBundleID(input.BundleID) || !validEnvironment(input.Environment) {
+		writeError(w, http.StatusBadRequest, "provider_token, instance_ref, a valid bundle_id, and environment=sandbox|production are required")
 		return
 	}
 	encrypted, err := a.cipher.encrypt(input.ProviderToken)
@@ -54,7 +59,14 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not protect device token")
 		return
 	}
-	d, err := a.store.upsertDevice(encrypted, digest(input.ProviderToken), input.UserRef, input.AppVersion)
+	d, err := a.store.upsertDevice(
+		encrypted,
+		digest(input.ProviderToken),
+		input.BundleID,
+		input.Environment,
+		input.UserRef,
+		input.AppVersion,
+	)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not register device")
 		return
@@ -69,7 +81,12 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create grant")
 		return
 	}
-	a.ctx.Emit("device.registered", map[string]any{"device_id": d.ID, "platform": d.Platform})
+	a.ctx.Emit("device.registered", map[string]any{
+		"device_id":   d.ID,
+		"platform":    d.Platform,
+		"bundle_id":   d.BundleID,
+		"environment": d.Environment,
+	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"device":     d,
 		"grant":      secret,
@@ -213,7 +230,7 @@ func (a *App) dispatch(w http.ResponseWriter, d *delivery) {
 		writeJSON(w, http.StatusInternalServerError, finished)
 		return
 	}
-	result, sendErr := a.provider.send(a.ctx, token, d)
+	result, sendErr := a.provider.send(a.ctx, token, device, d)
 	if sendErr != nil {
 		providerID := ""
 		if result != nil {
@@ -300,6 +317,30 @@ func (a *App) requireGrant(w http.ResponseWriter, r *http.Request) (*grant, bool
 
 func validDeliveryType(value string) bool {
 	return value == "approval" || value == "alert" || value == "report" || value == "test"
+}
+
+func validEnvironment(value string) bool {
+	return value == "sandbox" || value == "production"
+}
+
+func validBundleID(value string) bool {
+	if len(value) < 3 || len(value) > 255 || !strings.Contains(value, ".") {
+		return false
+	}
+	for _, part := range strings.Split(value, ".") {
+		if part == "" {
+			return false
+		}
+		for _, char := range part {
+			if (char < 'a' || char > 'z') &&
+				(char < 'A' || char > 'Z') &&
+				(char < '0' || char > '9') &&
+				char != '-' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func queryLimit(r *http.Request, fallback int) int {

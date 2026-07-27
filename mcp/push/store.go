@@ -15,6 +15,8 @@ type device struct {
 	ID              string `json:"id"`
 	TokenCiphertext string `json:"-"`
 	Platform        string `json:"platform"`
+	BundleID        string `json:"bundle_id"`
+	Environment     string `json:"environment"`
 	UserRef         string `json:"user_ref,omitempty"`
 	AppVersion      string `json:"app_version,omitempty"`
 	Status          string `json:"status"`
@@ -52,7 +54,7 @@ type pushStats struct {
 	Recent        []delivery `json:"recent"`
 }
 
-func (s *store) upsertDevice(tokenCiphertext, tokenHash, userRef, appVersion string) (*device, error) {
+func (s *store) upsertDevice(tokenCiphertext, tokenHash, bundleID, environment, userRef, appVersion string) (*device, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	id, err := randomValue("dev_", 16)
 	if err != nil {
@@ -60,15 +62,17 @@ func (s *store) upsertDevice(tokenCiphertext, tokenHash, userRef, appVersion str
 	}
 	_, err = s.db.Exec(`
 		INSERT INTO devices
-			(id, token_ciphertext, token_hash, platform, user_ref, app_version, status, last_seen_at, created_at)
-		VALUES (?, ?, ?, 'ios', ?, ?, 'active', ?, ?)
+			(id, token_ciphertext, token_hash, platform, bundle_id, environment, user_ref, app_version, status, last_seen_at, created_at)
+		VALUES (?, ?, ?, 'ios', ?, ?, ?, ?, 'active', ?, ?)
 		ON CONFLICT(token_hash) DO UPDATE SET
 			token_ciphertext = excluded.token_ciphertext,
+			bundle_id = excluded.bundle_id,
+			environment = excluded.environment,
 			user_ref = excluded.user_ref,
 			app_version = excluded.app_version,
 			status = 'active',
 			last_seen_at = excluded.last_seen_at`,
-		id, tokenCiphertext, tokenHash, userRef, appVersion, now, now)
+		id, tokenCiphertext, tokenHash, bundleID, environment, userRef, appVersion, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("upsert device: %w", err)
 	}
@@ -77,13 +81,13 @@ func (s *store) upsertDevice(tokenCiphertext, tokenHash, userRef, appVersion str
 
 func (s *store) deviceByTokenHash(tokenHash string) (*device, error) {
 	return scanDevice(s.db.QueryRow(`
-		SELECT id, token_ciphertext, platform, user_ref, app_version, status, last_seen_at, created_at
+		SELECT id, token_ciphertext, platform, bundle_id, environment, user_ref, app_version, status, last_seen_at, created_at
 		FROM devices WHERE token_hash = ?`, tokenHash))
 }
 
 func (s *store) deviceByID(id string) (*device, error) {
 	return scanDevice(s.db.QueryRow(`
-		SELECT id, token_ciphertext, platform, user_ref, app_version, status, last_seen_at, created_at
+		SELECT id, token_ciphertext, platform, bundle_id, environment, user_ref, app_version, status, last_seen_at, created_at
 		FROM devices WHERE id = ?`, id))
 }
 
@@ -93,10 +97,20 @@ type rowScanner interface {
 
 func scanDevice(row rowScanner) (*device, error) {
 	var d device
-	if err := row.Scan(&d.ID, &d.TokenCiphertext, &d.Platform, &d.UserRef, &d.AppVersion, &d.Status, &d.LastSeenAt, &d.CreatedAt); err != nil {
+	if err := row.Scan(&d.ID, &d.TokenCiphertext, &d.Platform, &d.BundleID, &d.Environment, &d.UserRef, &d.AppVersion, &d.Status, &d.LastSeenAt, &d.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &d, nil
+}
+
+func (s *store) backfillDeviceRouting(bundleID, environment string) error {
+	if bundleID == "" || !validEnvironment(environment) {
+		return nil
+	}
+	_, err := s.db.Exec(`
+		UPDATE devices SET bundle_id = ?, environment = ?
+		WHERE bundle_id = '' OR environment = ''`, bundleID, environment)
+	return err
 }
 
 func (s *store) createGrant(deviceID, instanceRef, secretHash string, expires time.Time) (*grant, error) {
@@ -238,7 +252,7 @@ func (s *store) finishDelivery(id, status, providerID, message string) (*deliver
 
 func (s *store) listDevices(limit int) ([]device, error) {
 	rows, err := s.db.Query(`
-		SELECT id, token_ciphertext, platform, user_ref, app_version, status, last_seen_at, created_at
+		SELECT id, token_ciphertext, platform, bundle_id, environment, user_ref, app_version, status, last_seen_at, created_at
 		FROM devices ORDER BY last_seen_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err

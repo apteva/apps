@@ -20,31 +20,41 @@ type providerStub struct {
 	calls []providerCall
 }
 
-func (p *providerStub) send(_ *sdk.AppCtx, token string, d *delivery) (*providerResult, error) {
+func (p *providerStub) send(_ *sdk.AppCtx, token string, _ *device, d *delivery) (*providerResult, error) {
 	p.calls = append(p.calls, providerCall{token: token, delivery: *d})
 	return &providerResult{ID: "apns-test-id"}, nil
 }
 
 type credentialPlatform struct {
 	tk.BasePlatformClient
+	executeInput map[string]any
 }
 
-func (credentialPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+func (*credentialPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 	return &sdk.InstallIdentity{
 		AppName:  "push",
 		Bindings: map[string]any{"ios_provider": float64(7)},
 	}, nil
 }
 
-func (credentialPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+func (*credentialPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	return &sdk.PlatformConnection{ID: id, AppSlug: "apple-push-notifications", Status: "active"}, nil
 }
 
-func (credentialPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+func (*credentialPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
 	return &sdk.ConnectionCredentials{
 		ConnectionID: id,
 		Slug:         "apple-push-notifications",
 		Fields:       map[string]string{"relay_encryption_key": "connection-generated-secret-with-32-bytes"},
+	}, nil
+}
+
+func (p *credentialPlatform) ExecuteIntegrationTool(_ int64, _ string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.executeInput = input
+	return &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Headers: map[string]string{"Apns-Id": "apns-routing-test"},
 	}, nil
 }
 
@@ -105,6 +115,8 @@ func TestRegisterAndDeliver(t *testing.T) {
 	registered := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
 		"provider_token": token,
 		"platform":       "ios",
+		"bundle_id":      "ai.apteva.mobile",
+		"environment":    "sandbox",
 		"instance_ref":   "local-instance",
 		"app_version":    "0.1",
 	})
@@ -117,6 +129,9 @@ func TestRegisterAndDeliver(t *testing.T) {
 	}](t, registered)
 	if body.Device.ID == "" || body.Grant == "" {
 		t.Fatalf("incomplete registration: %+v", body)
+	}
+	if body.Device.BundleID != "ai.apteva.mobile" || body.Device.Environment != "sandbox" {
+		t.Fatalf("device routing not stored: %+v", body.Device)
 	}
 
 	delivered := h.request(t, http.MethodPost, "/v1/deliveries", body.Grant, map[string]any{
@@ -161,6 +176,8 @@ func TestGrantCannotControlAnotherDevice(t *testing.T) {
 		response := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
 			"provider_token": token,
 			"platform":       "ios",
+			"bundle_id":      "ai.apteva.mobile",
+			"environment":    "sandbox",
 			"instance_ref":   "instance",
 		})
 		return decodeResponse[struct {
@@ -183,6 +200,8 @@ func TestDeviceTokensAreEncryptedAtRest(t *testing.T) {
 	response := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
 		"provider_token": token,
 		"platform":       "ios",
+		"bundle_id":      "ai.apteva.mobile",
+		"environment":    "sandbox",
 		"instance_ref":   "instance",
 	})
 	if response.Code != http.StatusCreated {
@@ -201,6 +220,43 @@ func TestDeviceTokensAreEncryptedAtRest(t *testing.T) {
 	}
 }
 
+func TestRegistrationRejectsInvalidRouting(t *testing.T) {
+	h := newHarness(t)
+	response := h.request(t, http.MethodPost, "/v1/devices/register", "", map[string]any{
+		"provider_token": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		"platform":       "ios",
+		"bundle_id":      "not a bundle id",
+		"environment":    "staging",
+		"instance_ref":   "instance",
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid routing status=%d body=%s", response.Code, response.Body)
+	}
+}
+
+func TestBackfillLegacyDeviceRouting(t *testing.T) {
+	h := newHarness(t)
+	now := "2026-07-27T00:00:00Z"
+	_, err := h.app.store.db.Exec(`
+		INSERT INTO devices
+			(id, token_ciphertext, token_hash, platform, user_ref, app_version, status, last_seen_at, created_at)
+		VALUES ('legacy', 'ciphertext', 'legacy-token', 'ios', '', '', 'active', ?, ?)`,
+		now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.app.store.backfillDeviceRouting("ai.apteva.mobile", "sandbox"); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := h.app.store.deviceByID("legacy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.BundleID != "ai.apteva.mobile" || legacy.Environment != "sandbox" {
+		t.Fatalf("legacy routing not backfilled: %+v", legacy)
+	}
+}
+
 func TestManifestHasNoMCPTools(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	if manifest.Name != "push" {
@@ -215,12 +271,30 @@ func TestManifestHasNoMCPTools(t *testing.T) {
 }
 
 func TestConnectionEncryptionKeyComesFromBoundIntegration(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(credentialPlatform{}))
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&credentialPlatform{}))
 	key, err := connectionEncryptionKey(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if key != "connection-generated-secret-with-32-bytes" {
 		t.Fatalf("key=%q", key)
+	}
+}
+
+func TestAPNsProviderUsesDeviceRouting(t *testing.T) {
+	platform := &credentialPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	_, err := (apnsProvider{}).send(ctx, "device-token", &device{
+		BundleID:    "com.example.second-app",
+		Environment: "production",
+	}, &delivery{Type: "alert", ItemID: "alert-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if platform.executeInput["topic"] != "com.example.second-app" {
+		t.Fatalf("topic=%v", platform.executeInput["topic"])
+	}
+	if platform.executeInput["environment"] != "production" {
+		t.Fatalf("environment=%v", platform.executeInput["environment"])
 	}
 }

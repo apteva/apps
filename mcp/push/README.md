@@ -7,7 +7,7 @@ private inbox content remains on the user's Apteva instance.
 ## Setup
 
 1. Create an `Apple Push Notifications` integration connection with an Apple
-   Team ID, APNs Key ID, `.p8` private key, app bundle ID, and environment.
+   Team ID, APNs Key ID, and `.p8` private key.
 2. Install Push globally and bind its `ios_provider` dependency to that
    connection.
 
@@ -24,6 +24,9 @@ creating deliveries.
 
 The grant is scoped to one device, expires after one year, and is stored only as
 a hash. APNs device tokens are encrypted before they are written to SQLite.
+Each device registration records its bundle ID and APNs environment, so one
+team-scoped Apple connection can serve any number of iOS apps and both sandbox
+and production tokens.
 
 ## Public API
 
