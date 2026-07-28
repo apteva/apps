@@ -974,10 +974,29 @@ func waitForVoiceCompletionEvidence(ctx context.Context, grace, poll time.Durati
 }
 
 func voiceTranscript(events []sdk.RuntimeTelemetryEvent, threadID string, started time.Time) []VoiceTranscriptTurn {
+	ordered := append([]sdk.RuntimeTelemetryEvent(nil), events...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Time.Before(ordered[j].Time) })
 	out := []VoiceTranscriptTurn{}
-	for _, event := range events {
-		if event.ThreadID != threadID || (event.Type != "realtime.user" && event.Type != "realtime.assistant") {
+	assistantSpoke := false
+	for _, event := range ordered {
+		if event.ThreadID != threadID {
 			continue
+		}
+		if event.Type == "realtime.state" {
+			var data struct {
+				State string `json:"state"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.State == "speaking" {
+				assistantSpoke = true
+			}
+			continue
+		}
+		if event.Type != "realtime.user" && event.Type != "realtime.assistant" {
+			continue
+		}
+		spokenAssistant := assistantSpoke
+		if event.Type == "realtime.assistant" {
+			assistantSpoke = false
 		}
 		var data struct {
 			Text string `json:"text"`
@@ -987,11 +1006,13 @@ func voiceTranscript(events []sdk.RuntimeTelemetryEvent, threadID string, starte
 		}
 		speaker := "caller"
 		if event.Type == "realtime.assistant" {
+			if !spokenAssistant {
+				continue
+			}
 			speaker = "receptionist"
 		}
 		out = append(out, VoiceTranscriptTurn{Speaker: speaker, Text: data.Text, Time: event.Time, AtMS: event.Time.Sub(started).Milliseconds()})
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
 	return out
 }
 

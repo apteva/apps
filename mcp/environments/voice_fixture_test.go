@@ -553,6 +553,58 @@ func TestVoiceMetricsSortsTelemetryChronologically(t *testing.T) {
 	}
 }
 
+func TestVoiceTranscriptExcludesAssistantTextWithoutSpokenAudio(t *testing.T) {
+	started := time.Date(2026, time.July, 28, 8, 14, 0, 0, time.UTC)
+	events := []sdk.RuntimeTelemetryEvent{
+		{
+			ThreadID: "target", Type: "realtime.assistant", Time: started.Add(9 * time.Second),
+			Data: json.RawMessage(`{"text":"User input is needed to continue."}`),
+		},
+		{
+			ThreadID: "target", Type: "tool.result", Time: started.Add(8 * time.Second),
+			Data: json.RawMessage(`{"name":"create_booking","success":true}`),
+		},
+		{
+			ThreadID: "target", Type: "realtime.assistant", Time: started.Add(7 * time.Second),
+			Data: json.RawMessage(`{"text":"Your callback is confirmed."}`),
+		},
+		{
+			ThreadID: "target", Type: "realtime.state", Time: started.Add(6 * time.Second),
+			Data: json.RawMessage(`{"state":"speaking"}`),
+		},
+		{
+			ThreadID: "target", Type: "realtime.user", Time: started.Add(5 * time.Second),
+			Data: json.RawMessage(`{"text":"Yes, please book it."}`),
+		},
+		{
+			ThreadID: "target", Type: "realtime.assistant", Time: started.Add(2 * time.Second),
+			Data: json.RawMessage(`{"text":"How can I help?"}`),
+		},
+		{
+			ThreadID: "target", Type: "realtime.state", Time: started.Add(time.Second),
+			Data: json.RawMessage(`{"state":"speaking"}`),
+		},
+		{
+			ThreadID: "other", Type: "realtime.assistant", Time: started,
+			Data: json.RawMessage(`{"text":"Ignore me."}`),
+		},
+	}
+
+	transcript := voiceTranscript(events, "target", started)
+	if len(transcript) != 3 {
+		t.Fatalf("transcript=%#v", transcript)
+	}
+	if transcript[0].Speaker != "receptionist" || transcript[0].Text != "How can I help?" {
+		t.Fatalf("opening=%#v", transcript[0])
+	}
+	if transcript[1].Speaker != "caller" || transcript[1].Text != "Yes, please book it." {
+		t.Fatalf("caller=%#v", transcript[1])
+	}
+	if transcript[2].Speaker != "receptionist" || transcript[2].Text != "Your callback is confirmed." {
+		t.Fatalf("confirmation=%#v", transcript[2])
+	}
+}
+
 func TestVoiceOpeningGuidanceDoesNotBecomeInitialConversationPrompt(t *testing.T) {
 	spec := VoiceFixtureSpec{TargetDirective: "Be a receptionist.", Greeting: "Ask when to call back."}
 	directive := voiceTargetDirective(spec)

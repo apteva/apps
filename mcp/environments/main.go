@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.6.5
-description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.6.5 keeps carrier simulations on the selected agent directive and uses a neutral, role-anchored call-opening trigger.
+version: 0.6.6
+description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.6.6 excludes text-only realtime continuations from spoken voice transcripts and eval results.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -71,7 +71,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.6.5, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.6.6, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
