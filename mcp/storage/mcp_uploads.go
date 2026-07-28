@@ -18,6 +18,8 @@ import (
 
 const mcpUploadPartSize int64 = 1 * 1024 * 1024
 
+var errUploadSessionNotFound = errors.New("upload session not found")
+
 func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -160,9 +162,13 @@ func (a *App) requireUploadSessionWriteAccess(ctx context.Context, app *sdk.AppC
 	}
 	meta, err := loadUploadMeta(uploadSessionDir(app, id))
 	if err != nil {
-		return "", nil, errors.New("upload session not found")
+		return "", nil, errUploadSessionNotFound
 	}
-	if pid := strings.TrimSpace(strArg(args, "_project_id")); pid != "" && pid != meta.ProjectID {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return "", nil, err
+	}
+	if pid != meta.ProjectID {
 		return "", nil, errors.New("upload session belongs to a different project")
 	}
 	if caller := sdk.CallerFrom(ctx); caller != nil {

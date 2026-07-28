@@ -176,7 +176,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_get",
-			Description: "Fetch metadata for one file. Args: id.",
+			Description: "Fetch metadata for one file. Args: id. Returns {found:true,file:{...}} when present or {found:false,file:null} when missing/deleted.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			HandlerCtx:  a.toolGetCtx,
 		},
@@ -246,13 +246,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_move",
-			Description: "Move and/or rename a file. Args: id, folder?, name?.",
+			Description: "Move and/or rename a file. Args: id, folder?, name?. Requires write access to both the source and destination folders.",
 			InputSchema: schemaObject(map[string]any{
 				"id":     map[string]any{"type": "integer"},
 				"folder": map[string]any{"type": "string"},
 				"name":   map[string]any{"type": "string"},
 			}, []string{"id"}),
-			Handler: a.toolMove,
+			HandlerCtx: a.toolMoveCtx,
 		},
 		{
 			Name:        "files_set_tags",
@@ -278,7 +278,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"sha256": map[string]any{"type": "string"},
 			}, []string{"sha256"}),
-			Handler: a.toolDedupe,
+			HandlerCtx: a.toolDedupeCtx,
 		},
 		{
 			Name:        "files_delete",
@@ -344,7 +344,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "storage_abort_upload",
-			Description: "Abort an in-progress multipart upload session. Removes the partial bytes on disk and emits upload.aborted. Idempotent: aborting an already-removed session returns found=false. Args: id (the upload session id from /uploads init), reason? (free-text label for the audit log). Use this when a client cancels a large upload — without it, partial bytes sit on disk until the sweeper TTL fires.",
+			Description: "Abort an in-progress multipart upload session. Requires files.write access to its destination folder, removes partial bytes, and emits upload.aborted. Idempotent: aborting an already-removed session returns found=false. Args: id (the upload session id from /uploads init), reason? (free-text label for the audit log).",
 			InputSchema: schemaObject(map[string]any{
 				"id":     map[string]any{"type": "string"},
 				"reason": map[string]any{"type": "string"},
