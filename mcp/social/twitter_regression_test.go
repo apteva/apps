@@ -180,6 +180,41 @@ func TestTwitterPostMetricsUsesStandardEndpointFirst(t *testing.T) {
 	}
 }
 
+func TestTwitterPostMetricsRetriesPublicOnlyForOlderPosts(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeQueues["get_tweet_analytics"] = []*sdk.ExecuteResult{
+		{
+			Success: false,
+			Status:  http.StatusForbidden,
+			Data:    json.RawMessage(`{"detail":"non-public metrics are unavailable"}`),
+		},
+		{
+			Success: true,
+			Status:  http.StatusOK,
+			Data:    json.RawMessage(`{"data":{"public_metrics":{"impression_count":12,"like_count":1}}}`),
+		},
+	}
+	pf.executeResponses["get_post_analytics"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  http.StatusForbidden,
+		Data:    json.RawMessage(`{"reason":"client-not-enrolled"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	out := (&App{}).getTwitterPostMetrics(ctx, targetMetricsOutcome{
+		Platform:       "twitter",
+		PlatformPostID: "old-tweet",
+	}, 42)
+	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Views != 12 || out.Metrics.Likes != 1 {
+		t.Fatalf("outcome = %+v", out)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("analytics calls = %+v", pf.executeCalls)
+	}
+	if got := pf.executeCalls[1].Input["tweet.fields"]; got != "public_metrics" {
+		t.Fatalf("fallback fields = %v", got)
+	}
+}
+
 func TestTwitterPublishRejectsOversizeBeforeUpstreamCalls(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)

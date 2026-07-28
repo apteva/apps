@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.82
+version: 0.14.83
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -94,7 +94,7 @@ provides:
   workers:
     - { name: scheduled_publisher, schedule: "@every 1m" }
     - { name: inbox_collector, schedule: "@every 5m" }
-    - { name: analytics_collector, schedule: "@every 6h" }
+    - { name: analytics_collector, schedule: "@every 1h" }
   mcp_tools:
     - { name: account_add,                description: "Begin OAuth for a platform." }
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
@@ -623,7 +623,7 @@ func (a *App) Workers() []sdk.Worker {
 		},
 		{
 			Name:     "analytics_collector",
-			Schedule: "@every 6h",
+			Schedule: "@every 1h",
 			Run:      a.runAnalyticsCollector,
 		},
 	}
@@ -4918,14 +4918,21 @@ type twitterMetricCounts struct {
 // metrics when the caller owns the post. The separate analytics endpoint
 // is an enrollment-gated fallback, not a prerequisite for basic stats.
 func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
-		"tweet_id":     out.PlatformPostID,
-		"tweet.fields": "public_metrics,non_public_metrics,organic_metrics",
-	})
-	if err != nil {
-		return a.getTwitterPostAnalytics(ctx, out, connID)
+	var res *sdk.ExecuteResult
+	for _, fields := range []string{
+		"public_metrics,non_public_metrics,organic_metrics",
+		"public_metrics",
+	} {
+		current, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
+			"tweet_id":     out.PlatformPostID,
+			"tweet.fields": fields,
+		})
+		if err == nil && current != nil && current.Success {
+			res = current
+			break
+		}
 	}
-	if res == nil || !res.Success {
+	if res == nil {
 		return a.getTwitterPostAnalytics(ctx, out, connID)
 	}
 	var resp struct {
@@ -5980,7 +5987,11 @@ func mergeInsightSeries(dst, src insightSeries) {
 	}
 }
 
-const analyticsSnapshotMinInterval = 4 * time.Hour
+const (
+	analyticsSnapshotMinInterval  = 4 * time.Hour
+	postAnalyticsBatchSize        = 50
+	postAnalyticsCandidateScanMax = 200
+)
 
 const (
 	defaultAccountMetricsHistoryDays = 30
@@ -5998,6 +6009,9 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 		}
 		if err := a.collectProjectAccountMetrics(ctx, app, pid); err != nil {
 			app.Logger().Warn("analytics_collector: project failed", "project", pid, "err", err)
+		}
+		if err := a.collectProjectPostMetrics(ctx, app, pid); err != nil {
+			app.Logger().Warn("analytics_collector: post metrics failed", "project", pid, "err", err)
 		}
 	}
 	return nil
@@ -6069,6 +6083,163 @@ func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppC
 		}
 	}
 	return nil
+}
+
+type postAnalyticsCandidate struct {
+	PostID     int64
+	ProfileID  int64
+	Published  string
+	LastRun    string
+	LastStatus string
+	Target     metricsTarget
+}
+
+func (a *App) collectProjectPostMetrics(runCtx context.Context, app *sdk.AppCtx, pid string) error {
+	rows, err := app.AppDB().Query(
+		`SELECT p.id, COALESCE(p.profile_id,0),
+		        COALESCE(t.published_at, p.published_at, p.created_at, ''),
+		        t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
+		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
+		        COALESCE(a.external_account_id,''), COALESCE(a.page_credentials,''),
+		        COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,''),
+		        COALESCE(t.provider_post_id,''), COALESCE(t.publish_operation_id,''),
+		        COALESCE((
+		          SELECT point_time FROM social_metric_points mp
+		           WHERE mp.project_id=p.project_id AND mp.scope='post'
+		             AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		           ORDER BY mp.point_time DESC, mp.id DESC LIMIT 1
+		        ), ''),
+		        COALESCE((
+		          SELECT status FROM social_metric_points mp
+		           WHERE mp.project_id=p.project_id AND mp.scope='post'
+		             AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		           ORDER BY mp.point_time DESC, mp.id DESC LIMIT 1
+		        ), '')
+		   FROM post_targets t
+		   JOIN posts p ON p.id=t.post_id
+		   JOIN social_accounts a ON a.id=t.social_account_id
+		  WHERE p.project_id=? AND t.status='published' AND a.status='active'
+		    AND (
+		      COALESCE(t.platform_post_id,'')<>''
+		      OR COALESCE(t.provider_post_id,'')<>''
+		      OR COALESCE(t.publish_operation_id,'')<>''
+		    )
+		  ORDER BY
+		    CASE WHEN EXISTS(
+		      SELECT 1 FROM social_metric_points mp
+		       WHERE mp.project_id=p.project_id AND mp.scope='post'
+		         AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		    ) THEN 1 ELSE 0 END,
+		    COALESCE((
+		      SELECT MAX(point_time) FROM social_metric_points mp
+		       WHERE mp.project_id=p.project_id AND mp.scope='post'
+		         AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		    ), ''),
+		    t.id
+		  LIMIT ?`,
+		pid, postAnalyticsCandidateScanMax,
+	)
+	if err != nil {
+		return err
+	}
+	candidates := make([]postAnalyticsCandidate, 0, postAnalyticsCandidateScanMax)
+	for rows.Next() {
+		var candidate postAnalyticsCandidate
+		if err := rows.Scan(
+			&candidate.PostID, &candidate.ProfileID, &candidate.Published,
+			&candidate.Target.TargetID, &candidate.Target.SocialAccountID,
+			&candidate.Target.ExtPostID, &candidate.Target.ExtURL,
+			&candidate.Target.Platform, &candidate.Target.ConnID,
+			&candidate.Target.ExternalAccountID, &candidate.Target.PageCreds,
+			&candidate.Target.ProviderSlug, &candidate.Target.ProviderAccountID,
+			&candidate.Target.ProviderPostID, &candidate.Target.PublishOperationID,
+			&candidate.LastRun, &candidate.LastStatus,
+		); err == nil {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	refreshed := 0
+	for _, candidate := range candidates {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		if refreshed >= postAnalyticsBatchSize {
+			break
+		}
+		if !postAnalyticsDue(candidate.Published, candidate.LastRun, candidate.LastStatus, now) {
+			continue
+		}
+		outcome := a.getPostMetrics(app, candidate.Target)
+		if err := persistPostMetricOutcome(app, pid, candidate.ProfileID, candidate.PostID, outcome); err != nil {
+			app.Logger().Warn("analytics_collector: post persist failed",
+				"project", pid, "post", candidate.PostID, "target", candidate.Target.TargetID, "err", err)
+			continue
+		}
+		refreshed++
+		if outcome.Status == "failed" {
+			app.Logger().Warn("analytics_collector: post metrics provider failed",
+				"project", pid, "post", candidate.PostID, "target", candidate.Target.TargetID,
+				"platform", candidate.Target.Platform, "err", outcome.Error)
+		}
+		if outcome.Status == "ok" {
+			app.EmitWithProject("metrics.updated", pid, map[string]any{
+				"post_id":              candidate.PostID,
+				"post_target_id":       candidate.Target.TargetID,
+				"social_account_id":    candidate.Target.SocialAccountID,
+				"platform":             candidate.Target.Platform,
+				"status":               outcome.Status,
+				"automatic_collection": true,
+			})
+		}
+	}
+	return nil
+}
+
+func postAnalyticsDue(publishedAt, lastRun, lastStatus string, now time.Time) bool {
+	if strings.TrimSpace(lastRun) == "" {
+		return true
+	}
+	last, ok := parseMetricPointTime(lastRun)
+	if !ok {
+		return true
+	}
+	published, ok := parseMetricPointTime(publishedAt)
+	if !ok {
+		published = now
+	}
+	age := now.Sub(published)
+	interval := time.Hour
+	switch {
+	case age > 90*24*time.Hour:
+		interval = 7 * 24 * time.Hour
+	case age > 30*24*time.Hour:
+		interval = 24 * time.Hour
+	case age > 7*24*time.Hour:
+		interval = 6 * time.Hour
+	}
+	switch lastStatus {
+	case "unsupported", "skipped":
+		interval = maxDuration(interval, 7*24*time.Hour)
+	case "failed":
+		interval = maxDuration(interval, 6*time.Hour)
+	}
+	return !last.After(now) && now.Sub(last) >= interval
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterval time.Duration) (bool, error) {
@@ -6245,10 +6416,29 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 }
 
 func persistPostMetricOutcome(ctx *sdk.AppCtx, pid string, profileID, postID int64, outcome targetMetricsOutcome) error {
-	if outcome.Status != "ok" || outcome.Metrics == nil || pid == "" || outcome.SocialAccountID <= 0 {
+	if pid == "" || outcome.SocialAccountID <= 0 || outcome.TargetID <= 0 || outcome.Platform == "" {
 		return nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	status := outcome.Status
+	if status == "" {
+		status = "failed"
+	}
+	note := strings.TrimSpace(strings.Join(append([]string{outcome.Error, outcome.Reason}, outcome.Warnings...), "; "))
+	noteRunes := []rune(note)
+	if len(noteRunes) > 500 {
+		note = string(noteRunes[:500])
+	}
+	if err := insertSocialMetricPoint(
+		ctx, pid, profileID, outcome.SocialAccountID, postID, outcome.TargetID,
+		outcome.Platform, "post", "_refresh", "heartbeat", now, 1,
+		outcome.Platform+"_post_refresh", status, note,
+	); err != nil {
+		return err
+	}
+	if status != "ok" || outcome.Metrics == nil {
+		return nil
+	}
 	points := []struct {
 		name  string
 		value int64

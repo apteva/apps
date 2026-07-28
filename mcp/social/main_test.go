@@ -1370,8 +1370,8 @@ func TestPostMetrics_ZernioUsesProviderAdapterForLinkedIn(t *testing.T) {
 	).Scan(&points); err != nil {
 		t.Fatal(err)
 	}
-	if points != 4 {
-		t.Fatalf("persisted metric points = %d, want 4", points)
+	if points != 5 {
+		t.Fatalf("persisted metric points = %d, want 5 including refresh heartbeat", points)
 	}
 }
 
@@ -3164,6 +3164,157 @@ func TestScheduledWorkerFallbackPublishesDuePost(t *testing.T) {
 	}
 }
 
+func TestAnalyticsCollectorAutomaticallyRefreshesPublishedPostTargets(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_tweet_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(`{"data":{"public_metrics":{
+			"impression_count":18,"like_count":2,"reply_count":1,
+			"retweet_count":1,"quote_count":0,"bookmark_count":3
+		}}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@test', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, published_at)
+		 VALUES ('test-proj', 'Published X post', 'published', datetime('now'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	targetResult, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets
+		   (post_id, social_account_id, status, platform_post_id, published_at)
+		 VALUES (?, ?, 'published', 'tweet-1', datetime('now'))`,
+		postID, accountID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, _ := targetResult.LastInsertId()
+
+	app := &App{}
+	if err := app.collectProjectPostMetrics(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_tweet_analytics" {
+		t.Fatalf("provider calls = %+v", pf.executeCalls)
+	}
+	var points, views int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*), COALESCE(MAX(CASE WHEN metric='views' THEN value END),0)
+		   FROM social_metric_points
+		  WHERE project_id='test-proj' AND post_target_id=? AND scope='post'`,
+		targetID,
+	).Scan(&points, &views); err != nil {
+		t.Fatal(err)
+	}
+	if points != 6 || views != 18 {
+		t.Fatalf("stored points=%d views=%d", points, views)
+	}
+
+	if err := app.collectProjectPostMetrics(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("fresh target was refreshed again: calls=%+v", pf.executeCalls)
+	}
+}
+
+func TestAnalyticsCollectorBoundsPostRefreshBatch(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_tweet_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"data":{"public_metrics":{"impression_count":1}}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@test', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < postAnalyticsBatchSize+1; i++ {
+		postResult, err := tx.Exec(
+			`INSERT INTO posts (project_id, body, status, published_at)
+			 VALUES ('test-proj', ?, 'published', datetime('now'))`,
+			fmt.Sprintf("post-%d", i),
+		)
+		if err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+		postID, _ := postResult.LastInsertId()
+		if _, err := tx.Exec(
+			`INSERT INTO post_targets
+			   (post_id, social_account_id, status, platform_post_id, published_at)
+			 VALUES (?, ?, 'published', ?, datetime('now'))`,
+			postID, accountID, fmt.Sprintf("tweet-%d", i),
+		); err != nil {
+			tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := (&App{}).collectProjectPostMetrics(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != postAnalyticsBatchSize {
+		t.Fatalf("provider calls = %d, want bounded batch of %d", len(pf.executeCalls), postAnalyticsBatchSize)
+	}
+}
+
+func TestPostAnalyticsDueUsesAgeAndFailureBackoff(t *testing.T) {
+	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		publishedAt time.Time
+		lastRun     time.Time
+		status      string
+		want        bool
+	}{
+		{name: "new target", publishedAt: now, want: true},
+		{name: "recent waits one hour", publishedAt: now.Add(-24 * time.Hour), lastRun: now.Add(-30 * time.Minute), status: "ok", want: false},
+		{name: "recent due hourly", publishedAt: now.Add(-24 * time.Hour), lastRun: now.Add(-time.Hour), status: "ok", want: true},
+		{name: "month old waits six hours", publishedAt: now.Add(-14 * 24 * time.Hour), lastRun: now.Add(-5 * time.Hour), status: "ok", want: false},
+		{name: "old post due weekly", publishedAt: now.Add(-180 * 24 * time.Hour), lastRun: now.Add(-7 * 24 * time.Hour), status: "ok", want: true},
+		{name: "failed recent waits six hours", publishedAt: now.Add(-24 * time.Hour), lastRun: now.Add(-5 * time.Hour), status: "failed", want: false},
+		{name: "unsupported waits a week", publishedAt: now.Add(-24 * time.Hour), lastRun: now.Add(-6 * 24 * time.Hour), status: "unsupported", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lastRun := ""
+			if !tt.lastRun.IsZero() {
+				lastRun = tt.lastRun.Format(time.RFC3339)
+			}
+			if got := postAnalyticsDue(tt.publishedAt.Format(time.RFC3339), lastRun, tt.status, now); got != tt.want {
+				t.Fatalf("postAnalyticsDue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWorkersIncludeSchedulingInboxAndAnalytics(t *testing.T) {
 	names := map[string]string{}
 	for _, worker := range (&App{}).Workers() {
@@ -3172,7 +3323,7 @@ func TestWorkersIncludeSchedulingInboxAndAnalytics(t *testing.T) {
 	for name, schedule := range map[string]string{
 		"scheduled_publisher": "@every 1m",
 		"inbox_collector":     "@every 5m",
-		"analytics_collector": "@every 6h",
+		"analytics_collector": "@every 1h",
 	} {
 		if names[name] != schedule {
 			t.Fatalf("worker %q schedule=%q, want %q; all=%+v", name, names[name], schedule, names)

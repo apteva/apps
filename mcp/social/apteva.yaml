@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.82
+version: 0.14.83
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -69,7 +69,7 @@ provides:
     - name: inbox_collector
       schedule: "@every 5m"
     - name: analytics_collector
-      schedule: "@every 6h"
+      schedule: "@every 1h"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
