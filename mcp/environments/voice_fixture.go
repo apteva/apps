@@ -522,7 +522,7 @@ func voiceTargetDirective(spec VoiceFixtureSpec) string {
 }
 
 func voiceOpeningCue() string {
-	return "The caller is now connected. Speak only your opening turn, then stop and wait for the caller to respond."
+	return "The caller is now connected. You are the receptionist. Greet the caller according to your directive, then stop and wait for the caller to respond."
 }
 
 func voiceCallerDirective(spec VoiceFixtureSpec) string {

@@ -134,12 +134,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		return call, fmt.Errorf("load runtime app endpoint: %w", err)
 	}
 	virtualNumber := carrierVirtualNumber(call.ID)
-	routeInput := map[string]any{
-		"phone_number": virtualNumber,
-		"answer_mode":  "realtime_immediate", "directive": voiceTargetDirective(spec),
-		"voice": spec.Voice, "greeting": firstNonEmpty(spec.Greeting, voiceOpeningCue()),
-		"timeout_sec": spec.TimeoutSeconds, "recording_mode": "off",
-	}
+	routeInput := voiceCarrierRouteInput(spec, virtualNumber)
 	if err = s.runtime().CallRuntimeAppAsAgentResult(run.RuntimeID, fixture.TargetApp, spec.TargetAgent, "telephony_routes_create", routeInput, &route); err != nil {
 		return call, fmt.Errorf("create simulated inbound route: %w", err)
 	}
@@ -321,6 +316,22 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
 	return call, nil
+}
+
+func voiceCarrierRouteInput(spec VoiceFixtureSpec, virtualNumber string) map[string]any {
+	directive := strings.TrimSpace(spec.TargetDirective)
+	if directive == "" {
+		directive = "Help the caller using the tools available to you."
+	}
+	return map[string]any{
+		"phone_number":   virtualNumber,
+		"answer_mode":    "realtime_immediate",
+		"directive":      directive,
+		"voice":          spec.Voice,
+		"greeting":       voiceOpeningCue(),
+		"timeout_sec":    spec.TimeoutSeconds,
+		"recording_mode": "off",
+	}
 }
 
 func (s *service) addProtocolEvent(runID, fixtureID, callID, eventType, direction string, data map[string]any) {

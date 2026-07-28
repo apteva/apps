@@ -567,6 +567,36 @@ func TestVoiceOpeningGuidanceDoesNotBecomeInitialConversationPrompt(t *testing.T
 	}
 }
 
+func TestVoiceCarrierRouteUsesAgentDirectiveAndNeutralOpeningCue(t *testing.T) {
+	spec := VoiceFixtureSpec{
+		TargetDirective: "  Be the project's receptionist.  ",
+		Greeting:        "Bonjour, Flexylead à votre écoute.",
+		Voice:           "Kore",
+		TimeoutSeconds:  90,
+	}
+
+	input := voiceCarrierRouteInput(spec, "+15550100001")
+	if got := input["directive"]; got != "Be the project's receptionist." {
+		t.Fatalf("directive=%q", got)
+	}
+	if got := input["greeting"]; got != voiceOpeningCue() {
+		t.Fatalf("greeting=%q", got)
+	}
+	if strings.Contains(input["greeting"].(string), spec.Greeting) {
+		t.Fatalf("carrier opening cue contains scripted greeting: %q", input["greeting"])
+	}
+	if !strings.Contains(input["greeting"].(string), "You are the receptionist") {
+		t.Fatalf("carrier opening cue does not anchor the target role: %q", input["greeting"])
+	}
+}
+
+func TestVoiceCarrierRouteFallsBackWhenAgentDirectiveIsEmpty(t *testing.T) {
+	input := voiceCarrierRouteInput(VoiceFixtureSpec{}, "+15550100001")
+	if strings.TrimSpace(input["directive"].(string)) == "" {
+		t.Fatal("carrier route directive is empty")
+	}
+}
+
 func TestVoiceAudioConditionsAreDeterministic(t *testing.T) {
 	samples := make([]int16, voiceFrameBytes/2)
 	for i := range samples {
