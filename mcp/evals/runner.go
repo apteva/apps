@@ -362,6 +362,31 @@ func voiceTranscriptCounts(transcript []VoiceTranscriptTurn) (receptionist, call
 }
 
 func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
+	retried, err := s.db.retryInvalidSimulation(run)
+	if err != nil {
+		return err
+	}
+	if retried {
+		run.SimulationAttempt++
+		run.Status = "queued"
+		run.Stage = "retrying_simulation"
+		run.EnvironmentRunID = ""
+		run.Execution = nil
+		run.VoiceCall = nil
+		run.Assertions = nil
+		run.CorrectnessScore = nil
+		run.JudgeScore = nil
+		run.OverallScore = nil
+		run.StartedAt = nil
+		run.FinishedAt = nil
+		run.Error = ""
+		s.ctx.Emit("eval.run.retrying", map[string]any{
+			"run_id": run.ID, "experiment_id": run.ExperimentID,
+			"attempt": run.SimulationAttempt + 1, "issues": issues,
+		})
+		return nil
+	}
+
 	run.Status = "error"
 	run.Stage = "invalid_simulation"
 	run.Error = "Voice simulation invalid: " + strings.Join(issues, "; ")

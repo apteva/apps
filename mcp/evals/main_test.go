@@ -22,7 +22,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -103,6 +103,59 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 	if got.Summary.Passed != 1 || got.Summary.Queued != 1 || got.Summary.Targets[0].AverageTokens != 15 {
 		t.Fatalf("summary=%#v", got.Summary)
+	}
+}
+
+func TestInvalidSimulationRetriesSameLogicalRunOnce(t *testing.T) {
+	db := testStore(t)
+	suite := &Suite{ID: "suite-retry", Name: "Retry", RequiredPassRate: 1, Enabled: true}
+	if err := db.saveSuite(suite); err != nil {
+		t.Fatal(err)
+	}
+	item := Case{
+		ID: "case-retry", SuiteID: suite.ID, Name: "Voice", Mode: "voice",
+		Prompt: "Complete the call", Goals: []string{"Finish naturally"},
+		Voice: &VoiceCase{CallerGoal: "Complete the call"}, Enabled: true,
+	}
+	if err := db.saveCase(&item); err != nil {
+		t.Fatal(err)
+	}
+	experiment := &Experiment{
+		ID: "exp-retry", SuiteID: suite.ID, SuiteRevision: 1, Name: "Retry",
+		TriggerType: "manual", Targets: []Target{{AgentID: 1}}, Repetitions: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.createExperiment(experiment, []Case{item}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.claimRun()
+	if err != nil || run == nil {
+		t.Fatalf("claim run: run=%#v err=%v", run, err)
+	}
+	run.EnvironmentRunID = "env-first"
+	run.VoiceCall = &EnvironmentVoiceCall{ID: "call-first"}
+	run.Assertions = []AssertionResult{{Name: "valid", Passed: false}}
+
+	retried, err := db.retryInvalidSimulation(run)
+	if err != nil || !retried {
+		t.Fatalf("retry invalid simulation: retried=%v err=%v", retried, err)
+	}
+	requeued, err := db.getRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.Status != "queued" || requeued.Stage != "retrying_simulation" ||
+		requeued.SimulationAttempt != 1 || requeued.EnvironmentRunID != "" ||
+		requeued.VoiceCall != nil || len(requeued.Assertions) != 0 {
+		t.Fatalf("requeued run=%#v", requeued)
+	}
+	requeued, err = db.claimRun()
+	if err != nil || requeued == nil {
+		t.Fatalf("claim retry: run=%#v err=%v", requeued, err)
+	}
+	retried, err = db.retryInvalidSimulation(requeued)
+	if err != nil || retried {
+		t.Fatalf("second retry: retried=%v err=%v", retried, err)
 	}
 }
 
@@ -329,7 +382,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.2" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.3" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {

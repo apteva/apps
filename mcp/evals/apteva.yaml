@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.2
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.2 accepts explicit target completion as a valid end to realtime voice evaluations.
+version: 0.5.3
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.3 retries one invalid voice simulation without counting transient provider failures against the agent.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -17,7 +17,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.6.2" }
+    - { name: environments, version: ">=0.6.4" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -46,6 +46,7 @@ provides:
     - { name: eval.run.stage.changed, description: "An evaluation run moved to another execution stage." }
     - { name: eval.run.completed, description: "An individual evaluation run completed." }
     - { name: eval.run.invalid, description: "A voice run ended without a valid two-sided simulation and was not scored." }
+    - { name: eval.run.retrying, description: "An invalid voice simulation is being retried automatically." }
     - { name: eval.run.failed, description: "An individual evaluation run failed to execute." }
     - { name: eval.experiment.completed, description: "Every run in an evaluation experiment finished." }
     - { name: eval.regression.detected, description: "A continuous suite fell below its required pass rate." }
@@ -58,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.2
+    ref: evals/v0.5.3
     entry: mcp/evals
   port: 8080
   health_check: /health

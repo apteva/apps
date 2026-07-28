@@ -121,29 +121,30 @@ type Experiment struct {
 }
 
 type Run struct {
-	ID               string                     `json:"id"`
-	ExperimentID     string                     `json:"experiment_id"`
-	CaseID           string                     `json:"case_id"`
-	CaseRevision     int                        `json:"case_revision"`
-	TargetIndex      int                        `json:"target_index"`
-	Repetition       int                        `json:"repetition"`
-	Status           string                     `json:"status"`
-	Stage            string                     `json:"stage,omitempty"`
-	CaseSnapshot     Case                       `json:"case"`
-	TargetSnapshot   Target                     `json:"target"`
-	EnvironmentRunID string                     `json:"environment_run_id,omitempty"`
-	Execution        *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
-	VoiceCall        *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
-	Assertions       []AssertionResult          `json:"assertions"`
-	Judge            *JudgeVerdict              `json:"judge,omitempty"`
-	CorrectnessScore *float64                   `json:"correctness_score,omitempty"`
-	JudgeScore       *float64                   `json:"judge_score,omitempty"`
-	OverallScore     *float64                   `json:"overall_score,omitempty"`
-	StartedAt        *time.Time                 `json:"started_at,omitempty"`
-	FinishedAt       *time.Time                 `json:"finished_at,omitempty"`
-	Error            string                     `json:"error,omitempty"`
-	CreatedAt        time.Time                  `json:"created_at"`
-	Suggestions      []Suggestion               `json:"suggestions,omitempty"`
+	ID                string                     `json:"id"`
+	ExperimentID      string                     `json:"experiment_id"`
+	CaseID            string                     `json:"case_id"`
+	CaseRevision      int                        `json:"case_revision"`
+	TargetIndex       int                        `json:"target_index"`
+	Repetition        int                        `json:"repetition"`
+	SimulationAttempt int                        `json:"simulation_attempt"`
+	Status            string                     `json:"status"`
+	Stage             string                     `json:"stage,omitempty"`
+	CaseSnapshot      Case                       `json:"case"`
+	TargetSnapshot    Target                     `json:"target"`
+	EnvironmentRunID  string                     `json:"environment_run_id,omitempty"`
+	Execution         *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	VoiceCall         *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
+	Assertions        []AssertionResult          `json:"assertions"`
+	Judge             *JudgeVerdict              `json:"judge,omitempty"`
+	CorrectnessScore  *float64                   `json:"correctness_score,omitempty"`
+	JudgeScore        *float64                   `json:"judge_score,omitempty"`
+	OverallScore      *float64                   `json:"overall_score,omitempty"`
+	StartedAt         *time.Time                 `json:"started_at,omitempty"`
+	FinishedAt        *time.Time                 `json:"finished_at,omitempty"`
+	Error             string                     `json:"error,omitempty"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	Suggestions       []Suggestion               `json:"suggestions,omitempty"`
 }
 
 type EnvironmentVoiceCall struct {

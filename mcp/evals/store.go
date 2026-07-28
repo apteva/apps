@@ -329,14 +329,14 @@ func (s store) getRun(id string) (*Run, error) {
 	return run, err
 }
 
-const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
+const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
 	var caseRaw, targetRaw, assertionsRaw, created string
 	var executionRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
 	var correctness, judgeScore, overall sql.NullFloat64
-	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
+	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -435,6 +435,39 @@ func (s store) finishRun(run *Run) error {
 		return err
 	}
 	return s.rollupExperiment(run.ExperimentID)
+}
+
+func (s store) retryInvalidSimulation(run *Run) (bool, error) {
+	if run == nil || run.SimulationAttempt >= 1 {
+		return false, nil
+	}
+	result, err := s.db.Exec(`
+		UPDATE eval_runs
+		SET status='queued',
+			stage='retrying_simulation',
+			simulation_attempt=simulation_attempt+1,
+			environment_run_id='',
+			execution_json=NULL,
+			voice_call_json=NULL,
+			assertions_json='[]',
+			judge_json=NULL,
+			correctness_score=NULL,
+			judge_score=NULL,
+			overall_score=NULL,
+			started_at=NULL,
+			finished_at=NULL,
+			error=''
+		WHERE id=? AND simulation_attempt=?
+	`, run.ID, run.SimulationAttempt)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return false, err
+	}
+	_, err = s.db.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=?`, run.ExperimentID)
+	return true, err
 }
 
 func (s store) rollupExperiment(id string) error {
