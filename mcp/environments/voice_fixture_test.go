@@ -301,6 +301,48 @@ func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
 	}
 }
 
+func TestVoiceConversationIdleAcceptsFinalGoodbyeWithoutCallerTelemetryAck(t *testing.T) {
+	now := time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	quietAt := now.Add(-voiceConversationIdle - time.Second)
+	activity := &voiceMediaActivity{
+		active: map[string]bool{"receptionist": false, "caller": false},
+		last:   quietAt,
+	}
+	transcript := []VoiceTranscriptTurn{
+		{Speaker: "receptionist", Text: "How can I help?"},
+		{Speaker: "caller", Text: "Please reserve tomorrow at three."},
+		{Speaker: "receptionist", Text: "It is reserved. Goodbye."},
+	}
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-4 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
+	}
+	callerEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-5 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-6 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
+	}
+
+	if voiceRelayDeliverySettled(activity, targetEvents, "target", callerEvents, "caller") {
+		t.Fatal("strict relay check unexpectedly accepted missing final caller telemetry")
+	}
+	if !voiceConversationIsIdle(
+		now, activity, transcript,
+		targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("completed final goodbye did not become conversation idle")
+	}
+
+	targetEvents[0].Time = quietAt.Add(-7 * time.Second)
+	if voiceConversationIsIdle(
+		now, activity, transcript,
+		targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("conversation completed before the caller's last turn reached the target")
+	}
+}
+
 func TestVoiceRelayDeliverySettledWaitsForMediaAndBothDestinations(t *testing.T) {
 	base := time.Date(2026, time.July, 23, 17, 0, 0, 0, time.UTC)
 	activity := &voiceMediaActivity{
@@ -407,6 +449,17 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 	}
 }
 
+func TestVoiceBridgeExitAllowsSettledExchangeOnlyForReadClosures(t *testing.T) {
+	for _, endpoint := range []voiceBridgeEndpoint{voiceBridgeCaller, voiceBridgeTarget, voiceBridgeCarrier} {
+		if !voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{Endpoint: endpoint, Operation: "read"}) {
+			t.Fatalf("%s read closure did not allow settled completion", endpoint)
+		}
+		if voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{Endpoint: endpoint, Operation: "write_audio"}) {
+			t.Fatalf("%s write failure allowed settled completion", endpoint)
+		}
+	}
+}
+
 func TestWaitForVoiceCompletionEvidenceAllowsDelayedTelemetry(t *testing.T) {
 	probes := 0
 	if !waitForVoiceCompletionEvidence(context.Background(), 200*time.Millisecond, 5*time.Millisecond, func() bool {
@@ -452,6 +505,13 @@ func TestVoiceFinalExchangeSettledRequiresDeliveredInactiveConversation(t *testi
 		activity, transcript, targetEvents, "target", callerEvents, "caller",
 	) {
 		t.Fatal("completed final exchange was not settled")
+	}
+
+	callerEvents[0].Time = base.Add(-time.Second)
+	if !voiceFinalExchangeSettled(
+		activity, transcript, targetEvents, "target", callerEvents, "caller",
+	) {
+		t.Fatal("final exchange required caller telemetry for the receptionist goodbye")
 	}
 
 	active := &voiceMediaActivity{

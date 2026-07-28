@@ -27,7 +27,7 @@ const (
 	voiceFrameBytes       = voiceBytesPerSecond / (int(time.Second / voiceFrameDuration))
 	voiceSilenceTail      = 2 * time.Second
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
-	voiceCompletionGrace  = 5 * time.Second
+	voiceCompletionGrace  = 10 * time.Second
 	voiceCompletionPoll   = 100 * time.Millisecond
 	voiceConversationIdle = 8 * time.Second
 	maxVoiceRelayBuffer   = 5 * voiceBytesPerSecond
@@ -700,7 +700,7 @@ func voiceConversationIsIdle(
 		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
 		return false
 	}
-	if !voiceRelayDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
+	if !voiceFinalExchangeDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
 		return false
 	}
 	_, lastActivity := media.snapshot()
@@ -731,7 +731,7 @@ func voiceFinalExchangeSettled(
 		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
 		return false
 	}
-	if !voiceRelayDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
+	if !voiceFinalExchangeDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
 		return false
 	}
 	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
@@ -744,6 +744,25 @@ func voiceFinalExchangeSettled(
 
 func voiceRealtimeStateSettled(state string) bool {
 	return state == "listening" || state == "disconnected"
+}
+
+func voiceFinalExchangeDeliverySettled(
+	media *voiceMediaActivity,
+	targetEvents []sdk.RuntimeTelemetryEvent,
+	targetThreadID string,
+	callerEvents []sdk.RuntimeTelemetryEvent,
+	callerThreadID string,
+) bool {
+	active, _ := media.snapshot()
+	if active {
+		return false
+	}
+	// The relay has already drained before a read-side bridge exit is reported.
+	// Only require proof that the caller's last turn reached the target; caller
+	// providers may close before emitting input telemetry for the final goodbye.
+	callerOutput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.assistant")
+	targetInput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.user")
+	return !callerOutput.IsZero() && !targetInput.IsZero() && !callerOutput.After(targetInput)
 }
 
 func voiceRelayDeliverySettled(
@@ -864,9 +883,7 @@ func (s *service) classifyVoiceBridgeExit(
 	if callerDone {
 		completionReason = "caller_done"
 	} else {
-		completionReason = s.waitForVoiceBridgeCompletion(
-			ctx, runtimeID, call, media, exit.Endpoint == voiceBridgeCaller,
-		)
+		completionReason = s.waitForVoiceBridgeCompletion(ctx, runtimeID, call, media, exit)
 	}
 	log.Printf(
 		"[VOICE] bridge exit endpoint=%s operation=%s completion=%s err=%v",
@@ -890,7 +907,7 @@ func (s *service) waitForVoiceBridgeCompletion(
 	runtimeID string,
 	call *VoiceCall,
 	media *voiceMediaActivity,
-	allowSettledExchange bool,
+	exit voiceBridgeExit,
 ) string {
 	reason := ""
 	waitForVoiceCompletionEvidence(ctx, voiceCompletionGrace, voiceCompletionPoll, func() bool {
@@ -904,7 +921,7 @@ func (s *service) waitForVoiceBridgeCompletion(
 			reason = "target_done"
 			return true
 		}
-		if !allowSettledExchange || callerErr != nil {
+		if !voiceBridgeExitAllowsSettledExchange(exit) || callerErr != nil {
 			return false
 		}
 		if targetErr != nil {
@@ -914,12 +931,24 @@ func (s *service) waitForVoiceBridgeCompletion(
 			media, voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt),
 			targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID,
 		) {
-			reason = "caller_done"
+			reason = "conversation_idle"
 			return true
 		}
 		return false
 	})
 	return reason
+}
+
+func voiceBridgeExitAllowsSettledExchange(exit voiceBridgeExit) bool {
+	if exit.Operation != "read" {
+		return false
+	}
+	switch exit.Endpoint {
+	case voiceBridgeCaller, voiceBridgeTarget, voiceBridgeCarrier:
+		return true
+	default:
+		return false
+	}
 }
 
 func waitForVoiceCompletionEvidence(ctx context.Context, grace, poll time.Duration, probe func() bool) bool {
