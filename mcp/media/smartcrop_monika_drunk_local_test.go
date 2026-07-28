@@ -288,13 +288,20 @@ func localSmartCropStillX(t *testing.T, video string, duration, focus int64, src
 	if err != nil {
 		t.Fatal(err)
 	}
+	trackingConsensusApplied := false
+	if tracking && contextOK && smartCropTemporalResultConfident(contextResult) {
+		if corrected, changed := stabilizeSmartCropStillTrackingX(x, samples, contextResult, cropW, srcW); changed {
+			x = corrected
+			trackingConsensusApplied = true
+		}
+	}
 	if !tracking {
 		if contextOK {
 			if corrected, changed := applySmartCropTemporalOverride(x, contextResult, cropW, srcW); changed {
 				x = corrected
 			}
 		}
-	} else if contextOK && smartCropTemporalResultConfident(contextResult) &&
+	} else if !trackingConsensusApplied && contextOK && smartCropTemporalResultConfident(contextResult) &&
 		(contextResult.StaticAnchored || !smartCropStillHasMotionEvidence(samples, focus)) {
 		if corrected, changed := applySmartCropTemporalOverride(x, contextResult, cropW, srcW); changed {
 			x = corrected

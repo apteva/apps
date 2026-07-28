@@ -256,13 +256,15 @@ func smartCropFaceCandidateSupported(face smartCropFace, currentX, cropW int, we
 	// torso, curtain or furniture pattern, not a face. This specifically keeps
 	// a large rotated false positive from blocking the independent background
 	// model when a reclining person is elsewhere in the frame.
-	hugeLimit := cropW * 4 / 5
-	if cropW >= 1000 {
-		// On 4K landscape inputs a rotated furniture/torso hit can still be
-		// enormous in source pixels while remaining below the ordinary 80%
-		// cutoff. The 640 detector path used by HD close-ups remains unchanged.
-		hugeLimit = cropW * 2 / 3
-	}
+	// A weak detection wider than two thirds of the portrait window is not a
+	// useful face anchor at any source resolution. In practice this is a
+	// shoulder/torso, curtain, cushion, or furniture edge produced by a
+	// quarter-turn pass. Accepting it is especially damaging for reclining
+	// people: the oversized false face can pull an otherwise-correct
+	// exact-frame crop away from the real head. Genuine close-up faces of this
+	// size already dominate the saliency window, so rejecting only the weak
+	// cascade vote preserves their crop without granting it authority.
+	hugeLimit := cropW * 2 / 3
 	if face.Quality < 12 && face.Scale > hugeLimit {
 		return false
 	}

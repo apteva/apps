@@ -252,6 +252,11 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 			face: smartCropFace{CenterX: 1300, MinX: 850, MaxX: 1750, Scale: 900, Quality: 5.8},
 			want: false,
 		},
+		{
+			name: "hd-reclining-torso-is-not-a-face",
+			face: smartCropFace{CenterX: 714, MinX: 510, MaxX: 918, Scale: 414, Quality: 8.7},
+			want: false,
+		},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -263,6 +268,22 @@ func TestSmartCropWeakFaceCandidateCannotOverrideEstablishedSubject(t *testing.T
 	fourKPattern := smartCropFace{CenterX: 2256, MinX: 1824, MaxX: 2688, Scale: 864, Quality: 7}
 	if smartCropFaceCandidateSupported(fourKPattern, 900, 1214, true) {
 		t.Fatalf("4K large rotated furniture pattern was accepted: %+v", fourKPattern)
+	}
+}
+
+func TestSmartCropStillTrackingConsensusKeepsExactRecliningFrames(t *testing.T) {
+	samples := []smartCropV2Sample{
+		{point: cropPathPoint{AtMs: 20_500, X: 240}},
+		{point: cropPathPoint{AtMs: 21_000, X: 324}},
+		{point: cropPathPoint{AtMs: 21_500, X: 240}},
+	}
+	context := smartCropTemporalResult{
+		X: 480, Samples: 9, Concentration: 0.95,
+		MeanActivity: 1.0, ActiveFraction: 0.05, StaticAnchored: true,
+	}
+	x, changed := stabilizeSmartCropStillTrackingX(324, samples, context, 606, 1920)
+	if !changed || x != 240 {
+		t.Fatalf("stable exact reclining frames lost to broad context: x=%d changed=%v", x, changed)
 	}
 }
 

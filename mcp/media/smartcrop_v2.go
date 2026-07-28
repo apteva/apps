@@ -158,10 +158,12 @@ func computeSmartCropStillV2(
 	if err != nil {
 		return nil, err
 	}
+	trackingConsensusApplied := false
 	if trackingStill && contextTemporalOK && smartCropTemporalResultConfident(contextTemporal) {
 		if corrected, changed := stabilizeSmartCropStillTrackingX(x, samples, contextTemporal, cw, row.Width); changed {
 			x = corrected
 			method += "+tracking-consensus"
+			trackingConsensusApplied = true
 		}
 	} else if contextTemporalOK {
 		if corrected, changed := applySmartCropWeakTemporalStabilizer(x, contextTemporal, contextSamples, cw, row.Width); changed {
@@ -179,7 +181,7 @@ func computeSmartCropStillV2(
 				method += "+temporal"
 			}
 		}
-	} else if contextTemporalOK && smartCropTemporalResultConfident(contextTemporal) &&
+	} else if !trackingConsensusApplied && contextTemporalOK && smartCropTemporalResultConfident(contextTemporal) &&
 		(contextTemporal.StaticAnchored || !smartCropStillHasMotionEvidence(samples, target.FocusMs)) {
 		temporal = contextTemporal
 		if corrected, changed := applySmartCropTemporalOverride(x, contextTemporal, cw, row.Width); changed {
