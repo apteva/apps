@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.78
+version: 0.14.82
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -340,6 +341,10 @@ var platforms = map[string]platformDef{
 		},
 		DeleteTool:    "delete_tweet",
 		DeleteIDField: "tweet_id",
+		OptionFields: []optionField{
+			{Name: "allow_longform", Type: "boolean", Label: "Allow long-form post",
+				Help: "Bypass the standard 280-character preflight for X accounts whose API access supports long-form posts."},
+		},
 		Inbox: inboxCaps{
 			CommentsRead:   true,
 			CommentsWrite:  true,
@@ -761,6 +766,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. " +
+				"X accepts {body, allow_longform}; normal posts are validated against X's 280-character weighted limit before media is uploaded. " +
 				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
 				"Body resolution per target: target.body if set, else post-level body. Top-level body may be omitted only when every target has its own non-empty body. " +
@@ -773,7 +779,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Per-target overrides. Each entry: {social_account_id (required), body? required when top-level body is omitted, plus platform-specific keys like title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
+					"description": "Per-target overrides. Each entry: {social_account_id (required), body? required when top-level body is omitted, plus platform-specific keys such as allow_longform for X or title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
 					"items":       map[string]any{"type": "object"},
 				},
 				"schedule_at":       map[string]any{"type": "string"},
@@ -1350,6 +1356,12 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 			return nil, err
 		}
 		if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
+			return nil, err
+		}
+		// A reconnect can add scopes that were unavailable on the old
+		// token. Clear capability backoffs so the next worker tick tests
+		// the new credentials immediately.
+		if _, err := tx.Exec(`DELETE FROM inbox_cursors WHERE social_account_id=?`, existingID); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -2797,6 +2809,13 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 // then creates the post with media.media_ids. Text-only posts still use
 // the simple post_tweet path. X accepts up to 4 images, or one video/GIF.
 func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	allowLongform, _ := boolOption(j.options, "allow_longform")
+	if weighted := twitterWeightedTextLength(j.body); weighted > 280 && !allowLongform {
+		return "", "", fmt.Errorf(
+			"X post is %d weighted characters; the standard limit is 280. Shorten it or set targets[].allow_longform=true for an account with long-form API access",
+			weighted,
+		)
+	}
 	bodyField := def.BodyField
 	if bodyField == "" {
 		bodyField = "text"
@@ -2824,6 +2843,35 @@ func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	ctx.Logger().Info("publishTwitter: published",
 		"platform_post_id", id, "platform_url", url)
 	return id, url, nil
+}
+
+var twitterURLPattern = regexp.MustCompile(`https?://[^\s]+`)
+
+func twitterWeightedTextLength(text string) int {
+	weighted := 0
+	offset := 0
+	for _, match := range twitterURLPattern.FindAllStringIndex(text, -1) {
+		weighted += twitterWeightedRunes(text[offset:match[0]])
+		weighted += 23
+		offset = match[1]
+	}
+	return weighted + twitterWeightedRunes(text[offset:])
+}
+
+func twitterWeightedRunes(text string) int {
+	weighted := 0
+	for _, r := range text {
+		switch {
+		case r <= 0x10FF,
+			r >= 0x2000 && r <= 0x200D,
+			r >= 0x2010 && r <= 0x201F,
+			r >= 0x2032 && r <= 0x2037:
+			weighted++
+		default:
+			weighted += 2
+		}
+	}
+	return weighted
 }
 
 func (a *App) uploadTwitterMedia(ctx *sdk.AppCtx, connID int64, media []mediaItem) ([]string, error) {
@@ -4856,54 +4904,77 @@ func extractPageToken(pageCreds string) string {
 	return creds["access_token"]
 }
 
-// getTwitterPostMetrics calls get_tweet_analytics for a single tweet
-// and maps Twitter's public_metrics to our normalized shape. Twitter's
-// response wraps under {data: {public_metrics: {...}}}; some shapes
-// also nest under {data: [{...}]} when called for multiple tweets,
-// which we don't use here.
+type twitterMetricCounts struct {
+	ImpressionCount int64 `json:"impression_count"`
+	LikeCount       int64 `json:"like_count"`
+	ReplyCount      int64 `json:"reply_count"`
+	RetweetCount    int64 `json:"retweet_count"`
+	QuoteCount      int64 `json:"quote_count"`
+	BookmarkCount   int64 `json:"bookmark_count"`
+}
+
+// getTwitterPostMetrics uses the standard tweet lookup first. It is
+// available to normal OAuth clients and already includes owner-only
+// metrics when the caller owns the post. The separate analytics endpoint
+// is an enrollment-gated fallback, not a prerequisite for basic stats.
 func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
-	if rich := a.getTwitterPostAnalytics(ctx, out, connID); rich.Status == "ok" && rich.Metrics != nil && hasAnyMetrics(rich.Metrics) {
-		return rich
-	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
 		"tweet_id":     out.PlatformPostID,
 		"tweet.fields": "public_metrics,non_public_metrics,organic_metrics",
 	})
 	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
+		return a.getTwitterPostAnalytics(ctx, out, connID)
 	}
 	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
+		return a.getTwitterPostAnalytics(ctx, out, connID)
 	}
-	// Pull public_metrics out of either {data: {public_metrics}} or
-	// {public_metrics} top-level depending on the integration's response
-	// shape.
 	var resp struct {
 		Data struct {
-			PublicMetrics struct {
-				ImpressionCount int64 `json:"impression_count"`
-				LikeCount       int64 `json:"like_count"`
-				ReplyCount      int64 `json:"reply_count"`
-				RetweetCount    int64 `json:"retweet_count"`
-				QuoteCount      int64 `json:"quote_count"`
-				BookmarkCount   int64 `json:"bookmark_count"`
-			} `json:"public_metrics"`
+			PublicMetrics    twitterMetricCounts `json:"public_metrics"`
+			NonPublicMetrics twitterMetricCounts `json:"non_public_metrics"`
+			OrganicMetrics   twitterMetricCounts `json:"organic_metrics"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(res.Data, &resp)
-	pm := resp.Data.PublicMetrics
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		out.Status, out.Error = "failed", "decode X post metrics: "+err.Error()
+		return out
+	}
+	pm := mergeTwitterMetricCounts(
+		resp.Data.PublicMetrics,
+		resp.Data.NonPublicMetrics,
+		resp.Data.OrganicMetrics,
+	)
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
 		Views:     pm.ImpressionCount,
 		Likes:     pm.LikeCount,
 		Comments:  pm.ReplyCount,
 		Shares:    pm.RetweetCount + pm.QuoteCount, // group retweets + quotes under shares
-		Available: []string{"views", "likes", "comments", "shares"},
+		Saves:     pm.BookmarkCount,
+		Available: []string{"views", "likes", "comments", "shares", "saves"},
 		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
+}
+
+func mergeTwitterMetricCounts(groups ...twitterMetricCounts) twitterMetricCounts {
+	var merged twitterMetricCounts
+	for _, group := range groups {
+		merged.ImpressionCount = maxInt64(merged.ImpressionCount, group.ImpressionCount)
+		merged.LikeCount = maxInt64(merged.LikeCount, group.LikeCount)
+		merged.ReplyCount = maxInt64(merged.ReplyCount, group.ReplyCount)
+		merged.RetweetCount = maxInt64(merged.RetweetCount, group.RetweetCount)
+		merged.QuoteCount = maxInt64(merged.QuoteCount, group.QuoteCount)
+		merged.BookmarkCount = maxInt64(merged.BookmarkCount, group.BookmarkCount)
+	}
+	return merged
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
