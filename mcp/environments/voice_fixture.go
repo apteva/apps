@@ -171,9 +171,11 @@ func (r *voiceMediaRelay) hasPendingPlayback() bool {
 }
 
 type voiceRelayEvent struct {
-	chunk     *voiceAudioChunk
-	interrupt bool
-	err       error
+	chunk          *voiceAudioChunk
+	interrupt      bool
+	terminalReason sdk.RealtimeAudioTerminalReason
+	closeCode      int
+	err            error
 }
 
 type voiceBridgeEndpoint string
@@ -185,9 +187,11 @@ const (
 )
 
 type voiceBridgeExit struct {
-	Endpoint  voiceBridgeEndpoint
-	Operation string
-	Err       error
+	Endpoint       voiceBridgeEndpoint
+	Operation      string
+	TerminalReason sdk.RealtimeAudioTerminalReason
+	CloseCode      int
+	Err            error
 }
 
 type voiceMediaActivity struct {
@@ -354,8 +358,14 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 				transcript := voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
 				raw, _ := json.Marshal(transcript)
 				signature := string(raw)
-				if len(transcript) > 0 && signature != lastTranscript {
-					lastTranscript = signature
+				delivery := voiceTurnDelivery(targetEvents, call.TargetThreadID, events, call.CallerThreadID)
+				applyVoiceTurnDeliveryMetrics(&call.Metrics, delivery)
+				progressSignature := signature + fmt.Sprintf("|%d|%d|%d|%d",
+					delivery.receptionistSource, delivery.callerReceived,
+					delivery.callerSource, delivery.receptionistReceived,
+				)
+				if len(transcript) > 0 && progressSignature != lastTranscript {
+					lastTranscript = progressSignature
 					call.Transcript = transcript
 					call.TargetTelemetry = targetEvents
 					_ = s.db.saveVoiceCall(call)
@@ -571,11 +581,14 @@ func pumpVoiceAudio(
 		case event := <-input:
 			switch {
 			case event.err != nil:
-				exit := voiceBridgeExit{Endpoint: sourceEndpoint, Operation: "read", Err: event.err}
+				exit := voiceBridgeExit{
+					Endpoint: sourceEndpoint, Operation: "read", Err: event.err,
+					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update(speaker, false, time.Now())
-					sendVoiceBridgeExit(ctx, result, exit.Endpoint, exit.Operation, exit.Err)
+					sendVoiceBridgeExitValue(ctx, result, exit)
 					return
 				}
 			case event.interrupt:
@@ -590,7 +603,7 @@ func pumpVoiceAudio(
 			if !ok {
 				activity.update(speaker, false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExit(ctx, result, sourceExit.Endpoint, sourceExit.Operation, sourceExit.Err)
+					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
 					return
 				}
 				continue
@@ -633,6 +646,85 @@ type voiceTelemetryState struct {
 	state        string
 	pendingTools int
 	lastActivity time.Time
+}
+
+type voiceTurnDeliveryState struct {
+	receptionistSource   int
+	callerReceived       int
+	pendingReceptionist  int
+	callerSource         int
+	receptionistReceived int
+	pendingCaller        int
+}
+
+func voiceTurnDelivery(
+	targetEvents []sdk.RuntimeTelemetryEvent,
+	targetThreadID string,
+	callerEvents []sdk.RuntimeTelemetryEvent,
+	callerThreadID string,
+) voiceTurnDeliveryState {
+	targetAssistant, targetUser := voiceRealtimeTurnCounts(targetEvents, targetThreadID)
+	callerAssistant, callerUser := voiceRealtimeTurnCounts(callerEvents, callerThreadID)
+	return voiceTurnDeliveryState{
+		receptionistSource:   targetAssistant,
+		callerReceived:       callerUser,
+		pendingReceptionist:  max(0, targetAssistant-callerUser),
+		callerSource:         callerAssistant,
+		receptionistReceived: targetUser,
+		pendingCaller:        max(0, callerAssistant-targetUser),
+	}
+}
+
+func voiceRealtimeTurnCounts(events []sdk.RuntimeTelemetryEvent, threadID string) (assistant, user int) {
+	ordered := make([]sdk.RuntimeTelemetryEvent, 0, len(events))
+	hasSpeakingState := false
+	for _, event := range events {
+		if event.ThreadID == threadID {
+			ordered = append(ordered, event)
+			if event.Type == "realtime.state" {
+				var data struct {
+					State string `json:"state"`
+				}
+				if json.Unmarshal(event.Data, &data) == nil && strings.TrimSpace(data.State) == "speaking" {
+					hasSpeakingState = true
+				}
+			}
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Time.Before(ordered[j].Time) })
+
+	assistantSpoke := false
+	for _, event := range ordered {
+		switch event.Type {
+		case "realtime.state":
+			var data struct {
+				State string `json:"state"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && strings.TrimSpace(data.State) == "speaking" {
+				assistantSpoke = true
+			}
+		case "realtime.user":
+			user++
+		case "realtime.assistant":
+			if assistantSpoke || !hasSpeakingState {
+				assistant++
+			}
+			assistantSpoke = false
+		}
+	}
+	return assistant, user
+}
+
+func applyVoiceTurnDeliveryMetrics(metrics *VoiceCallMetrics, delivery voiceTurnDeliveryState) {
+	if metrics == nil {
+		return
+	}
+	metrics.ReceptionistSourceTurns = delivery.receptionistSource
+	metrics.CallerReceivedTurns = delivery.callerReceived
+	metrics.PendingReceptionistTurns = delivery.pendingReceptionist
+	metrics.CallerSourceTurns = delivery.callerSource
+	metrics.ReceptionistReceivedTurns = delivery.receptionistReceived
+	metrics.PendingCallerTurns = delivery.pendingCaller
 }
 
 func voiceRealtimeTelemetryState(events []sdk.RuntimeTelemetryEvent, threadID string) voiceTelemetryState {
@@ -700,14 +792,16 @@ func voiceConversationIsIdle(
 		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
 		return false
 	}
-	if !voiceFinalExchangeDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
+	active, lastActivity := media.snapshot()
+	if active {
 		return false
 	}
-	_, lastActivity := media.snapshot()
 	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
 	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
+	delivery := voiceTurnDelivery(targetEvents, targetThreadID, callerEvents, callerThreadID)
 	if target.state != "listening" || caller.state != "listening" ||
-		target.pendingTools > 0 || caller.pendingTools > 0 {
+		target.pendingTools > 0 || caller.pendingTools > 0 ||
+		delivery.pendingCaller > 0 {
 		return false
 	}
 	for _, candidate := range []time.Time{target.lastActivity, caller.lastActivity} {
@@ -731,38 +825,22 @@ func voiceFinalExchangeSettled(
 		len(transcript) == 0 || transcript[len(transcript)-1].Speaker != "receptionist" {
 		return false
 	}
-	if !voiceFinalExchangeDeliverySettled(media, targetEvents, targetThreadID, callerEvents, callerThreadID) {
-		return false
-	}
-	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
-	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
-	return voiceRealtimeStateSettled(target.state) &&
-		voiceRealtimeStateSettled(caller.state) &&
-		target.pendingTools == 0 &&
-		caller.pendingTools == 0
-}
-
-func voiceRealtimeStateSettled(state string) bool {
-	return state == "listening" || state == "disconnected"
-}
-
-func voiceFinalExchangeDeliverySettled(
-	media *voiceMediaActivity,
-	targetEvents []sdk.RuntimeTelemetryEvent,
-	targetThreadID string,
-	callerEvents []sdk.RuntimeTelemetryEvent,
-	callerThreadID string,
-) bool {
 	active, _ := media.snapshot()
 	if active {
 		return false
 	}
-	// The relay has already drained before a read-side bridge exit is reported.
-	// Only require proof that the caller's last turn reached the target; caller
-	// providers may close before emitting input telemetry for the final goodbye.
-	callerOutput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.assistant")
-	targetInput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.user")
-	return !callerOutput.IsZero() && !targetInput.IsZero() && !callerOutput.After(targetInput)
+	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
+	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
+	delivery := voiceTurnDelivery(targetEvents, targetThreadID, callerEvents, callerThreadID)
+	return voiceRealtimeStateSettled(target.state) &&
+		voiceRealtimeStateSettled(caller.state) &&
+		target.pendingTools == 0 &&
+		caller.pendingTools == 0 &&
+		delivery.pendingCaller == 0
+}
+
+func voiceRealtimeStateSettled(state string) bool {
+	return state == "listening" || state == "disconnected"
 }
 
 func voiceRelayDeliverySettled(
@@ -776,31 +854,27 @@ func voiceRelayDeliverySettled(
 	if active {
 		return false
 	}
-	targetOutput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.assistant")
-	callerInput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.user")
-	callerOutput := voiceLastRealtimeEvent(callerEvents, callerThreadID, "realtime.assistant")
-	targetInput := voiceLastRealtimeEvent(targetEvents, targetThreadID, "realtime.user")
-	return !targetOutput.After(callerInput) && !callerOutput.After(targetInput)
-}
-
-func voiceLastRealtimeEvent(events []sdk.RuntimeTelemetryEvent, threadID, eventType string) time.Time {
-	var latest time.Time
-	for _, event := range events {
-		if event.ThreadID == threadID && event.Type == eventType && event.Time.After(latest) {
-			latest = event.Time
-		}
-	}
-	return latest
+	delivery := voiceTurnDelivery(targetEvents, targetThreadID, callerEvents, callerThreadID)
+	target := voiceRealtimeTelemetryState(targetEvents, targetThreadID)
+	caller := voiceRealtimeTelemetryState(callerEvents, callerThreadID)
+	return delivery.pendingCaller == 0 &&
+		delivery.pendingReceptionist == 0 &&
+		target.pendingTools == 0 &&
+		caller.pendingTools == 0
 }
 
 func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAudio, incoming chan<- voiceRelayEvent) {
 	var itemID string
 	var audioEndMS int
+	var terminal sdk.RealtimeAudioTerminalMessage
 	for {
 		_ = source.conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		messageType, payload, err := source.conn.ReadMessage()
 		if err != nil {
-			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{err: err})
+			reason, closeCode := voiceAudioTerminalDetails(err, terminal)
+			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{
+				err: err, terminalReason: reason, closeCode: closeCode,
+			})
 			return
 		}
 		if messageType == websocket.TextMessage {
@@ -810,6 +884,12 @@ func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAud
 				AudioEndMS int    `json:"audio_end_ms"`
 			}
 			if json.Unmarshal(payload, &event) != nil {
+				continue
+			}
+			if event.Type == sdk.RealtimeAudioTerminalMessageType {
+				if json.Unmarshal(payload, &terminal) != nil {
+					terminal = sdk.RealtimeAudioTerminalMessage{}
+				}
 				continue
 			}
 			switch event.Type {
@@ -834,6 +914,38 @@ func readVoiceAudio(ctx context.Context, source *voiceSocket, capture *cappedAud
 	}
 }
 
+func voiceAudioTerminalDetails(err error, terminal sdk.RealtimeAudioTerminalMessage) (sdk.RealtimeAudioTerminalReason, int) {
+	reason := terminal.Reason
+	closeCode := terminal.CloseCode
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeCode == 0 {
+			closeCode = closeErr.Code
+		}
+		if reason == "" {
+			reason = voiceAudioTerminalReason(closeErr.Text)
+		}
+	}
+	return reason, closeCode
+}
+
+func voiceAudioTerminalReason(value string) sdk.RealtimeAudioTerminalReason {
+	switch sdk.RealtimeAudioTerminalReason(strings.TrimSpace(value)) {
+	case sdk.RealtimeTerminalCallerDone:
+		return sdk.RealtimeTerminalCallerDone
+	case sdk.RealtimeTerminalCarrierError:
+		return sdk.RealtimeTerminalCarrierError
+	case sdk.RealtimeTerminalAudioDisconnected:
+		return sdk.RealtimeTerminalAudioDisconnected
+	case sdk.RealtimeTerminalServerShutdown:
+		return sdk.RealtimeTerminalServerShutdown
+	case sdk.RealtimeTerminalStopped:
+		return sdk.RealtimeTerminalStopped
+	default:
+		return ""
+	}
+}
+
 func sendVoiceRelayEvent(ctx context.Context, incoming chan<- voiceRelayEvent, event voiceRelayEvent) bool {
 	select {
 	case incoming <- event:
@@ -843,9 +955,21 @@ func sendVoiceRelayEvent(ctx context.Context, incoming chan<- voiceRelayEvent, e
 	}
 }
 
-func sendVoiceBridgeExit(ctx context.Context, result chan<- voiceBridgeExit, endpoint voiceBridgeEndpoint, operation string, err error) {
+func sendVoiceBridgeExit(
+	ctx context.Context,
+	result chan<- voiceBridgeExit,
+	endpoint voiceBridgeEndpoint,
+	operation string,
+	err error,
+) {
+	sendVoiceBridgeExitValue(ctx, result, voiceBridgeExit{
+		Endpoint: endpoint, Operation: operation, Err: err,
+	})
+}
+
+func sendVoiceBridgeExitValue(ctx context.Context, result chan<- voiceBridgeExit, exit voiceBridgeExit) {
 	select {
-	case result <- voiceBridgeExit{Endpoint: endpoint, Operation: operation, Err: err}:
+	case result <- exit:
 	case <-ctx.Done():
 	}
 }
@@ -880,14 +1004,14 @@ func (s *service) classifyVoiceBridgeExit(
 	callerDone bool,
 ) string {
 	completionReason := ""
-	if callerDone {
+	if callerDone || voiceBridgeEndReason(exit, false) == "caller_done" {
 		completionReason = "caller_done"
 	} else {
 		completionReason = s.waitForVoiceBridgeCompletion(ctx, runtimeID, call, media, exit)
 	}
 	log.Printf(
-		"[VOICE] bridge exit endpoint=%s operation=%s completion=%s err=%v",
-		exit.Endpoint, exit.Operation, completionReason, exit.Err,
+		"[VOICE] bridge exit endpoint=%s operation=%s terminal=%s close_code=%d completion=%s err=%v",
+		exit.Endpoint, exit.Operation, exit.TerminalReason, exit.CloseCode, completionReason, exit.Err,
 	)
 	if completionReason != "" {
 		return completionReason
@@ -899,7 +1023,17 @@ func voiceBridgeEndReason(exit voiceBridgeExit, completionEvidence bool) string 
 	if completionEvidence {
 		return "caller_done"
 	}
+	if exit.Operation == "read" &&
+		(exit.Endpoint == voiceBridgeCaller || exit.Endpoint == voiceBridgeCarrier) &&
+		(exit.TerminalReason == sdk.RealtimeTerminalCallerDone || voiceWebSocketClosedNormally(exit)) {
+		return "caller_done"
+	}
 	return "audio_disconnected"
+}
+
+func voiceWebSocketClosedNormally(exit voiceBridgeExit) bool {
+	return exit.CloseCode == websocket.CloseNormalClosure ||
+		exit.CloseCode == websocket.CloseGoingAway
 }
 
 func (s *service) waitForVoiceBridgeCompletion(
@@ -1022,6 +1156,9 @@ func voiceMetrics(targetEvents, callerEvents []sdk.RuntimeTelemetryEvent, target
 		CallerAudioS:       float64(len(callerAudio)) / voiceBytesPerSecond,
 		EndedBy:            endedBy,
 	}
+	applyVoiceTurnDeliveryMetrics(&metrics, voiceTurnDelivery(
+		targetEvents, targetThreadID, callerEvents, callerThreadID,
+	))
 	targetEvents = append([]sdk.RuntimeTelemetryEvent(nil), targetEvents...)
 	callerEvents = append([]sdk.RuntimeTelemetryEvent(nil), callerEvents...)
 	sort.SliceStable(targetEvents, func(i, j int) bool { return targetEvents[i].Time.Before(targetEvents[j].Time) })

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/gorilla/websocket"
 )
 
 func TestVoiceMediaRelayPacesSpeechAndAddsSilenceTail(t *testing.T) {
@@ -273,12 +274,15 @@ func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
 	}
 	targetEvents := []sdk.RuntimeTelemetryEvent{
 		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-4 * time.Second)},
-		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-3 * time.Second)},
+		// This is a late transcription of the previous caller turn. Its timestamp
+		// is newer than the caller's next output, but it only matches one turn.
+		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-500 * time.Millisecond)},
 		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
 		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
 	callerEvents := []sdk.RuntimeTelemetryEvent{
 		{ThreadID: "caller", Type: "realtime.user", Time: quietAt.Add(-1500 * time.Millisecond)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-3500 * time.Millisecond)},
 		{ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second)},
 		{ThreadID: "caller", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
@@ -291,7 +295,7 @@ func TestVoiceConversationIdleWaitsForFinalCallerAudioDelivery(t *testing.T) {
 	}
 
 	targetEvents = append(targetEvents, sdk.RuntimeTelemetryEvent{
-		ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-500 * time.Millisecond),
+		ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-250 * time.Millisecond),
 	})
 	if !voiceConversationIsIdle(
 		now, activity, append(transcript, VoiceTranscriptTurn{Speaker: "receptionist", Text: "Goodbye."}),
@@ -315,6 +319,7 @@ func TestVoiceConversationIdleAcceptsFinalGoodbyeWithoutCallerTelemetryAck(t *te
 	}
 	targetEvents := []sdk.RuntimeTelemetryEvent{
 		{ThreadID: "target", Type: "realtime.user", Time: quietAt.Add(-4 * time.Second)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-7 * time.Second)},
 		{ThreadID: "target", Type: "realtime.assistant", Time: quietAt.Add(-2 * time.Second)},
 		{ThreadID: "target", Type: "realtime.state", Time: quietAt, Data: json.RawMessage(`{"state":"listening"}`)},
 	}
@@ -334,7 +339,9 @@ func TestVoiceConversationIdleAcceptsFinalGoodbyeWithoutCallerTelemetryAck(t *te
 		t.Fatal("completed final goodbye did not become conversation idle")
 	}
 
-	targetEvents[0].Time = quietAt.Add(-7 * time.Second)
+	callerEvents = append(callerEvents, sdk.RuntimeTelemetryEvent{
+		ThreadID: "caller", Type: "realtime.assistant", Time: quietAt.Add(-time.Second),
+	})
 	if voiceConversationIsIdle(
 		now, activity, transcript,
 		targetEvents, "target", callerEvents, "caller",
@@ -421,8 +428,11 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 		},
 		{
 			name: "caller normal close before completion",
-			exit: voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "read"},
-			want: "audio_disconnected",
+			exit: voiceBridgeExit{
+				Endpoint: voiceBridgeCaller, Operation: "read",
+				CloseCode: websocket.CloseNormalClosure,
+			},
+			want: "caller_done",
 		},
 		{
 			name: "caller abnormal close before completion",
@@ -436,8 +446,19 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 		},
 		{
 			name: "carrier normal close before completion",
-			exit: voiceBridgeExit{Endpoint: voiceBridgeCarrier, Operation: "read"},
-			want: "audio_disconnected",
+			exit: voiceBridgeExit{
+				Endpoint: voiceBridgeCarrier, Operation: "read",
+				CloseCode: websocket.CloseNormalClosure,
+			},
+			want: "caller_done",
+		},
+		{
+			name: "structured caller completion wins over abnormal socket close",
+			exit: voiceBridgeExit{
+				Endpoint: voiceBridgeCaller, Operation: "read", Err: abnormal,
+				TerminalReason: sdk.RealtimeTerminalCallerDone,
+			},
+			want: "caller_done",
 		},
 	}
 	for _, test := range tests {
@@ -550,6 +571,51 @@ func TestVoiceMetricsSortsTelemetryChronologically(t *testing.T) {
 	}
 	if metrics.AverageResponseMS != 2000 {
 		t.Fatalf("average response = %d, want 2000", metrics.AverageResponseMS)
+	}
+}
+
+func TestVoiceMetricsPersistsPendingTurnCounters(t *testing.T) {
+	started := time.Date(2026, time.July, 29, 8, 0, 0, 0, time.UTC)
+	targetEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "target", Type: "realtime.state", Time: started.Add(time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
+		{ThreadID: "target", Type: "realtime.assistant", Time: started.Add(2 * time.Second)},
+		{ThreadID: "target", Type: "realtime.user", Time: started.Add(4 * time.Second)},
+	}
+	callerEvents := []sdk.RuntimeTelemetryEvent{
+		{ThreadID: "caller", Type: "realtime.user", Time: started.Add(3 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.state", Time: started.Add(3500 * time.Millisecond), Data: json.RawMessage(`{"state":"speaking"}`)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(4 * time.Second)},
+		{ThreadID: "caller", Type: "realtime.state", Time: started.Add(5 * time.Second), Data: json.RawMessage(`{"state":"speaking"}`)},
+		{ThreadID: "caller", Type: "realtime.assistant", Time: started.Add(6 * time.Second)},
+	}
+
+	metrics := voiceMetrics(targetEvents, callerEvents, "target", "caller", started, nil, nil, "timeout")
+	if metrics.CallerSourceTurns != 2 || metrics.ReceptionistReceivedTurns != 1 || metrics.PendingCallerTurns != 1 {
+		t.Fatalf("caller delivery metrics=%#v", metrics)
+	}
+	if metrics.ReceptionistSourceTurns != 1 || metrics.CallerReceivedTurns != 1 || metrics.PendingReceptionistTurns != 0 {
+		t.Fatalf("receptionist delivery metrics=%#v", metrics)
+	}
+}
+
+func TestVoiceAudioTerminalDetailsUsesSDKReasonAndCloseCode(t *testing.T) {
+	reason, closeCode := voiceAudioTerminalDetails(
+		&websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "transport lost"},
+		sdk.RealtimeAudioTerminalMessage{
+			Type: sdk.RealtimeAudioTerminalMessageType, Reason: sdk.RealtimeTerminalCallerDone,
+			CloseCode: websocket.CloseNormalClosure,
+		},
+	)
+	if reason != sdk.RealtimeTerminalCallerDone || closeCode != websocket.CloseNormalClosure {
+		t.Fatalf("terminal reason=%q close_code=%d", reason, closeCode)
+	}
+
+	reason, closeCode = voiceAudioTerminalDetails(
+		&websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "caller_done"},
+		sdk.RealtimeAudioTerminalMessage{},
+	)
+	if reason != sdk.RealtimeTerminalCallerDone || closeCode != websocket.CloseNormalClosure {
+		t.Fatalf("close reason=%q close_code=%d", reason, closeCode)
 	}
 }
 

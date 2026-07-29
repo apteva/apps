@@ -204,6 +204,12 @@ type VoiceCallMetrics struct {
 	CallerRealtimeErrors       int                         `json:"caller_realtime_errors"`
 	DroppedAudioEvents         int                         `json:"dropped_audio_events"`
 	EndedBy                    string                      `json:"ended_by"`
+	ReceptionistSourceTurns    int                         `json:"receptionist_source_turns"`
+	CallerReceivedTurns        int                         `json:"caller_received_turns"`
+	PendingReceptionistTurns   int                         `json:"pending_receptionist_turns"`
+	CallerSourceTurns          int                         `json:"caller_source_turns"`
+	ReceptionistReceivedTurns  int                         `json:"receptionist_received_turns"`
+	PendingCallerTurns         int                         `json:"pending_caller_turns"`
 	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
 }
 

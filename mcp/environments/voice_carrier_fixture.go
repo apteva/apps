@@ -250,8 +250,14 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 			}
 			transcript := voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
 			raw, _ := json.Marshal(transcript)
-			if len(transcript) > 0 && string(raw) != lastTranscript {
-				lastTranscript = string(raw)
+			delivery := voiceTurnDelivery(targetEvents, call.TargetThreadID, callerEvents, call.CallerThreadID)
+			applyVoiceTurnDeliveryMetrics(&call.Metrics, delivery)
+			progressSignature := string(raw) + fmt.Sprintf("|%d|%d|%d|%d",
+				delivery.receptionistSource, delivery.callerReceived,
+				delivery.callerSource, delivery.receptionistReceived,
+			)
+			if len(transcript) > 0 && progressSignature != lastTranscript {
+				lastTranscript = progressSignature
 				call.Transcript = transcript
 				call.TargetTelemetry = targetEvents
 				_ = s.db.saveVoiceCall(call)
@@ -453,11 +459,14 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 		case event := <-input:
 			switch {
 			case event.err != nil:
-				exit := voiceBridgeExit{Endpoint: voiceBridgeCaller, Operation: "read", Err: event.err}
+				exit := voiceBridgeExit{
+					Endpoint: voiceBridgeCaller, Operation: "read", Err: event.err,
+					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update("caller", false, time.Now())
-					sendVoiceBridgeExit(ctx, result, exit.Endpoint, exit.Operation, exit.Err)
+					sendVoiceBridgeExitValue(ctx, result, exit)
 					return
 				}
 			case event.interrupt:
@@ -472,7 +481,7 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 			if !ok {
 				activity.update("caller", false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExit(ctx, result, sourceExit.Endpoint, sourceExit.Operation, sourceExit.Err)
+					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
 					return
 				}
 				continue
@@ -531,11 +540,14 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 			return
 		case event := <-input:
 			if event.err != nil {
-				exit := voiceBridgeExit{Endpoint: voiceBridgeCarrier, Operation: "read", Err: event.err}
+				exit := voiceBridgeExit{
+					Endpoint: voiceBridgeCarrier, Operation: "read", Err: event.err,
+					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update("receptionist", false, time.Now())
-					sendVoiceBridgeExit(ctx, result, exit.Endpoint, exit.Operation, exit.Err)
+					sendVoiceBridgeExitValue(ctx, result, exit)
 					return
 				}
 				continue
@@ -549,7 +561,7 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 			if !ok {
 				activity.update("receptionist", false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExit(ctx, result, sourceExit.Endpoint, sourceExit.Operation, sourceExit.Err)
+					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
 					return
 				}
 				continue
@@ -576,7 +588,10 @@ func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *c
 	for {
 		messageType, raw, err := media.conn.ReadMessage()
 		if err != nil {
-			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{err: err})
+			reason, closeCode := voiceAudioTerminalDetails(err, sdk.RealtimeAudioTerminalMessage{})
+			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{
+				err: err, terminalReason: reason, closeCode: closeCode,
+			})
 			return
 		}
 		if messageType != websocket.TextMessage {
@@ -598,6 +613,13 @@ func readCarrierAudio(ctx context.Context, media *carrierMediaSocket, capture *c
 		if frame.Event == "mark" && frame.Mark != nil {
 			_ = media.writeJSON(map[string]any{"event": "mark", "streamSid": frame.StreamSID, "mark": map[string]string{"name": frame.Mark.Name}})
 			continue
+		}
+		if frame.Event == "stop" {
+			sendVoiceRelayEvent(ctx, incoming, voiceRelayEvent{
+				err: io.EOF, terminalReason: sdk.RealtimeTerminalCallerDone,
+				closeCode: websocket.CloseNormalClosure,
+			})
+			return
 		}
 		if frame.Event != "media" || frame.Media == nil {
 			continue
