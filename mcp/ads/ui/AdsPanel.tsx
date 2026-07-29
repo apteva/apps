@@ -27,6 +27,12 @@ interface PendingAccountPage {
   name: string;
   currency: string;
   timezone: string;
+  test_account?: boolean;
+}
+
+interface ConnectionOption {
+  id: number;
+  name: string;
 }
 
 interface Campaign {
@@ -49,6 +55,7 @@ interface PlatformInfo {
   can_add: boolean;
   setup_url: string;
   connection_count: number;
+  connections: ConnectionOption[];
   active_account: boolean;
   unavailable_reason?: string;
 }
@@ -172,7 +179,9 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [startingPlatform, setStartingPlatform] = useState<string | null>(null);
+  const [connectionPicker, setConnectionPicker] = useState<PlatformInfo | null>(null);
   const [pendingPicker, setPendingPicker] = useState<PendingPicker | null>(null);
+  const [accountFilter, setAccountFilter] = useState("");
   const [disconnectTarget, setDisconnectTarget] = useState<AdAccount | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,6 +191,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     () => accounts.find((account) => account.id === selectedId) || null,
     [accounts, selectedId],
   );
+  const filteredPendingPages = useMemo(() => {
+    if (!pendingPicker) return [];
+    const query = accountFilter.trim().toLowerCase();
+    if (!query) return pendingPicker.pages;
+    return pendingPicker.pages.filter((page) =>
+      `${page.name} ${page.id} ${page.currency} ${page.timezone}`.toLowerCase().includes(query),
+    );
+  }, [accountFilter, pendingPicker]);
 
   const appURL = useCallback((path: string) => {
     const url = new URL(`${API}${path}`, window.location.origin);
@@ -277,6 +294,8 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
         platform: result.platform,
         pages: result.pages || [],
       });
+      setAccountFilter("");
+      setConnectionPicker(null);
       setAddOpen(false);
     } catch (err) {
       setError((err as Error).message);
@@ -317,11 +336,41 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     refreshCampaigns(account);
   };
 
-  const startPlatform = async (platform: PlatformInfo) => {
+  const startPlatform = async (platform: PlatformInfo, connectionId?: number) => {
     if (!platform.can_add) {
       setError(platform.unavailable_reason || "Set up this integration before adding an account.");
       return;
     }
+    const activeConnections = platform.connections || [];
+    if (!connectionId && activeConnections.length > 1) {
+      setConnectionPicker(platform);
+      setAddOpen(false);
+      return;
+    }
+    const reusableConnectionId = connectionId || activeConnections[0]?.id;
+    if (reusableConnectionId) {
+      setStartingPlatform(platform.platform);
+      setError(null);
+      try {
+        const result = await apiJSON("/accounts/start", {
+          method: "POST",
+          body: JSON.stringify({
+            platform: platform.platform,
+            connection_id: reusableConnectionId,
+          }),
+        });
+        if (!result.pending_account_id || !result.reused_connection) {
+          throw new Error("The selected integration connection could not be reused.");
+        }
+        await resumeOAuth(Number(result.pending_account_id));
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setStartingPlatform(null);
+      }
+      return;
+    }
+
     const popup = window.open("about:blank", "ads_oauth", "width=620,height=760");
     if (!popup) {
       setError("Popup blocked. Allow pop-ups for this site and try again.");
@@ -436,20 +485,39 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       {pendingPicker && (
         <Modal
           title="Choose an ad account"
-          description={`${pendingPicker.pages.length} available from ${pendingPicker.platform === "meta" ? "Meta Ads" : "this provider"}.`}
+          description={`${pendingPicker.pages.length} available from ${pendingPicker.platform === "meta" ? "Meta Ads" : "Google Ads"}.`}
           size="large"
-          onClose={() => setPendingPicker(null)}
+          onClose={() => {
+            setPendingPicker(null);
+            setAccountFilter("");
+          }}
           labelledBy="ads-account-picker-title"
         >
+          {pendingPicker.pages.length > 5 && (
+            <div className="border-b border-border px-4 py-3">
+              <input
+                type="search"
+                value={accountFilter}
+                onChange={(event) => setAccountFilter(event.target.value)}
+                placeholder="Search accounts"
+                aria-label="Search ad accounts"
+                className="h-9 w-full rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"
+              />
+            </div>
+          )}
           <div className="max-h-[60vh] divide-y divide-border overflow-y-auto">
             {pendingPicker.pages.length === 0 ? (
               <p className="px-4 py-8 text-center text-sm text-text-muted">No ad accounts were returned by this connection.</p>
-            ) : pendingPicker.pages.map((page) => (
+            ) : filteredPendingPages.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-text-muted">No accounts match that search.</p>
+            ) : filteredPendingPages.map((page) => (
               <div key={page.id} className="flex items-center gap-3 px-4 py-3">
                 <ProviderMark platform={pendingPicker.platform || ""} size="sm" />
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium">{page.name || page.id}</div>
-                  <div className="truncate text-xs text-text-muted">{page.id} · {page.currency || "-"} · {page.timezone || "-"}</div>
+                  <div className="truncate text-xs text-text-muted">
+                    {page.id} · {page.currency || "-"} · {page.timezone || "-"}{page.test_account ? " · Test account" : ""}
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -665,6 +733,37 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   </button>
                 )}
               </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {connectionPicker && (
+        <Modal
+          title={`Choose ${connectionPicker.display_name} connection`}
+          description="Select the dashboard integration connection whose ad accounts you want to use."
+          size="large"
+          onClose={() => setConnectionPicker(null)}
+          labelledBy="ads-connection-picker-title"
+        >
+          <div className="divide-y divide-border">
+            {(connectionPicker.connections || []).map((connection) => (
+              <button
+                key={connection.id}
+                type="button"
+                disabled={startingPlatform === connectionPicker.platform}
+                onClick={() => startPlatform(connectionPicker, connection.id)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-bg-input disabled:cursor-wait disabled:opacity-50"
+              >
+                <ProviderMark platform={connectionPicker.platform} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-text">{connection.name || connectionPicker.display_name}</div>
+                  <div className="text-xs text-text-muted">Connection #{connection.id}</div>
+                </div>
+                <span className="text-xs font-medium text-accent">
+                  {startingPlatform === connectionPicker.platform ? "Loading..." : "Choose"}
+                </span>
+              </button>
             ))}
           </div>
         </Modal>

@@ -29,6 +29,7 @@ type recordingPlatform struct {
 	nextStartErr       error
 	listConnections    []sdk.PlatformConnection
 	listConnectionsErr error
+	executeResponder   func(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error)
 	executeResponses   map[string]*sdk.ExecuteResult
 	callAppResponses   map[string]json.RawMessage
 	identity           *sdk.InstallIdentity
@@ -89,6 +90,9 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 	p.mu.Lock()
 	p.executeCalls = append(p.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
 	p.mu.Unlock()
+	if p.executeResponder != nil {
+		return p.executeResponder(connID, tool, input)
+	}
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
 	}
@@ -229,6 +233,76 @@ func TestAccountAdd_StartsGoogleOAuth(t *testing.T) {
 	}
 	if pf.startOAuthCalls[0].IntegrationSlug != "google-ads" {
 		t.Fatalf("wrong slug: %s", pf.startOAuthCalls[0].IntegrationSlug)
+	}
+}
+
+func TestAccountAdd_ReusesRequestedConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{
+		{ID: 8, AppSlug: "google-ads", Name: "Agency manager", ProjectID: "test-proj", Status: "active"},
+		{ID: 9, AppSlug: "google-ads", Name: "Direct advertiser", ProjectID: "test-proj", Status: "active"},
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":      "google",
+		"connection_id": 9,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["reused_connection"] != int64(9) {
+		t.Fatalf("reused connection = %#v", result["reused_connection"])
+	}
+	if len(pf.startOAuthCalls) != 0 {
+		t.Fatalf("reuse unexpectedly started OAuth: %#v", pf.startOAuthCalls)
+	}
+}
+
+func TestAccountAdd_RejectsForeignOrInactiveConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{
+		{ID: 8, AppSlug: "google-ads", ProjectID: "test-proj", Status: "failed"},
+		{ID: 9, AppSlug: "google-ads", ProjectID: "test-proj", Status: "active"},
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":      "google",
+		"connection_id": 8,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("inactive connection was accepted: %#v", out)
+	}
+}
+
+func TestAccountAdd_RejectsExternalReturnURL(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.listConnections = []sdk.PlatformConnection{{
+		ID: 6, AppSlug: "google-ads", ProjectID: "test-proj", Status: "pending",
+	}}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":  "google",
+		"force_new": true,
+		"return_to": "https://attacker.example/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("external return URL was accepted: %#v", out)
+	}
+	if len(pf.startOAuthCalls) != 0 {
+		t.Fatalf("external return URL started OAuth: %#v", pf.startOAuthCalls)
 	}
 }
 
@@ -605,6 +679,71 @@ func TestAccountFinalize_ReactivationUpdatesConnection(t *testing.T) {
 	).Scan(&connectionID)
 	if connectionID != 8 {
 		t.Fatalf("connection_id = %d, want 8", connectionID)
+	}
+}
+
+func TestGoogleAccountPicker_ExpandsManagerHierarchy(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		switch {
+		case tool == "list_accounts":
+			return &sdk.ExecuteResult{
+				Success: true,
+				Status:  200,
+				Data:    json.RawMessage(`{"resourceNames":["customers/1111111111"]}`),
+			}, nil
+		case tool == "search" && strings.Contains(input["query"].(string), "FROM customer LIMIT 1"):
+			return &sdk.ExecuteResult{
+				Success: true,
+				Status:  200,
+				Data: json.RawMessage(`{"results":[{"customer":{
+					"id":"1111111111",
+					"descriptiveName":"Agency Manager",
+					"manager":true,
+					"status":"ENABLED"
+				}}]}`),
+			}, nil
+		case tool == "search" && strings.Contains(input["query"].(string), "FROM customer_client"):
+			return &sdk.ExecuteResult{
+				Success: true,
+				Status:  200,
+				Data: json.RawMessage(`{"results":[
+					{"customerClient":{"id":"1111111111","descriptiveName":"Agency Manager","manager":true,"status":"ENABLED","level":"0"}},
+					{"customerClient":{"id":"2222222222","descriptiveName":"Client One","currencyCode":"EUR","timeZone":"Europe/Madrid","manager":false,"status":"ENABLED","level":"1"}},
+					{"customerClient":{"id":"3333333333","descriptiveName":"Nested Manager","manager":true,"status":"ENABLED","level":"1"}},
+					{"customerClient":{"id":"4444444444","descriptiveName":"Client Two","currencyCode":"USD","timeZone":"America/New_York","manager":false,"status":"ENABLED","level":"2"}},
+					{"customerClient":{"id":"5555555555","descriptiveName":"Closed Client","manager":false,"status":"CANCELED","level":"1"}}
+				]}`),
+			}, nil
+		default:
+			t.Fatalf("unexpected integration call: tool=%s input=%#v", tool, input)
+			return nil, nil
+		}
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj','google','google-ads',8,'ready',datetime('now','+1 hour'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID, _ := res.LastInsertId()
+
+	out, err := app.toolAccountListPendingPages(ctx, map[string]any{"pending_account_id": pendingID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := out.(map[string]any)["pages"].([]map[string]any)
+	if len(pages) != 2 {
+		t.Fatalf("expected two advertiser accounts, got %#v", pages)
+	}
+	if pages[0]["id"] != "2222222222" || pages[0]["name"] != "Client One" {
+		t.Fatalf("first client not normalized: %#v", pages[0])
+	}
+	if pages[1]["id"] != "4444444444" || pages[1]["currency"] != "USD" {
+		t.Fatalf("nested client not normalized: %#v", pages[1])
 	}
 }
 

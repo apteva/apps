@@ -38,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.24
+version: 0.1.25
 scopes: [project, global]
 requires:
   permissions:
@@ -395,10 +395,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "account_add",
 			Description: "Begin connecting an ads account. Returns authorize_url + pending_account_id; visit the URL to authorize. " +
 				"After OAuth completes, call account_list_pending_pages to pick a specific ad account, then account_finalize. " +
-				"Args: platform (meta|google), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
+				"Args: platform (meta|google), connection_id? (reuse a specific active integration connection), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
 			InputSchema: schemaObject(map[string]any{
-				"platform":  map[string]any{"type": "string", "enum": platformKeys()},
-				"force_new": map[string]any{"type": "boolean"},
+				"platform":      map[string]any{"type": "string", "enum": platformKeys()},
+				"connection_id": map[string]any{"type": "integer", "description": "Active provider connection to reuse. Use when more than one connection exists for the platform."},
+				"force_new":     map[string]any{"type": "boolean"},
 				"return_to": map[string]any{
 					"type":        "string",
 					"description": "Where to redirect after OAuth. Defaults to the ads panel.",
@@ -813,20 +814,39 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(conns) == 0 {
 		return integrationSetupRequired(&def), nil
 	}
+	requestedConnectionID := int64(intArg(args, "connection_id", 0))
+	if requestedConnectionID > 0 && forceNew {
+		return mcpError("connection_id cannot be combined with force_new"), nil
+	}
+	activeConnections := make(map[int64]sdk.PlatformConnection)
+	for _, conn := range conns {
+		if conn.Status == "active" {
+			activeConnections[conn.ID] = conn
+		}
+	}
+	if requestedConnectionID > 0 {
+		if _, ok := activeConnections[requestedConnectionID]; !ok {
+			return mcpError("connection_id is not an active " + def.DisplayName + " connection in this project"), nil
+		}
+	}
 
 	// Reuse path (mirrors social): the access token from any active
-	// Meta connection in this project covers all the user's ad
-	// accounts, so a fresh OAuth dance just produces a duplicate. Skip
-	// straight to the picker when an active connection already exists.
+	// provider connection in this project covers its accessible ad
+	// accounts, so a fresh OAuth dance just produces a duplicate.
 	if !forceNew {
-		var existingConnID int64
-		err := ctx.AppDB().QueryRow(
-			`SELECT connection_id FROM ad_accounts
-			 WHERE project_id=? AND platform=? AND status='active'
-			 ORDER BY id DESC LIMIT 1`,
-			pid, def.Platform,
-		).Scan(&existingConnID)
-		if err != nil {
+		existingConnID := requestedConnectionID
+		if existingConnID == 0 {
+			_ = ctx.AppDB().QueryRow(
+				`SELECT connection_id FROM ad_accounts
+				 WHERE project_id=? AND platform=? AND status='active'
+				 ORDER BY id DESC LIMIT 1`,
+				pid, def.Platform,
+			).Scan(&existingConnID)
+			if _, ok := activeConnections[existingConnID]; !ok {
+				existingConnID = 0
+			}
+		}
+		if existingConnID == 0 {
 			for _, c := range conns {
 				if c.Status == "active" {
 					existingConnID = c.ID
@@ -860,6 +880,8 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	returnTo, _ := args["return_to"].(string)
 	if returnTo == "" {
 		returnTo = "/api/apps/ads/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
+	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+		return mcpError("return_to must be a same-origin absolute path"), nil
 	}
 
 	now := time.Now().UTC()
@@ -1290,6 +1312,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 	for _, opt := range adsPlatformOptions {
 		connectionCount := 0
 		activeConnectionID := int64(0)
+		activeConnections := make([]map[string]any, 0)
 		conns, listErr := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 			ProjectID: pid,
 			AppSlug:   opt.IntegrationSlug,
@@ -1304,6 +1327,10 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 				if activeConnectionID == 0 {
 					activeConnectionID = c.ID
 				}
+				activeConnections = append(activeConnections, map[string]any{
+					"id":   c.ID,
+					"name": c.Name,
+				})
 			}
 		}
 
@@ -1348,6 +1375,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			"setup_url":            "/integrations?app=" + url.QueryEscape(opt.IntegrationSlug),
 			"requires_picker":      opt.Supported,
 			"connection_count":     connectionCount,
+			"connections":          activeConnections,
 			"active_connection_id": activeConnectionID,
 			"active_account":       activeAccount,
 			"unavailable_reason":   unavailable,
@@ -2294,6 +2322,23 @@ func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def 
 		return nil, fmt.Errorf("parse accessible customers: %w", err)
 	}
 	accounts := make([]map[string]any, 0, len(payload.ResourceNames))
+	seen := make(map[string]bool)
+	appendAccount := func(account map[string]any) {
+		id := googleCustomerID(toString(account["id"]))
+		if id == "" || seen[id] || googleBool(account["manager"]) {
+			return
+		}
+		status := strings.ToUpper(strings.TrimSpace(toString(account["status"])))
+		if status == "CANCELED" || status == "CLOSED" {
+			return
+		}
+		account["id"] = id
+		if strings.TrimSpace(toString(account["name"])) == "" {
+			account["name"] = id
+		}
+		seen[id] = true
+		accounts = append(accounts, account)
+	}
 	for _, rn := range payload.ResourceNames {
 		customerID := googleCustomerID(rn)
 		if customerID == "" {
@@ -2303,12 +2348,22 @@ func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def 
 		enriched, err := googleFetchCustomer(ctx, row.connectionID, customerID)
 		if err == nil {
 			for k, v := range enriched {
-				if toString(v) != "" {
+				if v != nil && (toString(v) != "" || k == "manager") {
 					account[k] = v
 				}
 			}
 		}
-		accounts = append(accounts, account)
+		if googleBool(account["manager"]) {
+			clients, err := googleFetchClientAccounts(ctx, row.connectionID, customerID)
+			if err != nil {
+				return nil, fmt.Errorf("list client accounts for manager %s: %w", customerID, err)
+			}
+			for _, client := range clients {
+				appendAccount(client)
+			}
+			continue
+		}
+		appendAccount(account)
 	}
 	return accounts, nil
 }
@@ -3137,7 +3192,7 @@ func (a *App) execOrErr(ctx *sdk.AppCtx, acct *adAccount, tool string, input map
 func googleFetchCustomer(ctx *sdk.AppCtx, connID int64, customerID string) (map[string]any, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "search", map[string]any{
 		"customer_id": customerID,
-		"query":       "SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone FROM customer LIMIT 1",
+		"query":       "SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone, customer.manager, customer.status, customer.test_account FROM customer LIMIT 1",
 	})
 	if err != nil {
 		return nil, err
@@ -3159,11 +3214,75 @@ func googleFetchCustomer(ctx *sdk.AppCtx, connID int64, customerID string) (map[
 		name = customerID
 	}
 	return map[string]any{
-		"id":       customerID,
-		"name":     name,
-		"currency": firstString(customer, "currencyCode", "currency_code"),
-		"timezone": firstString(customer, "timeZone", "time_zone"),
+		"id":           customerID,
+		"name":         name,
+		"currency":     firstString(customer, "currencyCode", "currency_code"),
+		"timezone":     firstString(customer, "timeZone", "time_zone"),
+		"manager":      googleBool(customer["manager"]),
+		"status":       firstString(customer, "status"),
+		"test_account": googleBool(customer["testAccount"]) || googleBool(customer["test_account"]),
 	}, nil
+}
+
+func googleFetchClientAccounts(ctx *sdk.AppCtx, connID int64, managerID string) ([]map[string]any, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "search", map[string]any{
+		"customer_id": managerID,
+		"query": "SELECT customer_client.id, customer_client.descriptive_name, customer_client.currency_code, " +
+			"customer_client.time_zone, customer_client.manager, customer_client.status, customer_client.test_account, customer_client.level " +
+			"FROM customer_client WHERE customer_client.level <= 10",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("customer hierarchy lookup failed: %s", body)
+	}
+	var parsed any
+	if err := json.Unmarshal(res.Data, &parsed); err != nil {
+		return nil, err
+	}
+	rows := resultRows(parsed)
+	accounts := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		client := mapAt(row, "customerClient")
+		if len(client) == 0 {
+			client = mapAt(row, "customer_client")
+		}
+		id := googleCustomerID(firstString(client, "id", "clientCustomer", "client_customer"))
+		if id == "" {
+			continue
+		}
+		name := firstString(client, "descriptiveName", "descriptive_name", "name")
+		if name == "" {
+			name = id
+		}
+		accounts = append(accounts, map[string]any{
+			"id":           id,
+			"name":         name,
+			"currency":     firstString(client, "currencyCode", "currency_code"),
+			"timezone":     firstString(client, "timeZone", "time_zone"),
+			"manager":      googleBool(client["manager"]),
+			"status":       firstString(client, "status"),
+			"test_account": googleBool(client["testAccount"]) || googleBool(client["test_account"]),
+		})
+	}
+	return accounts, nil
+}
+
+func googleBool(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, _ := strconv.ParseBool(strings.TrimSpace(typed))
+		return parsed
+	default:
+		return false
+	}
 }
 
 func googleCustomerID(resourceName string) string {

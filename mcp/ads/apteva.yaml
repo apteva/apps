@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.24
+version: 0.1.25
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
   uses direct Graph API tools; Google Ads uses customer account picking,
   GAQL reads, and mutate operations behind the same generic MCP tools.
-  Connect ad accounts at runtime via the Add Account flow; the underlying
-  integrations system handles OAuth and token refresh.
+  The Add Account flow reuses project-scoped Dashboard integration
+  connections and expands Google manager hierarchies into selectable
+  client advertiser accounts.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
