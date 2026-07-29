@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.26
+version: 0.1.27
 scopes: [project, global]
 requires:
   permissions:
@@ -2626,7 +2626,6 @@ func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccoun
 	input := map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"query":       query,
-		"page_size":   10000,
 	}
 	data := make([]map[string]any, 0)
 	pageToken := ""

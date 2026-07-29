@@ -179,13 +179,17 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [startingPlatform, setStartingPlatform] = useState<string | null>(null);
+  const [copyingPlatform, setCopyingPlatform] = useState<string | null>(null);
+  const [copiedPlatform, setCopiedPlatform] = useState<string | null>(null);
   const [connectionPicker, setConnectionPicker] = useState<PlatformInfo | null>(null);
+  const [connectionPickerMode, setConnectionPickerMode] = useState<"account" | "link">("account");
   const [pendingPicker, setPendingPicker] = useState<PendingPicker | null>(null);
   const [accountFilter, setAccountFilter] = useState("");
   const [disconnectTarget, setDisconnectTarget] = useState<AdAccount | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const campaignRequest = useRef(0);
+  const copyFeedbackTimer = useRef<number | null>(null);
 
   const selected = useMemo(
     () => accounts.find((account) => account.id === selectedId) || null,
@@ -328,6 +332,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     return () => {
       campaignRequest.current++;
+      if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
     };
   }, []);
 
@@ -343,10 +348,12 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     }
     const activeConnections = platform.connections || [];
     if (!connectionId && activeConnections.length > 1) {
+      setConnectionPickerMode("account");
       setConnectionPicker(platform);
       setAddOpen(false);
       return;
     }
+    if (connectionId) setConnectionPicker(null);
     const reusableConnectionId = connectionId || activeConnections[0]?.id;
     if (reusableConnectionId) {
       setStartingPlatform(platform.platform);
@@ -398,6 +405,53 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       setError((err as Error).message);
     } finally {
       setStartingPlatform(null);
+    }
+  };
+
+  const copyAccessLink = async (platform: PlatformInfo, connectionId?: number) => {
+    const activeConnections = platform.connections || [];
+    if (!connectionId && activeConnections.length > 1) {
+      setConnectionPickerMode("link");
+      setConnectionPicker(platform);
+      setAddOpen(false);
+      return;
+    }
+    const templateConnectionId = connectionId || activeConnections[0]?.id;
+    if (!templateConnectionId) {
+      setError("Set up this integration before creating an access link.");
+      return;
+    }
+
+    setCopyingPlatform(platform.platform);
+    setError(null);
+    try {
+      const response = await fetch("/api/invites", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          app_slug: platform.integration_slug,
+          source: "local",
+          project_id: scopedProject,
+          template_connection_id: templateConnectionId,
+          ttl_seconds: 24 * 60 * 60,
+        }),
+      });
+      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+      const result = await response.json();
+      if (!result.url) throw new Error("The server did not return an access link.");
+      await navigator.clipboard.writeText(result.url);
+      setConnectionPicker(null);
+      setCopiedPlatform(platform.platform);
+      if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
+      copyFeedbackTimer.current = window.setTimeout(() => {
+        setCopiedPlatform((current) => current === platform.platform ? null : current);
+        copyFeedbackTimer.current = null;
+      }, 2200);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setCopyingPlatform(null);
     }
   };
 
@@ -719,18 +773,34 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     Set up
                   </a>
                 ) : (
-                  <button
-                    type="button"
-                    disabled={!platform.can_add || startingPlatform === platform.platform}
-                    onClick={() => startPlatform(platform)}
-                    className="h-8 w-28 shrink-0 whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
-                  >
-                    {startingPlatform === platform.platform
-                      ? "Starting..."
-                      : platform.state === "connected"
-                        ? "Choose"
-                        : "Connect"}
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {platform.configured && (
+                      <button
+                        type="button"
+                        disabled={copyingPlatform === platform.platform}
+                        onClick={() => copyAccessLink(platform)}
+                        className="h-8 w-20 whitespace-nowrap rounded border border-border px-2 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {copyingPlatform === platform.platform
+                          ? "Copying..."
+                          : copiedPlatform === platform.platform
+                            ? "Copied"
+                            : "Copy link"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!platform.can_add || startingPlatform === platform.platform}
+                      onClick={() => startPlatform(platform)}
+                      className="h-8 w-24 whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
+                    >
+                      {startingPlatform === platform.platform
+                        ? "Starting..."
+                        : platform.state === "connected"
+                          ? "Choose"
+                          : "Connect"}
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
@@ -740,8 +810,12 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
 
       {connectionPicker && (
         <Modal
-          title={`Choose ${connectionPicker.display_name} connection`}
-          description="Select the dashboard integration connection whose ad accounts you want to use."
+          title={connectionPickerMode === "link"
+            ? `${connectionPicker.display_name} access link`
+            : `Choose ${connectionPicker.display_name} connection`}
+          description={connectionPickerMode === "link"
+            ? "Select the connection to use for this access link."
+            : "Select the dashboard integration connection whose ad accounts you want to use."}
           size="large"
           onClose={() => setConnectionPicker(null)}
           labelledBy="ads-connection-picker-title"
@@ -751,8 +825,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               <button
                 key={connection.id}
                 type="button"
-                disabled={startingPlatform === connectionPicker.platform}
-                onClick={() => startPlatform(connectionPicker, connection.id)}
+                disabled={
+                  connectionPickerMode === "link"
+                    ? copyingPlatform === connectionPicker.platform
+                    : startingPlatform === connectionPicker.platform
+                }
+                onClick={() => connectionPickerMode === "link"
+                  ? copyAccessLink(connectionPicker, connection.id)
+                  : startPlatform(connectionPicker, connection.id)}
                 className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-bg-input disabled:cursor-wait disabled:opacity-50"
               >
                 <ProviderMark platform={connectionPicker.platform} size="sm" />
@@ -761,7 +841,9 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   <div className="text-xs text-text-muted">Connection #{connection.id}</div>
                 </div>
                 <span className="text-xs font-medium text-accent">
-                  {startingPlatform === connectionPicker.platform ? "Loading..." : "Choose"}
+                  {connectionPickerMode === "link"
+                    ? copyingPlatform === connectionPicker.platform ? "Copying..." : "Copy link"
+                    : startingPlatform === connectionPicker.platform ? "Loading..." : "Choose"}
                 </span>
               </button>
             ))}

@@ -63,6 +63,9 @@ func TestCampaignPerformanceGoogle_PaginatesAndNormalizes(t *testing.T) {
 		if input["customer_id"] != "9876543210" {
 			t.Fatalf("customer_id=%#v", input["customer_id"])
 		}
+		if _, ok := input["page_size"]; ok {
+			t.Fatalf("Google Ads v23 search rejects page_size: %#v", input)
+		}
 		switch call {
 		case 1:
 			if input["page_token"] != nil {
