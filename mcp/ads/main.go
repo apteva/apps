@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -38,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.25
+version: 0.1.26
 scopes: [project, global]
 requires:
   permissions:
@@ -202,6 +203,7 @@ type platformAdapter interface {
 	ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error)
 	CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
 	AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
@@ -473,6 +475,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"after":         map[string]any{"type": "string"},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolCampaignList,
+		},
+		{
+			Name: "campaign_performance_get",
+			Description: "Get normalized daily campaign performance from the provider. " +
+				"Returns actual media spend in integer micros plus impressions, clicks, and conversions. " +
+				"Queries are restricted to the selected project-owned ad account and a maximum 90-day range. " +
+				"Args: ad_account_id, date_from (YYYY-MM-DD), date_to (YYYY-MM-DD), granularity? (day), campaign_ids? (up to 100 numeric provider campaign ids).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"date_from":     map[string]any{"type": "string", "pattern": `^\d{4}-\d{2}-\d{2}$`},
+				"date_to":       map[string]any{"type": "string", "pattern": `^\d{4}-\d{2}-\d{2}$`},
+				"granularity":   map[string]any{"type": "string", "enum": []string{"day"}, "default": "day"},
+				"campaign_ids": map[string]any{
+					"type":     "array",
+					"maxItems": 100,
+					"items":    map[string]any{"type": "string", "pattern": `^\d+$`},
+				},
+			}, []string{"ad_account_id", "date_from", "date_to"}),
+			Handler: a.toolCampaignPerformanceGet,
 		},
 		{
 			Name:        "campaign_update",
@@ -1391,6 +1412,8 @@ type adAccount struct {
 	Platform        string
 	ConnectionID    int64
 	NativeAccountID string
+	Currency        string
+	Timezone        string
 }
 
 func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount, *platformDef, map[string]any) {
@@ -1404,10 +1427,18 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 	}
 	var acct adAccount
 	if err := ctx.AppDB().QueryRow(
-		`SELECT id, platform, connection_id, native_account_id
+		`SELECT id, platform, connection_id, native_account_id,
+		        COALESCE(currency,''), COALESCE(timezone_name,'')
 		 FROM ad_accounts WHERE id=? AND project_id=? AND status='active'`,
 		id, pid,
-	).Scan(&acct.ID, &acct.Platform, &acct.ConnectionID, &acct.NativeAccountID); err != nil {
+	).Scan(
+		&acct.ID,
+		&acct.Platform,
+		&acct.ConnectionID,
+		&acct.NativeAccountID,
+		&acct.Currency,
+		&acct.Timezone,
+	); err != nil {
 		return nil, nil, mcpError("ad_account not found or not active")
 	}
 	def, ok := platforms[acct.Platform]
@@ -1430,7 +1461,15 @@ func (a *App) execIntegrationTool(ctx *sdk.AppCtx, acct *adAccount, tool string,
 		if res != nil {
 			body = string(res.Data)
 		}
-		return nil, mcpError(tool + ": upstream non-2xx: " + body)
+		out := mcpError(tool + ": upstream non-2xx: " + body)
+		if res != nil {
+			out["provider_status"] = res.Status
+		}
+		if providerRateLimited(res, body) {
+			out["code"] = "provider_rate_limited"
+			out["retryable"] = true
+		}
+		return nil, out
 	}
 	var parsed any
 	if len(res.Data) > 0 {
@@ -1439,6 +1478,25 @@ func (a *App) execIntegrationTool(ctx *sdk.AppCtx, acct *adAccount, tool string,
 		}
 	}
 	return parsed, nil
+}
+
+func providerRateLimited(res *sdk.ExecuteResult, body string) bool {
+	if res != nil && res.Status == http.StatusTooManyRequests {
+		return true
+	}
+	upper := strings.ToUpper(body)
+	for _, marker := range []string{
+		"RESOURCE_EXHAUSTED",
+		"RATE LIMIT",
+		"TOO MANY CALLS",
+		"USER REQUEST LIMIT REACHED",
+		"APPLICATION REQUEST LIMIT REACHED",
+	} {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeOptions overlays native fields while preserving account and
@@ -1580,6 +1638,101 @@ var metaBidStrategy = map[string]string{
 	"bid_cap":                  "BID_CAP",
 }
 
+const (
+	maxPerformanceRangeDays = 90
+	maxPerformancePages     = 200
+	maxPerformanceCampaigns = 100
+)
+
+type performanceRequest struct {
+	DateFrom    string
+	DateTo      string
+	CampaignIDs []string
+}
+
+func validatePerformanceRequest(args map[string]any) (*performanceRequest, error) {
+	granularity := strings.ToLower(strings.TrimSpace(stringArgAny(args, "granularity")))
+	if granularity == "" {
+		granularity = "day"
+	}
+	if granularity != "day" {
+		return nil, errors.New("granularity must be day")
+	}
+
+	dateFrom := strings.TrimSpace(stringArgAny(args, "date_from"))
+	dateTo := strings.TrimSpace(stringArgAny(args, "date_to"))
+	from, err := time.Parse("2006-01-02", dateFrom)
+	if err != nil || from.Format("2006-01-02") != dateFrom {
+		return nil, errors.New("date_from must be a valid YYYY-MM-DD date")
+	}
+	to, err := time.Parse("2006-01-02", dateTo)
+	if err != nil || to.Format("2006-01-02") != dateTo {
+		return nil, errors.New("date_to must be a valid YYYY-MM-DD date")
+	}
+	if to.Before(from) {
+		return nil, errors.New("date_to must be on or after date_from")
+	}
+	days := int(to.Sub(from).Hours()/24) + 1
+	if days > maxPerformanceRangeDays {
+		return nil, fmt.Errorf("date range exceeds %d days", maxPerformanceRangeDays)
+	}
+
+	ids, err := performanceCampaignIDs(args["campaign_ids"])
+	if err != nil {
+		return nil, err
+	}
+	return &performanceRequest{
+		DateFrom:    dateFrom,
+		DateTo:      dateTo,
+		CampaignIDs: ids,
+	}, nil
+}
+
+func performanceCampaignIDs(value any) ([]string, error) {
+	var raw []string
+	switch ids := value.(type) {
+	case nil:
+		return nil, nil
+	case []string:
+		raw = ids
+	case []any:
+		raw = make([]string, 0, len(ids))
+		for _, id := range ids {
+			raw = append(raw, strings.TrimSpace(toString(id)))
+		}
+	default:
+		return nil, errors.New("campaign_ids must be an array of numeric strings")
+	}
+	if len(raw) > maxPerformanceCampaigns {
+		return nil, fmt.Errorf("campaign_ids supports at most %d ids", maxPerformanceCampaigns)
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]bool, len(raw))
+	for _, id := range raw {
+		id = strings.TrimSpace(id)
+		if id == "" || !asciiDigits(id) {
+			return nil, errors.New("campaign_ids must contain numeric provider campaign ids")
+		}
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+func asciiDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
@@ -1594,6 +1747,17 @@ func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return errOut, nil
 	}
 	return platformAdapters[acct.Platform].CampaignList(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCampaignPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	if _, err := validatePerformanceRequest(args); err != nil {
+		return mcpError(err.Error()), nil
+	}
+	return platformAdapters[acct.Platform].CampaignPerformance(a, ctx, acct, def, args)
 }
 
 func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1760,6 +1924,63 @@ func (metaAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *p
 		input["filtering"] = fmt.Sprintf(`[{"field":"effective_status","operator":"IN","value":["%s"]}]`, v)
 	}
 	return a.execOrErr(ctx, acct, def.CampaignListTool, input)
+}
+
+func (metaAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccount, _ *platformDef, args map[string]any) (any, error) {
+	request, err := validatePerformanceRequest(args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	timeRange, _ := json.Marshal(map[string]string{
+		"since": request.DateFrom,
+		"until": request.DateTo,
+	})
+	input := map[string]any{
+		"objectId":       acct.NativeAccountID,
+		"level":          "campaign",
+		"fields":         "campaign_id,campaign_name,date_start,date_stop,spend,impressions,clicks,actions",
+		"time_range":     string(timeRange),
+		"time_increment": "1",
+		"limit":          500,
+	}
+	if len(request.CampaignIDs) > 0 {
+		filtering, _ := json.Marshal([]map[string]any{{
+			"field":    "campaign.id",
+			"operator": "IN",
+			"value":    request.CampaignIDs,
+		}})
+		input["filtering"] = string(filtering)
+	}
+
+	data := make([]map[string]any, 0)
+	after := ""
+	for page := 0; page < maxPerformancePages; page++ {
+		if after != "" {
+			input["after"] = after
+		} else {
+			delete(input, "after")
+		}
+		parsed, errOut := a.execIntegrationTool(ctx, acct, "insights_get", input)
+		if errOut != nil {
+			return errOut, nil
+		}
+		for _, row := range resultRows(parsed) {
+			item, err := normalizeMetaPerformance(acct, row)
+			if err != nil {
+				return mcpError("normalize Meta performance: " + err.Error()), nil
+			}
+			data = append(data, item)
+		}
+		next := metaNextCursor(parsed)
+		if next == "" {
+			return performanceResponse(data), nil
+		}
+		if next == after {
+			return mcpError("Meta insights pagination returned a repeated cursor"), nil
+		}
+		after = next
+	}
+	return mcpError("Meta insights pagination exceeded the safety limit"), nil
 }
 
 func (metaAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2388,6 +2609,50 @@ func (googleAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		return errOut, nil
 	}
 	return map[string]any{"data": normalizeGoogleCampaigns(parsed)}, nil
+}
+
+func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccount, _ *platformDef, args map[string]any) (any, error) {
+	request, err := validatePerformanceRequest(args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	query := "SELECT segments.date, campaign.id, campaign.name, customer.currency_code, " +
+		"metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions " +
+		"FROM campaign WHERE segments.date BETWEEN '" + request.DateFrom + "' AND '" + request.DateTo + "'"
+	if len(request.CampaignIDs) > 0 {
+		query += " AND campaign.id IN (" + strings.Join(request.CampaignIDs, ",") + ")"
+	}
+
+	input := map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"query":       query,
+		"page_size":   10000,
+	}
+	data := make([]map[string]any, 0)
+	pageToken := ""
+	for page := 0; page < maxPerformancePages; page++ {
+		if pageToken != "" {
+			input["page_token"] = pageToken
+		} else {
+			delete(input, "page_token")
+		}
+		parsed, errOut := a.execIntegrationTool(ctx, acct, "search", input)
+		if errOut != nil {
+			return errOut, nil
+		}
+		for _, row := range resultRows(parsed) {
+			data = append(data, normalizeGooglePerformance(acct, row))
+		}
+		next := googleNextPageToken(parsed)
+		if next == "" {
+			return performanceResponse(data), nil
+		}
+		if next == pageToken {
+			return mcpError("Google Ads pagination returned a repeated page token"), nil
+		}
+		pageToken = next
+	}
+	return mcpError("Google Ads pagination exceeded the safety limit"), nil
 }
 
 func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -3441,6 +3706,165 @@ func normalizeGoogleCampaigns(v any) []map[string]any {
 		out = append(out, item)
 	}
 	return out
+}
+
+func performanceResponse(data []map[string]any) map[string]any {
+	return map[string]any{
+		"data":        data,
+		"next_cursor": nil,
+	}
+}
+
+func normalizeGooglePerformance(acct *adAccount, row map[string]any) map[string]any {
+	campaign := mapAt(row, "campaign")
+	segments := mapAt(row, "segments")
+	metrics := mapAt(row, "metrics")
+	customer := mapAt(row, "customer")
+	currency := firstString(customer, "currencyCode", "currency_code")
+	if currency == "" {
+		currency = acct.Currency
+	}
+	return map[string]any{
+		"platform":      acct.Platform,
+		"ad_account_id": acct.ID,
+		"campaign_id":   firstString(campaign, "id"),
+		"campaign_name": firstString(campaign, "name"),
+		"date":          firstString(segments, "date"),
+		"currency":      currency,
+		"timezone":      acct.Timezone,
+		"spend_micros": int64ArgAny(
+			metrics["costMicros"],
+			metrics["cost_micros"],
+		),
+		"impressions": int64ArgAny(metrics["impressions"]),
+		"clicks":      int64ArgAny(metrics["clicks"]),
+		"conversions": numericArgAny(metrics["conversions"]),
+	}
+}
+
+func normalizeMetaPerformance(acct *adAccount, row map[string]any) (map[string]any, error) {
+	spendMicros, err := decimalToMicros(row["spend"])
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"platform":      acct.Platform,
+		"ad_account_id": acct.ID,
+		"campaign_id":   firstString(row, "campaign_id", "campaignId"),
+		"campaign_name": firstString(row, "campaign_name", "campaignName"),
+		"date":          firstString(row, "date_start", "dateStart"),
+		"currency":      acct.Currency,
+		"timezone":      acct.Timezone,
+		"spend_micros":  spendMicros,
+		"impressions":   int64ArgAny(row["impressions"]),
+		"clicks":        int64ArgAny(row["clicks"]),
+		"conversions":   metaConversionValue(row),
+	}, nil
+}
+
+func decimalToMicros(value any) (int64, error) {
+	raw := strings.TrimSpace(toString(value))
+	if raw == "" {
+		return 0, nil
+	}
+	amount, ok := new(big.Rat).SetString(raw)
+	if !ok || amount.Sign() < 0 {
+		return 0, fmt.Errorf("invalid non-negative spend %q", raw)
+	}
+	numerator := new(big.Int).Mul(new(big.Int).Set(amount.Num()), big.NewInt(1_000_000))
+	denominator := new(big.Int).Set(amount.Denom())
+	micros, remainder := new(big.Int), new(big.Int)
+	micros.QuoRem(numerator, denominator, remainder)
+	if new(big.Int).Mul(remainder, big.NewInt(2)).Cmp(denominator) >= 0 {
+		micros.Add(micros, big.NewInt(1))
+	}
+	if !micros.IsInt64() {
+		return 0, fmt.Errorf("spend %q exceeds int64 micros", raw)
+	}
+	return micros.Int64(), nil
+}
+
+func metaConversionValue(row map[string]any) float64 {
+	if direct := numericArgAny(row["conversion"]); direct != 0 {
+		return direct
+	}
+	for _, key := range []string{"conversions", "actions"} {
+		values := actionValues(row[key])
+		if len(values) == 0 {
+			continue
+		}
+		for _, aggregate := range []string{"offsite_conversion", "onsite_conversion", "conversion"} {
+			if value, ok := values[aggregate]; ok {
+				return value
+			}
+		}
+		total := 0.0
+		for actionType, value := range values {
+			lower := strings.ToLower(actionType)
+			if strings.Contains(lower, "conversion") ||
+				strings.Contains(lower, "purchase") ||
+				strings.Contains(lower, "lead") ||
+				strings.Contains(lower, "complete_registration") {
+				total += value
+			}
+		}
+		if total != 0 {
+			return total
+		}
+	}
+	return 0
+}
+
+func actionValues(value any) map[string]float64 {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make(map[string]float64, len(items))
+	for _, item := range items {
+		entry := asMap(item)
+		actionType := strings.ToLower(firstString(entry, "action_type", "actionType"))
+		if actionType != "" {
+			out[actionType] = numericArgAny(entry["value"])
+		}
+	}
+	return out
+}
+
+func numericArgAny(values ...any) float64 {
+	for _, value := range values {
+		switch number := value.(type) {
+		case float64:
+			return number
+		case float32:
+			return float64(number)
+		case int:
+			return float64(number)
+		case int64:
+			return float64(number)
+		case json.Number:
+			if parsed, err := number.Float64(); err == nil {
+				return parsed
+			}
+		case string:
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(number), 64); err == nil {
+				return parsed
+			}
+		}
+	}
+	return 0
+}
+
+func googleNextPageToken(value any) string {
+	payload := asMap(value)
+	return firstString(payload, "nextPageToken", "next_page_token")
+}
+
+func metaNextCursor(value any) string {
+	payload := asMap(value)
+	paging := mapAt(payload, "paging")
+	cursors := mapAt(paging, "cursors")
+	return firstString(cursors, "after")
 }
 
 func normalizeGoogleAdGroups(v any) []map[string]any {

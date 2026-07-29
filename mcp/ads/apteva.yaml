@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.25
+version: 0.1.26
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -11,6 +11,7 @@ description: |
   The Add Account flow reuses project-scoped Dashboard integration
   connections and expands Google manager hierarchies into selectable
   client advertiser accounts.
+  v0.1.26 adds normalized daily campaign spend and performance reports.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -48,6 +49,7 @@ provides:
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
+    - { name: campaign_performance_get,     description: "Get normalized daily campaign spend and performance for a bounded date range." }
     - { name: campaign_update,              description: "Update campaign fields (name, status, budget, schedule, bid strategy)." }
     - { name: campaign_pause,               description: "Convenience: set campaign status=PAUSED." }
     - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
