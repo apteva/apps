@@ -269,13 +269,13 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 		return a.failBuild(build, "mkdir: "+err.Error()), nil
 	}
 	logPath := filepath.Join(buildDir, "build.log")
-	if err := appendCloudBuildLog(logPath, "submitting "+backendName+" build"); err != nil {
+	if err := appendCloudBuildLog(logPath, "preparing "+backendName+" build"); err != nil {
 		return a.failBuild(build, "open log: "+err.Error()), nil
 	}
 	startedAt := nowUTC()
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
 		"status": "running", "started_at": startedAt, "log_path": logPath,
-		"external_status": "submitting",
+		"external_status": "not_submitted",
 	})
 	emit("deploy.build.started", map[string]any{
 		"deployment_id": d.ID, "environment": d.EnvironmentName,
@@ -293,8 +293,11 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 			capsule.SHA256, capsule.Size, capsule.Expires,
 		))
 	}
+	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_status": "submitting"})
+	_ = appendCloudBuildLog(logPath, "submitting "+backendName+" build")
 	job, err := backend.Submit(ctx, bound, cfg, d, build, capsule)
 	if err != nil {
+		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"external_status": "submission_failed"})
 		return a.failBuild(build, "submit "+backendName+": "+err.Error()), nil
 	}
 	fields := map[string]any{

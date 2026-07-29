@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -304,6 +305,47 @@ func TestSourceCapsuleRejectsExpiredURLAndCleanupRemovesIt(t *testing.T) {
 	count, _ := app.cleanupSourceCapsules([]Build{*fresh}, time.Now())
 	if count != 1 {
 		t.Fatalf("removed capsules=%d", count)
+	}
+}
+
+func TestCloudBuildPreflightFailureIsNotSubmitted(t *testing.T) {
+	sourceDir, _ := newIOSPreflightFixture(t)
+	writeTestFile(t, filepath.Join(sourceDir, "project.yml"), `
+name: Example
+targets:
+  Example:
+    type: application
+    platform: iOS
+`)
+
+	platform := &cloudBuildPlatform{provider: "codemagic"}
+	ctx := withCloudBuildContext(t, platform)
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-preflight", TargetKind: "ios", SourceKind: "local", SourceRef: sourceDir,
+		Framework: "ios", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"runner","workflow_id":"ios","branch":"main","source_mode":"bundle"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{dataDir: t.TempDir(), retainRollbacks: 3}
+	build, err := app.submitCloudBuild(context.Background(), effectiveDeploymentForEnvironment(d, env))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.Status != "failed" || build.ExternalStatus != "not_submitted" || build.ExternalJobID != "" {
+		t.Fatalf("preflight build=%+v", build)
+	}
+	if !strings.Contains(build.Error, "does not declare supported interface orientations") {
+		t.Fatalf("preflight error=%q", build.Error)
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("provider calls=%+v", platform.calls)
 	}
 }
 

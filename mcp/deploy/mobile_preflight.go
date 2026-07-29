@@ -8,8 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 func validateMobileSource(root string, d *Deployment, cloudCfg cloudBuildConfig) error {
@@ -92,11 +90,11 @@ func validateIOSSource(root string, cfg mobileTargetConfig, cloudCfg cloudBuildC
 	if iconSet == "" {
 		return errors.New("iOS source has no populated .appiconset asset catalog")
 	}
-	settings, err := readIOSProjectSettings(root)
+	hasOrientations, err := hasIOSSupportedOrientations(root)
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(settings, "UISupportedInterfaceOrientations") {
+	if !hasOrientations {
 		return errors.New("iOS source does not declare supported interface orientations")
 	}
 	return nil
@@ -141,54 +139,6 @@ func findIOSAppIconSet(root string) (string, error) {
 		return nil
 	})
 	return found, err
-}
-
-func readIOSProjectSettings(root string) (string, error) {
-	projectYAML := filepath.Join(root, "project.yml")
-	if body, err := os.ReadFile(projectYAML); err == nil {
-		var document yaml.Node
-		if err := yaml.Unmarshal(body, &document); err != nil {
-			return "", fmt.Errorf("parse project.yml: %w", err)
-		}
-		var values []string
-		collectYAMLScalars(&document, &values)
-		return strings.Join(values, "\n"), nil
-	}
-	var settings strings.Builder
-	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() && (info.Name() == ".git" || info.Name() == "DerivedData" || info.Name() == "build") {
-			return filepath.SkipDir
-		}
-		if info.IsDir() || info.Name() != "project.pbxproj" {
-			return nil
-		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		settings.Write(body)
-		settings.WriteByte('\n')
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return settings.String(), nil
-}
-
-func collectYAMLScalars(node *yaml.Node, values *[]string) {
-	if node == nil {
-		return
-	}
-	if node.Kind == yaml.ScalarNode {
-		*values = append(*values, node.Value)
-	}
-	for _, child := range node.Content {
-		collectYAMLScalars(child, values)
-	}
 }
 
 func validateAndroidSource(root string, cfg mobileTargetConfig, cloudCfg cloudBuildConfig) error {
