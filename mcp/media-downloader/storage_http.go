@@ -23,6 +23,8 @@ type storageHTTPClient struct {
 	httpClient *http.Client
 }
 
+const storageBoundProxyPath = "/api/apps/callback/apps/storage/proxy"
+
 func newStorageHTTPClient() *storageHTTPClient {
 	token := strings.TrimSpace(os.Getenv("APTEVA_OUTBOUND_TOKEN"))
 	if token == "" {
@@ -218,7 +220,7 @@ func (c *storageHTTPClient) do(ctx context.Context, method, path, projectID stri
 	if c.base == "" {
 		return nil, errors.New("APTEVA_GATEWAY_URL not set")
 	}
-	u := c.base + "/api/apps/storage" + path
+	u := c.base + storageBoundProxyPath + path
 	if projectID != "" {
 		sep := "?"
 		if strings.Contains(path, "?") {

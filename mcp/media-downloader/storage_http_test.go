@@ -24,7 +24,7 @@ func TestStorageHTTPClientMultipartUpload(t *testing.T) {
 			t.Fatalf("missing project_id: %q", r.URL.RawQuery)
 		}
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads":
+		case r.Method == http.MethodPost && r.URL.Path == storageBoundProxyPath+"/uploads":
 			initSeen = true
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -34,11 +34,11 @@ func TestStorageHTTPClientMultipartUpload(t *testing.T) {
 				t.Fatalf("filename = %v", body["filename"])
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"upload_id": "UP1", "part_size": 4})
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/apps/storage/uploads/UP1/parts/"):
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, storageBoundProxyPath+"/uploads/UP1/parts/"):
 			body, _ := io.ReadAll(r.Body)
 			parts = append(parts, body)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads/UP1/complete":
+		case r.Method == http.MethodPost && r.URL.Path == storageBoundProxyPath+"/uploads/UP1/complete":
 			completeSeen = true
 			_ = json.NewEncoder(w).Encode(map[string]any{"file": map[string]any{"id": 42, "url": "signed"}})
 		default:
@@ -67,7 +67,7 @@ func TestStorageHTTPClientRetriesPartUpload(t *testing.T) {
 	partAttempts := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads":
+		case r.Method == http.MethodPost && r.URL.Path == storageBoundProxyPath+"/uploads":
 			_ = json.NewEncoder(w).Encode(map[string]any{"upload_id": "UP1", "part_size": 4})
 		case r.Method == http.MethodPut:
 			partAttempts++
