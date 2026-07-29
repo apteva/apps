@@ -223,6 +223,14 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	}
 	enableCall := firstSigningCall(platform.calls, "enable_bundle_id_capability")
 	profileCall := firstSigningCall(platform.calls, "create_profile")
+	listCapabilitiesCall := firstSigningCall(platform.calls, "list_bundle_id_capabilities")
+	if listCapabilitiesCall == nil ||
+		listCapabilitiesCall.Input["fields[bundleIdCapabilities]"] != "capabilityType,settings" {
+		t.Fatalf("capability list call=%#v", listCapabilitiesCall)
+	}
+	if _, ok := listCapabilitiesCall.Input["limit"]; ok {
+		t.Fatalf("capability relationship request included unsupported limit: %#v", listCapabilitiesCall.Input)
+	}
 	if enableCall == nil || profileCall == nil ||
 		signingCallIndex(platform.calls, "enable_bundle_id_capability") > signingCallIndex(platform.calls, "create_profile") {
 		t.Fatalf("capability must be enabled before profile creation: calls=%v", platform.calls)

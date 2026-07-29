@@ -80,8 +80,8 @@ func reconcileAppleCapabilities(
 		}
 	}
 	raw, err := executeIntegration(bound, "list_bundle_id_capabilities", map[string]any{
-		"bundle_id": bundleResourceID,
-		"limit":     200,
+		"bundle_id":                    bundleResourceID,
+		"fields[bundleIdCapabilities]": "capabilityType,settings",
 	})
 	if err != nil {
 		return appleCapabilityReconcileResult{}, fmt.Errorf("list Apple bundle capabilities: %w", err)
