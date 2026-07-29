@@ -26,6 +26,23 @@ func TestValidateCookieProfileSupportsPatreon(t *testing.T) {
 	}
 }
 
+func TestValidateCookieProfileSupportsInstagram(t *testing.T) {
+	cookies := ".instagram.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\tsecret\n"
+	if err := validateCookieProfile("instagram", "cookies_netscape", profilePayload{CookiesNetscape: cookies}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCookieProfile("instagram", "cookies_netscape", profilePayload{CookiesNetscape: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret\n"}); err == nil {
+		t.Fatal("expected Instagram profile without Instagram cookies to fail")
+	}
+}
+
+func TestValidateCookieProfileRejectsUnknownProvider(t *testing.T) {
+	err := validateCookieProfile("unknown", "cookies_netscape", profilePayload{CookiesNetscape: ".example.com\tTRUE\t/\tTRUE\t1893456000\tsession\tsecret\n"})
+	if err == nil || !strings.Contains(err.Error(), "instagram") {
+		t.Fatalf("unknown provider error = %v, want supported provider list", err)
+	}
+}
+
 func TestValidateCookieProfileAcceptsHttpOnlyRows(t *testing.T) {
 	cookies := "#HttpOnly_.patreon.com\tTRUE\t/\tTRUE\t1893456000\tsession_id\tsecret\n"
 	if err := validateCookieProfile("patreon", "cookies_netscape", profilePayload{CookiesNetscape: cookies}); err != nil {

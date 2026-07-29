@@ -625,6 +625,7 @@ function JobRow({ job, projectId, onCancel, onRetry, setNotice }: any) {
 const providers: any = {
   youtube: { label: "YouTube", name: "YouTube account", test: "https://www.youtube.com/watch?v=...", cookie: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\t..." },
   patreon: { label: "Patreon", name: "Patreon account", test: "https://www.patreon.com/posts/...", cookie: ".patreon.com\tTRUE\t/\tTRUE\t1893456000\tsession_id\t..." },
+  instagram: { label: "Instagram", name: "Instagram account", test: "https://www.instagram.com/reel/...", cookie: ".instagram.com\tTRUE\t/\tTRUE\t1893456000\tsessionid\t..." },
 };
 
 function ProfilesTab({ profiles, projectId, onRefresh, setNotice }: any) {

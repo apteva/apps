@@ -4,8 +4,8 @@ import "testing"
 
 func TestManifestVersionAndEventContract(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.2.14" {
-		t.Fatalf("manifest version = %q, want 0.2.14", manifest.Version)
+	if manifest.Version != "0.2.15" {
+		t.Fatalf("manifest version = %q, want 0.2.15", manifest.Version)
 	}
 }
 
@@ -31,4 +31,20 @@ func TestSearchToolAndRouteAreRegistered(t *testing.T) {
 	if !foundRoute {
 		t.Fatal("/search HTTP route is not registered")
 	}
+}
+
+func TestSourceProfileToolSupportsInstagram(t *testing.T) {
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name != "source_profile_create" {
+			continue
+		}
+		provider := tool.InputSchema["properties"].(map[string]any)["provider"].(map[string]any)
+		for _, value := range provider["enum"].([]string) {
+			if value == "instagram" {
+				return
+			}
+		}
+		t.Fatal("source_profile_create provider enum does not include instagram")
+	}
+	t.Fatal("source_profile_create tool is not registered")
 }
