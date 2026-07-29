@@ -23,21 +23,57 @@ type Organization struct {
 }
 
 type User struct {
-	ID              int64           `json:"id"`
-	ProjectID       string          `json:"project_id,omitempty"`
-	OrganizationID  int64           `json:"organization_id"`
-	Email           string          `json:"email"`
-	EmailVerifiedAt string          `json:"email_verified_at,omitempty"`
-	DisplayName     string          `json:"display_name,omitempty"`
-	AvatarURL       string          `json:"avatar_url,omitempty"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	Status          string          `json:"status"`
-	HasPassword     bool            `json:"has_password"`
-	MFAEnabled      bool            `json:"mfa_enabled"`
-	LastLoginAt     string          `json:"last_login_at,omitempty"`
-	LockedUntil     string          `json:"locked_until,omitempty"`
-	CreatedAt       string          `json:"created_at,omitempty"`
-	UpdatedAt       string          `json:"updated_at,omitempty"`
+	ID                   int64           `json:"id"`
+	ProjectID            string          `json:"project_id,omitempty"`
+	OrganizationID       int64           `json:"organization_id"`
+	Email                string          `json:"email"`
+	EmailVerifiedAt      string          `json:"email_verified_at,omitempty"`
+	DisplayName          string          `json:"display_name,omitempty"`
+	AvatarURL            string          `json:"avatar_url,omitempty"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	Status               string          `json:"status"`
+	HasPassword          bool            `json:"has_password"`
+	MFAEnabled           bool            `json:"mfa_enabled"`
+	AuthorizationVersion int64           `json:"authorization_version"`
+	LastLoginAt          string          `json:"last_login_at,omitempty"`
+	LockedUntil          string          `json:"locked_until,omitempty"`
+	CreatedAt            string          `json:"created_at,omitempty"`
+	UpdatedAt            string          `json:"updated_at,omitempty"`
+}
+
+// Role and Permission are organization-owned authorization records.
+// Keys are stable machine identifiers; names and descriptions are
+// display data. Permissions on Role are the effective configured keys.
+type Role struct {
+	ID             int64    `json:"id"`
+	OrganizationID int64    `json:"organization_id"`
+	Key            string   `json:"key"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description,omitempty"`
+	Permissions    []string `json:"permissions"`
+	CreatedAt      string   `json:"created_at,omitempty"`
+	UpdatedAt      string   `json:"updated_at,omitempty"`
+}
+
+type Permission struct {
+	ID             int64  `json:"id"`
+	OrganizationID int64  `json:"organization_id"`
+	Key            string `json:"key"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+}
+
+// AuthorizationContext is computed exclusively from server-managed RBAC
+// tables and is safe to use for authorization after verifying the JWT.
+type AuthorizationContext struct {
+	UserID               string   `json:"user_id"`
+	OrganizationID       string   `json:"organization_id"`
+	OrganizationSlug     string   `json:"organization_slug"`
+	Roles                []string `json:"roles"`
+	Permissions          []string `json:"permissions"`
+	AuthorizationVersion int64    `json:"authorization_version"`
 }
 
 type Client struct {

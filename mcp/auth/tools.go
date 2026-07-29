@@ -271,10 +271,15 @@ func (a *App) toolUsersGetContext(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	authorization, err := dbAuthorizationContext(ctx.AppDB(), pid, org, user.ID)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"user":      user,
-		"sessions":  sessions,
-		"audit_log": audits,
+		"user":          user,
+		"authorization": authorization,
+		"sessions":      sessions,
+		"audit_log":     audits,
 	}, nil
 }
 

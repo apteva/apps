@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.7.4
+version: 0.8.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -15,8 +15,8 @@ description: |
   URL changes from v0.3); the dashboard renders a consolidated AuthPanel
   with OrgSwitcher.
 
-  v0.7.4 adds Auth's adaptive themed app icon and updates the app to
-  the current Apteva app SDK.
+  v0.8.0 adds generic organization-scoped RBAC, trusted role and
+  permission claims, authorization versioning, and dashboard management.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
@@ -101,6 +101,26 @@ provides:
       description: Force-logout one user across all sessions (requires org).
     - name: auth_users_set_password
       description: ADMIN — set a new password for a user, validating the password policy and optionally revoking active sessions (requires org).
+    - name: auth_roles_list
+      description: List organization-scoped roles and their effective permissions.
+    - name: auth_roles_create
+      description: Create an organization-scoped role with an immutable machine key.
+    - name: auth_roles_update
+      description: Update a role's display name or description.
+    - name: auth_roles_delete
+      description: Delete a role and remove its user assignments.
+    - name: auth_permissions_list
+      description: List the organization's permission catalog.
+    - name: auth_permissions_create
+      description: Create a namespaced permission such as resources:read.
+    - name: auth_permissions_update
+      description: Update a permission's display name or description.
+    - name: auth_permissions_delete
+      description: Delete a permission and remove it from roles.
+    - name: auth_role_permissions_set
+      description: Atomically replace a role's permission set.
+    - name: auth_user_roles_set
+      description: Atomically replace a user's role assignments and advance their authorization version.
     - name: auth_audit_search
       description: Time-window + event-type filter over the audit log. Org-scoped or project-wide.
     - name: auth_stats

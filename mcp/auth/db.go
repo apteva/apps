@@ -153,6 +153,7 @@ func dbGetUserByID(db *sql.DB, projectID string, orgID, id int64) (*User, error)
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
 		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
+		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
 		FROM users WHERE project_id = ? AND organization_id = ? AND id = ?`,
@@ -164,6 +165,7 @@ func dbGetUserByEmail(db *sql.DB, projectID string, orgID int64, email string) (
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
 		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
+		       authorization_version,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
 		FROM users WHERE project_id = ? AND organization_id = ? AND email = ?`,
@@ -176,7 +178,8 @@ func scanUser(db *sql.DB, projectID string, row *sql.Row) (*User, error) {
 	var hasPw int
 	var metadata string
 	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-		&metadata, &u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		&metadata, &u.Status, &hasPw, &u.AuthorizationVersion,
+		&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(metadata) == "" {
@@ -329,7 +332,7 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		args = append(args, createdAfter)
 	}
 	args = append(args, limit)
-	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
+	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL, authorization_version, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
 	rows, err := db.Query(q1, args...)
 	if err != nil {
 		return nil, err
@@ -344,7 +347,8 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		var hasPw int
 		var metadata string
 		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-			&metadata, &u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			&metadata, &u.Status, &hasPw, &u.AuthorizationVersion,
+			&u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
