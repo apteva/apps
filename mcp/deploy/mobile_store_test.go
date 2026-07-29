@@ -1,0 +1,243 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
+)
+
+func TestMobileStoreConfigRoundTripUsesEnvironmentIdentity(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-listing", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	doc := completeIOSStoreDocument()
+	cfg, err := dbUpsertMobileStoreConfig(db, d, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Platform != "ios" || cfg.Provider != "app_store_connect" || cfg.EnvironmentID != env.ID || cfg.DesiredHash == "" {
+		t.Fatalf("config=%+v", cfg)
+	}
+	var saved StoreDocument
+	if err := json.Unmarshal([]byte(cfg.DesiredJSON), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.VersionName != "1.0" || saved.Localizations["en-US"].Description == "" {
+		t.Fatalf("saved=%+v", saved)
+	}
+}
+
+func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
+	doc := completeIOSStoreDocument()
+	doc.Review.DemoAccountRequired = true
+	doc.Review.DemoUsername = "reviewer"
+	doc.Review.DemoPassword = "do-not-store"
+	raw, _, err := canonicalStoreDocument(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(raw, "do-not-store") || strings.Contains(raw, "demo_password\"") {
+		t.Fatalf("review password leaked into desired document: %s", raw)
+	}
+}
+
+func TestStorePreflightRejectsBinaryListingVersionMismatch(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "ios"}
+	doc := completeIOSStoreDocument()
+	cfg := &MobileStoreConfig{DesiredHash: "configured"}
+	build := &Build{ArtifactManifestJSON: mustJSON(artifactManifest{
+		Platform: "ios", VersionName: "0.1.0", BuildNumber: "1", Primary: "app.ipa",
+	})}
+	preflight := validateStoreDocument(root, d, build, cfg, doc, true)
+	if preflight.Ready {
+		t.Fatalf("preflight unexpectedly ready: %+v", preflight)
+	}
+	found := false
+	for _, finding := range preflight.Findings {
+		if finding.Code == "version.binary_mismatch" && strings.Contains(finding.Message, "0.1.0") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing version mismatch: %+v", preflight.Findings)
+	}
+}
+
+func TestStorePreflightRequiresProviderMedia(t *testing.T) {
+	root := t.TempDir()
+	ios := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "ios"}
+	iosDoc := completeIOSStoreDocument()
+	iosDoc.Localizations["en-US"] = StoreLocalization{
+		Description: "Description", Keywords: []string{"test"}, SupportURL: "https://example.com/support",
+	}
+	preflight := validateStoreDocument(root, ios, nil, &MobileStoreConfig{}, iosDoc, true)
+	if !hasStoreFinding(preflight, "title.required") {
+		t.Fatalf("expected iOS title finding: %#v", preflight.Findings)
+	}
+
+	android := &Deployment{ID: 3, EnvironmentID: 4, TargetKind: "android"}
+	androidDoc := defaultStoreDocument("android")
+	androidDoc.VersionName = "1.0"
+	androidDoc.Localizations["en-US"] = StoreLocalization{
+		Title: "Test", ShortDescription: "Short", Description: "Description",
+	}
+	androidDoc.Privacy.PolicyURL = "https://example.com/privacy"
+	androidDoc.Privacy.ManualAttestations["google_data_safety_published"] = true
+	androidDoc.Privacy.ManualAttestations["google_app_content_complete"] = true
+	androidDoc.Distribution.Provider = map[string]any{
+		"availability_configured": true,
+		"pricing_configured":      true,
+	}
+	preflight = validateStoreDocument(root, android, nil, &MobileStoreConfig{}, androidDoc, true)
+	for _, code := range []string{"screenshots.google_minimum", "icon.google_required", "feature_graphic.google_required"} {
+		if !hasStoreFinding(preflight, code) {
+			t.Fatalf("expected %s finding: %#v", code, preflight.Findings)
+		}
+	}
+}
+
+func hasStoreFinding(preflight StorePreflight, code string) bool {
+	for _, finding := range preflight.Findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStoreAssetPathsCannotCrossDeploymentBoundary(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{ID: 12, EnvironmentID: 34}
+	good := filepath.Join(root, "store-assets", "12", "34", "asset", "shot.png")
+	if err := os.MkdirAll(filepath.Dir(good), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(good, []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveStoreAssetPath(root, d, "store-assets/12/34/asset/shot.png"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../secret", "store-assets/12/99/asset/shot.png", good} {
+		if _, err := resolveStoreAssetPath(root, d, path); err == nil {
+			t.Fatalf("path %q should be rejected", path)
+		}
+	}
+}
+
+func TestAppleAssetUploadExecutesReservedChunks(t *testing.T) {
+	var received bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.Header.Get("X-Upload") != "yes" {
+			t.Fatalf("request=%s headers=%v", r.Method, r.Header)
+		}
+		_, _ = received.ReadFrom(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "shot.png")
+	if err := os.WriteFile(path, []byte("abcdef"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(`{"data":{"attributes":{"uploadOperations":[
+		{"method":"PUT","url":"` + server.URL + `","length":3,"offset":0,"requestHeaders":[{"name":"X-Upload","value":"yes"}]},
+		{"method":"PUT","url":"` + server.URL + `","length":3,"offset":3,"requestHeaders":[{"name":"X-Upload","value":"yes"}]}
+	]}}}`)
+	if err := uploadAppleAssetOperations(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	if received.String() != "abcdef" {
+		t.Fatalf("uploaded=%q", received.String())
+	}
+}
+
+func TestApplePendingReleaseIsNotMarkedLive(t *testing.T) {
+	platform := &iosPlatform{state: "PENDING_APPLE_RELEASE"}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-pending", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpdateRelease(ctx.AppDB(), release.ID, map[string]any{
+		"provider": "app_store_connect", "status": "starting",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).syncAppStoreVersionState(bound, release, &mobileReleaseMeta{AppStoreVersionID: "version-1"}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := dbGetRelease(ctx.AppDB(), release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.Status == "live" || fresh.ExternalStatus != "approved_pending_release" {
+		t.Fatalf("release=%+v", fresh)
+	}
+}
+
+func completeIOSStoreDocument() StoreDocument {
+	return StoreDocument{
+		SchemaVersion: 1, VersionName: "1.0", DefaultLocale: "en-US", ReleaseMode: "manual",
+		Localizations: map[string]StoreLocalization{
+			"en-US": {
+				Title: "Example", Description: "A complete description.", Keywords: []string{"example"},
+				SupportURL: "https://example.com/support",
+			},
+		},
+		Assets: []StoreAsset{{
+			ID: "shot", Locale: "en-US", Kind: "phone_screenshot",
+			Path: "store-assets/1/2/shot/shot.png", SHA256: "abc",
+		}},
+		Review: StoreReview{
+			FirstName: "Ada", LastName: "Lovelace", Email: "review@example.com", Phone: "+1 555 0100",
+		},
+		Classification: StoreClassification{
+			PrimaryCategory: "PRODUCTIVITY", AgeDeclaration: map[string]any{"gamblingAndContests": "NONE"},
+		},
+		Distribution: StoreDistribution{
+			Territories: []string{"US"}, PriceTier: "FREE",
+			Provider: map[string]any{"availability_configured": true, "pricing_configured": true},
+		},
+		Privacy: StorePrivacy{
+			PolicyURL:          "https://example.com/privacy",
+			ManualAttestations: map[string]bool{"apple_privacy_published": true},
+		},
+	}
+}

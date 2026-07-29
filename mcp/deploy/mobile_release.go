@@ -110,6 +110,24 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 		}
 		meta.ReleaseType = cfg.ReleaseType
 	}
+	if channel == "production" {
+		storeCfg, _, storeErr := a.mobileStoreConfig(d)
+		if storeErr != nil {
+			err = storeErr
+		} else if storeCfg != nil {
+			_, err = a.applyStoreConfig(d, b, true)
+		} else if platform == "ios" && meta.SubmitForReview {
+			err = errors.New("configure and validate the App Store listing before submitting for review")
+		}
+		if err != nil {
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "stopped_at": nowUTC(), "error": err.Error(),
+				"external_status": "not_submitted",
+			})
+			_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "store_preflight_failed", mustJSON(map[string]any{"error": err.Error()}))
+			return nil, err
+		}
+	}
 	metaJSON := mustJSON(meta)
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 		"channel": channel, "provider": provider, "external_status": "publishing",
@@ -249,6 +267,9 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 		"releases": []map[string]any{release},
 	}); err != nil {
 		return fmt.Errorf("update Play track: %w", err)
+	}
+	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
+		return fmt.Errorf("validate Play edit: %w", err)
 	}
 	if _, err := executeIntegration(bound, "commit_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
 		return fmt.Errorf("commit Play edit: %w", err)
@@ -551,8 +572,11 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	normalized := strings.ToLower(state)
 	fields := map[string]any{"external_status": normalized}
 	switch state {
-	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE", "PENDING_APPLE_RELEASE":
+	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE":
 		fields["status"] = "live"
+	case "PENDING_APPLE_RELEASE":
+		fields["status"] = "starting"
+		fields["external_status"] = "approved_pending_release"
 	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY":
 		fields["status"] = "failed"
 		fields["error"] = "App Store state: " + state

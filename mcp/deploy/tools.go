@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -210,6 +211,57 @@ func (a *App) MCPTools() []sdk.Tool {
 					"id":          map[string]any{"type": "integer"},
 					"environment": map[string]any{"type": "string"},
 				},
+			},
+		},
+		{
+			Name: "deploy_store_get", Handler: a.toolStoreGet,
+			Description: "Get the provider-neutral mobile store listing document, persisted provider state, and current readiness findings. Args: name OR id, environment?.",
+			InputSchema: storeToolDeploymentSchema(nil),
+		},
+		{
+			Name: "deploy_store_update", Handler: a.toolStoreUpdate,
+			Description: "Create or replace the provider-neutral store listing document for an Android or iOS deployment. Existing builds and releases are unchanged. Args: name OR id, environment?, desired.",
+			InputSchema: storeToolDeploymentSchema(map[string]any{
+				"desired":      map[string]any{"type": "object", "description": "StoreDocument schema v1."},
+				"desired_json": map[string]any{"type": "string", "description": "JSON alternative to desired."},
+			}),
+		},
+		{
+			Name: "deploy_store_plan", Handler: a.toolStorePlan,
+			Description: "Return a non-mutating listing reconciliation plan and readiness findings. Args: name OR id, environment?, build_id?, strict?.",
+			InputSchema: storeToolDeploymentSchema(map[string]any{
+				"build_id": map[string]any{"type": "integer"},
+				"strict":   map[string]any{"type": "boolean"},
+			}),
+		},
+		{
+			Name: "deploy_store_preflight", Handler: a.toolStorePreflight,
+			Description: "Validate listing metadata, media, compliance attestations, and optional binary version compatibility before submission. Args: name OR id, environment?, build_id?, strict?.",
+			InputSchema: storeToolDeploymentSchema(map[string]any{
+				"build_id": map[string]any{"type": "integer"},
+				"strict":   map[string]any{"type": "boolean"},
+			}),
+		},
+		{
+			Name: "deploy_store_apply", Handler: a.toolStoreApply,
+			Description: "Idempotently apply the desired listing to App Store Connect or Google Play without building or submitting it. Args: name OR id, environment?, build_id?, review_demo_password?.",
+			InputSchema: storeToolDeploymentSchema(map[string]any{
+				"build_id":             map[string]any{"type": "integer"},
+				"review_demo_password": map[string]any{"type": "string", "description": "One-shot Apple review password; sent to Apple and never stored by Deploy."},
+			}),
+		},
+		{
+			Name: "deploy_store_sync", Handler: a.toolStoreSync,
+			Description: "Read the current listing state from App Store Connect or Google Play and persist a non-secret observed snapshot. Args: name OR id, environment?.",
+			InputSchema: storeToolDeploymentSchema(nil),
+		},
+		{
+			Name: "deploy_store_release_approved", Handler: a.toolStoreReleaseApproved,
+			Description: "Release an App Store version after Apple approval when it is waiting for manual developer release. Args: release_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"release_id": map[string]any{"type": "integer"}},
+				"required":   []string{"release_id"},
 			},
 		},
 		{
@@ -668,6 +720,7 @@ func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
 		return nil, err
 	}
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(env.ID, 10)))
 	emit("deploy.environment.destroyed", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name})
 	return map[string]any{"destroyed": true, "environment": env.Name, "environment_id": env.ID}, nil
 }
@@ -770,6 +823,166 @@ func (a *App) toolMobileSigningStatus(ctx *sdk.AppCtx, args map[string]any) (any
 		"setups":         setups,
 		"count":          len(setups),
 	}, nil
+}
+
+func storeToolDeploymentSchema(extra map[string]any) map[string]any {
+	properties := map[string]any{
+		"name":        map[string]any{"type": "string"},
+		"id":          map[string]any{"type": "integer"},
+		"environment": map[string]any{"type": "string"},
+	}
+	for key, value := range extra {
+		properties[key] = value
+	}
+	return map[string]any{"type": "object", "properties": properties}
+}
+
+func (a *App) toolStoreGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	if mobileStoreProvider(d.TargetKind) == "" {
+		return nil, errors.New("store listing is only available for Android and iOS deployments")
+	}
+	cfg, doc, err := a.mobileStoreConfig(d)
+	if err != nil {
+		return nil, err
+	}
+	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+	return map[string]any{
+		"deployment_id": d.ID, "environment_id": d.EnvironmentID,
+		"platform": d.TargetKind, "provider": mobileStoreProvider(d.TargetKind),
+		"config": cfg, "desired": doc, "preflight": preflight,
+	}, nil
+}
+
+func (a *App) toolStoreUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	var doc StoreDocument
+	switch desired := args["desired"].(type) {
+	case map[string]any:
+		raw, marshalErr := json.Marshal(desired)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		doc, err = parseStoreDocument(string(raw), d.TargetKind)
+	default:
+		doc, err = parseStoreDocument(strArg(args, "desired_json"), d.TargetKind)
+	}
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc)
+	if err != nil {
+		return nil, err
+	}
+	a.pruneUnreferencedStoreAssets(d, doc)
+	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+	status := "ready"
+	if !preflight.Ready {
+		status = "blocked"
+	}
+	_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+	cfg, _ = dbGetMobileStoreConfig(ctx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
+	emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
+	return map[string]any{"config": cfg, "desired": doc, "preflight": preflight}, nil
+}
+
+func storeBuildFromArgs(ctx *sdk.AppCtx, d *Deployment, args map[string]any) (*Build, error) {
+	id := int64(intArg(args, "build_id"))
+	if id == 0 {
+		return nil, nil
+	}
+	build, err := dbGetBuild(ctx.AppDB(), id)
+	if err != nil || build == nil || build.DeploymentID != d.ID || (d.EnvironmentID > 0 && build.EnvironmentID != d.EnvironmentID) {
+		return nil, fmt.Errorf("build %d not found for deployment environment", id)
+	}
+	return build, nil
+}
+
+func (a *App) toolStorePlan(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	build, err := storeBuildFromArgs(ctx, d, args)
+	if err != nil {
+		return nil, err
+	}
+	return a.storePlan(d, build, boolArg(args, "strict"))
+}
+
+func (a *App) toolStorePreflight(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	build, err := storeBuildFromArgs(ctx, d, args)
+	if err != nil {
+		return nil, err
+	}
+	cfg, doc, err := a.mobileStoreConfig(d)
+	if err != nil {
+		return nil, err
+	}
+	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, boolArg(args, "strict"))
+	if cfg != nil {
+		status := "ready"
+		if !preflight.Ready {
+			status = "blocked"
+		}
+		_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+	}
+	return preflight, nil
+}
+
+func (a *App) toolStoreApply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	build, err := storeBuildFromArgs(ctx, d, args)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := a.applyStoreConfigWithReviewSecret(d, build, true, strArg(args, "review_demo_password"))
+	if err != nil {
+		return nil, err
+	}
+	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
+	return map[string]any{"config": cfg, "applied": true}, nil
+}
+
+func (a *App) toolStoreSync(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	cfg, observed, err := a.observeStoreConfig(d)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"config": cfg, "observed": observed}, nil
+}
+
+func (a *App) toolStoreReleaseApproved(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := int64(intArg(args, "release_id"))
+	if id == 0 {
+		return nil, errors.New("release_id required")
+	}
+	rel, err := dbGetRelease(ctx.AppDB(), id)
+	if err != nil || rel == nil {
+		return nil, fmt.Errorf("release %d not found", id)
+	}
+	updated, err := a.releaseApprovedMobileVersion(rel)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"release": updated, "release_requested": true}, nil
 }
 
 func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -981,6 +1194,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	a.removeBuildDirs(builds)
+	_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10)))
 	emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 	return map[string]any{"destroyed": true, "id": d.ID}, nil
 }

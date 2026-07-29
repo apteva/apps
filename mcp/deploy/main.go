@@ -111,7 +111,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	} else {
 		a.dataDir = "/data"
 	}
-	for _, sub := range []string{"builds", "releases"} {
+	for _, sub := range []string{"builds", "releases", "store-assets"} {
 		if err := os.MkdirAll(filepath.Join(a.dataDir, sub), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", sub, err)
 		}

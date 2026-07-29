@@ -278,6 +278,37 @@ IDs/status, stages outputs, and performs a requested release only after
 the build succeeds. `deploy_build_cancel` and
 `POST /api/builds/:id/cancel` cancel active provider jobs.
 
+## Store listings
+
+Store preparation is independent from the build backend. Codemagic, GitHub
+Actions, a capsule runner, or a local build produces the artifact; the App
+Store Connect and Google Play adapters own listing metadata, media, compliance
+readiness, submission, observation, and release.
+
+One `mobile_store_configs` row per deployment environment stores a versioned,
+provider-neutral desired document and the latest non-secret observed provider
+state. Store media uses relative paths under
+`/data/store-assets/<deployment>/<environment>/`; files removed from the
+document are pruned when it is saved.
+
+The workflow is:
+
+1. `deploy_store_update` saves metadata, media references, review details,
+   classification, privacy, and distribution settings.
+2. Upload media through `POST /api/deployments/<id>/store-assets`.
+3. `deploy_store_plan` or `deploy_store_preflight` reports blocking findings,
+   including exact binary/listing version mismatches.
+4. `deploy_store_apply` reconciles supported provider resources.
+5. `deploy_release` attaches the exact build and optionally submits it.
+6. `deploy_store_sync` refreshes observed provider state.
+7. `deploy_store_release_approved` releases an Apple-approved version waiting
+   for manual developer release.
+
+Review demo passwords are one-shot apply inputs. Deploy sends them to Apple and
+stores only that one has been configured. Apple privacy answers and Google Play
+App Content declarations remain explicit human attestations because their full
+questionnaires are not writable through the publishing APIs.
+
 ## Runtime targets (pluggable)
 
 v0.1 ships a single `LocalRuntime` that supervises the build artifact
@@ -322,6 +353,7 @@ PATH (the build step shells out to it).
 /data/builds/<build_id>/dist/                  build output
 /data/builds/<build_id>/build.log              build stdout/stderr
 /data/releases/<release_id>/runtime.log        runtime or store release log
+/data/store-assets/<deployment>/<environment>/ listing screenshots, previews, attachments
 ```
 
 ## Configuration

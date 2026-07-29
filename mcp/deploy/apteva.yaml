@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.21.1
+version: 0.22.0
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -105,6 +105,20 @@ provides:
       description: Configure, reconcile, repair, or explicitly rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
+    - name: deploy_store_get
+      description: Get mobile store listing desired state, provider state, and readiness findings.
+    - name: deploy_store_update
+      description: Create or replace a provider-neutral App Store or Google Play listing document.
+    - name: deploy_store_plan
+      description: Preview the provider reconciliation without changing the store.
+    - name: deploy_store_preflight
+      description: Validate listing, media, compliance, and binary version compatibility.
+    - name: deploy_store_apply
+      description: Apply the desired listing to the bound store provider without submitting it.
+    - name: deploy_store_sync
+      description: Read and persist the current provider listing state.
+    - name: deploy_store_release_approved
+      description: Release an Apple-approved version waiting for manual developer release.
     - name: deploy_distribution_status
       description: Read the provider-backed TestFlight or Google Play test audience for a mobile channel.
     - name: deploy_distribution_update

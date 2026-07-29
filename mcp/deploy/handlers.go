@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +77,18 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentMobileSigning(w, r, d)
 	case tail == "mobile-signing/setup":
 		a.httpDeploymentMobileSigningSetup(w, r, d)
+	case tail == "store-config":
+		a.httpDeploymentStoreConfig(w, r, d)
+	case tail == "store-plan":
+		a.httpDeploymentStorePlan(w, r, d)
+	case tail == "store-preflight":
+		a.httpDeploymentStorePreflight(w, r, d)
+	case tail == "store-apply":
+		a.httpDeploymentStoreApply(w, r, d)
+	case tail == "store-sync":
+		a.httpDeploymentStoreSync(w, r, d)
+	case tail == "store-assets":
+		a.httpDeploymentStoreAssets(w, r, d)
 	case tail == "distribution":
 		a.httpDeploymentDistribution(w, r, d)
 	case tail == "cloud-backend/setup":
@@ -88,6 +102,178 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
+}
+
+func (a *App) httpDeploymentStoreConfig(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if mobileStoreProvider(d.TargetKind) == "" {
+		httpErr(w, http.StatusBadRequest, "store listing is only available for mobile deployments")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		cfg, doc, err := a.mobileStoreConfig(d)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+		httpJSON(w, map[string]any{"config": cfg, "desired": doc, "preflight": preflight})
+	case http.MethodPut:
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		desired := body
+		if nested, ok := body["desired"].(map[string]any); ok {
+			desired = nested
+		}
+		raw, _ := json.Marshal(desired)
+		doc, err := parseStoreDocument(string(raw), d.TargetKind)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		cfg, err := dbUpsertMobileStoreConfig(globalCtx.AppDB(), d, doc)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		a.pruneUnreferencedStoreAssets(d, doc)
+		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+		status := "ready"
+		if !preflight.Ready {
+			status = "blocked"
+		}
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+		cfg, _ = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
+		emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
+		httpJSON(w, map[string]any{"config": cfg, "desired": doc, "preflight": preflight})
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or PUT")
+	}
+}
+
+func (a *App) httpDeploymentStorePlan(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	build, err := storeBuildFromRequest(d, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	plan, err := a.storePlan(d, build, true)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, plan)
+}
+
+func (a *App) httpDeploymentStorePreflight(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	build, err := storeBuildFromRequest(d, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg, doc, err := a.mobileStoreConfig(d)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, true)
+	if cfg != nil {
+		status := "ready"
+		if !preflight.Ready {
+			status = "blocked"
+		}
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+	}
+	httpJSON(w, preflight)
+}
+
+func (a *App) httpDeploymentStoreApply(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		ReviewDemoPassword string `json:"review_demo_password"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+	}
+	build, err := storeBuildFromRequest(d, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cfg, err := a.applyStoreConfigWithReviewSecret(d, build, true, body.ReviewDemoPassword)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
+	httpJSON(w, map[string]any{"config": cfg, "applied": true})
+}
+
+func (a *App) httpDeploymentStoreSync(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	cfg, observed, err := a.observeStoreConfig(d)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"config": cfg, "observed": observed})
+}
+
+func (a *App) httpDeploymentStoreAssets(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 101<<20)
+	if err := r.ParseMultipartForm(101 << 20); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid multipart upload: "+err.Error())
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "file required")
+		return
+	}
+	defer file.Close()
+	asset, err := a.saveStoreAsset(d, header.Filename, file)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	asset.Locale = defaultStr(strings.TrimSpace(r.FormValue("locale")), "en-US")
+	asset.Kind = defaultStr(strings.TrimSpace(r.FormValue("kind")), "phone_screenshot")
+	asset.DisplayTarget = strings.TrimSpace(r.FormValue("display_target"))
+	asset.Order, _ = strconv.Atoi(r.FormValue("order"))
+	httpJSON(w, map[string]any{"asset": asset})
+}
+
+func storeBuildFromRequest(d *Deployment, r *http.Request) (*Build, error) {
+	id := queryInt(r, "build_id", 0)
+	if id == 0 {
+		return nil, nil
+	}
+	build, err := dbGetBuild(globalCtx.AppDB(), int64(id))
+	if err != nil || build == nil || build.DeploymentID != d.ID || (d.EnvironmentID > 0 && build.EnvironmentID != d.EnvironmentID) {
+		return nil, fmt.Errorf("build %d not found for deployment environment", id)
+	}
+	return build, nil
 }
 
 func (a *App) httpDeploymentDistribution(w http.ResponseWriter, r *http.Request, d *Deployment) {
@@ -299,6 +485,17 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, out)
+	case "release-approved":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		updated, err := a.releaseApprovedMobileVersion(rel)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"release": updated, "release_requested": true})
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -442,6 +639,7 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
+			_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(d.EnvironmentID, 10)))
 			emit("deploy.environment.destroyed", map[string]any{
 				"deployment_id": d.ID, "environment_id": d.EnvironmentID, "environment": d.EnvironmentName,
 			})
@@ -455,6 +653,7 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 		builds, _ := dbListBuilds(globalCtx.AppDB(), d.ID, 100000)
 		_ = dbDeleteDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
 		a.removeBuildDirs(builds)
+		_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10)))
 		emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 		httpJSON(w, map[string]any{"destroyed": true, "id": d.ID})
 	case http.MethodPatch:
