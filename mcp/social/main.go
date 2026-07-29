@@ -49,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.83
+version: 0.14.84
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4587,12 +4587,12 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) error {
-	if err := a.resolvePendingTikTokPostIDs(runCtx, ctx); err != nil {
-		ctx.Logger().Warn("resolve pending TikTok post IDs", "err", err)
-	}
 	pid := projectScope(ctx)
 	if pid == "" {
 		return nil
+	}
+	if err := a.resolvePendingTikTokPostIDs(runCtx, ctx, pid); err != nil {
+		ctx.Logger().Warn("resolve pending TikTok post IDs", "project", pid, "err", err)
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id FROM posts
@@ -4631,21 +4631,27 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 	return nil
 }
 
-func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCtx) error {
+func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCtx, pid string) error {
+	if strings.TrimSpace(pid) == "" {
+		return nil
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, a.connection_id,
 		        COALESCE(t.platform_post_id,''), COALESCE(t.publish_operation_id,'')
 		   FROM post_targets t
+		   JOIN posts p ON p.id=t.post_id
 		   JOIN social_accounts a ON a.id=t.social_account_id
-		  WHERE a.platform='tiktok' AND a.status='active' AND t.status='published'
+		  WHERE p.project_id=? AND a.project_id=?
+		    AND a.platform='tiktok' AND a.status='active' AND t.status='published'
 		    AND (
-		      (t.publish_operation_id!='' AND
-		       (t.identity_resolve_after IS NULL OR t.identity_resolve_after<=CURRENT_TIMESTAMP))
+		      t.publish_operation_id!=''
 		      OR t.platform_post_id LIKE 'v_pub_%'
 		      OR t.platform_post_id LIKE 'p_pub_%'
 		    )
+		    AND (t.identity_resolve_after IS NULL OR t.identity_resolve_after<=CURRENT_TIMESTAMP)
 		  ORDER BY COALESCE(t.identity_resolve_after,t.published_at), t.id
 		  LIMIT 20`,
+		pid, pid,
 	)
 	if err != nil {
 		return err
@@ -4675,7 +4681,8 @@ func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCt
 				        identity_resolve_after=CASE
 				          WHEN identity_resolve_attempts<2 THEN datetime('now','+5 minutes')
 				          WHEN identity_resolve_attempts<5 THEN datetime('now','+30 minutes')
-				          ELSE datetime('now','+6 hours')
+				          WHEN identity_resolve_attempts<12 THEN datetime('now','+6 hours')
+				          ELSE datetime('now','+7 days')
 				        END,
 				        last_error=?
 				  WHERE id=?`,

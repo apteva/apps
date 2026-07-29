@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -92,6 +94,148 @@ func TestTikTokPostMetricsResolvesPublishOperationBeforeQuery(t *testing.T) {
 	}
 	if storedID != "7667276869607116037" || operationID != "" {
 		t.Fatalf("resolved identity not persisted: post=%q operation=%q", storedID, operationID)
+	}
+}
+
+func TestTikTokIdentityResolverScopesLegacyTargetsAndHonorsBackoff(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+
+	insertTarget := func(project string, connID int64, operationID, resolveAfter string) int64 {
+		t.Helper()
+		accountResult, err := ctx.AppDB().Exec(
+			`INSERT INTO social_accounts
+			   (project_id, platform, connection_id, display_name, status)
+			 VALUES (?, 'tiktok', ?, ?, 'active')`,
+			project, connID, project,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accountID, _ := accountResult.LastInsertId()
+		postResult, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, status, published_at)
+			 VALUES (?, ?, 'published', datetime('now'))`,
+			project, project,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		postID, _ := postResult.LastInsertId()
+		targetResult, err := ctx.AppDB().Exec(
+			`INSERT INTO post_targets
+			   (post_id, social_account_id, status, platform_post_id,
+			    identity_resolve_after, published_at)
+			 VALUES (?, ?, 'published', ?, ?, datetime('now'))`,
+			postID, accountID, operationID, resolveAfter,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		targetID, _ := targetResult.LastInsertId()
+		return targetID
+	}
+
+	dueTarget := insertTarget("test-proj", 42, "v_pub_due", time.Now().UTC().Add(-time.Minute).Format("2006-01-02 15:04:05"))
+	futureTarget := insertTarget("test-proj", 42, "v_pub_future", time.Now().UTC().Add(time.Hour).Format("2006-01-02 15:04:05"))
+	otherProjectTarget := insertTarget("other-proj", 43, "v_pub_other", time.Now().UTC().Add(-time.Minute).Format("2006-01-02 15:04:05"))
+
+	app := &App{}
+	if err := app.resolvePendingTikTokPostIDs(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].ConnID != 42 || pf.executeCalls[0].Input["publish_id"] != "v_pub_due" {
+		t.Fatalf("resolver calls = %+v", pf.executeCalls)
+	}
+	var attempts int
+	var nextRun string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT identity_resolve_attempts, COALESCE(identity_resolve_after,'')
+		   FROM post_targets WHERE id=?`,
+		dueTarget,
+	).Scan(&attempts, &nextRun); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 1 || nextRun == "" {
+		t.Fatalf("due target attempts=%d next=%q", attempts, nextRun)
+	}
+
+	if err := app.resolvePendingTikTokPostIDs(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("backoff was bypassed: calls=%+v", pf.executeCalls)
+	}
+	for _, targetID := range []int64{futureTarget, otherProjectTarget} {
+		if err := ctx.AppDB().QueryRow(
+			`SELECT identity_resolve_attempts FROM post_targets WHERE id=?`,
+			targetID,
+		).Scan(&attempts); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != 0 {
+			t.Fatalf("target %d attempts=%d, want 0", targetID, attempts)
+		}
+	}
+}
+
+func TestTikTokIdentityResolverCapsStaleRetriesAtWeekly(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":[]}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, 'Creator', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, published_at)
+		 VALUES ('test-proj', 'Old post', 'published', datetime('now','-30 days'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	targetResult, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets
+		   (post_id, social_account_id, status, platform_post_id,
+		    identity_resolve_attempts, identity_resolve_after, published_at)
+		 VALUES (?, ?, 'published', 'v_pub_stale', 12, datetime('now','-1 minute'), datetime('now','-30 days'))`,
+		postID, accountID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetID, _ := targetResult.LastInsertId()
+
+	if err := (&App{}).resolvePendingTikTokPostIDs(context.Background(), ctx, "test-proj"); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var nextRun string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT identity_resolve_attempts, COALESCE(identity_resolve_after,'')
+		   FROM post_targets WHERE id=?`,
+		targetID,
+	).Scan(&attempts, &nextRun); err != nil {
+		t.Fatal(err)
+	}
+	next, ok := parseMetricPointTime(nextRun)
+	if !ok || attempts != 13 || time.Until(next) < 6*24*time.Hour {
+		t.Fatalf("stale target attempts=%d next=%q", attempts, nextRun)
 	}
 }
 
