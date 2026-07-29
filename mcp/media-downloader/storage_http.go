@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +35,7 @@ func newStorageHTTPClient() *storageHTTPClient {
 	}
 }
 
-func (c *storageHTTPClient) uploadMultipart(ctx context.Context, projectID string, r io.Reader, name, contentType, folder, visibility string, tags []string, size int64, sha256Hex string) (storageUploadResult, error) {
+func (c *storageHTTPClient) uploadMultipart(ctx context.Context, projectID string, r io.Reader, name, contentType, folder, visibility string, tags []string, size int64, sha256Hex string, progress func(float64)) (storageUploadResult, error) {
 	init, err := c.initUpload(ctx, projectID, map[string]any{
 		"filename":     name,
 		"size":         size,
@@ -49,16 +51,24 @@ func (c *storageHTTPClient) uploadMultipart(ctx context.Context, projectID strin
 	if init.File != nil {
 		return storageUploadResult{ID: init.File.ID, URL: init.File.URL}, nil
 	}
-	if init.UploadID == "" || init.PartSize <= 0 {
+	if init.UploadID == "" {
 		return storageUploadResult{}, errors.New("storage upload init returned no upload_id")
 	}
 	partSize := init.PartSize
 	if partSize <= 0 {
 		partSize = 5 * 1024 * 1024
 	}
+	if partSize > 64*1024*1024 {
+		return storageUploadResult{}, fmt.Errorf("storage upload part_size %d exceeds 64 MiB safety limit", partSize)
+	}
 	buf := make([]byte, partSize)
 	part := 1
+	var uploaded int64
 	for {
+		if err := ctx.Err(); err != nil {
+			c.abortUploadSoon(projectID, init.UploadID)
+			return storageUploadResult{}, err
+		}
 		n, readErr := io.ReadFull(r, buf)
 		if readErr == io.EOF {
 			break
@@ -67,13 +77,17 @@ func (c *storageHTTPClient) uploadMultipart(ctx context.Context, projectID strin
 			readErr = nil
 		}
 		if readErr != nil {
-			_ = c.abortUpload(context.Background(), projectID, init.UploadID)
+			c.abortUploadSoon(projectID, init.UploadID)
 			return storageUploadResult{}, readErr
 		}
 		if n > 0 {
-			if err := c.uploadPart(ctx, projectID, init.UploadID, part, buf[:n]); err != nil {
-				_ = c.abortUpload(context.Background(), projectID, init.UploadID)
+			if err := c.uploadPartWithRetry(ctx, projectID, init.UploadID, part, buf[:n]); err != nil {
+				c.abortUploadSoon(projectID, init.UploadID)
 				return storageUploadResult{}, err
+			}
+			uploaded += int64(n)
+			if progress != nil && size > 0 {
+				progress(min(float64(uploaded)/float64(size), 1))
 			}
 			part++
 		}
@@ -83,10 +97,68 @@ func (c *storageHTTPClient) uploadMultipart(ctx context.Context, projectID strin
 	}
 	file, err := c.completeUpload(ctx, projectID, init.UploadID, sha256Hex)
 	if err != nil {
-		_ = c.abortUpload(context.Background(), projectID, init.UploadID)
+		c.abortUploadSoon(projectID, init.UploadID)
 		return storageUploadResult{}, err
 	}
 	return storageUploadResult{ID: file.ID, URL: file.URL}, nil
+}
+
+func (c *storageHTTPClient) uploadPartWithRetry(ctx context.Context, projectID, uploadID string, part int, body []byte) error {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := c.uploadPart(ctx, projectID, uploadID, part, body); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt < 2 {
+			timer := time.NewTimer(time.Duration(attempt+1) * 250 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	return fmt.Errorf("upload part %d after 3 attempts: %w", part, lastErr)
+}
+
+func (c *storageHTTPClient) abortUploadSoon(projectID, uploadID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = c.abortUpload(ctx, projectID, uploadID)
+}
+
+func hashFile(ctx context.Context, r io.Reader, size int64, progress func(float64)) (string, error) {
+	h := sha256.New()
+	buf := make([]byte, 1024*1024)
+	var read int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := r.Read(buf)
+		if n > 0 {
+			if _, writeErr := h.Write(buf[:n]); writeErr != nil {
+				return "", writeErr
+			}
+			read += int64(n)
+			if progress != nil && size > 0 {
+				progress(min(float64(read)/float64(size), 1))
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type storageUploadInitResponse struct {
@@ -169,7 +241,13 @@ func (c *storageHTTPClient) do(ctx context.Context, method, path, projectID stri
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024*1024+1))
+	if readErr != nil {
+		return nil, readErr
+	}
+	if len(raw) > 1024*1024 {
+		return nil, errors.New("storage response exceeded 1 MiB")
+	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("storage %s %s: http %d: %s", method, path, resp.StatusCode, string(raw))
 	}

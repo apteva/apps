@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -24,7 +25,9 @@ type commandRunner interface {
 type osCommandRunner struct{}
 
 func (osCommandRunner) Run(ctx context.Context, name string, args []string, stdout func(string), stderr func(string)) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, name, args...)
 	outPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -38,32 +41,46 @@ func (osCommandRunner) Run(ctx context.Context, name string, args []string, stdo
 	}
 
 	var wg sync.WaitGroup
+	scanErrs := make(chan error, 2)
 	wg.Add(2)
-	go scanPipe(&wg, outPipe, stdout)
-	go scanPipe(&wg, errPipe, stderr)
+	go scanPipe(&wg, outPipe, stdout, scanErrs, cancel)
+	go scanPipe(&wg, errPipe, stderr, scanErrs, cancel)
 	waitErr := cmd.Wait()
 	wg.Wait()
+	close(scanErrs)
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	for scanErr := range scanErrs {
+		if scanErr != nil {
+			return fmt.Errorf("read yt-dlp output: %w", scanErr)
+		}
 	}
 	return waitErr
 }
 
-func scanPipe(wg *sync.WaitGroup, r io.Reader, fn func(string)) {
+func scanPipe(wg *sync.WaitGroup, r io.Reader, fn func(string), errs chan<- error, cancel context.CancelFunc) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
 	for scanner.Scan() {
 		if fn != nil {
 			fn(scanner.Text())
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		errs <- err
+		cancel()
+	}
 }
 
-func buildProbeArgs(rawURL, cookieFile string, extraArgs []string) []string {
+func buildProbeArgs(rawURL, cookieFile string, extraArgs []string, proxyURL string) []string {
 	args := []string{"--dump-single-json", "--no-playlist", "--no-warnings"}
 	args = append(args, extraArgs...)
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
 	if cookieFile != "" {
 		args = append(args, "--cookies", cookieFile)
 	}
@@ -75,15 +92,20 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 	args := []string{
 		"--newline",
 		"--progress",
-		"--print", "after_move:filepath",
+		"--print", "before_dl:__APTEVA_META__%(title).200B|%(extractor)s",
+		"--print", "after_move:__APTEVA_FILE__%(filepath)s",
 		"--restrict-filenames",
 		"-P", jobDir,
 		"-o", "%(title).200B-%(id)s.%(ext)s",
 	}
 	args = append(args, req.YTDLPExtraArgs...)
-	if req.NoPlaylist {
-		args = append(args, "--no-playlist")
+	if req.ProxyURL != "" {
+		args = append(args, "--proxy", req.ProxyURL)
 	}
+	if req.MaxDownloadBytes > 0 {
+		args = append(args, "--max-filesize", strconv.FormatInt(req.MaxDownloadBytes, 10))
+	}
+	args = append(args, "--no-playlist")
 	if cookieFile != "" {
 		args = append(args, "--cookies", cookieFile)
 	}
@@ -188,10 +210,10 @@ func parseExtraArgs(raw string) []string {
 	return strings.Fields(strings.TrimSpace(raw))
 }
 
-func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, cookieFile string, extraArgs []string) (map[string]any, error) {
+func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, cookieFile string, extraArgs []string, proxyURL string) (map[string]any, error) {
 	var stdout strings.Builder
 	var stderr strings.Builder
-	err := runner.Run(ctx, ytdlpPath, buildProbeArgs(rawURL, cookieFile, extraArgs), func(line string) {
+	err := runner.Run(ctx, ytdlpPath, buildProbeArgs(rawURL, cookieFile, extraArgs, proxyURL), func(line string) {
 		stdout.WriteString(line)
 		stdout.WriteByte('\n')
 	}, func(line string) {
@@ -215,6 +237,7 @@ func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, co
 func findOutputFile(jobDir string, printed []string) (string, error) {
 	for i := len(printed) - 1; i >= 0; i-- {
 		candidate := strings.TrimSpace(printed[i])
+		candidate = strings.TrimPrefix(candidate, "__APTEVA_FILE__")
 		if candidate == "" {
 			continue
 		}

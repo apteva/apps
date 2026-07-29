@@ -2,14 +2,12 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.11
+version: 0.2.12
 description: |
-  Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
-  and authenticated source downloads, stores completed files through the
-  storage app, and keeps sensitive YouTube and Patreon cookie profiles
-  encrypted in the app database. v0.2.9 adds configurable extra yt-dlp
-  arguments so installs can enable JavaScript challenge solving, for
-  example --js-runtimes node:/path/to/node.
+  Media download sidecar for public and authenticated sources supported by
+  yt-dlp. Downloads use bounded concurrency and guarded public-network
+  egress, stream completed files to storage, and keep sensitive YouTube and
+  Patreon cookie profiles encrypted in the app database.
 
 author: Apteva
 icon: /ui/icon.svg
@@ -44,6 +42,40 @@ provides:
       label: Downloads
       icon: download
       entry: /ui/MediaDownloaderPanel.mjs
+  publishes:
+    - name: download.created
+      description: A media download job was queued.
+      payload: { id: string, status: string, stage: string, progress: number }
+    - name: download.started
+      description: A queued media download acquired a worker and started.
+      payload: { id: string, status: string, stage: string, progress: number }
+    - name: download.stage
+      description: A running download moved between download, processing, preparation, and upload stages.
+      payload: { id: string, status: string, stage: string, progress: number }
+    - name: download.progress
+      description: Download progress changed.
+      payload: { id: string, status: string, stage: string, progress: number }
+    - name: download.cancel_requested
+      description: Cancellation was requested for a running or queued download.
+      payload: { id: string, status: string }
+    - name: download.completed
+      description: A download completed and its output was stored.
+      payload: { id: string, status: string, stage: string, storage_file_id: integer, storage_url: string }
+    - name: download.failed
+      description: A download failed.
+      payload: { id: string, status: string, stage: string, error: string }
+    - name: download.canceled
+      description: A download was canceled.
+      payload: { id: string, status: string, stage: string, error: string }
+    - name: profile.created
+      description: An encrypted source profile was created.
+      payload: { id: string, provider: string, status: string }
+    - name: profile.validated
+      description: A source profile validation finished.
+      payload: { id: string, provider: string, status: string, last_error: string }
+    - name: profile.deleted
+      description: A source profile was deleted and its encrypted payload scrubbed.
+      payload: { id: string }
   mcp_tools:
     - name: download_probe_url
       description: Inspect a supported media URL with yt-dlp without downloading it.
@@ -103,7 +135,12 @@ config_schema:
     type: text
     default: "512"
     label: Max download size MB
-    description: Files larger than this are rejected before upload to storage.
+    description: yt-dlp rejects files over this limit and the output is checked again before upload.
+  - name: max_concurrent_downloads
+    type: text
+    default: "2"
+    label: Max concurrent downloads
+    description: Number of yt-dlp jobs allowed to run at once. Additional jobs remain queued.
   - name: default_storage_folder
     type: text
     default: "/.downloads/media"

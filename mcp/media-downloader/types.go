@@ -7,6 +7,7 @@ type downloadJob struct {
 	ProjectID         string  `json:"project_id,omitempty"`
 	URL               string  `json:"url"`
 	Status            string  `json:"status"`
+	Stage             string  `json:"stage"`
 	Progress          float64 `json:"progress"`
 	Title             string  `json:"title,omitempty"`
 	Extractor         string  `json:"extractor,omitempty"`
@@ -62,7 +63,8 @@ type downloadRequest struct {
 	FFmpegLocation    string
 	YoutubePlayer     string
 	YTDLPExtraArgs    []string
-	NoPlaylist        bool
+	ProxyURL          string
+	MaxDownloadBytes  int64
 	Tags              []string
 }
 

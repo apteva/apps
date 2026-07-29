@@ -2,11 +2,8 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"embed"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -35,6 +33,9 @@ type App struct {
 
 	mu      sync.Mutex
 	cancels map[string]runningDownload
+	wg      sync.WaitGroup
+	slots   chan struct{}
+	proxy   *safeProxy
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -56,6 +57,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.ctx = ctx
 	a.runner = osCommandRunner{}
 	a.cancels = make(map[string]runningDownload)
+	a.slots = make(chan struct{}, configInt(ctx, "max_concurrent_downloads", 2))
 	a.dataDir = ctx.DataDir()
 	if a.dataDir == "" {
 		return errors.New("media-downloader requires APTEVA_DATA_DIR or DB_PATH")
@@ -78,27 +80,69 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			a.ffmpegPath = p
 		}
 	}
+	proxy, err := startSafeProxy(nil)
+	if err != nil {
+		return err
+	}
+	a.proxy = proxy
 	interrupted, err := interruptActiveDownloads(context.Background(), ctx.AppDB(), "interrupted by app restart; start a new download")
 	if err != nil {
+		_ = proxy.Close(context.Background())
 		return err
 	}
 	for _, job := range interrupted {
 		a.emitDownloadJob(ctx.WithProject(job.ProjectID), "download.failed", job)
 	}
-	ctx.Logger().Info("media-downloader mounted", "ytdlp_path", a.ytdlpPath, "ffmpeg_path", a.ffmpegPath)
+	a.cleanupJobDirs(ctx)
+	ctx.Logger().Info("media-downloader mounted", "ytdlp_path", a.ytdlpPath, "ffmpeg_path", a.ffmpegPath, "max_concurrent_downloads", cap(a.slots))
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	for id, running := range a.cancels {
-		running.cancel()
-		appendLog(context.Background(), a.ctx.AppDB(), id, "info", "download canceled by app shutdown")
-		_ = failDownload(context.Background(), a.ctx.AppDB(), id, statusCanceled, "download canceled by app shutdown")
-		a.emitDownload(a.ctx, "download.canceled", running.projectID, map[string]any{"id": id, "status": statusCanceled, "error": "download canceled by app shutdown"})
+	running := make([]runningDownload, 0, len(a.cancels))
+	for _, download := range a.cancels {
+		running = append(running, download)
+	}
+	a.mu.Unlock()
+	for _, download := range running {
+		download.cancel()
+	}
+	done := make(chan struct{})
+	go func() {
+		a.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		if a.ctx != nil {
+			a.ctx.Logger().Warn("timed out waiting for downloads to stop")
+		}
+	}
+	if a.proxy != nil {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = a.proxy.Close(closeCtx)
 	}
 	return nil
+}
+
+func (a *App) cleanupJobDirs(ctx *sdk.AppCtx) {
+	root := filepath.Join(a.dataDir, "jobs")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		ctx.Logger().Warn("clean stale media download directories", "error", err)
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			ctx.Logger().Warn("remove stale media download directory", "job_id", entry.Name(), "error", err)
+		}
+	}
 }
 
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
@@ -109,10 +153,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/jobs", Handler: a.httpJobs},
 		{Method: http.MethodPost, Pattern: "/jobs", Handler: a.httpCreateJob},
+		{Method: http.MethodPost, Pattern: "/probe", Handler: a.httpProbe},
 		{Method: http.MethodGet, Pattern: "/jobs/", Handler: a.httpJob},
 		{Method: http.MethodPost, Pattern: "/jobs/", Handler: a.httpJobAction},
 		{Method: http.MethodGet, Pattern: "/profiles", Handler: a.httpProfiles},
 		{Method: http.MethodPost, Pattern: "/profiles", Handler: a.httpCreateProfile},
+		{Method: http.MethodPost, Pattern: "/profiles/", Handler: a.httpProfileAction},
 		{Method: http.MethodDelete, Pattern: "/profiles/", Handler: a.httpDeleteProfile},
 	}
 }
@@ -131,8 +177,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "download_media",
-			Description: "Start a media download job with yt-dlp and upload the completed file to storage. " +
-				"Args: url, mode? (video|audio, default video), quality? (best|1080p|720p|480p|360p|worst or yt-dlp selector), format_id?, audio_format?, source_profile_id?, folder?, visibility?, tags?, no_playlist? (default true). Returns {job}.",
+			Description: "Start a single-item media download job with yt-dlp and upload the completed file to storage. " +
+				"Args: url, mode? (video|audio, default video), quality? (best|1080p|720p|480p|360p|worst or yt-dlp selector), format_id?, audio_format?, source_profile_id?, folder?, visibility?, tags?. Returns {job}.",
 			InputSchema: schemaObj(map[string]any{
 				"url":               map[string]any{"type": "string"},
 				"mode":              map[string]any{"type": "string"},
@@ -172,7 +218,7 @@ func (a *App) toolProbe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer cleanup()
-	meta, err := probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")))
+	meta, err := probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")), a.proxyURL())
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +240,9 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if mode != "video" && mode != "audio" {
 		return nil, errors.New("mode must be video or audio")
+	}
+	if !boolArg(args, "no_playlist", true) {
+		return nil, errors.New("playlist downloads are not supported by a single-file job; submit one item URL per job")
 	}
 	quality := strArg(args, "quality")
 	if quality == "" {
@@ -224,10 +273,11 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		FFmpegLocation:    a.ffmpegPath,
 		YoutubePlayer:     configString(ctx, "youtube_player_client", "android"),
 		YTDLPExtraArgs:    parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")),
-		NoPlaylist:        boolArg(args, "no_playlist", true),
+		ProxyURL:          a.proxyURL(),
+		MaxDownloadBytes:  int64(configInt(ctx, "max_download_mb", 512)) * 1024 * 1024,
 		Tags:              stringSliceArg(args, "tags"),
 	}
-	j := downloadJob{ID: id, ProjectID: projectID, URL: rawURL, Status: statusQueued, Mode: mode, Quality: quality, FormatID: req.FormatID, SourceProfileID: req.SourceProfileID, StorageFolder: folder, StorageVisibility: visibility}
+	j := downloadJob{ID: id, ProjectID: projectID, URL: rawURL, Status: statusQueued, Stage: stageQueued, Mode: mode, Quality: quality, FormatID: req.FormatID, SourceProfileID: req.SourceProfileID, StorageFolder: folder, StorageVisibility: visibility}
 	if err := insertDownload(context.Background(), ctx.AppDB(), j); err != nil {
 		return nil, err
 	}
@@ -236,6 +286,7 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.mu.Lock()
 	a.cancels[id] = runningDownload{cancel: cancel, projectID: projectID}
 	a.mu.Unlock()
+	a.wg.Add(1)
 	go a.runDownload(runCtx, ctx.WithProject(projectID), id, req)
 	return map[string]any{"job": j}, nil
 }
@@ -243,29 +294,39 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, req downloadRequest) {
 	db := ctx.AppDB()
 	defer func() {
+		pruneDownloadLogs(context.Background(), db, id, 200)
 		a.mu.Lock()
 		delete(a.cancels, id)
 		a.mu.Unlock()
+		a.wg.Done()
 	}()
+	select {
+	case a.slots <- struct{}{}:
+		defer func() { <-a.slots }()
+	case <-runCtx.Done():
+		a.finishError(ctx, req.ProjectID, id, runCtx.Err())
+		return
+	}
 	_ = setDownloadRunning(context.Background(), db, id)
 	appendLog(context.Background(), db, id, "info", "download started")
-	a.emitDownload(ctx, "download.started", req.ProjectID, map[string]any{"id": id, "status": statusRunning})
+	a.emitDownload(ctx, "download.started", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "stage": stageDownloading, "progress": 0})
 
 	jobDir := filepath.Join(a.dataDir, "jobs", id)
 	if err := os.MkdirAll(jobDir, 0700); err != nil {
-		a.fail(ctx, req.ProjectID, id, err)
+		a.finishError(ctx, req.ProjectID, id, err)
 		return
 	}
+	defer os.RemoveAll(jobDir)
 	var cookieFile string
 	if req.SourceProfileID != "" {
-		payload, err := a.profilePayload(context.Background(), ctx, req.ProjectID, req.SourceProfileID)
+		payload, err := a.profilePayload(runCtx, ctx, req.ProjectID, req.SourceProfileID)
 		if err != nil {
-			a.fail(ctx, req.ProjectID, id, err)
+			a.finishError(ctx, req.ProjectID, id, err)
 			return
 		}
 		cookieFile, err = writeCookieFile(jobDir, payload)
 		if err != nil {
-			a.fail(ctx, req.ProjectID, id, err)
+			a.finishError(ctx, req.ProjectID, id, err)
 			return
 		}
 	}
@@ -273,42 +334,68 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 	printed := make([]string, 0, 4)
 	var lastErr string
 	lastProgress := -1.0
+	currentStage := stageDownloading
+	var stateMu sync.Mutex
 	err := a.runner.Run(runCtx, a.ytdlpPath, buildDownloadArgs(req, jobDir, cookieFile), func(line string) {
 		line = trimLogLine(line)
-		if p, ok := parseProgressLine(line); ok {
-			_ = updateDownloadProgress(context.Background(), db, id, p)
-			if p == 100 || lastProgress < 0 || p-lastProgress >= 1 {
-				lastProgress = p
-				a.emitDownload(ctx, "download.progress", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "progress": p})
-			}
+		stateMu.Lock()
+		defer stateMu.Unlock()
+		if strings.HasPrefix(line, "__APTEVA_META__") {
+			meta := strings.TrimPrefix(line, "__APTEVA_META__")
+			title, extractor, _ := strings.Cut(meta, "|")
+			_ = setDownloadProbe(context.Background(), db, id, title, extractor)
+			a.emitDownload(ctx, "download.stage", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "stage": currentStage, "progress": max(lastProgress, 0), "title": title, "extractor": extractor})
+			return
 		}
-		if strings.HasPrefix(line, "/") || strings.HasPrefix(line, jobDir) {
+		if strings.HasPrefix(line, "__APTEVA_FILE__") {
 			printed = append(printed, line)
+			return
+		}
+		if p, ok := parseProgressLine(line); ok {
+			progress := min(p*0.84, 84)
+			if lastProgress < 0 || progress-lastProgress >= 1 || progress >= 84 {
+				lastProgress = progress
+				_ = updateDownloadStage(context.Background(), db, id, stageDownloading, progress)
+				a.emitDownload(ctx, "download.progress", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "stage": stageDownloading, "progress": progress})
+			}
+			return
+		}
+		if isPostprocessingLine(line) && currentStage != stagePostprocessing {
+			currentStage = stagePostprocessing
+			lastProgress = max(lastProgress, 85)
+			_ = updateDownloadStage(context.Background(), db, id, currentStage, lastProgress)
+			a.emitDownload(ctx, "download.stage", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "stage": currentStage, "progress": lastProgress})
 		}
 		appendLog(context.Background(), db, id, "stdout", line)
 	}, func(line string) {
-		lastErr = trimLogLine(line)
+		line = trimLogLine(line)
+		stateMu.Lock()
+		lastErr = line
+		stateMu.Unlock()
 		appendLog(context.Background(), db, id, "stderr", line)
 	})
 	if err != nil {
-		status := statusFailed
+		stateMu.Lock()
+		message := lastErr
+		stateMu.Unlock()
 		if errors.Is(err, context.Canceled) {
-			status = statusCanceled
-			lastErr = "download canceled"
-		} else if lastErr == "" {
-			lastErr = err.Error()
+			a.finishError(ctx, req.ProjectID, id, err)
+		} else {
+			if message == "" {
+				message = err.Error()
+			}
+			a.finishError(ctx, req.ProjectID, id, errors.New(message))
 		}
-		_ = failDownload(context.Background(), db, id, status, lastErr)
-		a.emitDownload(ctx, "download."+status, req.ProjectID, map[string]any{"id": id, "status": status, "error": lastErr})
 		return
 	}
+	a.setDownloadStage(ctx, req.ProjectID, id, stagePostprocessing, 86)
 	output, err := findOutputFile(jobDir, printed)
 	if err != nil {
-		a.fail(ctx, req.ProjectID, id, err)
+		a.finishError(ctx, req.ProjectID, id, err)
 		return
 	}
-	if err := a.uploadOutput(ctx, id, req, output); err != nil {
-		a.fail(ctx, req.ProjectID, id, err)
+	if err := a.uploadOutput(runCtx, ctx, id, req, output); err != nil {
+		a.finishError(ctx, req.ProjectID, id, err)
 		return
 	}
 	appendLog(context.Background(), db, id, "info", "download completed")
@@ -319,13 +406,29 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 	}
 }
 
-func (a *App) uploadOutput(ctx *sdk.AppCtx, id string, req downloadRequest, path string) error {
+func isPostprocessingLine(line string) bool {
+	for _, prefix := range []string{"[ExtractAudio]", "[Merger]", "[VideoConvertor]", "[AudioConvertor]", "[Fixup", "[Embed"} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) setDownloadStage(ctx *sdk.AppCtx, projectID, id, stage string, progress float64) {
+	_ = updateDownloadStage(context.Background(), ctx.AppDB(), id, stage, progress)
+	a.emitDownload(ctx, "download.stage", projectID, map[string]any{"id": id, "status": statusRunning, "stage": stage, "progress": progress})
+}
+
+func (a *App) uploadOutput(runCtx context.Context, ctx *sdk.AppCtx, id string, req downloadRequest, path string) error {
+	if err := runCtx.Err(); err != nil {
+		return err
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	maxBytes := int64(configInt(ctx, "max_download_mb", 512)) * 1024 * 1024
-	if maxBytes > 0 && st.Size() > maxBytes {
+	if req.MaxDownloadBytes > 0 && st.Size() > req.MaxDownloadBytes {
 		return fmt.Errorf("output is %d bytes, over max_download_mb", st.Size())
 	}
 	name := filepath.Base(path)
@@ -334,47 +437,34 @@ func (a *App) uploadOutput(ctx *sdk.AppCtx, id string, req downloadRequest, path
 		ctype = "application/octet-stream"
 	}
 	tags := append([]string{"media-downloader", req.Mode}, req.Tags...)
-	var got storageUploadResult
-	if st.Size() > inlineUploadLimitBytes {
-		got, err = uploadFileMultipart(context.Background(), req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags)
-	} else {
-		got, err = uploadFileInline(ctx, req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags)
-	}
+	a.setDownloadStage(ctx, req.ProjectID, id, stagePreparing, 88)
+	lastHashProgress := -1.0
+	lastUploadProgress := -1.0
+	got, err := uploadFileMultipart(runCtx, req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags,
+		func(progress float64) {
+			if progress-lastHashProgress >= 0.1 || progress >= 1 {
+				lastHashProgress = progress
+				a.setDownloadStage(ctx, req.ProjectID, id, stagePreparing, 88+progress*4)
+			}
+		},
+		func(progress float64) {
+			if progress-lastUploadProgress >= 0.01 || progress >= 1 {
+				lastUploadProgress = progress
+				a.setDownloadStage(ctx, req.ProjectID, id, stageUploading, 92+progress*7)
+			}
+		})
 	if err != nil {
 		return err
 	}
 	return completeDownload(context.Background(), ctx.AppDB(), id, name, st.Size(), got.ID, got.URL)
 }
 
-const inlineUploadLimitBytes = 32 * 1024 * 1024
-
 type storageUploadResult struct {
 	ID  int64  `json:"id"`
 	URL string `json:"url"`
 }
 
-func uploadFileInline(ctx *sdk.AppCtx, projectID, path, name, contentType, folder, visibility string, tags []string) (storageUploadResult, error) {
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return storageUploadResult{}, err
-	}
-	args := map[string]any{
-		"name":           name,
-		"folder":         folder,
-		"content_type":   contentType,
-		"content_base64": base64.StdEncoding.EncodeToString(body),
-		"tags":           tags,
-		"visibility":     visibility,
-		"source":         "media-downloader",
-	}
-	var got storageUploadResult
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", storageArgs(projectID, args), &got); err != nil {
-		return storageUploadResult{}, fmt.Errorf("storage.files_upload: %w", err)
-	}
-	return got, nil
-}
-
-func uploadFileMultipart(ctx context.Context, projectID, path, name, contentType, folder, visibility string, tags []string) (storageUploadResult, error) {
+func uploadFileMultipart(ctx context.Context, projectID, path, name, contentType, folder, visibility string, tags []string, hashProgress, uploadProgress func(float64)) (storageUploadResult, error) {
 	client := newStorageHTTPClient()
 	if client.base == "" {
 		return storageUploadResult{}, errors.New("APTEVA_GATEWAY_URL not set; cannot stream large file to storage")
@@ -387,26 +477,33 @@ func uploadFileMultipart(ctx context.Context, projectID, path, name, contentType
 		return storageUploadResult{}, err
 	}
 	defer f.Close()
-	h := sha256.New()
-	size, err := io.Copy(h, f)
+	st, err := f.Stat()
+	if err != nil {
+		return storageUploadResult{}, err
+	}
+	sha, err := hashFile(ctx, f, st.Size(), hashProgress)
 	if err != nil {
 		return storageUploadResult{}, fmt.Errorf("hash output: %w", err)
 	}
-	sha := hex.EncodeToString(h.Sum(nil))
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return storageUploadResult{}, err
 	}
-	return client.uploadMultipart(ctx, projectID, f, name, contentType, folder, visibility, tags, size, sha)
+	return client.uploadMultipart(ctx, projectID, f, name, contentType, folder, visibility, tags, st.Size(), sha, uploadProgress)
 }
 
-func (a *App) fail(ctx *sdk.AppCtx, projectID, id string, err error) {
+func (a *App) finishError(ctx *sdk.AppCtx, projectID, id string, err error) {
 	msg := "unknown error"
 	if err != nil {
 		msg = err.Error()
 	}
+	status := statusFailed
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		status = statusCanceled
+		msg = "download canceled"
+	}
 	appendLog(context.Background(), a.ctx.AppDB(), id, "error", msg)
-	_ = failDownload(context.Background(), a.ctx.AppDB(), id, statusFailed, msg)
-	a.emitDownload(ctx, "download.failed", projectID, map[string]any{"id": id, "status": statusFailed, "error": msg})
+	_ = failDownload(context.Background(), a.ctx.AppDB(), id, status, msg)
+	a.emitDownload(ctx, "download."+status, projectID, map[string]any{"id": id, "status": status, "stage": terminalStage(status), "error": msg})
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -431,15 +528,23 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strArg(args, "job_id")
+	projectID := projectScope(ctx, args)
+	job, err := getDownload(context.Background(), ctx.AppDB(), projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if job.Status != statusQueued && job.Status != statusRunning {
+		return map[string]any{"canceled": false, "reason": "job is not running"}, nil
+	}
 	a.mu.Lock()
 	running := a.cancels[id]
 	a.mu.Unlock()
-	if running.cancel == nil {
+	if running.cancel == nil || running.projectID != projectID {
 		return map[string]any{"canceled": false, "reason": "job is not running"}, nil
 	}
 	running.cancel()
 	appendLog(context.Background(), ctx.AppDB(), id, "info", "cancel requested")
-	a.emitDownload(ctx, "download.cancel_requested", projectScope(ctx, args), map[string]any{"id": id})
+	a.emitDownload(ctx, "download.cancel_requested", projectID, map[string]any{"id": id, "status": statusRunning})
 	return map[string]any{"canceled": true}, nil
 }
 
@@ -478,13 +583,16 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if testURL := strArg(args, "test_url"); testURL != "" {
 		if err := a.guard(ctx, args, testURL); err != nil {
 			_ = markProfileValidated(context.Background(), ctx.AppDB(), id, p.ProjectID, err.Error())
-			a.emitProfile(ctx, "profile.validated", sourceProfile{ID: id, ProjectID: p.ProjectID, Name: name, Provider: provider, AuthType: authType, Status: "active", LastError: err.Error()})
-			return map[string]any{"profile": public, "validated": false, "validation_error": err.Error()}, nil
+			updated, _ := getProfile(context.Background(), ctx.AppDB(), p.ProjectID, id)
+			a.emitProfile(ctx, "profile.validated", updated.sourceProfile)
+			return map[string]any{"profile": updated.sourceProfile, "validated": false, "validation_error": err.Error()}, nil
 		}
 		if err := a.validateProfileAgainstURL(ctx, p.ProjectID, id, testURL); err != nil {
-			return map[string]any{"profile": public, "validated": false, "validation_error": err.Error()}, nil
+			updated, _ := getProfile(context.Background(), ctx.AppDB(), p.ProjectID, id)
+			return map[string]any{"profile": updated.sourceProfile, "validated": false, "validation_error": err.Error()}, nil
 		}
-		return map[string]any{"profile": public, "validated": true}, nil
+		updated, _ := getProfile(context.Background(), ctx.AppDB(), p.ProjectID, id)
+		return map[string]any{"profile": updated.sourceProfile, "validated": true}, nil
 	}
 	return map[string]any{"profile": public}, nil
 }
@@ -506,9 +614,11 @@ func (a *App) toolProfileValidate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if err := a.validateProfileAgainstURL(ctx, projectScope(ctx, args), profileID, rawURL); err != nil {
-		return map[string]any{"valid": false, "error": err.Error()}, nil
+		profile, _ := getProfile(context.Background(), ctx.AppDB(), projectScope(ctx, args), profileID)
+		return map[string]any{"valid": false, "profile": profile.sourceProfile, "error": err.Error()}, nil
 	}
-	return map[string]any{"valid": true}, nil
+	profile, _ := getProfile(context.Background(), ctx.AppDB(), projectScope(ctx, args), profileID)
+	return map[string]any{"valid": true, "profile": profile.sourceProfile}, nil
 }
 
 func (a *App) validateProfileAgainstURL(ctx *sdk.AppCtx, projectID, profileID, rawURL string) error {
@@ -517,17 +627,23 @@ func (a *App) validateProfileAgainstURL(ctx *sdk.AppCtx, projectID, profileID, r
 		return err
 	}
 	defer cleanup()
-	_, err = probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")))
+	_, err = probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")), a.proxyURL())
 	lastErr := ""
 	if err != nil {
 		lastErr = err.Error()
 	}
 	_ = markProfileValidated(context.Background(), ctx.AppDB(), profileID, projectID, lastErr)
-	payload := map[string]any{"id": profileID, "valid": err == nil}
-	if lastErr != "" {
-		payload["error"] = lastErr
+	profile, getErr := getProfile(context.Background(), ctx.AppDB(), projectID, profileID)
+	if getErr == nil {
+		a.emitProfile(ctx, "profile.validated", profile.sourceProfile)
+	} else {
+		payload := map[string]any{"id": profileID, "status": "valid", "last_validated_at": nowRFC3339()}
+		if lastErr != "" {
+			payload["status"] = "invalid"
+			payload["last_error"] = lastErr
+		}
+		a.emitProfileData(ctx, "profile.validated", projectID, payload)
 	}
-	a.emitProfileData(ctx, "profile.validated", projectID, payload)
 	return err
 }
 
@@ -543,16 +659,25 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 func (a *App) emitDownloadJob(ctx *sdk.AppCtx, topic string, job downloadJob) {
 	a.emitDownload(ctx, topic, job.ProjectID, map[string]any{
-		"id":              job.ID,
-		"status":          job.Status,
-		"progress":        job.Progress,
-		"url":             job.URL,
-		"title":           job.Title,
-		"mode":            job.Mode,
-		"quality":         job.Quality,
-		"storage_file_id": job.StorageFileID,
-		"storage_url":     job.StorageURL,
-		"error":           job.Error,
+		"id":                 job.ID,
+		"status":             job.Status,
+		"stage":              job.Stage,
+		"progress":           job.Progress,
+		"url":                job.URL,
+		"title":              job.Title,
+		"mode":               job.Mode,
+		"quality":            job.Quality,
+		"format_id":          job.FormatID,
+		"extractor":          job.Extractor,
+		"source_profile_id":  job.SourceProfileID,
+		"storage_folder":     job.StorageFolder,
+		"storage_visibility": job.StorageVisibility,
+		"storage_file_id":    job.StorageFileID,
+		"storage_url":        job.StorageURL,
+		"output_name":        job.OutputName,
+		"output_bytes":       job.OutputBytes,
+		"updated_at":         job.UpdatedAt,
+		"error":              job.Error,
 	})
 }
 
@@ -635,6 +760,13 @@ func (a *App) guard(ctx *sdk.AppCtx, args map[string]any, rawURL string) error {
 	return guardURL(context.Background(), rawURL, allowed, blocked, nil)
 }
 
+func (a *App) proxyURL() string {
+	if a.proxy == nil {
+		return ""
+	}
+	return a.proxy.url
+}
+
 func slimMetadata(meta map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, k := range []string{"id", "title", "extractor", "extractor_key", "webpage_url", "duration", "live_status", "age_limit", "channel", "uploader", "upload_date"} {
@@ -677,13 +809,24 @@ func (a *App) httpJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) httpCreateJob(w http.ResponseWriter, r *http.Request) {
-	args, err := readJSONArgs(r)
+	args, err := readJSONArgs(w, r)
 	if err != nil {
 		writeJSON(w, nil, err)
 		return
 	}
 	withHTTPProject(r, args)
 	out, err := a.toolDownload(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpProbe(w http.ResponseWriter, r *http.Request) {
+	args, err := readJSONArgs(w, r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	withHTTPProject(r, args)
+	out, err := a.toolProbe(a.ctx.WithProject(strArg(args, "_project_id")), args)
 	writeJSON(w, out, err)
 }
 
@@ -711,13 +854,32 @@ func (a *App) httpProfiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) httpCreateProfile(w http.ResponseWriter, r *http.Request) {
-	args, err := readJSONArgs(r)
+	args, err := readJSONArgs(w, r)
 	if err != nil {
 		writeJSON(w, nil, err)
 		return
 	}
 	withHTTPProject(r, args)
 	out, err := a.toolProfileCreate(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpProfileAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/profiles/"), "/")
+	if !strings.HasSuffix(path, "/validate") {
+		writeJSON(w, nil, errNotFound)
+		return
+	}
+	id := strings.TrimSuffix(path, "/validate")
+	id = strings.TrimSuffix(id, "/")
+	args, err := readJSONArgs(w, r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	args["profile_id"] = id
+	withHTTPProject(r, args)
+	out, err := a.toolProfileValidate(a.ctx.WithProject(strArg(args, "_project_id")), args)
 	writeJSON(w, out, err)
 }
 
@@ -730,11 +892,17 @@ func (a *App) httpDeleteProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out, err)
 }
 
-func readJSONArgs(r *http.Request) (map[string]any, error) {
+func readJSONArgs(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
 	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024*1024)
 	var args map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&args); err != nil {
 		return nil, err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return nil, errors.New("request body must contain one JSON object")
 	}
 	if args == nil {
 		args = map[string]any{}

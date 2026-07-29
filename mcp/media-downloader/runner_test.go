@@ -9,17 +9,18 @@ import (
 
 func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 	req := downloadRequest{
-		URL:            "https://www.youtube.com/watch?v=abc",
-		Mode:           "audio",
-		AudioFormat:    "m4a",
-		NoPlaylist:     true,
-		FFmpegLocation: "/usr/bin/ffmpeg",
-		YoutubePlayer:  "android",
-		YTDLPExtraArgs: []string{"--js-runtimes", "node:/usr/bin/node"},
+		URL:              "https://www.youtube.com/watch?v=abc",
+		Mode:             "audio",
+		AudioFormat:      "m4a",
+		FFmpegLocation:   "/usr/bin/ffmpeg",
+		YoutubePlayer:    "android",
+		YTDLPExtraArgs:   []string{"--js-runtimes", "node:/usr/bin/node"},
+		ProxyURL:         "http://127.0.0.1:1234",
+		MaxDownloadBytes: 1048576,
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--js-runtimes node:/usr/bin/node", "--proxy http://127.0.0.1:1234", "--max-filesize 1048576", "--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "--print before_dl:__APTEVA_META__", "--print after_move:__APTEVA_FILE__", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -56,9 +57,9 @@ func TestBuildDownloadArgsSkipsYouTubeArgsForOtherHosts(t *testing.T) {
 }
 
 func TestBuildProbeArgsIncludesExtraArgs(t *testing.T) {
-	args := buildProbeArgs("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt", []string{"--js-runtimes", "node:/usr/bin/node"})
+	args := buildProbeArgs("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt", []string{"--js-runtimes", "node:/usr/bin/node"}, "http://127.0.0.1:1234")
 	got := stringsJoin(args)
-	for _, want := range []string{"--dump-single-json", "--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt"} {
+	for _, want := range []string{"--dump-single-json", "--js-runtimes node:/usr/bin/node", "--proxy http://127.0.0.1:1234", "--cookies /tmp/cookies.txt"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("probe args missing %q: %v", want, args)
 		}
@@ -115,7 +116,7 @@ func TestFindOutputFileUsesPrintedPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := findOutputFile(dir, []string{path})
+	got, err := findOutputFile(dir, []string{"__APTEVA_FILE__" + path})
 	if err != nil {
 		t.Fatal(err)
 	}
