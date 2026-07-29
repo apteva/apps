@@ -29,6 +29,7 @@ const (
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
 	voiceCompletionGrace  = 10 * time.Second
 	voiceCompletionPoll   = 100 * time.Millisecond
+	voiceExitCollectGrace = 2 * time.Second
 	voiceConversationIdle = 8 * time.Second
 	maxVoiceRelayBuffer   = 5 * voiceBytesPerSecond
 	maxVoiceRecordingSize = 32 << 20
@@ -179,19 +180,61 @@ type voiceRelayEvent struct {
 }
 
 type voiceBridgeEndpoint string
+type voiceBridgeLeg string
 
 const (
 	voiceBridgeCaller  voiceBridgeEndpoint = "caller"
 	voiceBridgeTarget  voiceBridgeEndpoint = "target"
 	voiceBridgeCarrier voiceBridgeEndpoint = "carrier"
+
+	voiceBridgeLegCallerToTarget  voiceBridgeLeg = "caller_to_target"
+	voiceBridgeLegTargetToCaller  voiceBridgeLeg = "target_to_caller"
+	voiceBridgeLegCallerToCarrier voiceBridgeLeg = "caller_to_carrier"
+	voiceBridgeLegCarrierToCaller voiceBridgeLeg = "carrier_to_caller"
 )
 
 type voiceBridgeExit struct {
+	Leg            voiceBridgeLeg
 	Endpoint       voiceBridgeEndpoint
 	Operation      string
 	TerminalReason sdk.RealtimeAudioTerminalReason
 	CloseCode      int
 	Err            error
+	ObservedAt     time.Time
+}
+
+type voiceBridgeExitReporter struct {
+	ctx      context.Context
+	result   chan<- voiceBridgeExit
+	leg      voiceBridgeLeg
+	reported bool
+}
+
+func newVoiceBridgeExitReporter(ctx context.Context, result chan<- voiceBridgeExit, leg voiceBridgeLeg) *voiceBridgeExitReporter {
+	return &voiceBridgeExitReporter{ctx: ctx, result: result, leg: leg}
+}
+
+func (r *voiceBridgeExitReporter) report(exit voiceBridgeExit) {
+	if r == nil || r.reported {
+		return
+	}
+	r.reported = true
+	exit.Leg = r.leg
+	if exit.ObservedAt.IsZero() {
+		exit.ObservedAt = time.Now().UTC()
+	}
+	sendVoiceBridgeExitValue(r.ctx, r.result, exit)
+}
+
+func (r *voiceBridgeExitReporter) finish(sourceExit *voiceBridgeExit, sourceEndpoint voiceBridgeEndpoint) {
+	if sourceExit != nil {
+		r.report(*sourceExit)
+		return
+	}
+	r.report(voiceBridgeExit{
+		Endpoint: sourceEndpoint, Operation: "bridge_shutdown",
+		TerminalReason: sdk.RealtimeTerminalStopped,
+	})
 }
 
 type voiceMediaActivity struct {
@@ -330,8 +373,8 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	bridgeExits := make(chan voiceBridgeExit, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
 	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, true)
-	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, voiceBridgeTarget, voiceBridgeCaller, "receptionist", mediaActivity, &receptionistAudio, nil, nil, bridgeExits)
-	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, voiceBridgeCaller, voiceBridgeTarget, "caller", mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeExits)
+	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, voiceBridgeLegTargetToCaller, voiceBridgeTarget, voiceBridgeCaller, "receptionist", mediaActivity, &receptionistAudio, nil, nil, bridgeExits)
+	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, voiceBridgeLegCallerToTarget, voiceBridgeCaller, voiceBridgeTarget, "caller", mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeExits)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
 	defer timeout.Stop()
@@ -347,6 +390,9 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		case <-timeout.C:
 			endedBy = "timeout"
 		case bridgeExit := <-bridgeExits:
+			appendVoiceBridgeExit(call, bridgeExit)
+			_ = s.db.saveVoiceCall(call)
+			s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
 			endedBy = s.classifyVoiceBridgeExit(ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
 		case <-ticker.C:
 			events, listErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
@@ -389,6 +435,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	cancel()
 	targetSocket.close()
 	callerSocket.close()
+	s.collectVoiceBridgeExits(call, bridgeExits, 2)
 
 	targetEvents, targetErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 	if targetErr != nil {
@@ -406,6 +453,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		PostToolIdleSeconds: 1, RequireActivity: true,
 	})
 	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	finalizeVoiceBridgeExits(call)
 	if audioPipeline != nil {
 		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
@@ -432,7 +480,8 @@ func voiceCallEvent(call *VoiceCall) map[string]any {
 	return map[string]any{
 		"call_id": call.ID, "run_id": call.RunID, "status": call.Status,
 		"transcript": call.Transcript, "metrics": call.Metrics, "validity": call.Validity,
-		"started_at": call.StartedAt, "finished_at": call.FinishedAt,
+		"bridge_exits": call.BridgeExits,
+		"started_at":   call.StartedAt, "finished_at": call.FinishedAt,
 	}
 }
 
@@ -555,6 +604,7 @@ func voiceCallerDirective(spec VoiceFixtureSpec) string {
 func pumpVoiceAudio(
 	ctx context.Context,
 	source, destination *voiceSocket,
+	leg voiceBridgeLeg,
 	sourceEndpoint, destinationEndpoint voiceBridgeEndpoint,
 	speaker string,
 	activity *voiceMediaActivity,
@@ -570,6 +620,8 @@ func pumpVoiceAudio(
 	defer ticker.Stop()
 	var relay voiceMediaRelay
 	var sourceExit *voiceBridgeExit
+	reporter := newVoiceBridgeExitReporter(ctx, result, leg)
+	defer func() { reporter.finish(sourceExit, sourceEndpoint) }()
 	for {
 		input := (<-chan voiceRelayEvent)(incoming)
 		if sourceExit != nil || relay.queue.bytes >= maxVoiceRelayBuffer {
@@ -584,11 +636,12 @@ func pumpVoiceAudio(
 				exit := voiceBridgeExit{
 					Endpoint: sourceEndpoint, Operation: "read", Err: event.err,
 					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+					ObservedAt: time.Now().UTC(),
 				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update(speaker, false, time.Now())
-					sendVoiceBridgeExitValue(ctx, result, exit)
+					reporter.report(exit)
 					return
 				}
 			case event.interrupt:
@@ -603,7 +656,7 @@ func pumpVoiceAudio(
 			if !ok {
 				activity.update(speaker, false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
+					reporter.report(*sourceExit)
 					return
 				}
 				continue
@@ -612,7 +665,9 @@ func pumpVoiceAudio(
 			if speechStarted {
 				if err := destination.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
 					activity.update(speaker, false, time.Now())
-					sendVoiceBridgeExit(ctx, result, destinationEndpoint, "write_speech_started", err)
+					reporter.report(voiceBridgeExit{
+						Endpoint: destinationEndpoint, Operation: "write_speech_started", Err: err,
+					})
 					return
 				}
 			}
@@ -622,7 +677,9 @@ func pumpVoiceAudio(
 			}
 			if err := destination.write(websocket.BinaryMessage, frame); err != nil {
 				activity.update(speaker, false, time.Now())
-				sendVoiceBridgeExit(ctx, result, destinationEndpoint, "write_audio", err)
+				reporter.report(voiceBridgeExit{
+					Endpoint: destinationEndpoint, Operation: "write_audio", Err: err,
+				})
 				return
 			}
 			for _, playback := range acks {
@@ -634,7 +691,9 @@ func pumpVoiceAudio(
 				})
 				if err := source.write(websocket.TextMessage, ack); err != nil {
 					activity.update(speaker, false, time.Now())
-					sendVoiceBridgeExit(ctx, result, sourceEndpoint, "write_playback_ack", err)
+					reporter.report(voiceBridgeExit{
+						Endpoint: sourceEndpoint, Operation: "write_playback_ack", Err: err,
+					})
 					return
 				}
 			}
@@ -725,6 +784,7 @@ func applyVoiceTurnDeliveryMetrics(metrics *VoiceCallMetrics, delivery voiceTurn
 	metrics.CallerSourceTurns = delivery.callerSource
 	metrics.ReceptionistReceivedTurns = delivery.receptionistReceived
 	metrics.PendingCallerTurns = delivery.pendingCaller
+	metrics.CallerResponseUndelivered = delivery.pendingCaller > 0
 }
 
 func voiceRealtimeTelemetryState(events []sdk.RuntimeTelemetryEvent, threadID string) voiceTelemetryState {
@@ -955,22 +1015,77 @@ func sendVoiceRelayEvent(ctx context.Context, incoming chan<- voiceRelayEvent, e
 	}
 }
 
-func sendVoiceBridgeExit(
-	ctx context.Context,
-	result chan<- voiceBridgeExit,
-	endpoint voiceBridgeEndpoint,
-	operation string,
-	err error,
-) {
-	sendVoiceBridgeExitValue(ctx, result, voiceBridgeExit{
-		Endpoint: endpoint, Operation: operation, Err: err,
-	})
-}
-
-func sendVoiceBridgeExitValue(ctx context.Context, result chan<- voiceBridgeExit, exit voiceBridgeExit) {
+func sendVoiceBridgeExitValue(_ context.Context, result chan<- voiceBridgeExit, exit voiceBridgeExit) {
+	timer := time.NewTimer(voiceExitCollectGrace)
+	defer timer.Stop()
 	select {
 	case result <- exit:
-	case <-ctx.Done():
+	case <-timer.C:
+		log.Printf("[VOICE] bridge exit dropped leg=%s endpoint=%s operation=%s", exit.Leg, exit.Endpoint, exit.Operation)
+	}
+}
+
+func appendVoiceBridgeExit(call *VoiceCall, exit voiceBridgeExit) {
+	if call == nil {
+		return
+	}
+	elapsed := int64(0)
+	if !exit.ObservedAt.IsZero() && !call.StartedAt.IsZero() {
+		elapsed = exit.ObservedAt.Sub(call.StartedAt).Milliseconds()
+		if elapsed < 0 {
+			elapsed = 0
+		}
+	}
+	item := VoiceBridgeExitResult{
+		Leg: string(exit.Leg), Endpoint: string(exit.Endpoint), Operation: exit.Operation,
+		CloseCode: exit.CloseCode, Reason: string(exit.TerminalReason),
+		Error: voiceBridgeExitError(exit.Err), ElapsedMS: elapsed,
+		NormalClosure:             voiceWebSocketClosedNormally(exit),
+		TransportFailure:          voiceBridgeExitIsTransportFailure(exit),
+		CallerResponseUndelivered: call.Metrics.CallerResponseUndelivered,
+	}
+	for index := range call.BridgeExits {
+		if call.BridgeExits[index].Leg == item.Leg {
+			call.BridgeExits[index] = item
+			return
+		}
+	}
+	call.BridgeExits = append(call.BridgeExits, item)
+}
+
+func voiceBridgeExitError(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := strings.TrimSpace(err.Error())
+	if len(value) > 2048 {
+		value = value[:2048]
+	}
+	return value
+}
+
+func finalizeVoiceBridgeExits(call *VoiceCall) {
+	if call == nil {
+		return
+	}
+	for index := range call.BridgeExits {
+		call.BridgeExits[index].CallerResponseUndelivered = call.Metrics.CallerResponseUndelivered
+	}
+}
+
+func (s *service) collectVoiceBridgeExits(call *VoiceCall, exits <-chan voiceBridgeExit, expected int) {
+	if call == nil || expected <= len(call.BridgeExits) {
+		return
+	}
+	timer := time.NewTimer(voiceExitCollectGrace)
+	defer timer.Stop()
+	for len(call.BridgeExits) < expected {
+		select {
+		case exit := <-exits:
+			appendVoiceBridgeExit(call, exit)
+		case <-timer.C:
+			return
+		}
 	}
 }
 
@@ -1036,6 +1151,32 @@ func voiceWebSocketClosedNormally(exit voiceBridgeExit) bool {
 		exit.CloseCode == websocket.CloseGoingAway
 }
 
+func voiceBridgeExitIsTransportFailure(exit voiceBridgeExit) bool {
+	if exit.Operation == "bridge_shutdown" {
+		return false
+	}
+	switch exit.TerminalReason {
+	case sdk.RealtimeTerminalCallerDone:
+		return false
+	case sdk.RealtimeTerminalCarrierError,
+		sdk.RealtimeTerminalAudioDisconnected,
+		sdk.RealtimeTerminalServerShutdown:
+		return true
+	case sdk.RealtimeTerminalStopped:
+		return true
+	}
+	if exit.Operation != "read" {
+		return true
+	}
+	if voiceWebSocketClosedNormally(exit) {
+		return false
+	}
+	if exit.CloseCode != 0 || exit.Err != nil {
+		return true
+	}
+	return false
+}
+
 func (s *service) waitForVoiceBridgeCompletion(
 	ctx context.Context,
 	runtimeID string,
@@ -1074,7 +1215,7 @@ func (s *service) waitForVoiceBridgeCompletion(
 }
 
 func voiceBridgeExitAllowsSettledExchange(exit voiceBridgeExit) bool {
-	if exit.Operation != "read" {
+	if exit.Operation != "read" || voiceBridgeExitIsTransportFailure(exit) {
 		return false
 	}
 	switch exit.Endpoint {

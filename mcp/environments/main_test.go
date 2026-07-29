@@ -103,7 +103,11 @@ func TestVoiceCallPersistenceAndValidation(t *testing.T) {
 		Spec:       VoiceFixtureSpec{CallerGoal: "Book an appointment", TargetAgent: "main", TimeoutSeconds: 90},
 		Transcript: []VoiceTranscriptTurn{{Speaker: "caller", Text: "I need an appointment.", Time: started, AtMS: 250}},
 		Metrics:    VoiceCallMetrics{DurationMS: 3200, FirstResponseMS: 850, ToolCalls: 1, EndedBy: "caller"},
-		StartedAt:  started,
+		BridgeExits: []VoiceBridgeExitResult{{
+			Leg: "caller_to_target", Endpoint: "caller", Operation: "read",
+			CloseCode: 1000, Reason: "caller_done", ElapsedMS: 3100, NormalClosure: true,
+		}},
+		StartedAt: started,
 	}
 	if err := s.saveVoiceCall(call); err != nil {
 		t.Fatal(err)
@@ -112,12 +116,17 @@ func TestVoiceCallPersistenceAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Spec.CallerGoal != call.Spec.CallerGoal || len(got.Transcript) != 1 || got.Metrics.FirstResponseMS != 850 {
+	if got == nil || got.Spec.CallerGoal != call.Spec.CallerGoal || len(got.Transcript) != 1 ||
+		got.Metrics.FirstResponseMS != 850 || len(got.BridgeExits) != 1 ||
+		got.BridgeExits[0].Reason != "caller_done" {
 		t.Fatalf("voice call=%#v", got)
 	}
 	event := voiceCallEvent(got)
 	if event["call_id"] != call.ID || event["run_id"] != call.RunID || len(event["transcript"].([]VoiceTranscriptTurn)) != 1 {
 		t.Fatalf("voice event=%#v", event)
+	}
+	if len(event["bridge_exits"].([]VoiceBridgeExitResult)) != 1 {
+		t.Fatalf("voice event bridge exits=%#v", event["bridge_exits"])
 	}
 	if err := validateVoiceSpec(VoiceFixtureSpec{CallerGoal: "Help me", TimeoutSeconds: 90}); err != nil {
 		t.Fatal(err)

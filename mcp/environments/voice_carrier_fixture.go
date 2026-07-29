@@ -238,6 +238,9 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		case <-timeout.C:
 			endedBy = "timeout"
 		case bridgeExit := <-bridgeExits:
+			appendVoiceBridgeExit(call, bridgeExit)
+			_ = s.db.saveVoiceCall(call)
+			s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
 			endedBy = s.classifyVoiceBridgeExit(ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
 		case <-ticker.C:
 			callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
@@ -276,6 +279,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	_ = media.writeJSON(map[string]any{"event": "stop", "streamSid": streamSID, "stop": map[string]any{"accountSid": stringConfig(fixture.Config, "account_sid", ""), "callSid": callSID}})
 	_ = mediaConn.Close()
 	callerSocket.close()
+	s.collectVoiceBridgeExits(call, bridgeExits, 2)
 
 	if response.Connect.Stream.StatusCallback != "" {
 		callbackGatewayURL, _ := carrierGatewayURL(response.Connect.Stream.StatusCallback, endpoint)
@@ -302,6 +306,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1, PostToolIdleSeconds: 1, RequireActivity: true,
 	})
 	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	finalizeVoiceBridgeExits(call)
 	if audioPipeline != nil {
 		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
@@ -447,6 +452,8 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 	defer ticker.Stop()
 	var relay voiceMediaRelay
 	var sourceExit *voiceBridgeExit
+	reporter := newVoiceBridgeExitReporter(ctx, result, voiceBridgeLegCallerToCarrier)
+	defer func() { reporter.finish(sourceExit, voiceBridgeCaller) }()
 	resampler := newCarrierResampler(24000, 8000)
 	for {
 		input := (<-chan voiceRelayEvent)(incoming)
@@ -462,11 +469,12 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				exit := voiceBridgeExit{
 					Endpoint: voiceBridgeCaller, Operation: "read", Err: event.err,
 					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+					ObservedAt: time.Now().UTC(),
 				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update("caller", false, time.Now())
-					sendVoiceBridgeExitValue(ctx, result, exit)
+					reporter.report(exit)
 					return
 				}
 			case event.interrupt:
@@ -481,7 +489,7 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 			if !ok {
 				activity.update("caller", false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
+					reporter.report(*sourceExit)
 					return
 				}
 				continue
@@ -500,7 +508,9 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				payload := base64.StdEncoding.EncodeToString(carrierPCMToUlaw(pcm8[:count]))
 				if err := media.writeJSON(map[string]any{"event": "media", "streamSid": streamSID, "media": map[string]string{"track": "inbound", "payload": payload}}); err != nil {
 					activity.update("caller", false, time.Now())
-					sendVoiceBridgeExit(ctx, result, voiceBridgeCarrier, "write_audio", err)
+					reporter.report(voiceBridgeExit{
+						Endpoint: voiceBridgeCarrier, Operation: "write_audio", Err: err,
+					})
 					return
 				}
 				pcm8 = pcm8[count:]
@@ -514,7 +524,9 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				})
 				if err := caller.write(websocket.TextMessage, ack); err != nil {
 					activity.update("caller", false, time.Now())
-					sendVoiceBridgeExit(ctx, result, voiceBridgeCaller, "write_playback_ack", err)
+					reporter.report(voiceBridgeExit{
+						Endpoint: voiceBridgeCaller, Operation: "write_playback_ack", Err: err,
+					})
 					return
 				}
 			}
@@ -530,6 +542,8 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 	defer ticker.Stop()
 	var relay voiceMediaRelay
 	var sourceExit *voiceBridgeExit
+	reporter := newVoiceBridgeExitReporter(ctx, result, voiceBridgeLegCarrierToCaller)
+	defer func() { reporter.finish(sourceExit, voiceBridgeCarrier) }()
 	for {
 		input := (<-chan voiceRelayEvent)(incoming)
 		if sourceExit != nil || relay.queue.bytes >= maxVoiceRelayBuffer {
@@ -543,11 +557,12 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 				exit := voiceBridgeExit{
 					Endpoint: voiceBridgeCarrier, Operation: "read", Err: event.err,
 					TerminalReason: event.terminalReason, CloseCode: event.closeCode,
+					ObservedAt: time.Now().UTC(),
 				}
 				sourceExit = &exit
 				if !relay.hasPendingPlayback() {
 					activity.update("receptionist", false, time.Now())
-					sendVoiceBridgeExitValue(ctx, result, exit)
+					reporter.report(exit)
 					return
 				}
 				continue
@@ -561,7 +576,7 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 			if !ok {
 				activity.update("receptionist", false, time.Time{})
 				if sourceExit != nil {
-					sendVoiceBridgeExitValue(ctx, result, *sourceExit)
+					reporter.report(*sourceExit)
 					return
 				}
 				continue
@@ -570,13 +585,17 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 			if speechStarted {
 				if err := caller.write(websocket.TextMessage, []byte(`{"type":"input.speech_started"}`)); err != nil {
 					activity.update("receptionist", false, time.Now())
-					sendVoiceBridgeExit(ctx, result, voiceBridgeCaller, "write_speech_started", err)
+					reporter.report(voiceBridgeExit{
+						Endpoint: voiceBridgeCaller, Operation: "write_speech_started", Err: err,
+					})
 					return
 				}
 			}
 			if err := caller.write(websocket.BinaryMessage, frame); err != nil {
 				activity.update("receptionist", false, time.Now())
-				sendVoiceBridgeExit(ctx, result, voiceBridgeCaller, "write_audio", err)
+				reporter.report(voiceBridgeExit{
+					Endpoint: voiceBridgeCaller, Operation: "write_audio", Err: err,
+				})
 				return
 			}
 		}

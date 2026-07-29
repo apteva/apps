@@ -176,6 +176,7 @@ type VoiceCall struct {
 	CallerTelemetry          []sdk.RuntimeTelemetryEvent `json:"caller_telemetry,omitempty"`
 	Execution                *sdk.RuntimeAgentExecution  `json:"execution,omitempty"`
 	ProtocolEvents           []ProtocolFixtureEvent      `json:"protocol_events,omitempty"`
+	BridgeExits              []VoiceBridgeExitResult     `json:"bridge_exits,omitempty"`
 }
 
 type VoiceCallValidity struct {
@@ -210,7 +211,21 @@ type VoiceCallMetrics struct {
 	CallerSourceTurns          int                         `json:"caller_source_turns"`
 	ReceptionistReceivedTurns  int                         `json:"receptionist_received_turns"`
 	PendingCallerTurns         int                         `json:"pending_caller_turns"`
+	CallerResponseUndelivered  bool                        `json:"caller_response_generated_not_delivered"`
 	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
+}
+
+type VoiceBridgeExitResult struct {
+	Leg                       string `json:"leg"`
+	Endpoint                  string `json:"endpoint"`
+	Operation                 string `json:"operation"`
+	CloseCode                 int    `json:"close_code,omitempty"`
+	Reason                    string `json:"reason,omitempty"`
+	Error                     string `json:"error,omitempty"`
+	ElapsedMS                 int64  `json:"elapsed_ms"`
+	NormalClosure             bool   `json:"normal_closure"`
+	TransportFailure          bool   `json:"transport_failure"`
+	CallerResponseUndelivered bool   `json:"caller_response_generated_not_delivered"`
 }
 
 type VoiceAudioConditionMetrics struct {

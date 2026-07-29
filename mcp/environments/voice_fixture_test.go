@@ -471,6 +471,7 @@ func TestVoiceBridgeEndReasonUsesEndpointAndCompletionEvidence(t *testing.T) {
 }
 
 func TestVoiceBridgeExitAllowsSettledExchangeOnlyForReadClosures(t *testing.T) {
+	abnormal := errors.New("unexpected websocket closure")
 	for _, endpoint := range []voiceBridgeEndpoint{voiceBridgeCaller, voiceBridgeTarget, voiceBridgeCarrier} {
 		if !voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{Endpoint: endpoint, Operation: "read"}) {
 			t.Fatalf("%s read closure did not allow settled completion", endpoint)
@@ -478,6 +479,88 @@ func TestVoiceBridgeExitAllowsSettledExchangeOnlyForReadClosures(t *testing.T) {
 		if voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{Endpoint: endpoint, Operation: "write_audio"}) {
 			t.Fatalf("%s write failure allowed settled completion", endpoint)
 		}
+		if voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{
+			Endpoint: endpoint, Operation: "read", Err: abnormal,
+			CloseCode: websocket.CloseAbnormalClosure,
+		}) {
+			t.Fatalf("%s abnormal read failure allowed transcript settlement", endpoint)
+		}
+	}
+	if voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{
+		Endpoint: voiceBridgeCarrier, Operation: "read",
+		TerminalReason: sdk.RealtimeTerminalAudioDisconnected,
+		CloseCode:      websocket.CloseNormalClosure,
+	}) {
+		t.Fatal("structured audio disconnection allowed transcript settlement")
+	}
+	if !voiceBridgeExitAllowsSettledExchange(voiceBridgeExit{
+		Endpoint: voiceBridgeCaller, Operation: "read", Err: abnormal,
+		TerminalReason: sdk.RealtimeTerminalCallerDone,
+	}) {
+		t.Fatal("structured caller completion was treated as a transport failure")
+	}
+}
+
+func TestVoiceBridgeExitDiagnosticsPersistSeparateLegs(t *testing.T) {
+	started := time.Date(2026, time.July, 29, 9, 0, 0, 0, time.UTC)
+	call := &VoiceCall{
+		StartedAt: started,
+		Metrics:   VoiceCallMetrics{CallerResponseUndelivered: true},
+	}
+	appendVoiceBridgeExit(call, voiceBridgeExit{
+		Leg: voiceBridgeLegCallerToCarrier, Endpoint: voiceBridgeCaller,
+		Operation: "read", CloseCode: websocket.CloseAbnormalClosure,
+		TerminalReason: sdk.RealtimeTerminalAudioDisconnected,
+		Err:            errors.New("websocket transport lost"),
+		ObservedAt:     started.Add(60 * time.Second),
+	})
+	appendVoiceBridgeExit(call, voiceBridgeExit{
+		Leg: voiceBridgeLegCarrierToCaller, Endpoint: voiceBridgeCarrier,
+		Operation:      "bridge_shutdown",
+		TerminalReason: sdk.RealtimeTerminalStopped,
+		ObservedAt:     started.Add(60*time.Second + 25*time.Millisecond),
+	})
+
+	if len(call.BridgeExits) != 2 {
+		t.Fatalf("bridge exits=%#v", call.BridgeExits)
+	}
+	first := call.BridgeExits[0]
+	if first.Leg != "caller_to_carrier" || first.Endpoint != "caller" || first.Operation != "read" {
+		t.Fatalf("first exit=%#v", first)
+	}
+	if first.CloseCode != websocket.CloseAbnormalClosure ||
+		first.Reason != string(sdk.RealtimeTerminalAudioDisconnected) ||
+		first.Error != "websocket transport lost" ||
+		first.ElapsedMS != 60000 ||
+		!first.TransportFailure ||
+		!first.CallerResponseUndelivered {
+		t.Fatalf("first exit diagnostics=%#v", first)
+	}
+	second := call.BridgeExits[1]
+	if second.Leg != "carrier_to_caller" || second.Operation != "bridge_shutdown" ||
+		second.ElapsedMS != 60025 || second.TransportFailure {
+		t.Fatalf("second exit diagnostics=%#v", second)
+	}
+}
+
+func TestVoiceBridgeExitReportersProduceOneResultPerLeg(t *testing.T) {
+	exits := make(chan voiceBridgeExit, 2)
+	caller := newVoiceBridgeExitReporter(context.Background(), exits, voiceBridgeLegCallerToCarrier)
+	carrier := newVoiceBridgeExitReporter(context.Background(), exits, voiceBridgeLegCarrierToCaller)
+	caller.report(voiceBridgeExit{
+		Endpoint: voiceBridgeCaller, Operation: "read", Err: errors.New("caller lost"),
+	})
+	caller.finish(nil, voiceBridgeCaller)
+	carrier.finish(nil, voiceBridgeCarrier)
+
+	call := &VoiceCall{StartedAt: time.Now().Add(-time.Second)}
+	(&service{}).collectVoiceBridgeExits(call, exits, 2)
+	if len(call.BridgeExits) != 2 {
+		t.Fatalf("bridge exits=%#v", call.BridgeExits)
+	}
+	if call.BridgeExits[0].Leg != "caller_to_carrier" ||
+		call.BridgeExits[1].Leg != "carrier_to_caller" {
+		t.Fatalf("bridge exits=%#v", call.BridgeExits)
 	}
 }
 
@@ -592,6 +675,9 @@ func TestVoiceMetricsPersistsPendingTurnCounters(t *testing.T) {
 	metrics := voiceMetrics(targetEvents, callerEvents, "target", "caller", started, nil, nil, "timeout")
 	if metrics.CallerSourceTurns != 2 || metrics.ReceptionistReceivedTurns != 1 || metrics.PendingCallerTurns != 1 {
 		t.Fatalf("caller delivery metrics=%#v", metrics)
+	}
+	if !metrics.CallerResponseUndelivered {
+		t.Fatalf("undelivered caller response was not exposed: %#v", metrics)
 	}
 	if metrics.ReceptionistSourceTurns != 1 || metrics.CallerReceivedTurns != 1 || metrics.PendingReceptionistTurns != 0 {
 		t.Fatalf("receptionist delivery metrics=%#v", metrics)
