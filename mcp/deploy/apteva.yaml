@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.20.1
+version: 0.21.0
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -102,7 +102,7 @@ provides:
     - name: deploy_cloud_backend_setup
       description: Discover or create a provider's shared build adapter and configure a deployment environment.
     - name: deploy_mobile_signing_setup
-      description: Provision or rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
+      description: Configure, reconcile, repair, or explicitly rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
     - name: deploy_distribution_status

@@ -188,6 +188,11 @@ interface MobileSigningSetup {
   provider_secret_ref?: string;
   provider_config_json: string;
   key_fingerprint?: string;
+  required_features_json: string;
+  provisioned_features_json: string;
+  managed_features_json: string;
+  requirements_hash?: string;
+  platform_state_json: string;
   last_error?: string;
   updated_at: string;
 }
@@ -253,6 +258,36 @@ function formatDuration(ms: number): string {
   if (!ms) return "—";
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function mobileFeatureLabels(raw: string): string {
+  try {
+    const features = JSON.parse(raw);
+    if (!Array.isArray(features) || features.length === 0) return "none";
+    return features.map((feature) => {
+      if (feature === "ios.push_notifications") return "Push Notifications";
+      return String(feature);
+    }).join(", ");
+  } catch {
+    return "unknown";
+  }
+}
+
+function cloudExecutionLabel(raw: string, backend: string): string {
+  try {
+    const config = JSON.parse(raw || "{}");
+    const versions = config.software_versions ?? {};
+    const xcode = versions.xcode ?? config.xcode_version;
+    const runner = config.instance_type ??
+      (config.machine_class
+        ? config.machine_class
+        : backend === "codemagic"
+          ? "mac_mini_m2"
+          : "");
+    return [xcode ? `Xcode ${xcode}` : "", runner].filter(Boolean).join(" · ");
+  } catch {
+    return "";
+  }
 }
 
 export default function DeployPanel({ projectId, installId }: NativePanelProps) {
@@ -574,10 +609,10 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const handleMobileSigningSetup = () => {
-    if (mobileSigning?.status !== "ready") {
-      void runMobileSigningSetup(false);
-      return;
-    }
+    void runMobileSigningSetup(false);
+  };
+
+  const handleMobileSigningRotation = () => {
     setConfirmState({
       title: "Rotate iOS signing",
       body: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
@@ -877,7 +912,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
               />
             )}
             {detail.deployment.target_kind === "ios" && (
-              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs">
+              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
                 <span className="text-text-dim uppercase">iOS signing</span>
                 <span className={
                   mobileSigning?.status === "ready"
@@ -890,9 +925,18 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 }>
                   {mobileSigning?.status || "not configured"}
                 </span>
-                <span className="text-text-dim truncate">
+                <span className="text-text-dim truncate min-w-[12rem] flex-1">
                   {detail.deployment.build_backend}
                   {mobileSigning?.bundle_id ? ` · ${mobileSigning.bundle_id}` : ""}
+                  {mobileSigning?.required_features_json
+                    ? ` · requires ${mobileFeatureLabels(mobileSigning.required_features_json)}`
+                    : ""}
+                  {mobileSigning?.provisioned_features_json
+                    ? ` · Apple ${mobileFeatureLabels(mobileSigning.provisioned_features_json)}`
+                    : ""}
+                  {cloudExecutionLabel(detail.deployment.build_backend_config_json, detail.deployment.build_backend)
+                    ? ` · ${cloudExecutionLabel(detail.deployment.build_backend_config_json, detail.deployment.build_backend)}`
+                    : ""}
                   {mobileSigning?.provider_secret_ref ? ` · secret group ${mobileSigning.provider_secret_ref}` : ""}
                 </span>
                 {mobileSigning?.last_error && (
@@ -904,15 +948,30 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   type="button"
                   onClick={handleMobileSigningSetup}
                   disabled={signingBusy || detail.deployment.build_backend !== "codemagic"}
-                  className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40"
+                  className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
                   title={
                     detail.deployment.build_backend === "codemagic"
                       ? "Provision Apple distribution signing and store credentials securely at the build provider."
                       : "This build provider does not yet expose a signing-secret adapter."
                   }
                 >
-                  {signingBusy ? "Provisioning..." : mobileSigning?.status === "ready" ? "Rotate" : "Configure"}
+                  {signingBusy
+                    ? "Reconciling..."
+                    : mobileSigning?.status === "ready"
+                      ? "Repair"
+                      : "Configure"}
                 </button>
+                {mobileSigning?.status === "ready" && (
+                  <button
+                    type="button"
+                    onClick={handleMobileSigningRotation}
+                    disabled={signingBusy}
+                    className="px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
+                    title="Replace the Apple distribution certificate, private key, and provisioning profile."
+                  >
+                    Rotate certificate
+                  </button>
+                )}
               </section>
             )}
             {mobile && mobileChannel !== "production" && (

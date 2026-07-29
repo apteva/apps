@@ -33,8 +33,9 @@ type iosPlistReference struct {
 }
 
 type iosProjectMetadata struct {
-	orientationValues []string
-	plistReferences   []iosPlistReference
+	orientationValues     []string
+	plistReferences       []iosPlistReference
+	entitlementReferences []iosPlistReference
 }
 
 func hasIOSSupportedOrientations(root string) (bool, error) {
@@ -134,6 +135,10 @@ func collectIOSYAMLSettings(node *yaml.Node, baseDir string, metadata *iosProjec
 				for _, ref := range yamlScalarValues(value) {
 					metadata.plistReferences = append(metadata.plistReferences, iosPlistReference{baseDir: baseDir, value: ref})
 				}
+			case key == "CODE_SIGN_ENTITLEMENTS":
+				for _, ref := range yamlScalarValues(value) {
+					metadata.entitlementReferences = append(metadata.entitlementReferences, iosPlistReference{baseDir: baseDir, value: ref})
+				}
 			}
 		}
 	}
@@ -165,6 +170,8 @@ func collectIOSPBXSettings(body, baseDir string, metadata *iosProjectMetadata) {
 			metadata.orientationValues = append(metadata.orientationValues, value)
 		case key == "INFOPLIST_FILE":
 			metadata.plistReferences = append(metadata.plistReferences, iosPlistReference{baseDir: baseDir, value: value})
+		case key == "CODE_SIGN_ENTITLEMENTS":
+			metadata.entitlementReferences = append(metadata.entitlementReferences, iosPlistReference{baseDir: baseDir, value: value})
 		}
 	}
 }
@@ -192,6 +199,10 @@ func containsIOSOrientation(value string) bool {
 }
 
 func resolveIOSInfoPlists(root string, references []iosPlistReference) ([]string, error) {
+	return resolveIOSProjectFiles(root, references, "INFOPLIST_FILE")
+}
+
+func resolveIOSProjectFiles(root string, references []iosPlistReference, setting string) ([]string, error) {
 	rootAbs, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -203,7 +214,7 @@ func resolveIOSInfoPlists(root string, references []iosPlistReference) ([]string
 	seen := map[string]struct{}{}
 	var paths []string
 	for _, ref := range references {
-		path, ok := resolveIOSInfoPlistReference(ref)
+		path, ok := resolveIOSProjectFileReference(ref)
 		if !ok {
 			continue
 		}
@@ -219,7 +230,7 @@ func resolveIOSInfoPlists(root string, references []iosPlistReference) ([]string
 			return nil, err
 		}
 		if !pathWithinRoot(rootReal, pathReal) {
-			return nil, fmt.Errorf("INFOPLIST_FILE resolves outside source root: %s", ref.value)
+			return nil, fmt.Errorf("%s resolves outside source root: %s", setting, ref.value)
 		}
 		if _, ok := seen[pathReal]; ok {
 			continue
@@ -230,7 +241,7 @@ func resolveIOSInfoPlists(root string, references []iosPlistReference) ([]string
 	return paths, nil
 }
 
-func resolveIOSInfoPlistReference(ref iosPlistReference) (string, bool) {
+func resolveIOSProjectFileReference(ref iosPlistReference) (string, bool) {
 	value := strings.Trim(strings.TrimSpace(ref.value), `"'`)
 	for _, variable := range []string{
 		"$(SRCROOT)", "${SRCROOT}", "$(SOURCE_ROOT)", "${SOURCE_ROOT}",

@@ -516,6 +516,8 @@ func openSchemaDB(t *testing.T) *sql.DB {
 		"migrations/003_environments.sql",
 		"migrations/004_mobile_targets.sql",
 		"migrations/005_build_backends.sql",
+		"migrations/006_mobile_signing.sql",
+		"migrations/007_mobile_requirements.sql",
 	} {
 		body, err := os.ReadFile(mig)
 		if err != nil {

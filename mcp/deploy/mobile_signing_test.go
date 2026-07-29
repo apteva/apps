@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
+	"howett.net/plist"
 )
 
 type mobileSigningPlatform struct {
@@ -21,6 +24,8 @@ type mobileSigningPlatform struct {
 	certificateSeq int
 	profileSeq     int
 	failTool       string
+	capabilities   map[string]string
+	certificates   map[string]bool
 }
 
 func (p *mobileSigningPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -75,9 +80,46 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		} else {
 			data = json.RawMessage(`{"data":[]}`)
 		}
+	case "list_bundle_id_capabilities":
+		items := make([]map[string]any, 0, len(p.capabilities))
+		for capabilityType, id := range p.capabilities {
+			items = append(items, map[string]any{
+				"id": id, "attributes": map[string]any{"capabilityType": capabilityType},
+			})
+		}
+		data, _ = json.Marshal(map[string]any{"data": items})
+	case "enable_bundle_id_capability":
+		if p.capabilities == nil {
+			p.capabilities = map[string]string{}
+		}
+		capabilityType := input["capabilityType"].(string)
+		id := "capability-" + strings.ToLower(capabilityType)
+		p.capabilities[capabilityType] = id
+		data = json.RawMessage(fmt.Sprintf(
+			`{"data":{"id":%q,"attributes":{"capabilityType":%q}}}`,
+			id, capabilityType,
+		))
 	case "create_certificate":
 		p.certificateSeq++
-		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":"certificate-%d"}}`, p.certificateSeq))
+		id := fmt.Sprintf("certificate-%d", p.certificateSeq)
+		if p.certificates == nil {
+			p.certificates = map[string]bool{}
+		}
+		p.certificates[id] = true
+		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q}}`, id))
+	case "list_certificates":
+		items := make([]map[string]any, 0, len(p.certificates))
+		for id, available := range p.certificates {
+			if available {
+				items = append(items, map[string]any{"id": id, "attributes": map[string]any{}})
+			}
+		}
+		data, _ = json.Marshal(map[string]any{"data": items})
+	case "revoke_certificate":
+		if id, _ := input["certificate_id"].(string); id != "" {
+			delete(p.certificates, id)
+		}
+		data = json.RawMessage(`{}`)
 	case "create_profile":
 		p.profileSeq++
 		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":"profile-%d"}}`, p.profileSeq))
@@ -117,8 +159,26 @@ func newIOSSigningDeployment(t *testing.T, platform *mobileSigningPlatform) (*sd
 	oldGlobal := globalCtx
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = oldGlobal })
+	sourceDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sourceDir, "project.yml"), []byte(`
+settings:
+  base:
+    CODE_SIGN_ENTITLEMENTS: App/App.entitlements
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sourceDir, "App"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDir, "App", "App.entitlements"), []byte(`
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>aps-environment</key><string>$(APNS_ENVIRONMENT)</string></dict></plist>
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
-		Name: "ios-app", TargetKind: "ios", SourceKind: "local", SourceRef: "/src",
+		Name: "ios-app", TargetKind: "ios", SourceKind: "local", SourceRef: sourceDir,
 		Framework: "ios", BuildBackend: "codemagic",
 		BuildBackendJSON: `{"app_id":"runner-app","workflow_id":"ios","branch":"main","source_mode":"bundle"}`,
 		TargetConfigJSON: `{"bundle_id":"com.example.ios","scheme":"Example"}`,
@@ -161,6 +221,16 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	if len(platform.variables) < 6 {
 		t.Fatalf("variables=%v", platform.variables)
 	}
+	enableCall := firstSigningCall(platform.calls, "enable_bundle_id_capability")
+	profileCall := firstSigningCall(platform.calls, "create_profile")
+	if enableCall == nil || profileCall == nil ||
+		signingCallIndex(platform.calls, "enable_bundle_id_capability") > signingCallIndex(platform.calls, "create_profile") {
+		t.Fatalf("capability must be enabled before profile creation: calls=%v", platform.calls)
+	}
+	if result.Setup.RequirementsHash == "" ||
+		!mobileFeaturesContainAll(mobileFeaturesFromJSON(result.Setup.ProvisionedFeaturesJSON), []string{mobileFeatureIOSPushNotifications}) {
+		t.Fatalf("requirements not persisted: setup=%+v", result.Setup)
+	}
 	importCall := firstSigningCall(platform.calls, "import_group_variables")
 	if importCall == nil || importCall.Input["secure"] != true {
 		t.Fatalf("secure import call=%#v", importCall)
@@ -188,13 +258,90 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 		}
 	}
 
-	callCount := len(platform.calls)
+	certificateCount := platform.certificateSeq
+	profileCount := platform.profileSeq
 	second, err := app.setupMobileSigning(t.Context(), d, "", false)
 	if err != nil || !second.Ready {
 		t.Fatalf("idempotent result=%+v err=%v", second, err)
 	}
-	if len(platform.calls) != callCount {
-		t.Fatalf("idempotent setup made %d additional integration calls", len(platform.calls)-callCount)
+	if platform.certificateSeq != certificateCount || platform.profileSeq != profileCount {
+		t.Fatalf("idempotent setup mutated signing resources: certificates=%d profiles=%d", platform.certificateSeq, platform.profileSeq)
+	}
+	if signingCallCount(platform.calls, "enable_bundle_id_capability") != 1 ||
+		signingCallCount(platform.calls, "disable_bundle_id_capability") != 0 {
+		t.Fatalf("idempotent setup mutated Apple capabilities: calls=%v", platform.calls)
+	}
+}
+
+func TestMobileSigningRepairsProfileWhenSourceRequirementsChange(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	_, d := newIOSSigningDeployment(t, platform)
+	entitlements := filepath.Join(d.SourceRef, "App", "App.entitlements")
+	if err := os.WriteFile(entitlements, []byte(`<?xml version="1.0"?><plist version="1.0"><dict/></plist>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeIOSPlist(t, entitlements, plist.XMLFormat, map[string]any{
+		"aps-environment": "$(APNS_ENVIRONMENT)",
+	})
+	providerWrites := signingCallCount(platform.calls, "import_group_variables") +
+		signingCallCount(platform.calls, "update_group_variable")
+	repaired, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Setup.AppleCertificateID != first.Setup.AppleCertificateID ||
+		repaired.Setup.AppleProfileID == first.Setup.AppleProfileID {
+		t.Fatalf("expected profile-only repair: first=%+v repaired=%+v", first.Setup, repaired.Setup)
+	}
+	if platform.certificateSeq != 1 {
+		t.Fatalf("repair created certificate: %d", platform.certificateSeq)
+	}
+	if got := signingCallCount(platform.calls, "import_group_variables") +
+		signingCallCount(platform.calls, "update_group_variable"); got != providerWrites {
+		t.Fatalf("profile repair rewrote provider secrets: before=%d after=%d", providerWrites, got)
+	}
+	deleted := lastSigningCall(platform.calls, "delete_profile")
+	if deleted == nil || deleted.Input["profile_id"] != first.Setup.AppleProfileID {
+		t.Fatalf("old profile cleanup=%#v", deleted)
+	}
+	if signingCallIndex(platform.calls, "delete_profile") <
+		lastSigningCallIndex(platform.calls, "create_profile") {
+		t.Fatalf("old profile deleted before replacement creation: calls=%v", platform.calls)
+	}
+}
+
+func TestMobileSigningRepairFailurePreservesReadySetup(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	_, d := newIOSSigningDeployment(t, platform)
+	entitlements := filepath.Join(d.SourceRef, "App", "App.entitlements")
+	if err := os.WriteFile(entitlements, []byte(`<?xml version="1.0"?><plist version="1.0"><dict/></plist>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeIOSPlist(t, entitlements, plist.XMLFormat, map[string]any{
+		"aps-environment": "production",
+	})
+	platform.failTool = "create_profile"
+	if result, err := app.setupMobileSigning(t.Context(), d, "", false); err == nil || result != nil {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	stored, err := dbGetMobileSigningSetup(globalCtx.AppDB(), d.ID, d.EnvironmentID, "codemagic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != mobileSigningStatusReady ||
+		stored.AppleProfileID != first.Setup.AppleProfileID ||
+		stored.AppleCertificateID != first.Setup.AppleCertificateID {
+		t.Fatalf("stored=%+v", stored)
 	}
 }
 
@@ -373,4 +520,22 @@ func signingCalls(calls []integrationCall, tool string) []integrationCall {
 		}
 	}
 	return out
+}
+
+func signingCallIndex(calls []integrationCall, tool string) int {
+	for i, call := range calls {
+		if call.Tool == tool {
+			return i
+		}
+	}
+	return -1
+}
+
+func lastSigningCallIndex(calls []integrationCall, tool string) int {
+	for i := len(calls) - 1; i >= 0; i-- {
+		if calls[i].Tool == tool {
+			return i
+		}
+	}
+	return -1
 }

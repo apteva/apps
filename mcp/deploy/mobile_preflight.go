@@ -21,7 +21,48 @@ func validateMobileSource(root string, d *Deployment, cloudCfg cloudBuildConfig)
 	}
 	switch platform {
 	case "ios":
-		return validateIOSSource(root, target, cloudCfg)
+		if err := validateIOSSource(root, target, cloudCfg); err != nil {
+			return err
+		}
+		if target.SmokeOnly || normalizeBuildBackend(d.BuildBackend) == buildBackendLocal || globalCtx == nil {
+			return nil
+		}
+		requirements, err := detectMobileRequirements(root, d)
+		if err != nil {
+			return err
+		}
+		setup, err := dbGetMobileSigningSetup(
+			globalCtx.AppDB(), d.ID, d.EnvironmentID, normalizeBuildBackend(d.BuildBackend),
+		)
+		if err != nil {
+			return err
+		}
+		if setup == nil {
+			if len(requirements.Features) == 0 {
+				return nil
+			}
+			return errors.New("iOS signing requirements are not reconciled; run mobile signing setup before submitting the build")
+		}
+		if setup.Status != mobileSigningStatusReady ||
+			setup.RequirementsHash != requirements.Hash ||
+			!mobileFeaturesContainAll(
+				mobileFeaturesFromJSON(setup.ProvisionedFeaturesJSON),
+				requirements.Features,
+			) {
+			provisioned := mobileFeaturesFromJSON(setup.ProvisionedFeaturesJSON)
+			for _, feature := range requirements.Features {
+				if mobileFeaturesContainAll(provisioned, []string{feature}) {
+					continue
+				}
+				capability := defaultStr(appleCapabilityForMobileFeature[feature], feature)
+				return fmt.Errorf(
+					"iOS signing profile does not satisfy required capability %s. Run signing setup to repair it",
+					capability,
+				)
+			}
+			return errors.New("iOS signing requirements changed; repair mobile signing before submitting the build")
+		}
+		return nil
 	case "android":
 		return validateAndroidSource(root, target, cloudCfg)
 	default:

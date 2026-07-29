@@ -188,7 +188,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_mobile_signing_setup", Handler: a.toolMobileSigningSetup,
-			Description: "Provision or rotate iOS distribution signing for the selected cloud build provider. Registers the Apple Bundle ID, creates the distribution certificate/profile, stores secrets at the provider, and wires the provider secret group into this environment. Args: name OR id, environment?, provider?, rotate?",
+			Description: "Configure or repair iOS signing for the selected cloud build provider. Reconciles source-required Apple capabilities before provisioning, repairs stale profiles without rotating a valid certificate, and rotates the certificate/key only when rotate=true. Args: name OR id, environment?, provider?, rotate?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

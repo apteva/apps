@@ -38,6 +38,9 @@ type cloudBuildConfig struct {
 	Branch              string            `json:"branch,omitempty"`
 	Tag                 string            `json:"tag,omitempty"`
 	InstanceType        string            `json:"instance_type,omitempty"`
+	MachineClass        string            `json:"machine_class,omitempty"`
+	XcodeVersion        string            `json:"xcode_version,omitempty"`
+	SoftwareVersions    map[string]string `json:"software_versions,omitempty"`
 	ArtifactName        string            `json:"artifact_name,omitempty"`
 	ArtifactMode        string            `json:"artifact_mode,omitempty"`
 	ArtifactFile        string            `json:"artifact_file,omitempty"`
@@ -101,6 +104,26 @@ func normalizeBuildBackend(value string) string {
 	}
 }
 
+func resolvedCodemagicInstanceType(cfg cloudBuildConfig) string {
+	if value := strings.TrimSpace(cfg.InstanceType); value != "" {
+		return value
+	}
+	if cfg.MachineClass == "performance" {
+		return "mac_mini_m4"
+	}
+	return "mac_mini_m2"
+}
+
+func resolvedMachineClass(cfg cloudBuildConfig) string {
+	if cfg.MachineClass != "" {
+		return cfg.MachineClass
+	}
+	if strings.Contains(strings.ToLower(cfg.InstanceType), "m4") {
+		return "performance"
+	}
+	return "standard"
+}
+
 func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	var cfg cloudBuildConfig
 	raw = strings.TrimSpace(raw)
@@ -116,6 +139,19 @@ func parseCloudBuildConfig(backend, raw string) (cloudBuildConfig, error) {
 	cfg.SourceMode = strings.ToLower(strings.TrimSpace(cfg.SourceMode))
 	cfg.StoreChannel = strings.ToLower(strings.TrimSpace(cfg.StoreChannel))
 	cfg.Preflight = strings.ToLower(strings.TrimSpace(cfg.Preflight))
+	cfg.MachineClass = strings.ToLower(strings.TrimSpace(cfg.MachineClass))
+	cfg.XcodeVersion = strings.TrimSpace(cfg.XcodeVersion)
+	if cfg.MachineClass != "" && cfg.MachineClass != "standard" && cfg.MachineClass != "performance" {
+		return cfg, errors.New("machine_class must be standard or performance")
+	}
+	if cfg.XcodeVersion != "" {
+		if cfg.SoftwareVersions == nil {
+			cfg.SoftwareVersions = map[string]string{}
+		}
+		if strings.TrimSpace(cfg.SoftwareVersions["xcode"]) == "" {
+			cfg.SoftwareVersions["xcode"] = cfg.XcodeVersion
+		}
+	}
 	if cfg.SourceMode == "" && normalizeBuildBackend(backend) == buildBackendRunner {
 		cfg.SourceMode = "bundle"
 	} else if cfg.SourceMode == "" {
@@ -561,8 +597,8 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	} else {
 		input["tag"] = cfg.Tag
 	}
-	if cfg.InstanceType != "" {
-		input["instanceType"] = cfg.InstanceType
+	if instanceType := resolvedCodemagicInstanceType(cfg); instanceType != "" {
+		input["instanceType"] = instanceType
 	}
 	variables := cloneStringMap(cfg.Variables)
 	contract, err := cloudBuildContractVariables(cfg, d, build, capsule)
@@ -572,7 +608,11 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	for key, value := range contract {
 		variables[key] = value
 	}
-	input["environment"] = map[string]any{"variables": variables, "groups": cfg.Groups}
+	environment := map[string]any{"variables": variables, "groups": cfg.Groups}
+	if len(cfg.SoftwareVersions) > 0 {
+		environment["softwareVersions"] = cfg.SoftwareVersions
+	}
+	input["environment"] = environment
 	data, err := executeIntegration(bound, "start_build", input)
 	if err != nil {
 		return nil, err
@@ -913,6 +953,7 @@ func cloudBuildContractVariables(cfg cloudBuildConfig, d *Deployment, build *Bui
 		Environment: d.EnvironmentName, TargetKind: d.TargetKind,
 		Framework: d.Framework, BuildCmd: d.BuildCmd,
 		Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
+		MachineClass: resolvedMachineClass(cfg), SoftwareVersions: cfg.SoftwareVersions,
 	}
 	specJSON, err := json.Marshal(spec)
 	if err != nil {

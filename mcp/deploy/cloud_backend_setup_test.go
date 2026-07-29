@@ -90,7 +90,8 @@ func TestCloudBackendSetupCreatesSharedCodemagicAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.AppID != "created-app" || cfg.WorkflowID != defaultCodemagicMobileWorkflow ||
-		cfg.SourceMode != "bundle" || cfg.ArtifactMode != "store_upload" {
+		cfg.SourceMode != "bundle" || cfg.ArtifactMode != "store_upload" ||
+		cfg.InstanceType != "mac_mini_m2" {
 		t.Fatalf("config=%+v", cfg)
 	}
 }

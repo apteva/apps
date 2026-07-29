@@ -120,6 +120,10 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	if issuerID == "" || keyID == "" || apiPrivateKey == "" {
 		return nil, errors.New("app_store integration requires issuer_id, key_id, and private_key")
 	}
+	requirements, err := a.inspectMobileRequirements(ctx, d)
+	if err != nil {
+		return nil, err
+	}
 
 	existing, err := dbGetMobileSigningSetup(globalCtx.AppDB(), d.ID, d.EnvironmentID, providerName)
 	if err != nil {
@@ -131,16 +135,13 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 			existing.BundleID, target.BundleID,
 		)
 	}
-	if existing != nil && existing.Status == mobileSigningStatusReady &&
-		existing.ProviderConnectionID == providerBound.ConnectionID &&
-		provider.SetupMatchesBuildConfig(cfg, existing) && !rotate {
-		return &mobileSigningSetupResult{Setup: existing, Ready: true}, nil
-	}
 	previous := existing
 	setup := &MobileSigningSetup{
 		DeploymentID: d.ID, EnvironmentID: d.EnvironmentID, Platform: "ios",
 		Provider: providerName, ProviderConnectionID: providerBound.ConnectionID,
 		BundleID: target.BundleID, Status: "provisioning",
+		RequiredFeaturesJSON: mobileFeaturesJSON(requirements.Features),
+		RequirementsHash:     requirements.Hash,
 	}
 	if previous != nil {
 		setup.AppleBundleResourceID = previous.AppleBundleResourceID
@@ -150,10 +151,15 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		setup.ProviderSecretRef = previous.ProviderSecretRef
 		setup.ProviderConfigJSON = previous.ProviderConfigJSON
 		setup.KeyFingerprint = previous.KeyFingerprint
+		setup.ProvisionedFeaturesJSON = previous.ProvisionedFeaturesJSON
+		setup.ManagedFeaturesJSON = previous.ManagedFeaturesJSON
+		setup.PlatformStateJSON = previous.PlatformStateJSON
 	}
-	setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
-	if err != nil {
-		return nil, err
+	if previous == nil || previous.Status != mobileSigningStatusReady {
+		setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
+		if err != nil {
+			return nil, err
+		}
 	}
 	failSetup := func(cause error) error {
 		if previous != nil && previous.Status == mobileSigningStatusReady {
@@ -223,6 +229,99 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	}
 	setup.AppStoreAppID = appStoreAppID
 
+	capabilities, err := reconcileAppleCapabilities(appleBound, bundleResourceID, requirements.Features)
+	if err != nil {
+		return nil, failSetup(err)
+	}
+	setup.RequiredFeaturesJSON = mobileFeaturesJSON(requirements.Features)
+	setup.ProvisionedFeaturesJSON = mobileFeaturesJSON(capabilities.Provisioned)
+	setup.ManagedFeaturesJSON = mobileFeaturesJSON(mergeMobileFeatures(
+		mobileFeaturesFromJSON(setup.ManagedFeaturesJSON),
+		capabilities.Managed,
+	))
+	setup.RequirementsHash = requirements.Hash
+	setup.PlatformStateJSON = capabilities.StateJSON
+
+	providerMatches := previous != nil &&
+		previous.ProviderConnectionID == providerBound.ConnectionID &&
+		provider.SetupMatchesBuildConfig(cfg, previous)
+	requirementsMatch := previous != nil &&
+		previous.RequirementsHash == requirements.Hash &&
+		mobileFeaturesContainAll(
+			mobileFeaturesFromJSON(previous.ProvisionedFeaturesJSON),
+			requirements.Features,
+		)
+	if previous != nil && previous.Status == mobileSigningStatusReady &&
+		providerMatches && requirementsMatch && !capabilities.Changed && !rotate {
+		ready := *previous
+		ready.RequiredFeaturesJSON = setup.RequiredFeaturesJSON
+		ready.ProvisionedFeaturesJSON = setup.ProvisionedFeaturesJSON
+		ready.ManagedFeaturesJSON = setup.ManagedFeaturesJSON
+		ready.RequirementsHash = setup.RequirementsHash
+		ready.PlatformStateJSON = setup.PlatformStateJSON
+		ready.LastError = ""
+		readySetup, err := dbUpsertMobileSigningSetup(globalCtx.AppDB(), &ready)
+		if err != nil {
+			return nil, err
+		}
+		return &mobileSigningSetupResult{Setup: readySetup, Ready: true}, nil
+	}
+
+	if previous != nil && previous.Status == mobileSigningStatusReady && providerMatches && !rotate {
+		available, checkErr := appleCertificateAvailable(appleBound, previous.AppleCertificateID)
+		if checkErr != nil {
+			return nil, failSetup(checkErr)
+		}
+		if available {
+			profile, createErr := executeIntegration(appleBound, "create_profile", map[string]any{
+				"name":            appleReplacementProfileName(d, previous.KeyFingerprint, requirements.Hash),
+				"profileType":     "IOS_APP_STORE",
+				"bundle_id":       bundleResourceID,
+				"certificate_ids": []string{previous.AppleCertificateID},
+			})
+			if createErr != nil {
+				return nil, failSetup(createErr)
+			}
+			profileID := jsonStringAt(profile, "data", "id")
+			if profileID == "" {
+				return nil, failSetup(errors.New("Apple create_profile returned no resource id"))
+			}
+			setup.Status = mobileSigningStatusReady
+			setup.AppleCertificateID = previous.AppleCertificateID
+			setup.AppleProfileID = profileID
+			setup.ProviderSecretRef = previous.ProviderSecretRef
+			setup.ProviderConfigJSON = previous.ProviderConfigJSON
+			setup.KeyFingerprint = previous.KeyFingerprint
+			setup.LastError = ""
+			target.AppStoreAppID = appStoreAppID
+			targetBody, marshalErr := json.Marshal(target)
+			if marshalErr != nil {
+				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				return nil, failSetup(marshalErr)
+			}
+			if persistErr := persistEffectiveDeploymentConfig(d, map[string]any{
+				"target_config_json": string(targetBody),
+			}); persistErr != nil {
+				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				return nil, failSetup(persistErr)
+			}
+			setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
+			if err != nil {
+				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				return nil, err
+			}
+			if previous.AppleProfileID != "" && previous.AppleProfileID != profileID {
+				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": previous.AppleProfileID})
+			}
+			emit("deploy.mobile_signing.ready", map[string]any{
+				"deployment_id": d.ID, "environment_id": d.EnvironmentID,
+				"provider": providerName, "bundle_id": target.BundleID,
+				"repair": true,
+			})
+			return &mobileSigningSetupResult{Setup: setup, Ready: true}, nil
+		}
+	}
+
 	certificatePrivateKey, csr, fingerprint, err := generateAppleDistributionKey(d, target.BundleID)
 	if err != nil {
 		return nil, failSetup(err)
@@ -247,7 +346,7 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	}
 
 	profile, err := executeIntegration(appleBound, "create_profile", map[string]any{
-		"name":            appleProfileName(d, fingerprint),
+		"name":            appleReplacementProfileName(d, fingerprint, requirements.Hash),
 		"profileType":     "IOS_APP_STORE",
 		"bundle_id":       bundleResourceID,
 		"certificate_ids": []string{certificateID},
@@ -298,11 +397,19 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	setup.ProviderSecretRef = providerResult.SecretRef
 	setup.ProviderConfigJSON = defaultStr(providerResult.ConfigJSON, "{}")
 	setup.KeyFingerprint = fingerprint
+	setup.RequiredFeaturesJSON = mobileFeaturesJSON(requirements.Features)
+	setup.ProvisionedFeaturesJSON = mobileFeaturesJSON(capabilities.Provisioned)
+	setup.ManagedFeaturesJSON = mobileFeaturesJSON(mergeMobileFeatures(
+		mobileFeaturesFromJSON(setup.ManagedFeaturesJSON),
+		capabilities.Managed,
+	))
+	setup.RequirementsHash = requirements.Hash
+	setup.PlatformStateJSON = capabilities.StateJSON
 	setup.LastError = ""
 	setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
 	if err != nil {
 		cleanupNewAppleResources()
-		return nil, err
+		return nil, failSetup(err)
 	}
 
 	if previous != nil && previous.Status == mobileSigningStatusReady {
@@ -384,10 +491,21 @@ func appleResourceName(d *Deployment) string {
 	return strings.TrimSpace(name)
 }
 
-func appleProfileName(d *Deployment, fingerprint string) string {
+func appleReplacementProfileName(d *Deployment, fingerprint, requirementsHash string) string {
 	suffix := strings.TrimSpace(fingerprint)
 	if len(suffix) > 8 {
 		suffix = suffix[:8]
+	}
+	requirementSuffix := strings.TrimSpace(requirementsHash)
+	if len(requirementSuffix) > 8 {
+		requirementSuffix = requirementSuffix[:8]
+	}
+	if requirementSuffix != "" {
+		suffix = strings.Trim(strings.Join([]string{suffix, requirementSuffix}, "-"), "-")
+	}
+	var nonce [4]byte
+	if _, err := rand.Read(nonce[:]); err == nil {
+		suffix = strings.Trim(strings.Join([]string{suffix, hex.EncodeToString(nonce[:])}, "-"), "-")
 	}
 	if suffix == "" {
 		return appleResourceName(d) + " App Store"

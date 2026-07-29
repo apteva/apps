@@ -232,6 +232,98 @@ settings:
 	}
 }
 
+func TestDetectIOSRequiredFeaturesFromReferencedEntitlements(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		projectPath string
+		projectBody string
+	}{
+		{
+			name:        "XcodeGen",
+			projectPath: "project.yml",
+			projectBody: "settings:\n  CODE_SIGN_ENTITLEMENTS: $(SRCROOT)/Example/App.entitlements\n",
+		},
+		{
+			name:        "xcodeproj",
+			projectPath: "Example.xcodeproj/project.pbxproj",
+			projectBody: "buildSettings = { CODE_SIGN_ENTITLEMENTS = Example/App.entitlements; };",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, test.projectPath), test.projectBody)
+			writeIOSPlist(t, filepath.Join(root, "Example", "App.entitlements"), plist.XMLFormat, map[string]any{
+				"aps-environment": "$(APNS_ENVIRONMENT)",
+			})
+			features, err := detectIOSRequiredFeatures(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(features) != 1 || features[0] != mobileFeatureIOSPushNotifications {
+				t.Fatalf("features=%v", features)
+			}
+		})
+	}
+}
+
+func TestDetectIOSRequiredFeaturesIgnoresGeneratedEntitlements(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "project.yml"), "name: Example\n")
+	writeIOSPlist(t, filepath.Join(root, "DerivedData", "App.entitlements"), plist.BinaryFormat, map[string]any{
+		"aps-environment": "production",
+	})
+	features, err := detectIOSRequiredFeatures(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(features) != 0 {
+		t.Fatalf("features=%v", features)
+	}
+}
+
+func TestDetectIOSRequiredFeaturesAcceptsValidReferenceAlongsideMalformedOne(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "project.yml"), `
+targets:
+  Broken:
+    settings:
+      CODE_SIGN_ENTITLEMENTS: Broken.entitlements
+  Example:
+    settings:
+      CODE_SIGN_ENTITLEMENTS: Example/App.entitlements
+`)
+	writeTestFile(t, filepath.Join(root, "Broken.entitlements"), "not a plist")
+	writeIOSPlist(t, filepath.Join(root, "Example", "App.entitlements"), plist.BinaryFormat, map[string]any{
+		"aps-environment": "production",
+	})
+	features, err := detectIOSRequiredFeatures(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(features) != 1 || features[0] != mobileFeatureIOSPushNotifications {
+		t.Fatalf("features=%v", features)
+	}
+}
+
+func TestMobileRequirementsNormalizeExplicitFeaturesAcrossPlatforms(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{
+		TargetKind:       "android",
+		TargetConfigJSON: `{"required_features":["android.integrity","android.integrity"]}`,
+	}
+	snapshot, err := detectMobileRequirements(root, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Features) != 1 || snapshot.Features[0] != "android.integrity" || snapshot.Hash == "" {
+		t.Fatalf("snapshot=%+v", snapshot)
+	}
+	d.TargetConfigJSON = `{"required_features":["ios.push_notifications"]}`
+	if _, err := detectMobileRequirements(root, d); err == nil {
+		t.Fatal("expected cross-platform feature validation error")
+	}
+}
+
 func TestAndroidSourcePreflightValidatesStoreIdentity(t *testing.T) {
 	root := t.TempDir()
 	mainDir := filepath.Join(root, "app", "src", "main")

@@ -153,7 +153,7 @@ func (codemagicCloudBootstrapper) Setup(
 	cfg.SourceMode = "bundle"
 	cfg.AdapterRepository = repositoryURL
 	cfg.Preflight = "strict"
-	cfg.InstanceType = defaultStr(cfg.InstanceType, "mac_mini_m4")
+	cfg.InstanceType = defaultStr(cfg.InstanceType, "mac_mini_m2")
 	cfg.ArtifactName = defaultCloudArtifactName
 	cfg.ArtifactMode = strings.ToLower(strings.TrimSpace(input.ArtifactMode))
 	if cfg.ArtifactMode == "" {

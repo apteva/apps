@@ -21,6 +21,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
+	"howett.net/plist"
 )
 
 type cloudBuildPlatform struct {
@@ -117,6 +118,58 @@ func TestCloudBuildConfigValidation(t *testing.T) {
 	if err := validateBuildBackendSelection("github_actions", `{"owner":"acme","repo":"api","workflow_id":"deploy.yml","ref":"main","source_mode":"bundle","contract_inputs":true}`); err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := parseCloudBuildConfig(
+		"codemagic",
+		`{"app_id":"app","workflow_id":"ios","branch":"main","xcode_version":"26.6"}`,
+	)
+	if err != nil || cfg.SoftwareVersions["xcode"] != "26.6" {
+		t.Fatalf("xcode alias config=%+v err=%v", cfg, err)
+	}
+}
+
+func TestStrictIOSPreflightRejectsStaleSigningBeforeCodemagicSubmission(t *testing.T) {
+	root, _ := newIOSPreflightFixture(t)
+	writeTestFile(t, filepath.Join(root, "project.yml"), `
+settings:
+  INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+  CODE_SIGN_ENTITLEMENTS: Example/App.entitlements
+`)
+	writeIOSPlist(t, filepath.Join(root, "Example", "App.entitlements"), plist.XMLFormat, map[string]any{
+		"aps-environment": "production",
+	})
+	platform := &cloudBuildPlatform{provider: "codemagic"}
+	ctx := withCloudBuildContext(t, platform)
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "stale-signing", TargetKind: "ios", SourceKind: "local", SourceRef: root,
+		Framework: "ios", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"runner","workflow_id":"ios","branch":"main","source_mode":"bundle","preflight":"strict"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app","version_name":"1.0","build_number":"1"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := effectiveDeploymentForEnvironment(d, env)
+	if _, err := dbUpsertMobileSigningSetup(ctx.AppDB(), &MobileSigningSetup{
+		DeploymentID: d.ID, EnvironmentID: env.ID, Platform: "ios", Provider: "codemagic",
+		BundleID: "com.example.app", Status: mobileSigningStatusReady,
+		RequirementsHash: "stale", ProvisionedFeaturesJSON: "[]",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	build, err := (&App{dataDir: t.TempDir()}).submitCloudBuild(t.Context(), effective)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if build.Status != "failed" || !strings.Contains(build.Error, "PUSH_NOTIFICATIONS") {
+		t.Fatalf("build=%+v", build)
+	}
+	if signingCallCount(platform.calls, "start_build") != 0 {
+		t.Fatalf("Codemagic was submitted despite stale signing: calls=%v", platform.calls)
+	}
 }
 
 func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
@@ -136,7 +189,7 @@ func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
 	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
 		Name: "ios-source", TargetKind: "ios", SourceKind: "local", SourceRef: sourceDir,
 		Framework: "ios", BuildBackend: "codemagic",
-		BuildBackendJSON: `{"app_id":"runner","workflow_id":"apteva-ios-runner","branch":"main","source_mode":"bundle","preflight":"off"}`,
+		BuildBackendJSON: `{"app_id":"runner","workflow_id":"apteva-ios-runner","branch":"main","source_mode":"bundle","preflight":"off","software_versions":{"xcode":"26.6"}}`,
 		EnvJSON:          `{"API_URL":"https://staging.example.test"}`,
 		TargetConfigJSON: `{"bundle_id":"com.example.source"}`,
 	})
@@ -167,6 +220,13 @@ func TestCodemagicBundleSourceCapsuleRoundTrip(t *testing.T) {
 	environment, ok := start.Input["environment"].(map[string]any)
 	if !ok {
 		t.Fatalf("environment=%#v", start.Input["environment"])
+	}
+	if start.Input["instanceType"] != "mac_mini_m2" {
+		t.Fatalf("default instance type=%#v", start.Input["instanceType"])
+	}
+	softwareVersions, ok := environment["softwareVersions"].(map[string]string)
+	if !ok || softwareVersions["xcode"] != "26.6" {
+		t.Fatalf("software versions=%#v", environment["softwareVersions"])
 	}
 	variables, ok := environment["variables"].(map[string]string)
 	if !ok {

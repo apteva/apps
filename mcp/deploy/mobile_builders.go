@@ -23,23 +23,24 @@ import (
 const artifactManifestFilename = ".apteva-artifact.json"
 
 type mobileTargetConfig struct {
-	Module        string   `json:"module,omitempty"`
-	Variant       string   `json:"variant,omitempty"`
-	PackageName   string   `json:"package_name,omitempty"`
-	VersionCode   string   `json:"version_code,omitempty"`
-	GradleArgs    []string `json:"gradle_args,omitempty"`
-	ProjectPath   string   `json:"project_path,omitempty"`
-	WorkspacePath string   `json:"workspace_path,omitempty"`
-	Scheme        string   `json:"scheme,omitempty"`
-	Configuration string   `json:"configuration,omitempty"`
-	TeamID        string   `json:"team_id,omitempty"`
-	BundleID      string   `json:"bundle_id,omitempty"`
-	VersionName   string   `json:"version_name,omitempty"`
-	BuildNumber   string   `json:"build_number,omitempty"`
-	AppStoreAppID string   `json:"app_store_app_id,omitempty"`
-	BetaGroupID   string   `json:"beta_group_id,omitempty"`
-	ReleaseType   string   `json:"release_type,omitempty"`
-	SmokeOnly     bool     `json:"smoke_only,omitempty"`
+	Module           string   `json:"module,omitempty"`
+	Variant          string   `json:"variant,omitempty"`
+	RequiredFeatures []string `json:"required_features,omitempty"`
+	PackageName      string   `json:"package_name,omitempty"`
+	VersionCode      string   `json:"version_code,omitempty"`
+	GradleArgs       []string `json:"gradle_args,omitempty"`
+	ProjectPath      string   `json:"project_path,omitempty"`
+	WorkspacePath    string   `json:"workspace_path,omitempty"`
+	Scheme           string   `json:"scheme,omitempty"`
+	Configuration    string   `json:"configuration,omitempty"`
+	TeamID           string   `json:"team_id,omitempty"`
+	BundleID         string   `json:"bundle_id,omitempty"`
+	VersionName      string   `json:"version_name,omitempty"`
+	BuildNumber      string   `json:"build_number,omitempty"`
+	AppStoreAppID    string   `json:"app_store_app_id,omitempty"`
+	BetaGroupID      string   `json:"beta_group_id,omitempty"`
+	ReleaseType      string   `json:"release_type,omitempty"`
+	SmokeOnly        bool     `json:"smoke_only,omitempty"`
 }
 
 type artifactManifest struct {

@@ -42,6 +42,8 @@ type runnerBuildSpec struct {
 	BuildCmd         string            `json:"build_cmd,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	TargetConfigJSON string            `json:"target_config_json,omitempty"`
+	MachineClass     string            `json:"machine_class,omitempty"`
+	SoftwareVersions map[string]string `json:"software_versions,omitempty"`
 }
 
 type runnerCredentials struct {
@@ -92,6 +94,7 @@ func (runnerBuildBackend) Submit(ctx context.Context, _ *sdk.BoundIntegration, c
 			Environment: d.EnvironmentName, TargetKind: d.TargetKind,
 			Framework: d.Framework, BuildCmd: d.BuildCmd,
 			Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
+			MachineClass: resolvedMachineClass(cfg), SoftwareVersions: cfg.SoftwareVersions,
 		},
 		Credentials: runnerBuildCredentials(d),
 	}
