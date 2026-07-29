@@ -41,6 +41,18 @@ type sourceProfile struct {
 	UpdatedAt       string `json:"updated_at"`
 }
 
+type mediaSearchResult struct {
+	ID              string  `json:"id"`
+	Title           string  `json:"title"`
+	URL             string  `json:"url"`
+	Channel         string  `json:"channel,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	Thumbnail       string  `json:"thumbnail,omitempty"`
+	AgeLimit        int     `json:"age_limit,omitempty"`
+	LiveStatus      string  `json:"live_status,omitempty"`
+	UploadDate      string  `json:"upload_date,omitempty"`
+}
+
 type storedProfile struct {
 	sourceProfile
 	EncryptedPayload string

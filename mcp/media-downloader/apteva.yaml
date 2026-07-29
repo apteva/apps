@@ -2,12 +2,13 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.12
+version: 0.2.13
 description: |
   Media download sidecar for public and authenticated sources supported by
   yt-dlp. Downloads use bounded concurrency and guarded public-network
   egress, stream completed files to storage, and keep sensitive YouTube and
-  Patreon cookie profiles encrypted in the app database.
+  Patreon cookie profiles encrypted in the app database. Agents can search
+  YouTube directly without a separate API key.
 
 author: Apteva
 icon: /ui/icon.svg
@@ -77,6 +78,8 @@ provides:
       description: A source profile was deleted and its encrypted payload scrubbed.
       payload: { id: string }
   mcp_tools:
+    - name: youtube_search
+      description: Search YouTube without an API key and return normalized media candidates for probing or download.
     - name: download_probe_url
       description: Inspect a supported media URL with yt-dlp without downloading it.
     - name: download_media

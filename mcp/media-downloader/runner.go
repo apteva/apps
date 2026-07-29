@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 type commandRunner interface {
@@ -86,6 +87,35 @@ func buildProbeArgs(rawURL, cookieFile string, extraArgs []string, proxyURL stri
 	}
 	args = append(args, rawURL)
 	return args
+}
+
+func buildSearchArgs(query string, limit int, cookieFile string, extraArgs []string, proxyURL string) []string {
+	limit = searchLimit(limit)
+	args := []string{
+		"--flat-playlist",
+		"--dump-single-json",
+		"--no-warnings",
+		"--playlist-end", strconv.Itoa(limit),
+	}
+	args = append(args, extraArgs...)
+	if proxyURL != "" {
+		args = append(args, "--proxy", proxyURL)
+	}
+	if cookieFile != "" {
+		args = append(args, "--cookies", cookieFile)
+	}
+	args = append(args, fmt.Sprintf("ytsearch%d:%s", limit, strings.TrimSpace(query)))
+	return args
+}
+
+func searchLimit(limit int) int {
+	if limit <= 0 {
+		return 10
+	}
+	if limit > 25 {
+		return 25
+	}
+	return limit
 }
 
 func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string {
@@ -232,6 +262,106 @@ func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, co
 		return nil, fmt.Errorf("parse yt-dlp metadata: %w", err)
 	}
 	return out, nil
+}
+
+func searchYouTube(ctx context.Context, runner commandRunner, ytdlpPath, query, cookieFile string, limit int, extraArgs []string, proxyURL string) ([]mediaSearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+	if utf8.RuneCountInString(query) > 300 {
+		return nil, errors.New("query must be 300 characters or fewer")
+	}
+	limit = searchLimit(limit)
+	var stdout strings.Builder
+	var stderr strings.Builder
+	err := runner.Run(ctx, ytdlpPath, buildSearchArgs(query, limit, cookieFile, extraArgs, proxyURL), func(line string) {
+		stdout.WriteString(line)
+		stdout.WriteByte('\n')
+	}, func(line string) {
+		stderr.WriteString(line)
+		stderr.WriteByte('\n')
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = err.Error()
+		}
+		return nil, errors.New(message)
+	}
+	var envelope struct {
+		Entries []map[string]any `json:"entries"`
+	}
+	if err := json.Unmarshal([]byte(stdout.String()), &envelope); err != nil {
+		return nil, fmt.Errorf("parse yt-dlp search results: %w", err)
+	}
+	results := make([]mediaSearchResult, 0, len(envelope.Entries))
+	for _, entry := range envelope.Entries {
+		id := mapString(entry, "id")
+		title := mapString(entry, "title")
+		if id == "" || title == "" {
+			continue
+		}
+		channel := mapString(entry, "channel")
+		if channel == "" {
+			channel = mapString(entry, "uploader")
+		}
+		results = append(results, mediaSearchResult{
+			ID:              id,
+			Title:           title,
+			URL:             "https://www.youtube.com/watch?v=" + url.QueryEscape(id),
+			Channel:         channel,
+			DurationSeconds: mapFloat(entry, "duration"),
+			Thumbnail:       bestThumbnail(entry),
+			AgeLimit:        int(mapFloat(entry, "age_limit")),
+			LiveStatus:      mapString(entry, "live_status"),
+			UploadDate:      mapString(entry, "upload_date"),
+		})
+		if len(results) >= limit {
+			break
+		}
+	}
+	return results, nil
+}
+
+func mapString(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func mapFloat(values map[string]any, key string) float64 {
+	switch value := values[key].(type) {
+	case float64:
+		return value
+	case int:
+		return float64(value)
+	case json.Number:
+		number, _ := value.Float64()
+		return number
+	}
+	return 0
+}
+
+func bestThumbnail(entry map[string]any) string {
+	thumbnails, _ := entry["thumbnails"].([]any)
+	bestURL := mapString(entry, "thumbnail")
+	bestArea := float64(0)
+	for _, raw := range thumbnails {
+		thumbnail, _ := raw.(map[string]any)
+		candidate := mapString(thumbnail, "url")
+		if candidate == "" {
+			continue
+		}
+		area := mapFloat(thumbnail, "width") * mapFloat(thumbnail, "height")
+		if area >= bestArea {
+			bestURL = candidate
+			bestArea = area
+		}
+	}
+	return bestURL
 }
 
 func findOutputFile(jobDir string, printed []string) (string, error) {

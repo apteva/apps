@@ -154,6 +154,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/jobs", Handler: a.httpJobs},
 		{Method: http.MethodPost, Pattern: "/jobs", Handler: a.httpCreateJob},
 		{Method: http.MethodPost, Pattern: "/probe", Handler: a.httpProbe},
+		{Method: http.MethodPost, Pattern: "/search", Handler: a.httpSearch},
 		{Method: http.MethodGet, Pattern: "/jobs/", Handler: a.httpJob},
 		{Method: http.MethodPost, Pattern: "/jobs/", Handler: a.httpJobAction},
 		{Method: http.MethodGet, Pattern: "/profiles", Handler: a.httpProfiles},
@@ -165,6 +166,17 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{
+			Name:        "youtube_search",
+			Description: "Search YouTube without an API key and return normalized media candidates. Args: query, limit? (1-25, default 10), source_profile_id?, _project_id?.",
+			InputSchema: schemaObj(map[string]any{
+				"query":             map[string]any{"type": "string"},
+				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": 25},
+				"source_profile_id": map[string]any{"type": "string"},
+				"_project_id":       map[string]any{"type": "string"},
+			}, []string{"query"}),
+			Handler: a.toolSearch,
+		},
 		{
 			Name:        "download_probe_url",
 			Description: "Inspect a public or authenticated media URL using yt-dlp. Args: url, source_profile_id?, _project_id?. Returns metadata without downloading.",
@@ -202,6 +214,27 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "source_profile_validate", Description: "Validate a profile against yt-dlp. Args: profile_id, url, _project_id?.", InputSchema: schemaObj(map[string]any{"profile_id": map[string]any{"type": "string"}, "url": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"profile_id", "url"}), Handler: a.toolProfileValidate},
 		{Name: "source_profile_delete", Description: "Delete a source profile. Args: profile_id, _project_id?.", InputSchema: schemaObj(map[string]any{"profile_id": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}}, []string{"profile_id"}), Handler: a.toolProfileDelete},
 	}
+}
+
+func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	query := strArg(args, "query")
+	if query == "" {
+		return nil, errors.New("query is required")
+	}
+	projectID := projectScope(ctx, args)
+	cookieFile, cleanup, err := a.cookieFileForProfile(context.Background(), ctx, projectID, strArg(args, "source_profile_id"))
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	limit := searchLimit(intArg(args, "limit", 10))
+	searchCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	results, err := searchYouTube(searchCtx, a.runner, a.ytdlpPath, query, cookieFile, limit, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")), a.proxyURL())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"query": query, "results": results, "count": len(results)}, nil
 }
 
 func (a *App) toolProbe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -827,6 +860,17 @@ func (a *App) httpProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	withHTTPProject(r, args)
 	out, err := a.toolProbe(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpSearch(w http.ResponseWriter, r *http.Request) {
+	args, err := readJSONArgs(w, r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	withHTTPProject(r, args)
+	out, err := a.toolSearch(a.ctx.WithProject(strArg(args, "_project_id")), args)
 	writeJSON(w, out, err)
 }
 

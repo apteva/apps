@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   RefreshCw,
   RotateCcw,
+  Search,
   ShieldCheck,
   Trash2,
   Upload,
@@ -146,6 +147,17 @@ function fmtDate(value: string) {
   if (!value) return "";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
+function fmtDuration(value: number) {
+  const total = Math.max(0, Math.round(Number(value || 0)));
+  if (!total) return "";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+    : `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
 function shortError(value: string) {
@@ -296,8 +308,16 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
   const [submitting, setSubmitting] = useState(false);
   const [probing, setProbing] = useState(false);
   const [metadata, setMetadata] = useState<any>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<any[]>([]);
   const active = useMemo(() => jobs.filter((job: any) => job.status === "running" || job.status === "queued").length, [jobs]);
   const update = (key: string, value: string) => setDraft((current: any) => ({ ...current, [key]: value }));
+
+  useEffect(() => {
+    setSearchResults([]);
+    setMetadata(null);
+  }, [projectId]);
 
   const probe = async () => {
     if (!draft.url.trim()) return;
@@ -312,6 +332,35 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
     } finally {
       setProbing(false);
     }
+  };
+
+  const search = async (event: any) => {
+    event.preventDefault();
+    if (!searchQuery.trim()) return;
+    setSearching(true);
+    setNotice("");
+    try {
+      const result = await request("/search", {
+        method: "POST",
+        body: JSON.stringify({ query: searchQuery, limit: 10, source_profile_id: draft.source_profile_id }),
+      }, projectId);
+      setSearchResults(result.results || []);
+    } catch (error: any) {
+      setSearchResults([]);
+      setNotice(error.message);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const selectSearchResult = (result: any) => {
+    setDraft((current: any) => ({ ...current, url: result.url }));
+    setMetadata({
+      ...result,
+      uploader: result.channel,
+      duration: result.duration_seconds,
+    });
+    window.setTimeout(() => document.getElementById("media-download-url")?.focus(), 0);
   };
 
   const submit = async (event: any) => {
@@ -354,6 +403,65 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
 
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4 p-3 sm:p-4">
+      <form onSubmit={search} className="grid w-full min-w-0 max-w-full gap-3 border-b border-border pb-4">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
+          <Field label="Search YouTube" className="flex-1">
+            <input
+              className={inputClass}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Title, topic, channel..."
+              maxLength={300}
+            />
+          </Field>
+          <Field label="Search profile" className="sm:w-56">
+            <select className={inputClass} value={draft.source_profile_id} onChange={(event) => update("source_profile_id", event.target.value)}>
+              <option value="">None</option>
+              {profiles.map((profile: any) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            </select>
+          </Field>
+          <div className="flex items-end">
+            <Button type="submit" icon={searching ? LoaderCircle : Search} className={searching ? "w-full [&>svg]:animate-spin sm:w-auto" : "w-full sm:w-auto"} disabled={!searchQuery.trim() || searching}>
+              Search
+            </Button>
+          </div>
+        </div>
+        {searchResults.length > 0 && (
+          <section className="min-w-0 border-y border-border" aria-label="YouTube search results" aria-live="polite">
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+              <h2 className="text-sm font-medium">Search results</h2>
+              <span className="text-xs text-text-dim">{searchResults.length}</span>
+            </div>
+            {searchResults.map((result: any) => (
+              <article key={result.id} className="flex min-w-0 gap-3 border-b border-border p-3 last:border-b-0">
+                {result.thumbnail ? (
+                  <img className="h-14 w-24 shrink-0 rounded border border-border object-cover" src={result.thumbnail} alt="" loading="lazy" />
+                ) : (
+                  <div className="grid h-14 w-24 shrink-0 place-items-center rounded border border-border bg-bg-input text-text-dim">
+                    <Video size={18} aria-hidden="true" />
+                  </div>
+                )}
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium" title={result.title}>{result.title}</div>
+                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-dim">
+                    {result.channel && <span className="max-w-full truncate">{result.channel}</span>}
+                    {result.duration_seconds > 0 && <span>{fmtDuration(result.duration_seconds)}</span>}
+                    {result.age_limit > 0 && <span>Age {result.age_limit}+</span>}
+                    {result.live_status && result.live_status !== "not_live" && <span>{result.live_status.replaceAll("_", " ")}</span>}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <Button type="button" className="min-h-8 px-2" onClick={() => selectSearchResult(result)}>Use URL</Button>
+                    <a href={result.url} target="_blank" rel="noreferrer" className="inline-flex min-h-8 items-center gap-1 px-2 text-xs text-accent hover:underline">
+                      Open <ExternalLink size={12} aria-hidden="true" />
+                    </a>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </section>
+        )}
+      </form>
+
       <form onSubmit={submit} className="grid w-full min-w-0 max-w-full gap-3 border-b border-border pb-4">
         <div className="flex min-w-0 flex-col gap-2 sm:flex-row">
           <Field label="Source URL" className="flex-1">
