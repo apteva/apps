@@ -321,10 +321,7 @@ func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *fac
 			prevID = m.ID
 			continue
 		}
-		mediaJSON := ""
-		if len(m.Attachments) > 0 {
-			mediaJSON = string(m.Attachments)
-		}
+		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
@@ -385,10 +382,7 @@ func syncFacebookMentions(ctx *sdk.AppCtx, projectID string, creds *facebookAcco
 		if t.ID == "" {
 			continue
 		}
-		mediaJSON := ""
-		if len(t.Attachments) > 0 {
-			mediaJSON = string(t.Attachments)
-		}
+		mediaJSON := normalizeInboxMediaJSON(t.Attachments)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
@@ -472,12 +466,8 @@ func syncFacebookReviews(ctx *sdk.AppCtx, projectID string, creds *facebookAccou
 	return added, nil
 }
 
-func facebookInboxReply(ctx *sdk.AppCtx, item *inboxItem, body, mode string) inboxOutcome {
+func facebookInboxReply(ctx *sdk.AppCtx, item *inboxItem, message inboxMessage, mode string) inboxOutcome {
 	out := inboxOutcome{InboxItemID: item.ID, SocialAccountID: item.SocialAccountID, Platform: item.Platform}
-	if body == "" {
-		out.Status, out.Error = "failed", "body required"
-		return out
-	}
 	creds, err := loadFacebookAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -486,16 +476,16 @@ func facebookInboxReply(ctx *sdk.AppCtx, item *inboxItem, body, mode string) inb
 	switch item.Kind {
 	case inboxKindComment:
 		if mode == inboxReplyModePrivate {
-			return fbPrivateReplyToComment(ctx, out, creds, item, body)
+			return fbPrivateReplyToComment(ctx, out, creds, item, message.Body)
 		}
-		return fbReplyToComment(ctx, out, creds, item, body)
+		return fbReplyToComment(ctx, out, creds, item, message.Body)
 	case inboxKindDM:
 		if mode == inboxReplyModePrivate {
 			out.Status = "unsupported"
 			out.Reason = "facebook DM replies are already private; use mode=public or mode=auto"
 			return out
 		}
-		return fbSendDM(ctx, out, creds, item, body)
+		return fbSendDM(ctx, out, creds, item, message)
 	default:
 		out.Status = "unsupported"
 		out.Reason = fmt.Sprintf("facebook inbox_reply: kind %q has no reply path", item.Kind)
@@ -565,45 +555,74 @@ func fbPrivateReplyToComment(ctx *sdk.AppCtx, out inboxOutcome, creds *facebookA
 	return out
 }
 
-func fbSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *facebookAccountCreds, item *inboxItem, body string) inboxOutcome {
+func fbSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *facebookAccountCreds, item *inboxItem, message inboxMessage) inboxOutcome {
 	if item.AuthorExternalID == "" {
 		out.Status, out.Error = "failed", "facebook DM target requires author_external_id (PSID)"
 		return out
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_send_message", map[string]any{
-		"pageId":         creds.PageID,
-		"recipient":      map[string]any{"id": item.AuthorExternalID},
-		"message":        map[string]any{"text": body},
-		"messaging_type": "RESPONSE",
-		"access_token":   creds.PageToken,
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	var resp struct {
-		MessageID string `json:"message_id"`
-	}
-	_ = json.Unmarshal(res.Data, &resp)
-	out.Status = "ok"
-	out.ExternalID = resp.MessageID
-	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
-	if resp.MessageID != "" {
+	deliveries := make([]inboxDelivery, 0, len(message.Attachments)+1)
+	parentID := item.ExternalID
+	for _, part := range inboxMessageParts(message) {
+		payload := map[string]any{}
+		if part.Attachment != nil {
+			payload["attachment"] = map[string]any{
+				"type": part.Attachment.Kind,
+				"payload": map[string]any{
+					"url":         part.Attachment.URL,
+					"is_reusable": false,
+				},
+			}
+		} else {
+			payload["text"] = part.Body
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_send_message", map[string]any{
+			"pageId":         creds.PageID,
+			"recipient":      map[string]any{"id": item.AuthorExternalID},
+			"message":        payload,
+			"messaging_type": "RESPONSE",
+			"access_token":   creds.PageToken,
+		})
+		delivery := inboxDelivery{Kind: part.Kind}
+		if err != nil {
+			delivery.Status, delivery.Error = "failed", err.Error()
+			deliveries = append(deliveries, delivery)
+			continue
+		}
+		if res == nil || !res.Success {
+			delivery.Status, delivery.Error = "failed", upstreamError(res).Error()
+			deliveries = append(deliveries, delivery)
+			continue
+		}
+		var resp struct {
+			MessageID string `json:"message_id"`
+		}
+		_ = json.Unmarshal(res.Data, &resp)
+		delivery.Status, delivery.ExternalID = "ok", resp.MessageID
+		deliveries = append(deliveries, delivery)
+		mediaJSON := ""
+		if part.Attachment != nil {
+			mediaJSON = marshalInboxAttachments([]inboxAttachment{*part.Attachment})
+		}
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",
 			Kind:             inboxKindDM,
 			ExternalID:       resp.MessageID,
-			ParentExternalID: item.ExternalID,
+			ParentExternalID: parentID,
 			ExternalPostID:   item.ExternalPostID,
-			Body:             body,
+			AuthorExternalID: creds.PageID,
+			Body:             part.Body,
+			MediaJSON:        mediaJSON,
 			OccurredAt:       time.Now().UTC(),
 		})
+		if resp.MessageID != "" {
+			parentID = resp.MessageID
+		}
+	}
+	out = outcomeFromInboxDeliveries(out, deliveries)
+	if out.Status == "ok" || out.Status == "partial" {
+		_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
 	}
 	return out
 }

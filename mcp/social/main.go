@@ -112,7 +112,7 @@ provides:
     - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
     - { name: inbox_mark_unread,          description: "Mark inbox items unread (local-only)." }
     - { name: inbox_archive,              description: "Archive inbox items (local-only)." }
-    - { name: inbox_reply,                description: "Reply to a comment or DM. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies." }
+    - { name: inbox_reply,                description: "Reply to a comment or DM with text and, where supported, image/video/audio/file attachments from Storage or a public HTTPS URL. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies." }
     - { name: inbox_private_reply,        description: "Compatibility alias for inbox_reply with mode=private." }
     - { name: inbox_hide,                 description: "Hide a comment on the platform side." }
     - { name: inbox_unhide,               description: "Reverse inbox_hide." }
@@ -305,6 +305,10 @@ type inboxCaps struct {
 	MentionsRead                               bool
 	ReviewsRead, ReviewsReply                  bool
 	PrivateReply                               bool
+	DMAttachmentTypes                          []string
+	DMMaxAttachments                           int
+	CommentAttachmentTypes                     []string
+	CommentMaxAttachments                      int
 }
 
 // optionField describes one customizable knob on a platform — its key
@@ -409,8 +413,15 @@ var platforms = map[string]platformDef{
 			PrivateReply:   true,
 			DMsRead:        true,
 			DMsWrite:       true,
-			MentionsRead:   true,
-			ReviewsRead:    true,
+			DMAttachmentTypes: []string{
+				inboxAttachmentImage,
+				inboxAttachmentVideo,
+				inboxAttachmentAudio,
+				inboxAttachmentFile,
+			},
+			DMMaxAttachments: 1,
+			MentionsRead:     true,
+			ReviewsRead:      true,
 		},
 	},
 	"instagram": {
@@ -472,8 +483,15 @@ var platforms = map[string]platformDef{
 			CommentsDelete: true,
 			DMsRead:        true,
 			DMsWrite:       true,
-			MentionsRead:   true,
-			PrivateReply:   true,
+			DMAttachmentTypes: []string{
+				inboxAttachmentImage,
+				inboxAttachmentVideo,
+				inboxAttachmentAudio,
+				inboxAttachmentFile,
+			},
+			DMMaxAttachments: 1,
+			MentionsRead:     true,
+			PrivateReply:     true,
 		},
 	},
 	"tiktok": {
@@ -921,14 +939,32 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "inbox_reply",
-			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|unsupported|skipped|failed, reason?, error?, external_id?, permalink?}. " +
-				"For comment items, mode controls the route: `auto`/`public` creates a public child comment, `private` sends a private reply where supported (Facebook Pages and Instagram Business). Args: id, body, mode? (`auto` default, `public`, `private`), media_storage_ids?.",
+			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|partial|unsupported|skipped|failed, reason?, error?, external_id?, permalink?, deliveries?}. " +
+				"For comment items, mode controls the route: `auto`/`public` creates a public child comment, `private` sends a private reply where supported (Facebook Pages and Instagram Business). " +
+				"For DMs, attachments can reference Storage through media_storage_ids or attachments:[{source:'storage',storage_id}], or a public HTTPS URL through attachments:[{source:'url',url,type}]. Platform capabilities decide the allowed types. Args: id, body?, mode?, media_storage_ids?, media_project_id?, attachments?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                map[string]any{"type": "integer"},
 				"body":              map[string]any{"type": "string"},
 				"mode":              map[string]any{"type": "string", "enum": []string{"auto", "public", "private"}, "default": "auto"},
 				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-			}, []string{"id", "body"}),
+				"media_project_id":  map[string]any{"type": "string"},
+				"attachments": map[string]any{
+					"type": "array",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"source":     map[string]any{"type": "string", "enum": []string{"storage", "url"}},
+							"storage_id": map[string]any{"type": "integer"},
+							"project_id": map[string]any{"type": "string"},
+							"url":        map[string]any{"type": "string"},
+							"type":       map[string]any{"type": "string", "enum": []string{"image", "video", "audio", "file"}},
+							"mime":       map[string]any{"type": "string"},
+							"name":       map[string]any{"type": "string"},
+							"size_bytes": map[string]any{"type": "integer"},
+						},
+					},
+				},
+			}, []string{"id"}),
 			Handler: a.toolInboxReply,
 		},
 		{
@@ -3948,6 +3984,7 @@ type mediaItem struct {
 	ID    int64
 	URL   string
 	Mime  string
+	Name  string
 	Bytes int64
 }
 
@@ -3983,9 +4020,11 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		var meta struct {
 			File struct {
 				ContentType string `json:"content_type"`
+				Name        string `json:"name"`
 				SizeBytes   int64  `json:"size_bytes"`
 			} `json:"file"`
 			ContentType string `json:"content_type"`
+			Name        string `json:"name"`
 			SizeBytes   int64  `json:"size_bytes"`
 		}
 		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", storageArgs, &meta); err != nil {
@@ -3998,6 +4037,10 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		size := meta.SizeBytes
 		if size == 0 {
 			size = meta.File.SizeBytes
+		}
+		name := meta.Name
+		if name == "" {
+			name = meta.File.Name
 		}
 
 		// Signed URL — separate call because files_get_url is the
@@ -4029,7 +4072,7 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		}
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
-		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Bytes: size})
+		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Name: name, Bytes: size})
 	}
 	return out, nil
 }
@@ -8350,14 +8393,29 @@ func (a *App) handleInboxItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, out)
 	case "reply", "private_reply":
 		var body struct {
-			Body string `json:"body"`
-			Mode string `json:"mode"`
+			Body             string           `json:"body"`
+			Mode             string           `json:"mode"`
+			MediaStorageIDs  []int64          `json:"media_storage_ids"`
+			MediaProjectID   string           `json:"media_project_id"`
+			StorageProjectID string           `json:"storage_project_id"`
+			Attachments      []map[string]any `json:"attachments"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 		args["body"] = body.Body
+		if len(body.MediaStorageIDs) > 0 {
+			args["media_storage_ids"] = body.MediaStorageIDs
+		}
+		if body.MediaProjectID != "" {
+			args["media_project_id"] = body.MediaProjectID
+		} else if body.StorageProjectID != "" {
+			args["storage_project_id"] = body.StorageProjectID
+		}
+		if len(body.Attachments) > 0 {
+			args["attachments"] = body.Attachments
+		}
 		if parts[1] == "private_reply" {
 			args["mode"] = inboxReplyModePrivate
 		} else if strings.TrimSpace(body.Mode) != "" {
@@ -8936,6 +8994,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			"available":        available,
 			"zernio_available": zernioAvailable,
 			"option_fields":    fields,
+			"inbox":            inboxCapabilitiesPayload(def.Inbox),
 		})
 	}
 	for _, p := range zernioProviderPlatforms() {
@@ -8951,9 +9010,40 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 			"zernio_available": zernioAvailable,
 			"provider_only":    true,
 			"option_fields":    []optionField{},
+			"inbox": map[string]any{
+				"dm_attachment_types": []string{
+					inboxAttachmentImage,
+					inboxAttachmentVideo,
+					inboxAttachmentAudio,
+					inboxAttachmentFile,
+				},
+				"dm_max_attachments": 1,
+			},
 		})
 	}
 	writeJSON(w, map[string]any{"platforms": out})
+}
+
+func inboxCapabilitiesPayload(caps inboxCaps) map[string]any {
+	dmTypes := caps.DMAttachmentTypes
+	if dmTypes == nil {
+		dmTypes = []string{}
+	}
+	commentTypes := caps.CommentAttachmentTypes
+	if commentTypes == nil {
+		commentTypes = []string{}
+	}
+	return map[string]any{
+		"dm_read":                  caps.DMsRead,
+		"dm_write":                 caps.DMsWrite,
+		"dm_attachment_types":      dmTypes,
+		"dm_max_attachments":       caps.DMMaxAttachments,
+		"comments_read":            caps.CommentsRead,
+		"comments_write":           caps.CommentsWrite,
+		"comment_attachment_types": commentTypes,
+		"comment_max_attachments":  caps.CommentMaxAttachments,
+		"private_reply":            caps.PrivateReply,
+	}
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

@@ -138,14 +138,15 @@ const (
 // that touches a platform returns. Mirrors the post_metrics shape so
 // the dashboard can render any inbox response with the same widget.
 type inboxOutcome struct {
-	InboxItemID     int64  `json:"inbox_item_id,omitempty"`
-	SocialAccountID int64  `json:"social_account_id,omitempty"`
-	Platform        string `json:"platform,omitempty"`
-	Status          string `json:"status"` // ok | unsupported | skipped | failed
-	Reason          string `json:"reason,omitempty"`
-	Error           string `json:"error,omitempty"`
-	ExternalID      string `json:"external_id,omitempty"` // platform-side id of the created reply
-	Permalink       string `json:"permalink,omitempty"`
+	InboxItemID     int64           `json:"inbox_item_id,omitempty"`
+	SocialAccountID int64           `json:"social_account_id,omitempty"`
+	Platform        string          `json:"platform,omitempty"`
+	Status          string          `json:"status"` // ok | partial | unsupported | skipped | failed
+	Reason          string          `json:"reason,omitempty"`
+	Error           string          `json:"error,omitempty"`
+	ExternalID      string          `json:"external_id,omitempty"` // first platform-side id created
+	Permalink       string          `json:"permalink,omitempty"`
+	Deliveries      []inboxDelivery `json:"deliveries,omitempty"`
 }
 
 func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -153,10 +154,6 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return mcpError("id required"), nil
-	}
-	body, _ := args["body"].(string)
-	if body == "" {
-		return mcpError("body required"), nil
 	}
 	item, err := getInboxItem(ctx.AppDB(), pid, id)
 	if err != nil {
@@ -174,7 +171,21 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	default:
 		return mcpError("mode must be auto, public, or private"), nil
 	}
-	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+	message, err := a.resolveInboxMessage(ctx, args, pid)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	providerBacked := isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug)
+	if reason, ok := validateInboxAttachments(item, mode, providerBacked, message.Attachments); !ok {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          reason,
+		}, nil
+	}
+	if providerBacked {
 		if mode == inboxReplyModePrivate {
 			return inboxOutcome{
 				InboxItemID:     item.ID,
@@ -184,7 +195,7 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				Reason:          "provider-backed accounts do not expose private comment replies yet",
 			}, nil
 		}
-		return a.zernioInboxReply(ctx, item, body), nil
+		return a.zernioInboxReply(ctx, item, message), nil
 	}
 	if mode == inboxReplyModePrivate {
 		if item.Kind != inboxKindComment || !platformSupportsInbox(item.Platform, item.Kind, "private_reply") {
@@ -198,9 +209,9 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		switch item.Platform {
 		case "instagram":
-			return instagramInboxPrivateReply(ctx, item, body), nil
+			return instagramInboxPrivateReply(ctx, item, message.Body), nil
 		case "facebook":
-			return facebookInboxReply(ctx, item, body, mode), nil
+			return facebookInboxReply(ctx, item, message, mode), nil
 		}
 		return inboxOutcome{
 			InboxItemID:     item.ID,
@@ -221,11 +232,11 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	switch item.Platform {
 	case "facebook":
-		return facebookInboxReply(ctx, item, body, mode), nil
+		return facebookInboxReply(ctx, item, message, mode), nil
 	case "instagram":
-		return instagramInboxReply(ctx, item, body), nil
+		return instagramInboxReply(ctx, item, message), nil
 	case "twitter":
-		return twitterInboxReply(ctx, item, body), nil
+		return twitterInboxReply(ctx, item, message.Body), nil
 	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,

@@ -355,10 +355,7 @@ func expandAndUpsertIGConversation(ctx *sdk.AppCtx, projectID string, creds *igA
 			continue
 		}
 		occurred := parseIGTimestamp(m.CreatedTime)
-		mediaJSON := ""
-		if len(m.Attachments) > 0 {
-			mediaJSON = string(m.Attachments)
-		}
+		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 			ProjectID:        projectID,
 			SocialAccountID:  creds.AccountID,
@@ -452,15 +449,11 @@ func syncInstagramMentions(ctx *sdk.AppCtx, projectID string, creds *igAccountCr
 // instagramInboxReply dispatches based on the item's kind. Comment
 // → reply_to_comment; DM → send_message with recipient.id. Returns
 // the standard inbox outcome envelope.
-func instagramInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOutcome {
+func instagramInboxReply(ctx *sdk.AppCtx, item *inboxItem, message inboxMessage) inboxOutcome {
 	out := inboxOutcome{
 		InboxItemID:     item.ID,
 		SocialAccountID: item.SocialAccountID,
 		Platform:        item.Platform,
-	}
-	if body == "" {
-		out.Status, out.Error = "failed", "body required"
-		return out
 	}
 	creds, err := loadIGAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
@@ -469,9 +462,9 @@ func instagramInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOut
 	}
 	switch item.Kind {
 	case inboxKindComment:
-		return igReplyToComment(ctx, out, creds, item, body)
+		return igReplyToComment(ctx, out, creds, item, message.Body)
 	case inboxKindDM:
-		return igSendDM(ctx, out, creds, item, body)
+		return igSendDM(ctx, out, creds, item, message)
 	default:
 		out.Status = "unsupported"
 		out.Reason = fmt.Sprintf("instagram inbox_reply: kind %q has no reply path", item.Kind)
@@ -519,33 +512,74 @@ func igReplyToComment(ctx *sdk.AppCtx, out inboxOutcome, creds *igAccountCreds, 
 	return out
 }
 
-func igSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *igAccountCreds, item *inboxItem, body string) inboxOutcome {
+func igSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *igAccountCreds, item *inboxItem, message inboxMessage) inboxOutcome {
 	if item.AuthorExternalID == "" {
 		out.Status, out.Error = "failed", "no IGSID for recipient — DM target requires author_external_id"
 		return out
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "send_message", map[string]any{
-		"instagramAccountId": creds.IGUserID,
-		"recipient":          map[string]any{"id": item.AuthorExternalID},
-		"message":            map[string]any{"text": body},
-		"access_token":       creds.PageToken,
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
+	deliveries := make([]inboxDelivery, 0, len(message.Attachments)+1)
+	parentID := item.ExternalID
+	for _, part := range inboxMessageParts(message) {
+		payload := map[string]any{}
+		if part.Attachment != nil {
+			payload["attachment"] = map[string]any{
+				"type": part.Attachment.Kind,
+				"payload": map[string]any{
+					"url":         part.Attachment.URL,
+					"is_reusable": false,
+				},
+			}
+		} else {
+			payload["text"] = part.Body
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "send_message", map[string]any{
+			"instagramAccountId": creds.IGUserID,
+			"recipient":          map[string]any{"id": item.AuthorExternalID},
+			"message":            payload,
+			"access_token":       creds.PageToken,
+		})
+		delivery := inboxDelivery{Kind: part.Kind}
+		if err != nil {
+			delivery.Status, delivery.Error = "failed", err.Error()
+			deliveries = append(deliveries, delivery)
+			continue
+		}
+		if res == nil || !res.Success {
+			delivery.Status, delivery.Error = "failed", upstreamError(res).Error()
+			deliveries = append(deliveries, delivery)
+			continue
+		}
+		var resp struct {
+			MessageID string `json:"message_id"`
+		}
+		_ = json.Unmarshal(res.Data, &resp)
+		delivery.Status, delivery.ExternalID = "ok", resp.MessageID
+		deliveries = append(deliveries, delivery)
+		mediaJSON := ""
+		if part.Attachment != nil {
+			mediaJSON = marshalInboxAttachments([]inboxAttachment{*part.Attachment})
+		}
+		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			ProjectID:        item.ProjectID,
+			SocialAccountID:  creds.AccountID,
+			Platform:         "instagram",
+			Kind:             inboxKindDM,
+			ExternalID:       resp.MessageID,
+			ParentExternalID: parentID,
+			ExternalPostID:   item.ExternalPostID,
+			AuthorExternalID: creds.IGUserID,
+			Body:             part.Body,
+			MediaJSON:        mediaJSON,
+			OccurredAt:       time.Now().UTC(),
+		})
+		if resp.MessageID != "" {
+			parentID = resp.MessageID
+		}
 	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
+	out = outcomeFromInboxDeliveries(out, deliveries)
+	if out.Status == "ok" || out.Status == "partial" {
+		_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
 	}
-	var resp struct {
-		MessageID   string `json:"message_id"`
-		RecipientID string `json:"recipient_id"`
-	}
-	_ = json.Unmarshal(res.Data, &resp)
-	out.Status = "ok"
-	out.ExternalID = resp.MessageID
-	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
 	return out
 }
 

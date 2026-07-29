@@ -13,6 +13,7 @@
 // this file uses the same useAppEvents pattern as media-studio.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { File, FileAudio, Paperclip, X } from "lucide-react";
 import {
   Area,
   AreaChart,
@@ -30,6 +31,13 @@ import {
   metricTrendEntries,
 } from "./metricsPresentation";
 import { platformPresentation } from "./platformPresentation";
+import {
+  inboxAttachmentCapabilities,
+  parseInboxAttachments,
+  storageAttachmentKind,
+  type InboxAttachment,
+  type InboxAttachmentKind,
+} from "./inboxAttachments";
 import {
   calendarWindow,
   filterCalendarPosts,
@@ -179,6 +187,17 @@ interface PlatformInfo {
   // customise (Twitter / FB / IG / LinkedIn in v1; YouTube and
   // TikTok expose a few platform-specific controls).
   option_fields?: OptionField[];
+  inbox?: {
+    dm_read?: boolean;
+    dm_write?: boolean;
+    dm_attachment_types?: InboxAttachmentKind[];
+    dm_max_attachments?: number;
+    comments_read?: boolean;
+    comments_write?: boolean;
+    comment_attachment_types?: InboxAttachmentKind[];
+    comment_max_attachments?: number;
+    private_reply?: boolean;
+  };
 }
 
 interface OptionField {
@@ -491,6 +510,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         {tab === "inbox" && (
           <InboxView
             accounts={accounts}
+            platforms={platforms}
             projectId={projectId}
             setStatus={setStatus}
             onCountChange={setInboxCount}
@@ -1321,9 +1341,10 @@ function ImportHistoryDialog({
 // --- InboxView -----------------------------------------------------
 
 function InboxView({
-  accounts, projectId, setStatus, onCountChange,
+  accounts, platforms, projectId, setStatus, onCountChange,
 }: {
   accounts: SocialAccount[];
+  platforms: PlatformInfo[];
   projectId?: string | null;
   setStatus: (s: string) => void;
   onCountChange: (n: number) => void;
@@ -1339,6 +1360,8 @@ function InboxView({
   const [busy, setBusy] = useState<string | null>(null);
   const [replyBody, setReplyBody] = useState("");
   const [replyMode, setReplyMode] = useState<"public" | "private">("public");
+  const [replyAttachments, setReplyAttachments] = useState<StorageFile[]>([]);
+  const [attachmentPickerOpen, setAttachmentPickerOpen] = useState(false);
 
   const accountIDs = accounts.map((a) => a.id);
   const selectedAccountIDs =
@@ -1417,6 +1440,8 @@ function InboxView({
 
   useEffect(() => {
     setReplyMode("public");
+    setReplyAttachments([]);
+    setAttachmentPickerOpen(false);
   }, [selectedId]);
 
   const runAction = async (action: string, id = selectedId, body?: Record<string, unknown>) => {
@@ -1431,14 +1456,32 @@ function InboxView({
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      if (data?.status === "unsupported") {
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) {
+        setStatus(envelopeError);
+      } else if (data?.status === "unsupported") {
         setStatus(data.reason || "Inbox action unsupported.");
       } else if (data?.status === "failed") {
         setStatus(data.error || "Inbox action failed.");
+      } else if (data?.status === "partial") {
+        setStatus(data.error || "Some message parts could not be delivered.");
       } else {
         setStatus("");
       }
-      if (action === "reply" || action === "private_reply") setReplyBody("");
+      if ((action === "reply" || action === "private_reply") && data?.status === "ok") {
+        setReplyBody("");
+        setReplyAttachments([]);
+      } else if ((action === "reply" || action === "private_reply") && data?.status === "partial") {
+        const deliveredKinds = new Set(
+          (Array.isArray(data?.deliveries) ? data.deliveries : [])
+            .filter((delivery: { status?: string }) => delivery?.status === "ok")
+            .map((delivery: { kind?: string }) => delivery?.kind || ""),
+        );
+        if (deliveredKinds.has("text")) setReplyBody("");
+        setReplyAttachments((current) =>
+          current.filter((attachment) => !deliveredKinds.has(storageAttachmentKind(attachment.content_type || "")))
+        );
+      }
       await loadItems();
       await loadThread(id);
     } catch (e) {
@@ -1473,6 +1516,14 @@ function InboxView({
 
   const accountByID = new Map(accounts.map((a) => [a.id, a]));
   const activeItem = selected || (selectedId ? items.find((it) => it.id === selectedId) || null : null);
+  const activeAccount = activeItem ? accountByID.get(activeItem.social_account_id) : undefined;
+  const platformInfo = activeItem ? platforms.find((platform) => platform.platform === activeItem.platform) : undefined;
+  const attachmentCaps = inboxAttachmentCapabilities(
+    activeAccount?.capabilities,
+    platformInfo?.inbox as Record<string, unknown> | undefined,
+    activeItem?.kind || "",
+  );
+  const canAttach = attachmentCaps.max > 0 && replyMode !== "private";
   const canPrivateReply =
     !!activeItem &&
     activeItem.kind === "comment" &&
@@ -1568,7 +1619,7 @@ function InboxView({
                         {inboxAuthor(item)}
                       </div>
                       <div className="text-text-dim text-sm truncate mt-0.5">
-                        {item.body || "(no text)"}
+                        {item.body || inboxAttachmentSummary(item.media) || "(no text)"}
                       </div>
                       {account && (
                         <div className="text-text-dim text-xs truncate mt-1">{account.display_name}</div>
@@ -1643,8 +1694,9 @@ function InboxView({
                         <span>{formatInboxDate(message.occurred_at)}</span>
                       </div>
                       <div className="text-text text-sm whitespace-pre-wrap break-words">
-                        {message.body || "(no text)"}
+                        {message.body || (parseInboxAttachments(message.media).length === 0 ? "(no text)" : "")}
                       </div>
+                      <InboxAttachmentList attachments={parseInboxAttachments(message.media)} />
                     </div>
                   );
                 })}
@@ -1654,10 +1706,12 @@ function InboxView({
                 className="border-t border-border p-4 flex flex-col gap-2"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  if (replyBody.trim()) {
+                  if (replyBody.trim() || replyAttachments.length > 0) {
                     runAction("reply", activeItem.id, {
                       body: replyBody.trim(),
                       mode: canPrivateReply ? replyMode : "auto",
+                      media_storage_ids: replyAttachments.map((attachment) => attachment.id),
+                      media_project_id: projectId,
                     });
                   }
                 }}
@@ -1672,12 +1726,28 @@ function InboxView({
                   {canPrivateReply && (
                     <select
                       value={replyMode}
-                      onChange={(e) => setReplyMode(e.target.value as "public" | "private")}
+                      onChange={(e) => {
+                        const mode = e.target.value as "public" | "private";
+                        setReplyMode(mode);
+                        if (mode === "private") setReplyAttachments([]);
+                      }}
                       className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
                     >
                       <option value="public">Public comment</option>
                       <option value="private">Private message</option>
                     </select>
+                  )}
+                  {canAttach && (
+                    <button
+                      type="button"
+                      onClick={() => setAttachmentPickerOpen(true)}
+                      disabled={!!busy || replyAttachments.length >= attachmentCaps.max}
+                      className="w-9 h-9 grid place-items-center border border-border rounded text-text-dim hover:text-text disabled:opacity-50"
+                      title={`Attach ${attachmentCaps.types.join(", ")}`}
+                      aria-label="Attach media"
+                    >
+                      <Paperclip size={17} />
+                    </button>
                   )}
                   {(activeItem.kind === "comment" || activeItem.kind === "mention") && (
                     <>
@@ -1701,17 +1771,145 @@ function InboxView({
                   )}
                   <button
                     type="submit"
-                    disabled={!replyBody.trim() || !!busy}
+                    disabled={(!replyBody.trim() && replyAttachments.length === 0) || !!busy}
                     className="ml-auto px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
                   >
                     {busy === "reply" ? "Sending..." : "Reply"}
                   </button>
                 </div>
+                {replyAttachments.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {replyAttachments.map((attachment) => (
+                      <ReplyAttachmentPreview
+                        key={attachment.id}
+                        attachment={attachment}
+                        projectId={projectId}
+                        onRemove={() => setReplyAttachments((current) => current.filter((item) => item.id !== attachment.id))}
+                      />
+                    ))}
+                  </div>
+                )}
               </form>
+              {attachmentPickerOpen && (
+                <StoragePickerDialog
+                  excludeIds={new Set(replyAttachments.map((attachment) => attachment.id))}
+                  projectId={projectId}
+                  onClose={() => setAttachmentPickerOpen(false)}
+                  onPick={(files) => {
+                    setReplyAttachments((current) =>
+                      [...current, ...files.filter((file) => !current.some((item) => item.id === file.id))]
+                        .slice(0, attachmentCaps.max)
+                    );
+                    setAttachmentPickerOpen(false);
+                  }}
+                  initialKind={attachmentCaps.types.length === 1 ? attachmentCaps.types[0] : "all"}
+                  allowedKinds={attachmentCaps.types}
+                  single={attachmentCaps.max === 1}
+                  title="Attach to reply"
+                />
+              )}
             </>
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function inboxAttachmentSummary(media: unknown): string {
+  const attachments = parseInboxAttachments(media);
+  if (attachments.length === 0) return "";
+  const labels = attachments.map((attachment) =>
+    attachment.kind === "audio" ? "Audio" :
+      attachment.kind === "image" ? "Image" :
+        attachment.kind === "video" ? "Video" : "File"
+  );
+  return labels.join(", ");
+}
+
+function InboxAttachmentList({ attachments }: { attachments: InboxAttachment[] }) {
+  if (attachments.length === 0) return null;
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      {attachments.map((attachment, index) => {
+        const key = `${attachment.url}-${index}`;
+        if (attachment.kind === "image") {
+          return (
+            <a key={key} href={attachment.url} target="_blank" rel="noopener" className="block">
+              <img
+                src={attachment.thumbnail_url || attachment.url}
+                alt={attachment.name || "Attached image"}
+                loading="lazy"
+                className="block max-w-full max-h-72 rounded border border-border object-contain bg-bg-input"
+              />
+            </a>
+          );
+        }
+        if (attachment.kind === "video") {
+          return (
+            <video
+              key={key}
+              src={attachment.url}
+              poster={attachment.thumbnail_url}
+              controls
+              preload="metadata"
+              className="block max-w-full max-h-72 rounded border border-border bg-black"
+            />
+          );
+        }
+        if (attachment.kind === "audio") {
+          return (
+            <div key={key} className="flex items-center gap-2 min-w-0">
+              <FileAudio size={18} className="text-text-dim flex-shrink-0" />
+              <audio src={attachment.url} controls preload="metadata" className="max-w-full h-10" />
+            </div>
+          );
+        }
+        return (
+          <a
+            key={key}
+            href={attachment.url}
+            target="_blank"
+            rel="noopener"
+            className="inline-flex items-center gap-2 text-sm text-text hover:text-accent"
+          >
+            <File size={17} />
+            <span className="truncate">{attachment.name || "Open attachment"}</span>
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
+function ReplyAttachmentPreview({
+  attachment, projectId, onRemove,
+}: {
+  attachment: StorageFile;
+  projectId?: string | null;
+  onRemove: () => void;
+}) {
+  const kind = storageAttachmentKind(attachment.content_type || "");
+  const src = storageURL(`/files/${attachment.id}/content`, projectId);
+  return (
+    <div className="relative w-40 h-20 rounded border border-border bg-bg-input overflow-hidden">
+      {kind === "image" && <img src={src} alt={attachment.name} className="w-full h-full object-cover" />}
+      {kind === "video" && <video src={src} muted preload="metadata" className="w-full h-full object-cover" />}
+      {(kind === "audio" || kind === "file") && (
+        <div className="h-full px-3 flex items-center gap-2 min-w-0">
+          {kind === "audio" ? <FileAudio size={20} /> : <File size={20} />}
+          <span className="text-xs text-text truncate">{attachment.name}</span>
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove attachment"
+        aria-label="Remove attachment"
+        className="absolute top-1 right-1 w-6 h-6 rounded bg-black/70 text-white grid place-items-center"
+      >
+        <X size={14} />
+      </button>
     </div>
   );
 }
@@ -3188,7 +3386,7 @@ interface MediaLibraryRow {
 }
 
 type PickerTab = "media" | "storage";
-type PickerKind = "all" | "image" | "video";
+type PickerKind = "all" | InboxAttachmentKind;
 type RatingFilter = "all" | "general" | "mature" | "adult" | "unrated";
 type LengthFilter = "all" | "short" | "medium" | "long" | "very-long";
 type AspectFilter = "all" | "9:16" | "1:1" | "4:5" | "16:9";
@@ -3206,6 +3404,7 @@ function mediaStorageID(row: MediaLibraryRow): number | null {
 function mediaContentType(row: MediaLibraryRow): string {
   if (row.is_image) return "image/*";
   if (row.has_video) return "video/*";
+  if (row.has_audio) return "audio/*";
   return "";
 }
 
@@ -3284,7 +3483,8 @@ function lengthMatches(row: MediaLibraryRow, length: LengthFilter): boolean {
 }
 
 function StoragePickerDialog({
-  excludeIds, projectId, onClose, onPick, initialKind = "all", lockedKind, single = false, title = "Pick media",
+  excludeIds, projectId, onClose, onPick, initialKind = "all", lockedKind,
+  allowedKinds = ["image", "video"], single = false, title = "Pick media",
 }: {
   excludeIds: Set<number>;
   projectId?: string | null;
@@ -3292,10 +3492,11 @@ function StoragePickerDialog({
   onPick: (files: StorageFile[]) => void;
   initialKind?: PickerKind;
   lockedKind?: PickerKind;
+  allowedKinds?: InboxAttachmentKind[];
   single?: boolean;
   title?: string;
 }) {
-  const [tab, setTab] = useState<PickerTab>("media");
+  const [tab, setTab] = useState<PickerTab>(initialKind === "file" ? "storage" : "media");
   const [mediaRows, setMediaRows] = useState<MediaLibraryRow[]>([]);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [mediaError, setMediaError] = useState<string | null>(null);
@@ -3322,6 +3523,7 @@ function StoragePickerDialog({
         params.set("order_by", "updated_at");
         if (kind === "image") params.set("is_image", "true");
         else if (kind === "video") params.set("has_video", "true");
+        else if (kind === "audio") params.set("has_audio", "true");
         if (length === "short") params.set("duration_max_ms", "14999");
         else if (length === "medium") {
           params.set("duration_min_ms", "15000");
@@ -3356,7 +3558,11 @@ function StoragePickerDialog({
           if (rating !== "all" && (row.audience_rating || "unrated") !== rating) return false;
           if (!aspectMatches(row, aspect)) return false;
           if (!lengthMatches(row, length)) return false;
-          return row.is_image || row.has_video;
+          const rowKind: InboxAttachmentKind = row.is_image
+            ? "image"
+            : row.has_video ? "video" : row.has_audio ? "audio" : "file";
+          return allowedKinds.includes(rowKind) && rowKind !== "file" &&
+            (kind === "all" || rowKind === kind);
         });
         setMediaRows(usable);
       } catch (e) {
@@ -3370,7 +3576,7 @@ function StoragePickerDialog({
     };
     const t = setTimeout(run, q.trim() ? 200 : 0);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [q, kind, rating, length, aspect, folder, recursive, projectId]);
+  }, [q, kind, rating, length, aspect, folder, recursive, projectId, allowedKinds.join(",")]);
 
   // Re-fetch on q/kind change. The storage app does prefix-match on
   // content_type via SQL LIKE, so passing "image/" filters server-side;
@@ -3388,6 +3594,7 @@ function StoragePickerDialog({
         if (q.trim()) params.set("q", q.trim());
         if (kind === "image") params.set("content_type", "image/");
         else if (kind === "video") params.set("content_type", "video/");
+        else if (kind === "audio") params.set("content_type", "audio/");
         appendStorageScope(params, projectId);
         const res = await fetch(`${STORAGE_API}/files?${params.toString()}`, {
           credentials: "same-origin",
@@ -3397,9 +3604,8 @@ function StoragePickerDialog({
         if (cancelled) return;
         const usable = (data.files || []).filter(
           (f) => !isHiddenStorageFile(f) && (
-            kind !== "all" ||
-            (f.content_type || "").startsWith("image/") ||
-            (f.content_type || "").startsWith("video/")
+            allowedKinds.includes(storageAttachmentKind(f.content_type || "")) &&
+            (kind === "all" || storageAttachmentKind(f.content_type || "") === kind)
           )
         );
         setFiles(usable);
@@ -3412,7 +3618,7 @@ function StoragePickerDialog({
     // Debounce text input so we don't hammer storage on every keystroke.
     const t = setTimeout(run, q.trim() ? 200 : 0);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [q, kind, projectId, tab]);
+  }, [q, kind, projectId, tab, allowedKinds.join(",")]);
 
   const toggle = (id: number) => {
     setPicked((s) => {
@@ -3503,17 +3709,26 @@ function StoragePickerDialog({
           />
           {lockedKind ? (
             <div className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim">
-              {lockedKind === "image" ? "Images" : lockedKind === "video" ? "Videos" : "All media"}
+              {lockedKind === "image" ? "Images" :
+                lockedKind === "video" ? "Videos" :
+                  lockedKind === "audio" ? "Audio" :
+                    lockedKind === "file" ? "Files" : "All media"}
             </div>
           ) : (
             <select
               value={kind}
-              onChange={(e) => setKind(e.target.value as "all" | "image" | "video")}
+              onChange={(e) => {
+                const next = e.target.value as PickerKind;
+                setKind(next);
+                if (next === "file") setTab("storage");
+              }}
               className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             >
               <option value="all">All media</option>
-              <option value="image">Images</option>
-              <option value="video">Videos</option>
+              {allowedKinds.includes("image") && <option value="image">Images</option>}
+              {allowedKinds.includes("video") && <option value="video">Videos</option>}
+              {allowedKinds.includes("audio") && <option value="audio">Audio</option>}
+              {allowedKinds.includes("file") && <option value="file">Files</option>}
             </select>
           )}
           </div>
@@ -3599,6 +3814,7 @@ function StoragePickerDialog({
                 const sel = picked.has(id);
                 const name = mediaDisplayName(row);
                 const isVideo = !!row.has_video;
+                const isAudio = !!row.has_audio && !row.has_video && !row.is_image;
                 const preview = mediaPreviewURL(row, projectId);
                 const hasThumb = mediaHasThumbnail(row);
                 const meta = [
@@ -3622,7 +3838,11 @@ function StoragePickerDialog({
                     }
                     aria-label={already ? `${name} already attached` : `Select ${name}`}
                   >
-                    {isVideo && !hasThumb ? (
+                    {isAudio ? (
+                      <div className="w-full h-full grid place-items-center text-text-dim">
+                        <FileAudio size={32} />
+                      </div>
+                    ) : isVideo && !hasThumb ? (
                       <video src={preview} className="w-full h-full object-cover" muted preload="metadata" />
                     ) : (
                       <img src={preview} alt={name} className="w-full h-full object-cover" loading="lazy" />
@@ -3663,6 +3883,8 @@ function StoragePickerDialog({
                 const already = excludeIds.has(f.id);
                 const sel = picked.has(f.id);
                 const isVideo = (f.content_type || "").startsWith("video/");
+                const isImage = (f.content_type || "").startsWith("image/");
+                const isAudio = (f.content_type || "").startsWith("audio/");
                 const src = storageURL(`/files/${f.id}/content`, projectId);
                 return (
                   <button
@@ -3682,8 +3904,12 @@ function StoragePickerDialog({
                   >
                     {isVideo ? (
                       <video src={src} className="w-full h-full object-cover" muted preload="metadata" />
-                    ) : (
+                    ) : isImage ? (
                       <img src={src} alt={f.name} className="w-full h-full object-cover" loading="lazy" />
+                    ) : (
+                      <div className="w-full h-full grid place-items-center text-text-dim">
+                        {isAudio ? <FileAudio size={32} /> : <File size={32} />}
+                      </div>
                     )}
                     {isVideo && <PlayBadge />}
                     {sel && (

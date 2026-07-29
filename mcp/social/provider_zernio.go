@@ -1326,7 +1326,7 @@ func (a *App) upsertZernioInboxItem(ctx *sdk.AppCtx, pid string, accountID int64
 	mediaJSON := ""
 	if media := zernioMediaURLs(item); len(media) > 0 {
 		b, _ := json.Marshal(media)
-		mediaJSON = string(b)
+		mediaJSON = normalizeInboxMediaJSON(b)
 	}
 	rawJSON, _ := json.Marshal(item)
 	_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
@@ -1354,13 +1354,35 @@ func (a *App) upsertZernioInboxItem(ctx *sdk.AppCtx, pid string, accountID int64
 	return inserted
 }
 
-func (a *App) zernioInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOutcome {
+func (a *App) zernioInboxReply(ctx *sdk.AppCtx, item *inboxItem, message inboxMessage) inboxOutcome {
 	connID, err := zernioConnForInboxItem(ctx, item)
 	if err != nil {
 		return inboxOutcome{InboxItemID: item.ID, SocialAccountID: item.SocialAccountID, Platform: item.Platform, Status: "failed", Error: err.Error()}
 	}
+	var providerAccountID string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COALESCE(provider_account_id,'') FROM social_accounts
+		  WHERE id=? AND project_id=?`,
+		item.SocialAccountID, item.ProjectID,
+	).Scan(&providerAccountID); err != nil {
+		return inboxOutcome{InboxItemID: item.ID, SocialAccountID: item.SocialAccountID, Platform: item.Platform, Status: "failed", Error: err.Error()}
+	}
+	if providerAccountID == "" {
+		return inboxOutcome{InboxItemID: item.ID, SocialAccountID: item.SocialAccountID, Platform: item.Platform, Status: "failed", Error: "zernio account has no provider_account_id"}
+	}
 	var tool string
-	input := map[string]any{"message": body}
+	input := map[string]any{"accountId": providerAccountID}
+	if message.Body != "" {
+		input["message"] = message.Body
+	}
+	if len(message.Attachments) > 0 {
+		attachment := message.Attachments[0]
+		input["attachmentUrl"] = attachment.URL
+		input["attachmentType"] = attachment.Kind
+		if attachment.Name != "" {
+			input["attachmentName"] = attachment.Name
+		}
+	}
 	switch item.Kind {
 	case inboxKindDM:
 		tool = "send_inbox_message"
@@ -1388,7 +1410,39 @@ func (a *App) zernioInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) in
 	}
 	extID, _, url := extractZernioPostIdentity(res.Data)
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), item.SocialAccountID, item.Kind, item.ExternalID)
-	return inboxOutcome{InboxItemID: item.ID, SocialAccountID: item.SocialAccountID, Platform: item.Platform, Status: "ok", ExternalID: extID, Permalink: url}
+	if item.Kind == inboxKindDM && extID != "" {
+		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			ProjectID:        item.ProjectID,
+			SocialAccountID:  item.SocialAccountID,
+			Platform:         item.Platform,
+			Kind:             inboxKindDM,
+			ExternalID:       extID,
+			ParentExternalID: item.ExternalID,
+			ExternalPostID:   item.ExternalPostID,
+			Body:             message.Body,
+			MediaJSON:        marshalInboxAttachments(message.Attachments),
+			OccurredAt:       time.Now().UTC(),
+		})
+	}
+	kind := "text"
+	if len(message.Attachments) > 0 && message.Body == "" {
+		kind = message.Attachments[0].Kind
+	} else if len(message.Attachments) > 0 {
+		kind = "mixed"
+	}
+	return inboxOutcome{
+		InboxItemID:     item.ID,
+		SocialAccountID: item.SocialAccountID,
+		Platform:        item.Platform,
+		Status:          "ok",
+		ExternalID:      extID,
+		Permalink:       url,
+		Deliveries: []inboxDelivery{{
+			Kind:       kind,
+			Status:     "ok",
+			ExternalID: extID,
+		}},
+	}
 }
 
 func (a *App) zernioCommentModeration(ctx *sdk.AppCtx, item *inboxItem, action string, hide bool) inboxOutcome {
@@ -1850,14 +1904,16 @@ func isZernioMetricMetadata(name string) bool {
 
 func zernioCapabilities(platform string) map[string]any {
 	return map[string]any{
-		"post":      true,
-		"image":     true,
-		"video":     true,
-		"analytics": true,
-		"inbox":     true,
-		"comments":  true,
-		"provider":  zernioProviderSlug,
-		"platform":  platform,
+		"post":                   true,
+		"image":                  true,
+		"video":                  true,
+		"analytics":              true,
+		"inbox":                  true,
+		"inbox_attachment_types": []string{"image", "video", "audio", "file"},
+		"inbox_max_attachments":  1,
+		"comments":               true,
+		"provider":               zernioProviderSlug,
+		"platform":               platform,
 	}
 }
 
@@ -1879,7 +1935,7 @@ func extractZernioPostIdentity(raw json.RawMessage) (providerID, platformID, pla
 	if json.Unmarshal(raw, &data) != nil {
 		return "", "", ""
 	}
-	providerID = firstDeepString(data, "id", "_id", "postId", "post_id")
+	providerID = firstDeepString(data, "id", "_id", "postId", "post_id", "messageId", "message_id")
 	platformID = firstDeepString(data, "platformPostId", "platform_post_id", "externalId", "external_id")
 	platformURL = firstDeepString(data, "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
 	return providerID, platformID, platformURL
