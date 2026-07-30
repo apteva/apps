@@ -49,6 +49,7 @@ func dmsTools() []sdk.Tool {
 			Name:        "dms_open",
 			Description: "Open or fetch a DM thread between members. Args: participants (required, array of >=2 member ids). Idempotent — re-opening returns the existing thread.",
 			InputSchema: schemaObject(map[string]any{
+				"community_id": map[string]any{"type": "string"},
 				"participants": map[string]any{
 					"type":  "array",
 					"items": map[string]any{"type": "string"},
@@ -70,8 +71,9 @@ func dmsTools() []sdk.Tool {
 			Name:        "dms_list_threads",
 			Description: "List DM threads a member participates in, most recent first. Args: member_id (required), limit? (default 50).",
 			InputSchema: schemaObject(map[string]any{
-				"member_id": map[string]any{"type": "string"},
-				"limit":     map[string]any{"type": "integer"},
+				"community_id": map[string]any{"type": "string"},
+				"member_id":    map[string]any{"type": "string"},
+				"limit":        map[string]any{"type": "integer"},
 			}, []string{"member_id"}),
 			Handler: toolDMsListThreads,
 		},
@@ -98,7 +100,8 @@ func dmsTools() []sdk.Tool {
 			Name:        "dms_unread_count",
 			Description: "Total unread DM messages for a member across all their DM threads. Args: member_id (required).",
 			InputSchema: schemaObject(map[string]any{
-				"member_id": map[string]any{"type": "string"},
+				"community_id": map[string]any{"type": "string"},
+				"member_id":    map[string]any{"type": "string"},
 			}, []string{"member_id"}),
 			Handler: toolDMsUnreadCount,
 		},
@@ -192,6 +195,7 @@ func toolDMsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("need at least 2 distinct participants")
 	}
 	sort.Strings(parts)
+	participantKey := strings.Join(parts, "|")
 
 	db := ctx.AppDB()
 	// All participants must exist in the same community.
@@ -215,11 +219,26 @@ func toolDMsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(
-		`INSERT INTO dm_threads (id, community_id) VALUES (?, ?)`,
-		id, communityID,
-	); err != nil {
+	res, err := tx.Exec(
+		`INSERT OR IGNORE INTO dm_threads (id, community_id, participant_key) VALUES (?, ?, ?)`,
+		id, communityID, participantKey,
+	)
+	if err != nil {
 		return nil, fmt.Errorf("create dm thread: %w", err)
+	}
+	inserted, _ := res.RowsAffected()
+	if inserted == 0 {
+		var existingID string
+		if err := tx.QueryRow(
+			`SELECT id FROM dm_threads WHERE community_id = ? AND participant_key = ?`,
+			communityID, participantKey,
+		).Scan(&existingID); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return loadDMThread(db, existingID)
 	}
 	for _, p := range parts {
 		if _, err := tx.Exec(
@@ -313,18 +332,20 @@ func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := ensureCommunityVisible(ctx, ctx.AppDB(), m.CommunityID); err != nil {
 		return nil, err
 	}
-	limit := 50
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 50, 200)
 	db := ctx.AppDB()
 	rows, err := db.Query(
-		`SELECT t.id, t.community_id, t.created_at, t.last_message_at, p.last_read_at
+		`SELECT t.id, t.community_id, t.created_at, t.last_message_at,
+		        COUNT(CASE
+		          WHEN msg.author_id <> ? AND (p.last_read_at IS NULL OR msg.created_at > p.last_read_at)
+		          THEN 1 END) AS unread_count
 		 FROM dm_threads t
 		 JOIN dm_participants p ON p.dm_thread_id = t.id
+		 LEFT JOIN dm_messages msg ON msg.dm_thread_id = t.id
 		 WHERE p.member_id = ?
-		 ORDER BY t.last_message_at DESC LIMIT ?`,
-		memberID, limit,
+		 GROUP BY t.id, t.community_id, t.created_at, t.last_message_at
+		 ORDER BY t.last_message_at DESC, t.id DESC LIMIT ?`,
+		memberID, memberID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -332,40 +353,19 @@ func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	defer rows.Close()
 	out := []DMThread{}
 	ids := []string{}
-	lastReads := map[string]sql.NullString{}
 	for rows.Next() {
 		var t DMThread
-		var lastRead sql.NullString
-		if err := rows.Scan(&t.ID, &t.CommunityID, &t.CreatedAt, &t.LastMessageAt, &lastRead); err != nil {
+		if err := rows.Scan(&t.ID, &t.CommunityID, &t.CreatedAt, &t.LastMessageAt, &t.UnreadCount); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
 		ids = append(ids, t.ID)
-		lastReads[t.ID] = lastRead
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if err := hydrateParticipants(db, ids, out); err != nil {
 		return nil, err
-	}
-	// One COUNT per thread is fine at limit=50; revisit if this gets hot.
-	for i := range out {
-		lr := lastReads[out[i].ID]
-		var n int
-		if lr.Valid {
-			err = db.QueryRow(
-				`SELECT COUNT(*) FROM dm_messages
-				 WHERE dm_thread_id = ? AND author_id <> ? AND created_at > ?`,
-				out[i].ID, memberID, lr.String,
-			).Scan(&n)
-		} else {
-			err = db.QueryRow(
-				`SELECT COUNT(*) FROM dm_messages WHERE dm_thread_id = ? AND author_id <> ?`,
-				out[i].ID, memberID,
-			).Scan(&n)
-		}
-		if err != nil {
-			return nil, err
-		}
-		out[i].UnreadCount = n
 	}
 	return map[string]any{"threads": out}, nil
 }
@@ -379,10 +379,7 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit := 200
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 200, 500)
 	db := ctx.AppDB()
 	t, err := loadDMThread(db, id)
 	if err != nil {
@@ -395,7 +392,7 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	rows, err := db.Query(
-		`SELECT `+dmMessageCols+` FROM dm_messages WHERE dm_thread_id = ? ORDER BY created_at LIMIT ?`,
+		`SELECT `+dmMessageCols+` FROM dm_messages WHERE dm_thread_id = ? ORDER BY created_at, id LIMIT ?`,
 		id, limit,
 	)
 	if err != nil {
@@ -410,6 +407,9 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		view.Messages = append(view.Messages, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return view, nil
 }
 
@@ -421,12 +421,16 @@ func commonCommunity(db *sql.DB, memberIDs []string) (string, error) {
 	communities := map[string]bool{}
 	for _, id := range memberIDs {
 		var c string
-		err := db.QueryRow(`SELECT community_id FROM members WHERE id = ?`, id).Scan(&c)
+		var status string
+		err := db.QueryRow(`SELECT community_id, status FROM members WHERE id = ?`, id).Scan(&c, &status)
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("member %q not found", id)
 		}
 		if err != nil {
 			return "", err
+		}
+		if status != "active" {
+			return "", fmt.Errorf("member %q is %s", id, status)
 		}
 		communities[c] = true
 	}
@@ -440,37 +444,15 @@ func commonCommunity(db *sql.DB, memberIDs []string) (string, error) {
 }
 
 func findDMThreadByParticipants(db *sql.DB, communityID string, sortedParts []string) (string, bool, error) {
-	// Find threads with exactly this participant set:
-	//  - count(dm_participants where member in set) == len(set)
-	//  - count(dm_participants total)              == len(set)
-	placeholders := strings.Repeat("?,", len(sortedParts))
-	placeholders = strings.TrimRight(placeholders, ",")
-	queryArgs := make([]any, 0, 2+len(sortedParts))
-	queryArgs = append(queryArgs, communityID)
-	for _, p := range sortedParts {
-		queryArgs = append(queryArgs, p)
+	var id string
+	err := db.QueryRow(
+		`SELECT id FROM dm_threads WHERE community_id = ? AND participant_key = ?`,
+		communityID, strings.Join(sortedParts, "|"),
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
 	}
-	queryArgs = append(queryArgs, len(sortedParts), len(sortedParts))
-	rows, err := db.Query(
-		`SELECT t.id FROM dm_threads t
-		 WHERE t.community_id = ?
-		   AND (SELECT COUNT(*) FROM dm_participants p
-		        WHERE p.dm_thread_id = t.id AND p.member_id IN (`+placeholders+`)) = ?
-		   AND (SELECT COUNT(*) FROM dm_participants p WHERE p.dm_thread_id = t.id) = ?`,
-		queryArgs...,
-	)
-	if err != nil {
-		return "", false, err
-	}
-	defer rows.Close()
-	if rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", false, err
-		}
-		return id, true, nil
-	}
-	return "", false, nil
+	return id, err == nil, err
 }
 
 func verifyDMParticipant(db *sql.DB, threadID, memberID string) error {
@@ -521,6 +503,9 @@ func participantsFor(db *sql.DB, threadID string) ([]string, error) {
 		}
 		out = append(out, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -551,6 +536,9 @@ func hydrateParticipants(db *sql.DB, threadIDs []string, threads []DMThread) err
 		}
 		byThread[tID] = append(byThread[tID], mID)
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	for i := range threads {
 		threads[i].Participants = byThread[threads[i].ID]
 	}
@@ -571,7 +559,7 @@ func (a *App) httpDMs(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolDMsListThreads(globalCtx, map[string]any{"member_id": memberID})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)

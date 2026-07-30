@@ -218,7 +218,7 @@ func toolSpacesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	s, err := loadSpace(db, id)
+	s, err := ensureSpaceVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +442,9 @@ func toolSpacesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"spaces": out}, nil
 }
 
@@ -567,16 +570,13 @@ func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit := 50
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 50, 200)
 	if _, err := ensureSpaceVisible(ctx, ctx.AppDB(), spaceID); err != nil {
 		return nil, err
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT `+threadCols+` FROM threads WHERE space_id = ?
-		 ORDER BY pinned DESC, last_post_at DESC LIMIT ?`,
+		 ORDER BY pinned DESC, last_post_at DESC, id DESC LIMIT ?`,
 		spaceID, limit,
 	)
 	if err != nil {
@@ -590,6 +590,9 @@ func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"threads": out}, nil
 }
@@ -650,16 +653,13 @@ func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit := 200
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 200, 500)
 	includeRemoved, _ := args["include_removed"].(bool)
 	q := `SELECT ` + postCols + ` FROM posts WHERE thread_id = ?`
 	if !includeRemoved {
 		q += ` AND removed_at IS NULL`
 	}
-	q += ` ORDER BY created_at LIMIT ?`
+	q += ` ORDER BY created_at, rowid LIMIT ?`
 	if _, _, err := ensureThreadInVisibleSpace(ctx, ctx.AppDB(), threadID); err != nil {
 		return nil, err
 	}
@@ -677,6 +677,9 @@ func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		posts = append(posts, p)
 		postIDs = append(postIDs, p.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	// Load reaction summaries in one go.
 	if len(postIDs) > 0 {
@@ -773,8 +776,13 @@ func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := verifyMember(db, communityID, memberID); err != nil {
 		return nil, err
 	}
-	// Toggle: delete if exists, insert otherwise.
-	res, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	// Toggle atomically: delete if it exists, insert otherwise.
+	res, err := tx.Exec(
 		`DELETE FROM reactions WHERE post_id = ? AND member_id = ? AND emoji = ?`,
 		postID, memberID, emoji,
 	)
@@ -784,7 +792,7 @@ func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	n, _ := res.RowsAffected()
 	action := "added"
 	if n == 0 {
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			`INSERT INTO reactions (post_id, member_id, emoji) VALUES (?, ?, ?)`,
 			postID, memberID, emoji,
 		)
@@ -793,6 +801,9 @@ func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	} else {
 		action = "removed"
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	emit(ctx, "post.reacted", map[string]any{
 		"community_id": communityID,
@@ -843,9 +854,27 @@ func toolPostsRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 	}
-	if _, err := db.Exec(
-		`UPDATE posts SET removed_at = CURRENT_TIMESTAMP, body = '' WHERE id = ?`, id,
-	); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`UPDATE posts SET removed_at = CURRENT_TIMESTAMP, body = '' WHERE id = ? AND removed_at IS NULL`, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	changed, _ := res.RowsAffected()
+	if changed > 0 {
+		if _, err := tx.Exec(
+			`UPDATE threads SET post_count = CASE WHEN post_count > 0 THEN post_count - 1 ELSE 0 END WHERE id = ?`,
+			threadID,
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	emit(ctx, "post.removed", map[string]any{
@@ -915,6 +944,9 @@ func loadReactionsForPosts(db *sql.DB, postIDs []string) (map[string][]ReactionS
 		}
 		buckets[k].Count++
 		buckets[k].By = append(buckets[k].By, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	out := map[string][]ReactionSummary{}
 	for postID, keys := range order {
@@ -1051,10 +1083,11 @@ var newlineRE = regexp.MustCompile(`\s+`)
 // fetching the full body, but never the body itself.
 func preview(body string) string {
 	body = strings.TrimSpace(newlineRE.ReplaceAllString(body, " "))
-	if len(body) <= 140 {
+	runes := []rune(body)
+	if len(runes) <= 140 {
 		return body
 	}
-	return body[:137] + "..."
+	return string(runes[:137]) + "..."
 }
 
 // ─── HTTP stubs ──────────────────────────────────────────────────
@@ -1075,7 +1108,7 @@ func (a *App) httpSpaces(w http.ResponseWriter, r *http.Request) {
 		"include_archived": r.URL.Query().Get("include_archived") == "true",
 	})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)
@@ -1093,7 +1126,7 @@ func (a *App) httpThreads(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolThreadsList(globalCtx, map[string]any{"space_id": spaceID})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)
@@ -1111,7 +1144,7 @@ func (a *App) httpPosts(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolPostsList(globalCtx, map[string]any{"thread_id": threadID})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)

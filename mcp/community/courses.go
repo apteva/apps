@@ -342,6 +342,9 @@ func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, s)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"sections": out}, nil
 }
 
@@ -355,11 +358,16 @@ func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("order must be a non-empty array of section ids")
 	}
 	order := make([]string, len(rawOrder))
+	seen := map[string]bool{}
 	for i, v := range rawOrder {
 		s, _ := v.(string)
 		if s == "" {
 			return nil, errors.New("section id is empty")
 		}
+		if seen[s] {
+			return nil, fmt.Errorf("section %q appears more than once", s)
+		}
+		seen[s] = true
 		order[i] = s
 	}
 	db := ctx.AppDB()
@@ -371,6 +379,13 @@ func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sections WHERE space_id = ?`, spaceID).Scan(&existing); err != nil {
+		return nil, err
+	}
+	if existing != len(order) {
+		return nil, fmt.Errorf("order must contain every section exactly once: got %d, want %d", len(order), existing)
+	}
 	for i, secID := range order {
 		res, err := tx.Exec(
 			`UPDATE sections SET position = ? WHERE id = ? AND space_id = ?`,
@@ -544,11 +559,16 @@ func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("order must be a non-empty array of lesson ids")
 	}
 	order := make([]string, len(rawOrder))
+	seen := map[string]bool{}
 	for i, v := range rawOrder {
 		s, _ := v.(string)
 		if s == "" {
 			return nil, errors.New("lesson id is empty")
 		}
+		if seen[s] {
+			return nil, fmt.Errorf("lesson %q appears more than once", s)
+		}
+		seen[s] = true
 		order[i] = s
 	}
 	db := ctx.AppDB()
@@ -567,6 +587,13 @@ func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
+	var existing int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM lessons WHERE section_id = ?`, sectionID).Scan(&existing); err != nil {
+		return nil, err
+	}
+	if existing != len(order) {
+		return nil, fmt.Errorf("order must contain every lesson exactly once: got %d, want %d", len(order), existing)
+	}
 	for i, lID := range order {
 		res, err := tx.Exec(
 			`UPDATE lessons SET position = ?, updated_at = CURRENT_TIMESTAMP
@@ -599,13 +626,27 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	q := `SELECT ` + lessonCols + `
 	      FROM lessons l
-	      JOIN sections s ON s.id = l.section_id
-	      WHERE s.space_id = ?`
+	      JOIN sections s ON s.id = l.section_id`
+	queryArgs := []any{}
+	if viewerID := strArg(args, "_viewer_member_id", ""); viewerID != "" {
+		q += `
+	      JOIN course_enrollments e ON e.space_id = s.space_id AND e.member_id = ?
+	      LEFT JOIN drip_schedules d ON d.lesson_id = l.id`
+		queryArgs = append(queryArgs, viewerID)
+	}
+	q += ` WHERE s.space_id = ?`
+	queryArgs = append(queryArgs, spaceID)
 	if !includeDrafts {
 		q += ` AND l.published_at IS NOT NULL`
 	}
+	if viewerID := strArg(args, "_viewer_member_id", ""); viewerID != "" {
+		q += ` AND e.status IN ('active','completed')
+		       AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
+		       AND (d.release_after_days IS NULL OR
+		            datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`
+	}
 	q += ` ORDER BY s.position, l.position`
-	rows, err := ctx.AppDB().Query(q, spaceID)
+	rows, err := ctx.AppDB().Query(q, queryArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -617,6 +658,9 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if memberID != "" && len(out) > 0 {
 		prog, err := progressMap(ctx.AppDB(), memberID, out)
@@ -642,6 +686,15 @@ func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	l, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
+	}
+	if viewerID := strArg(args, "_viewer_member_id", ""); viewerID != "" {
+		available, err := lessonAvailableToMember(db, id, viewerID)
+		if err != nil {
+			return nil, err
+		}
+		if !available {
+			return nil, errors.New("lesson is not available yet")
+		}
 	}
 	if memberID != "" {
 		p, ok, err := loadLessonProgress(db, id, memberID)
@@ -674,6 +727,9 @@ func toolLessonsAttachVideo(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	db := ctx.AppDB()
 	cur, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateStorageFile(ctx, storageKey); err != nil {
 		return nil, err
 	}
 	// Try to fill duration from ffmpeg if not supplied.
@@ -801,10 +857,6 @@ func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if v, ok := intArg(args, "last_position_seconds"); ok && v >= 0 {
 		lastPos = v
 	}
-	var completed any
-	if status == "complete" {
-		completed = "CURRENT_TIMESTAMP_marker"
-	}
 	// Upsert.
 	var q string
 	var execArgs []any
@@ -820,16 +872,19 @@ func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	} else {
 		q = `INSERT INTO lesson_progress (lesson_id, member_id, status, last_position_seconds, updated_at)
 		     VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-		     ON CONFLICT(lesson_id, member_id) DO UPDATE SET
-		       status = excluded.status,
-		       last_position_seconds = COALESCE(excluded.last_position_seconds, lesson_progress.last_position_seconds),
+			     ON CONFLICT(lesson_id, member_id) DO UPDATE SET
+			       status = excluded.status,
+			       completed_at = NULL,
+			       last_position_seconds = COALESCE(excluded.last_position_seconds, lesson_progress.last_position_seconds),
 		       updated_at = CURRENT_TIMESTAMP`
 		execArgs = []any{lessonID, memberID, status, lastPos}
 	}
 	if _, err := db.Exec(q, execArgs...); err != nil {
 		return nil, err
 	}
-	_ = completed // silence linter; completed_at handled in the SQL above
+	if err := syncCourseCompletion(db, lessonID, memberID); err != nil {
+		return nil, err
+	}
 	prog, _, err := loadLessonProgress(db, lessonID, memberID)
 	if err != nil {
 		return nil, err
@@ -866,10 +921,18 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		        lp.completed_at, lp.last_position_seconds
 		 FROM lessons l
 		 JOIN sections s ON s.id = l.section_id
+		 LEFT JOIN course_enrollments e ON e.space_id = s.space_id AND e.member_id = ?
+		 LEFT JOIN drip_schedules d ON d.lesson_id = l.id
 		 LEFT JOIN lesson_progress lp ON lp.lesson_id = l.id AND lp.member_id = ?
 		 WHERE s.space_id = ? AND l.published_at IS NOT NULL
+		   AND (? = '' OR (
+		     e.status IN ('active','completed')
+		     AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
+		     AND (d.release_after_days IS NULL OR
+		          datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)
+		   ))
 		 ORDER BY s.position, l.position`,
-		memberID, spaceID,
+		memberID, memberID, spaceID, strArg(args, "_viewer_member_id", ""),
 	)
 	if err != nil {
 		return nil, err
@@ -903,6 +966,9 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			completed++
 		}
 		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	percent := 0
 	if len(out) > 0 {
@@ -949,6 +1015,9 @@ func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"space_id": spaceID, "lessons": out}, nil
 }
@@ -1003,16 +1072,13 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	limit := 200
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 200, 500)
 	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
 		return nil, err
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, lesson_id, member_id, body, created_at FROM lesson_comments
-		 WHERE lesson_id = ? ORDER BY created_at LIMIT ?`,
+		 WHERE lesson_id = ? ORDER BY created_at, id LIMIT ?`,
 		lessonID, limit,
 	)
 	if err != nil {
@@ -1026,6 +1092,9 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"comments": out}, nil
 }
@@ -1162,7 +1231,73 @@ func progressMap(db *sql.DB, memberID string, lessons []Lesson) (map[string]Less
 		}
 		out[p.LessonID] = p
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+func syncCourseCompletion(db *sql.DB, lessonID, memberID string) error {
+	var spaceID string
+	if err := db.QueryRow(
+		`SELECT s.space_id FROM lessons l JOIN sections s ON s.id = l.section_id WHERE l.id = ?`,
+		lessonID,
+	).Scan(&spaceID); err != nil {
+		return err
+	}
+	var total, completed int
+	if err := db.QueryRow(
+		`SELECT COUNT(*), COUNT(lp.lesson_id)
+		   FROM lessons l
+		   JOIN sections s ON s.id = l.section_id
+		   LEFT JOIN lesson_progress lp
+		     ON lp.lesson_id = l.id AND lp.member_id = ? AND lp.status = 'complete'
+		  WHERE s.space_id = ? AND l.published_at IS NOT NULL`,
+		memberID, spaceID,
+	).Scan(&total, &completed); err != nil {
+		return err
+	}
+	if total > 0 && total == completed {
+		result, err := db.Exec(
+			`UPDATE course_enrollments
+			    SET status = 'completed', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)
+			  WHERE space_id = ? AND member_id = ? AND status IN ('active','completed')`,
+			spaceID, memberID,
+		)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed == 0 {
+			return nil
+		}
+		var enabled, issue int
+		var title, body string
+		if err := db.QueryRow(
+			`SELECT enabled, issue_on_completion, title, body FROM course_certificates WHERE space_id = ?`,
+			spaceID,
+		).Scan(&enabled, &issue, &title, &body); err == nil && enabled != 0 && issue != 0 {
+			_, err = db.Exec(
+				`INSERT INTO issued_certificates (id, space_id, member_id, title, body)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(space_id, member_id) DO NOTHING`,
+				newID("cert"), spaceID, memberID, title, body,
+			)
+			return err
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return nil
+	}
+	_, err := db.Exec(
+		`UPDATE course_enrollments SET status = 'active', completed_at = NULL
+		  WHERE space_id = ? AND member_id = ? AND status = 'completed'`,
+		spaceID, memberID,
+	)
+	return err
 }
 
 func lookupCommunityForSpace(db *sql.DB, spaceID string) (string, error) {
@@ -1221,7 +1356,7 @@ func (a *App) httpSections(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolSectionsList(globalCtx, map[string]any{"space_id": spaceID})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)
@@ -1246,7 +1381,7 @@ func (a *App) httpLessons(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolLessonsList(globalCtx, args)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)
@@ -1268,7 +1403,7 @@ func (a *App) httpLesson(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := toolLessonsGet(globalCtx, args)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)

@@ -1,7 +1,7 @@
 // CommunityPanel — project.page operator surface for the community app.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
 const API = "/api/apps/community";
 
@@ -89,6 +89,7 @@ interface Community {
 interface Member {
   id: string;
   community_id: string;
+  auth_user_id?: string;
   handle: string;
   display_name: string;
   bio: string;
@@ -388,7 +389,11 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
     (ev) => {
       const t = ev.topic;
       const d = ev.data ?? {};
-      if (t === "community.community.created" || t === "community.community.updated") {
+      if (
+        t === "community.community.created" ||
+        t === "community.community.updated" ||
+        t === "community.community.archived"
+      ) {
         refreshCommunities().catch(() => {});
         return;
       }
@@ -396,7 +401,12 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
       if (t.startsWith("community.member.")) {
         refreshMembers(communityId).catch(() => {});
       }
-      if (t === "community.space.created" || t === "community.space.updated" || t === "community.space.member_added") {
+      if (
+        t === "community.space.created" ||
+        t === "community.space.updated" ||
+        t === "community.space.archived" ||
+        t === "community.space.member_added"
+      ) {
         refreshSpaces(communityId).catch(() => {});
         return;
       }
@@ -464,8 +474,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="relative flex h-full w-full bg-bg text-text">
-      <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
+    <div className="relative flex h-full w-full flex-col overflow-auto bg-bg text-text lg:flex-row lg:overflow-hidden">
+      <aside className="flex w-full shrink-0 flex-col border-b border-border min-h-0 max-h-80 lg:h-full lg:w-72 lg:max-h-none lg:border-b-0 lg:border-r">
         <div className="p-3 border-b border-border space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="text-text-muted text-xs uppercase tracking-wide">Community</div>
@@ -564,7 +574,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </aside>
 
-      <section className="w-96 shrink-0 border-r border-border flex flex-col min-h-0">
+      <section className="flex w-full shrink-0 flex-col border-b border-border min-h-0 max-h-96 lg:h-full lg:w-96 lg:max-h-none lg:border-b-0 lg:border-r">
         <header className="p-3 border-b border-border flex items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="font-medium truncate">{activeSpace?.name ?? "No space selected"}</div>
@@ -666,7 +676,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </section>
 
-      <main className="flex-1 flex flex-col min-w-0 min-h-0">
+      <main className="flex min-h-[28rem] min-w-0 flex-1 flex-col lg:min-h-0">
         <header className="p-3 border-b border-border flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="font-medium truncate">
@@ -794,8 +804,17 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             } else {
               await refreshCommunities();
             }
-            if (target.spaceId || (spaceId && isCourseSpace)) await refreshCourse(target.spaceId || spaceId!);
-            if (spaceId && !isCourseSpace) await refreshThreads(spaceId);
+            const createdCourseContent =
+              dialog === "course" ||
+              dialog === "section" ||
+              dialog === "lesson" ||
+              dialog === "edit_lesson" ||
+              dialog === "video";
+            if (createdCourseContent && (target.spaceId || spaceId)) {
+              await refreshCourse(target.spaceId || spaceId!);
+            } else if (target.spaceId || spaceId) {
+              await refreshThreads(target.spaceId || spaceId!);
+            }
             if (target.communityId) setCommunityId(target.communityId);
             if (target.memberId) setMemberId(target.memberId);
             if (target.spaceId) setSpaceId(target.spaceId);
@@ -827,11 +846,61 @@ function DialogShell({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog.focus();
+    return () => previous?.focus();
+  }, []);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
-    <div className="absolute inset-0 bg-black/40 flex items-center justify-center p-4 z-20">
-      <div className="w-full max-w-xl bg-bg border border-border rounded shadow-xl">
+    <div
+      className="absolute inset-0 bg-black/40 flex items-center justify-center p-4 z-20"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="community-dialog-title"
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        className="w-full max-w-xl bg-bg border border-border rounded shadow-xl outline-none"
+      >
         <header className="px-4 py-3 border-b border-border flex items-center justify-between">
-          <div className="font-medium">{title}</div>
+          <div id="community-dialog-title" className="font-medium">{title}</div>
           <button className={buttonClass("ghost")} onClick={onClose}>
             Close
           </button>
@@ -887,6 +956,7 @@ function CommunityDialog({
   const [name, setName] = useState(kind === "edit_lesson" ? lesson?.title || "" : "");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
+  const [authUserId, setAuthUserId] = useState("");
   const [visibility, setVisibility] = useState<"members" | "public">("members");
   const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
   const [sectionId, setSectionId] = useState(initialSectionId || sections[0]?.id || "");
@@ -935,6 +1005,7 @@ function CommunityDialog({
           handle: slug || slugify(name).replace(/-/g, "_"),
           display_name: name,
           bio: description,
+          auth_user_id: authUserId.trim() || undefined,
         });
         await onCreated({ memberId: out.id });
       } else if (kind === "space" || kind === "course") {
@@ -1069,6 +1140,17 @@ function CommunityDialog({
         {kind === "community" || kind === "member" ? (
           <Field label={kind === "community" ? "Description" : "Bio"}>
             <textarea className={`${inputClass} min-h-[92px]`} value={description} onChange={(e) => setDescription(e.target.value)} />
+          </Field>
+        ) : null}
+
+        {kind === "member" ? (
+          <Field label="Auth user ID">
+            <input
+              className={inputClass}
+              value={authUserId}
+              onChange={(e) => setAuthUserId(e.target.value)}
+              placeholder="Link the ID shown by the member portal"
+            />
           </Field>
         ) : null}
 

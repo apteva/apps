@@ -15,12 +15,35 @@ export interface Member {
   id: string;
   community_id: string;
   contact_id?: string;
+  auth_user_id?: string;
   handle: string;
   display_name: string;
   bio: string;
   status: string;
   joined_at: string;
   last_seen_at?: string;
+}
+
+export interface DMThread {
+  id: string;
+  community_id: string;
+  created_at: string;
+  last_message_at: string;
+  participants: string[];
+  unread_count?: number;
+}
+
+export interface DMMessage {
+  id: string;
+  community_id: string;
+  dm_thread_id: string;
+  author_id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface DMThreadView extends DMThread {
+  messages: DMMessage[];
 }
 
 export interface Space {

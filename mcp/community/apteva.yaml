@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.4.2
+version: 0.5.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -30,8 +30,8 @@ requires:
     - platform.apps.call
   apps:
     - name: auth
-      optional: true
-      reason: Client-facing portal can call Auth public signup/login. A later server pass should map Auth users to Community members and enforce member identity on portal routes.
+      optional: false
+      reason: The member portal authenticates through Auth and maps verified users to Community members.
   integrations:
     - role: storage
       kind: app
@@ -60,6 +60,7 @@ provides:
     - { name: members_create,      description: "Create a member in a community." }
     - { name: members_list,        description: "List members of a community." }
     - { name: members_get,         description: "Fetch one member by id or handle." }
+    - { name: members_me,          description: "Return the member linked to the verified Auth user." }
     - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
     # ─── spaces ────────────────────────────────────────────────
     - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }
@@ -103,6 +104,7 @@ provides:
     - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video. If ffmpeg is bound, duration_seconds is auto-filled from ffmpeg_probe." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
+    - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
     - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
     - { name: quizzes_create,      description: "Create a lesson quiz." }
     - { name: quizzes_update,      description: "Update a lesson quiz." }
@@ -120,6 +122,7 @@ provides:
     - { name: enrollment_rules_set, description: "Set course enrollment rules." }
     - { name: course_enroll,       description: "Enroll a member in a course." }
     - { name: course_enrollments_list, description: "List course enrollments." }
+    - { name: course_enrollment_update, description: "Approve, reject, cancel, activate, or complete an enrollment." }
     - { name: lessons_mark_complete, description: "Mark a lesson complete (or in_progress with last_position_seconds) for a member." }
     - { name: lessons_progress,    description: "Get one member's progress across a course." }
     - { name: course_progress,     description: "Funnel across all members: started / 50% / completed counts per lesson." }

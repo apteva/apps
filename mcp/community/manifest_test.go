@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -28,6 +29,18 @@ func TestManifestParses(t *testing.T) {
 	}
 	if len(m.Provides.UIPanels) == 0 {
 		t.Fatal("expected at least one UI panel")
+	}
+	externalRaw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatalf("read external manifest: %v", err)
+	}
+	external, err := sdk.ParseManifest(externalRaw)
+	if err != nil {
+		t.Fatalf("parse external manifest: %v", err)
+	}
+	if external.Name != m.Name || external.Version != m.Version || external.Icon != m.Icon {
+		t.Fatalf("embedded/external manifest drift: embedded=%s@%s icon=%q external=%s@%s icon=%q",
+			m.Name, m.Version, m.Icon, external.Name, external.Version, external.Icon)
 	}
 	if m.Provides.UIPanels[0].Entry != "/ui/CommunityPanel.mjs" {
 		t.Fatalf("panel entry = %q", m.Provides.UIPanels[0].Entry)

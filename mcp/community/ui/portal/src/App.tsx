@@ -1,249 +1,189 @@
 import {
-  ArrowDown,
-  ArrowUp,
-  BarChart3,
   BookOpen,
   CheckCircle2,
-  Globe2,
-  Hash,
-  LayoutDashboard,
-  Lock,
-  MessageSquare,
-  Paperclip,
-  Plus,
+  Home,
+  LogOut,
+  Menu,
+  MessageCircle,
+  MessagesSquare,
   RefreshCcw,
-  Save,
   Send,
-  Trash2,
-  UploadCloud,
   UserRound,
   Users,
+  X,
 } from "lucide-react";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { api, apteva, COMMUNITY_APP, currentProjectId, setCurrentProjectId } from "./api";
-import type {
-  Assignment,
-  Community,
-  CourseAnalytics,
-  CourseCertificate,
-  CourseDetails,
-  CourseEnrollment,
-  DripSchedule,
-  EnrollmentRule,
-  Lesson,
-  LessonComment,
-  LessonResource,
-  Member,
-  Post,
-  Quiz,
-  Section,
-  Space,
-  Thread,
-} from "./types";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, useDelegatedToken } from "./api";
+import type { Community, DMThread, DMThreadView, Lesson, Member, Post, Section, Space, Thread } from "./types";
 
-type View = "home" | "spaces" | "courses" | "members" | "auth";
-
-const emptyCourseDetails: CourseDetails = {
-  space_id: "",
-  summary: "",
-  description: "",
-  instructor_name: "",
-  level: "",
-  tags: [],
-  price_cents: 0,
-  currency: "USD",
-  prerequisites: [],
-  outcomes: [],
+type View = "home" | "spaces" | "courses" | "members" | "messages" | "profile";
+type AuthMode = "login" | "signup";
+type AppEvent = {
+  topic: string;
+  data?: {
+    community_id?: string;
+    space_id?: string;
+    thread_id?: string;
+    lesson_id?: string;
+    dm_thread_id?: string;
+  };
 };
 
-const emptyEnrollmentRule: EnrollmentRule = {
-  space_id: "",
-  access_mode: "free",
-  requires_approval: false,
-};
-
-const emptyCertificate: CourseCertificate = {
-  space_id: "",
-  enabled: false,
-  title: "",
-  body: "",
-  issue_on_completion: true,
-};
-
-const views: Array<{ id: View; label: string; icon: typeof LayoutDashboard }> = [
-  { id: "home", label: "Home", icon: LayoutDashboard },
-  { id: "spaces", label: "Spaces", icon: Hash },
+const nav: Array<{ id: View; label: string; icon: typeof Home }> = [
+  { id: "home", label: "Home", icon: Home },
+  { id: "spaces", label: "Spaces", icon: MessagesSquare },
   { id: "courses", label: "Courses", icon: BookOpen },
   { id: "members", label: "Members", icon: Users },
-  { id: "auth", label: "Auth", icon: Lock },
+  { id: "messages", label: "Messages", icon: MessageCircle },
+  { id: "profile", label: "Profile", icon: UserRound },
 ];
 
-function routeFromHash(): View {
-  const raw = window.location.hash.replace(/^#\/?/, "");
-  if (raw === "spaces" || raw === "courses" || raw === "members" || raw === "auth") return raw;
-  return "home";
+function initialAuthForm() {
+  const params = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
+  return {
+    client_id: params.get("client_id") || "",
+    organization_slug: params.get("organization_slug") || params.get("organization") || "",
+    email: "",
+    password: "",
+    display_name: "",
+  };
 }
 
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 62);
+function friendlyError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("not linked to an active member")) {
+    return "Your account is not linked to a community membership yet. Ask a community operator to link your Auth user ID.";
+  }
+  if (message.includes("active course enrollment required")) return "Enroll in this course to open its lessons.";
+  if (message.includes("lesson is not available yet")) return "This lesson is scheduled for a later date.";
+  const json = message.match(/\{"error":"([^"]+)"\}/);
+  if (json?.[1]) return json[1];
+  return message.replace(/^HTTP \d+:\s*/, "");
 }
 
-function handleFromName(value: string): string {
-  return value
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 30);
+function displayName(member?: Member): string {
+  return member?.display_name || member?.handle || "Member";
 }
 
-function listFromText(value: string): string[] {
-  return value
-    .split(/\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
+export default function App() {
+  const [auth, setAuth] = useState<AuthResponse | null>(null);
+  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authForm, setAuthForm] = useState(initialAuthForm);
+  const [view, setView] = useState<View>("home");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [pending, setPending] = useState(0);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
-function textFromList(value?: string[]): string {
-  return (value || []).join("\n");
-}
-
-function parseQuestions(value: string): unknown[] {
-  if (!value.trim()) return [];
-  const parsed = JSON.parse(value);
-  return Array.isArray(parsed) ? parsed : [parsed];
-}
-
-function maybeNumber(value: string): number | undefined {
-  if (!value.trim()) return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
-}
-
-export function App() {
-  const [view, setView] = useState<View>(() => routeFromHash());
-  const [projectId, setProjectId] = useState(() => currentProjectId());
   const [communities, setCommunities] = useState<Community[]>([]);
+  const [memberships, setMemberships] = useState<Member[]>([]);
+  const [communityId, setCommunityId] = useState("");
   const [members, setMembers] = useState<Member[]>([]);
   const [spaces, setSpaces] = useState<Space[]>([]);
+  const [dmThreads, setDMThreads] = useState<DMThread[]>([]);
+
+  const [spaceId, setSpaceId] = useState("");
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [threadId, setThreadId] = useState("");
   const [posts, setPosts] = useState<Post[]>([]);
+  const [threadForm, setThreadForm] = useState({ title: "", body: "" });
+  const [reply, setReply] = useState("");
+
+  const [courseId, setCourseId] = useState("");
   const [sections, setSections] = useState<Section[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
-  const [courseDetails, setCourseDetails] = useState<CourseDetails>(emptyCourseDetails);
-  const [enrollmentRule, setEnrollmentRule] = useState<EnrollmentRule>(emptyEnrollmentRule);
-  const [certificate, setCertificate] = useState<CourseCertificate>(emptyCertificate);
-  const [drips, setDrips] = useState<DripSchedule[]>([]);
-  const [enrollments, setEnrollments] = useState<CourseEnrollment[]>([]);
-  const [analytics, setAnalytics] = useState<CourseAnalytics>();
-  const [resources, setResources] = useState<LessonResource[]>([]);
-  const [quizzes, setQuizzes] = useState<Quiz[]>([]);
-  const [assignments, setAssignments] = useState<Assignment[]>([]);
-  const [comments, setComments] = useState<LessonComment[]>([]);
-  const [communityId, setCommunityId] = useState("");
-  const [memberId, setMemberId] = useState("");
-  const [spaceId, setSpaceId] = useState("");
-  const [threadId, setThreadId] = useState("");
-  const [courseId, setCourseId] = useState("");
   const [lessonId, setLessonId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [bundle, setBundle] = useState<LessonBundle | null>(null);
+  const [courseSummary, setCourseSummary] = useState("");
+  const [courseLocked, setCourseLocked] = useState(false);
+  const [comment, setComment] = useState("");
 
-  const [communityForm, setCommunityForm] = useState({ name: "", slug: "", description: "" });
-  const [memberForm, setMemberForm] = useState({ display_name: "", handle: "", bio: "" });
-  const [spaceForm, setSpaceForm] = useState({ name: "", slug: "", kind: "forum", visibility: "members" });
-  const [threadForm, setThreadForm] = useState({ title: "", body: "" });
-  const [replyBody, setReplyBody] = useState("");
-  const [courseForm, setCourseForm] = useState({ name: "", slug: "", visibility: "members" });
-  const [detailsForm, setDetailsForm] = useState({
-    summary: "",
-    description: "",
-    instructor_member_id: "",
-    instructor_name: "",
-    level: "",
-    tags: "",
-    price_cents: "0",
-    currency: "USD",
-    prerequisites: "",
-    outcomes: "",
-    cover_storage_file_id: "",
-  });
-  const [sectionTitle, setSectionTitle] = useState("");
-  const [sectionEdit, setSectionEdit] = useState<Record<string, string>>({});
-  const [lessonForm, setLessonForm] = useState({ section_id: "", title: "", body: "" });
-  const [lessonEdit, setLessonEdit] = useState({ title: "", body: "" });
-  const [videoForm, setVideoForm] = useState({ storage_key: "", duration_seconds: "" });
-  const [resourceForm, setResourceForm] = useState({ storage_file_id: "", name: "", kind: "file", content_type: "", size_bytes: "" });
-  const [quizForm, setQuizForm] = useState({ title: "", questions: "", passing_score: "70" });
-  const [assignmentForm, setAssignmentForm] = useState({ title: "", instructions: "", due_after_days: "", attachment_storage_file_id: "" });
-  const [certificateForm, setCertificateForm] = useState({ enabled: false, title: "", body: "", template_storage_file_id: "", issue_on_completion: true });
-  const [dripForm, setDripForm] = useState({ release_at: "", release_after_days: "" });
-  const [enrollmentForm, setEnrollmentForm] = useState({ access_mode: "free", requires_approval: false, max_enrollments: "", starts_at: "", ends_at: "" });
-  const [commentBody, setCommentBody] = useState("");
-  const [authForm, setAuthForm] = useState({ client_id: "", email: "", password: "", organization_slug: "" });
-  const [authResult, setAuthResult] = useState("");
+  const [dmId, setDMId] = useState("");
+  const [dm, setDM] = useState<DMThreadView | null>(null);
+  const [dmRecipient, setDMRecipient] = useState("");
+  const [dmBody, setDMBody] = useState("");
 
-  const selectedCommunity = communities.find((c) => c.id === communityId);
-  const selectedMember = members.find((m) => m.id === memberId);
-  const selectedSpace = spaces.find((s) => s.id === spaceId);
-  const selectedThread = threads.find((t) => t.id === threadId);
-  const courses = spaces.filter((s) => s.kind === "course");
-  const discussionSpaces = spaces.filter((s) => s.kind !== "course");
-  const selectedCourse = spaces.find((s) => s.id === courseId);
-  const selectedLesson = lessons.find((l) => l.id === lessonId);
+  const requestVersion = useRef<Record<string, number>>({});
+  const eventTimer = useRef<number | undefined>(undefined);
+  const busy = pending > 0;
 
-  const lessonBySection = useMemo(() => {
-    const map = new Map<string, Lesson[]>();
-    for (const lesson of lessons) {
-      const list = map.get(lesson.section_id) || [];
-      list.push(lesson);
-      map.set(lesson.section_id, list);
+  const selectedCommunity = communities.find((item) => item.id === communityId);
+  const me = memberships.find((item) => item.community_id === communityId);
+  const discussionSpaces = spaces.filter((item) => item.kind !== "course");
+  const courses = spaces.filter((item) => item.kind === "course");
+  const selectedSpace = spaces.find((item) => item.id === spaceId);
+  const selectedThread = threads.find((item) => item.id === threadId);
+  const selectedCourse = courses.find((item) => item.id === courseId);
+  const selectedLesson = lessons.find((item) => item.id === lessonId);
+  const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
+
+  const run = useCallback(async <T,>(task: () => Promise<T>, options: { quiet?: boolean } = {}): Promise<T | undefined> => {
+    setPending((value) => value + 1);
+    if (!options.quiet) {
+      setError("");
+      setNotice("");
     }
-    return map;
-  }, [lessons]);
-
-  useEffect(() => {
-    const onHash = () => setView(routeFromHash());
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, []);
-
-  const run = useCallback(async (fn: () => Promise<void>) => {
-    setBusy(true);
-    setError("");
     try {
-      await fn();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      return await task();
+    } catch (caught) {
+      if (!options.quiet) setError(friendlyError(caught));
+      return undefined;
     } finally {
-      setBusy(false);
+      setPending((value) => Math.max(0, value - 1));
     }
   }, []);
 
-  const loadCommunities = useCallback(async () => {
-    const out = await api.communities.list();
-    setCommunities(out.communities || []);
-    if (!communityId && out.communities?.[0]) setCommunityId(out.communities[0].id);
-  }, [communityId]);
+  const latest = useCallback(async <T,>(key: string, task: () => Promise<T>, apply: (value: T) => void) => {
+    const version = (requestVersion.current[key] || 0) + 1;
+    requestVersion.current[key] = version;
+    const value = await task();
+    if (requestVersion.current[key] === version) apply(value);
+  }, []);
 
-  const loadCommunityData = useCallback(async () => {
-    if (!communityId) return;
-    const [memberOut, spaceOut] = await Promise.all([api.members.list(communityId), api.spaces.list(communityId)]);
-    setMembers(memberOut.members || []);
-    setSpaces(spaceOut.spaces || []);
-    const storedMember = window.localStorage.getItem(`apteva.community.${communityId}.member_id`) || "";
-    const nextMember = memberOut.members.find((m) => m.id === storedMember)?.id || memberOut.members[0]?.id || "";
-    setMemberId((cur) => memberOut.members.find((m) => m.id === cur)?.id || nextMember);
-    const nextSpace = spaceOut.spaces.find((s) => s.id === spaceId)?.id || spaceOut.spaces.find((s) => s.kind !== "course")?.id || "";
-    setSpaceId(nextSpace);
-    const nextCourse = spaceOut.spaces.find((s) => s.id === courseId)?.id || spaceOut.spaces.find((s) => s.kind === "course")?.id || "";
-    setCourseId(nextCourse);
-  }, [communityId, courseId, spaceId]);
+  const loadSession = useCallback(async () => {
+    await latest("session", api.session, (session) => {
+      setCommunities(session.communities || []);
+      setMemberships(session.memberships || []);
+      setCommunityId((current) =>
+        session.communities.some((item) => item.id === current) ? current : session.communities[0]?.id || "",
+      );
+    });
+  }, [latest]);
+
+  const loadCommunity = useCallback(async () => {
+    if (!communityId) {
+      setMembers([]);
+      setSpaces([]);
+      setDMThreads([]);
+      return;
+    }
+    await latest(
+      "community",
+      async () => {
+        const [memberOut, spaceOut, dmOut] = await Promise.all([
+          api.members.list(communityId),
+          api.spaces.list(communityId),
+          api.dms.list(communityId),
+        ]);
+        return { members: memberOut.members || [], spaces: spaceOut.spaces || [], dms: dmOut.threads || [] };
+      },
+      (result) => {
+        setMembers(result.members);
+        setSpaces(result.spaces);
+        setDMThreads(result.dms);
+        setSpaceId((current) =>
+          result.spaces.some((item) => item.id === current && item.kind !== "course")
+            ? current
+            : result.spaces.find((item) => item.kind !== "course")?.id || "",
+        );
+        setCourseId((current) =>
+          result.spaces.some((item) => item.id === current && item.kind === "course")
+            ? current
+            : result.spaces.find((item) => item.kind === "course")?.id || "",
+        );
+      },
+    );
+  }, [communityId, latest]);
 
   const loadThreads = useCallback(async () => {
     if (!spaceId) {
@@ -251,1410 +191,473 @@ export function App() {
       setPosts([]);
       return;
     }
-    const out = await api.threads.list(spaceId);
-    setThreads(out.threads || []);
-    setThreadId((cur) => out.threads.find((t) => t.id === cur)?.id || out.threads[0]?.id || "");
-  }, [spaceId]);
+    await latest("threads", () => api.threads.list(spaceId), (result) => {
+      const next = result.threads || [];
+      setThreads(next);
+      setThreadId((current) => next.some((item) => item.id === current) ? current : next[0]?.id || "");
+    });
+  }, [latest, spaceId]);
 
   const loadPosts = useCallback(async () => {
     if (!threadId) {
       setPosts([]);
       return;
     }
-    const out = await api.posts.list(threadId);
-    setPosts(out.posts || []);
-  }, [threadId]);
+    await latest("posts", () => api.posts.list(threadId), (result) => setPosts(result.posts || []));
+  }, [latest, threadId]);
 
   const loadCourse = useCallback(async () => {
     if (!courseId) {
       setSections([]);
       setLessons([]);
-      setCourseDetails(emptyCourseDetails);
-      setEnrollmentRule(emptyEnrollmentRule);
-      setCertificate(emptyCertificate);
-      setDrips([]);
-      setEnrollments([]);
-      setAnalytics(undefined);
+      setBundle(null);
       return;
     }
-    const [sectionOut, lessonOut, detailsOut, dripOut, enrollmentOut, analyticsOut] = await Promise.all([
-      api.courses.sections(courseId),
-      api.courses.lessons(courseId, memberId || undefined, true),
-      api.courses.details(courseId),
-      api.courses.drips(courseId),
-      api.courses.enrollments(courseId),
-      api.courses.analytics(courseId),
-    ]);
-    setSections(sectionOut.sections || []);
-    setLessons(lessonOut.lessons || []);
-    setCourseDetails(detailsOut.details || { ...emptyCourseDetails, space_id: courseId });
-    setEnrollmentRule(detailsOut.enrollment_rules || { ...emptyEnrollmentRule, space_id: courseId });
-    setCertificate(detailsOut.certificate || { ...emptyCertificate, space_id: courseId });
-    setDrips(dripOut.schedules || []);
-    setEnrollments(enrollmentOut.enrollments || []);
-    setAnalytics(analyticsOut);
-    setDetailsForm({
-      summary: detailsOut.details?.summary || "",
-      description: detailsOut.details?.description || "",
-      instructor_member_id: detailsOut.details?.instructor_member_id || "",
-      instructor_name: detailsOut.details?.instructor_name || "",
-      level: detailsOut.details?.level || "",
-      tags: textFromList(detailsOut.details?.tags),
-      price_cents: String(detailsOut.details?.price_cents ?? 0),
-      currency: detailsOut.details?.currency || "USD",
-      prerequisites: textFromList(detailsOut.details?.prerequisites),
-      outcomes: textFromList(detailsOut.details?.outcomes),
-      cover_storage_file_id: detailsOut.details?.cover_storage_file_id || "",
-    });
-    setCertificateForm({
-      enabled: Boolean(detailsOut.certificate?.enabled),
-      title: detailsOut.certificate?.title || "",
-      body: detailsOut.certificate?.body || "",
-      template_storage_file_id: detailsOut.certificate?.template_storage_file_id || "",
-      issue_on_completion: detailsOut.certificate?.issue_on_completion ?? true,
-    });
-    setEnrollmentForm({
-      access_mode: detailsOut.enrollment_rules?.access_mode || "free",
-      requires_approval: Boolean(detailsOut.enrollment_rules?.requires_approval),
-      max_enrollments: detailsOut.enrollment_rules?.max_enrollments ? String(detailsOut.enrollment_rules.max_enrollments) : "",
-      starts_at: detailsOut.enrollment_rules?.starts_at || "",
-      ends_at: detailsOut.enrollment_rules?.ends_at || "",
-    });
-    setLessonId((cur) => lessonOut.lessons.find((l) => l.id === cur)?.id || lessonOut.lessons[0]?.id || "");
-  }, [courseId, memberId]);
+    await latest(
+      "course",
+      async () => {
+        const [details, sectionOut] = await Promise.all([api.courses.details(courseId), api.courses.sections(courseId)]);
+        let lessonOut: { lessons: Lesson[] } | undefined;
+        let locked = false;
+        try {
+          lessonOut = await api.courses.lessons(courseId);
+        } catch {
+          locked = true;
+        }
+        return { details, sections: sectionOut.sections || [], lessons: lessonOut?.lessons || [], locked };
+      },
+      (result) => {
+        setSections(result.sections);
+        setLessons(result.lessons);
+        setCourseLocked(result.locked);
+        setCourseSummary(result.details.details?.summary || result.details.details?.description || "");
+        setLessonId((current) =>
+          result.lessons.some((item) => item.id === current) ? current : result.lessons[0]?.id || "",
+        );
+      },
+    );
+  }, [courseId, latest]);
 
-  const loadLessonExtras = useCallback(async () => {
+  const loadBundle = useCallback(async () => {
     if (!lessonId) {
-      setResources([]);
-      setQuizzes([]);
-      setAssignments([]);
-      setComments([]);
-      setLessonEdit({ title: "", body: "" });
-      setVideoForm({ storage_key: "", duration_seconds: "" });
+      setBundle(null);
       return;
     }
-    const lesson = lessons.find((l) => l.id === lessonId);
-    setLessonEdit({ title: lesson?.title || "", body: lesson?.body || "" });
-    setVideoForm({
-      storage_key: lesson?.video_storage_key || "",
-      duration_seconds: lesson?.video_duration_seconds ? String(lesson.video_duration_seconds) : "",
-    });
-    const [resourceOut, quizOut, assignmentOut, commentOut] = await Promise.all([
-      api.courses.resources(lessonId),
-      api.courses.quizzes(lessonId),
-      api.courses.assignments(lessonId),
-      api.courses.comments(lessonId),
-    ]);
-    setResources(resourceOut.resources || []);
-    setQuizzes(quizOut.quizzes || []);
-    setAssignments(assignmentOut.assignments || []);
-    setComments(commentOut.comments || []);
-  }, [lessonId, lessons]);
+    await latest("lesson", () => api.courses.bundle(lessonId), setBundle);
+  }, [latest, lessonId]);
 
-  useEffect(() => {
-    void run(loadCommunities);
-  }, [loadCommunities, run]);
-
-  useEffect(() => {
-    void run(loadCommunityData);
-  }, [loadCommunityData, run]);
-
-  useEffect(() => {
-    void run(loadThreads);
-  }, [loadThreads, run]);
-
-  useEffect(() => {
-    void run(loadPosts);
-  }, [loadPosts, run]);
-
-  useEffect(() => {
-    void run(loadCourse);
-  }, [loadCourse, run]);
-
-  useEffect(() => {
-    void run(loadLessonExtras);
-  }, [loadLessonExtras, run]);
-
-  useEffect(() => {
-    if (memberId && communityId) {
-      window.localStorage.setItem(`apteva.community.${communityId}.member_id`, memberId);
+  const loadDM = useCallback(async () => {
+    if (!dmId) {
+      setDM(null);
+      return;
     }
-  }, [communityId, memberId]);
+    await latest("dm", () => api.dms.get(dmId), (result) => {
+      setDM(result);
+      void api.dms.markRead(dmId).catch(() => undefined);
+    });
+  }, [dmId, latest]);
 
   useEffect(() => {
-    if (!projectId) return;
+    if (!auth) return;
+    void run(loadSession);
+  }, [auth, loadSession, run]);
+
+  useEffect(() => {
+    if (!auth) return;
+    void run(loadCommunity);
+  }, [auth, loadCommunity, run]);
+
+  useEffect(() => {
+    if (view === "spaces") void run(loadThreads, { quiet: true });
+  }, [loadThreads, run, view]);
+
+  useEffect(() => {
+    if (view === "spaces") void run(loadPosts, { quiet: true });
+  }, [loadPosts, run, view]);
+
+  useEffect(() => {
+    if (view === "courses") void run(loadCourse, { quiet: true });
+  }, [loadCourse, run, view]);
+
+  useEffect(() => {
+    if (view === "courses") void run(loadBundle, { quiet: true });
+  }, [loadBundle, run, view]);
+
+  useEffect(() => {
+    if (view === "messages") void run(loadDM, { quiet: true });
+  }, [loadDM, run, view]);
+
+  useEffect(() => {
+    if (!auth || !currentProjectId()) return;
     try {
-      const sub = apteva.subscribe(
+      const subscription = apteva.subscribe<AppEvent>(
         `/api/app-events/${encodeURIComponent(COMMUNITY_APP)}`,
-        { project_id: projectId },
-        () => {
-          void Promise.allSettled([loadCommunities(), loadCommunityData(), loadThreads(), loadPosts(), loadCourse()]);
+        { project_id: currentProjectId() },
+        (event) => {
+          const data = event.data ?? {};
+          if (data.community_id && data.community_id !== communityId) return;
+          if (eventTimer.current) window.clearTimeout(eventTimer.current);
+          eventTimer.current = window.setTimeout(() => {
+            if (event.topic.includes(".member.") || event.topic.includes(".space.")) void run(loadCommunity, { quiet: true });
+            if (view === "spaces" && (!data.space_id || data.space_id === spaceId)) void run(loadThreads, { quiet: true });
+            if (view === "spaces" && data.thread_id === threadId) void run(loadPosts, { quiet: true });
+            if (view === "courses" && (!data.space_id || data.space_id === courseId)) void run(loadCourse, { quiet: true });
+            if (view === "courses" && data.lesson_id === lessonId) void run(loadBundle, { quiet: true });
+            if (view === "messages") void run(loadCommunity, { quiet: true });
+          }, 250);
         },
       );
-      return () => sub.close();
+      return () => {
+        if (eventTimer.current) window.clearTimeout(eventTimer.current);
+        subscription.close();
+      };
     } catch {
       return undefined;
     }
-  }, [loadCommunities, loadCommunityData, loadCourse, loadPosts, loadThreads, projectId]);
+  }, [auth, communityId, courseId, lessonId, loadBundle, loadCommunity, loadCourse, loadPosts, loadThreads, run, spaceId, threadId, view]);
 
-  function navigate(next: View) {
-    window.location.hash = next === "home" ? "#/" : `#/${next}`;
-    setView(next);
-  }
-
-  function saveProject(e: FormEvent) {
-    e.preventDefault();
-    setCurrentProjectId(projectId.trim());
-    window.location.reload();
-  }
-
-  function refreshAll() {
-    void run(async () => {
-      await Promise.all([loadCommunities(), loadCommunityData(), loadThreads(), loadPosts(), loadCourse()]);
+  async function authenticate(event: FormEvent) {
+    event.preventDefault();
+    await run(async () => {
+      const organization_slug = authForm.organization_slug.trim() || undefined;
+      const response = authMode === "login"
+        ? await api.auth.login({
+          client_id: authForm.client_id.trim(),
+          organization_slug,
+          email: authForm.email.trim(),
+          password: authForm.password,
+        })
+        : await api.auth.signup({
+          client_id: authForm.client_id.trim(),
+          organization_slug,
+          email: authForm.email.trim(),
+          password: authForm.password,
+          display_name: authForm.display_name.trim() || authForm.email.trim(),
+        });
+      if (!response.apteva_access_token) {
+        if (response.verification_required) {
+          setNotice("Account created. Verify your email, then log in.");
+          setAuthMode("login");
+          return;
+        }
+        throw new Error("Auth did not return a delegated access token.");
+      }
+      useDelegatedToken(response.apteva_access_token);
+      setAuth(response);
+      setAuthForm((current) => ({ ...current, password: "" }));
     });
   }
 
-  function createCommunity(e: FormEvent) {
-    e.preventDefault();
-    void run(async () => {
-      const created = await api.communities.create(communityForm);
-      setCommunityForm({ name: "", slug: "", description: "" });
-      setCommunityId(created.id);
-      await loadCommunities();
-    });
+  function logout() {
+    useDelegatedToken(undefined);
+    setAuth(null);
+    setCommunities([]);
+    setMemberships([]);
+    setMembers([]);
+    setSpaces([]);
+    setError("");
+    setNotice("Signed out.");
   }
 
-  function createMember(e: FormEvent) {
-    e.preventDefault();
-    if (!communityId) return;
-    void run(async () => {
-      const created = await api.members.create({ community_id: communityId, ...memberForm });
-      setMemberForm({ display_name: "", handle: "", bio: "" });
-      setMemberId(created.id);
-      await loadCommunityData();
-    });
-  }
-
-  function createSpace(e: FormEvent) {
-    e.preventDefault();
-    if (!communityId) return;
-    void run(async () => {
-      const created = await api.spaces.create({ community_id: communityId, ...spaceForm });
-      setSpaceForm({ name: "", slug: "", kind: "forum", visibility: "members" });
-      setSpaceId(created.id);
-      await loadCommunityData();
-    });
-  }
-
-  function createThread(e: FormEvent) {
-    e.preventDefault();
-    if (!spaceId || !memberId) return;
-    void run(async () => {
-      const out = await api.threads.create({ space_id: spaceId, author_id: memberId, ...threadForm });
+  async function createThread(event: FormEvent) {
+    event.preventDefault();
+    if (!spaceId || !threadForm.body.trim()) return;
+    await run(async () => {
+      const created = await api.threads.create(spaceId, threadForm.title.trim(), threadForm.body.trim());
       setThreadForm({ title: "", body: "" });
-      setThreadId(out.thread.id);
       await loadThreads();
-      await loadPosts();
+      setThreadId(created.thread.id);
     });
   }
 
-  function createPost(e: FormEvent) {
-    e.preventDefault();
-    if (!threadId || !memberId || !replyBody.trim()) return;
-    void run(async () => {
-      await api.posts.create({ thread_id: threadId, author_id: memberId, body: replyBody });
-      setReplyBody("");
-      await Promise.all([loadThreads(), loadPosts()]);
+  async function createPost(event: FormEvent) {
+    event.preventDefault();
+    if (!threadId || !reply.trim()) return;
+    await run(async () => {
+      await api.posts.create(threadId, reply.trim());
+      setReply("");
+      await Promise.all([loadPosts(), loadThreads()]);
     });
   }
 
-  function createCourse(e: FormEvent) {
-    e.preventDefault();
-    if (!communityId) return;
-    void run(async () => {
-      const created = await api.spaces.createCourse({ community_id: communityId, ...courseForm });
-      setCourseForm({ name: "", slug: "", visibility: "members" });
-      setCourseId(created.id);
-      await loadCommunityData();
-    });
-  }
-
-  function createSection(e: FormEvent) {
-    e.preventDefault();
-    if (!courseId || !sectionTitle.trim()) return;
-    void run(async () => {
-      await api.courses.createSection({ space_id: courseId, title: sectionTitle, position: sections.length });
-      setSectionTitle("");
-      await loadCourse();
-    });
-  }
-
-  function createLesson(e: FormEvent) {
-    e.preventDefault();
-    const targetSection = lessonForm.section_id || sections[0]?.id;
-    if (!targetSection || !lessonForm.title.trim()) return;
-    void run(async () => {
-      const created = await api.courses.createLesson({ section_id: targetSection, title: lessonForm.title, body: lessonForm.body });
-      setLessonForm({ section_id: targetSection, title: "", body: "" });
-      setLessonId(created.id);
-      await loadCourse();
-    });
-  }
-
-  function publishLesson(published: boolean) {
-    if (!selectedLesson) return;
-    void run(async () => {
-      await api.courses.publishLesson(selectedLesson.id, published);
-      await loadCourse();
-    });
-  }
-
-  function markLessonComplete() {
-    if (!selectedLesson || !memberId) return;
-    void run(async () => {
-      await api.courses.markLesson(selectedLesson.id, memberId, "complete");
-      await loadCourse();
-    });
-  }
-
-  function saveCourseDetails(e: FormEvent) {
-    e.preventDefault();
+  async function enroll() {
     if (!courseId) return;
-    void run(async () => {
-      await api.courses.updateDetails({
-        space_id: courseId,
-        summary: detailsForm.summary,
-        description: detailsForm.description,
-        instructor_member_id: detailsForm.instructor_member_id,
-        instructor_name: detailsForm.instructor_name,
-        level: detailsForm.level,
-        tags: listFromText(detailsForm.tags),
-        price_cents: maybeNumber(detailsForm.price_cents) || 0,
-        currency: detailsForm.currency || "USD",
-        prerequisites: listFromText(detailsForm.prerequisites),
-        outcomes: listFromText(detailsForm.outcomes),
-        cover_storage_file_id: detailsForm.cover_storage_file_id,
-      });
+    await run(async () => {
+      await api.courses.enroll(courseId);
+      setNotice("Enrollment submitted.");
       await loadCourse();
     });
   }
 
-  function saveEnrollmentRules(e: FormEvent) {
-    e.preventDefault();
-    if (!courseId) return;
-    void run(async () => {
-      await api.courses.setEnrollmentRules({
-        space_id: courseId,
-        access_mode: enrollmentForm.access_mode as EnrollmentRule["access_mode"],
-        requires_approval: enrollmentForm.requires_approval,
-        max_enrollments: maybeNumber(enrollmentForm.max_enrollments),
-        starts_at: enrollmentForm.starts_at,
-        ends_at: enrollmentForm.ends_at,
-      });
-      await loadCourse();
+  async function completeLesson() {
+    if (!lessonId) return;
+    await run(async () => {
+      await api.courses.mark(lessonId, "complete");
+      await Promise.all([loadCourse(), loadBundle()]);
     });
   }
 
-  function enrollSelectedMember() {
-    if (!courseId || !memberId) return;
-    void run(async () => {
-      await api.courses.enroll({ space_id: courseId, member_id: memberId });
-      await loadCourse();
+  async function postComment(event: FormEvent) {
+    event.preventDefault();
+    if (!lessonId || !comment.trim()) return;
+    await run(async () => {
+      await api.courses.comment(lessonId, comment.trim());
+      setComment("");
+      await loadBundle();
     });
   }
 
-  function saveCertificate(e: FormEvent) {
-    e.preventDefault();
-    if (!courseId) return;
-    void run(async () => {
-      await api.courses.configureCertificate({ space_id: courseId, ...certificateForm });
-      await loadCourse();
+  async function openDM(event: FormEvent) {
+    event.preventDefault();
+    if (!communityId || !dmRecipient) return;
+    await run(async () => {
+      const opened = await api.dms.open(communityId, dmRecipient);
+      setDMId(opened.id);
+      setDMRecipient("");
+      const listed = await api.dms.list(communityId);
+      setDMThreads(listed.threads || []);
     });
   }
 
-  function updateSection(section: Section) {
-    const title = sectionEdit[section.id] ?? section.title;
-    void run(async () => {
-      await api.courses.updateSection({ id: section.id, title });
-      await loadCourse();
+  async function sendDM(event: FormEvent) {
+    event.preventDefault();
+    if (!dmId || !dmBody.trim()) return;
+    await run(async () => {
+      await api.dms.send(dmId, dmBody.trim());
+      setDMBody("");
+      await loadDM();
     });
   }
 
-  function deleteSection(section: Section) {
-    void run(async () => {
-      await api.courses.deleteSection(section.id);
-      await loadCourse();
-    });
+  if (!auth) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card" aria-labelledby="auth-title">
+          <div className="brand-mark"><MessagesSquare aria-hidden="true" /></div>
+          <p className="eyebrow">Community</p>
+          <h1 id="auth-title">{authMode === "login" ? "Welcome back" : "Create your account"}</h1>
+          <p className="muted">Sign in through Auth to reach your verified community memberships.</p>
+          {error && <div className="alert error" role="alert">{error}</div>}
+          {notice && <div className="alert success" role="status">{notice}</div>}
+          <form className="stack" onSubmit={authenticate}>
+            <Field label="Auth client ID" id="client-id">
+              <input id="client-id" value={authForm.client_id} onChange={(event) => setAuthForm({ ...authForm, client_id: event.target.value })} autoComplete="username" required />
+            </Field>
+            <Field label="Organization (optional)" id="organization">
+              <input id="organization" value={authForm.organization_slug} onChange={(event) => setAuthForm({ ...authForm, organization_slug: event.target.value })} />
+            </Field>
+            {authMode === "signup" && (
+              <Field label="Display name" id="display-name">
+                <input id="display-name" value={authForm.display_name} onChange={(event) => setAuthForm({ ...authForm, display_name: event.target.value })} autoComplete="name" />
+              </Field>
+            )}
+            <Field label="Email" id="email">
+              <input id="email" type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} autoComplete="email" required />
+            </Field>
+            <Field label="Password" id="password">
+              <input id="password" type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} autoComplete={authMode === "login" ? "current-password" : "new-password"} required />
+            </Field>
+            <button className="primary" disabled={busy}>{busy ? "Please wait…" : authMode === "login" ? "Sign in" : "Sign up"}</button>
+          </form>
+          <button className="text-button" onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}>
+            {authMode === "login" ? "Need an account? Sign up" : "Already registered? Sign in"}
+          </button>
+        </section>
+      </main>
+    );
   }
 
-  function moveSection(section: Section, direction: -1 | 1) {
-    const index = sections.findIndex((s) => s.id === section.id);
-    const next = [...sections];
-    const swap = index + direction;
-    if (index < 0 || swap < 0 || swap >= next.length) return;
-    [next[index], next[swap]] = [next[swap], next[index]];
-    void run(async () => {
-      await api.courses.reorderSections(courseId, next.map((s) => s.id));
-      await loadCourse();
-    });
-  }
-
-  function updateLesson(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson) return;
-    void run(async () => {
-      await api.courses.updateLesson({ id: selectedLesson.id, ...lessonEdit });
-      await loadCourse();
-    });
-  }
-
-  function deleteLesson() {
-    if (!selectedLesson) return;
-    void run(async () => {
-      await api.courses.deleteLesson(selectedLesson.id);
-      setLessonId("");
-      await loadCourse();
-    });
-  }
-
-  function moveLesson(lesson: Lesson, direction: -1 | 1) {
-    const sectionLessons = (lessonBySection.get(lesson.section_id) || []).slice();
-    const index = sectionLessons.findIndex((l) => l.id === lesson.id);
-    const swap = index + direction;
-    if (index < 0 || swap < 0 || swap >= sectionLessons.length) return;
-    [sectionLessons[index], sectionLessons[swap]] = [sectionLessons[swap], sectionLessons[index]];
-    void run(async () => {
-      await api.courses.reorderLessons(lesson.section_id, sectionLessons.map((l) => l.id));
-      await loadCourse();
-    });
-  }
-
-  function attachVideo(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson || !videoForm.storage_key.trim()) return;
-    void run(async () => {
-      await api.courses.attachVideo(selectedLesson.id, videoForm.storage_key, maybeNumber(videoForm.duration_seconds));
-      await loadCourse();
-    });
-  }
-
-  function addResource(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson || !resourceForm.storage_file_id.trim()) return;
-    void run(async () => {
-      await api.courses.addResource({
-        lesson_id: selectedLesson.id,
-        storage_file_id: resourceForm.storage_file_id,
-        name: resourceForm.name,
-        kind: resourceForm.kind,
-        content_type: resourceForm.content_type,
-        size_bytes: maybeNumber(resourceForm.size_bytes),
-      });
-      setResourceForm({ storage_file_id: "", name: "", kind: "file", content_type: "", size_bytes: "" });
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function addQuiz(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson || !quizForm.title.trim()) return;
-    void run(async () => {
-      await api.courses.createQuiz({
-        lesson_id: selectedLesson.id,
-        title: quizForm.title,
-        questions: parseQuestions(quizForm.questions),
-        passing_score: maybeNumber(quizForm.passing_score) || 70,
-      });
-      setQuizForm({ title: "", questions: "", passing_score: "70" });
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function addAssignment(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson || !assignmentForm.title.trim()) return;
-    void run(async () => {
-      await api.courses.createAssignment({
-        lesson_id: selectedLesson.id,
-        title: assignmentForm.title,
-        instructions: assignmentForm.instructions,
-        due_after_days: maybeNumber(assignmentForm.due_after_days),
-        attachment_storage_file_id: assignmentForm.attachment_storage_file_id,
-      });
-      setAssignmentForm({ title: "", instructions: "", due_after_days: "", attachment_storage_file_id: "" });
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function setDrip(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson) return;
-    void run(async () => {
-      await api.courses.setDrip({
-        lesson_id: selectedLesson.id,
-        release_at: dripForm.release_at,
-        release_after_days: maybeNumber(dripForm.release_after_days),
-      });
-      await loadCourse();
-    });
-  }
-
-  function postLessonComment(e: FormEvent) {
-    e.preventDefault();
-    if (!selectedLesson || !memberId || !commentBody.trim()) return;
-    void run(async () => {
-      await api.courses.postComment({ lesson_id: selectedLesson.id, member_id: memberId, body: commentBody });
-      setCommentBody("");
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function deleteResource(id: string) {
-    void run(async () => {
-      await api.courses.deleteResource(id);
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function deleteQuiz(id: string) {
-    void run(async () => {
-      await api.courses.deleteQuiz(id);
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function deleteAssignment(id: string) {
-    void run(async () => {
-      await api.courses.deleteAssignment(id);
-      await loadLessonExtras();
-      await loadCourse();
-    });
-  }
-
-  function authSubmit(e: FormEvent, mode: "login" | "signup") {
-    e.preventDefault();
-    void run(async () => {
-      const body = { ...authForm, organization_slug: authForm.organization_slug || undefined };
-      const out = mode === "login" ? await api.auth.login(body) : await api.auth.signup({ ...body, display_name: authForm.email });
-      setAuthResult(JSON.stringify(out, null, 2));
-    });
+  if (!busy && communities.length === 0) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card">
+          <UserRound size={34} aria-hidden="true" />
+          <h1>Membership pending</h1>
+          <p className="muted">Your Auth account is valid, but it is not linked to an active Community member.</p>
+          <div className="identity-box">
+            <span>Auth user ID</span>
+            <code>{auth.user.id}</code>
+          </div>
+          <p className="muted">Give this ID to a community operator so they can link it to your member profile.</p>
+          <button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button>
+        </section>
+      </main>
+    );
   }
 
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div className="app-shell">
+      <header className="mobile-header">
+        <button className="icon-button" aria-label="Open navigation" onClick={() => setMenuOpen(true)}><Menu /></button>
+        <strong>{selectedCommunity?.name || "Community"}</strong>
+        <span className="avatar">{displayName(me).slice(0, 1).toUpperCase()}</span>
+      </header>
+
+      {menuOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
+      <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
         <div className="brand">
-          <Users size={22} />
-          <div>
-            <strong>Community</strong>
-            <span>Member portal</span>
-          </div>
+          <div className="brand-mark"><MessagesSquare aria-hidden="true" /></div>
+          <div><strong>Community</strong><span>Member portal</span></div>
+          <button className="icon-button mobile-close" aria-label="Close navigation" onClick={() => setMenuOpen(false)}><X /></button>
         </div>
-
-        <form className="project-form" onSubmit={saveProject}>
-          <label>Project</label>
-          <div className="inline">
-            <input value={projectId} onChange={(e) => setProjectId(e.target.value)} placeholder="project_id" />
-            <button type="submit" className="icon-button" aria-label="Save project">
-              <CheckCircle2 size={16} />
-            </button>
-          </div>
-        </form>
-
-        <nav>
-          {views.map((item) => {
+        <Field label="Community" id="community-select">
+          <select id="community-select" value={communityId} onChange={(event) => setCommunityId(event.target.value)}>
+            {communities.map((community) => <option key={community.id} value={community.id}>{community.name}</option>)}
+          </select>
+        </Field>
+        <nav aria-label="Community navigation">
+          {nav.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => navigate(item.id)}>
-                <Icon size={17} />
-                {item.label}
+              <button key={item.id} className={view === item.id ? "active" : ""} aria-current={view === item.id ? "page" : undefined} onClick={() => { setView(item.id); setMenuOpen(false); }}>
+                <Icon size={18} aria-hidden="true" />{item.label}
+                {item.id === "messages" && dmThreads.some((thread) => (thread.unread_count || 0) > 0) && <span className="unread-dot" />}
               </button>
             );
           })}
         </nav>
-
-        <section className="side-section">
-          <div className="section-title">Communities</div>
-          <select value={communityId} onChange={(e) => setCommunityId(e.target.value)}>
-            <option value="">Select community</option>
-            {communities.map((community) => (
-              <option key={community.id} value={community.id}>
-                {community.name}
-              </option>
-            ))}
-          </select>
-        </section>
-
-        <section className="side-section">
-          <div className="section-title">Acting As</div>
-          <select value={memberId} onChange={(e) => setMemberId(e.target.value)}>
-            <option value="">Select member</option>
-            {members.map((member) => (
-              <option key={member.id} value={member.id}>
-                {member.display_name || member.handle}
-              </option>
-            ))}
-          </select>
-          {selectedMember ? <p className="muted">@{selectedMember.handle}</p> : <p className="muted">Create a member to post and track lessons.</p>}
-        </section>
+        <div className="sidebar-user">
+          <span className="avatar">{displayName(me).slice(0, 1).toUpperCase()}</span>
+          <div><strong>{displayName(me)}</strong><span>@{me?.handle}</span></div>
+          <button className="icon-button" onClick={logout} aria-label="Sign out"><LogOut size={17} /></button>
+        </div>
       </aside>
 
-      <main>
+      <main className="content">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">{selectedCommunity?.slug || "setup"}</p>
-            <h1>{selectedCommunity?.name || "Create your community"}</h1>
-          </div>
-          <button className="secondary" onClick={refreshAll} disabled={busy}>
-            <RefreshCcw size={16} />
-            Refresh
-          </button>
+          <div><p className="eyebrow">{selectedCommunity?.slug}</p><h1>{nav.find((item) => item.id === view)?.label}</h1></div>
+          <button className="secondary" onClick={() => void run(loadCommunity)} disabled={busy}><RefreshCcw size={16} className={busy ? "spin" : ""} /> Refresh</button>
         </header>
+        {error && <div className="alert error" role="alert">{error}</div>}
+        {notice && <div className="alert success" role="status">{notice}</div>}
 
-        {error ? <div className="error">{error}</div> : null}
+        {view === "home" && (
+          <div className="stack">
+            <section className="hero">
+              <div><p className="eyebrow">Welcome back</p><h2>{displayName(me)}</h2><p>{selectedCommunity?.description || "Your community conversations, courses, and people in one place."}</p></div>
+              <div className="hero-icon"><MessagesSquare aria-hidden="true" /></div>
+            </section>
+            <div className="metrics">
+              <Metric label="Members" value={members.length} />
+              <Metric label="Spaces" value={discussionSpaces.length} />
+              <Metric label="Courses" value={courses.length} />
+              <Metric label="Unread messages" value={dmThreads.reduce((sum, thread) => sum + (thread.unread_count || 0), 0)} />
+            </div>
+          </div>
+        )}
 
-        {view === "home" ? (
-          <HomeView
-            communities={communities}
-            selectedCommunity={selectedCommunity}
-            discussionSpaces={discussionSpaces}
-            courses={courses}
-            members={members}
-            communityForm={communityForm}
-            setCommunityForm={setCommunityForm}
-            createCommunity={createCommunity}
-          />
-        ) : null}
+        {view === "spaces" && (
+          <div className="three-pane">
+            <section className="pane">
+              <h2>Spaces</h2>
+              <ItemList empty="No discussion spaces yet.">
+                {discussionSpaces.map((space) => <button key={space.id} className={space.id === spaceId ? "selected" : ""} onClick={() => setSpaceId(space.id)}><strong>{space.name}</strong><span>{space.kind}</span></button>)}
+              </ItemList>
+            </section>
+            <section className="pane">
+              <h2>{selectedSpace?.name || "Threads"}</h2>
+              <ItemList empty="Start the first conversation.">
+                {threads.map((thread) => <button key={thread.id} className={thread.id === threadId ? "selected" : ""} onClick={() => setThreadId(thread.id)}><strong>{thread.title || "Conversation"}</strong><span>{thread.post_count} posts</span></button>)}
+              </ItemList>
+              {spaceId && <form className="composer" onSubmit={createThread}>
+                <Field label="Thread title" id="thread-title"><input id="thread-title" value={threadForm.title} onChange={(event) => setThreadForm({ ...threadForm, title: event.target.value })} /></Field>
+                <Field label="Opening message" id="thread-body"><textarea id="thread-body" value={threadForm.body} onChange={(event) => setThreadForm({ ...threadForm, body: event.target.value })} required /></Field>
+                <button className="primary" disabled={busy}>Start thread</button>
+              </form>}
+            </section>
+            <section className="pane conversation-pane">
+              <h2>{selectedThread?.title || "Conversation"}</h2>
+              <div className="messages">
+                {posts.map((post) => <article className={`message ${post.author_id === me?.id ? "mine" : ""}`} key={post.id}>
+                  <header><strong>{displayName(memberMap.get(post.author_id))}</strong><time>{new Date(post.created_at).toLocaleString()}</time></header>
+                  <p>{post.body}</p>
+                  <div className="message-actions">
+                    {["👍", "❤️", "🎉"].map((emoji) => <button key={emoji} aria-label={`React ${emoji}`} onClick={() => void run(async () => { await api.posts.react(post.id, emoji); await loadPosts(); }, { quiet: true })}>{emoji} {post.reactions?.find((item) => item.emoji === emoji)?.count || ""}</button>)}
+                    {post.author_id === me?.id && <button onClick={() => {
+                      const body = window.prompt("Edit your post", post.body);
+                      if (body?.trim()) void run(async () => { await api.posts.edit(post.id, body.trim()); await loadPosts(); });
+                    }}>Edit</button>}
+                    {post.author_id === me?.id && <button onClick={() => {
+                      if (window.confirm("Remove this post?")) void run(async () => { await api.posts.remove(post.id); await loadPosts(); });
+                    }}>Remove</button>}
+                  </div>
+                </article>)}
+                {!threadId && <Empty>Select a thread to read the conversation.</Empty>}
+              </div>
+              {threadId && <form className="reply" onSubmit={createPost}><Field label="Reply" id="reply"><textarea id="reply" value={reply} onChange={(event) => setReply(event.target.value)} required /></Field><button className="primary" disabled={busy}><Send size={16} /> Send</button></form>}
+            </section>
+          </div>
+        )}
 
-        {view === "spaces" ? (
-          <SpacesView
-            spaces={discussionSpaces}
-            selectedSpace={selectedSpace?.kind === "course" ? undefined : selectedSpace}
-            setSpaceId={setSpaceId}
-            threads={threads}
-            selectedThread={selectedThread}
-            setThreadId={setThreadId}
-            posts={posts}
-            members={members}
-            memberId={memberId}
-            spaceForm={spaceForm}
-            setSpaceForm={setSpaceForm}
-            createSpace={createSpace}
-            threadForm={threadForm}
-            setThreadForm={setThreadForm}
-            createThread={createThread}
-            replyBody={replyBody}
-            setReplyBody={setReplyBody}
-            createPost={createPost}
-          />
-        ) : null}
+        {view === "courses" && (
+          <div className="course-layout">
+            <section className="pane">
+              <h2>Courses</h2>
+              <ItemList empty="No courses available.">
+                {courses.map((course) => <button key={course.id} className={course.id === courseId ? "selected" : ""} onClick={() => setCourseId(course.id)}><strong>{course.name}</strong><span>{course.visibility}</span></button>)}
+              </ItemList>
+            </section>
+            <section className="course-content">
+              <div className="course-heading"><div><p className="eyebrow">Course</p><h2>{selectedCourse?.name || "Choose a course"}</h2><p className="muted">{courseSummary}</p></div>{courseLocked && courseId && <button className="primary" onClick={enroll}>Enroll</button>}</div>
+              {courseLocked ? <Empty>Enroll to unlock published lessons. Paid, invite-only, and manual courses require operator approval.</Empty> : (
+                <div className="lesson-layout">
+                  <aside className="lesson-list">
+                    {sections.map((section) => <div key={section.id}><h3>{section.title}</h3>{lessons.filter((lesson) => lesson.section_id === section.id).map((lesson) => <button key={lesson.id} className={lesson.id === lessonId ? "selected" : ""} onClick={() => setLessonId(lesson.id)}><span>{lesson.title}</span>{lesson.progress?.status === "complete" && <CheckCircle2 size={16} aria-label="Completed" />}</button>)}</div>)}
+                  </aside>
+                  <article className="lesson-reader">
+                    {bundle ? <>
+                      <div className="lesson-title"><div><p className="eyebrow">Lesson</p><h2>{bundle.lesson.title}</h2></div><button className="secondary" onClick={completeLesson} disabled={bundle.lesson.progress?.status === "complete"}><CheckCircle2 size={16} />{bundle.lesson.progress?.status === "complete" ? "Completed" : "Mark complete"}</button></div>
+                      <div className="lesson-body">{bundle.lesson.body}</div>
+                      {bundle.resources.length > 0 && <section><h3>Resources</h3><ul>{bundle.resources.map((resource) => <li key={resource.id}>{resource.name || resource.storage_file_id}</li>)}</ul></section>}
+                      {bundle.assignments.length > 0 && <section><h3>Assignments</h3>{bundle.assignments.map((assignment) => <article className="card" key={assignment.id}><strong>{assignment.title}</strong><p>{assignment.instructions}</p></article>)}</section>}
+                      {bundle.quizzes.length > 0 && <section><h3>Quizzes</h3>{bundle.quizzes.map((quiz) => <article className="card" key={quiz.id}><strong>{quiz.title}</strong><span>Pass mark {quiz.passing_score}%</span></article>)}</section>}
+                      <section><h3>Discussion</h3><div className="comment-list">{bundle.comments.map((item) => <article key={item.id}><strong>{displayName(memberMap.get(item.member_id))}</strong><p>{item.body}</p></article>)}</div><form className="reply" onSubmit={postComment}><Field label="Add a comment" id="lesson-comment"><textarea id="lesson-comment" value={comment} onChange={(event) => setComment(event.target.value)} required /></Field><button className="primary" disabled={busy}>Comment</button></form></section>
+                    </> : <Empty>{lessonId ? "Loading lesson…" : "Choose a lesson."}</Empty>}
+                  </article>
+                </div>
+              )}
+            </section>
+          </div>
+        )}
 
-        {view === "courses" ? (
-          <CoursesView
-            courses={courses}
-            selectedCourse={selectedCourse}
-            setCourseId={setCourseId}
-            courseDetails={courseDetails}
-            detailsForm={detailsForm}
-            setDetailsForm={setDetailsForm}
-            saveCourseDetails={saveCourseDetails}
-            enrollmentRule={enrollmentRule}
-            enrollmentForm={enrollmentForm}
-            setEnrollmentForm={setEnrollmentForm}
-            saveEnrollmentRules={saveEnrollmentRules}
-            enrollSelectedMember={enrollSelectedMember}
-            enrollments={enrollments}
-            certificate={certificate}
-            certificateForm={certificateForm}
-            setCertificateForm={setCertificateForm}
-            saveCertificate={saveCertificate}
-            analytics={analytics}
-            sections={sections}
-            lessons={lessons}
-            lessonBySection={lessonBySection}
-            selectedLesson={selectedLesson}
-            setLessonId={setLessonId}
-            memberId={memberId}
-            courseForm={courseForm}
-            setCourseForm={setCourseForm}
-            createCourse={createCourse}
-            sectionTitle={sectionTitle}
-            setSectionTitle={setSectionTitle}
-            createSection={createSection}
-            sectionEdit={sectionEdit}
-            setSectionEdit={setSectionEdit}
-            updateSection={updateSection}
-            deleteSection={deleteSection}
-            moveSection={moveSection}
-            lessonForm={lessonForm}
-            setLessonForm={setLessonForm}
-            createLesson={createLesson}
-            lessonEdit={lessonEdit}
-            setLessonEdit={setLessonEdit}
-            updateLesson={updateLesson}
-            deleteLesson={deleteLesson}
-            moveLesson={moveLesson}
-            publishLesson={publishLesson}
-            markLessonComplete={markLessonComplete}
-            videoForm={videoForm}
-            setVideoForm={setVideoForm}
-            attachVideo={attachVideo}
-            resources={resources}
-            resourceForm={resourceForm}
-            setResourceForm={setResourceForm}
-            addResource={addResource}
-            deleteResource={deleteResource}
-            quizzes={quizzes}
-            quizForm={quizForm}
-            setQuizForm={setQuizForm}
-            addQuiz={addQuiz}
-            deleteQuiz={deleteQuiz}
-            assignments={assignments}
-            assignmentForm={assignmentForm}
-            setAssignmentForm={setAssignmentForm}
-            addAssignment={addAssignment}
-            deleteAssignment={deleteAssignment}
-            drips={drips}
-            dripForm={dripForm}
-            setDripForm={setDripForm}
-            setDrip={setDrip}
-            comments={comments}
-            commentBody={commentBody}
-            setCommentBody={setCommentBody}
-            postLessonComment={postLessonComment}
-          />
-        ) : null}
+        {view === "members" && <section className="member-grid" aria-label="Member directory">{members.map((member) => <article className="member-card" key={member.id}><span className="avatar large">{displayName(member).slice(0, 1).toUpperCase()}</span><div><h2>{displayName(member)}</h2><p>@{member.handle}</p><p>{member.bio}</p></div>{member.id !== me?.id && <button className="secondary" onClick={() => { setDMRecipient(member.id); setView("messages"); }}>Message</button>}</article>)}</section>}
 
-        {view === "members" ? (
-          <MembersView
-            members={members}
-            memberForm={memberForm}
-            setMemberForm={setMemberForm}
-            createMember={createMember}
-          />
-        ) : null}
+        {view === "messages" && (
+          <div className="message-layout">
+            <section className="pane">
+              <h2>Messages</h2>
+              <form className="composer" onSubmit={openDM}><Field label="Start a conversation" id="dm-recipient"><select id="dm-recipient" value={dmRecipient} onChange={(event) => setDMRecipient(event.target.value)}><option value="">Choose a member</option>{members.filter((member) => member.id !== me?.id).map((member) => <option key={member.id} value={member.id}>{displayName(member)}</option>)}</select></Field><button className="primary" disabled={!dmRecipient || busy}>Open</button></form>
+              <ItemList empty="No direct messages yet.">{dmThreads.map((thread) => {
+                const other = thread.participants.find((id) => id !== me?.id);
+                return <button key={thread.id} className={thread.id === dmId ? "selected" : ""} onClick={() => setDMId(thread.id)}><strong>{displayName(memberMap.get(other || ""))}</strong><span>{thread.unread_count ? `${thread.unread_count} unread` : "Up to date"}</span></button>;
+              })}</ItemList>
+            </section>
+            <section className="pane conversation-pane">
+              <h2>{dm ? displayName(memberMap.get(dm.participants.find((id) => id !== me?.id) || "")) : "Conversation"}</h2>
+              <div className="messages">{dm?.messages.map((message) => <article key={message.id} className={`message ${message.author_id === me?.id ? "mine" : ""}`}><header><strong>{displayName(memberMap.get(message.author_id))}</strong><time>{new Date(message.created_at).toLocaleString()}</time></header><p>{message.body}</p></article>)}{!dm && <Empty>Choose a conversation.</Empty>}</div>
+              {dm && <form className="reply" onSubmit={sendDM}><Field label="Message" id="dm-body"><textarea id="dm-body" value={dmBody} onChange={(event) => setDMBody(event.target.value)} required /></Field><button className="primary" disabled={busy}><Send size={16} /> Send</button></form>}
+            </section>
+          </div>
+        )}
 
-        {view === "auth" ? (
-          <AuthView
-            authForm={authForm}
-            setAuthForm={setAuthForm}
-            authResult={authResult}
-            authSubmit={authSubmit}
-          />
-        ) : null}
+        {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p><p>{me?.bio || "No bio yet."}</p><p className="muted">Signed in as {auth.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
       </main>
     </div>
   );
 }
 
-function HomeView(props: {
-  communities: Community[];
-  selectedCommunity?: Community;
-  discussionSpaces: Space[];
-  courses: Space[];
-  members: Member[];
-  communityForm: { name: string; slug: string; description: string };
-  setCommunityForm: (v: { name: string; slug: string; description: string }) => void;
-  createCommunity: (e: FormEvent) => void;
-}) {
-  return (
-    <div className="grid two">
-      <section className="panel hero-panel">
-        <div className="stat-row">
-          <Metric label="Spaces" value={props.discussionSpaces.length} />
-          <Metric label="Courses" value={props.courses.length} />
-          <Metric label="Members" value={props.members.length} />
-        </div>
-        <h2>{props.selectedCommunity?.name || "Community workspace"}</h2>
-        <p>{props.selectedCommunity?.description || "Set up a community, add spaces, publish courses, and let members participate from one portal."}</p>
-      </section>
-
-      <section className="panel">
-        <h3>Create Community</h3>
-        <form className="stack" onSubmit={props.createCommunity}>
-          <input
-            value={props.communityForm.name}
-            onChange={(e) => props.setCommunityForm({ ...props.communityForm, name: e.target.value, slug: props.communityForm.slug || slugify(e.target.value) })}
-            placeholder="Name"
-            required
-          />
-          <input
-            value={props.communityForm.slug}
-            onChange={(e) => props.setCommunityForm({ ...props.communityForm, slug: slugify(e.target.value) })}
-            placeholder="slug"
-            required
-          />
-          <textarea
-            value={props.communityForm.description}
-            onChange={(e) => props.setCommunityForm({ ...props.communityForm, description: e.target.value })}
-            placeholder="Description"
-          />
-          <button type="submit">
-            <Plus size={16} />
-            Create community
-          </button>
-        </form>
-      </section>
-
-      <section className="panel span">
-        <h3>Current Surface</h3>
-        <div className="feature-grid">
-          <Feature icon={Hash} title="Spaces" body="Feeds, forums, and chat-style areas for member conversations." />
-          <Feature icon={BookOpen} title="Courses" body="Course spaces with sections, lessons, publishing, and progress." />
-          <Feature icon={MessageSquare} title="Threads" body="Threaded posts, replies, reactions, pinning, and locking through Community tools." />
-          <Feature icon={UserRound} title="Members" body="Member directory and local member identity until Auth mapping is promoted server-side." />
-        </div>
-      </section>
-    </div>
-  );
+function Field({ label, id, children }: { label: string; id: string; children: ReactNode }) {
+  return <label className="field" htmlFor={id}><span>{label}</span>{children}</label>;
 }
 
-function SpacesView(props: {
-  spaces: Space[];
-  selectedSpace?: Space;
-  setSpaceId: (id: string) => void;
-  threads: Thread[];
-  selectedThread?: Thread;
-  setThreadId: (id: string) => void;
-  posts: Post[];
-  members: Member[];
-  memberId: string;
-  spaceForm: { name: string; slug: string; kind: string; visibility: string };
-  setSpaceForm: (v: { name: string; slug: string; kind: string; visibility: string }) => void;
-  createSpace: (e: FormEvent) => void;
-  threadForm: { title: string; body: string };
-  setThreadForm: (v: { title: string; body: string }) => void;
-  createThread: (e: FormEvent) => void;
-  replyBody: string;
-  setReplyBody: (v: string) => void;
-  createPost: (e: FormEvent) => void;
-}) {
-  return (
-    <div className="grid layout">
-      <section className="panel list-panel">
-        <h3>Spaces</h3>
-        <div className="list">
-          {props.spaces.map((space) => (
-            <button key={space.id} className={props.selectedSpace?.id === space.id ? "list-item active" : "list-item"} onClick={() => props.setSpaceId(space.id)}>
-              <span>{space.name}</span>
-              <small>{space.kind} · {space.visibility}</small>
-            </button>
-          ))}
-        </div>
-        <form className="stack compact" onSubmit={props.createSpace}>
-          <input
-            value={props.spaceForm.name}
-            onChange={(e) => props.setSpaceForm({ ...props.spaceForm, name: e.target.value, slug: props.spaceForm.slug || slugify(e.target.value) })}
-            placeholder="New space"
-            required
-          />
-          <div className="inline">
-            <input value={props.spaceForm.slug} onChange={(e) => props.setSpaceForm({ ...props.spaceForm, slug: slugify(e.target.value) })} placeholder="slug" required />
-            <select value={props.spaceForm.kind} onChange={(e) => props.setSpaceForm({ ...props.spaceForm, kind: e.target.value })}>
-              <option value="forum">Forum</option>
-              <option value="feed">Feed</option>
-              <option value="chat">Chat</option>
-            </select>
-          </div>
-          <button type="submit">
-            <Plus size={16} />
-            Add space
-          </button>
-        </form>
-      </section>
-
-      <section className="panel list-panel">
-        <h3>{props.selectedSpace?.name || "Threads"}</h3>
-        <div className="list">
-          {props.threads.map((thread) => (
-            <button key={thread.id} className={props.selectedThread?.id === thread.id ? "list-item active" : "list-item"} onClick={() => props.setThreadId(thread.id)}>
-              <span>{thread.title || "Untitled thread"}</span>
-              <small>{thread.post_count} posts</small>
-            </button>
-          ))}
-        </div>
-        <form className="stack compact" onSubmit={props.createThread}>
-          <input value={props.threadForm.title} onChange={(e) => props.setThreadForm({ ...props.threadForm, title: e.target.value })} placeholder="Thread title" />
-          <textarea value={props.threadForm.body} onChange={(e) => props.setThreadForm({ ...props.threadForm, body: e.target.value })} placeholder="Start the discussion" />
-          <button type="submit" disabled={!props.memberId || !props.selectedSpace}>
-            <Plus size={16} />
-            New thread
-          </button>
-        </form>
-      </section>
-
-      <section className="panel conversation">
-        <h3>{props.selectedThread?.title || "Select a thread"}</h3>
-        <div className="posts">
-          {props.posts.map((post) => {
-            const author = props.members.find((m) => m.id === post.author_id);
-            return (
-              <article key={post.id} className="post">
-                <strong>{author?.display_name || author?.handle || "Member"}</strong>
-                <p>{post.removed_at ? "This post was removed." : post.body}</p>
-                {post.reactions?.length ? <small>{post.reactions.map((r) => `${r.emoji} ${r.count}`).join(" · ")}</small> : null}
-              </article>
-            );
-          })}
-        </div>
-        <form className="composer" onSubmit={props.createPost}>
-          <textarea value={props.replyBody} onChange={(e) => props.setReplyBody(e.target.value)} placeholder="Reply to the thread" />
-          <button type="submit" disabled={!props.memberId || !props.selectedThread}>
-            <Send size={16} />
-            Send
-          </button>
-        </form>
-      </section>
-    </div>
-  );
+function ItemList({ children, empty }: { children: ReactNode; empty: string }) {
+  return <div className="item-list">{children || <Empty>{empty}</Empty>}</div>;
 }
 
-function CoursesView(props: {
-  courses: Space[];
-  selectedCourse?: Space;
-  setCourseId: (id: string) => void;
-  courseDetails: CourseDetails;
-  detailsForm: {
-    summary: string;
-    description: string;
-    instructor_member_id: string;
-    instructor_name: string;
-    level: string;
-    tags: string;
-    price_cents: string;
-    currency: string;
-    prerequisites: string;
-    outcomes: string;
-    cover_storage_file_id: string;
-  };
-  setDetailsForm: (v: {
-    summary: string;
-    description: string;
-    instructor_member_id: string;
-    instructor_name: string;
-    level: string;
-    tags: string;
-    price_cents: string;
-    currency: string;
-    prerequisites: string;
-    outcomes: string;
-    cover_storage_file_id: string;
-  }) => void;
-  saveCourseDetails: (e: FormEvent) => void;
-  enrollmentRule: EnrollmentRule;
-  enrollmentForm: { access_mode: string; requires_approval: boolean; max_enrollments: string; starts_at: string; ends_at: string };
-  setEnrollmentForm: (v: { access_mode: string; requires_approval: boolean; max_enrollments: string; starts_at: string; ends_at: string }) => void;
-  saveEnrollmentRules: (e: FormEvent) => void;
-  enrollSelectedMember: () => void;
-  enrollments: CourseEnrollment[];
-  certificate: CourseCertificate;
-  certificateForm: { enabled: boolean; title: string; body: string; template_storage_file_id: string; issue_on_completion: boolean };
-  setCertificateForm: (v: { enabled: boolean; title: string; body: string; template_storage_file_id: string; issue_on_completion: boolean }) => void;
-  saveCertificate: (e: FormEvent) => void;
-  analytics?: CourseAnalytics;
-  sections: Section[];
-  lessons: Lesson[];
-  lessonBySection: Map<string, Lesson[]>;
-  selectedLesson?: Lesson;
-  setLessonId: (id: string) => void;
-  memberId: string;
-  courseForm: { name: string; slug: string; visibility: string };
-  setCourseForm: (v: { name: string; slug: string; visibility: string }) => void;
-  createCourse: (e: FormEvent) => void;
-  sectionTitle: string;
-  setSectionTitle: (v: string) => void;
-  createSection: (e: FormEvent) => void;
-  sectionEdit: Record<string, string>;
-  setSectionEdit: (v: Record<string, string>) => void;
-  updateSection: (section: Section) => void;
-  deleteSection: (section: Section) => void;
-  moveSection: (section: Section, direction: -1 | 1) => void;
-  lessonForm: { section_id: string; title: string; body: string };
-  setLessonForm: (v: { section_id: string; title: string; body: string }) => void;
-  createLesson: (e: FormEvent) => void;
-  lessonEdit: { title: string; body: string };
-  setLessonEdit: (v: { title: string; body: string }) => void;
-  updateLesson: (e: FormEvent) => void;
-  deleteLesson: () => void;
-  moveLesson: (lesson: Lesson, direction: -1 | 1) => void;
-  publishLesson: (published: boolean) => void;
-  markLessonComplete: () => void;
-  videoForm: { storage_key: string; duration_seconds: string };
-  setVideoForm: (v: { storage_key: string; duration_seconds: string }) => void;
-  attachVideo: (e: FormEvent) => void;
-  resources: LessonResource[];
-  resourceForm: { storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: string };
-  setResourceForm: (v: { storage_file_id: string; name: string; kind: string; content_type: string; size_bytes: string }) => void;
-  addResource: (e: FormEvent) => void;
-  deleteResource: (id: string) => void;
-  quizzes: Quiz[];
-  quizForm: { title: string; questions: string; passing_score: string };
-  setQuizForm: (v: { title: string; questions: string; passing_score: string }) => void;
-  addQuiz: (e: FormEvent) => void;
-  deleteQuiz: (id: string) => void;
-  assignments: Assignment[];
-  assignmentForm: { title: string; instructions: string; due_after_days: string; attachment_storage_file_id: string };
-  setAssignmentForm: (v: { title: string; instructions: string; due_after_days: string; attachment_storage_file_id: string }) => void;
-  addAssignment: (e: FormEvent) => void;
-  deleteAssignment: (id: string) => void;
-  drips: DripSchedule[];
-  dripForm: { release_at: string; release_after_days: string };
-  setDripForm: (v: { release_at: string; release_after_days: string }) => void;
-  setDrip: (e: FormEvent) => void;
-  comments: LessonComment[];
-  commentBody: string;
-  setCommentBody: (v: string) => void;
-  postLessonComment: (e: FormEvent) => void;
-}) {
-  const currentDrip = props.drips.find((d) => d.lesson_id === props.selectedLesson?.id);
-  return (
-    <div className="course-builder">
-      <section className="panel list-panel">
-        <h3>Courses</h3>
-        <div className="list">
-          {props.courses.map((course) => (
-            <button key={course.id} className={props.selectedCourse?.id === course.id ? "list-item active" : "list-item"} onClick={() => props.setCourseId(course.id)}>
-              <span>{course.name}</span>
-              <small>{course.visibility}</small>
-            </button>
-          ))}
-        </div>
-        <form className="stack compact" onSubmit={props.createCourse}>
-          <input
-            value={props.courseForm.name}
-            onChange={(e) => props.setCourseForm({ ...props.courseForm, name: e.target.value, slug: props.courseForm.slug || slugify(e.target.value) })}
-            placeholder="Course name"
-            required
-          />
-          <input value={props.courseForm.slug} onChange={(e) => props.setCourseForm({ ...props.courseForm, slug: slugify(e.target.value) })} placeholder="slug" required />
-          <button type="submit">
-            <Plus size={16} />
-            Add course
-          </button>
-        </form>
-      </section>
-
-      <section className="panel builder-wide">
-        <div className="reader-actions">
-          <div>
-            <h3>{props.selectedCourse?.name || "Course Setup"}</h3>
-            <p className="muted">{props.courseDetails.summary || "Define the public course offer, files, pricing, and access rules."}</p>
-          </div>
-          <button onClick={props.enrollSelectedMember} disabled={!props.selectedCourse || !props.memberId}>
-            <Users size={16} />
-            Enroll
-          </button>
-        </div>
-        <div className="builder-grid">
-          <form className="stack" onSubmit={props.saveCourseDetails}>
-            <h4>Definition</h4>
-            <input value={props.detailsForm.summary} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, summary: e.target.value })} placeholder="Summary" />
-            <textarea value={props.detailsForm.description} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, description: e.target.value })} placeholder="Course description" />
-            <div className="inline">
-              <input value={props.detailsForm.instructor_name} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, instructor_name: e.target.value })} placeholder="Instructor name" />
-              <input value={props.detailsForm.instructor_member_id} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, instructor_member_id: e.target.value })} placeholder="Instructor member id" />
-            </div>
-            <div className="inline">
-              <input value={props.detailsForm.level} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, level: e.target.value })} placeholder="Level" />
-              <input value={props.detailsForm.cover_storage_file_id} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, cover_storage_file_id: e.target.value })} placeholder="Cover storage file id" />
-            </div>
-            <div className="inline">
-              <input value={props.detailsForm.price_cents} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, price_cents: e.target.value })} placeholder="Price cents" />
-              <input value={props.detailsForm.currency} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, currency: e.target.value.toUpperCase() })} placeholder="Currency" />
-            </div>
-            <textarea value={props.detailsForm.tags} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, tags: e.target.value })} placeholder="Tags, one per line" />
-            <textarea value={props.detailsForm.prerequisites} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, prerequisites: e.target.value })} placeholder="Prerequisites, one per line" />
-            <textarea value={props.detailsForm.outcomes} onChange={(e) => props.setDetailsForm({ ...props.detailsForm, outcomes: e.target.value })} placeholder="Outcomes, one per line" />
-            <button type="submit" disabled={!props.selectedCourse}>
-              <Save size={16} />
-              Save definition
-            </button>
-          </form>
-
-          <form className="stack" onSubmit={props.saveEnrollmentRules}>
-            <h4>Access</h4>
-            <select value={props.enrollmentForm.access_mode} onChange={(e) => props.setEnrollmentForm({ ...props.enrollmentForm, access_mode: e.target.value })}>
-              <option value="free">Free</option>
-              <option value="paid">Paid</option>
-              <option value="invite">Invite</option>
-              <option value="manual">Manual</option>
-            </select>
-            <label className="check-row">
-              <input type="checkbox" checked={props.enrollmentForm.requires_approval} onChange={(e) => props.setEnrollmentForm({ ...props.enrollmentForm, requires_approval: e.target.checked })} />
-              Approval required
-            </label>
-            <input value={props.enrollmentForm.max_enrollments} onChange={(e) => props.setEnrollmentForm({ ...props.enrollmentForm, max_enrollments: e.target.value })} placeholder="Max enrollments" />
-            <input value={props.enrollmentForm.starts_at} onChange={(e) => props.setEnrollmentForm({ ...props.enrollmentForm, starts_at: e.target.value })} placeholder="Starts at" />
-            <input value={props.enrollmentForm.ends_at} onChange={(e) => props.setEnrollmentForm({ ...props.enrollmentForm, ends_at: e.target.value })} placeholder="Ends at" />
-            <button type="submit" disabled={!props.selectedCourse}>
-              <Save size={16} />
-              Save access
-            </button>
-            <div className="pill-row">
-              <span>{props.enrollmentRule.access_mode}</span>
-              <span>{props.enrollments.length} enrollments</span>
-            </div>
-          </form>
-
-          <form className="stack" onSubmit={props.saveCertificate}>
-            <h4>Certificate</h4>
-            <label className="check-row">
-              <input type="checkbox" checked={props.certificateForm.enabled} onChange={(e) => props.setCertificateForm({ ...props.certificateForm, enabled: e.target.checked })} />
-              Enabled
-            </label>
-            <input value={props.certificateForm.title} onChange={(e) => props.setCertificateForm({ ...props.certificateForm, title: e.target.value })} placeholder="Certificate title" />
-            <textarea value={props.certificateForm.body} onChange={(e) => props.setCertificateForm({ ...props.certificateForm, body: e.target.value })} placeholder="Certificate body" />
-            <input value={props.certificateForm.template_storage_file_id} onChange={(e) => props.setCertificateForm({ ...props.certificateForm, template_storage_file_id: e.target.value })} placeholder="Template storage file id" />
-            <label className="check-row">
-              <input type="checkbox" checked={props.certificateForm.issue_on_completion} onChange={(e) => props.setCertificateForm({ ...props.certificateForm, issue_on_completion: e.target.checked })} />
-              Issue on completion
-            </label>
-            <button type="submit" disabled={!props.selectedCourse}>
-              <Save size={16} />
-              Save certificate
-            </button>
-          </form>
-        </div>
-      </section>
-
-      <section className="panel list-panel">
-        <h3>{props.selectedCourse?.name || "Curriculum"}</h3>
-        <div className="curriculum">
-          {props.sections.map((section) => (
-            <div key={section.id} className="section-block">
-              <div className="section-tools">
-                <input value={props.sectionEdit[section.id] ?? section.title} onChange={(e) => props.setSectionEdit({ ...props.sectionEdit, [section.id]: e.target.value })} />
-                <button className="icon-button secondary" onClick={() => props.moveSection(section, -1)} aria-label="Move section up">
-                  <ArrowUp size={15} />
-                </button>
-                <button className="icon-button secondary" onClick={() => props.moveSection(section, 1)} aria-label="Move section down">
-                  <ArrowDown size={15} />
-                </button>
-                <button className="icon-button secondary" onClick={() => props.updateSection(section)} aria-label="Save section">
-                  <Save size={15} />
-                </button>
-                <button className="icon-button danger" onClick={() => props.deleteSection(section)} aria-label="Delete section">
-                  <Trash2 size={15} />
-                </button>
-              </div>
-              {(props.lessonBySection.get(section.id) || []).map((lesson) => (
-                <div key={lesson.id} className={props.selectedLesson?.id === lesson.id ? "lesson-row active" : "lesson-row"}>
-                  <button className="lesson pick" onClick={() => props.setLessonId(lesson.id)}>
-                    <span>{lesson.title}</span>
-                    <small>{lesson.published_at ? "Published" : "Draft"}</small>
-                  </button>
-                  <button className="icon-button secondary" onClick={() => props.moveLesson(lesson, -1)} aria-label="Move lesson up">
-                    <ArrowUp size={14} />
-                  </button>
-                  <button className="icon-button secondary" onClick={() => props.moveLesson(lesson, 1)} aria-label="Move lesson down">
-                    <ArrowDown size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          ))}
-        </div>
-        <form className="inline-form" onSubmit={props.createSection}>
-          <input value={props.sectionTitle} onChange={(e) => props.setSectionTitle(e.target.value)} placeholder="Section title" />
-          <button type="submit" disabled={!props.selectedCourse}>
-            <Plus size={16} />
-          </button>
-        </form>
-        <form className="stack compact" onSubmit={props.createLesson}>
-          <select value={props.lessonForm.section_id} onChange={(e) => props.setLessonForm({ ...props.lessonForm, section_id: e.target.value })}>
-            <option value="">First section</option>
-            {props.sections.map((section) => (
-              <option key={section.id} value={section.id}>
-                {section.title}
-              </option>
-            ))}
-          </select>
-          <input value={props.lessonForm.title} onChange={(e) => props.setLessonForm({ ...props.lessonForm, title: e.target.value })} placeholder="Lesson title" />
-          <textarea value={props.lessonForm.body} onChange={(e) => props.setLessonForm({ ...props.lessonForm, body: e.target.value })} placeholder="Lesson body" />
-          <button type="submit" disabled={!props.sections.length}>
-            <Plus size={16} />
-            Add lesson
-          </button>
-        </form>
-      </section>
-
-      <section className="panel reader">
-        <div className="reader-actions">
-          <h3>{props.selectedLesson?.title || "Select a lesson"}</h3>
-          {props.selectedLesson ? (
-            <div className="inline">
-              <button className="secondary" onClick={() => props.publishLesson(!props.selectedLesson?.published_at)}>
-                {props.selectedLesson.published_at ? "Unpublish" : "Publish"}
-              </button>
-              <button onClick={props.markLessonComplete} disabled={!props.memberId}>
-                <CheckCircle2 size={16} />
-                Complete
-              </button>
-            </div>
-          ) : null}
-        </div>
-        {props.selectedLesson ? (
-          <>
-            <div className="lesson-meta">
-              {props.selectedLesson.published_at ? (
-                <span>
-                  <Globe2 size={14} /> Published
-                </span>
-              ) : (
-                <span>
-                  <Lock size={14} /> Draft
-                </span>
-              )}
-              {props.selectedLesson.progress?.status ? (
-                <span>
-                  <CheckCircle2 size={14} /> {props.selectedLesson.progress.status}
-                </span>
-              ) : null}
-              {props.selectedLesson.video_storage_key ? (
-                <span>
-                  <UploadCloud size={14} /> video {props.selectedLesson.video_storage_key}
-                </span>
-              ) : null}
-              {currentDrip ? <span>drip {currentDrip.release_at || `${currentDrip.release_after_days || 0} days`}</span> : null}
-            </div>
-            <form className="stack" onSubmit={props.updateLesson}>
-              <input value={props.lessonEdit.title} onChange={(e) => props.setLessonEdit({ ...props.lessonEdit, title: e.target.value })} placeholder="Lesson title" />
-              <textarea value={props.lessonEdit.body} onChange={(e) => props.setLessonEdit({ ...props.lessonEdit, body: e.target.value })} placeholder="Lesson body" />
-              <div className="inline">
-                <button type="submit">
-                  <Save size={16} />
-                  Save lesson
-                </button>
-                <button type="button" className="danger" onClick={props.deleteLesson}>
-                  <Trash2 size={16} />
-                  Delete
-                </button>
-              </div>
-            </form>
-
-            <form className="inline compact" onSubmit={props.attachVideo}>
-              <input value={props.videoForm.storage_key} onChange={(e) => props.setVideoForm({ ...props.videoForm, storage_key: e.target.value })} placeholder="Video storage file id" />
-              <input value={props.videoForm.duration_seconds} onChange={(e) => props.setVideoForm({ ...props.videoForm, duration_seconds: e.target.value })} placeholder="Duration seconds" />
-              <button type="submit">
-                <UploadCloud size={16} />
-                Video
-              </button>
-            </form>
-
-            <form className="inline compact" onSubmit={props.setDrip}>
-              <input value={props.dripForm.release_at} onChange={(e) => props.setDripForm({ ...props.dripForm, release_at: e.target.value })} placeholder="Release at" />
-              <input value={props.dripForm.release_after_days} onChange={(e) => props.setDripForm({ ...props.dripForm, release_after_days: e.target.value })} placeholder="Release after days" />
-              <button type="submit">Drip</button>
-            </form>
-
-            <div className="builder-grid lesson-extras">
-              <div className="stack">
-                <h4>Resources</h4>
-                {props.resources.map((resource) => (
-                  <div key={resource.id} className="mini-row">
-                    <span>{resource.name || resource.storage_file_id}</span>
-                    <small>{resource.kind}</small>
-                    <button className="icon-button danger" onClick={() => props.deleteResource(resource.id)} aria-label="Delete resource">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-                <form className="stack compact" onSubmit={props.addResource}>
-                  <input value={props.resourceForm.storage_file_id} onChange={(e) => props.setResourceForm({ ...props.resourceForm, storage_file_id: e.target.value })} placeholder="Storage file id" />
-                  <input value={props.resourceForm.name} onChange={(e) => props.setResourceForm({ ...props.resourceForm, name: e.target.value })} placeholder="Resource name" />
-                  <div className="inline">
-                    <input value={props.resourceForm.kind} onChange={(e) => props.setResourceForm({ ...props.resourceForm, kind: e.target.value })} placeholder="Kind" />
-                    <input value={props.resourceForm.content_type} onChange={(e) => props.setResourceForm({ ...props.resourceForm, content_type: e.target.value })} placeholder="Content type" />
-                  </div>
-                  <button type="submit">
-                    <Paperclip size={16} />
-                    Add resource
-                  </button>
-                </form>
-              </div>
-
-              <div className="stack">
-                <h4>Quizzes</h4>
-                {props.quizzes.map((quiz) => (
-                  <div key={quiz.id} className="mini-row">
-                    <span>{quiz.title}</span>
-                    <small>{quiz.passing_score}%</small>
-                    <button className="icon-button danger" onClick={() => props.deleteQuiz(quiz.id)} aria-label="Delete quiz">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-                <form className="stack compact" onSubmit={props.addQuiz}>
-                  <input value={props.quizForm.title} onChange={(e) => props.setQuizForm({ ...props.quizForm, title: e.target.value })} placeholder="Quiz title" />
-                  <textarea value={props.quizForm.questions} onChange={(e) => props.setQuizForm({ ...props.quizForm, questions: e.target.value })} placeholder="Questions JSON array" />
-                  <input value={props.quizForm.passing_score} onChange={(e) => props.setQuizForm({ ...props.quizForm, passing_score: e.target.value })} placeholder="Passing score" />
-                  <button type="submit">Add quiz</button>
-                </form>
-              </div>
-
-              <div className="stack">
-                <h4>Assignments</h4>
-                {props.assignments.map((assignment) => (
-                  <div key={assignment.id} className="mini-row">
-                    <span>{assignment.title}</span>
-                    <small>{assignment.due_after_days ? `${assignment.due_after_days} days` : "open"}</small>
-                    <button className="icon-button danger" onClick={() => props.deleteAssignment(assignment.id)} aria-label="Delete assignment">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-                <form className="stack compact" onSubmit={props.addAssignment}>
-                  <input value={props.assignmentForm.title} onChange={(e) => props.setAssignmentForm({ ...props.assignmentForm, title: e.target.value })} placeholder="Assignment title" />
-                  <textarea value={props.assignmentForm.instructions} onChange={(e) => props.setAssignmentForm({ ...props.assignmentForm, instructions: e.target.value })} placeholder="Instructions" />
-                  <div className="inline">
-                    <input value={props.assignmentForm.due_after_days} onChange={(e) => props.setAssignmentForm({ ...props.assignmentForm, due_after_days: e.target.value })} placeholder="Due days" />
-                    <input value={props.assignmentForm.attachment_storage_file_id} onChange={(e) => props.setAssignmentForm({ ...props.assignmentForm, attachment_storage_file_id: e.target.value })} placeholder="Storage file id" />
-                  </div>
-                  <button type="submit">Add assignment</button>
-                </form>
-              </div>
-            </div>
-
-            <section className="stack compact">
-              <h4>Comments</h4>
-              {props.comments.map((comment) => (
-                <article key={comment.id} className="post">
-                  <strong>{comment.member_id}</strong>
-                  <p>{comment.body}</p>
-                </article>
-              ))}
-              <form className="composer" onSubmit={props.postLessonComment}>
-                <textarea value={props.commentBody} onChange={(e) => props.setCommentBody(e.target.value)} placeholder="Comment on this lesson" />
-                <button type="submit" disabled={!props.memberId}>
-                  <Send size={16} />
-                  Comment
-                </button>
-              </form>
-            </section>
-          </>
-        ) : (
-          <p className="muted">Create sections and lessons to build the course.</p>
-        )}
-      </section>
-
-      <section className="panel builder-wide">
-        <h3>
-          <BarChart3 size={18} /> Analytics
-        </h3>
-        <div className="stat-row analytics-row">
-          <Metric label="Sections" value={props.analytics?.sections || 0} />
-          <Metric label="Lessons" value={props.analytics?.lessons || 0} />
-          <Metric label="Published" value={props.analytics?.published_lessons || 0} />
-          <Metric label="Resources" value={props.analytics?.resources || 0} />
-          <Metric label="Quizzes" value={props.analytics?.quizzes || 0} />
-          <Metric label="Assignments" value={props.analytics?.assignments || 0} />
-          <Metric label="Comments" value={props.analytics?.comments || 0} />
-          <Metric label="Enrollments" value={props.analytics?.active_enrollments || 0} />
-          <Metric label="Completion %" value={props.analytics?.progress_completion_percent || 0} />
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function MembersView(props: {
-  members: Member[];
-  memberForm: { display_name: string; handle: string; bio: string };
-  setMemberForm: (v: { display_name: string; handle: string; bio: string }) => void;
-  createMember: (e: FormEvent) => void;
-}) {
-  return (
-    <div className="grid two">
-      <section className="panel">
-        <h3>Members</h3>
-        <div className="member-grid">
-          {props.members.map((member) => (
-            <article key={member.id} className="member">
-              <div className="avatar">{(member.display_name || member.handle).slice(0, 1).toUpperCase()}</div>
-              <div>
-                <strong>{member.display_name || member.handle}</strong>
-                <span>@{member.handle}</span>
-                <p>{member.bio || "No bio yet."}</p>
-              </div>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className="panel">
-        <h3>Create Member</h3>
-        <form className="stack" onSubmit={props.createMember}>
-          <input
-            value={props.memberForm.display_name}
-            onChange={(e) => props.setMemberForm({ ...props.memberForm, display_name: e.target.value, handle: props.memberForm.handle || handleFromName(e.target.value) })}
-            placeholder="Display name"
-          />
-          <input value={props.memberForm.handle} onChange={(e) => props.setMemberForm({ ...props.memberForm, handle: handleFromName(e.target.value) })} placeholder="handle" required />
-          <textarea value={props.memberForm.bio} onChange={(e) => props.setMemberForm({ ...props.memberForm, bio: e.target.value })} placeholder="Bio" />
-          <button type="submit">
-            <Plus size={16} />
-            Add member
-          </button>
-        </form>
-      </section>
-    </div>
-  );
-}
-
-function AuthView(props: {
-  authForm: { client_id: string; email: string; password: string; organization_slug: string };
-  setAuthForm: (v: { client_id: string; email: string; password: string; organization_slug: string }) => void;
-  authResult: string;
-  authSubmit: (e: FormEvent, mode: "login" | "signup") => void;
-}) {
-  return (
-    <div className="grid two">
-      <section className="panel">
-        <h3>Auth App Connection</h3>
-        <p className="muted">
-          This portal uses the web SDK and can call the Auth app public endpoints. The next server pass should map Auth users to Community members and enforce member identity on portal routes.
-        </p>
-        <form className="stack" onSubmit={(e) => props.authSubmit(e, "login")}>
-          <input value={props.authForm.client_id} onChange={(e) => props.setAuthForm({ ...props.authForm, client_id: e.target.value })} placeholder="Auth client_id" required />
-          <input value={props.authForm.organization_slug} onChange={(e) => props.setAuthForm({ ...props.authForm, organization_slug: e.target.value })} placeholder="organization_slug optional" />
-          <input type="email" value={props.authForm.email} onChange={(e) => props.setAuthForm({ ...props.authForm, email: e.target.value })} placeholder="Email" required />
-          <input type="password" value={props.authForm.password} onChange={(e) => props.setAuthForm({ ...props.authForm, password: e.target.value })} placeholder="Password" required />
-          <div className="inline">
-            <button type="submit">Login</button>
-            <button type="button" className="secondary" onClick={(e) => props.authSubmit(e as unknown as FormEvent, "signup")}>
-              Signup
-            </button>
-          </div>
-        </form>
-      </section>
-      <section className="panel">
-        <h3>Result</h3>
-        <pre className="result">{props.authResult || "No auth call yet."}</pre>
-      </section>
-    </div>
-  );
+function Empty({ children }: { children: ReactNode }) {
+  return <div className="empty">{children}</div>;
 }
 
 function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="metric">
-      <strong>{value}</strong>
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function Feature({ icon: Icon, title, body }: { icon: typeof Hash; title: string; body: string }) {
-  return (
-    <article className="feature">
-      <Icon size={18} />
-      <strong>{title}</strong>
-      <p>{body}</p>
-    </article>
-  );
+  return <article className="metric"><strong>{value}</strong><span>{label}</span></article>;
 }
