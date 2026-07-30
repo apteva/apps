@@ -30,9 +30,15 @@ declare const __AUTH_APP__: string;
 export const COMMUNITY_APP = __COMMUNITY_APP__ || "community";
 export const AUTH_APP = __AUTH_APP__ || "auth";
 
+const portalFetch = ((input: RequestInfo | URL, init?: RequestInit) =>
+  globalThis.fetch(input, { ...init, credentials: "omit" })) as typeof fetch;
+
 export const apteva = new AptevaClient({
   baseURL: pickBaseURL(__API_BASE__),
   projectId: currentProjectId(),
+  // The portal authenticates with a delegated member token. Do not let a
+  // same-origin operator dashboard cookie shadow that explicit identity.
+  fetch: portalFetch,
 });
 const community = apteva.app(COMMUNITY_APP);
 const auth = apteva.app(AUTH_APP);
