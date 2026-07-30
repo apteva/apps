@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.6.4
+version: 0.6.5
 description: |
   Publish a locally-installed Apteva instance through one of four HTTPS
   tunnel providers selected explicitly in the Live Link panel:

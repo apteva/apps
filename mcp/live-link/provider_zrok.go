@@ -385,10 +385,25 @@ var (
 		return response.Shares, nil
 	}
 	zrokDeleteShare = func(ctx context.Context, token, envZID, shareToken string) error {
-		return zrokAPIRequest(ctx, http.MethodPost, "/unshare", token, map[string]string{
+		return zrokAPIRequest(ctx, http.MethodDelete, "/unshare", token, map[string]string{
 			"envZId":     envZID,
 			"shareToken": shareToken,
 		}, nil)
+	}
+	zrokPerformRequest = func(req *http.Request) (*http.Response, error) {
+		client := &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(next *http.Request, via []*http.Request) error {
+				if next.URL.Scheme != "https" || next.URL.Hostname() != "api-v2.zrok.io" {
+					return errors.New("zrok API redirect refused")
+				}
+				if len(via) >= 3 {
+					return errors.New("too many zrok API redirects")
+				}
+				return nil
+			},
+		}
+		return client.Do(req)
 	}
 )
 
@@ -484,19 +499,7 @@ func zrokAPIRequest(ctx context.Context, method, path, token string, body, out a
 	req.Header.Set("Accept", "application/zrok.v1+json")
 	req.Header.Set("X-TOKEN", token)
 	req.Header.Set("User-Agent", "apteva-live-link/0.6")
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(next *http.Request, via []*http.Request) error {
-			if next.URL.Scheme != "https" || next.URL.Hostname() != "api-v2.zrok.io" {
-				return errors.New("zrok API redirect refused")
-			}
-			if len(via) >= 3 {
-				return errors.New("too many zrok API redirects")
-			}
-			return nil
-		},
-	}
-	resp, err := client.Do(req)
+	resp, err := zrokPerformRequest(req)
 	if err != nil {
 		return err
 	}

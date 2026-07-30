@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,6 +192,41 @@ func TestReconcileZrokSharesDeletesOnlyOwnedReservedEndpoint(t *testing.T) {
 	}
 	if removed != 1 || len(deleted) != 1 || deleted[0] != "owned-stale-share" {
 		t.Fatalf("removed=%d deleted=%v", removed, deleted)
+	}
+}
+
+func TestZrokDeleteShareUsesDelete(t *testing.T) {
+	oldPerform := zrokPerformRequest
+	t.Cleanup(func() { zrokPerformRequest = oldPerform })
+	zrokPerformRequest = func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodDelete {
+			t.Fatalf("method=%q, want DELETE", req.Method)
+		}
+		if req.URL.Path != "/api/v2/unshare" {
+			t.Fatalf("path=%q", req.URL.Path)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]string
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload["envZId"] != "current-environment" || payload["shareToken"] != "owned-stale-share" {
+			t.Fatalf("unexpected unshare payload")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("")),
+			Header:     make(http.Header),
+		}, nil
+	}
+
+	if err := zrokDeleteShare(
+		context.Background(), "enable-token", "current-environment", "owned-stale-share",
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
