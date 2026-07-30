@@ -222,6 +222,9 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
   const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
   const [selectedProviderProduct, setSelectedProviderProduct] = useState<ProviderProduct | null>(null);
+  const [prodigiImport, setProdigiImport] = useState({
+    retailPrice: "", artworkUrl: "", printArea: "default", sizing: "fitPrintArea", designKey: "",
+  });
   const [selectedStore, setSelectedStore] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
@@ -441,9 +444,16 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
 
   async function browseProvider(provider: ProviderPolicy) {
     if (!selectedStore) throw new Error("Select a store before browsing a provider");
+    const draft = providerDrafts[provider.connection_id] || provider;
+    const providerInput = provider.provider_slug === "prodigi"
+      ? { skus: String(draft.settings?.catalog_skus || "") }
+      : undefined;
     const result = await api<{ products: ProviderProduct[] }>("/admin/provider-catalog", {
       method: "POST",
-      body: JSON.stringify({ store_id: Number(selectedStore), connection_id: provider.connection_id }),
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: provider.connection_id,
+        provider_input: providerInput,
+      }),
     });
     setCatalogProvider(provider);
     setProviderProducts(result.products || []);
@@ -460,16 +470,31 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       }),
     });
     setSelectedProviderProduct(result.product);
+    setProdigiImport({ retailPrice: "", artworkUrl: "", printArea: "default", sizing: "fitPrintArea", designKey: "" });
   }
 
   async function importProviderProduct() {
     if (!catalogProvider || !selectedProviderProduct || !selectedStore) return;
+    const payload: Record<string, unknown> = {
+      store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
+      product: selectedProviderProduct,
+    };
+    if (catalogProvider.provider_slug === "prodigi") {
+      if (!prodigiImport.retailPrice) throw new Error("Retail price is required for a Prodigi import");
+      if (!prodigiImport.artworkUrl.trim()) throw new Error("A public artwork URL is required for a Prodigi import");
+      const priceCents = moneyToCents(prodigiImport.retailPrice);
+      payload.price_cents_by_variant = Object.fromEntries(
+        (selectedProviderProduct.variants || []).map((variant) => [variant.id, priceCents]),
+      );
+      payload.provider_input = {
+        assets: [{ printArea: prodigiImport.printArea.trim(), url: prodigiImport.artworkUrl.trim() }],
+        sizing: prodigiImport.sizing,
+        design_key: prodigiImport.designKey.trim() || undefined,
+      };
+    }
     await api("/admin/provider-products/import", {
       method: "POST",
-      body: JSON.stringify({
-        store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
-        product: selectedProviderProduct,
-      }),
+      body: JSON.stringify(payload),
     });
     setSelectedProviderProduct(null);
   }
@@ -658,6 +683,15 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                           <Field label="Flat shipping"><input type="number" min="0" step="0.01" value={(Number(settings.flat_shipping_cents || 0) / 100).toString()} onChange={(event) => updateProviderSetting(provider.connection_id, "flat_shipping_cents", Math.round(Number(event.target.value) * 100))} className={inputClass} /></Field>
                           {provider.provider_slug === "printify" ? <Field label="Printify shop ID"><input value={String(settings.shop_id || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "shop_id", event.target.value)} className={inputClass} /></Field> : <div />}
                         </div>
+                        {provider.provider_slug === "prodigi" && (
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <Field label="Catalog SKUs"><textarea rows={3} value={String(settings.catalog_skus || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "catalog_skus", event.target.value)} placeholder="One Prodigi SKU per line" className={inputClass} /></Field>
+                            <div className="grid grid-cols-2 gap-3">
+                              <Field label="Shipping method"><select value={String(settings.shipping_method || "Budget")} onChange={(event) => updateProviderSetting(provider.connection_id, "shipping_method", event.target.value)} className={inputClass}><option>Budget</option><option>Standard</option><option>StandardPlus</option><option>Express</option><option>Overnight</option></select></Field>
+                              <Field label="Callback URL"><input type="url" value={String(settings.callback_url || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "callback_url", event.target.value)} placeholder="Optional" className={inputClass} /></Field>
+                            </div>
+                          </div>
+                        )}
                         <div className="flex justify-end gap-2">
                           <button type="button" disabled={!selectedStore || busy || !draft.enabled} onClick={() => void run(() => browseProvider(provider), `${provider.provider_slug} catalog loaded`)} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Browse catalog</button>
                           <button type="button" disabled={!selectedStore || busy} onClick={() => void run(() => saveProvider(provider), "Provider policy saved")} className="h-8 rounded-md bg-accent px-3 text-sm font-medium text-bg disabled:opacity-50">Save</button>
@@ -665,7 +699,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                       </div>
                     );
                   })}
-                  {providers.length === 0 && <div className="px-3 py-10 text-center text-sm text-text-muted">No Printful, Printify, BigBuy, or CJ Dropshipping connection is bound to Commerce.</div>}
+                  {providers.length === 0 && <div className="px-3 py-10 text-center text-sm text-text-muted">No Printful, Printify, Prodigi, BigBuy, or CJ Dropshipping connection is bound to Commerce.</div>}
                 </div>
               </div>
               <aside className="xl:border-l xl:border-border xl:pl-5 space-y-3 min-w-0">
@@ -673,7 +707,20 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                 {selectedProviderProduct ? (
                   <div className="space-y-3">
                     <div className="flex gap-3">{selectedProviderProduct.image_url && <img src={selectedProviderProduct.image_url} alt="" className="h-16 w-16 rounded object-cover bg-bg-input" />}<div className="min-w-0"><div className="font-medium">{selectedProviderProduct.title}</div><div className="text-xs text-text-muted">{selectedProviderProduct.variants?.length || 0} variants</div></div></div>
-                    <div className="max-h-64 overflow-auto border-y border-border divide-y divide-border">{(selectedProviderProduct.variants || []).map((variant) => <div key={variant.id} className="flex items-center justify-between gap-3 py-2 text-sm"><span className="min-w-0"><span className="block truncate">{variant.title}</span><span className="text-xs text-text-muted">{variant.sku || variant.id}</span></span><span className="text-right whitespace-nowrap"><span className="block">{fmtMoney(variant.cost_cents, variant.currency)}</span><span className="text-xs text-text-muted">{variant.available ? "Available" : "Unavailable"}</span></span></div>)}</div>
+                    <div className="max-h-64 overflow-auto border-y border-border divide-y divide-border">{(selectedProviderProduct.variants || []).map((variant) => <div key={variant.id} className="flex items-center justify-between gap-3 py-2 text-sm"><span className="min-w-0"><span className="block truncate">{variant.title}</span><span className="text-xs text-text-muted">{variant.sku || variant.id}</span></span><span className="text-right whitespace-nowrap"><span className="block">{catalogProvider?.provider_slug === "prodigi" ? "Price set on import" : fmtMoney(variant.cost_cents, variant.currency)}</span><span className="text-xs text-text-muted">{variant.available ? "Available" : "Unavailable"}</span></span></div>)}</div>
+                    {catalogProvider?.provider_slug === "prodigi" && (
+                      <div className="space-y-3 border border-border rounded-md p-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <Field label={`Retail price (${currentStore?.default_currency || "USD"})`}><input type="number" min="0.01" step="0.01" value={prodigiImport.retailPrice} onChange={(event) => setProdigiImport({ ...prodigiImport, retailPrice: event.target.value })} className={inputClass} /></Field>
+                          <Field label="Print area"><input value={prodigiImport.printArea} onChange={(event) => setProdigiImport({ ...prodigiImport, printArea: event.target.value })} className={inputClass} /></Field>
+                        </div>
+                        <Field label="Public artwork URL"><input type="url" value={prodigiImport.artworkUrl} onChange={(event) => setProdigiImport({ ...prodigiImport, artworkUrl: event.target.value })} placeholder="https://..." className={inputClass} /></Field>
+                        <div className="grid grid-cols-2 gap-3">
+                          <Field label="Artwork sizing"><select value={prodigiImport.sizing} onChange={(event) => setProdigiImport({ ...prodigiImport, sizing: event.target.value })} className={inputClass}><option value="fitPrintArea">Fit print area</option><option value="fillPrintArea">Fill print area</option><option value="stretchToPrintArea">Stretch to print area</option></select></Field>
+                          <Field label="Design key"><input value={prodigiImport.designKey} onChange={(event) => setProdigiImport({ ...prodigiImport, designKey: event.target.value })} placeholder="Optional" className={inputClass} /></Field>
+                        </div>
+                      </div>
+                    )}
                     <div className="flex gap-2"><button type="button" onClick={() => setSelectedProviderProduct(null)} className="flex-1 h-9 rounded-md border border-border text-sm">Back</button><button type="button" disabled={busy || !(selectedProviderProduct.variants?.length)} onClick={() => void run(importProviderProduct, "Product imported as draft")} className="flex-1 h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">Import product</button></div>
                   </div>
                 ) : catalogProvider ? (

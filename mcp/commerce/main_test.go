@@ -1044,6 +1044,11 @@ func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
 		SaleItem: &SaleItem{SKU: "LOCAL-1", Quantity: 2},
 		Source: &VariantSource{
 			ExternalProductID: "product-1", ExternalVariantID: "123", ProviderSKU: "PROVIDER-1",
+			Source: map[string]any{
+				"attributes": map[string]any{"color": "black"},
+				"assets":     []any{map[string]any{"printArea": "front", "url": "https://cdn.example/design.png"}},
+				"sizing":     "fitPrintArea",
+			},
 		},
 	}
 	tests := []struct {
@@ -1072,6 +1077,17 @@ func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
 				t.Fatalf("unexpected CJ request: %#v", request)
 			}
 		}},
+		{"prodigi", map[string]any{"shipping_method": "Standard"}, func(t *testing.T, request map[string]any) {
+			item := anyMap(anySlice(request["items"])[0])
+			recipient := mapArg(request, "recipient")
+			address := mapArg(recipient, "address")
+			if strArg(request, "shippingMethod") != "Standard" ||
+				strArg(item, "sku") != "PROVIDER-1" ||
+				strArg(address, "postalOrZipCode") != "28001" ||
+				len(anySlice(item["assets"])) != 1 {
+				t.Fatalf("unexpected Prodigi request: %#v", request)
+			}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
@@ -1083,6 +1099,79 @@ func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
 			}
 			test.assert(t, request)
 		})
+	}
+}
+
+func TestProdigiProductNormalizationAndDesignIdentity(t *testing.T) {
+	raw := map[string]any{
+		"outcome": "Ok",
+		"product": map[string]any{
+			"sku":         "GLOBAL-TEE-01",
+			"description": "Organic T-shirt",
+			"printAreas":  map[string]any{"front": map[string]any{"required": true}},
+			"variants": []any{
+				map[string]any{"attributes": map[string]any{"size": "M", "color": "Black"}, "shipsTo": []any{"ES", "US"}},
+				map[string]any{"attributes": map[string]any{"size": "L", "color": "Black"}, "shipsTo": []any{"ES", "US"}},
+			},
+		},
+	}
+	products := normalizeProdigiProducts(raw)
+	if len(products) != 1 || products[0].ID != "GLOBAL-TEE-01" || len(products[0].Variants) != 2 {
+		t.Fatalf("unexpected normalized product: %#v", products)
+	}
+	firstID := products[0].Variants[0].ID
+	if firstID == "" || firstID == products[0].Variants[1].ID {
+		t.Fatalf("Prodigi attribute variants need stable distinct ids: %#v", products[0].Variants)
+	}
+
+	input := map[string]any{
+		"design_key": "feliqo-sleep-club",
+		"assets": []any{
+			map[string]any{"printArea": "front", "url": "https://cdn.example/feliqo.png"},
+		},
+	}
+	prepared, err := prepareProdigiVariants(products[0].Variants, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared[0].ID != firstID+"@feliqo-sleep-club" {
+		t.Fatalf("design identity missing from variant id: %q", prepared[0].ID)
+	}
+	source := anyMap(prepared[0].Raw)
+	if strArg(source, "sizing") != "fitPrintArea" || len(anySlice(source["assets"])) != 1 {
+		t.Fatalf("Prodigi source JSON lost provider-specific fields: %#v", source)
+	}
+}
+
+func TestProdigiQuoteAndStatusNormalization(t *testing.T) {
+	bound := &sdk.BoundIntegration{AppSlug: "prodigi", ConnectionID: 42}
+	raw := map[string]any{
+		"outcome": "Ok",
+		"quotes": []any{
+			map[string]any{
+				"shipmentMethod": "Budget",
+				"costSummary": map[string]any{
+					"shipping": map[string]any{"amount": "4.25", "currency": "EUR"},
+				},
+			},
+		},
+	}
+	options := normalizeProdigiShippingOptions(bound, raw, "USD")
+	if len(options) != 1 || options[0].AmountCents != 425 || options[0].Currency != "EUR" || options[0].ID != "Budget" {
+		t.Fatalf("unexpected Prodigi quote: %#v", options)
+	}
+	if status := normalizeProdigiOrderStatus("Complete"); status != "shipped" {
+		t.Fatalf("Complete normalized to %q, want shipped", status)
+	}
+	if status := normalizeProdigiOrderStatus("InProgress"); status != "accepted" {
+		t.Fatalf("InProgress normalized to %q, want accepted", status)
+	}
+	shipped := map[string]any{"order": map[string]any{
+		"status":    map[string]any{"stage": "InProgress"},
+		"shipments": []any{map[string]any{"status": "Shipped"}},
+	}}
+	if status := prodigiOrderStatus(shipped); status != "shipped" {
+		t.Fatalf("shipped fulfillment normalized to %q, want shipped", status)
 	}
 }
 

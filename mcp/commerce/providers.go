@@ -1,12 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -144,6 +147,25 @@ func (a *App) toolProviderCatalog(ctx *sdk.AppCtx, args map[string]any) (any, er
 		tool = "products_list"
 	case "cjdropshipping":
 		tool = "products_search"
+	case "prodigi":
+		skus := prodigiCatalogSKUs(input, policy)
+		if len(skus) == 0 {
+			return nil, errors.New("Prodigi catalog requires provider_input.skus or provider policy settings.catalog_skus")
+		}
+		products := make([]ProviderProduct, 0, len(skus))
+		rawProducts := make([]any, 0, len(skus))
+		for _, sku := range skus {
+			rawProduct, callErr := executeProviderTool(ctx, bound, "get_product", map[string]any{"sku": sku})
+			if callErr != nil {
+				return nil, callErr
+			}
+			rawProducts = append(rawProducts, rawProduct)
+			products = append(products, normalizeProviderProducts("prodigi", rawProduct, true)...)
+		}
+		return map[string]any{
+			"provider": bound.AppSlug, "connection_id": bound.ConnectionID,
+			"products": products, "count": len(products), "raw": rawProducts,
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported supplier provider %q", bound.AppSlug)
 	}
@@ -212,6 +234,15 @@ func (a *App) toolProviderProductImport(ctx *sdk.AppCtx, args map[string]any) (a
 	}
 	if len(variants) == 0 {
 		return nil, errors.New("no provider variants selected")
+	}
+	if bound.AppSlug == "prodigi" {
+		variants, err = prepareProdigiVariants(variants, mapArg(args, "provider_input"))
+		if err != nil {
+			return nil, err
+		}
+		for i := range variants {
+			variants[i].Currency = store.DefaultCurrency
+		}
 	}
 	for _, variant := range variants {
 		if variant.ID == "" {
@@ -407,6 +438,9 @@ func fetchProviderProduct(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, policy *
 		}
 		variantsRaw, _ := executeProviderTool(ctx, bound, "product_variants_list", map[string]any{"pid": productID})
 		raw = map[string]any{"product": productRaw, "variants": variantsRaw}
+	case "prodigi":
+		input["sku"] = productID
+		raw, err = executeProviderTool(ctx, bound, "get_product", input)
 	default:
 		return nil, fmt.Errorf("unsupported supplier provider %q", bound.AppSlug)
 	}
@@ -435,9 +469,152 @@ func normalizeProviderProducts(provider string, raw any, detail bool) []Provider
 		return normalizeBigBuyProducts(raw, detail)
 	case "cjdropshipping":
 		return normalizeCJProducts(raw, detail)
+	case "prodigi":
+		return normalizeProdigiProducts(raw)
 	default:
 		return nil
 	}
+}
+
+func normalizeProdigiProducts(raw any) []ProviderProduct {
+	root := anyMap(raw)
+	productMap := anyMap(root["product"])
+	if len(productMap) == 0 {
+		productMap = root
+	}
+	sku := firstString(productMap, "sku")
+	if sku == "" {
+		return nil
+	}
+	product := ProviderProduct{
+		ID: sku, Title: firstNonEmpty(firstString(productMap, "description"), sku),
+		Description: firstString(productMap, "description"), Vendor: "Prodigi",
+		Raw: raw,
+	}
+	printAreas := productMap["printAreas"]
+	rows := anySlice(productMap["variants"])
+	if len(rows) == 0 {
+		rows = []any{map[string]any{"attributes": map[string]any{}}}
+	}
+	for _, row := range rows {
+		variantMap := anyMap(row)
+		attributes := mapArg(variantMap, "attributes")
+		rawVariant := copyMap(variantMap)
+		rawVariant["sku"] = sku
+		rawVariant["printAreas"] = printAreas
+		product.Variants = append(product.Variants, ProviderVariant{
+			ID:        prodigiVariantID(sku, attributes),
+			SKU:       sku,
+			Title:     prodigiVariantTitle(attributes),
+			Currency:  "USD",
+			Available: true,
+			Options:   attributes,
+			Raw:       rawVariant,
+		})
+	}
+	return []ProviderProduct{product}
+}
+
+func prodigiVariantID(sku string, attributes map[string]any) string {
+	if len(attributes) == 0 {
+		return sku
+	}
+	encoded, _ := json.Marshal(attributes)
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%s#%x", sku, sum[:6])
+}
+
+func prodigiVariantTitle(attributes map[string]any) string {
+	if len(attributes) == 0 {
+		return "Default"
+	}
+	keys := make([]string, 0, len(attributes))
+	for key := range attributes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %v", key, attributes[key]))
+	}
+	if len(parts) == 0 {
+		return "Default"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func prodigiCatalogSKUs(input map[string]any, policy *ProviderPolicy) []string {
+	value := input["skus"]
+	if value == nil && policy != nil {
+		value = policy.Settings["catalog_skus"]
+	}
+	var candidates []any
+	switch current := value.(type) {
+	case []any:
+		candidates = current
+	case []string:
+		for _, item := range current {
+			candidates = append(candidates, item)
+		}
+	case string:
+		for _, item := range strings.FieldsFunc(current, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r'
+		}) {
+			candidates = append(candidates, item)
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, candidate := range candidates {
+		sku := strings.TrimSpace(fmt.Sprint(candidate))
+		if sku == "" || seen[sku] {
+			continue
+		}
+		seen[sku] = true
+		out = append(out, sku)
+	}
+	return out
+}
+
+func prepareProdigiVariants(variants []ProviderVariant, input map[string]any) ([]ProviderVariant, error) {
+	assets := anySlice(input["assets"])
+	if len(assets) == 0 {
+		return nil, errors.New("Prodigi import requires provider_input.assets with public artwork URLs")
+	}
+	for _, raw := range assets {
+		asset := anyMap(raw)
+		assetURL := firstString(asset, "url")
+		if firstString(asset, "printArea") == "" || assetURL == "" {
+			return nil, errors.New("each Prodigi asset requires printArea and url")
+		}
+		parsed, err := url.ParseRequestURI(assetURL)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+			return nil, errors.New("each Prodigi asset url must be a public HTTPS URL")
+		}
+	}
+	designKey := strings.TrimSpace(strArg(input, "design_key"))
+	if designKey == "" {
+		encoded, _ := json.Marshal(assets)
+		sum := sha256.Sum256(encoded)
+		designKey = fmt.Sprintf("%x", sum[:6])
+	}
+	sizing := firstNonEmpty(strArg(input, "sizing"), "fitPrintArea")
+	switch sizing {
+	case "fillPrintArea", "fitPrintArea", "stretchToPrintArea":
+	default:
+		return nil, errors.New("Prodigi sizing must be fillPrintArea, fitPrintArea, or stretchToPrintArea")
+	}
+	out := make([]ProviderVariant, 0, len(variants))
+	for _, variant := range variants {
+		raw := anyMap(variant.Raw)
+		raw["assets"] = assets
+		raw["sizing"] = sizing
+		raw["designKey"] = designKey
+		variant.Raw = raw
+		variant.ID = variant.ID + "@" + compactExternalID(designKey, 48)
+		out = append(out, variant)
+	}
+	return out, nil
 }
 
 func normalizePrintfulProducts(raw any, detail bool) []ProviderProduct {
@@ -625,6 +802,11 @@ func providerProductFromMap(m map[string]any) *ProviderProduct {
 func providerRetailPrice(variant ProviderVariant, marginBPS int64, overrides map[string]any) (int64, error) {
 	if override := intArg(overrides, variant.ID); override > 0 {
 		return override, nil
+	}
+	if baseID := strings.SplitN(variant.ID, "@", 2)[0]; baseID != variant.ID {
+		if override := intArg(overrides, baseID); override > 0 {
+			return override, nil
+		}
 	}
 	if variant.SuggestedPrice > 0 {
 		return variant.SuggestedPrice, nil

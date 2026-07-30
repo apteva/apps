@@ -492,6 +492,38 @@ func providerOrderRequest(provider string, policy *ProviderPolicy, sale *Sale, l
 		return map[string]any{
 			"orderNumber": reference, "shippingAddress": cjAddress(sale.ShippingAddress, sale), "products": products,
 		}, nil
+	case "prodigi":
+		items := make([]any, 0, len(lines))
+		for _, line := range lines {
+			source := line.Source.Source
+			assets := anySlice(source["assets"])
+			if len(assets) == 0 {
+				return nil, fmt.Errorf("Prodigi source %d has no artwork assets", line.Source.ID)
+			}
+			item := map[string]any{
+				"merchantReference": fmt.Sprintf("commerce-item-%d", line.OrderItemID),
+				"sku":               line.Source.ProviderSKU,
+				"copies":            int(math.Ceil(line.SaleItem.Quantity)),
+				"sizing":            firstNonEmpty(firstString(source, "sizing"), "fitPrintArea"),
+				"assets":            assets,
+			}
+			if attributes := mapArg(source, "attributes"); len(attributes) > 0 {
+				item["attributes"] = attributes
+			}
+			items = append(items, item)
+		}
+		request := map[string]any{
+			"merchantReference": reference,
+			"shippingMethod":    firstNonEmpty(stringSetting(policy, "shipping_method"), "Budget"),
+			"recipient":         prodigiRecipient(sale.ShippingAddress, sale),
+			"items":             items,
+			"idempotencyKey":    reference,
+			"metadata":          map[string]any{"commerceSaleId": sale.ID, "commerceOrderId": ptrValue(sale.OrderID)},
+		}
+		if callbackURL := stringSetting(policy, "callback_url"); callbackURL != "" {
+			request["callbackUrl"] = callbackURL
+		}
+		return request, nil
 	default:
 		return nil, fmt.Errorf("unsupported supplier provider %q", provider)
 	}
@@ -513,7 +545,7 @@ func (a *App) submitDispatch(ctx *sdk.AppCtx, pid string, job *DispatchJob) erro
 	}
 	tool := map[string]string{
 		"printful": "create_order", "printify": "create_order",
-		"bigbuy": "order_create", "cjdropshipping": "orders_create",
+		"bigbuy": "order_create", "cjdropshipping": "orders_create", "prodigi": "create_order",
 	}[job.ProviderSlug]
 	if tool == "" {
 		return fmt.Errorf("unsupported supplier provider %q", job.ProviderSlug)
@@ -575,12 +607,20 @@ func (a *App) syncDispatch(ctx *sdk.AppCtx, pid string, job *DispatchJob) error 
 		tool, input["orderId"] = "order_get", providerNumberOrString(job.ExternalOrderID)
 	case "cjdropshipping":
 		tool, input["orderId"] = "order_get", job.ExternalOrderID
+	case "prodigi":
+		tool, input["order_id"] = "get_order", job.ExternalOrderID
+	}
+	if tool == "" {
+		return fmt.Errorf("unsupported supplier provider %q", job.ProviderSlug)
 	}
 	raw, err := executeProviderTool(ctx, bound, tool, input)
 	if err != nil {
 		return err
 	}
 	status := normalizeProviderOrderStatus(extractProviderStatus(raw))
+	if job.ProviderSlug == "prodigi" {
+		status = prodigiOrderStatus(raw)
+	}
 	if status == "" {
 		status = job.Status
 	}
@@ -599,6 +639,9 @@ func (a *App) syncDispatch(ctx *sdk.AppCtx, pid string, job *DispatchJob) error 
 		}
 	}
 	tracking := extractProviderTracking(raw)
+	if job.ProviderSlug == "prodigi" {
+		tracking = extractProdigiTracking(raw)
+	}
 	if tracking["tracking_number"] != "" && job.FulfillmentID != nil {
 		var ignored map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("orders", "shipments_upsert", map[string]any{
@@ -642,8 +685,22 @@ func (a *App) syncVariantSource(ctx *sdk.AppCtx, pid string, source *VariantSour
 		return err
 	}
 	for _, variant := range product.Variants {
-		if variant.ID != source.ExternalVariantID {
+		externalVariantID := source.ExternalVariantID
+		if source.ProviderSlug == "prodigi" {
+			externalVariantID = strings.SplitN(externalVariantID, "@", 2)[0]
+		}
+		if variant.ID != externalVariantID {
 			continue
+		}
+		if source.ProviderSlug == "prodigi" {
+			refreshed := anyMap(variant.Raw)
+			for _, key := range []string{"assets", "sizing", "designKey"} {
+				if value := source.Source[key]; value != nil {
+					refreshed[key] = value
+				}
+			}
+			variant.Raw = refreshed
+			variant.ID = source.ExternalVariantID
 		}
 		availability := "available"
 		if !variant.Available {
@@ -759,6 +816,40 @@ func quoteProviderShipping(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, policy 
 			ID: "cj-standard", Name: "Standard", AmountCents: total, Currency: currency,
 			Provider: bound.AppSlug, ConnectionID: bound.ConnectionID, Raw: map[string]any{"parts": parts},
 		}}, nil
+	case "prodigi":
+		items := make([]any, 0, len(lines))
+		for _, line := range lines {
+			source := line.Source.Source
+			item := map[string]any{
+				"sku":    line.Source.ProviderSKU,
+				"copies": int(math.Ceil(line.SaleItem.Quantity)),
+			}
+			if attributes := mapArg(source, "attributes"); len(attributes) > 0 {
+				item["attributes"] = attributes
+			}
+			var quoteAssets []any
+			for _, rawAsset := range anySlice(source["assets"]) {
+				asset := anyMap(rawAsset)
+				quoteAsset := map[string]any{"printArea": firstString(asset, "printArea")}
+				if pageCount, ok := numberValue(asset["pageCount"]); ok {
+					quoteAsset["pageCount"] = int(pageCount)
+				}
+				quoteAssets = append(quoteAssets, quoteAsset)
+			}
+			if len(quoteAssets) > 0 {
+				item["assets"] = quoteAssets
+			}
+			items = append(items, item)
+		}
+		input := map[string]any{
+			"destinationCountryCode": firstString(address, "country_code", "country"),
+			"currencyCode":           strings.ToUpper(currency),
+			"items":                  items,
+		}
+		if shippingMethod := stringSetting(policy, "shipping_method"); shippingMethod != "" {
+			input["shippingMethod"] = shippingMethod
+		}
+		raw, err = executeProviderTool(ctx, bound, "create_quote", input)
 	case "printify":
 		return nil, errors.New("Printify requires provider policy settings.flat_shipping_cents for checkout quotes")
 	default:
@@ -767,7 +858,34 @@ func quoteProviderShipping(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, policy 
 	if err != nil {
 		return nil, err
 	}
+	if bound.AppSlug == "prodigi" {
+		return normalizeProdigiShippingOptions(bound, raw, currency), nil
+	}
 	return normalizeShippingOptions(bound, raw, currency), nil
+}
+
+func normalizeProdigiShippingOptions(bound *sdk.BoundIntegration, raw any, fallbackCurrency string) []ShippingOption {
+	root := anyMap(raw)
+	rows := anySlice(root["quotes"])
+	var out []ShippingOption
+	for i, row := range rows {
+		quote := anyMap(row)
+		shipping := mapArg(mapArg(quote, "costSummary"), "shipping")
+		amount := numberCents(shipping["amount"], false)
+		if amount < 0 {
+			continue
+		}
+		currency := strings.ToUpper(firstNonEmpty(firstString(shipping, "currency"), fallbackCurrency))
+		method := firstNonEmpty(firstString(quote, "shipmentMethod", "shippingMethod"), "Standard")
+		out = append(out, ShippingOption{
+			ID: method, Name: method, AmountCents: amount, Currency: currency,
+			Provider: bound.AppSlug, ConnectionID: bound.ConnectionID, Raw: quote,
+		})
+		if amount == 0 && i == 0 {
+			out[len(out)-1].Name = method + " (free)"
+		}
+	}
+	return out
 }
 
 func normalizeShippingOptions(bound *sdk.BoundIntegration, raw any, fallbackCurrency string) []ShippingOption {
@@ -987,7 +1105,7 @@ func extractProviderID(value any) string {
 }
 
 func extractProviderStatus(value any) string {
-	return recursiveString(value, []string{"status", "order_status", "orderStatus", "statusName", "orderStatusName"})
+	return recursiveString(value, []string{"stage", "status", "order_status", "orderStatus", "statusName", "orderStatusName"})
 }
 
 func extractProviderTracking(value any) map[string]string {
@@ -1042,6 +1160,51 @@ func normalizeProviderOrderStatus(status string) string {
 	}
 }
 
+func normalizeProdigiOrderStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "complete":
+		return "shipped"
+	case "cancelled", "canceled":
+		return "cancelled"
+	case "inprogress", "in_progress":
+		return "accepted"
+	default:
+		return normalizeProviderOrderStatus(status)
+	}
+}
+
+func prodigiOrderStatus(value any) string {
+	root := firstObject(value)
+	order := mapArg(root, "order")
+	for _, rawShipment := range anySlice(order["shipments"]) {
+		if strings.EqualFold(firstString(anyMap(rawShipment), "status"), "Shipped") {
+			return "shipped"
+		}
+	}
+	return normalizeProdigiOrderStatus(extractProviderStatus(value))
+}
+
+func extractProdigiTracking(value any) map[string]string {
+	root := firstObject(value)
+	order := mapArg(root, "order")
+	shipments := anySlice(order["shipments"])
+	if len(shipments) == 0 {
+		shipments = anySlice(root["shipments"])
+	}
+	if len(shipments) == 0 {
+		return extractProviderTracking(value)
+	}
+	shipment := anyMap(shipments[0])
+	tracking := mapArg(shipment, "tracking")
+	carrier := mapArg(shipment, "carrier")
+	return map[string]string{
+		"shipment_id":     firstString(shipment, "id", "shipmentId"),
+		"carrier":         firstNonEmpty(firstString(carrier, "name"), firstString(shipment, "carrierName", "carrier")),
+		"tracking_number": firstString(tracking, "number", "trackingNumber"),
+		"tracking_url":    firstString(tracking, "url", "trackingUrl"),
+	}
+}
+
 func printfulAddress(address map[string]any) map[string]any {
 	return map[string]any{
 		"name": firstString(address, "name", "full_name"), "company": firstString(address, "company"),
@@ -1081,6 +1244,22 @@ func cjAddress(address map[string]any, sale *Sale) map[string]any {
 		"province": firstString(address, "state", "region", "state_code"), "city": firstString(address, "city"),
 		"address": firstString(address, "address1", "line1"), "address2": firstString(address, "address2", "line2"),
 		"zip": firstString(address, "postal_code", "zip"),
+	}
+}
+
+func prodigiRecipient(address map[string]any, sale *Sale) map[string]any {
+	return map[string]any{
+		"name":        firstNonEmpty(firstString(address, "name", "full_name"), sale.CustomerName),
+		"email":       firstNonEmpty(firstString(address, "email"), sale.CustomerEmail),
+		"phoneNumber": firstString(address, "phone", "phone_number"),
+		"address": map[string]any{
+			"line1":           firstString(address, "address1", "line1"),
+			"line2":           firstString(address, "address2", "line2"),
+			"postalOrZipCode": firstString(address, "postal_code", "zip"),
+			"countryCode":     firstString(address, "country_code", "country"),
+			"townOrCity":      firstString(address, "city"),
+			"stateOrCounty":   firstString(address, "state", "region", "state_code"),
+		},
 	}
 }
 
