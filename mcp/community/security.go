@@ -26,6 +26,10 @@ var delegatedMemberTools = map[string]bool{
 	"course_enroll": true, "lesson_comments_list": true, "lesson_comments_post": true,
 	"course_offer_get": true, "course_purchase_start": true,
 	"course_purchase_status": true, "course_purchase_cancel": true,
+	"membership_plans_list": true, "membership_plans_get": true,
+	"membership_checkout_start": true, "membership_status": true,
+	"membership_cancel": true, "membership_resume": true,
+	"course_access_explain": true,
 }
 
 var enrollmentRequiredTools = map[string]bool{
@@ -160,7 +164,9 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 		args["caller_member_id"] = memberID
 	case "posts_react", "dms_mark_read", "dms_list_threads", "dms_unread_count",
 		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
-		"course_purchase_start", "course_purchase_status", "course_purchase_cancel":
+		"course_purchase_start", "course_purchase_status", "course_purchase_cancel",
+		"membership_checkout_start", "membership_status", "membership_cancel",
+		"membership_resume", "course_access_explain":
 		args["member_id"] = memberID
 	case "members_update":
 		args["id"] = memberID
@@ -325,6 +331,14 @@ func communityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string
 		"lessons_list", "lessons_progress", "certificates_get", "drip_schedule_list",
 		"enrollment_rules_get", "course_enroll", "course_offer_get", "course_purchase_start":
 		return communityBySpace(db, strArg(args, "space_id", ""))
+	case "membership_plans_list", "membership_status":
+		return mustStr(args, "community_id")
+	case "membership_plans_get", "membership_checkout_start":
+		return communityByMembershipPlan(db, strArg(args, "id", strArg(args, "plan_id", "")))
+	case "membership_cancel", "membership_resume":
+		return communityByMemberSubscription(db, strArg(args, "id", ""))
+	case "course_access_explain":
+		return communityBySpace(db, strArg(args, "space_id", ""))
 	case "course_purchase_status", "course_purchase_cancel":
 		if spaceID := strArg(args, "space_id", ""); spaceID != "" {
 			return communityBySpace(db, spaceID)
@@ -388,6 +402,18 @@ func communityByPurchase(db *sql.DB, id string) (string, error) {
 	return communityID, notFound(err, "course purchase")
 }
 
+func communityByMembershipPlan(db *sql.DB, id string) (string, error) {
+	var communityID string
+	err := db.QueryRow(`SELECT community_id FROM membership_plans WHERE id = ?`, id).Scan(&communityID)
+	return communityID, notFound(err, "membership plan")
+}
+
+func communityByMemberSubscription(db *sql.DB, id string) (string, error) {
+	var communityID string
+	err := db.QueryRow(`SELECT community_id FROM member_subscriptions WHERE id = ?`, id).Scan(&communityID)
+	return communityID, notFound(err, "membership subscription")
+}
+
 func notFound(err error, kind string) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%s not found", kind)
@@ -416,23 +442,25 @@ func spaceByLesson(db *sql.DB, lessonID string) (string, error) {
 }
 
 func ensureActiveEnrollment(db *sql.DB, spaceID, memberID string) error {
-	var count int
-	err := db.QueryRow(
-		`SELECT COUNT(*)
-		   FROM course_enrollments e
-		   LEFT JOIN enrollment_rules r ON r.space_id = e.space_id
-		  WHERE e.space_id = ? AND e.member_id = ? AND e.status IN ('active','completed')
-		    AND e.access_revoked_at IS NULL
-		    AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
-		    AND (r.starts_at IS NULL OR datetime(r.starts_at) <= CURRENT_TIMESTAMP)
-		    AND (r.ends_at IS NULL OR datetime(r.ends_at) >= CURRENT_TIMESTAMP)`,
-		spaceID, memberID,
-	).Scan(&count)
+	allowed, _, _, err := resolveCourseAccess(db, spaceID, memberID, true)
 	if err != nil {
 		return err
 	}
-	if count == 0 {
+	if !allowed {
 		return errors.New("active course enrollment required")
+	}
+	var available int
+	err = db.QueryRow(`SELECT COUNT(*) FROM spaces s WHERE s.id=? AND (
+		NOT EXISTS(SELECT 1 FROM enrollment_rules r WHERE r.space_id=s.id) OR
+		EXISTS(SELECT 1 FROM enrollment_rules r WHERE r.space_id=s.id
+			AND (r.starts_at IS NULL OR datetime(r.starts_at)<=CURRENT_TIMESTAMP)
+			AND (r.ends_at IS NULL OR datetime(r.ends_at)>=CURRENT_TIMESTAMP))
+	)`, spaceID).Scan(&available)
+	if err != nil {
+		return err
+	}
+	if available == 0 {
+		return errors.New("course enrollment window is not active")
 	}
 	return nil
 }

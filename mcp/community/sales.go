@@ -73,6 +73,8 @@ type catalogPrice struct {
 	UnitAmountCents int64  `json:"unit_amount_cents"`
 	Currency        string `json:"currency"`
 	Interval        string `json:"interval"`
+	IntervalCount   int64  `json:"interval_count"`
+	TrialDays       int64  `json:"trial_days"`
 	BillingScheme   string `json:"billing_scheme"`
 	Active          bool   `json:"active"`
 	ArchivedAt      string `json:"archived_at"`

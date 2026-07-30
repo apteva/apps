@@ -245,6 +245,13 @@ textarea { min-height: 92px; resize: vertical; }
 .comment-list { display: grid; gap: 8px; }
 .comment-list article { border-radius: 10px; padding: 11px; background: var(--surface-soft); }
 .comment-list p { margin: 5px 0 0; }
+.membership-plans, .membership-summary { display: grid; gap: 10px; margin-bottom: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
+.membership-plans article { display: grid; gap: 7px; padding-top: 12px; border-top: 1px solid var(--line); }
+.membership-plans article:first-of-type { padding-top: 0; border-top: 0; }
+.membership-plans p, .membership-summary span { margin: 0; color: var(--muted); font-size: .86rem; }
+.status-pill { justify-self: start; padding: 3px 8px; border-radius: 999px; background: #e8f4ef; color: #176351 !important; font-size: .72rem !important; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+.status-pill.past_due, .status-pill.paused { background: #fff1d8; color: #8a5700 !important; }
+.status-pill.cancelled, .status-pill.ended, .status-pill.failed { background: #fee7e5; color: #9e2d25 !important; }
 
 .member-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
 .member-card { display: flex; align-items: flex-start; gap: 14px; padding: 18px; }

@@ -23,6 +23,8 @@ import type {
   EnrollmentRule,
   Lesson,
   Member,
+  MemberSubscription,
+  MembershipPlan,
   Post,
   Section,
   Space,
@@ -109,6 +111,19 @@ function formatCoursePrice(offer: CourseOffer): string {
   }
 }
 
+function formatMembershipPrice(plan: MembershipPlan): string {
+  const amount = (() => {
+    try {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: plan.currency })
+        .format(plan.unit_amount_cents / 100);
+    } catch {
+      return `${plan.currency} ${(plan.unit_amount_cents / 100).toFixed(2)}`;
+    }
+  })();
+  const count = plan.interval_count > 1 ? `${plan.interval_count} ` : "";
+  return `${amount} / ${count}${plan.interval}${plan.interval_count > 1 ? "s" : ""}`;
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
@@ -143,6 +158,8 @@ export default function App() {
   const [courseAccessMode, setCourseAccessMode] = useState<EnrollmentRule["access_mode"]>("free");
   const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
   const [coursePurchase, setCoursePurchase] = useState<CoursePurchase | null>(null);
+  const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
+  const [memberSubscription, setMemberSubscription] = useState<MemberSubscription | null>(null);
   const [comment, setComment] = useState("");
 
   const [dmId, setDMId] = useState("");
@@ -205,22 +222,34 @@ export default function App() {
       setMembers([]);
       setSpaces([]);
       setDMThreads([]);
+      setMembershipPlans([]);
+      setMemberSubscription(null);
       return;
     }
     await latest(
       "community",
       async () => {
-        const [memberOut, spaceOut, dmOut] = await Promise.all([
+        const [memberOut, spaceOut, dmOut, planOut, membershipOut] = await Promise.all([
           api.members.list(communityId),
           api.spaces.list(communityId),
           api.dms.list(communityId),
+          api.memberships.plans(communityId),
+          api.memberships.status(communityId),
         ]);
-        return { members: memberOut.members || [], spaces: spaceOut.spaces || [], dms: dmOut.threads || [] };
+        return {
+          members: memberOut.members || [],
+          spaces: spaceOut.spaces || [],
+          dms: dmOut.threads || [],
+          plans: planOut.plans || [],
+          membership: membershipOut.subscription,
+        };
       },
       (result) => {
         setMembers(result.members);
         setSpaces(result.spaces);
         setDMThreads(result.dms);
+        setMembershipPlans(result.plans);
+        setMemberSubscription(result.membership);
         setSpaceId((current) =>
           result.spaces.some((item) => item.id === current && item.kind !== "course")
             ? current
@@ -340,6 +369,8 @@ export default function App() {
       if (!payment) return;
       if (payment === "success") setNotice("Payment submitted. Course access activates as soon as Billing confirms it.");
       if (payment === "cancelled") setNotice("Checkout was cancelled. You can resume it whenever you are ready.");
+      if (payment === "membership-success") setNotice("Payment submitted. Membership access activates as soon as Billing confirms it.");
+      if (payment === "membership-cancelled") setNotice("Membership checkout was cancelled. You can resume it whenever you are ready.");
       url.searchParams.delete("payment");
       window.history.replaceState({}, "", url);
     });
@@ -387,7 +418,9 @@ export default function App() {
           if (data.community_id && data.community_id !== communityId) return;
           if (eventTimer.current) window.clearTimeout(eventTimer.current);
           eventTimer.current = window.setTimeout(() => {
-            if (event.topic.includes(".member.") || event.topic.includes(".space.")) void run(loadCommunity, { quiet: true });
+            if (event.topic.includes(".member.") || event.topic.includes(".space.") || event.topic.includes(".membership.")) {
+              void run(loadCommunity, { quiet: true });
+            }
             if (view === "spaces" && (!data.space_id || data.space_id === spaceId)) void run(loadThreads, { quiet: true });
             if (view === "spaces" && data.thread_id === threadId) void run(loadPosts, { quiet: true });
             if (view === "courses" && (!data.space_id || data.space_id === courseId)) void run(loadCourse, { quiet: true });
@@ -505,6 +538,42 @@ export default function App() {
       const result = await api.courses.purchaseCancel(courseId);
       setCoursePurchase(result.purchase);
       setNotice("Checkout cancelled.");
+    });
+  }
+
+  async function startMembership(planId: string) {
+    await run(async () => {
+      const success = new URL(window.location.href);
+      success.searchParams.set("payment", "membership-success");
+      const cancel = new URL(window.location.href);
+      cancel.searchParams.set("payment", "membership-cancelled");
+      const result = await api.memberships.checkout(planId, success.toString(), cancel.toString());
+      setMemberSubscription(result.subscription);
+      if (result.access_active && !result.checkout_url) {
+        setNotice("Membership access is active.");
+        await Promise.all([loadCommunity(), loadCourse()]);
+        return;
+      }
+      if (!result.checkout_url) throw new Error("Billing did not return a membership checkout URL.");
+      window.location.assign(result.checkout_url);
+    });
+  }
+
+  async function cancelMembership() {
+    if (!memberSubscription) return;
+    await run(async () => {
+      const result = await api.memberships.cancel(memberSubscription.id, true);
+      setMemberSubscription(result.subscription);
+      setNotice("Your membership will remain active until the current period ends.");
+    });
+  }
+
+  async function resumeMembership() {
+    if (!memberSubscription) return;
+    await run(async () => {
+      const result = await api.memberships.resume(memberSubscription.id);
+      setMemberSubscription(result.subscription);
+      setNotice("Membership renewal resumed.");
     });
   }
 
@@ -712,6 +781,32 @@ export default function App() {
           <div className="course-layout">
             <section className="pane">
               <h2>Courses</h2>
+              {memberSubscription ? (
+                <article className="membership-summary">
+                  <span className={`status-pill ${memberSubscription.status}`}>{memberSubscription.status.replaceAll("_", " ")}</span>
+                  <strong>{memberSubscription.plan?.name || "Course membership"}</strong>
+                  {memberSubscription.plan && <span>{formatMembershipPrice(memberSubscription.plan)}</span>}
+                  {memberSubscription.cancel_at ? (
+                    <button className="secondary" onClick={resumeMembership} disabled={busy}>Resume renewal</button>
+                  ) : memberSubscription.status !== "cancelled" && memberSubscription.status !== "ended" ? (
+                    <button className="text-button" onClick={cancelMembership} disabled={busy}>Cancel at period end</button>
+                  ) : null}
+                </article>
+              ) : membershipPlans.length > 0 ? (
+                <div className="membership-plans">
+                  <p className="eyebrow">Memberships</p>
+                  {membershipPlans.map((plan) => (
+                    <article key={plan.id}>
+                      <strong>{plan.name}</strong>
+                      <span>{formatMembershipPrice(plan)}</span>
+                      <p>{plan.description || (plan.scope_type === "all_courses" ? "Access every course." : "Access included courses.")}</p>
+                      <button className="primary" onClick={() => startMembership(plan.id)} disabled={busy}>
+                        Join membership
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : null}
               <ItemList empty="No courses available.">
                 {courses.map((course) => <button key={course.id} className={course.id === courseId ? "selected" : ""} onClick={() => setCourseId(course.id)}><strong>{course.name}</strong><span>{course.visibility}</span></button>)}
               </ItemList>

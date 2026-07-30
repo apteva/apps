@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.6.2
+version: 0.7.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -42,6 +42,9 @@ description: |
   quizzes, assignments, certificates, drip, enrollments, and progress). Ships both an
   operator dashboard panel and a client-facing React portal at
   /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Community directly orchestrates one-time course purchases and recurring
+  course memberships using Catalog, Billing, and Subscriptions. It does not
+  depend on the SaaS app.
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
@@ -55,6 +58,7 @@ requires:
   permissions: [db.write.app, platform.apps.call]
   apps:
     - name: auth
+      version: ">=0.8.0"
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
     - name: catalog
@@ -62,14 +66,29 @@ requires:
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
     - name: billing
-      version: ">=0.12.0"
+      version: ">=0.12.1"
       optional: false
       events:
         - invoice.paid
         - invoice.refunded
         - invoice.voided
         - invoice.payment_failed
-      reason: Billing owns course customers, invoices, hosted payment sessions, refunds, and authoritative payment events.
+        - invoice.payment_action_required
+        - payment_method.attached
+      reason: Billing owns course customers, invoices, hosted payment sessions, saved payment methods, automatic collection, refunds, and authoritative payment events.
+    - name: subscriptions
+      version: ">=0.7.2"
+      optional: false
+      events:
+        - subscription.active
+        - subscription.trialing
+        - subscription.past_due
+        - subscription.paused
+        - subscription.cancelled
+        - subscription.resumed
+        - subscription.ended
+        - subscription.cycle_due
+      reason: Subscriptions owns recurring lifecycle, trials, renewal cycles, grace periods, scheduled cancellation, and resume.
   integrations:
     - role: storage
       kind: app
@@ -171,6 +190,20 @@ provides:
     - { name: course_purchase_get, description: "Get a course purchase and reconciliation history." }
     - { name: course_purchase_reconcile, description: "Reconcile a course purchase with Billing." }
     - { name: course_purchase_refund, description: "Request a Billing refund for a course purchase." }
+    - { name: membership_plans_list, description: "List recurring course membership plans." }
+    - { name: membership_plans_get, description: "Get a recurring course membership plan." }
+    - { name: membership_plans_upsert, description: "Create or update a recurring course membership plan." }
+    - { name: membership_plans_archive, description: "Archive a recurring course membership plan." }
+    - { name: membership_plan_courses_set, description: "Set the courses included in a selected-courses plan." }
+    - { name: membership_plan_tags_set, description: "Set the tags included in a course-tags plan." }
+    - { name: membership_checkout_start, description: "Start or resume recurring membership checkout." }
+    - { name: membership_status, description: "Get the verified member's recurring membership status." }
+    - { name: membership_cancel, description: "Cancel a recurring membership." }
+    - { name: membership_resume, description: "Resume a scheduled recurring membership cancellation." }
+    - { name: membership_subscriptions_list, description: "List recurring Community memberships." }
+    - { name: membership_subscription_get, description: "Get a recurring Community membership." }
+    - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
+    - { name: course_access_explain, description: "Explain a member's effective course access source." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -232,14 +265,36 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
-func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "membership-recovery",
+		Schedule: "@every 5m",
+		Run:      recoverMembershipOperations,
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
-		{Event: "invoice.paid", Handler: a.handleCourseBillingEvent},
-		{Event: "invoice.refunded", Handler: a.handleCourseBillingEvent},
-		{Event: "invoice.voided", Handler: a.handleCourseBillingEvent},
-		{Event: "invoice.payment_failed", Handler: a.handleCourseBillingEvent},
+		{Event: "invoice.paid", Handler: a.handleBillingEvent},
+		{Event: "invoice.refunded", Handler: a.handleBillingEvent},
+		{Event: "invoice.voided", Handler: a.handleBillingEvent},
+		{Event: "invoice.payment_failed", Handler: a.handleBillingEvent},
+		{Event: "invoice.payment_action_required", Handler: a.handleBillingEvent},
+		{Event: "subscription.active", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.trialing", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.past_due", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.paused", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.cancelled", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.resumed", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.ended", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.cycle_due", Handler: a.handleMembershipSubscriptionEvent},
 	}
+}
+
+func (a *App) handleBillingEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	if err := a.handleCourseBillingEvent(ctx, event); err != nil {
+		return err
+	}
+	return a.handleMembershipBillingEvent(ctx, event)
 }
 
 // ─── HTTP routes ─────────────────────────────────────────────────
@@ -273,6 +328,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
 	tools = append(tools, courseSalesTools()...)
+	tools = append(tools, membershipTools()...)
 	return secureTools(tools)
 }
 

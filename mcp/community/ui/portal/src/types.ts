@@ -273,6 +273,55 @@ export interface CoursePurchase {
   refunded_at?: string;
 }
 
+export type MembershipStatus =
+  | "creating"
+  | "trialing"
+  | "past_due"
+  | "active"
+  | "paused"
+  | "cancelled"
+  | "ended"
+  | "failed";
+
+export interface MembershipPlan {
+  id: string;
+  community_id: string;
+  name: string;
+  description: string;
+  catalog_product_id: number;
+  catalog_price_id: number;
+  product_name: string;
+  price_nickname?: string;
+  unit_amount_cents: number;
+  currency: string;
+  interval: "day" | "week" | "month" | "year";
+  interval_count: number;
+  scope_type: "all_courses" | "selected_courses" | "course_tags";
+  collection_method: "automatic" | "send_invoice";
+  trial_days: number;
+  grace_days: number;
+  active: boolean;
+  course_ids: string[];
+  tags: string[];
+}
+
+export interface MemberSubscription {
+  id: string;
+  community_id: string;
+  member_id: string;
+  plan_id: string;
+  billing_customer_id?: number;
+  subscription_id?: number;
+  status: MembershipStatus;
+  current_period_start?: string;
+  current_period_end?: string;
+  next_renewal_at?: string;
+  cancel_at?: string;
+  checkout_url?: string;
+  last_error?: string;
+  plan?: MembershipPlan;
+}
+
 export interface CourseAnalytics {
   space_id: string;
   sections: number;

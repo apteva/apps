@@ -14,6 +14,8 @@ import type {
   LessonComment,
   LessonResource,
   Member,
+  MemberSubscription,
+  MembershipPlan,
   Post,
   Quiz,
   Section,
@@ -157,6 +159,26 @@ export const api = {
       community.tool("lessons_mark_complete", { lesson_id, member_id: self, status, last_position_seconds }),
     comment: (lesson_id: string, body: string) =>
       community.tool<LessonComment>("lesson_comments_post", { lesson_id, member_id: self, body }),
+  },
+  memberships: {
+    plans: (community_id: string) =>
+      community.tool<{ plans: MembershipPlan[] }>("membership_plans_list", { community_id }),
+    status: (community_id: string) =>
+      community.tool<{ subscription: MemberSubscription | null; has_membership: boolean; access_active?: boolean }>(
+        "membership_status",
+        { community_id, member_id: self },
+      ),
+    checkout: (plan_id: string, success_url: string, cancel_url: string) =>
+      community.tool<{ subscription: MemberSubscription; checkout_url?: string; access_active?: boolean }>(
+        "membership_checkout_start",
+        { plan_id, member_id: self, success_url, cancel_url },
+      ),
+    cancel: (id: string, at_period_end = true) =>
+      community.tool<{ subscription: MemberSubscription }>("membership_cancel", {
+        id, member_id: self, at_period_end,
+      }),
+    resume: (id: string) =>
+      community.tool<{ subscription: MemberSubscription }>("membership_resume", { id, member_id: self }),
   },
   dms: {
     list: (community_id: string) =>

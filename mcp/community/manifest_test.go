@@ -66,17 +66,27 @@ func TestManifestParses(t *testing.T) {
 		events[dep.Name] = dep.Events
 		versions[dep.Name] = dep.Version
 	}
-	for _, name := range []string{"auth", "catalog", "billing"} {
+	for _, name := range []string{"auth", "catalog", "billing", "subscriptions"} {
 		if !required[name] {
 			t.Errorf("%s must be a required Community dependency", name)
 		}
 	}
-	if versions["catalog"] != ">=0.3.0" || versions["billing"] != ">=0.12.0" {
-		t.Errorf("unexpected sales dependency versions: catalog=%q billing=%q", versions["catalog"], versions["billing"])
+	if _, hasSaaS := required["saas"]; hasSaaS {
+		t.Fatal("Community must orchestrate Billing and Subscriptions directly, not depend on SaaS")
+	}
+	if versions["auth"] != ">=0.8.0" || versions["catalog"] != ">=0.3.0" ||
+		versions["billing"] != ">=0.12.1" || versions["subscriptions"] != ">=0.7.2" {
+		t.Errorf("unexpected dependency versions: auth=%q catalog=%q billing=%q subscriptions=%q",
+			versions["auth"], versions["catalog"], versions["billing"], versions["subscriptions"])
 	}
 	for _, event := range []string{"invoice.paid", "invoice.refunded", "invoice.voided", "invoice.payment_failed"} {
 		if !containsString(events["billing"], event) {
 			t.Errorf("Community must subscribe to billing %s, got %v", event, events["billing"])
+		}
+	}
+	for _, event := range []string{"subscription.active", "subscription.past_due", "subscription.cancelled", "subscription.resumed", "subscription.ended", "subscription.cycle_due"} {
+		if !containsString(events["subscriptions"], event) {
+			t.Errorf("Community must subscribe to subscriptions %s, got %v", event, events["subscriptions"])
 		}
 	}
 }
