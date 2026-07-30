@@ -247,7 +247,7 @@ async function callTool<T>(
   args: Record<string, unknown>,
   projectId: string,
 ): Promise<T> {
-  const res = await fetch(`${API}/mcp`, {
+  const res = await fetch(`${API}/mcp?project_id=${encodeURIComponent(projectId)}`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
