@@ -24,6 +24,8 @@ var delegatedMemberTools = map[string]bool{
 	"lesson_resources_list": true, "lesson_bundle_get": true, "quizzes_list": true, "assignments_list": true,
 	"certificates_get": true, "drip_schedule_list": true, "enrollment_rules_get": true,
 	"course_enroll": true, "lesson_comments_list": true, "lesson_comments_post": true,
+	"course_offer_get": true, "course_purchase_start": true,
+	"course_purchase_status": true, "course_purchase_cancel": true,
 }
 
 var enrollmentRequiredTools = map[string]bool{
@@ -67,6 +69,8 @@ func secureTools(tools []sdk.Tool) []sdk.Tool {
 				return nil, err
 			}
 			safeArgs["_viewer_member_id"] = member.ID
+			safeArgs["_auth_subject_id"] = caller.SubjectID
+			safeArgs["_subject_email"] = caller.SubjectEmail
 			applyMemberIdentity(tool.Name, safeArgs, member.ID)
 			if enrollmentRequiredTools[tool.Name] {
 				spaceID, err := courseSpaceForTool(app.AppDB(), tool.Name, safeArgs)
@@ -155,7 +159,8 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 	case "posts_edit", "posts_remove", "dms_get_thread":
 		args["caller_member_id"] = memberID
 	case "posts_react", "dms_mark_read", "dms_list_threads", "dms_unread_count",
-		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post":
+		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
+		"course_purchase_start", "course_purchase_status", "course_purchase_cancel":
 		args["member_id"] = memberID
 	case "members_update":
 		args["id"] = memberID
@@ -318,8 +323,13 @@ func communityForTool(ctx *sdk.AppCtx, tool string, args map[string]any) (string
 		return mustStr(args, "community_id")
 	case "threads_create", "threads_list", "courses_get_details", "sections_list",
 		"lessons_list", "lessons_progress", "certificates_get", "drip_schedule_list",
-		"enrollment_rules_get", "course_enroll":
+		"enrollment_rules_get", "course_enroll", "course_offer_get", "course_purchase_start":
 		return communityBySpace(db, strArg(args, "space_id", ""))
+	case "course_purchase_status", "course_purchase_cancel":
+		if spaceID := strArg(args, "space_id", ""); spaceID != "" {
+			return communityBySpace(db, spaceID)
+		}
+		return communityByPurchase(db, strArg(args, "purchase_id", ""))
 	case "posts_create", "posts_list":
 		return communityByThread(db, strArg(args, "thread_id", ""))
 	case "posts_edit", "posts_remove":
@@ -372,6 +382,12 @@ func communityByLesson(db *sql.DB, id string) (string, error) {
 	return communityID, notFound(err, "lesson")
 }
 
+func communityByPurchase(db *sql.DB, id string) (string, error) {
+	var communityID string
+	err := db.QueryRow(`SELECT community_id FROM course_purchases WHERE id = ?`, id).Scan(&communityID)
+	return communityID, notFound(err, "course purchase")
+}
+
 func notFound(err error, kind string) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%s not found", kind)
@@ -406,6 +422,8 @@ func ensureActiveEnrollment(db *sql.DB, spaceID, memberID string) error {
 		   FROM course_enrollments e
 		   LEFT JOIN enrollment_rules r ON r.space_id = e.space_id
 		  WHERE e.space_id = ? AND e.member_id = ? AND e.status IN ('active','completed')
+		    AND e.access_revoked_at IS NULL
+		    AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
 		    AND (r.starts_at IS NULL OR datetime(r.starts_at) <= CURRENT_TIMESTAMP)
 		    AND (r.ends_at IS NULL OR datetime(r.ends_at) >= CURRENT_TIMESTAMP)`,
 		spaceID, memberID,
@@ -429,6 +447,8 @@ func lessonAvailableToMember(db *sql.DB, lessonID, memberID string) (bool, error
 		   LEFT JOIN drip_schedules d ON d.lesson_id = l.id
 		  WHERE l.id = ? AND l.published_at IS NOT NULL
 		    AND e.status IN ('active','completed')
+		    AND e.access_revoked_at IS NULL
+		    AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
 		    AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
 		    AND (d.release_after_days IS NULL OR
 		         datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`,

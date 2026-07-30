@@ -133,6 +133,27 @@ interface Lesson {
   progress?: LessonProgress;
 }
 
+interface CourseOffer {
+  space_id: string;
+  catalog_product_id: number;
+  catalog_price_id: number;
+  product_name: string;
+  price_nickname?: string;
+  unit_amount_cents: number;
+  currency: string;
+  active: boolean;
+}
+
+interface CoursePurchase {
+  id: string;
+  member_id: string;
+  customer_email: string;
+  status: string;
+  unit_amount_cents: number;
+  currency: string;
+  created_at: string;
+}
+
 interface Thread {
   id: string;
   community_id: string;
@@ -172,7 +193,8 @@ type DialogKind =
   | "section"
   | "lesson"
   | "edit_lesson"
-  | "video";
+  | "video"
+  | "offer";
 
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API}${path}`, {
@@ -229,6 +251,14 @@ function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+function formatMoney(cents: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
+  } catch {
+    return `${currency} ${(cents / 100).toFixed(2)}`;
+  }
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -256,6 +286,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
+  const [coursePurchases, setCoursePurchases] = useState<CoursePurchase[]>([]);
   const [lessonId, setLessonId] = useState<string | null>(null);
   const [newLessonSectionId, setNewLessonSectionId] = useState("");
   const [dialog, setDialog] = useState<DialogKind | null>(null);
@@ -310,19 +342,23 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   }, []);
 
   const refreshCourse = useCallback(async (sid: string) => {
-    const [s, l] = await Promise.all([
+    const [s, l, offerOut, purchasesOut] = await Promise.all([
       getJSON<{ sections: Section[] }>(`/sections?space_id=${encodeURIComponent(sid)}`),
       getJSON<{ lessons: Lesson[] }>(
         `/lessons?space_id=${encodeURIComponent(sid)}&include_drafts=true`,
       ),
+      callTool<{ offer: CourseOffer | null }>("course_offer_get", { space_id: sid }, projectId),
+      callTool<{ purchases: CoursePurchase[] }>("course_purchases_list", { space_id: sid, limit: 100 }, projectId),
     ]);
     setSections(s.sections || []);
     setLessons(l.lessons || []);
+    setCourseOffer(offerOut.offer || null);
+    setCoursePurchases(purchasesOut.purchases || []);
     setLessonId((prev) =>
       prev && l.lessons.some((x) => x.id === prev) ? prev : l.lessons[0]?.id ?? null,
     );
     return l.lessons || [];
-  }, []);
+  }, [projectId]);
 
   const refreshPosts = useCallback(async (tid: string) => {
     const d = await getJSON<{ posts: Post[] }>(`/posts?thread_id=${encodeURIComponent(tid)}`);
@@ -369,6 +405,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
     if (!spaceId || !isCourseSpace) {
       setSections([]);
       setLessons([]);
+      setCourseOffer(null);
+      setCoursePurchases([]);
       setLessonId(null);
       return;
     }
@@ -424,7 +462,11 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         isCourseSpace &&
         (t.startsWith("community.section.") ||
           t.startsWith("community.sections.") ||
-          t.startsWith("community.lesson."))
+          t.startsWith("community.lesson.") ||
+          t.startsWith("community.course.offer") ||
+          t.startsWith("community.course.purchase") ||
+          t.startsWith("community.course.refund") ||
+          t.startsWith("community.course.access"))
       ) {
         refreshCourse(spaceId).catch(() => {});
       }
@@ -583,9 +625,14 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             </div>
           </div>
           {isCourseSpace ? (
-            <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
-              + Section
-            </button>
+            <div className="flex gap-2">
+              <button className={buttonClass()} onClick={() => setDialog("offer")}>
+                {courseOffer?.active ? "Edit sale" : "Configure sale"}
+              </button>
+              <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
+                + Section
+              </button>
+            </div>
           ) : (
             <button
               className={buttonClass("primary")}
@@ -701,6 +748,54 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </header>
         <div className="flex-1 overflow-auto p-4 space-y-3 min-h-0">
           {isCourseSpace ? (
+            <section className="border border-border rounded bg-bg-secondary p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-text-muted">Course sales</div>
+                  {courseOffer?.active ? (
+                    <>
+                      <div className="font-medium mt-1">{formatMoney(courseOffer.unit_amount_cents, courseOffer.currency)}</div>
+                      <div className="text-xs text-text-muted">
+                        Catalog price #{courseOffer.catalog_price_id} · {coursePurchases.length} purchases
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-text-muted mt-1">No active offer. This course cannot be purchased.</div>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {courseOffer?.active ? (
+                    <button
+                      className={buttonClass("ghost")}
+                      onClick={() => {
+                        runTool("Archive sale", "course_offer_archive", { space_id: spaceId })
+                          .then(async () => {
+                            if (spaceId) await refreshCourse(spaceId);
+                          })
+                          .catch(() => {});
+                      }}
+                    >
+                      Stop sales
+                    </button>
+                  ) : null}
+                  <button className={buttonClass()} onClick={() => setDialog("offer")}>
+                    {courseOffer?.active ? "Change price" : "Set Catalog price"}
+                  </button>
+                </div>
+              </div>
+              {coursePurchases.length > 0 ? (
+                <div className="mt-3 grid gap-1 border-t border-border pt-3">
+                  {coursePurchases.slice(0, 4).map((purchase) => (
+                    <div key={purchase.id} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="truncate">{purchase.customer_email}</span>
+                      <span className="text-text-muted">{purchase.status.replaceAll("_", " ")}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+          {isCourseSpace ? (
             !activeLesson ? (
               <EmptyState label={lessons.length > 0 ? "Pick a lesson." : "No lessons in this course yet."} />
             ) : (
@@ -788,6 +883,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
           space={activeSpace}
           sections={sections}
           lesson={activeLesson}
+          offer={courseOffer}
           initialSectionId={newLessonSectionId}
           memberId={memberId}
           projectId={projectId}
@@ -809,7 +905,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
               dialog === "section" ||
               dialog === "lesson" ||
               dialog === "edit_lesson" ||
-              dialog === "video";
+              dialog === "video" ||
+              dialog === "offer";
             if (createdCourseContent && (target.spaceId || spaceId)) {
               await refreshCourse(target.spaceId || spaceId!);
             } else if (target.spaceId || spaceId) {
@@ -934,6 +1031,7 @@ function CommunityDialog({
   space,
   sections,
   lesson,
+  offer,
   initialSectionId,
   memberId,
   projectId,
@@ -946,6 +1044,7 @@ function CommunityDialog({
   space: Space | null;
   sections: Section[];
   lesson: Lesson | null;
+  offer: CourseOffer | null;
   initialSectionId: string;
   memberId: string;
   projectId: string;
@@ -964,6 +1063,7 @@ function CommunityDialog({
   const [published, setPublished] = useState(Boolean(lesson?.published_at));
   const [storageKey, setStorageKey] = useState("");
   const [duration, setDuration] = useState("");
+  const [catalogPriceId, setCatalogPriceId] = useState(offer?.catalog_price_id ? String(offer.catalog_price_id) : "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -984,6 +1084,8 @@ function CommunityDialog({
       ? "Edit lesson"
       : kind === "video"
       ? "Attach lesson video"
+      : kind === "offer"
+      ? "Configure course sale"
       : "New thread";
 
   const submit = async (e: FormEvent) => {
@@ -1055,6 +1157,12 @@ function CommunityDialog({
         if (duration.trim()) args.duration_seconds = Number(duration);
         await runTool<Lesson>("Attach video", "lessons_attach_video", args);
         await onCreated({ spaceId: space?.id, lessonId: lesson.id });
+      } else if (kind === "offer") {
+        await runTool<{ offer: CourseOffer }>("Save course sale", "course_offer_upsert", {
+          space_id: space?.id,
+          catalog_price_id: Number(catalogPriceId),
+        });
+        await onCreated({ spaceId: space?.id });
       } else if (kind === "thread") {
         const out = await runTool<{ thread: Thread }>("Create thread", "threads_create", {
           space_id: space?.id,
@@ -1073,7 +1181,9 @@ function CommunityDialog({
 
   const needsSlug = kind === "community" || kind === "member" || kind === "space" || kind === "course";
   const canSubmit =
-    kind === "video"
+    kind === "offer"
+      ? Number.isInteger(Number(catalogPriceId)) && Number(catalogPriceId) > 0
+      : kind === "video"
       ? Boolean(storageKey.trim())
       : kind === "lesson"
       ? Boolean(name.trim() && sectionId)
@@ -1096,7 +1206,7 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind !== "video" ? (
+        {kind !== "video" && kind !== "offer" ? (
           <Field label={kind === "member" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
             <input
               className={inputClass}
@@ -1175,6 +1285,25 @@ function CommunityDialog({
             <Field label="Duration seconds">
               <input className={inputClass} type="number" min="0" value={duration} onChange={(e) => setDuration(e.target.value)} />
             </Field>
+          </>
+        ) : null}
+
+        {kind === "offer" ? (
+          <>
+            <Field label="Catalog price ID">
+              <input
+                className={inputClass}
+                type="number"
+                min="1"
+                step="1"
+                value={catalogPriceId}
+                onChange={(e) => setCatalogPriceId(e.target.value)}
+                autoFocus
+              />
+            </Field>
+            <div className="text-sm text-text-muted">
+              Community validates that this is an active, flat, one-time Catalog price. Billing uses it for every new checkout.
+            </div>
           </>
         ) : null}
 

@@ -4,6 +4,8 @@ import type {
   Community,
   CourseCertificate,
   CourseDetails,
+  CourseOffer,
+  CoursePurchase,
   DMThread,
   DMThreadView,
   DripSchedule,
@@ -126,6 +128,23 @@ export const api = {
       community.tool<LessonBundle>("lesson_bundle_get", { id, member_id: self }),
     enroll: (space_id: string) =>
       community.tool("course_enroll", { space_id, member_id: self }),
+    offer: (space_id: string) =>
+      community.tool<{ offer: CourseOffer | null }>("course_offer_get", { space_id }),
+    purchase: (space_id: string) =>
+      community.tool<{ purchase: CoursePurchase | null }>("course_purchase_status", {
+        space_id,
+        member_id: self,
+      }),
+    purchaseStart: (space_id: string, success_url: string, cancel_url: string) =>
+      community.tool<{ purchase: CoursePurchase | null; checkout_url?: string; enrolled?: boolean }>(
+        "course_purchase_start",
+        { space_id, member_id: self, success_url, cancel_url },
+      ),
+    purchaseCancel: (space_id: string) =>
+      community.tool<{ purchase: CoursePurchase }>("course_purchase_cancel", {
+        space_id,
+        member_id: self,
+      }),
     progress: (space_id: string) =>
       community.tool("lessons_progress", { space_id, member_id: self }),
     mark: (lesson_id: string, status: "in_progress" | "complete", last_position_seconds?: number) =>

@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.5.0
+version: 0.6.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -49,13 +49,26 @@ icon: /ui/icon.svg
 icon_style: monochrome
 tags: [community, courses, membership, forum, dms]
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.11.0"
 requires:
   permissions: [db.write.app, platform.apps.call]
   apps:
     - name: auth
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
+    - name: catalog
+      version: ">=0.3.0"
+      optional: false
+      reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
+    - name: billing
+      version: ">=0.12.0"
+      optional: false
+      events:
+        - invoice.paid
+        - invoice.refunded
+        - invoice.voided
+        - invoice.payment_failed
+      reason: Billing owns course customers, invoices, hosted payment sessions, refunds, and authoritative payment events.
   integrations:
     - role: storage
       kind: app
@@ -146,6 +159,16 @@ provides:
     - { name: course_analytics,    description: "Course builder analytics summary." }
     - { name: lesson_comments_post, description: "Post a comment on a lesson." }
     - { name: lesson_comments_list, description: "List comments on a lesson, oldest first." }
+    - { name: course_offer_get, description: "Get the active Catalog-backed offer for a course." }
+    - { name: course_offer_upsert, description: "Bind a course to an active one-time Catalog price." }
+    - { name: course_offer_archive, description: "Stop new sales for a course." }
+    - { name: course_purchase_start, description: "Start or resume the verified member's Billing checkout." }
+    - { name: course_purchase_status, description: "Get and reconcile the verified member's course purchase." }
+    - { name: course_purchase_cancel, description: "Cancel an unpaid course purchase." }
+    - { name: course_purchases_list, description: "List course purchases for operators." }
+    - { name: course_purchase_get, description: "Get a course purchase and reconciliation history." }
+    - { name: course_purchase_reconcile, description: "Reconcile a course purchase with Billing." }
+    - { name: course_purchase_refund, description: "Request a Billing refund for a course purchase." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -205,10 +228,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "invoice.paid", Handler: a.handleCourseBillingEvent},
+		{Event: "invoice.refunded", Handler: a.handleCourseBillingEvent},
+		{Event: "invoice.voided", Handler: a.handleCourseBillingEvent},
+		{Event: "invoice.payment_failed", Handler: a.handleCourseBillingEvent},
+	}
+}
 
 // ─── HTTP routes ─────────────────────────────────────────────────
 // Mirror the MCP tools — the panel hits these for reads, the bus
@@ -240,6 +270,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, postsTools()...)
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
+	tools = append(tools, courseSalesTools()...)
 	return secureTools(tools)
 }
 

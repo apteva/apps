@@ -45,6 +45,27 @@ func TestManifestParses(t *testing.T) {
 	if m.Provides.UIPanels[0].Entry != "/ui/CommunityPanel.mjs" {
 		t.Fatalf("panel entry = %q", m.Provides.UIPanels[0].Entry)
 	}
+	required := map[string]bool{}
+	events := map[string][]string{}
+	versions := map[string]string{}
+	for _, dep := range m.Requires.Apps {
+		required[dep.Name] = !dep.Optional
+		events[dep.Name] = dep.Events
+		versions[dep.Name] = dep.Version
+	}
+	for _, name := range []string{"auth", "catalog", "billing"} {
+		if !required[name] {
+			t.Errorf("%s must be a required Community dependency", name)
+		}
+	}
+	if versions["catalog"] != ">=0.3.0" || versions["billing"] != ">=0.12.0" {
+		t.Errorf("unexpected sales dependency versions: catalog=%q billing=%q", versions["catalog"], versions["billing"])
+	}
+	for _, event := range []string{"invoice.paid", "invoice.refunded", "invoice.voided", "invoice.payment_failed"} {
+		if !containsString(events["billing"], event) {
+			t.Errorf("Community must subscribe to billing %s, got %v", event, events["billing"])
+		}
+	}
 }
 
 // TestToolSetMatchesManifest catches forgetting to wire a manifest-

@@ -94,11 +94,15 @@ type EnrollmentRule struct {
 }
 
 type CourseEnrollment struct {
-	SpaceID     string  `json:"space_id"`
-	MemberID    string  `json:"member_id"`
-	Status      string  `json:"status"`
-	EnrolledAt  string  `json:"enrolled_at"`
-	CompletedAt *string `json:"completed_at,omitempty"`
+	SpaceID         string  `json:"space_id"`
+	MemberID        string  `json:"member_id"`
+	Status          string  `json:"status"`
+	Source          string  `json:"source"`
+	SourceRef       *string `json:"source_ref,omitempty"`
+	AccessExpiresAt *string `json:"access_expires_at,omitempty"`
+	AccessRevokedAt *string `json:"access_revoked_at,omitempty"`
+	EnrolledAt      string  `json:"enrolled_at"`
+	CompletedAt     *string `json:"completed_at,omitempty"`
 }
 
 var currencyRE = regexp.MustCompile(`^[A-Z]{3}$`)
@@ -1125,10 +1129,14 @@ func toolCourseEnroll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("status %q invalid", status)
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO course_enrollments (space_id, member_id, status)
-		 VALUES (?, ?, ?)
+		`INSERT INTO course_enrollments (space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at)
+		 VALUES (?, ?, ?, 'manual', NULL, NULL, NULL)
 		 ON CONFLICT(space_id, member_id) DO UPDATE SET
 		   status = excluded.status,
+		   source = 'manual',
+		   source_ref = NULL,
+		   access_expires_at = NULL,
+		   access_revoked_at = NULL,
 		   completed_at = CASE WHEN excluded.status = 'completed' THEN COALESCE(course_enrollments.completed_at, CURRENT_TIMESTAMP) ELSE NULL END`,
 		spaceID, memberID, status,
 	); err != nil {
@@ -1164,9 +1172,13 @@ func toolCourseEnrollmentUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	res, err := ctx.AppDB().Exec(
 		`UPDATE course_enrollments
 		    SET status = ?,
+		        source = CASE WHEN ? = 'active' THEN 'manual' ELSE source END,
+		        source_ref = CASE WHEN ? = 'active' THEN NULL ELSE source_ref END,
+		        access_expires_at = CASE WHEN ? = 'active' THEN NULL ELSE access_expires_at END,
+		        access_revoked_at = CASE WHEN ? = 'active' THEN NULL ELSE access_revoked_at END,
 		        completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END
 		  WHERE space_id = ? AND member_id = ?`,
-		status, status, spaceID, memberID,
+		status, status, status, status, status, status, spaceID, memberID,
 	)
 	if err != nil {
 		return nil, err
@@ -1189,7 +1201,9 @@ func toolCourseEnrollmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	status := strArg(args, "status", "")
-	q := `SELECT space_id, member_id, status, enrolled_at, completed_at FROM course_enrollments WHERE space_id = ?`
+	q := `SELECT space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at,
+	             enrolled_at, completed_at
+	        FROM course_enrollments WHERE space_id = ?`
 	vals := []any{spaceID}
 	if status != "" {
 		q += ` AND status = ?`
@@ -1577,9 +1591,21 @@ func loadEnrollmentRule(db *sql.DB, spaceID string) (EnrollmentRule, error) {
 
 func scanCourseEnrollment(scan func(...any) error) (CourseEnrollment, error) {
 	var e CourseEnrollment
-	var completed sql.NullString
-	if err := scan(&e.SpaceID, &e.MemberID, &e.Status, &e.EnrolledAt, &completed); err != nil {
+	var sourceRef, expires, revoked, completed sql.NullString
+	if err := scan(
+		&e.SpaceID, &e.MemberID, &e.Status, &e.Source, &sourceRef, &expires, &revoked,
+		&e.EnrolledAt, &completed,
+	); err != nil {
 		return e, err
+	}
+	if sourceRef.Valid {
+		e.SourceRef = &sourceRef.String
+	}
+	if expires.Valid {
+		e.AccessExpiresAt = &expires.String
+	}
+	if revoked.Valid {
+		e.AccessRevokedAt = &revoked.String
 	}
 	if completed.Valid {
 		e.CompletedAt = &completed.String
@@ -1588,7 +1614,12 @@ func scanCourseEnrollment(scan func(...any) error) (CourseEnrollment, error) {
 }
 
 func loadCourseEnrollment(db *sql.DB, spaceID, memberID string) (CourseEnrollment, error) {
-	row := db.QueryRow(`SELECT space_id, member_id, status, enrolled_at, completed_at FROM course_enrollments WHERE space_id = ? AND member_id = ?`, spaceID, memberID)
+	row := db.QueryRow(
+		`SELECT space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at,
+		        enrolled_at, completed_at
+		   FROM course_enrollments WHERE space_id = ? AND member_id = ?`,
+		spaceID, memberID,
+	)
 	e, err := scanCourseEnrollment(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, fmt.Errorf("course_enrollment %q/%q not found", spaceID, memberID)

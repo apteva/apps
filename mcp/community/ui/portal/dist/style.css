@@ -228,6 +228,11 @@ textarea { min-height: 92px; resize: vertical; }
 .course-layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); overflow: hidden; min-height: calc(100vh - 145px); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); }
 .course-content { min-width: 0; padding: 22px; }
 .course-heading, .lesson-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+.course-price { display: inline-flex; margin-top: 4px; border-radius: 999px; padding: 5px 9px; color: var(--brand-dark); background: #dcf5ed; font-size: .78rem; font-weight: 800; }
+.purchase-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.purchase-card { display: grid; gap: 6px; margin-top: 22px; border: 1px solid var(--line); border-radius: 14px; padding: 22px; background: var(--surface-soft); }
+.purchase-card p { margin: 0; }
+.purchase-card .empty { min-height: 80px; }
 .lesson-layout { display: grid; grid-template-columns: minmax(190px, 260px) minmax(0, 1fr); gap: 22px; margin-top: 20px; }
 .lesson-list { border-right: 1px solid var(--line); padding-right: 18px; }
 .lesson-list h3 { color: var(--muted); font-size: .72rem; letter-spacing: .08em; text-transform: uppercase; }
@@ -307,5 +312,7 @@ textarea { min-height: 92px; resize: vertical; }
   .hero-icon { display: none; }
   .reply { grid-template-columns: 1fr; }
   .course-heading, .lesson-title, .profile-card, .member-card { align-items: stretch; flex-direction: column; }
+  .purchase-actions { justify-content: stretch; }
+  .purchase-actions button { width: 100%; }
   .message { max-width: 94%; }
 }

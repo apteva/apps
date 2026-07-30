@@ -214,8 +214,63 @@ export interface CourseEnrollment {
   space_id: string;
   member_id: string;
   status: "pending" | "active" | "rejected" | "cancelled" | "completed";
+  source: "manual" | "community_purchase" | string;
+  source_ref?: string;
+  access_expires_at?: string;
+  access_revoked_at?: string;
   enrolled_at: string;
   completed_at?: string;
+}
+
+export interface CourseOffer {
+  space_id: string;
+  catalog_product_id: number;
+  catalog_price_id: number;
+  product_name: string;
+  price_nickname?: string;
+  unit_amount_cents: number;
+  currency: string;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CoursePurchaseStatus =
+  | "creating"
+  | "awaiting_payment"
+  | "payment_failed"
+  | "paid"
+  | "fulfilled"
+  | "cancelled"
+  | "failed"
+  | "refund_pending"
+  | "partially_refunded"
+  | "refunded";
+
+export interface CoursePurchase {
+  id: string;
+  community_id: string;
+  space_id: string;
+  member_id: string;
+  catalog_product_id: number;
+  catalog_price_id: number;
+  product_name: string;
+  unit_amount_cents: number;
+  currency: string;
+  customer_email: string;
+  billing_customer_id?: number;
+  billing_invoice_id?: number;
+  billing_session_id?: string;
+  checkout_url?: string;
+  status: CoursePurchaseStatus;
+  refunded_cents: number;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+  paid_at?: string;
+  fulfilled_at?: string;
+  cancelled_at?: string;
+  refunded_at?: string;
 }
 
 export interface CourseAnalytics {

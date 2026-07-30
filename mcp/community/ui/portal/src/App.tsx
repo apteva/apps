@@ -14,7 +14,20 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, useDelegatedToken } from "./api";
-import type { Community, DMThread, DMThreadView, Lesson, Member, Post, Section, Space, Thread } from "./types";
+import type {
+  Community,
+  CourseOffer,
+  CoursePurchase,
+  DMThread,
+  DMThreadView,
+  EnrollmentRule,
+  Lesson,
+  Member,
+  Post,
+  Section,
+  Space,
+  Thread,
+} from "./types";
 
 type View = "home" | "spaces" | "courses" | "members" | "messages" | "profile";
 type AuthMode = "login" | "signup";
@@ -37,6 +50,26 @@ const nav: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "messages", label: "Messages", icon: MessageCircle },
   { id: "profile", label: "Profile", icon: UserRound },
 ];
+
+const authSessionKey = "apteva-community-auth";
+
+function initialAuthSession(): AuthResponse | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const stored = JSON.parse(window.sessionStorage.getItem(authSessionKey) || "null") as AuthResponse | null;
+    if (!stored?.apteva_access_token || !stored.user) return null;
+    useDelegatedToken(stored.apteva_access_token);
+    return stored;
+  } catch {
+    window.sessionStorage.removeItem(authSessionKey);
+    return null;
+  }
+}
+
+function initialView(): View {
+  if (typeof window === "undefined") return "home";
+  return new URLSearchParams(window.location.search).has("payment") ? "courses" : "home";
+}
 
 function initialAuthForm() {
   const params = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
@@ -65,11 +98,22 @@ function displayName(member?: Member): string {
   return member?.display_name || member?.handle || "Member";
 }
 
+function formatCoursePrice(offer: CourseOffer): string {
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: offer.currency,
+    }).format(offer.unit_amount_cents / 100);
+  } catch {
+    return `${offer.currency} ${(offer.unit_amount_cents / 100).toFixed(2)}`;
+  }
+}
+
 export default function App() {
-  const [auth, setAuth] = useState<AuthResponse | null>(null);
+  const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authForm, setAuthForm] = useState(initialAuthForm);
-  const [view, setView] = useState<View>("home");
+  const [view, setView] = useState<View>(initialView);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pending, setPending] = useState(0);
   const [error, setError] = useState("");
@@ -96,6 +140,9 @@ export default function App() {
   const [bundle, setBundle] = useState<LessonBundle | null>(null);
   const [courseSummary, setCourseSummary] = useState("");
   const [courseLocked, setCourseLocked] = useState(false);
+  const [courseAccessMode, setCourseAccessMode] = useState<EnrollmentRule["access_mode"]>("free");
+  const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
+  const [coursePurchase, setCoursePurchase] = useState<CoursePurchase | null>(null);
   const [comment, setComment] = useState("");
 
   const [dmId, setDMId] = useState("");
@@ -117,11 +164,14 @@ export default function App() {
   const selectedLesson = lessons.find((item) => item.id === lessonId);
   const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
 
-  const run = useCallback(async <T,>(task: () => Promise<T>, options: { quiet?: boolean } = {}): Promise<T | undefined> => {
+  const run = useCallback(async <T,>(
+    task: () => Promise<T>,
+    options: { quiet?: boolean; preserveNotice?: boolean } = {},
+  ): Promise<T | undefined> => {
     setPending((value) => value + 1);
     if (!options.quiet) {
       setError("");
-      setNotice("");
+      if (!options.preserveNotice) setNotice("");
     }
     try {
       return await task();
@@ -211,25 +261,45 @@ export default function App() {
       setSections([]);
       setLessons([]);
       setBundle(null);
+      setCourseOffer(null);
+      setCoursePurchase(null);
+      setCourseAccessMode("free");
       return;
     }
     await latest(
       "course",
       async () => {
-        const [details, sectionOut] = await Promise.all([api.courses.details(courseId), api.courses.sections(courseId)]);
+        const [details, sectionOut, offerOut, purchaseOut] = await Promise.all([
+          api.courses.details(courseId),
+          api.courses.sections(courseId),
+          api.courses.offer(courseId),
+          api.courses.purchase(courseId),
+        ]);
         let lessonOut: { lessons: Lesson[] } | undefined;
         let locked = false;
         try {
           lessonOut = await api.courses.lessons(courseId);
-        } catch {
+        } catch (caught) {
+          const message = caught instanceof Error ? caught.message : String(caught);
+          if (!message.includes("active course enrollment required")) throw caught;
           locked = true;
         }
-        return { details, sections: sectionOut.sections || [], lessons: lessonOut?.lessons || [], locked };
+        return {
+          details,
+          sections: sectionOut.sections || [],
+          lessons: lessonOut?.lessons || [],
+          offer: offerOut.offer,
+          purchase: purchaseOut.purchase,
+          locked,
+        };
       },
       (result) => {
         setSections(result.sections);
         setLessons(result.lessons);
         setCourseLocked(result.locked);
+        setCourseOffer(result.offer);
+        setCoursePurchase(result.purchase);
+        setCourseAccessMode(result.details.enrollment_rules?.access_mode || "free");
         setCourseSummary(result.details.details?.summary || result.details.details?.description || "");
         setLessonId((current) =>
           result.lessons.some((item) => item.id === current) ? current : result.lessons[0]?.id || "",
@@ -259,12 +329,20 @@ export default function App() {
 
   useEffect(() => {
     if (!auth) return;
-    void run(loadSession);
+    void run(loadSession, { preserveNotice: true });
   }, [auth, loadSession, run]);
 
   useEffect(() => {
     if (!auth) return;
-    void run(loadCommunity);
+    void run(loadCommunity, { preserveNotice: true }).then(() => {
+      const url = new URL(window.location.href);
+      const payment = url.searchParams.get("payment");
+      if (!payment) return;
+      if (payment === "success") setNotice("Payment submitted. Course access activates as soon as Billing confirms it.");
+      if (payment === "cancelled") setNotice("Checkout was cancelled. You can resume it whenever you are ready.");
+      url.searchParams.delete("payment");
+      window.history.replaceState({}, "", url);
+    });
   }, [auth, loadCommunity, run]);
 
   useEffect(() => {
@@ -276,12 +354,23 @@ export default function App() {
   }, [loadPosts, run, view]);
 
   useEffect(() => {
-    if (view === "courses") void run(loadCourse, { quiet: true });
+    if (view === "courses") void run(loadCourse, { preserveNotice: true });
   }, [loadCourse, run, view]);
 
   useEffect(() => {
     if (view === "courses") void run(loadBundle, { quiet: true });
   }, [loadBundle, run, view]);
+
+  useEffect(() => {
+    if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
+    const timer = window.setInterval(() => {
+      void api.courses.purchase(courseId).then((result) => {
+        setCoursePurchase(result.purchase);
+        if (result.purchase?.status === "fulfilled") void run(loadCourse, { quiet: true });
+      }).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [auth, courseId, coursePurchase?.status, loadCourse, run]);
 
   useEffect(() => {
     if (view === "messages") void run(loadDM, { quiet: true });
@@ -343,6 +432,7 @@ export default function App() {
         throw new Error("Auth did not return a delegated access token.");
       }
       useDelegatedToken(response.apteva_access_token);
+      window.sessionStorage.setItem(authSessionKey, JSON.stringify(response));
       setAuth(response);
       setAuthForm((current) => ({ ...current, password: "" }));
     });
@@ -350,6 +440,7 @@ export default function App() {
 
   function logout() {
     useDelegatedToken(undefined);
+    window.sessionStorage.removeItem(authSessionKey);
     setAuth(null);
     setCommunities([]);
     setMemberships([]);
@@ -386,6 +477,34 @@ export default function App() {
       await api.courses.enroll(courseId);
       setNotice("Enrollment submitted.");
       await loadCourse();
+    });
+  }
+
+  async function purchaseCourse() {
+    if (!courseId) return;
+    await run(async () => {
+      const success = new URL(window.location.href);
+      success.searchParams.set("payment", "success");
+      const cancel = new URL(window.location.href);
+      cancel.searchParams.set("payment", "cancelled");
+      const result = await api.courses.purchaseStart(courseId, success.toString(), cancel.toString());
+      setCoursePurchase(result.purchase);
+      if (result.enrolled) {
+        setNotice("Course access is active.");
+        await loadCourse();
+        return;
+      }
+      if (!result.checkout_url) throw new Error("Billing did not return a checkout URL.");
+      window.location.assign(result.checkout_url);
+    });
+  }
+
+  async function cancelPurchase() {
+    if (!courseId) return;
+    await run(async () => {
+      const result = await api.courses.purchaseCancel(courseId);
+      setCoursePurchase(result.purchase);
+      setNotice("Checkout cancelled.");
     });
   }
 
@@ -598,8 +717,44 @@ export default function App() {
               </ItemList>
             </section>
             <section className="course-content">
-              <div className="course-heading"><div><p className="eyebrow">Course</p><h2>{selectedCourse?.name || "Choose a course"}</h2><p className="muted">{courseSummary}</p></div>{courseLocked && courseId && <button className="primary" onClick={enroll}>Enroll</button>}</div>
-              {courseLocked ? <Empty>Enroll to unlock published lessons. Paid, invite-only, and manual courses require operator approval.</Empty> : (
+              <div className="course-heading">
+                <div>
+                  <p className="eyebrow">Course</p>
+                  <h2>{selectedCourse?.name || "Choose a course"}</h2>
+                  <p className="muted">{courseSummary}</p>
+                  {courseOffer && <span className="course-price">{formatCoursePrice(courseOffer)}</span>}
+                </div>
+                {courseLocked && courseId && courseAccessMode === "free" && <button className="primary" onClick={enroll}>Enroll</button>}
+                {courseLocked && courseId && courseAccessMode === "paid" && courseOffer && (
+                  <div className="purchase-actions">
+                    <button className="primary" onClick={purchaseCourse} disabled={busy || coursePurchase?.status === "refund_pending"}>
+                      {coursePurchase?.status === "awaiting_payment" || coursePurchase?.status === "payment_failed"
+                        ? "Continue checkout"
+                        : `Buy course · ${formatCoursePrice(courseOffer)}`}
+                    </button>
+                    {coursePurchase?.status === "awaiting_payment" && (
+                      <button className="secondary" onClick={cancelPurchase} disabled={busy}>Cancel</button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {courseLocked ? (
+                <div className="purchase-card">
+                  {courseAccessMode === "paid" && !courseOffer && <Empty>This course is not currently for sale.</Empty>}
+                  {courseAccessMode === "paid" && courseOffer && (
+                    <>
+                      <strong>{coursePurchase?.status === "awaiting_payment" ? "Checkout ready" : "Purchase to unlock this course"}</strong>
+                      <p className="muted">
+                        {coursePurchase?.status === "payment_failed"
+                          ? "The last payment attempt did not complete. You can safely retry."
+                          : "Payment is handled by Billing. Access activates only after the payment is confirmed."}
+                      </p>
+                    </>
+                  )}
+                  {courseAccessMode === "free" && <Empty>Enroll to unlock the published lessons.</Empty>}
+                  {(courseAccessMode === "invite" || courseAccessMode === "manual") && <Empty>Contact a community operator for access to this course.</Empty>}
+                </div>
+              ) : (
                 <div className="lesson-layout">
                   <aside className="lesson-list">
                     {sections.map((section) => <div key={section.id}><h3>{section.title}</h3>{lessons.filter((lesson) => lesson.section_id === section.id).map((lesson) => <button key={lesson.id} className={lesson.id === lessonId ? "selected" : ""} onClick={() => setLessonId(lesson.id)}><span>{lesson.title}</span>{lesson.progress?.status === "complete" && <CheckCircle2 size={16} aria-label="Completed" />}</button>)}</div>)}

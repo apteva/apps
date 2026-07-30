@@ -641,6 +641,8 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if viewerID := strArg(args, "_viewer_member_id", ""); viewerID != "" {
 		q += ` AND e.status IN ('active','completed')
+		       AND e.access_revoked_at IS NULL
+		       AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
 		       AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
 		       AND (d.release_after_days IS NULL OR
 		            datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)`
@@ -927,6 +929,8 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		 WHERE s.space_id = ? AND l.published_at IS NOT NULL
 		   AND (? = '' OR (
 		     e.status IN ('active','completed')
+		     AND e.access_revoked_at IS NULL
+		     AND (e.access_expires_at IS NULL OR datetime(e.access_expires_at) >= CURRENT_TIMESTAMP)
 		     AND (d.release_at IS NULL OR datetime(d.release_at) <= CURRENT_TIMESTAMP)
 		     AND (d.release_after_days IS NULL OR
 		          datetime(e.enrolled_at, '+' || d.release_after_days || ' days') <= CURRENT_TIMESTAMP)
