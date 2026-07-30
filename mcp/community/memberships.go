@@ -356,7 +356,7 @@ func toolMembershipCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, err
 	subArgs := map[string]any{
 		"customer_id": customer.Customer.ID, "customer_email": email,
 		"customer_name": strings.TrimSpace(strArg(args, "customer_name", "")), "kind": "service",
-		"status": status, "billing_provider": "stripe", "currency": plan.Currency,
+		"status": status, "billing_provider": "local", "currency": plan.Currency,
 		"interval": plan.Interval, "interval_count": plan.IntervalCount, "source": "community",
 		"source_ref": ms.ID, "current_period_start": periodStart.Format(time.RFC3339),
 		"current_period_end": periodEnd.Format(time.RFC3339), "next_renewal_at": periodEnd.Format(time.RFC3339),
@@ -629,7 +629,7 @@ func createMembershipInvoice(ctx *sdk.AppCtx, msID string, subID, cycleID, custo
 			Invoice billingInvoice `json:"invoice"`
 		}
 		if err := callAppResult(ctx, "billing", "invoices_create_from_prepared_lines", map[string]any{
-			"customer_id": customerID, "currency": plan.Currency, "provider": "stripe", "line_items": lines, "finalize": true,
+			"customer_id": customerID, "currency": plan.Currency, "provider": "local", "line_items": lines, "finalize": true,
 			"metadata": map[string]any{"source_app": "community", "flow": "course_membership", "member_subscription_id": msID,
 				"subscription_id": subID, "cycle_id": cycleID, "membership_plan_id": plan.ID, "idempotency_key": key},
 		}, &invoiceOut); err != nil {
@@ -1198,7 +1198,8 @@ func membershipResponse(ms *MemberSubscription) map[string]any {
 		out["checkout_url"] = *ms.CheckoutURL
 	}
 	if ms != nil {
-		out["access_active"] = ms.Status == "active" || ms.Status == "trialing" || ms.Status == "past_due"
+		out["access_active"] = ms.Status == "active" || ms.Status == "trialing" ||
+			(ms.Status == "past_due" && ms.AccessStartedAt != nil)
 	}
 	return out
 }

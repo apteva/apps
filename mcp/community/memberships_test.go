@@ -138,6 +138,9 @@ func startMembership(t *testing.T, ctx *sdk.AppCtx, member Member, plan *Members
 func TestMembershipCheckoutIsIdempotentAndUnpaidHasNoAccess(t *testing.T) {
 	ctx, platform, _, member, course, _, plan := membershipFixture(t)
 	first := startMembership(t, ctx, member, plan)
+	if membershipResponse(first)["access_active"] != false {
+		t.Fatal("unpaid first checkout must report access_active=false")
+	}
 	second := startMembership(t, ctx, member, plan)
 	if first.ID != second.ID {
 		t.Fatalf("retry created another membership: %s != %s", first.ID, second.ID)
