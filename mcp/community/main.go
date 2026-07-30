@@ -34,14 +34,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.6.1
+version: 0.6.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
   in-app DMs, and full courses (metadata, sections, lessons, resources,
   quizzes, assignments, certificates, drip, enrollments, and progress). Ships both an
   operator dashboard panel and a client-facing React portal at
-  /api/apps/community/ui/portal/dist/index.html. Portal calls use
+  /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
@@ -176,7 +177,7 @@ provides:
       icon: users
       entry: /ui/CommunityPanel.mjs
   # Client-facing portal SPA:
-  # /api/apps/community/ui/portal/dist/index.html
+  # /api/apps/community/_install/{install_id}/ui/portal/dist/index.html
 runtime:
   kind: source
   source:

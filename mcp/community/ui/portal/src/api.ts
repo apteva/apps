@@ -62,14 +62,20 @@ export function currentProjectId(): string {
   return fromQuery || window.__APTEVA_APP__?.default_project || "";
 }
 
+function projectScopedPath(path: string): string {
+  const projectId = currentProjectId();
+  if (!projectId) return path;
+  return `${path}?project_id=${encodeURIComponent(projectId)}`;
+}
+
 const self = "self";
 
 export const api = {
   auth: {
     login: (body: { client_id: string; email: string; password: string; organization_slug?: string }) =>
-      auth.post<AuthResponse>("/login", { ...body, project_id: currentProjectId() }),
+      auth.post<AuthResponse>(projectScopedPath("/login"), { ...body, project_id: currentProjectId() }),
     signup: (body: { client_id: string; email: string; password: string; display_name: string; organization_slug?: string }) =>
-      auth.post<AuthResponse>("/signup", { ...body, project_id: currentProjectId() }),
+      auth.post<AuthResponse>(projectScopedPath("/signup"), { ...body, project_id: currentProjectId() }),
   },
   session: () => community.tool<MemberSession>("members_me"),
   communities: {

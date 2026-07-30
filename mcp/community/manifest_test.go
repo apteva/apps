@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -54,6 +55,9 @@ func TestManifestParses(t *testing.T) {
 	if !foundPublicPortal {
 		t.Fatal("member portal assets must be exposed as an anonymous GET /ui/ route")
 	}
+	if !strings.Contains(m.Description, "/api/apps/community/_install/{install_id}/ui/portal/dist/index.html") {
+		t.Fatal("manifest must document the install-scoped portal URL so relative assets resolve anonymously")
+	}
 	required := map[string]bool{}
 	events := map[string][]string{}
 	versions := map[string]string{}
@@ -73,6 +77,18 @@ func TestManifestParses(t *testing.T) {
 	for _, event := range []string{"invoice.paid", "invoice.refunded", "invoice.voided", "invoice.payment_failed"} {
 		if !containsString(events["billing"], event) {
 			t.Errorf("Community must subscribe to billing %s, got %v", event, events["billing"])
+		}
+	}
+}
+
+func TestPortalAuthRoutesAreProjectScoped(t *testing.T) {
+	source, err := os.ReadFile("ui/portal/src/api.ts")
+	if err != nil {
+		t.Fatalf("read portal API source: %v", err)
+	}
+	for _, route := range []string{`projectScopedPath("/login")`, `projectScopedPath("/signup")`} {
+		if !strings.Contains(string(source), route) {
+			t.Errorf("portal auth route missing project scope: %s", route)
 		}
 	}
 }
