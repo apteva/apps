@@ -349,7 +349,7 @@ func TestIOSReleaseSyncAssignsProcessedBuildToTestFlight(t *testing.T) {
 	if fresh.Status != "live" || fresh.ExternalID != "build-42" || fresh.ExternalStatus != "testflight_available" {
 		t.Fatalf("release=%+v", fresh)
 	}
-	want := []string{"list_builds", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group"}
+	want := []string{"list_builds", "list_beta_groups", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group"}
 	if len(platform.calls) != len(want) {
 		t.Fatalf("calls=%+v", platform.calls)
 	}

@@ -358,9 +358,10 @@ func (a *App) updateIOSDistribution(target distributionTarget, audience []distri
 }
 
 type appleBetaGroup struct {
-	ID         string
-	Name       string
-	IsInternal bool
+	ID                   string
+	Name                 string
+	IsInternal           bool
+	HasAccessToAllBuilds bool
 }
 
 func (a *App) findIOSBetaGroup(bound *sdk.BoundIntegration, target distributionTarget, create bool) (appleBetaGroup, error) {
@@ -376,25 +377,38 @@ func (a *App) findIOSBetaGroup(bound *sdk.BoundIntegration, target distributionT
 		return group, nil
 	}
 	groupName := strings.TrimSpace(target.BetaGroupName)
-	input := map[string]any{"app_id": target.AppID, "internal": target.Channel == "internal", "limit": 200}
-	if groupName != "" {
-		input["name"] = groupName
-	}
-	raw, err := executeIntegration(bound, "list_beta_groups", input)
+	groups, err := listIOSBetaGroups(bound, target, groupName)
 	if err != nil {
 		return appleBetaGroup{}, err
 	}
-	group := parseAppleBetaGroup(raw)
+	group := selectAppleBetaGroup(groups, target.Channel, groupName)
 	if group.ID != "" || !create {
 		return group, nil
 	}
 	if groupName == "" {
 		groupName = "Deploy " + upperFirst(target.Channel)
 	}
-	raw, err = executeIntegration(bound, "create_beta_group", map[string]any{
+
+	// Re-query by the stable group name immediately before creating. This makes
+	// retries and concurrent publishers converge on the existing group.
+	groups, err = listIOSBetaGroups(bound, target, groupName)
+	if err != nil {
+		return appleBetaGroup{}, err
+	}
+	if group = selectAppleBetaGroup(groups, target.Channel, groupName); group.ID != "" {
+		return group, nil
+	}
+
+	raw, err := executeIntegration(bound, "create_beta_group", map[string]any{
 		"app_id": target.AppID, "name": groupName, "isInternalGroup": target.Channel == "internal",
 	})
 	if err != nil {
+		groups, lookupErr := listIOSBetaGroups(bound, target, groupName)
+		if lookupErr == nil {
+			if group = selectAppleBetaGroup(groups, target.Channel, groupName); group.ID != "" {
+				return group, nil
+			}
+		}
 		return appleBetaGroup{}, err
 	}
 	group = parseAppleBetaGroup(raw)
@@ -407,40 +421,94 @@ func (a *App) findIOSBetaGroup(bound *sdk.BoundIntegration, target distributionT
 	return group, nil
 }
 
+func listIOSBetaGroups(bound *sdk.BoundIntegration, target distributionTarget, groupName string) ([]appleBetaGroup, error) {
+	input := map[string]any{"app_id": target.AppID, "internal": target.Channel == "internal", "limit": 200}
+	if groupName != "" {
+		input["name"] = groupName
+	}
+	raw, err := executeIntegration(bound, "list_beta_groups", input)
+	if err != nil {
+		return nil, err
+	}
+	return parseAppleBetaGroups(raw), nil
+}
+
+func selectAppleBetaGroup(groups []appleBetaGroup, channel, groupName string) appleBetaGroup {
+	wantInternal := channel == "internal"
+	groupName = strings.TrimSpace(groupName)
+	defaultName := "Deploy " + upperFirst(channel)
+	matches := make([]appleBetaGroup, 0, len(groups))
+	for _, group := range groups {
+		if group.ID == "" || group.IsInternal != wantInternal {
+			continue
+		}
+		if groupName != "" && !strings.EqualFold(group.Name, groupName) {
+			continue
+		}
+		matches = append(matches, group)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].HasAccessToAllBuilds != matches[j].HasAccessToAllBuilds {
+			return matches[i].HasAccessToAllBuilds
+		}
+		iDefault := strings.EqualFold(matches[i].Name, defaultName)
+		jDefault := strings.EqualFold(matches[j].Name, defaultName)
+		if iDefault != jDefault {
+			return iDefault
+		}
+		return matches[i].ID < matches[j].ID
+	})
+	if len(matches) == 0 {
+		return appleBetaGroup{}
+	}
+	return matches[0]
+}
+
 func parseAppleBetaGroup(raw json.RawMessage) appleBetaGroup {
+	groups := parseAppleBetaGroups(raw)
+	if len(groups) == 0 {
+		return appleBetaGroup{}
+	}
+	return groups[0]
+}
+
+func parseAppleBetaGroups(raw json.RawMessage) []appleBetaGroup {
 	var payload struct {
 		Data json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
-		return appleBetaGroup{}
+		return nil
 	}
-	var one struct {
+	type betaGroupResource struct {
 		ID         string `json:"id"`
 		Attributes struct {
-			Name       string `json:"name"`
-			IsInternal bool   `json:"isInternalGroup"`
+			Name                 string `json:"name"`
+			IsInternal           bool   `json:"isInternalGroup"`
+			HasAccessToAllBuilds bool   `json:"hasAccessToAllBuilds"`
 		} `json:"attributes"`
 	}
+	var resources []betaGroupResource
 	if len(payload.Data) > 0 && payload.Data[0] == '[' {
-		var many []struct {
-			ID         string `json:"id"`
-			Attributes struct {
-				Name       string `json:"name"`
-				IsInternal bool   `json:"isInternalGroup"`
-			} `json:"attributes"`
+		if json.Unmarshal(payload.Data, &resources) != nil {
+			return nil
 		}
-		if json.Unmarshal(payload.Data, &many) == nil && len(many) > 0 {
-			return appleBetaGroup{
-				ID: many[0].ID, Name: many[0].Attributes.Name,
-				IsInternal: many[0].Attributes.IsInternal,
-			}
+	} else {
+		var one betaGroupResource
+		if json.Unmarshal(payload.Data, &one) != nil {
+			return nil
 		}
-		return appleBetaGroup{}
+		resources = append(resources, one)
 	}
-	if json.Unmarshal(payload.Data, &one) != nil {
-		return appleBetaGroup{}
+	groups := make([]appleBetaGroup, 0, len(resources))
+	for _, resource := range resources {
+		groups = append(groups, appleBetaGroup{
+			ID:                   resource.ID,
+			Name:                 resource.Attributes.Name,
+			IsInternal:           resource.Attributes.IsInternal,
+			HasAccessToAllBuilds: resource.Attributes.HasAccessToAllBuilds,
+		})
 	}
-	return appleBetaGroup{ID: one.ID, Name: one.Attributes.Name, IsInternal: one.Attributes.IsInternal}
+	return groups
 }
 
 func parseAppleTesters(raw json.RawMessage) []distributionAudienceMember {

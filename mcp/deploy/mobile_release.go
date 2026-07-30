@@ -466,41 +466,99 @@ func (a *App) syncIOSRelease(rel *Release) error {
 	}
 	rel.ExternalID = buildID
 	if rel.Channel == "internal" || rel.Channel == "external" {
-		groupID := meta.BetaGroupID
-		if groupID == "" {
-			groups, err := executeIntegration(bound, "list_beta_groups", map[string]any{
-				"app_id": meta.AppID, "internal": rel.Channel == "internal", "limit": 20,
-			})
-			if err != nil {
-				return err
-			}
-			groupID = firstJSONAPIID(groups)
-			if groupID == "" {
-				created, err := executeIntegration(bound, "create_beta_group", map[string]any{
-					"app_id": meta.AppID, "name": "Deploy " + upperFirst(rel.Channel), "isInternalGroup": rel.Channel == "internal",
-				})
-				if err != nil {
-					return err
-				}
-				groupID = jsonStringAt(created, "data", "id")
-			}
-		}
-		if _, err := executeIntegration(bound, "add_builds_to_beta_group", map[string]any{
-			"group_id": groupID,
-			"body":     map[string]any{"data": []map[string]any{{"type": "builds", "id": buildID}}},
-		}); err != nil {
+		group, err := a.findIOSBetaGroup(bound, distributionTarget{
+			Channel: rel.Channel, AppID: meta.AppID, BetaGroupID: meta.BetaGroupID,
+		}, true)
+		if err != nil {
 			return err
 		}
-		meta.BetaGroupID = groupID
-		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-			"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
-		})
-		return nil
+		if group.ID == "" {
+			return errors.New("App Store Connect beta group response missing id")
+		}
+		if !group.HasAccessToAllBuilds {
+			if err := addIOSBuildToBetaGroup(bound, group.ID, buildID); err != nil {
+				if !isRedundantIOSBuildAssignment(err) {
+					return err
+				}
+				present, verifyErr := iosBuildHasBetaGroup(bound, buildID, group.ID)
+				if verifyErr != nil {
+					return fmt.Errorf("%w; verify beta group relationship: %v", err, verifyErr)
+				}
+				if !present {
+					return err
+				}
+			}
+		}
+		return markTestFlightAvailable(rel, buildID, group.ID, &meta)
 	}
 	if rel.Channel == "production" {
 		return a.prepareIOSProductionRelease(bound, rel, buildID, &meta)
 	}
 	return fmt.Errorf("unsupported iOS channel %q", rel.Channel)
+}
+
+func addIOSBuildToBetaGroup(bound *sdk.BoundIntegration, groupID, buildID string) error {
+	_, err := executeIntegration(bound, "add_builds_to_beta_group", map[string]any{
+		"group_id": groupID,
+		"body":     map[string]any{"data": []map[string]any{{"type": "builds", "id": buildID}}},
+	})
+	return err
+}
+
+func isRedundantIOSBuildAssignment(err error) bool {
+	var toolErr *integrationToolError
+	if !errors.As(err, &toolErr) || toolErr.Status != http.StatusUnprocessableEntity {
+		return false
+	}
+	body := strings.ToLower(string(toolErr.Data))
+	return strings.Contains(body, "cannot add internal group to a build") ||
+		strings.Contains(body, "builds cannot be assigned to this internal group")
+}
+
+func iosBuildHasBetaGroup(bound *sdk.BoundIntegration, buildID, groupID string) (bool, error) {
+	raw, err := executeIntegration(bound, "get_build", map[string]any{
+		"build_id": buildID,
+		"include":  "betaGroups",
+	})
+	if err != nil {
+		return false, err
+	}
+	var payload struct {
+		Data struct {
+			Relationships struct {
+				BetaGroups struct {
+					Data []struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				} `json:"betaGroups"`
+			} `json:"relationships"`
+		} `json:"data"`
+		Included []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		} `json:"included"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, fmt.Errorf("decode App Store build beta groups: %w", err)
+	}
+	for _, group := range payload.Data.Relationships.BetaGroups.Data {
+		if group.ID == groupID {
+			return true, nil
+		}
+	}
+	for _, resource := range payload.Included {
+		if resource.Type == "betaGroups" && resource.ID == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
+	meta.BetaGroupID = groupID
+	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
+	})
 }
 
 func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Release, buildID string, meta *mobileReleaseMeta) error {
@@ -858,9 +916,22 @@ func executeIntegration(bound *sdk.BoundIntegration, tool string, input map[stri
 		if res != nil {
 			status, data = res.Status, res.Data
 		}
-		return nil, fmt.Errorf("%s.%s returned HTTP %d: %s", bound.AppSlug, tool, status, truncateString(string(data), 800))
+		return nil, &integrationToolError{
+			Slug: bound.AppSlug, Tool: tool, Status: status, Data: append(json.RawMessage(nil), data...),
+		}
 	}
 	return res.Data, nil
+}
+
+type integrationToolError struct {
+	Slug   string
+	Tool   string
+	Status int
+	Data   json.RawMessage
+}
+
+func (e *integrationToolError) Error() string {
+	return fmt.Sprintf("%s.%s returned HTTP %d: %s", e.Slug, e.Tool, e.Status, truncateString(string(e.Data), 800))
 }
 
 func (a *App) openMobileReleaseLog(releaseID int64) (string, *os.File, error) {
