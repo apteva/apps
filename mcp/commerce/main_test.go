@@ -187,6 +187,120 @@ func TestStoreListingCartAndSaleFlow(t *testing.T) {
 	}
 }
 
+func TestCartsListFiltersAbandonmentCandidates(t *testing.T) {
+	db := openCommerceTestDB(t)
+	pid := "cart-filters"
+
+	store, err := dbStoreCreate(db, pid, map[string]any{"slug": "filters", "name": "Filters"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, err := dbListingCreate(db, pid, map[string]any{
+		"store_id": store.ID, "title": "Filter product", "status": "active",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	variant, err := dbVariantCreate(db, pid, map[string]any{
+		"listing_id": listing.ID, "sku": "FILTER-1", "title": "Default",
+		"price_cents": int64(2500), "currency": "USD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	createCart := func(token, status, updatedAt string, withItems bool) *Cart {
+		t.Helper()
+		cart, createErr := dbCartCreate(db, pid, map[string]any{
+			"store_id": store.ID, "session_token": token, "currency": "USD",
+		})
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if withItems {
+			if addErr := dbCartAddItem(db, pid, cart.ID, variant, 1, 0); addErr != nil {
+				t.Fatal(addErr)
+			}
+		}
+		if _, updateErr := db.Exec(
+			`UPDATE commerce_carts SET status=?, updated_at=? WHERE project_id=? AND id=?`,
+			status, updatedAt, pid, cart.ID,
+		); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		return cart
+	}
+
+	oldOpen := createCart("old-open", "open", "2024-01-01 10:00:00", true)
+	oldCheckout := createCart("old-checkout", "checkout", "2024-01-02 10:00:00", true)
+	createCart("old-empty", "open", "2024-01-03 10:00:00", false)
+	createCart("old-converted", "converted", "2024-01-04 10:00:00", true)
+	createCart("recent-open", "open", "2099-01-01 10:00:00", true)
+
+	abandoned, err := dbCartsList(db, pid, map[string]any{
+		"abandoned_only": true,
+		"updated_before": "2025-01-01T00:00:00Z",
+		"sort":           "updated_asc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(abandoned) != 2 || abandoned[0].ID != oldOpen.ID || abandoned[1].ID != oldCheckout.ID {
+		t.Fatalf("abandoned carts=%#v, want old open and checkout carts", abandoned)
+	}
+
+	oldOpenOnly, err := dbCartsList(db, pid, map[string]any{
+		"status":         "open",
+		"has_items":      true,
+		"updated_before": "2025-01-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldOpenOnly) != 1 || oldOpenOnly[0].ID != oldOpen.ID {
+		t.Fatalf("old open carts=%#v, want cart %d", oldOpenOnly, oldOpen.ID)
+	}
+
+	inactive, err := dbCartsList(db, pid, map[string]any{
+		"abandoned_only":       true,
+		"inactive_for_minutes": int64(60),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inactive) != 2 {
+		t.Fatalf("inactive abandoned carts=%d, want 2", len(inactive))
+	}
+}
+
+func TestCartsListRejectsInvalidActivityFilters(t *testing.T) {
+	db := openCommerceTestDB(t)
+	tests := []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "invalid timestamp", args: map[string]any{"updated_before": "yesterday"}},
+		{name: "reversed range", args: map[string]any{
+			"updated_after": "2025-01-02T00:00:00Z", "updated_before": "2025-01-01T00:00:00Z",
+		}},
+		{name: "zero inactivity", args: map[string]any{"inactive_for_minutes": int64(0)}},
+		{name: "ambiguous cutoff", args: map[string]any{
+			"inactive_for_minutes": int64(60), "updated_before": "2025-01-01T00:00:00Z",
+		}},
+		{name: "abandoned without items", args: map[string]any{
+			"abandoned_only": true, "has_items": false,
+		}},
+		{name: "invalid sort", args: map[string]any{"sort": "oldest"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := dbCartsList(db, "cart-filters", tt.args); err == nil {
+				t.Fatalf("dbCartsList(%#v) succeeded, want validation error", tt.args)
+			}
+		})
+	}
+}
+
 func TestCheckoutMarketAllowlist(t *testing.T) {
 	store := &Store{Metadata: map[string]any{
 		"markets": map[string]any{"enabled": []any{"ES", "FR"}},

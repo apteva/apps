@@ -110,7 +110,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_collections_add_product", Description: "Add a listing to a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer"), "sort_order": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsAddProduct},
 		{Name: "commerce_collections_remove_product", Description: "Remove a listing from a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsRemoveProduct},
 		{Name: "commerce_cart_create", Description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "session_token": typ("string")}, nil), Handler: a.toolCartCreate},
-		{Name: "commerce_carts_list", Description: "List Commerce carts. Args: store_id?, status?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolCartsList},
+		{Name: "commerce_carts_list", Description: "List Commerce carts, including inactive abandonment candidates. Args: store_id?, status?, updated_before? (RFC3339), updated_after? (RFC3339), inactive_for_minutes?, has_items?, abandoned_only? (nonempty open/checkout carts; defaults to 24h inactivity), sort? (updated_desc|updated_asc), limit?.", InputSchema: schemaObject(cartFilterProps(), nil), Handler: a.toolCartsList},
 		{Name: "commerce_cart_get", Description: "Fetch a Commerce cart with items. Args: cart_id? or session_token? plus store_id?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "session_token": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolCartGet},
 		{Name: "commerce_cart_add_item", Description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "variant_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "variant_id"}), Handler: a.toolCartAddItem},
 		{Name: "commerce_cart_set_quantity", Description: "Set a Commerce cart item's quantity. Args: cart_id, item_id, quantity.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "item_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "item_id", "quantity"}), Handler: a.toolCartSetQuantity},
@@ -3118,6 +3118,34 @@ func productCreateProps() map[string]any {
 }
 func listingFilterProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "status": typ("string"), "q": typ("string"), "limit": typ("integer")}
+}
+func cartFilterProps() map[string]any {
+	return map[string]any{
+		"store_id": typ("integer"),
+		"status":   typ("string"),
+		"updated_before": map[string]any{
+			"type": "string", "format": "date-time",
+			"description": "Return carts last updated before this RFC3339 timestamp.",
+		},
+		"updated_after": map[string]any{
+			"type": "string", "format": "date-time",
+			"description": "Return carts last updated after this RFC3339 timestamp.",
+		},
+		"inactive_for_minutes": map[string]any{
+			"type": "integer", "minimum": 1, "maximum": 525600,
+			"description": "Return carts with no activity for at least this many minutes.",
+		},
+		"has_items": map[string]any{
+			"type": "boolean", "description": "Filter by whether the cart contains a positive-quantity item.",
+		},
+		"abandoned_only": map[string]any{
+			"type": "boolean", "description": "Return nonempty open or checkout carts past the inactivity cutoff; defaults to 24 hours.",
+		},
+		"sort": map[string]any{
+			"type": "string", "enum": []string{"updated_desc", "updated_asc"},
+		},
+		"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+	}
 }
 func variantProps() map[string]any {
 	return map[string]any{"listing_id": typ("integer"), "catalog_price_id": typ("integer"), "inventory_item_id": typ("integer"), "sku": typ("string"), "title": typ("string"), "option1": typ("string"), "option2": typ("string"), "option3": typ("string"), "price_cents": typ("integer"), "compare_at_price_cents": typ("integer"), "currency": typ("string"), "taxable": typ("boolean"), "requires_shipping": typ("boolean"), "sort_order": typ("integer"), "metadata": typ("object")}

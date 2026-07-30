@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.7.6
+version: 0.7.7
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -73,7 +73,7 @@ provides:
     - { name: commerce_collections_add_product, description: "Add a listing to a collection. Args: collection_id, listing_id." }
     - { name: commerce_collections_remove_product, description: "Remove a listing from a collection. Args: collection_id, listing_id." }
     - { name: commerce_cart_create, description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?." }
-    - { name: commerce_carts_list, description: "List Commerce carts. Args: store_id?, status?, limit?." }
+    - { name: commerce_carts_list, description: "List Commerce carts, including inactive abandonment candidates. Args: store_id?, status?, updated_before? (RFC3339), updated_after? (RFC3339), inactive_for_minutes?, has_items?, abandoned_only? (nonempty open/checkout carts; defaults to 24h inactivity), sort? (updated_desc|updated_asc), limit?." }
     - { name: commerce_cart_get, description: "Fetch a Commerce cart with items. Args: cart_id? or session_token?." }
     - { name: commerce_cart_add_item, description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?." }
     - { name: commerce_cart_set_quantity, description: "Set a Commerce cart item's quantity in the Commerce cart. Args: cart_id, item_id, quantity." }
@@ -138,7 +138,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.7.6
+    ref: commerce/v0.7.7
     entry: mcp/commerce
   port: 8080
   health_check: /health
