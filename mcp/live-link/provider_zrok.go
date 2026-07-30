@@ -78,6 +78,17 @@ func (p *zrokProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	if err := ensureZrokEnvironment(ctx.DataDir(), token); err != nil {
 		return "", fmt.Errorf("enable zrok environment: %w", err)
 	}
+	environment, err := readZrokEnvironment(ctx.DataDir())
+	if err != nil {
+		return "", fmt.Errorf("read zrok environment: %w", err)
+	}
+	removed, err := reconcileZrokShares(context.Background(), token, environment.ZitiIdentity, state.PublicURL)
+	if err != nil {
+		return "", fmt.Errorf("reconcile zrok shares: %w", err)
+	}
+	if removed > 0 {
+		ctx.Logger().Info("removed stale zrok share", "count", removed, "public_url", state.PublicURL)
+	}
 	binary, err := resolveZrokBinary(ctx.Config().Get("zrok2_path"), ctx.DataDir(), false, ctx.Logger().Info)
 	if err != nil {
 		return "", err
@@ -221,6 +232,25 @@ type zrokNativeEnvironment struct {
 	APIEndpoint  string `json:"api_endpoint"`
 }
 
+func readZrokEnvironment(dataDir string) (*zrokNativeEnvironment, error) {
+	if dataDir == "" {
+		return nil, errors.New("no APTEVA_DATA_DIR available")
+	}
+	path := filepath.Join(zrokHome(dataDir), ".zrok2", "environment.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var environment zrokNativeEnvironment
+	if err := json.Unmarshal(data, &environment); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(environment.ZitiIdentity) == "" {
+		return nil, errors.New("zrok environment identity is empty")
+	}
+	return &environment, nil
+}
+
 func ensureZrokEnvironment(dataDir, token string) error {
 	if dataDir == "" {
 		return errors.New("no APTEVA_DATA_DIR available")
@@ -304,6 +334,18 @@ type zrokName struct {
 	Name           string `json:"name"`
 }
 
+type zrokShareSummary struct {
+	BackendMode       string   `json:"backendMode"`
+	EnvZID            string   `json:"envZId"`
+	FrontendEndpoints []string `json:"frontendEndpoints"`
+	ShareMode         string   `json:"shareMode"`
+	ShareToken        string   `json:"shareToken"`
+}
+
+type zrokSharesList struct {
+	Shares []zrokShareSummary `json:"shares"`
+}
+
 var (
 	zrokEnableEnvironment = func(ctx context.Context, token string) (*zrokEnableResponse, error) {
 		out := &zrokEnableResponse{}
@@ -331,7 +373,81 @@ var (
 		}
 		return "", fmt.Errorf("reserved name %q was not returned by namespace %q", name, namespace)
 	}
+	zrokListShares = func(ctx context.Context, token, envZID string) ([]zrokShareSummary, error) {
+		query := url.Values{
+			"envZId":    []string{envZID},
+			"shareMode": []string{"public"},
+		}
+		var response zrokSharesList
+		if err := zrokAPIRequest(ctx, http.MethodGet, "/shares?"+query.Encode(), token, nil, &response); err != nil {
+			return nil, err
+		}
+		return response.Shares, nil
+	}
+	zrokDeleteShare = func(ctx context.Context, token, envZID, shareToken string) error {
+		return zrokAPIRequest(ctx, http.MethodPost, "/unshare", token, map[string]string{
+			"envZId":     envZID,
+			"shareToken": shareToken,
+		}, nil)
+	}
 )
+
+func reconcileZrokShares(ctx context.Context, token, envZID, publicURL string) (int, error) {
+	envZID = strings.TrimSpace(envZID)
+	if envZID == "" {
+		return 0, errors.New("zrok environment identity is empty")
+	}
+	expectedHost, err := zrokEndpointHost(publicURL)
+	if err != nil {
+		return 0, err
+	}
+	shares, err := zrokListShares(ctx, token, envZID)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, share := range shares {
+		if share.EnvZID != envZID ||
+			!strings.EqualFold(share.ShareMode, "public") ||
+			!strings.EqualFold(share.BackendMode, "proxy") {
+			continue
+		}
+		matchesEndpoint := false
+		for _, endpoint := range share.FrontendEndpoints {
+			host, hostErr := zrokEndpointHost(endpoint)
+			if hostErr == nil && host == expectedHost {
+				matchesEndpoint = true
+				break
+			}
+		}
+		if !matchesEndpoint {
+			continue
+		}
+		shareToken := strings.TrimSpace(share.ShareToken)
+		if shareToken == "" {
+			return removed, errors.New("zrok returned a matching share without a share token")
+		}
+		if err := zrokDeleteShare(ctx, token, envZID, shareToken); err != nil {
+			return removed, err
+		}
+		removed++
+	}
+	return removed, nil
+}
+
+func zrokEndpointHost(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" ||
+		parsed.User != nil || parsed.Port() != "" ||
+		(parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("zrok returned an invalid share endpoint")
+	}
+	return strings.ToLower(strings.TrimSuffix(parsed.Hostname(), ".")), nil
+}
 
 func zrokPublicURL(name, namespaceName string) (string, error) {
 	hostSuffix := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(namespaceName), "."))

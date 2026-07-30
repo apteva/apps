@@ -39,6 +39,25 @@ func TestZrokPublicURLUsesNamespaceReturnedByAPI(t *testing.T) {
 	}
 }
 
+func TestZrokEndpointHostRejectsUnexpectedURLParts(t *testing.T) {
+	for _, valid := range []string{"apteva.shares.zrok.io", "https://apteva.shares.zrok.io/"} {
+		if host, err := zrokEndpointHost(valid); err != nil || host != "apteva.shares.zrok.io" {
+			t.Errorf("valid endpoint %q: host=%q err=%v", valid, host, err)
+		}
+	}
+	for _, invalid := range []string{
+		"http://apteva.shares.zrok.io",
+		"https://user@apteva.shares.zrok.io",
+		"https://apteva.shares.zrok.io:443",
+		"https://apteva.shares.zrok.io/path",
+		"https://apteva.shares.zrok.io/?query=1",
+	} {
+		if _, err := zrokEndpointHost(invalid); err == nil {
+			t.Errorf("invalid endpoint %q was accepted", invalid)
+		}
+	}
+}
+
 func TestZrokArtifactsArePinned(t *testing.T) {
 	for _, platform := range [][2]string{
 		{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "amd64"}, {"darwin", "arm64"},
@@ -111,6 +130,84 @@ func TestEnsureZrokEnvironmentUsesPrivateNativeFiles(t *testing.T) {
 	}
 	if native.AccountToken != "secret-enable-token" || native.ZitiIdentity != "identity-id" {
 		t.Fatalf("native environment=%#v", native)
+	}
+	loaded, err := readZrokEnvironment(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ZitiIdentity != "identity-id" {
+		t.Fatalf("loaded environment=%#v", loaded)
+	}
+}
+
+func TestReconcileZrokSharesDeletesOnlyOwnedReservedEndpoint(t *testing.T) {
+	oldList, oldDelete := zrokListShares, zrokDeleteShare
+	t.Cleanup(func() {
+		zrokListShares, zrokDeleteShare = oldList, oldDelete
+	})
+	zrokListShares = func(_ context.Context, token, envZID string) ([]zrokShareSummary, error) {
+		if token != "enable-token" || envZID != "current-environment" {
+			t.Fatalf("list token/environment mismatch")
+		}
+		return []zrokShareSummary{
+			{
+				BackendMode: "proxy", EnvZID: "current-environment",
+				FrontendEndpoints: []string{"apteva.shares.zrok.io"},
+				ShareMode:         "public", ShareToken: "owned-stale-share",
+			},
+			{
+				BackendMode: "proxy", EnvZID: "another-environment",
+				FrontendEndpoints: []string{"apteva.shares.zrok.io"},
+				ShareMode:         "public", ShareToken: "other-environment",
+			},
+			{
+				BackendMode: "proxy", EnvZID: "current-environment",
+				FrontendEndpoints: []string{"different.shares.zrok.io"},
+				ShareMode:         "public", ShareToken: "different-endpoint",
+			},
+			{
+				BackendMode: "web", EnvZID: "current-environment",
+				FrontendEndpoints: []string{"apteva.shares.zrok.io"},
+				ShareMode:         "public", ShareToken: "different-backend",
+			},
+		}, nil
+	}
+	var deleted []string
+	zrokDeleteShare = func(_ context.Context, token, envZID, shareToken string) error {
+		if token != "enable-token" || envZID != "current-environment" {
+			t.Fatalf("delete token/environment mismatch")
+		}
+		deleted = append(deleted, shareToken)
+		return nil
+	}
+
+	removed, err := reconcileZrokShares(
+		context.Background(), "enable-token", "current-environment",
+		"https://apteva.shares.zrok.io",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 || len(deleted) != 1 || deleted[0] != "owned-stale-share" {
+		t.Fatalf("removed=%d deleted=%v", removed, deleted)
+	}
+}
+
+func TestReconcileZrokSharesRefusesMatchingShareWithoutToken(t *testing.T) {
+	oldList := zrokListShares
+	t.Cleanup(func() { zrokListShares = oldList })
+	zrokListShares = func(_ context.Context, _, _ string) ([]zrokShareSummary, error) {
+		return []zrokShareSummary{{
+			BackendMode: "proxy", EnvZID: "current-environment",
+			FrontendEndpoints: []string{"https://apteva.shares.zrok.io/"},
+			ShareMode:         "public",
+		}}, nil
+	}
+	if _, err := reconcileZrokShares(
+		context.Background(), "enable-token", "current-environment",
+		"https://apteva.shares.zrok.io",
+	); err == nil || !strings.Contains(err.Error(), "without a share token") {
+		t.Fatalf("error=%v", err)
 	}
 }
 

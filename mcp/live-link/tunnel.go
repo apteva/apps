@@ -119,6 +119,7 @@ type Manager struct {
 	// failed: ..." that the panel + DB row both expose.
 	recentOutput []string
 	redactions   []string
+	outputWG     sync.WaitGroup
 
 	// Hooks the caller (main.go) installs to persist state.
 	onURLAssigned func(runID int64, url string)
@@ -293,13 +294,11 @@ func (m *Manager) Start(p StartParams) error {
 		m.redactions = append(m.redactions, p.Authtoken)
 	}
 
-	// Wait for exit in the background; clean up when it ends.
-	go m.waitForExit(p.RunID)
-
 	// Per-mode wiring of stdout vs stderr to URL-scanner vs Discard.
 	// cloudflared writes its URL to STDERR; ngrok writes ours to STDOUT
 	// (because we passed --log stdout). Named mode knows the URL up
 	// front and just drains both streams.
+	m.outputWG.Add(2)
 	switch p.Mode {
 	case ModeQuick:
 		go m.scanForURL(stdout, p.RunID, nil)
@@ -334,6 +333,10 @@ func (m *Manager) Start(p StartParams) error {
 			go cb(runID, url)
 		}
 	}
+	// Start waiting only after both output readers are registered. Otherwise a
+	// fast-failing child can exit before its diagnostic line reaches the
+	// bounded output buffer.
+	go m.waitForExit(p.RunID)
 
 	return nil
 }
@@ -362,6 +365,7 @@ func withoutEnvKeys(env []string, keys ...string) []string {
 // — lets ngrok's `url=https://...` line strip the prefix without a
 // post-match substring.
 func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
+	defer m.outputWG.Done()
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
 	// Agent lines fit easily in the default 64KB Scanner buffer.
@@ -423,6 +427,9 @@ func (m *Manager) waitForExit(runID int64) {
 	}
 
 	waitErr := cmd.Wait()
+	// cmd.Wait closes the child pipes. Wait for both scanners to drain their
+	// remaining lines before constructing the failure reason.
+	m.outputWG.Wait()
 
 	m.mu.Lock()
 	// If the manager has already moved on (someone called Start again
@@ -463,15 +470,11 @@ func (m *Manager) waitForExit(runID int64) {
 		}
 	}
 
-	// If the agent died without publishing a URL, attach the tail of
-	// its output to the exit reason. Without this the panel just shows
-	// "exit 1" and operators have no path forward; with it they see
-	// the actual ngrok / cloudflared error message ("ERR_NGROK_105
-	// authentication failed", "tunnel limit reached", etc.). Only
-	// triggered for failures (clean stop has nothing to diagnose) and
-	// only when we never got a URL (a URL-bearing run that died later
-	// is a transient connection issue, not a startup misconfig).
-	if finalStatus == StatusFailed && m.publicURL == "" && len(m.recentOutput) > 0 {
+	// Attach the output tail to every failed run. Stable providers know their
+	// URL before the child is healthy, so publicURL being populated does not
+	// prove startup succeeded. The old publicURL=="" condition hid zrok's
+	// shareConflict diagnostics and reduced the panel to an unhelpful "exit 1".
+	if finalStatus == StatusFailed && len(m.recentOutput) > 0 {
 		// Show last 5 lines — enough to surface the error, short enough
 		// to fit in a panel toast or row.
 		start := 0

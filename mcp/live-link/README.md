@@ -31,6 +31,10 @@ zrok uses the `enable_token` stored in a bound zrok connection to enable one
 isolated native zrok environment per Live Link install. Configure a reserved
 name in the panel; zrok's public namespace maps it to
 the HTTPS hostname returned by zrok for its public namespace. Switching providers preserves the name.
+Before each launch, Live Link reconciles only public proxy shares in its own
+dedicated zrok environment that are attached to that exact reserved hostname.
+This removes an orphaned share left by an interrupted sidecar without releasing
+the stable name or touching another environment.
 The explicit **Release name** action removes the upstream name and local native
 environment.
 
