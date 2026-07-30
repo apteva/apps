@@ -658,11 +658,12 @@ export default function App() {
   if (!busy && communities.length === 0) {
     return (
       <main className="auth-shell">
-        <section className="auth-card">
-          <UserRound size={34} aria-hidden="true" />
-          <h1>Membership pending</h1>
-          <p className="muted">Your Auth account is valid, but it is not linked to an active Community member.</p>
-          <div className="identity-box">
+      <section className="auth-card">
+        <UserRound size={34} aria-hidden="true" />
+        <h1>Membership pending</h1>
+        <p className="muted">Your Auth account is valid, but it is not linked to an active Community member.</p>
+        {error && <div className="alert error" role="alert">{error}</div>}
+        <div className="identity-box">
             <span>Auth user ID</span>
             <code>{auth.user.id}</code>
           </div>
