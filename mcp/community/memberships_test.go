@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -156,6 +157,40 @@ func TestMembershipCheckoutIsIdempotentAndUnpaidHasNoAccess(t *testing.T) {
 	}
 	if allowed {
 		t.Fatal("an unpaid first checkout must not grant course access")
+	}
+}
+
+func TestMembershipSubscriptionsListReleasesSingleDatabaseConnection(t *testing.T) {
+	ctx, _, community, member, _, _, plan := membershipFixture(t)
+	startMembership(t, ctx, member, plan)
+	ctx.AppDB().SetMaxOpenConns(1)
+
+	result := make(chan struct {
+		out any
+		err error
+	}, 1)
+	go func() {
+		out, err := toolMembershipSubscriptionsList(ctx, map[string]any{
+			"community_id": community.ID,
+			"limit":        int64(100),
+		})
+		result <- struct {
+			out any
+			err error
+		}{out: out, err: err}
+	}()
+
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		subscriptions := got.out.(map[string]any)["subscriptions"].([]*MemberSubscription)
+		if len(subscriptions) != 1 || subscriptions[0].Plan == nil {
+			t.Fatalf("subscriptions=%#v, want one row with its plan", subscriptions)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("membership subscription list deadlocked with the SDK single-connection database pool")
 	}
 }
 

@@ -532,10 +532,21 @@ func toolMembershipSubscriptionsList(ctx *sdk.AppCtx, args map[string]any) (any,
 		if e != nil {
 			return nil, e
 		}
-		ms.Plan, _ = loadMembershipPlan(ctx.AppDB(), ms.PlanID, true)
 		out = append(out, ms)
 	}
-	return map[string]any{"subscriptions": out, "count": len(out)}, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	// The SDK intentionally limits app SQLite pools to one connection.
+	// Release the subscription cursor before loading each related plan or
+	// the nested query waits forever for the connection held by rows.
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, ms := range out {
+		ms.Plan, _ = loadMembershipPlan(ctx.AppDB(), ms.PlanID, true)
+	}
+	return map[string]any{"subscriptions": out, "count": len(out)}, nil
 }
 
 func toolMembershipSubscriptionGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1181,6 +1192,12 @@ func listMembershipPlans(db *sql.DB, communityID string, includeArchived bool) (
 		}
 		ids = append(ids, id)
 	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
 	out := make([]*MembershipPlan, 0, len(ids))
 	for _, id := range ids {
 		p, e := loadMembershipPlan(db, id, true)
@@ -1189,7 +1206,7 @@ func listMembershipPlans(db *sql.DB, communityID string, includeArchived bool) (
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func membershipResponse(ms *MemberSubscription) map[string]any {
