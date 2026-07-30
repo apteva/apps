@@ -218,11 +218,15 @@ type DialogKind =
   | "offer"
   | "membership_plan";
 
-async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+async function getJSON<T>(path: string, projectId: string): Promise<T> {
+  const separator = path.includes("?") ? "&" : "?";
+  const res = await fetch(
+    `${API}${path}${separator}project_id=${encodeURIComponent(projectId)}`,
+    {
     credentials: "same-origin",
     cache: "no-store",
-  });
+    },
+  );
   if (!res.ok) throw new Error(`${path}: ${res.status}: ${await res.text()}`);
   return res.json() as Promise<T>;
 }
@@ -323,36 +327,38 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   }, []);
 
   const refreshCommunities = useCallback(async () => {
-    const d = await getJSON<{ communities: Community[] }>("/communities");
+    const d = await getJSON<{ communities: Community[] }>("/communities", projectId);
     setCommunities(d.communities || []);
     setCommunityId((prev) =>
       prev && d.communities.some((c) => c.id === prev) ? prev : d.communities[0]?.id ?? null,
     );
     setStatus(`${d.communities.length} communities`);
     return d.communities || [];
-  }, []);
+  }, [projectId]);
 
   const refreshMembers = useCallback(async (cid: string) => {
     const d = await getJSON<{ members: Member[] }>(
       `/members?community_id=${encodeURIComponent(cid)}&status=active`,
+      projectId,
     );
     setMembers(d.members || []);
     setMemberId((prev) =>
       prev && d.members.some((m) => m.id === prev) ? prev : d.members[0]?.id ?? "",
     );
     return d.members || [];
-  }, []);
+  }, [projectId]);
 
   const refreshSpaces = useCallback(async (cid: string) => {
     const d = await getJSON<{ spaces: Space[] }>(
       `/spaces?community_id=${encodeURIComponent(cid)}`,
+      projectId,
     );
     setSpaces(d.spaces || []);
     setSpaceId((prev) =>
       prev && d.spaces.some((s) => s.id === prev) ? prev : d.spaces[0]?.id ?? null,
     );
     return d.spaces || [];
-  }, []);
+  }, [projectId]);
 
   const refreshMemberships = useCallback(async (cid: string) => {
     const [plansOut, subscriptionsOut] = await Promise.all([
@@ -366,19 +372,24 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   const refreshThreads = useCallback(async (sid: string) => {
     const d = await getJSON<{ threads: Thread[] }>(
       `/threads?space_id=${encodeURIComponent(sid)}`,
+      projectId,
     );
     setThreads(d.threads || []);
     setThreadId((prev) =>
       prev && d.threads.some((t) => t.id === prev) ? prev : d.threads[0]?.id ?? null,
     );
     return d.threads || [];
-  }, []);
+  }, [projectId]);
 
   const refreshCourse = useCallback(async (sid: string) => {
     const [s, l, offerOut, purchasesOut] = await Promise.all([
-      getJSON<{ sections: Section[] }>(`/sections?space_id=${encodeURIComponent(sid)}`),
+      getJSON<{ sections: Section[] }>(
+        `/sections?space_id=${encodeURIComponent(sid)}`,
+        projectId,
+      ),
       getJSON<{ lessons: Lesson[] }>(
         `/lessons?space_id=${encodeURIComponent(sid)}&include_drafts=true`,
+        projectId,
       ),
       callTool<{ offer: CourseOffer | null }>("course_offer_get", { space_id: sid }, projectId),
       callTool<{ purchases: CoursePurchase[] }>("course_purchases_list", { space_id: sid, limit: 100 }, projectId),
@@ -394,10 +405,13 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   }, [projectId]);
 
   const refreshPosts = useCallback(async (tid: string) => {
-    const d = await getJSON<{ posts: Post[] }>(`/posts?thread_id=${encodeURIComponent(tid)}`);
+    const d = await getJSON<{ posts: Post[] }>(
+      `/posts?thread_id=${encodeURIComponent(tid)}`,
+      projectId,
+    );
     setPosts(d.posts || []);
     return d.posts || [];
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     refreshCommunities().catch((e) => fail("Load communities", e));
