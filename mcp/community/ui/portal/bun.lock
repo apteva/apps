@@ -5,7 +5,7 @@
     "": {
       "name": "apteva-community-portal",
       "dependencies": {
-        "@apteva/web-sdk": "^0.5.1",
+        "@apteva/web-sdk": "^0.5.2",
         "lucide-react": "^0.468.0",
         "react": "^19.2.4",
         "react-dom": "^19.2.4",
@@ -19,7 +19,7 @@
     },
   },
   "packages": {
-    "@apteva/web-sdk": ["@apteva/web-sdk@0.5.1", "", {}, "sha512-GS0+bLMjNRBHVBckIlriquxnU8sAL1ppt5SCB1czt5xfIaEcr4dYNMVbymGgmrfvlrAEoVVRb/oyLZJ1PfJSJA=="],
+    "@apteva/web-sdk": ["@apteva/web-sdk@0.5.2", "", {}, "sha512-9Xn6hmdZKHJ+IjKkWhNYdCE8GSk4aubHqUwn8s37IxAaJiFg0py8pVsiKgL70GH1aIoA9YiHViTqjyJbJSftwQ=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 

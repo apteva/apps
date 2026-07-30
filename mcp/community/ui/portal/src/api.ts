@@ -30,7 +30,10 @@ declare const __AUTH_APP__: string;
 export const COMMUNITY_APP = __COMMUNITY_APP__ || "community";
 export const AUTH_APP = __AUTH_APP__ || "auth";
 
-export const apteva = new AptevaClient({ baseURL: pickBaseURL(__API_BASE__) });
+export const apteva = new AptevaClient({
+  baseURL: pickBaseURL(__API_BASE__),
+  projectId: currentProjectId(),
+});
 const community = apteva.app(COMMUNITY_APP);
 const auth = apteva.app(AUTH_APP);
 

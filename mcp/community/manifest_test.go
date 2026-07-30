@@ -101,6 +101,9 @@ func TestPortalAuthRoutesAreProjectScoped(t *testing.T) {
 			t.Errorf("portal auth route missing project scope: %s", route)
 		}
 	}
+	if !strings.Contains(string(source), "projectId: currentProjectId()") {
+		t.Error("portal AptevaClient must project-scope Community MCP calls")
+	}
 }
 
 // TestToolSetMatchesManifest catches forgetting to wire a manifest-
