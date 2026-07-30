@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.7.1
+version: 0.7.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -66,7 +66,7 @@ requires:
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
     - name: billing
-      version: ">=0.12.1"
+      version: ">=0.12.2"
       optional: false
       events:
         - invoice.paid

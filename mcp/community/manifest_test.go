@@ -75,7 +75,7 @@ func TestManifestParses(t *testing.T) {
 		t.Fatal("Community must orchestrate Billing and Subscriptions directly, not depend on SaaS")
 	}
 	if versions["auth"] != ">=0.8.0" || versions["catalog"] != ">=0.3.0" ||
-		versions["billing"] != ">=0.12.1" || versions["subscriptions"] != ">=0.7.2" {
+		versions["billing"] != ">=0.12.2" || versions["subscriptions"] != ">=0.7.2" {
 		t.Errorf("unexpected dependency versions: auth=%q catalog=%q billing=%q subscriptions=%q",
 			versions["auth"], versions["catalog"], versions["billing"], versions["subscriptions"])
 	}
