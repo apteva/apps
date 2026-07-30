@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.40
+version: 0.13.41
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -105,10 +105,10 @@ provides:
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{storage_id|url|content_base64, filename?, content_type?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
+    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{storage_id|url|content_base64, filename?, content_type?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events." }
-    - { name: message_list,           description: "List messages. Filters: direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?." }
+    - { name: message_list,           description: "List messages. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
     - { name: inbound_redispatch,     description: "Re-attempt routing for an inbound message that previously failed or had no_match. Args: id." }
     # routing config
     - { name: inbound_route_set,      description: "Bind a recipient URI pattern to a target app+route. Idempotent. Args: pattern (e.g. mailto:support+*@acme.com), target_app, target_route, priority?." }

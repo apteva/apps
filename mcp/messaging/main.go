@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.40
+version: 0.13.41
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -328,7 +328,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
-				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?}.",
+				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?}. " +
+				"Suppressed recipients return a JSON error with code=recipient_suppressed plus address, matched, kind, reason, source, and recipients.",
 			InputSchema: schemaObject(map[string]any{
 				"channel":                map[string]any{"type": "string", "enum": []string{"email", "sms", "whatsapp"}},
 				"from":                   map[string]any{"type": "string"},
@@ -377,8 +378,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "message_list",
-			Description: "List messages. Filters: direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200), offset? (default 0). Returns total for pagination.",
+			Description: "List messages. Filters: q? (free text across sender, recipients, subject, and body), direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200), offset? (default 0). Returns total for pagination.",
 			InputSchema: schemaObject(map[string]any{
+				"q":         map[string]any{"type": "string", "maxLength": 500},
 				"direction": map[string]any{"type": "string"},
 				"channel":   map[string]any{"type": "string"},
 				"status":    map[string]any{"type": "string"},
@@ -1105,23 +1107,26 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	attachJSON, _ := json.Marshal(attachIDs)
 
-	// Suppression check — drop any recipient that's on the list.
-	allowedTo, suppressedTo := filterSuppressed(ctx.AppDB(), pid, channel, to)
-	allowedCC, _ := filterSuppressed(ctx.AppDB(), pid, channel, cc)
-	allowedBCC, _ := filterSuppressed(ctx.AppDB(), pid, channel, bcc)
-	if len(allowedTo) == 0 {
-		return nil, fmt.Errorf("all 'to' recipients are suppressed: %v", suppressedTo)
+	// Suppression is an atomic pre-flight check. Silently dropping a
+	// suppressed Cc/Bcc or partially sending a multi-recipient email makes
+	// the caller's result ambiguous, so any match blocks the entire send.
+	suppressed, err := findSuppressedRecipients(ctx.AppDB(), pid, channel, to, cc, bcc)
+	if err != nil {
+		return nil, fmt.Errorf("suppression check: %w", err)
+	}
+	if len(suppressed) > 0 {
+		return nil, newRecipientSuppressedError(channel, suppressed)
 	}
 	if channel == channelWhatsApp && contentSid == "" {
-		if missing := whatsAppRecipientsOutsideSession(ctx.AppDB(), pid, from, allowedTo, time.Now().UTC()); len(missing) > 0 {
+		if missing := whatsAppRecipientsOutsideSession(ctx.AppDB(), pid, from, to, time.Now().UTC()); len(missing) > 0 {
 			return nil, fmt.Errorf("whatsapp free-form send requires an inbound message from each recipient within the last 24 hours; use an approved template for: %s", strings.Join(missing, ", "))
 		}
 	}
 
 	// Persist as pending first so a provider error still leaves a row.
-	toJSON, _ := json.Marshal(allowedTo)
-	ccJSON, _ := json.Marshal(allowedCC)
-	bccJSON, _ := json.Marshal(allowedBCC)
+	toJSON, _ := json.Marshal(to)
+	ccJSON, _ := json.Marshal(cc)
+	bccJSON, _ := json.Marshal(bcc)
 	idem := strArg(args, "idempotency_key")
 	var idemNullable any
 	if idem != "" {
@@ -1156,7 +1161,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// or template-derived).
 	in := providerSendInput{
 		Channel: channel,
-		From:    from, To: allowedTo, CC: allowedCC, BCC: allowedBCC,
+		From:    from, To: to, CC: cc, BCC: bcc,
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
 		Attachments:      attachments,
@@ -1192,7 +1197,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	emitMessagingEvent(ctx, pid, "message.sent", map[string]any{
 		"id":      id,
 		"channel": channel,
-		"to":      allowedTo,
+		"to":      to,
 	})
 	m, _ := dbMessageGet(ctx.AppDB(), pid, id)
 	return sendResponse(m), nil
@@ -1777,6 +1782,7 @@ func (a *App) toolMessageList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	opts := messageListOpts{
+		Q:         strings.TrimSpace(strArg(args, "q")),
 		Direction: strArg(args, "direction"),
 		Channel:   strArg(args, "channel"),
 		Status:    strArg(args, "status"),
@@ -5140,6 +5146,7 @@ func (a *App) handleMessagesList(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 	out, total, err := dbMessageListPage(globalCtx.AppDB(), pid, messageListOpts{
+		Q:         strings.TrimSpace(q.Get("q")),
 		Direction: q.Get("direction"),
 		Channel:   q.Get("channel"),
 		Status:    q.Get("status"),
@@ -5801,6 +5808,13 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := handler(globalCtx, body.Args)
 	if err != nil {
+		var suppressedErr *recipientSuppressedError
+		if errors.As(err, &suppressedErr) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": suppressedErr})
+			return
+		}
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -5913,8 +5927,8 @@ func whatsAppRecipientsOutsideSession(db *sql.DB, pid, from string, recipients [
 }
 
 type messageListOpts struct {
-	Direction, Channel, Status, Since, Address string
-	Limit, Offset                              int
+	Q, Direction, Channel, Status, Since, Address string
+	Limit, Offset                                 int
 }
 
 func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, error) {
@@ -5944,8 +5958,22 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 	if opts.Address != "" {
 		where = append(where, `(from_addr = ?
 			OR EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE json_each.value = ?)
-			OR EXISTS (SELECT 1 FROM json_each(messages.cc_addrs) WHERE json_each.value = ?))`)
-		args = append(args, opts.Address, opts.Address, opts.Address)
+			OR EXISTS (SELECT 1 FROM json_each(messages.cc_addrs) WHERE json_each.value = ?)
+			OR EXISTS (SELECT 1 FROM json_each(messages.bcc_addrs) WHERE json_each.value = ?))`)
+		args = append(args, opts.Address, opts.Address, opts.Address, opts.Address)
+	}
+	if opts.Q != "" {
+		pattern := messageSearchPattern(opts.Q)
+		where = append(where, `(LOWER(COALESCE(from_addr, '')) LIKE ? ESCAPE '\'
+			OR EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE ? ESCAPE '\')
+			OR EXISTS (SELECT 1 FROM json_each(messages.cc_addrs) WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE ? ESCAPE '\')
+			OR EXISTS (SELECT 1 FROM json_each(messages.bcc_addrs) WHERE LOWER(CAST(json_each.value AS TEXT)) LIKE ? ESCAPE '\')
+			OR LOWER(COALESCE(subject, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(body_text, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(body_html, '')) LIKE ? ESCAPE '\')`)
+		for range 7 {
+			args = append(args, pattern)
+		}
 	}
 	whereSQL := strings.Join(where, " AND ")
 	var total int
@@ -5981,6 +6009,16 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 		message.Attachments = attachments[message.ID]
 	}
 	return out, total, nil
+}
+
+func messageSearchPattern(q string) string {
+	runes := []rune(strings.ToLower(strings.TrimSpace(q)))
+	if len(runes) > 500 {
+		runes = runes[:500]
+	}
+	q = string(runes)
+	q = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	return "%" + q + "%"
 }
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
@@ -6788,40 +6826,78 @@ func dbSuppressionMatch(db *sql.DB, pid, channel, addr string) (*Suppression, er
 	return nil, nil
 }
 
-func filterSuppressed(db *sql.DB, pid, channel string, addrs []string) (allowed, suppressed []string) {
-	if len(addrs) == 0 {
-		return addrs, nil
-	}
-	rows, err := db.Query(
-		`SELECT COALESCE(kind,'address'), address FROM suppressions WHERE project_id = ? AND channel = ?`,
-		pid, channel,
-	)
+type suppressedRecipient struct {
+	Address       string `json:"address"`
+	RecipientType string `json:"recipient_type"`
+	Matched       string `json:"matched"`
+	Kind          string `json:"kind"`
+	Reason        string `json:"reason"`
+	Source        string `json:"source"`
+}
+
+type recipientSuppressedError struct {
+	Code       string                `json:"code"`
+	Channel    string                `json:"channel"`
+	Address    string                `json:"address"`
+	Matched    string                `json:"matched"`
+	Kind       string                `json:"kind"`
+	Reason     string                `json:"reason"`
+	Source     string                `json:"source"`
+	Recipients []suppressedRecipient `json:"recipients"`
+}
+
+func (e *recipientSuppressedError) Error() string {
+	b, err := json.Marshal(e)
 	if err != nil {
-		return addrs, nil
+		return "recipient_suppressed"
 	}
-	defer rows.Close()
-	addresses := map[string]bool{}
-	domains := map[string]bool{}
-	for rows.Next() {
-		var kind, a string
-		if err := rows.Scan(&kind, &a); err == nil {
-			switch kind {
-			case "domain":
-				domains[strings.ToLower(a)] = true
-			default:
-				addresses[strings.ToLower(a)] = true
+	return string(b)
+}
+
+func newRecipientSuppressedError(channel string, recipients []suppressedRecipient) error {
+	first := recipients[0]
+	return &recipientSuppressedError{
+		Code:       "recipient_suppressed",
+		Channel:    channel,
+		Address:    first.Address,
+		Matched:    first.Matched,
+		Kind:       first.Kind,
+		Reason:     first.Reason,
+		Source:     first.Source,
+		Recipients: recipients,
+	}
+}
+
+func findSuppressedRecipients(db *sql.DB, pid, channel string, to, cc, bcc []string) ([]suppressedRecipient, error) {
+	groups := []struct {
+		kind      string
+		addresses []string
+	}{
+		{kind: "to", addresses: to},
+		{kind: "cc", addresses: cc},
+		{kind: "bcc", addresses: bcc},
+	}
+	var out []suppressedRecipient
+	for _, group := range groups {
+		for _, address := range group.addresses {
+			match, err := dbSuppressionMatch(db, pid, channel, address)
+			if err != nil {
+				return nil, err
 			}
+			if match == nil {
+				continue
+			}
+			out = append(out, suppressedRecipient{
+				Address:       address,
+				RecipientType: group.kind,
+				Matched:       match.Address,
+				Kind:          match.Kind,
+				Reason:        match.Reason,
+				Source:        match.Source,
+			})
 		}
 	}
-	for _, a := range addrs {
-		lower := strings.ToLower(a)
-		if addresses[lower] || (channel == channelEmail && domains[emailDomain(lower)]) {
-			suppressed = append(suppressed, a)
-		} else {
-			allowed = append(allowed, a)
-		}
-	}
-	return allowed, suppressed
+	return out, nil
 }
 
 // ─── tiny utilities ────────────────────────────────────────────────

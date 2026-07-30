@@ -249,6 +249,13 @@ interface MessagePageState {
   total: number;
   hasMore: boolean;
 }
+interface MessageFilters {
+  q: string;
+  channel: string;
+  status: string;
+  address: string;
+  since: string;
+}
 interface ConfirmDialogRequest {
   title: string;
   message: React.ReactNode;
@@ -259,6 +266,13 @@ interface ConfirmDialogRequest {
 }
 type ConfirmFn = (request: ConfirmDialogRequest) => void;
 const MESSAGE_PAGE_SIZE = 100;
+const EMPTY_MESSAGE_FILTERS: MessageFilters = {
+  q: "",
+  channel: "",
+  status: "",
+  address: "",
+  since: "",
+};
 interface ComposeDraft {
   key: number;
   channel: string;
@@ -277,6 +291,26 @@ interface ComposeAttachment {
   content_base64: string;
 }
 
+function hasMessageFilters(filters: MessageFilters): boolean {
+  return Object.values(filters).some((value) => value !== "");
+}
+
+function messageListParams(
+  direction: "in" | "out",
+  page: MessagePageState,
+  filters: MessageFilters,
+): Record<string, string> {
+  const params: Record<string, string> = {
+    direction,
+    limit: String(page.limit),
+    offset: String(page.offset),
+  };
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) params[key] = value;
+  }
+  return params;
+}
+
 // ─── Component ────────────────────────────────────────────────────
 export default function MessagingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("outbox");
@@ -285,6 +319,10 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   const [outbox, setOutbox] = useState<MessageRow[]>([]);
   const [inbox, setInbox] = useState<MessageRow[]>([]);
+  const [outboxCount, setOutboxCount] = useState(0);
+  const [inboxCount, setInboxCount] = useState(0);
+  const [outboxFilters, setOutboxFilters] = useState<MessageFilters>(EMPTY_MESSAGE_FILTERS);
+  const [inboxFilters, setInboxFilters] = useState<MessageFilters>(EMPTY_MESSAGE_FILTERS);
   const [outboxPage, setOutboxPage] = useState<MessagePageState>({
     limit: MESSAGE_PAGE_SIZE,
     offset: 0,
@@ -340,36 +378,67 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }
     const qs = withParams(params || {});
     const res = await fetch(`${API}${path}?${qs}`, opts);
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let detail = text;
+      try {
+        const payload = JSON.parse(text) as {
+          error?: string | {
+            code?: string;
+            address?: string;
+            matched?: string;
+            kind?: string;
+            reason?: string;
+            source?: string;
+          };
+        };
+        if (payload.error && typeof payload.error === "object" && payload.error.code === "recipient_suppressed") {
+          const error = payload.error;
+          detail = `${error.address || "Recipient"} is suppressed: ${error.reason || "blocked"}` +
+            `${error.matched ? ` (matched ${error.kind || "entry"} ${error.matched}` : ""}` +
+            `${error.source ? `, source ${error.source}` : ""}` +
+            `${error.matched ? ")" : ""}`;
+        } else if (typeof payload.error === "string") {
+          detail = payload.error;
+        }
+      } catch {}
+      throw new Error(`${res.status}: ${detail}`);
+    }
     return res.json();
   }, [withParams]);
 
   const loadOutbox = useCallback(async () => {
-    const r = await api<MessageListResponse>("GET", "/messages", {
-      direction: "out",
-      limit: String(outboxPage.limit),
-      offset: String(outboxPage.offset),
-    });
+    const params = messageListParams("out", outboxPage, outboxFilters);
+    const [r, unfiltered] = await Promise.all([
+      api<MessageListResponse>("GET", "/messages", params),
+      hasMessageFilters(outboxFilters)
+        ? api<MessageListResponse>("GET", "/messages", { direction: "out", limit: "1", offset: "0" })
+        : Promise.resolve(null),
+    ]);
+    setOutboxCount(unfiltered?.total ?? r.total ?? (r.messages || []).length);
     setOutbox(r.messages || []);
     setOutboxPage((p) => ({
       ...p,
       total: typeof r.total === "number" ? r.total : (r.messages || []).length,
       hasMore: !!r.has_more,
     }));
-  }, [api, outboxPage.limit, outboxPage.offset]);
+  }, [api, outboxPage.limit, outboxPage.offset, outboxFilters]);
   const loadInbox = useCallback(async () => {
-    const r = await api<MessageListResponse>("GET", "/messages", {
-      direction: "in",
-      limit: String(inboxPage.limit),
-      offset: String(inboxPage.offset),
-    });
+    const params = messageListParams("in", inboxPage, inboxFilters);
+    const [r, unfiltered] = await Promise.all([
+      api<MessageListResponse>("GET", "/messages", params),
+      hasMessageFilters(inboxFilters)
+        ? api<MessageListResponse>("GET", "/messages", { direction: "in", limit: "1", offset: "0" })
+        : Promise.resolve(null),
+    ]);
+    setInboxCount(unfiltered?.total ?? r.total ?? (r.messages || []).length);
     setInbox(r.messages || []);
     setInboxPage((p) => ({
       ...p,
       total: typeof r.total === "number" ? r.total : (r.messages || []).length,
       hasMore: !!r.has_more,
     }));
-  }, [api, inboxPage.limit, inboxPage.offset]);
+  }, [api, inboxPage.limit, inboxPage.offset, inboxFilters]);
   const loadTemplates = useCallback(async () => {
     const r = await api<{ templates: TemplateRow[] }>("POST", "/tools/call", {}, {
       tool: "template_list",
@@ -471,14 +540,25 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }));
   }, []);
 
+  const filterOutbox = useCallback((filters: MessageFilters) => {
+    setSelected(null);
+    setOutboxFilters(filters);
+    setOutboxPage((p) => ({ ...p, offset: 0 }));
+  }, []);
+  const filterInbox = useCallback((filters: MessageFilters) => {
+    setSelected(null);
+    setInboxFilters(filters);
+    setInboxPage((p) => ({ ...p, offset: 0 }));
+  }, []);
+
   const counts = useMemo(() => ({
-    outbox: outboxPage.total,
-    inbox: inboxPage.total,
+    outbox: outboxCount,
+    inbox: inboxCount,
     templates: templates.length,
     routes: routes.length,
     suppressions: suppressions.length,
     senders: senders.length,
-  }), [outboxPage.total, inboxPage.total, templates, routes, suppressions, senders]);
+  }), [outboxCount, inboxCount, templates, routes, suppressions, senders]);
 
   const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
@@ -549,6 +629,9 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
             <MessageList
               rows={outbox}
               page={outboxPage}
+              direction="out"
+              filters={outboxFilters}
+              onFilters={filterOutbox}
               onPage={pageOutbox}
               onSelect={openMessage}
               selectedId={selected?.id}
@@ -558,6 +641,9 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
             <MessageList
               rows={inbox}
               page={inboxPage}
+              direction="in"
+              filters={inboxFilters}
+              onFilters={filterInbox}
               onPage={pageInbox}
               onSelect={openMessage}
               selectedId={selected?.id}
@@ -599,16 +685,99 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 // ─── Subviews ─────────────────────────────────────────────────────
 
 function MessageList({
-  rows, page, onPage, onSelect, selectedId,
+  rows, page, direction, filters, onFilters, onPage, onSelect, selectedId,
 }: {
   rows: MessageRow[];
   page: MessagePageState;
+  direction: "in" | "out";
+  filters: MessageFilters;
+  onFilters: (filters: MessageFilters) => void;
   onPage: (delta: number) => void;
   onSelect: (m: MessageRow) => void;
   selectedId?: number;
 }) {
+  const [draft, setDraft] = useState<MessageFilters>(filters);
+  useEffect(() => setDraft(filters), [filters]);
+  const update = (field: keyof MessageFilters, value: string) => {
+    setDraft((current) => ({ ...current, [field]: value }));
+  };
+  const apply = (event: React.FormEvent) => {
+    event.preventDefault();
+    onFilters({
+      q: draft.q.trim(),
+      channel: draft.channel,
+      status: draft.status,
+      address: draft.address.trim(),
+      since: draft.since,
+    });
+  };
+  const clear = () => {
+    const empty = { ...EMPTY_MESSAGE_FILTERS };
+    setDraft(empty);
+    onFilters(empty);
+  };
+  const statusOptions = direction === "in"
+    ? ["received"]
+    : ["pending", "sent", "delivered", "opened", "clicked", "bounced", "complained", "rejected", "failed"];
   return (
     <div>
+      <form onSubmit={apply} className="px-4 py-3 border-b border-border flex items-end gap-2 flex-wrap">
+        <label className="min-w-[15rem] flex-1">
+          <span className="block text-xs text-text-dim mb-1">Search</span>
+          <input
+            type="search"
+            value={draft.q}
+            onChange={(e) => update("q", e.target.value)}
+            placeholder="Sender, recipient, subject, or body"
+            className="w-full px-2.5 py-1.5 rounded border border-border bg-surface text-sm"
+          />
+        </label>
+        <label>
+          <span className="block text-xs text-text-dim mb-1">Channel</span>
+          <select
+            value={draft.channel}
+            onChange={(e) => update("channel", e.target.value)}
+            className="px-2.5 py-1.5 rounded border border-border bg-surface text-sm"
+          >
+            <option value="">All</option>
+            <option value="email">Email</option>
+            <option value="sms">SMS</option>
+            <option value="whatsapp">WhatsApp</option>
+          </select>
+        </label>
+        <label>
+          <span className="block text-xs text-text-dim mb-1">Status</span>
+          <select
+            value={draft.status}
+            onChange={(e) => update("status", e.target.value)}
+            className="px-2.5 py-1.5 rounded border border-border bg-surface text-sm"
+          >
+            <option value="">All</option>
+            {statusOptions.map((value) => <option key={value} value={value}>{value}</option>)}
+          </select>
+        </label>
+        <label className="min-w-[13rem]">
+          <span className="block text-xs text-text-dim mb-1">Exact address</span>
+          <input
+            type="text"
+            value={draft.address}
+            onChange={(e) => update("address", e.target.value)}
+            placeholder="name@example.com"
+            className="w-full px-2.5 py-1.5 rounded border border-border bg-surface text-sm"
+          />
+        </label>
+        <label>
+          <span className="block text-xs text-text-dim mb-1">Since</span>
+          <input
+            type="date"
+            value={draft.since}
+            onChange={(e) => update("since", e.target.value)}
+            className="px-2.5 py-1.5 rounded border border-border bg-surface text-sm"
+          />
+        </label>
+        <button type="submit" className="px-3 py-1.5 rounded bg-accent text-white text-sm">Apply</button>
+        <button type="button" onClick={clear} className="px-3 py-1.5 rounded border border-border text-sm hover:bg-surface-2">Clear</button>
+      </form>
       <MessagePager page={page} rowCount={rows.length} onPage={onPage} />
       {rows.length === 0 ? (
         <div className="p-6 text-text-dim text-sm">No messages.</div>
