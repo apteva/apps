@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.6.0
+version: 0.6.1
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -85,6 +85,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { prefix: /ui/, method: GET, no_auth: true }
   mcp_tools:
     - { name: communities_create,  description: "Create a community." }
     - { name: communities_list,    description: "List communities in this scope." }

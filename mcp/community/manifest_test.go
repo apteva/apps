@@ -45,6 +45,15 @@ func TestManifestParses(t *testing.T) {
 	if m.Provides.UIPanels[0].Entry != "/ui/CommunityPanel.mjs" {
 		t.Fatalf("panel entry = %q", m.Provides.UIPanels[0].Entry)
 	}
+	foundPublicPortal := false
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.Prefix == "/ui/" && route.Method == "GET" && route.NoAuth {
+			foundPublicPortal = true
+		}
+	}
+	if !foundPublicPortal {
+		t.Fatal("member portal assets must be exposed as an anonymous GET /ui/ route")
+	}
 	required := map[string]bool{}
 	events := map[string][]string{}
 	versions := map[string]string{}
