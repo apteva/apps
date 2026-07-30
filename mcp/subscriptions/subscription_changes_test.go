@@ -11,8 +11,8 @@ import (
 func TestSubscriptionChangeManifestAndTools(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Version != "0.7.1" {
-		t.Fatalf("manifest version=%s, want 0.7.0", manifest.Version)
+	if manifest.Version != "0.7.2" {
+		t.Fatalf("manifest version=%s, want 0.7.2", manifest.Version)
 	}
 	publishesChange := false
 	for _, event := range manifest.Provides.Publishes {

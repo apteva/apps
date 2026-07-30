@@ -102,6 +102,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"id": map[string]any{"type": "integer"}, "metadata_patch": map[string]any{"type": "object"}, "actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
 		}, []string{"id", "metadata_patch"}), Handler: a.toolSubscriptionsUpdateMetadata},
 		{Name: "subscriptions_cancel", Description: "Cancel a subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "at_period_end": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionsCancel},
+		{Name: "subscriptions_resume", Description: "Clear a scheduled period-end cancellation on an active subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionsResume},
 		{Name: "subscription_items_create", Description: "Add a flat or metered item to a subscription.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "product_id": map[string]any{"type": "integer"}, "price_id": map[string]any{"type": "integer"}, "sku": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "quantity": map[string]any{"type": "number"}, "unit_amount_cents": map[string]any{"type": "integer"}, "currency": map[string]any{"type": "string"}, "billing_scheme": map[string]any{"type": "string"}, "meter_key": map[string]any{"type": "string"}, "included_units": map[string]any{"type": "integer"}, "unit_size": map[string]any{"type": "integer"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "title"}), Handler: a.toolSubscriptionItemsCreate},
@@ -381,6 +382,21 @@ func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	ctx.Emit("subscription.cancelled", map[string]any{"subscription_id": sub.ID})
 	return map[string]any{"subscription": sub}, nil
+}
+
+func (a *App) toolSubscriptionsResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sub, changed, err := dbSubscriptionResume(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		ctx.Emit("subscription.resumed", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+	}
+	return map[string]any{"subscription": sub, "changed": changed}, nil
 }
 
 func (a *App) toolSubscriptionItemsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1317,6 +1333,42 @@ func dbSubscriptionCancel(db *sql.DB, pid string, args map[string]any) (*Subscri
 	return dbSubscriptionGet(db, pid, id, true)
 }
 
+func dbSubscriptionResume(db *sql.DB, pid string, args map[string]any) (*Subscription, bool, error) {
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, false, errors.New("id required")
+	}
+	sub, err := dbSubscriptionGet(db, pid, id, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if sub == nil {
+		return nil, false, errors.New("subscription not found")
+	}
+	if sub.Status != "active" {
+		return nil, false, fmt.Errorf("only active subscriptions can resume a scheduled cancellation (status=%s)", sub.Status)
+	}
+	if sub.CancelAt == "" {
+		return sub, false, nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscriptions SET cancel_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND status='active'`, id, pid); err != nil {
+		return nil, false, err
+	}
+	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.resumed", map[string]any{"reason": strArg(args, "reason")}); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	sub, err = dbSubscriptionGet(db, pid, id, true)
+	return sub, true, err
+}
+
 func dbSubscriptionItemCreate(db *sql.DB, pid string, args map[string]any) (*SubItem, error) {
 	subID := int64Arg(args, "subscription_id")
 	sub, err := dbSubscriptionGet(db, pid, subID, false)
@@ -2172,6 +2224,18 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, map[string]any{"subscription": sub})
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/resume") && r.Method == http.MethodPost {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		body["id"] = id
+		sub, changed, err := dbSubscriptionResume(ctx.AppDB(), pid, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"subscription": sub, "changed": changed})
 		return
 	}
 	if r.Method == http.MethodGet {

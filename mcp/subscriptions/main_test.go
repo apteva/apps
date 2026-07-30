@@ -79,6 +79,70 @@ func TestSubscriptionLifecycle(t *testing.T) {
 	}
 }
 
+func TestSubscriptionScheduledCancellationCanResume(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	app := &App{}
+	sub, err := dbSubscriptionCreate(ctx, "proj-test", map[string]any{
+		"customer_email":       "member@example.com",
+		"kind":                 "service",
+		"currency":             "EUR",
+		"interval":             "month",
+		"current_period_start": "2026-07-01T00:00:00Z",
+		"current_period_end":   "2026-08-01T00:00:00Z",
+		"next_renewal_at":      "2026-08-01T00:00:00Z",
+		"items": []any{
+			map[string]any{"title": "Community membership", "quantity": 1, "unit_amount_cents": 9900, "currency": "EUR"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduled, err := dbSubscriptionCancel(ctx.AppDB(), "proj-test", map[string]any{"id": sub.ID, "at_period_end": true, "actor": "member"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scheduled.Status != "active" || scheduled.CancelAt == "" {
+		t.Fatalf("scheduled cancellation = %+v", scheduled)
+	}
+	out, err := app.toolSubscriptionsResume(ctx, map[string]any{"id": sub.ID, "actor": "member"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed := out.(map[string]any)["subscription"].(*Subscription)
+	if resumed.Status != "active" || resumed.CancelAt != "" || out.(map[string]any)["changed"] != true {
+		t.Fatalf("resumed = %+v output=%+v", resumed, out)
+	}
+	again, err := app.toolSubscriptionsResume(ctx, map[string]any{"id": sub.ID, "actor": "member"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.(map[string]any)["changed"] != false {
+		t.Fatalf("second resume should be idempotent: %+v", again)
+	}
+	if len(rec.EventsByTopic("subscription.resumed")) != 1 {
+		t.Fatalf("subscription.resumed events = %d, want 1", len(rec.EventsByTopic("subscription.resumed")))
+	}
+}
+
+func TestSubscriptionImmediateCancellationCannotResume(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	sub, err := dbSubscriptionCreate(ctx, "proj-test", map[string]any{
+		"customer_email": "member@example.com",
+		"kind":           "service",
+		"items":          []any{map[string]any{"title": "Membership", "quantity": 1, "unit_amount_cents": 9900}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbSubscriptionCancel(ctx.AppDB(), "proj-test", map[string]any{"id": sub.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := dbSubscriptionResume(ctx.AppDB(), "proj-test", map[string]any{"id": sub.ID}); err == nil || !strings.Contains(err.Error(), "only active subscriptions") {
+		t.Fatalf("resume cancelled subscription error = %v", err)
+	}
+}
+
 func TestMeteredSubscriptionUsageAndInvoicePrepare(t *testing.T) {
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
