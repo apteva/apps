@@ -395,7 +395,7 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 		if err := validateURL("cancel_url", cancelURL); err != nil {
 			return nil, err
 		}
-		input["ui_mode"] = "hosted"
+		input["ui_mode"] = "hosted_page"
 		input["success_url"] = successURL
 		input["cancel_url"] = cancelURL
 	}

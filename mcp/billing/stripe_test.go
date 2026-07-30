@@ -181,6 +181,9 @@ func TestStripeIntegrationEnsuresWebhookBeforeCheckoutSession(t *testing.T) {
 	if input["mode"] != "payment" {
 		t.Fatalf("mode=%v", input["mode"])
 	}
+	if input["ui_mode"] != "hosted_page" {
+		t.Fatalf("hosted ui_mode=%v, want hosted_page", input["ui_mode"])
+	}
 	if !strings.HasPrefix(input["success_url"].(string), "https://billing-test.example/dashboard?app=billing") {
 		t.Fatalf("success_url=%q", input["success_url"])
 	}

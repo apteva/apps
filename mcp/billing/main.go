@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.12.0
+version: 0.12.1
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
