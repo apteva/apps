@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -565,8 +566,11 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	})
 	var ass *gigAssignmentView
 	if assignID > 0 {
-		workerURL := buildWorkerURL(ctx, token)
-		if o.NotifyWorker {
+		workerURL, workerURLErr := buildWorkerURL(ctx, token)
+		if workerURLErr != nil {
+			ctx.Logger().Warn("build worker URL failed", "err", workerURLErr.Error(), "gig_id", gigID)
+		}
+		if o.NotifyWorker && workerURLErr == nil {
 			body := fmt.Sprintf("%s\n\nOpen: %s", o.Title, workerURL)
 			if conversationID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, o.Title); sendErr != nil {
 				ctx.Logger().Warn("crm send failed", "err", sendErr.Error(), "gig_id", gigID)
@@ -668,8 +672,11 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 		return nil, err
 	}
 
-	workerURL := buildWorkerURL(ctx, token)
-	if notifyWorker {
+	workerURL, workerURLErr := buildWorkerURL(ctx, token)
+	if workerURLErr != nil {
+		ctx.Logger().Warn("build worker URL failed", "err", workerURLErr.Error(), "gig_id", gigID)
+	}
+	if notifyWorker && workerURLErr == nil {
 		body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
 		subject := g.Title
 		convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
@@ -696,20 +703,26 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	return view, err
 }
 
-func buildWorkerURL(ctx *sdk.AppCtx, token string) string {
-	base := ""
-	if ctx != nil {
-		if info, err := ctx.PlatformInfo(); err == nil && info != nil {
-			base = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
-		}
+func buildWorkerURL(ctx *sdk.AppCtx, token string) (string, error) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return "", errors.New("resolve gigs installation identity: platform client unavailable")
 	}
+	identity, err := ctx.PlatformAPI().WhoAmI()
+	if err != nil {
+		return "", fmt.Errorf("resolve gigs installation identity: %w", err)
+	}
+	if identity == nil || identity.InstallID <= 0 {
+		return "", errors.New("resolve gigs installation identity: platform returned no install id")
+	}
+	base := strings.TrimRight(strings.TrimSpace(identity.PublicURL), "/")
 	if base == "" {
 		base = strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
 	}
 	if base == "" {
 		base = "http://localhost:5280"
 	}
-	return base + "/api/apps/gigs/worker/" + token
+	return base + "/api/apps/gigs/_install/" + strconv.FormatInt(identity.InstallID, 10) +
+		"/worker/" + url.PathEscape(token), nil
 }
 
 // ─── Lifecycle tools ────────────────────────────────────────────────
@@ -1265,7 +1278,7 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			v.RespondedAt = responded.String
 			v.SubmittedAt = submitted.String
 			v.CRMConversationID = convID.Int64
-			v.WorkerURL = buildWorkerURL(ctx, token)
+			v.WorkerURL, _ = buildWorkerURL(ctx, token)
 			g.Assignments = append(g.Assignments, v)
 		}
 		if err := aRows.Err(); err != nil {
@@ -1362,7 +1375,7 @@ func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssign
 	v.RespondedAt = responded.String
 	v.SubmittedAt = submitted.String
 	v.CRMConversationID = convID.Int64
-	v.WorkerURL = buildWorkerURL(ctx, token)
+	v.WorkerURL, _ = buildWorkerURL(ctx, token)
 	if wk, err := getWorker(ctx.AppDB(), pid, v.WorkerID); err == nil {
 		if c, _ := crmGetContact(ctx, pid, wk.ContactID); c != nil {
 			wk.Contact = c

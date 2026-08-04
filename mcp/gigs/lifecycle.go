@@ -130,7 +130,12 @@ func remindOfferedWorkers(ctx context.Context, app *sdk.AppCtx) error {
 		if err := app.AppDB().QueryRowContext(ctx, `SELECT magic_token FROM gig_assignments WHERE id=?`, item.assignmentID).Scan(&token); err != nil {
 			continue
 		}
-		body := fmt.Sprintf("Reminder: %s\n\nOpen: %s", item.title, buildWorkerURL(app, token))
+		workerURL, err := buildWorkerURL(app, token)
+		if err != nil {
+			app.Logger().Warn("gig reminder URL failed", "gig_id", item.gigID, "err", err.Error())
+			continue
+		}
+		body := fmt.Sprintf("Reminder: %s\n\nOpen: %s", item.title, workerURL)
 		if _, err := crmSendMessage(app, item.pid, wk.ContactID, body, wk.DefaultChannel, item.title); err != nil {
 			app.Logger().Warn("gig reminder failed", "gig_id", item.gigID, "err", err.Error())
 			continue

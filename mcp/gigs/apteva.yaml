@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.19
+version: 0.1.20
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -41,6 +41,8 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /worker/
+      no_auth: true
     - prefix: /
   mcp_tools:
     # ─── Workers ─────────────────────────────────────────────────────
