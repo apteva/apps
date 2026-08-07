@@ -30,6 +30,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -39,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.31
+version: 0.1.34
 scopes: [project, global]
 requires:
   permissions:
@@ -57,7 +58,16 @@ provides:
     - prefix: /
   workers:
     - name: performance_collector
-      schedule: "@every 30m"
+      schedule: "@every 1m"
+  publishes:
+    - name: account.changed
+      description: "An ad-account binding was added or removed."
+    - name: entity.changed
+      description: "A campaign, ad group, or ad was created, updated, or deleted."
+    - name: performance.updated
+      description: "Normalized performance cache was refreshed for an account and level."
+    - name: performance.sync_failed
+      description: "A performance refresh failed and was scheduled for retry."
 db:
   driver: sqlite
   path: /data/ads.db
@@ -235,8 +245,10 @@ var platformAdapters = map[string]platformAdapter{
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	retryDelay func(retry int) time.Duration
-	sleep      func(ctx *sdk.AppCtx, delay time.Duration) bool
+	retryDelay        func(retry int) time.Duration
+	sleep             func(ctx *sdk.AppCtx, delay time.Duration) bool
+	analyticsMu       sync.Mutex
+	analyticsInFlight map[string]*analyticsSyncCall
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -261,7 +273,7 @@ func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{
 		Name:     "performance_collector",
-		Schedule: "@every 30m",
+		Schedule: "@every 1m",
 		Run:      a.runPerformanceCollector,
 	}}
 }
@@ -1249,6 +1261,9 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"platform":          def.Platform,
 		"native_account_id": pageID,
 	})
+	ctx.EmitWithProject("account.changed", pid, map[string]any{
+		"ad_account_id": id, "platform": def.Platform, "action": "added",
+	})
 
 	return map[string]any{
 		"ad_account_id":     id,
@@ -1354,6 +1369,7 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	ctx.EmitWithProject("account.removed", pid, map[string]any{"ad_account_id": id, "connection_id": connID})
+	ctx.EmitWithProject("account.changed", pid, map[string]any{"ad_account_id": id, "action": "removed"})
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1583,6 +1599,7 @@ func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
 
 type adAccount struct {
 	ID              int64
+	ProjectID       string
 	Platform        string
 	ConnectionID    int64
 	NativeAccountID string
@@ -1615,6 +1632,7 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 	); err != nil {
 		return nil, nil, mcpError("ad_account not found or not active")
 	}
+	acct.ProjectID = pid
 	def, ok := platforms[acct.Platform]
 	if !ok {
 		return nil, nil, mcpError("unsupported platform " + acct.Platform)
@@ -1887,7 +1905,9 @@ func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CampaignCreate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].CampaignCreate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "campaign", "created", args, out, err)
+	return out, err
 }
 
 func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1914,7 +1934,9 @@ func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CampaignUpdate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].CampaignUpdate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "campaign", "updated", args, out, err)
+	return out, err
 }
 
 func (a *App) toolCampaignPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1932,7 +1954,31 @@ func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CampaignDelete(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].CampaignDelete(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "campaign", "deleted", args, out, err)
+	return out, err
+}
+
+func (a *App) emitEntityChanged(ctx *sdk.AppCtx, acct *adAccount, level, action string, args map[string]any, out any, err error) {
+	if err != nil || acct == nil {
+		return
+	}
+	if result, ok := out.(map[string]any); ok && result["isError"] == true {
+		return
+	}
+	idKey := map[string]string{"campaign": "campaign_id", "ad_group": "adset_id", "ad": "ad_id"}[level]
+	entityID := stringArgAny(args, idKey)
+	if entityID == "" {
+		entityID = firstString(asMap(out), "id", "resourceName", "resource_name")
+	}
+	ctx.EmitWithProject("entity.changed", acct.ProjectID, map[string]any{
+		"ad_account_id": acct.ID,
+		"platform":      acct.Platform,
+		"level":         level,
+		"entity_id":     entityID,
+		"action":        action,
+		"status":        strings.ToUpper(stringArgAny(args, "status")),
+	})
 }
 
 // ─── Ad set tools ───────────────────────────────────────────────────
@@ -3410,7 +3456,9 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			args["promoted_object"] = promotedObject
 		}
 	}
-	return platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad_group", "created", args, out, err)
+	return out, err
 }
 
 func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3426,7 +3474,9 @@ func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdSetUpdate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdSetUpdate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad_group", "updated", args, out, err)
+	return out, err
 }
 
 func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3434,7 +3484,9 @@ func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdSetDelete(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdSetDelete(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad_group", "deleted", args, out, err)
+	return out, err
 }
 
 // ─── Ad tools ───────────────────────────────────────────────────────
@@ -3444,7 +3496,9 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad", "created", args, out, err)
+	return out, err
 }
 
 func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3460,7 +3514,9 @@ func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdUpdate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdUpdate(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad", "updated", args, out, err)
+	return out, err
 }
 
 func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3468,7 +3524,9 @@ func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdDelete(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].AdDelete(a, ctx, acct, def, args)
+	a.emitEntityChanged(ctx, acct, "ad", "deleted", args, out, err)
+	return out, err
 }
 
 // ─── Creative tools ────────────────────────────────────────────────

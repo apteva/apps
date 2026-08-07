@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.33
+version: 0.1.34
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -30,6 +30,9 @@ description: |
   generic Meta and Google delivery controls.
   v0.1.33 uses full-resolution Meta creative images in the campaign workspace
   instead of stretching provider thumbnail previews.
+  v0.1.34 adds coordinated near-real-time performance collection, persistent
+  provider backoff, AppBus invalidation events, and live cache updates in the
+  Ads panel.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -57,7 +60,16 @@ provides:
     - prefix: /
   workers:
     - name: performance_collector
-      schedule: "@every 30m"
+      schedule: "@every 1m"
+  publishes:
+    - name: account.changed
+      description: "An ad-account binding was added or removed."
+    - name: entity.changed
+      description: "A campaign, ad group, or ad was created, updated, or deleted."
+    - name: performance.updated
+      description: "Normalized performance cache was refreshed for an account and level."
+    - name: performance.sync_failed
+      description: "A performance refresh failed and was scheduled for retry."
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }

@@ -71,6 +71,12 @@ func (a *App) toolDeliveryActivate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		steps = append(steps, refreshed.response("activated"))
 		states[entity] = refreshed
 	}
+	eventArgs := map[string]any{
+		"campaign_id": campaignID, "adset_id": adSetID, "ad_id": adID, "status": "ACTIVE",
+	}
+	a.emitEntityChanged(ctx, acct, "ad", "updated", eventArgs, map[string]any{}, nil)
+	a.emitEntityChanged(ctx, acct, "ad_group", "updated", eventArgs, map[string]any{}, nil)
+	a.emitEntityChanged(ctx, acct, "campaign", "updated", eventArgs, map[string]any{}, nil)
 
 	return map[string]any{
 		"platform":      acct.Platform,

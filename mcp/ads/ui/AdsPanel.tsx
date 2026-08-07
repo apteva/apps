@@ -140,6 +140,31 @@ interface PerformanceResponse {
   freshness: { fetched_at?: string; row_count: number };
 }
 
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+interface AdsEventData {
+  ad_account_id?: number;
+  level?: string;
+  levels?: string[];
+  fetched_at?: string;
+  next_attempt_at?: string;
+  message?: string;
+}
+
+type PerformanceSyncState = {
+  status: "live" | "updating" | "updated" | "delayed";
+  at?: string;
+  message?: string;
+};
+
 interface CampaignPerformance extends PerformanceSummary {
   campaign_id: string;
   campaign_name: string;
@@ -194,6 +219,60 @@ interface PendingPicker {
 function mcpErrorText(data: any): string | null {
   if (!data?.isError) return null;
   return data.content?.find((item: any) => item.type === "text")?.text || "Request returned an error";
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (event: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (event: AppEventEnvelope<T>) => handlerRef.current(event);
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(
+          appName: string,
+          scopedProjectId: string,
+          listener: (event: AppEventEnvelope<T>) => void,
+        ): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) return bridge.subscribe(app, projectId, handler);
+
+    let lastSeq = 0;
+    let source: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url = `/api/app-events/${encodeURIComponent(app)}?project_id=${encodeURIComponent(projectId)}`
+        + (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      source = new EventSource(url, { withCredentials: true });
+      source.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as AppEventEnvelope<T>;
+          if (event.seq <= lastSeq) return;
+          lastSeq = event.seq;
+          handlerRef.current(event);
+        } catch {}
+      };
+      source.onerror = () => {
+        if (source?.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      source?.close();
+    };
+  }, [app, projectId]);
 }
 
 function ProviderMark({ platform, size = "md" }: { platform: string; size?: "sm" | "md" }) {
@@ -253,6 +332,17 @@ function formatMoneyMicros(value: number, currency: string): string {
   } catch {
     return `${amount.toFixed(2)} ${currency || "USD"}`;
   }
+}
+
+function syncStateLabel(state: PerformanceSyncState): string {
+  if (state.status === "updating") return "Updating";
+  if (state.status === "delayed") return "Sync delayed";
+  if (state.status === "live") return "Auto refresh";
+  if (!state.at) return "Updated";
+  const elapsed = Math.max(0, Date.now() - new Date(state.at).getTime());
+  if (elapsed < 60_000) return "Updated now";
+  if (elapsed < 3_600_000) return `Updated ${Math.floor(elapsed / 60_000)}m ago`;
+  return `Updated ${new Date(state.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 function isoDate(date: Date): string {
@@ -545,6 +635,7 @@ function CampaignWorkspace({
   dateFrom,
   dateTo,
   callTool,
+  eventRefreshKey,
   onCampaignChanged,
   onClose,
 }: {
@@ -554,6 +645,7 @@ function CampaignWorkspace({
   dateFrom: string;
   dateTo: string;
   callTool: (tool: string, args: Record<string, unknown>) => Promise<any>;
+  eventRefreshKey: number;
   onCampaignChanged: (campaignID: string, status: string) => void;
   onClose: () => void;
 }) {
@@ -575,6 +667,7 @@ function CampaignWorkspace({
   const [updating, setUpdating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const request = useRef(0);
+  const eventRefreshSeen = useRef(eventRefreshKey);
 
   const selectedAdSet = adSets.find((item) => item.id === selectedAdSetID) || null;
   const selectedAd = ads.find((item) => item.id === selectedAdID) || null;
@@ -650,6 +743,12 @@ function CampaignWorkspace({
     loadWorkspace(false);
     return () => { request.current++; };
   }, [campaign.id]);
+
+  useEffect(() => {
+    if (eventRefreshSeen.current === eventRefreshKey) return;
+    eventRefreshSeen.current = eventRefreshKey;
+    loadWorkspace(false);
+  }, [eventRefreshKey]);
 
   const chooseAdSet = async (adSetID: string) => {
     setSelectedAdSetID(adSetID);
@@ -849,6 +948,8 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
   const [loadingPerformance, setLoadingPerformance] = useState(false);
   const [performanceError, setPerformanceError] = useState<string | null>(null);
+  const [performanceSync, setPerformanceSync] = useState<PerformanceSyncState>({ status: "live" });
+  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
   const [dateFrom, setDateFrom] = useState(initialRange.from);
   const [dateTo, setDateTo] = useState(initialRange.to);
   const [compareEnabled, setCompareEnabled] = useState(false);
@@ -884,6 +985,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const performanceRequest = useRef(0);
   const copyFeedbackTimer = useRef<number | null>(null);
   const resourceRequest = useRef(0);
+  const eventRefreshTimer = useRef<number | null>(null);
 
   const selected = useMemo(
     () => accounts.find((account) => account.id === selectedId) || null,
@@ -1023,6 +1125,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     const request = ++performanceRequest.current;
     setLoadingPerformance(true);
     setPerformanceError(null);
+    if (refresh) setPerformanceSync({ status: "updating" });
     try {
       const currentPromise = callTool("performance_get", {
         ad_account_id: account.id,
@@ -1047,8 +1150,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       if (request !== performanceRequest.current) return;
       setPerformance(currentResult as PerformanceResponse);
       setComparison(comparisonResult as PerformanceResponse | null);
+      setPerformanceSync({
+        status: "updated",
+        at: (currentResult as PerformanceResponse).freshness?.fetched_at || new Date().toISOString(),
+      });
     } catch (err) {
-      if (request === performanceRequest.current) setPerformanceError((err as Error).message);
+      if (request === performanceRequest.current) {
+        setPerformanceError((err as Error).message);
+        setPerformanceSync({ status: "delayed", message: (err as Error).message });
+      }
     } finally {
       if (request === performanceRequest.current) setLoadingPerformance(false);
     }
@@ -1175,6 +1285,44 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => {
     if (selected) refreshPerformance(selected, true);
+  }, [refreshPerformance, selected]);
+
+  useAppEvents<AdsEventData>("ads", scopedProject, (event) => {
+    if (event.topic === "account.changed" || event.topic === "account.added" || event.topic === "account.removed") {
+      refreshAccounts();
+      refreshPlatforms();
+      return;
+    }
+    if (!selected || event.data?.ad_account_id !== selected.id) return;
+    if (event.topic === "performance.updated") {
+      setPerformanceSync({ status: "updated", at: event.data.fetched_at || event.time });
+      if (eventRefreshTimer.current) window.clearTimeout(eventRefreshTimer.current);
+      eventRefreshTimer.current = window.setTimeout(() => {
+        refreshPerformance(selected, false);
+        setWorkspaceRefreshKey((current) => current + 1);
+      }, 250);
+    } else if (event.topic === "performance.sync_failed") {
+      setPerformanceSync({ status: "delayed", at: event.data.next_attempt_at, message: event.data.message });
+    } else if (event.topic === "entity.changed") {
+      refreshCampaigns(selected);
+      setWorkspaceRefreshKey((current) => current + 1);
+    }
+  });
+
+  useEffect(() => {
+    const refreshVisibleCache = () => {
+      if (document.visibilityState === "visible" && selected) {
+        refreshPerformance(selected, false);
+        setWorkspaceRefreshKey((current) => current + 1);
+      }
+    };
+    window.addEventListener("focus", refreshVisibleCache);
+    document.addEventListener("visibilitychange", refreshVisibleCache);
+    return () => {
+      window.removeEventListener("focus", refreshVisibleCache);
+      document.removeEventListener("visibilitychange", refreshVisibleCache);
+      if (eventRefreshTimer.current) window.clearTimeout(eventRefreshTimer.current);
+    };
   }, [refreshPerformance, selected]);
 
   useEffect(() => {
@@ -1554,6 +1702,13 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   >
                     ↻
                   </button>
+                  <span
+                    className="inline-flex h-9 items-center gap-2 whitespace-nowrap px-1 text-xs text-text-muted"
+                    title={performanceSync.message || syncStateLabel(performanceSync)}
+                  >
+                    <span className={`h-2 w-2 rounded-full ${performanceSync.status === "delayed" ? "bg-yellow" : performanceSync.status === "updating" ? "bg-accent" : "bg-green"}`} />
+                    {syncStateLabel(performanceSync)}
+                  </span>
                 </div>
               </header>
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
@@ -2010,6 +2165,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
           dateFrom={dateFrom}
           dateTo={dateTo}
           callTool={callTool}
+          eventRefreshKey={workspaceRefreshKey}
           onCampaignChanged={(campaignID, status) => setCampaigns((current) => current.map((campaign) => campaign.id === campaignID ? { ...campaign, status } : campaign))}
           onClose={() => setSelectedCampaignID(null)}
         />

@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestPerformanceGetGoogle_DerivesAndCachesMetrics(t *testing.T) {
@@ -153,7 +158,165 @@ func TestPerformanceToolAndCollectorAreDeclared(t *testing.T) {
 		t.Fatal("performance_get is not declared")
 	}
 	workers := (&App{}).Workers()
-	if len(workers) != 1 || workers[0].Name != "performance_collector" || workers[0].Schedule != "@every 30m" {
+	if len(workers) != 1 || workers[0].Name != "performance_collector" || workers[0].Schedule != "@every 1m" {
 		t.Fatalf("workers=%#v", workers)
+	}
+	if performanceCollectorIntervals["campaign"] != 5*time.Minute || performanceCollectorIntervals["ad_group"] != 15*time.Minute || performanceCollectorIntervals["ad"] != 15*time.Minute {
+		t.Fatalf("collector intervals=%#v", performanceCollectorIntervals)
+	}
+}
+
+func TestPerformanceGetEmitsPostCommitInvalidation(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, _ string, _ map[string]any) (*sdk.ExecuteResult, error) {
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+			"data":[{"campaign_id":"123","campaign_name":"Live","date_start":"2026-08-07","spend":"1.25","impressions":"20","clicks":"2"}]
+		}`)}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	recorder := tk.NewEmitRecorder()
+	ctx.SetEmitter(recorder)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "meta", "act_123", "EUR", "Europe/Madrid")
+
+	out, err := (&App{}).toolPerformanceGet(ctx, map[string]any{
+		"ad_account_id": accountID, "level": "campaign",
+		"date_from": "2026-08-07", "date_to": "2026-08-07",
+	})
+	if err != nil || out.(map[string]any)["source"] != "live" {
+		t.Fatalf("out=%#v err=%v", out, err)
+	}
+	events := recorder.EventsByTopic("performance.updated")
+	if len(events) != 1 || events[0].ProjectID != "test-proj" {
+		t.Fatalf("events=%#v", events)
+	}
+	payload := events[0].Data.(map[string]any)
+	if payload["ad_account_id"] != accountID || payload["source"] != "manual" {
+		t.Fatalf("payload=%#v", payload)
+	}
+	levels := payload["levels"].([]string)
+	if len(levels) != 1 || levels[0] != "campaign" {
+		t.Fatalf("levels=%#v", levels)
+	}
+	var stored int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM ad_metric_points WHERE ad_account_id=? AND level='campaign'`, accountID,
+	).Scan(&stored); err != nil || stored != 1 {
+		t.Fatalf("stored=%d err=%v", stored, err)
+	}
+}
+
+func TestPerformanceGetSingleFlightsIdenticalRefreshes(t *testing.T) {
+	pf := newRecordingPlatform()
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	pf.executeResponder = func(_ int64, _ string, _ map[string]any) (*sdk.ExecuteResult, error) {
+		calls.Add(1)
+		startOnce.Do(func() { close(started) })
+		<-release
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"results":[]}`)}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "google", "123", "EUR", "UTC")
+	app := &App{}
+	args := map[string]any{
+		"ad_account_id": accountID, "level": "campaign",
+		"date_from": "2026-08-07", "date_to": "2026-08-07",
+	}
+	results := make(chan any, 2)
+	errors := make(chan error, 2)
+	go func() { out, err := app.toolPerformanceGet(ctx, args); results <- out; errors <- err }()
+	<-started
+	go func() { out, err := app.toolPerformanceGet(ctx, args); results <- out; errors <- err }()
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+		if out := <-results; out.(map[string]any)["isError"] == true {
+			t.Fatalf("out=%#v", out)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("provider calls=%d", calls.Load())
+	}
+}
+
+func TestPerformanceFailurePersistsBackoffAndEmitsRetryState(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, _ string, _ map[string]any) (*sdk.ExecuteResult, error) {
+		return &sdk.ExecuteResult{Success: false, Status: 500, Data: json.RawMessage(`{
+			"error":{"code":2,"is_transient":true,"message":"Try again","type":"OAuthException"}
+		}`)}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	recorder := tk.NewEmitRecorder()
+	ctx.SetEmitter(recorder)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "meta", "act_123", "EUR", "UTC")
+	out, err := (&App{}).toolPerformanceGet(ctx, map[string]any{
+		"ad_account_id": accountID, "level": "campaign",
+		"date_from": "2026-08-07", "date_to": "2026-08-07",
+	})
+	if err != nil || out.(map[string]any)["isError"] != true {
+		t.Fatalf("out=%#v err=%v", out, err)
+	}
+	var failureCount int
+	var nextAttempt, lastSuccess string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT failure_count, next_attempt_at, last_success_at FROM ad_sync_state WHERE project_id='test-proj' AND ad_account_id=? AND level='campaign'`,
+		accountID,
+	).Scan(&failureCount, &nextAttempt, &lastSuccess); err != nil {
+		t.Fatal(err)
+	}
+	if failureCount != 1 || nextAttempt == "" || lastSuccess != "" {
+		t.Fatalf("failure_count=%d next=%q success=%q", failureCount, nextAttempt, lastSuccess)
+	}
+	if due, _ := analyticsSyncDue(ctx, "test-proj", accountID, "campaign", 5*time.Minute, time.Now().UTC()); due {
+		t.Fatal("collector ignored persisted provider backoff")
+	}
+	events := recorder.EventsByTopic("performance.sync_failed")
+	if len(events) != 1 || events[0].Data.(map[string]any)["failure_count"] != 1 {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestPerformanceCollectorRefreshesEveryGenericHierarchyLevel(t *testing.T) {
+	pf := newRecordingPlatform()
+	var calls atomic.Int32
+	pf.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		if tool != "search" {
+			t.Fatalf("tool=%s input=%#v", tool, input)
+		}
+		calls.Add(1)
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"results":[]}`)}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	recorder := tk.NewEmitRecorder()
+	ctx.SetEmitter(recorder)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "google", "123", "EUR", "UTC")
+
+	if err := (&App{}).runPerformanceCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("provider calls=%d", calls.Load())
+	}
+	events := recorder.EventsByTopic("performance.updated")
+	if len(events) != 3 {
+		t.Fatalf("events=%#v", events)
+	}
+	var states int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM ad_sync_state WHERE ad_account_id=? AND last_status='ok' AND last_reconciled_at<>''`, accountID,
+	).Scan(&states); err != nil || states != 3 {
+		t.Fatalf("states=%d err=%v", states, err)
+	}
+	if err := (&App{}).runPerformanceCollector(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("collector ignored due intervals; provider calls=%d", calls.Load())
 	}
 }

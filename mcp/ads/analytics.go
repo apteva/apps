@@ -8,12 +8,38 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 const performanceCollectorReconcileInterval = 6 * time.Hour
+
+const (
+	performanceCollectorConcurrency = 2
+	performanceBackoffMin           = time.Minute
+	performanceBackoffMax           = 30 * time.Minute
+)
+
+var performanceCollectorIntervals = map[string]time.Duration{
+	"campaign": 5 * time.Minute,
+	"ad_group": 15 * time.Minute,
+	"ad":       15 * time.Minute,
+}
+
+type analyticsSyncCall struct {
+	signature   string
+	done        chan struct{}
+	points      []analyticsPoint
+	providerErr map[string]any
+	err         error
+}
+
+type analyticsSyncState struct {
+	FailureCount int
+	NextAttempt  string
+}
 
 type genericPerformanceRequest struct {
 	Level     string
@@ -104,16 +130,92 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return analyticsResponse(points, "cache"), nil
 	}
 
-	points, providerErr := a.fetchAnalyticsPoints(ctx, acct, request)
+	points, providerErr, syncErr, live := a.syncAnalytics(ctx, pid, acct, request, "manual")
 	if providerErr != nil {
-		recordAnalyticsSync(ctx, pid, acct.ID, request, "failed", mcpErrorTextValue(providerErr))
 		return providerErr, nil
 	}
-	if err := persistAnalyticsPoints(ctx, pid, acct, request, points); err != nil {
-		return nil, err
+	if syncErr != nil {
+		return nil, syncErr
 	}
-	recordAnalyticsSync(ctx, pid, acct.ID, request, "ok", "")
-	return analyticsResponse(points, "live"), nil
+	source := "cache"
+	if live {
+		source = "live"
+	}
+	return analyticsResponse(points, source), nil
+}
+
+func (a *App) syncAnalytics(ctx *sdk.AppCtx, pid string, acct *adAccount, request *genericPerformanceRequest, source string) ([]analyticsPoint, map[string]any, error, bool) {
+	key := fmt.Sprintf("%s:%d:%s", pid, acct.ID, request.Level)
+	signature := request.DateFrom + ":" + request.DateTo + ":" + strings.Join(request.EntityIDs, ",")
+
+	a.analyticsMu.Lock()
+	if a.analyticsInFlight == nil {
+		a.analyticsInFlight = make(map[string]*analyticsSyncCall)
+	}
+	if active := a.analyticsInFlight[key]; active != nil {
+		a.analyticsMu.Unlock()
+		<-active.done
+		if active.signature == signature {
+			return active.points, active.providerErr, active.err, false
+		}
+		return a.syncAnalytics(ctx, pid, acct, request, source)
+	}
+	call := &analyticsSyncCall{signature: signature, done: make(chan struct{})}
+	a.analyticsInFlight[key] = call
+	a.analyticsMu.Unlock()
+
+	defer func() {
+		a.analyticsMu.Lock()
+		delete(a.analyticsInFlight, key)
+		close(call.done)
+		a.analyticsMu.Unlock()
+	}()
+
+	call.points, call.providerErr = a.fetchAnalyticsPoints(ctx, acct, request)
+	if call.providerErr != nil {
+		message := mcpErrorTextValue(call.providerErr)
+		state, _ := recordAnalyticsSync(ctx, pid, acct.ID, request, "failed", message)
+		ctx.EmitWithProject("performance.sync_failed", pid, map[string]any{
+			"ad_account_id":   acct.ID,
+			"level":           request.Level,
+			"date_from":       request.DateFrom,
+			"date_to":         request.DateTo,
+			"source":          source,
+			"failure_count":   state.FailureCount,
+			"next_attempt_at": state.NextAttempt,
+			"message":         message,
+		})
+		return nil, call.providerErr, nil, true
+	}
+	if call.err = persistAnalyticsPoints(ctx, pid, acct, request, call.points); call.err != nil {
+		state, _ := recordAnalyticsSync(ctx, pid, acct.ID, request, "failed", call.err.Error())
+		ctx.EmitWithProject("performance.sync_failed", pid, map[string]any{
+			"ad_account_id":   acct.ID,
+			"level":           request.Level,
+			"date_from":       request.DateFrom,
+			"date_to":         request.DateTo,
+			"source":          source,
+			"failure_count":   state.FailureCount,
+			"next_attempt_at": state.NextAttempt,
+			"message":         "could not store provider performance",
+		})
+		return nil, nil, call.err, true
+	}
+	_, _ = recordAnalyticsSync(ctx, pid, acct.ID, request, "ok", "")
+	fetchedAt := time.Now().UTC().Format(time.RFC3339)
+	if freshness := analyticsFreshness(call.points); freshness["fetched_at"] != "" {
+		fetchedAt = freshness["fetched_at"].(string)
+	}
+	ctx.EmitWithProject("performance.updated", pid, map[string]any{
+		"ad_account_id": acct.ID,
+		"levels":        []string{request.Level},
+		"date_from":     request.DateFrom,
+		"date_to":       request.DateTo,
+		"fetched_at":    fetchedAt,
+		"source":        source,
+		"row_counts":    map[string]int{request.Level: len(call.points)},
+	})
+	return call.points, nil, nil, true
 }
 
 func (a *App) fetchAnalyticsPoints(ctx *sdk.AppCtx, acct *adAccount, request *genericPerformanceRequest) ([]analyticsPoint, map[string]any) {
@@ -597,20 +699,41 @@ func analyticsFreshness(points []analyticsPoint) map[string]any {
 	return map[string]any{"fetched_at": latest, "row_count": len(points)}
 }
 
-func recordAnalyticsSync(ctx *sdk.AppCtx, pid string, accountID int64, request *genericPerformanceRequest, status, message string) {
+func recordAnalyticsSync(ctx *sdk.AppCtx, pid string, accountID int64, request *genericPerformanceRequest, status, message string) (analyticsSyncState, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = ctx.AppDB().Exec(
+	state := analyticsSyncState{}
+	if status == "failed" {
+		_ = ctx.AppDB().QueryRow(
+			`SELECT failure_count FROM ad_sync_state WHERE project_id=? AND ad_account_id=? AND level=?`,
+			pid, accountID, request.Level,
+		).Scan(&state.FailureCount)
+		state.FailureCount++
+		delay := performanceBackoffMin * time.Duration(1<<min(state.FailureCount-1, 5))
+		if delay > performanceBackoffMax {
+			delay = performanceBackoffMax
+		}
+		state.NextAttempt = time.Now().UTC().Add(delay).Format(time.RFC3339)
+	}
+	_, err := ctx.AppDB().Exec(
 		`INSERT INTO ad_sync_state (
-		    project_id, ad_account_id, level, last_incremental_at,
-		    last_date_from, last_date_to, last_status, last_error
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		    project_id, ad_account_id, level, last_incremental_at, last_attempt_at,
+		    last_success_at, last_date_from, last_date_to, last_status, last_error,
+		    failure_count, next_attempt_at
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project_id, ad_account_id, level) DO UPDATE SET
-		    last_incremental_at=excluded.last_incremental_at,
+		    last_incremental_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_incremental_at ELSE ad_sync_state.last_incremental_at END,
+		    last_attempt_at=excluded.last_attempt_at,
+		    last_success_at=CASE WHEN excluded.last_status='ok' THEN excluded.last_success_at ELSE ad_sync_state.last_success_at END,
 		    last_date_from=excluded.last_date_from, last_date_to=excluded.last_date_to,
 		    last_status=excluded.last_status, last_error=excluded.last_error,
+		    failure_count=excluded.failure_count, next_attempt_at=excluded.next_attempt_at,
 		    updated_at=CURRENT_TIMESTAMP`,
-		pid, accountID, request.Level, now, request.DateFrom, request.DateTo, status, message,
+		pid, accountID, request.Level,
+		map[bool]string{true: now, false: ""}[status == "ok"], now,
+		map[bool]string{true: now, false: ""}[status == "ok"],
+		request.DateFrom, request.DateTo, status, message, state.FailureCount, state.NextAttempt,
 	)
+	return state, err
 }
 
 func mcpErrorTextValue(value map[string]any) string {
@@ -652,57 +775,102 @@ func (a *App) runPerformanceCollector(runCtx context.Context, app *sdk.AppCtx) e
 		jobs = append(jobs, job)
 	}
 	rows.Close()
+	type syncJob struct {
+		accountJob
+		level     string
+		reconcile bool
+	}
+	due := make([]syncJob, 0, len(jobs)*len(performanceCollectorIntervals))
+	now := time.Now().UTC()
 	for _, job := range jobs {
-		if err := runCtx.Err(); err != nil {
-			return err
-		}
-		location := time.UTC
-		if loaded, err := time.LoadLocation(job.timezone); err == nil {
-			location = loaded
-		}
-		today := time.Now().In(location)
-		dateFrom := today.Format("2006-01-02")
-		reconcile := analyticsReconcileDue(app, job.projectID, job.accountID)
-		if reconcile {
-			dateFrom = today.AddDate(0, 0, -6).Format("2006-01-02")
-		}
-		out, err := a.toolPerformanceGet(app, map[string]any{
-			"_project_id": job.projectID, "ad_account_id": job.accountID,
-			"level": "campaign", "date_from": dateFrom,
-			"date_to": today.Format("2006-01-02"), "granularity": "day", "refresh": true,
-		})
-		if err != nil {
-			app.Logger().Warn("performance_collector: sync failed", "project", job.projectID, "account", job.accountID, "err", err)
-			continue
-		}
-		if result, ok := out.(map[string]any); ok && result["isError"] == true {
-			app.Logger().Warn("performance_collector: provider failed", "project", job.projectID, "account", job.accountID, "err", mcpErrorTextValue(result))
-			continue
-		}
-		if reconcile {
-			_, _ = app.AppDB().Exec(
-				`UPDATE ad_sync_state SET last_reconciled_at=?, updated_at=CURRENT_TIMESTAMP
-				  WHERE project_id=? AND ad_account_id=? AND level='campaign'`,
-				time.Now().UTC().Format(time.RFC3339), job.projectID, job.accountID,
-			)
+		for level, interval := range performanceCollectorIntervals {
+			isDue, reconcile := analyticsSyncDue(app, job.projectID, job.accountID, level, interval, now)
+			if isDue {
+				due = append(due, syncJob{accountJob: job, level: level, reconcile: reconcile})
+			}
 		}
 	}
+	work := make(chan syncJob)
+	var wg sync.WaitGroup
+	for i := 0; i < performanceCollectorConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range work {
+				if runCtx.Err() != nil {
+					return
+				}
+				a.runPerformanceSyncJob(app, job.projectID, job.accountID, job.timezone, job.level, job.reconcile)
+			}
+		}()
+	}
+	for _, job := range due {
+		select {
+		case work <- job:
+		case <-runCtx.Done():
+			close(work)
+			wg.Wait()
+			return runCtx.Err()
+		}
+	}
+	close(work)
+	wg.Wait()
 	return nil
 }
 
-func analyticsReconcileDue(ctx *sdk.AppCtx, pid string, accountID int64) bool {
-	var raw string
+func (a *App) runPerformanceSyncJob(app *sdk.AppCtx, pid string, accountID int64, timezone, level string, reconcile bool) {
+	location := time.UTC
+	if loaded, err := time.LoadLocation(timezone); err == nil {
+		location = loaded
+	}
+	today := time.Now().In(location)
+	dateFrom := today.Format("2006-01-02")
+	if reconcile {
+		dateFrom = today.AddDate(0, 0, -6).Format("2006-01-02")
+	}
+	acct, _, errOut := a.resolveAdAccount(app, map[string]any{"_project_id": pid, "ad_account_id": accountID})
+	if errOut != nil {
+		app.Logger().Warn("performance_collector: account resolution failed", "project", pid, "account", accountID)
+		return
+	}
+	request := &genericPerformanceRequest{Level: level, DateFrom: dateFrom, DateTo: today.Format("2006-01-02"), Refresh: true}
+	_, providerErr, err, _ := a.syncAnalytics(app, pid, acct, request, "worker")
+	if err != nil {
+		app.Logger().Warn("performance_collector: sync failed", "project", pid, "account", accountID, "level", level, "err", err)
+		return
+	}
+	if providerErr != nil {
+		app.Logger().Warn("performance_collector: provider failed", "project", pid, "account", accountID, "level", level, "err", mcpErrorTextValue(providerErr))
+		return
+	}
+	if reconcile {
+		_, _ = app.AppDB().Exec(
+			`UPDATE ad_sync_state SET last_reconciled_at=?, updated_at=CURRENT_TIMESTAMP
+			  WHERE project_id=? AND ad_account_id=? AND level=?`,
+			time.Now().UTC().Format(time.RFC3339), pid, accountID, level,
+		)
+	}
+}
+
+func analyticsSyncDue(ctx *sdk.AppCtx, pid string, accountID int64, level string, interval time.Duration, now time.Time) (bool, bool) {
+	var lastSuccess, lastReconciled, nextAttempt string
 	err := ctx.AppDB().QueryRow(
-		`SELECT last_reconciled_at FROM ad_sync_state
-		  WHERE project_id=? AND ad_account_id=? AND level='campaign'`,
-		pid, accountID,
-	).Scan(&raw)
-	if err == sql.ErrNoRows || strings.TrimSpace(raw) == "" {
-		return true
+		`SELECT COALESCE(NULLIF(last_success_at,''), last_incremental_at), last_reconciled_at, next_attempt_at
+		   FROM ad_sync_state WHERE project_id=? AND ad_account_id=? AND level=?`,
+		pid, accountID, level,
+	).Scan(&lastSuccess, &lastReconciled, &nextAttempt)
+	if err == sql.ErrNoRows {
+		return true, true
 	}
 	if err != nil {
-		return true
+		return true, true
 	}
-	last, err := time.Parse(time.RFC3339, raw)
-	return err != nil || time.Since(last) >= performanceCollectorReconcileInterval
+	if retryAt, parseErr := time.Parse(time.RFC3339, nextAttempt); parseErr == nil && now.Before(retryAt) {
+		return false, false
+	}
+	last, parseErr := time.Parse(time.RFC3339, lastSuccess)
+	due := parseErr != nil || now.Sub(last) >= interval
+	reconciled, reconcileErr := time.Parse(time.RFC3339, lastReconciled)
+	reconcile := reconcileErr != nil || now.Sub(reconciled) >= performanceCollectorReconcileInterval
+	return due, reconcile
 }
