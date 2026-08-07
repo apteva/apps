@@ -61,6 +61,7 @@ type App struct {
 	watchdogStop    chan struct{} // closed on unmount; pid-owns-port poller
 	cloudBuildMu    sync.Mutex
 	mobileSigningMu sync.Mutex
+	mobileVersionMu sync.Mutex
 
 	sourceCapsuleKeyMu sync.Mutex
 	sourceCapsuleKey   []byte
@@ -544,6 +545,10 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	if err != nil {
 		return nil, err
 	}
+	d, err = a.prepareMobileBuildTarget(d, build)
+	if err != nil {
+		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
+	}
 
 	// Concurrency throttle.
 	a.buildSem <- struct{}{}
@@ -652,6 +657,7 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 		// the default case and fails with "no default start command".
 		"framework": fw,
 	})
+	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	// Stash entrypoint via the build's (framework-chosen) BuildCmd
 	// metadata is not enough — the runtime needs entrypoint at
 	// release time. Fastest path: re-derive at release time from
@@ -665,6 +671,7 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 }
 
 func (a *App) failBuild(b *Build, msg string) *Build {
+	dbSetMobileVersionStatus(globalCtx.AppDB(), b.ID, "failed")
 	_ = dbUpdateBuild(globalCtx.AppDB(), b.ID, map[string]any{
 		"status":      "failed",
 		"finished_at": nowUTC(),

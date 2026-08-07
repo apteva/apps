@@ -282,9 +282,6 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 		}
 		buildBackendJSON = string(body)
 	}
-	if err := validateMobileCloudContract(d, cfg); err != nil {
-		return nil, err
-	}
 	backend, err := cloudBackendFor(backendName)
 	if err != nil {
 		return nil, err
@@ -299,6 +296,13 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 	)
 	if err != nil {
 		return nil, err
+	}
+	d, err = a.prepareMobileBuildTarget(d, build)
+	if err != nil {
+		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
+	}
+	if err := validateMobileCloudContract(d, cfg); err != nil {
+		return a.failBuild(build, "mobile build contract: "+err.Error()), nil
 	}
 	buildDir := filepath.Join(a.dataDir, "builds", strconv.FormatInt(build.ID, 10))
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
@@ -415,6 +419,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build cancelled")
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+		dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 		a.removeSourceCapsule(build.ID)
 		emit("deploy.build.cancelled", map[string]any{
 			"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
@@ -426,6 +431,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build "+status.Status)
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+		dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 		a.removeSourceCapsule(build.ID)
 		emit("deploy.build.failed", map[string]any{
 			"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
@@ -499,6 +505,7 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 		fields["source_sha"] = status.SourceSHA
 	}
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, fmt.Sprintf("build succeeded artifact=%s size=%d", distDir, size))
 	fresh, _ := dbGetBuild(globalCtx.AppDB(), build.ID)
@@ -562,6 +569,7 @@ func (a *App) cancelCloudBuild(ctx context.Context, build *Build) (*Build, error
 		"status": "cancelled", "external_status": "cancelled",
 		"finished_at": nowUTC(), "error": "cancelled by operator",
 	})
+	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, "cancelled by operator")
 	emit("deploy.build.cancelled", map[string]any{
@@ -582,6 +590,9 @@ func (a *App) deploymentForBuild(build *Build) (*Deployment, error) {
 			return nil, errors.New("environment not found for cloud build")
 		}
 		d = effectiveDeploymentForEnvironment(d, env)
+	}
+	if strings.TrimSpace(build.TargetConfigJSON) != "" && strings.TrimSpace(build.TargetConfigJSON) != "{}" {
+		d.TargetConfigJSON = build.TargetConfigJSON
 	}
 	return d, nil
 }
@@ -915,7 +926,11 @@ func discoverGitHubRun(bound *sdk.BoundIntegration, cfg cloudBuildConfig, submit
 }
 
 func externalStoreArtifactManifest(d *Deployment, build *Build) (artifactManifest, error) {
-	cfg, err := parseMobileTargetConfig(d.TargetConfigJSON)
+	targetJSON := d.TargetConfigJSON
+	if build != nil && strings.TrimSpace(build.TargetConfigJSON) != "" && strings.TrimSpace(build.TargetConfigJSON) != "{}" {
+		targetJSON = build.TargetConfigJSON
+	}
+	cfg, err := parseMobileTargetConfig(targetJSON)
 	if err != nil {
 		return artifactManifest{}, err
 	}
@@ -937,6 +952,7 @@ func externalStoreArtifactManifest(d *Deployment, build *Build) (artifactManifes
 	return artifactManifest{
 		Platform: platform, BundleID: cfg.BundleID, PackageName: cfg.PackageName,
 		VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber, VersionCode: cfg.VersionCode,
+		DeviceFamilies:   cfg.DeviceFamilies,
 		Channel:          cloudCfg.StoreChannel,
 		ExternalProvider: provider, ExternalID: build.ExternalJobID,
 		ExternalStatus: map[string]string{"ios": "uploaded_processing", "android": "completed"}[platform],
@@ -975,6 +991,12 @@ func cloudBuildContractVariables(cfg cloudBuildConfig, d *Deployment, build *Bui
 		"APTEVA_TARGET_CONFIG_B64": base64.StdEncoding.EncodeToString([]byte(defaultStr(d.TargetConfigJSON, "{}"))),
 		"APTEVA_ENV_B64":           base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}"))),
 		"APTEVA_BUILD_SPEC_B64":    base64.StdEncoding.EncodeToString(specJSON),
+	}
+	if target, targetErr := parseMobileTargetConfig(d.TargetConfigJSON); targetErr == nil {
+		values["APTEVA_VERSION_NAME"] = target.VersionName
+		values["APTEVA_BUILD_NUMBER"] = target.BuildNumber
+		values["APTEVA_VERSION_CODE"] = target.VersionCode
+		values["APTEVA_DEVICE_FAMILIES_JSON"] = mustJSON(target.DeviceFamilies)
 	}
 	if cfg.SourceMode == "bundle" {
 		if capsule == nil {
@@ -1060,15 +1082,22 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 		}
 	}
 	if d.TargetKind == "android" || d.TargetKind == "ios" {
-		cfg, err := parseMobileTargetConfig(d.TargetConfigJSON)
+		targetJSON := d.TargetConfigJSON
+		if strings.TrimSpace(build.TargetConfigJSON) != "" && strings.TrimSpace(build.TargetConfigJSON) != "{}" {
+			targetJSON = build.TargetConfigJSON
+		}
+		cfg, err := parseMobileTargetConfig(targetJSON)
 		if err != nil {
 			return err
 		}
 		manifest := artifactManifest{
 			Platform: d.TargetKind, Primary: name, PackageName: cfg.PackageName,
 			BundleID: cfg.BundleID, VersionName: cfg.VersionName, BuildNumber: cfg.BuildNumber,
-			VersionCode: cfg.VersionCode,
-			Files:       []artifactFile{mobileArtifactFile(dst, strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))},
+			VersionCode: cfg.VersionCode, DeviceFamilies: cfg.DeviceFamilies,
+			Files: []artifactFile{mobileArtifactFile(dst, strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))},
+		}
+		if d.TargetKind == "ios" && len(manifest.DeviceFamilies) == 0 && strings.EqualFold(filepath.Ext(dst), ".ipa") {
+			manifest.DeviceFamilies, _ = readIPADeviceFamilies(dst)
 		}
 		return writeArtifactManifest(distDir, manifest)
 	}

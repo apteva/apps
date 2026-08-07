@@ -15,9 +15,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"howett.net/plist"
 )
 
 const artifactManifestFilename = ".apteva-artifact.json"
@@ -28,6 +31,7 @@ type mobileTargetConfig struct {
 	RequiredFeatures []string `json:"required_features,omitempty"`
 	PackageName      string   `json:"package_name,omitempty"`
 	VersionCode      string   `json:"version_code,omitempty"`
+	VersionStrategy  string   `json:"version_strategy,omitempty"`
 	GradleArgs       []string `json:"gradle_args,omitempty"`
 	ProjectPath      string   `json:"project_path,omitempty"`
 	WorkspacePath    string   `json:"workspace_path,omitempty"`
@@ -37,6 +41,7 @@ type mobileTargetConfig struct {
 	BundleID         string   `json:"bundle_id,omitempty"`
 	VersionName      string   `json:"version_name,omitempty"`
 	BuildNumber      string   `json:"build_number,omitempty"`
+	DeviceFamilies   []string `json:"device_families,omitempty"`
 	AppStoreAppID    string   `json:"app_store_app_id,omitempty"`
 	BetaGroupID      string   `json:"beta_group_id,omitempty"`
 	ReleaseType      string   `json:"release_type,omitempty"`
@@ -51,6 +56,7 @@ type artifactManifest struct {
 	VersionName      string         `json:"version_name,omitempty"`
 	BuildNumber      string         `json:"build_number,omitempty"`
 	VersionCode      string         `json:"version_code,omitempty"`
+	DeviceFamilies   []string       `json:"device_families,omitempty"`
 	Channel          string         `json:"channel,omitempty"`
 	ExternalProvider string         `json:"external_provider,omitempty"`
 	ExternalID       string         `json:"external_id,omitempty"`
@@ -126,9 +132,10 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return "", err
 	}
+	buildEnv := mobileVersionBuildEnv(ov.Env, cfg)
 
 	if strings.TrimSpace(ov.BuildCmd) != "" {
-		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, buildEnv, logW); err != nil {
 			return "", fmt.Errorf("android build_cmd: %w", err)
 		}
 	} else {
@@ -147,8 +154,16 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 			}
 		}
 		args := []string{task, "--console=plain", "--no-daemon"}
+		if cfg.VersionCode != "" || cfg.VersionName != "" {
+			initPath := filepath.Join(artifactDir, ".apteva-mobile-version.gradle")
+			if err := os.WriteFile(initPath, []byte(androidVersionInitScript(cfg)), 0o600); err != nil {
+				return "", err
+			}
+			defer os.Remove(initPath)
+			args = append(args, "--init-script", initPath)
+		}
 		args = append(args, cfg.GradleArgs...)
-		if err := runMobileBuildCommand(buildContext(ov), srcDir, bin, args, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, bin, args, buildEnv, logW); err != nil {
 			return "", fmt.Errorf("gradle %s: %w", task, err)
 		}
 	}
@@ -189,8 +204,9 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return "", err
 	}
+	buildEnv := mobileVersionBuildEnv(ov.Env, cfg)
 	if strings.TrimSpace(ov.BuildCmd) != "" {
-		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, buildEnv, logW); err != nil {
 			return "", fmt.Errorf("ios build_cmd: %w", err)
 		}
 		ipa, err := findMobileArtifact(srcDir, ".ipa", "")
@@ -209,7 +225,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		if _, err := exec.LookPath("xcodegen"); err != nil {
 			return "", errors.New("project.yml found but xcodegen is not on PATH")
 		}
-		if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodegen", []string{"generate"}, ov.Env, logW); err != nil {
+		if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodegen", []string{"generate"}, buildEnv, logW); err != nil {
 			return "", fmt.Errorf("xcodegen generate: %w", err)
 		}
 	}
@@ -220,14 +236,14 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	}
 	scheme := strings.TrimSpace(cfg.Scheme)
 	if scheme == "" {
-		scheme, err = discoverFirstIOSScheme(buildContext(ov), srcDir, containerFlag, containerPath, ov.Env)
+		scheme, err = discoverFirstIOSScheme(buildContext(ov), srcDir, containerFlag, containerPath, buildEnv)
 		if err != nil {
 			return "", err
 		}
 	}
 	configuration := defaultStr(cfg.Configuration, "Release")
 	if cfg.SmokeOnly {
-		return buildIOSSimulatorSmoke(buildContext(ov), srcDir, artifactDir, containerFlag, containerPath, scheme, configuration, ov.Env, cfg, logW)
+		return buildIOSSimulatorSmoke(buildContext(ov), srcDir, artifactDir, containerFlag, containerPath, scheme, configuration, buildEnv, cfg, logW)
 	}
 
 	fields, err := mobileBuildCredentialFields(ov.Credentials.AppStore, "app_store")
@@ -263,8 +279,14 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	if cfg.TeamID != "" {
 		archiveArgs = append(archiveArgs, "DEVELOPMENT_TEAM="+cfg.TeamID)
 	}
+	if cfg.VersionName != "" {
+		archiveArgs = append(archiveArgs, "MARKETING_VERSION="+cfg.VersionName)
+	}
+	if cfg.BuildNumber != "" {
+		archiveArgs = append(archiveArgs, "CURRENT_PROJECT_VERSION="+cfg.BuildNumber)
+	}
 	archiveArgs = append(archiveArgs, "archive")
-	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", archiveArgs, ov.Env, logW); err != nil {
+	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", archiveArgs, buildEnv, logW); err != nil {
 		return "", fmt.Errorf("xcodebuild archive: %w", err)
 	}
 
@@ -275,7 +297,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	exportDir := filepath.Join(tmp, "export")
 	exportArgs := []string{"-exportArchive", "-archivePath", archivePath, "-exportPath", exportDir, "-exportOptionsPlist", exportOptions}
 	exportArgs = append(exportArgs, authArgs...)
-	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", exportArgs, ov.Env, logW); err != nil {
+	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", exportArgs, buildEnv, logW); err != nil {
 		return "", fmt.Errorf("xcodebuild export: %w", err)
 	}
 	ipa, err := findMobileArtifact(exportDir, ".ipa", "")
@@ -288,6 +310,44 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	version := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleShortVersionString")
 	buildNumber := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleVersion")
 	return stageIPAWithVersion(ipa, artifactDir, cfg, version, buildNumber, logW)
+}
+
+func mobileVersionBuildEnv(base map[string]string, cfg mobileTargetConfig) map[string]string {
+	out := make(map[string]string, len(base)+3)
+	for key, value := range base {
+		out[key] = value
+	}
+	if cfg.VersionName != "" {
+		out["APTEVA_VERSION_NAME"] = cfg.VersionName
+	}
+	if cfg.BuildNumber != "" {
+		out["APTEVA_BUILD_NUMBER"] = cfg.BuildNumber
+	}
+	if cfg.VersionCode != "" {
+		out["APTEVA_VERSION_CODE"] = cfg.VersionCode
+	}
+	return out
+}
+
+func androidVersionInitScript(cfg mobileTargetConfig) string {
+	var assignments []string
+	if cfg.VersionCode != "" {
+		if code, err := strconv.ParseInt(cfg.VersionCode, 10, 64); err == nil && code > 0 {
+			assignments = append(assignments, fmt.Sprintf("androidExt.defaultConfig.versionCode = %d", code))
+		}
+	}
+	if cfg.VersionName != "" {
+		assignments = append(assignments, "androidExt.defaultConfig.versionName = "+strconv.Quote(cfg.VersionName))
+	}
+	return `allprojects { targetProject ->
+    targetProject.plugins.withId("com.android.application") {
+        def androidExt = targetProject.extensions.findByName("android")
+        if (androidExt != null) {
+            ` + strings.Join(assignments, "\n            ") + `
+        }
+    }
+}
+`
 }
 
 func buildIOSSimulatorSmoke(ctx context.Context, srcDir, artifactDir, containerFlag, containerPath, scheme, configuration string, env map[string]string, cfg mobileTargetConfig, logW io.Writer) (string, error) {
@@ -364,6 +424,9 @@ func stageIPAWithVersion(ipa, artifactDir string, cfg mobileTargetConfig, versio
 	if buildNumber == "" {
 		buildNumber = cfg.BuildNumber
 	}
+	if len(cfg.DeviceFamilies) == 0 {
+		cfg.DeviceFamilies, _ = readIPADeviceFamilies(ipa)
+	}
 	primary := filepath.Base(ipa)
 	dst := filepath.Join(artifactDir, primary)
 	if err := copyMobileFile(ipa, dst); err != nil {
@@ -371,7 +434,7 @@ func stageIPAWithVersion(ipa, artifactDir string, cfg mobileTargetConfig, versio
 	}
 	manifest := artifactManifest{
 		Platform: "ios", Primary: primary, BundleID: cfg.BundleID,
-		VersionName: version, BuildNumber: buildNumber,
+		VersionName: version, BuildNumber: buildNumber, DeviceFamilies: cfg.DeviceFamilies,
 		Files: []artifactFile{mobileArtifactFile(dst, "ipa")},
 	}
 	if err := writeArtifactManifest(artifactDir, manifest); err != nil {
@@ -379,6 +442,70 @@ func stageIPAWithVersion(ipa, artifactDir string, cfg mobileTargetConfig, versio
 	}
 	fmt.Fprintf(logW, "=== iOS archive export: %s ===\n", dst)
 	return primary, nil
+}
+
+func readIPADeviceFamilies(path string) ([]string, error) {
+	zr, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, err
+	}
+	defer zr.Close()
+	for _, file := range zr.File {
+		name := filepath.ToSlash(file.Name)
+		if !strings.HasPrefix(name, "Payload/") || !strings.HasSuffix(name, ".app/Info.plist") {
+			continue
+		}
+		reader, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(io.LimitReader(reader, 4<<20))
+		reader.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		var document map[string]any
+		if _, err := plist.Unmarshal(body, &document); err != nil {
+			return nil, err
+		}
+		return normalizeIOSDeviceFamilies(document["UIDeviceFamily"]), nil
+	}
+	return nil, errors.New("IPA contains no application Info.plist")
+}
+
+func normalizeIOSDeviceFamilies(value any) []string {
+	seen := map[string]bool{}
+	var out []string
+	var values []any
+	switch typed := value.(type) {
+	case []any:
+		values = typed
+	case []uint64:
+		for _, item := range typed {
+			values = append(values, item)
+		}
+	case []int64:
+		for _, item := range typed {
+			values = append(values, item)
+		}
+	default:
+		values = append(values, value)
+	}
+	for _, raw := range values {
+		family := strings.TrimSpace(fmt.Sprint(raw))
+		switch family {
+		case "1":
+			family = "iphone"
+		case "2":
+			family = "ipad"
+		}
+		if family != "" && !seen[family] {
+			seen[family] = true
+			out = append(out, family)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func runMobileBuildCommand(parent context.Context, dir, bin string, args []string, userEnv map[string]string, logW io.Writer) error {

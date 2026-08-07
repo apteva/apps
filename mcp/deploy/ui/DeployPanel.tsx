@@ -138,6 +138,7 @@ interface Build {
   artifact_path: string;
   artifact_size: number;
   artifact_manifest_json: string;
+  target_config_json?: string;
   log_path: string;
   error: string;
   created_at: string;
@@ -255,6 +256,35 @@ interface StoreAsset {
   path: string;
   sha256: string;
   order?: number;
+  mime?: string;
+  width?: number;
+  height?: number;
+}
+
+type StoreRatingLevel = "NONE" | "INFREQUENT" | "FREQUENT";
+
+interface StoreContentRating {
+  violence?: StoreRatingLevel;
+  sexual_content?: StoreRatingLevel;
+  profanity?: StoreRatingLevel;
+  drugs?: StoreRatingLevel;
+  gambling_simulation?: StoreRatingLevel;
+  contests?: StoreRatingLevel;
+  weapons?: StoreRatingLevel;
+  horror_fear?: StoreRatingLevel;
+  medical_information?: StoreRatingLevel;
+  health_wellness?: StoreRatingLevel;
+  mature_themes?: StoreRatingLevel;
+  unrestricted_web_access?: boolean;
+  real_money_gambling?: boolean;
+  loot_boxes?: boolean;
+  advertising?: boolean;
+  messaging_chat?: boolean;
+  user_generated_content?: boolean;
+  parental_controls?: boolean;
+  age_assurance?: boolean;
+  social_media?: boolean;
+  social_media_age_gate?: boolean;
 }
 
 interface StoreDocument {
@@ -280,6 +310,7 @@ interface StoreDocument {
   classification: {
     primary_category?: string;
     secondary_category?: string;
+    content_rating?: StoreContentRating;
     age_declaration?: Record<string, unknown>;
   };
   distribution: {
@@ -307,10 +338,55 @@ interface StoreConfigState {
     status: string;
     desired_hash: string;
     applied_hash: string;
+    observed_json?: string;
     last_error?: string;
   } | null;
   desired: StoreDocument;
   preflight: StorePreflight;
+}
+
+const APPLE_CATEGORIES = [
+  "BOOKS", "BUSINESS", "DEVELOPER_TOOLS", "EDUCATION", "ENTERTAINMENT", "FINANCE",
+  "FOOD_AND_DRINK", "GAMES", "GRAPHICS_AND_DESIGN", "HEALTH_AND_FITNESS", "LIFESTYLE",
+  "MAGAZINES_AND_NEWSPAPERS", "MEDICAL", "MUSIC", "NAVIGATION", "NEWS", "PHOTO_AND_VIDEO",
+  "PRODUCTIVITY", "REFERENCE", "SHOPPING", "SOCIAL_NETWORKING", "SPORTS", "TRAVEL", "UTILITIES", "WEATHER",
+] as const;
+
+const GOOGLE_CATEGORIES = [
+  "ART_AND_DESIGN", "AUTO_AND_VEHICLES", "BEAUTY", "BOOKS_AND_REFERENCE", "BUSINESS", "COMICS",
+  "COMMUNICATION", "DATING", "EDUCATION", "ENTERTAINMENT", "EVENTS", "FINANCE", "FOOD_AND_DRINK",
+  "HEALTH_AND_FITNESS", "HOUSE_AND_HOME", "LIBRARIES_AND_DEMO", "LIFESTYLE", "MAPS_AND_NAVIGATION",
+  "MEDICAL", "MUSIC_AND_AUDIO", "NEWS_AND_MAGAZINES", "PARENTING", "PERSONALIZATION", "PHOTOGRAPHY",
+  "PRODUCTIVITY", "SHOPPING", "SOCIAL", "SPORTS", "TOOLS", "TRAVEL_AND_LOCAL", "VIDEO_PLAYERS", "WEATHER", "GAME",
+] as const;
+
+const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
+  { key: "violence", label: "Violence" },
+  { key: "sexual_content", label: "Sexual content or nudity" },
+  { key: "profanity", label: "Profanity or crude humor" },
+  { key: "drugs", label: "Alcohol, tobacco, or drugs" },
+  { key: "gambling_simulation", label: "Simulated gambling" },
+  { key: "contests", label: "Contests" },
+  { key: "weapons", label: "Guns or other weapons" },
+  { key: "horror_fear", label: "Horror or fear" },
+  { key: "medical_information", label: "Medical information" },
+  { key: "health_wellness", label: "Health or wellness topics" },
+  { key: "mature_themes", label: "Mature or suggestive themes" },
+];
+
+function currentRatingLevel(value: unknown): string {
+  if (value === "INFREQUENT_OR_MILD") return "INFREQUENT";
+  if (value === "FREQUENT_OR_INTENSE") return "FREQUENT";
+  return String(value || "");
+}
+
+function storeReadiness(raw?: string): Record<string, { status?: string; source?: string; message?: string }> {
+  if (!raw) return {};
+  try {
+    return (JSON.parse(raw) as { readiness?: Record<string, { status?: string; source?: string; message?: string }> }).readiness || {};
+  } catch {
+    return {};
+  }
 }
 
 interface AutoRestartInfo {
@@ -387,6 +463,27 @@ function cloudExecutionLabel(raw: string, backend: string): string {
   }
 }
 
+function releaseRolloutFraction(release: Release): number {
+  try {
+    const value = Number(JSON.parse(release.release_meta_json || "{}").rollout_fraction);
+    return value > 0 && value <= 1 ? value : 0.1;
+  } catch {
+    return 0.1;
+  }
+}
+
+function mobileBuildVersion(build: Build): string {
+  for (const raw of [build.artifact_manifest_json, build.target_config_json]) {
+    try {
+      const value = JSON.parse(raw || "{}");
+      const name = String(value.version_name || "");
+      const number = String(value.build_number || value.version_code || "");
+      if (name || number) return [name, number && `(${number})`].filter(Boolean).join(" ");
+    } catch {}
+  }
+  return "-";
+}
+
 export default function DeployPanel({ projectId, installId }: NativePanelProps) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -411,6 +508,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [audienceBusy, setAudienceBusy] = useState(false);
   const [storeState, setStoreState] = useState<StoreConfigState | null>(null);
   const [showStoreListing, setShowStoreListing] = useState(false);
+  const [rolloutFractions, setRolloutFractions] = useState<Record<number, number>>({});
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -762,6 +860,34 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleRollout = async (release: Release) => {
+    const fraction = rolloutFractions[release.id] ?? releaseRolloutFraction(release);
+    setBusy(true);
+    try {
+      await api("POST", `/releases/${release.id}/rollout`, { fraction });
+      if (detail) await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Rollout update failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleHaltMobileRelease = (release: Release) => {
+    setConfirmState({
+      title: detail?.deployment.target_kind === "android" ? "Halt rollout" : "Expire TestFlight build",
+      body: detail?.deployment.target_kind === "android"
+        ? "Halt this Google Play production rollout?"
+        : "Expire this TestFlight build? Testers will no longer be able to install it.",
+      confirmLabel: "Halt",
+      tone: "warning",
+      onConfirm: async () => {
+        await api("POST", `/releases/${release.id}/halt`);
+        if (detail) await loadDetail(detail.deployment.id);
+      },
+    });
   };
 
   const handleStop = () => {
@@ -1223,6 +1349,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     </div>
                     <div className="text-text-dim truncate">
                       built as: {detail.builds[0].framework}
+                      {mobile && ` · version ${mobileBuildVersion(detail.builds[0])}`}
                       {detail.builds[0].build_backend !== "local"
                         && ` · ${detail.builds[0].build_backend}:${detail.builds[0].external_status || "queued"}`}
                       {detail.builds[0].framework !== detail.deployment.framework
@@ -1306,6 +1433,29 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                               className="text-green hover:underline disabled:opacity-40"
                             >release</button>
                           )}
+                          {detail.deployment.target_kind === "android" && rel.channel === "production" && rel.status !== "failed" && (
+                            <span className="inline-flex items-center gap-1">
+                              <input
+                                type="range"
+                                min={1}
+                                max={100}
+                                value={Math.round((rolloutFractions[rel.id] ?? releaseRolloutFraction(rel)) * 100)}
+                                onChange={(e) => setRolloutFractions((current) => ({
+                                  ...current,
+                                  [rel.id]: Number(e.target.value) / 100,
+                                }))}
+                                className="w-20"
+                                title="Production rollout percentage"
+                              />
+                              <button type="button" disabled={busy} onClick={() => handleRollout(rel)} className="text-accent hover:underline disabled:opacity-40">
+                                {Math.round((rolloutFractions[rel.id] ?? releaseRolloutFraction(rel)) * 100)}%
+                              </button>
+                              <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">halt</button>
+                            </span>
+                          )}
+                          {detail.deployment.target_kind === "ios" && rel.channel !== "production" && rel.status === "live" && (
+                            <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">expire</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -1321,6 +1471,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   <tr>
                     <th className="text-left font-normal">#</th>
                     <th className="text-left font-normal">Status</th>
+                    {mobile && <th className="text-left font-normal">Version</th>}
                     <th className="text-left font-normal">Duration</th>
                     <th className="text-left font-normal">Size</th>
                     <th className="text-left font-normal">Created</th>
@@ -1332,6 +1483,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     <tr key={b.id} className="border-t border-border/40">
                       <td className="py-1">{b.id}</td>
                       <td className={statusColor(b.status)}>{b.status}</td>
+                      {mobile && <td className="text-text-dim">{mobileBuildVersion(b)}</td>}
                       <td>{formatDuration(b.duration_ms)}</td>
                       <td>{formatSize(b.artifact_size)}</td>
                       <td className="text-text-dim truncate">{b.created_at}</td>
@@ -1577,6 +1729,18 @@ function CreateDeploymentDialog({
       setErr("Build backend config: " + (e as Error).message);
       return;
     }
+    const targetJSON = targetConfig.trim() || "{}";
+    if (targetKind !== "service") {
+      try {
+        const parsed = JSON.parse(targetJSON) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("must be an object");
+        if (targetKind === "android" && !String(parsed.package_name || "").trim()) throw new Error("package_name is required");
+        if (targetKind === "ios" && !String(parsed.bundle_id || "").trim()) throw new Error("bundle_id is required");
+      } catch (e) {
+        setErr("Mobile target config: " + (e as Error).message);
+        return;
+      }
+    }
     setBusy(true);
     try {
       let domain = "";
@@ -1596,7 +1760,7 @@ function CreateDeploymentDialog({
         build_backend_config_json: backendConfig,
         start_cmd: startCmd.trim(),
         env_json: env.trim() || "{}",
-        target_config_json: targetConfig.trim() || "{}",
+        target_config_json: targetJSON,
         domain: targetKind === "service" ? domain : "",
       });
       if (r.domain_error) {
@@ -1618,7 +1782,7 @@ function CreateDeploymentDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(); }}
-        className="w-[520px] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">New deployment</h2>
         <div className="grid grid-cols-2 gap-3">
@@ -1774,16 +1938,16 @@ function CreateDeploymentDialog({
           </div>
           {targetKind !== "service" && (
             <div className="col-span-2">
-              <label className="text-xs text-text-muted block mb-1">Mobile target config (JSON)</label>
-              <textarea
-                value={targetConfig}
-                onChange={(e) => setTargetConfig(e.target.value)}
-                placeholder={targetKind === "android"
-                  ? '{"package_name":"com.example.app","module":"app","variant":"release"}'
-                  : '{"bundle_id":"com.example.app","scheme":"App","team_id":"TEAMID"}'}
-                rows={3}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
+              <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />
+              <details className="mt-3 text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <textarea
+                  value={targetConfig}
+                  onChange={(e) => setTargetConfig(e.target.value)}
+                  rows={5}
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </details>
             </div>
           )}
           {targetKind === "service" && <div className="col-span-2">
@@ -2012,6 +2176,7 @@ function StoreListingDialog({
   const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "ios" ? "APP_IPHONE_67" : "");
   const [reviewPassword, setReviewPassword] = useState("");
   const [hasConfig, setHasConfig] = useState(Boolean(initial.config));
+  const [readiness, setReadiness] = useState(() => storeReadiness(initial.config?.observed_json));
   const [ageJSON, setAgeJSON] = useState(
     JSON.stringify(initial.desired.classification.age_declaration || {}, null, 2),
   );
@@ -2064,6 +2229,7 @@ function StoreListingDialog({
     const next = await api<StoreConfigState>("PUT", `/deployments/${deployment.id}/store-config`, desired);
     setDoc(structuredClone(next.desired));
     setPreflight(next.preflight);
+    setReadiness(storeReadiness(next.config?.observed_json));
     setHasConfig(true);
     onSaved(next);
     return next;
@@ -2102,6 +2268,7 @@ function StoreListingDialog({
       const next = await api<StoreConfigState>("GET", `/deployments/${deployment.id}/store-config`);
       setDoc(structuredClone(next.desired));
       setPreflight(next.preflight);
+      setReadiness(storeReadiness(next.config?.observed_json));
       onSaved(next);
     } catch (e) {
       setErr((e as Error).message);
@@ -2118,6 +2285,7 @@ function StoreListingDialog({
       const next = await api<StoreConfigState>("GET", `/deployments/${deployment.id}/store-config`);
       setDoc(structuredClone(next.desired));
       setPreflight(next.preflight);
+      setReadiness(storeReadiness(next.config?.observed_json));
       onSaved(next);
     } catch (e) {
       setErr((e as Error).message);
@@ -2179,7 +2347,7 @@ function StoreListingDialog({
         onClick={(e) => e.stopPropagation()}
         className="w-[820px] max-w-[94vw] h-[86vh] bg-bg border border-border rounded flex flex-col overflow-hidden"
       >
-        <header className="px-5 py-3 border-b border-border flex items-center gap-3">
+        <header className="px-5 py-3 border-b border-border flex flex-wrap items-center gap-3">
           <div className="min-w-0 flex-1">
             <h2 className="text-text font-semibold">Store listing</h2>
             <div className="text-xs text-text-dim">
@@ -2195,7 +2363,7 @@ function StoreListingDialog({
           </button>
         </header>
 
-        <nav className="px-5 border-b border-border flex items-center gap-1">
+        <nav className="px-5 border-b border-border flex items-center gap-1 overflow-x-auto shrink-0">
           {tabs.map(([value, label]) => (
             <button
               key={value}
@@ -2225,7 +2393,7 @@ function StoreListingDialog({
 
           {tab === "listing" && (
             <div className="space-y-5">
-              <section className="grid grid-cols-3 gap-3">
+              <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <label className="text-xs text-text-muted">
                   Store version
                   <input
@@ -2246,16 +2414,24 @@ function StoreListingDialog({
                   </select>
                 </label>
                 <label className="text-xs text-text-muted">
-                  Release mode
+                  {deployment.target_kind === "ios" ? "Release mode" : "Production rollout"}
                   <select
                     value={doc.release_mode}
                     onChange={(e) => setDoc({ ...doc, release_mode: e.target.value })}
                     className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                   >
-                    <option value="manual">Manual</option>
-                    <option value="after_approval">After approval</option>
-                    <option value="scheduled">Scheduled</option>
-                    <option value="automatic">Automatic</option>
+                    {deployment.target_kind === "ios" ? (
+                      <>
+                        <option value="manual">Manual</option>
+                        <option value="after_approval">After approval</option>
+                        <option value="scheduled">Scheduled</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="immediate">Immediate</option>
+                        <option value="staged">Staged rollout</option>
+                      </>
+                    )}
                   </select>
                 </label>
               </section>
@@ -2279,7 +2455,7 @@ function StoreListingDialog({
                     Add locale
                   </button>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <TextField label="Title" value={localization.title} onChange={(title) => updateLocalization({ title })} />
                   <TextField
                     label={deployment.target_kind === "ios" ? "Subtitle" : "Short description"}
@@ -2288,7 +2464,7 @@ function StoreListingDialog({
                       ? { subtitle: value }
                       : { short_description: value })}
                   />
-                  <label className="col-span-2 text-xs text-text-muted">
+                  <label className="sm:col-span-2 text-xs text-text-muted">
                     Description
                     <textarea
                       rows={6}
@@ -2318,10 +2494,22 @@ function StoreListingDialog({
 
           {tab === "media" && (
             <div className="space-y-4">
-              <section className="flex items-end gap-3">
+              <section className="flex flex-wrap items-end gap-3">
                 <label className="text-xs text-text-muted">
                   Asset type
-                  <select value={assetKind} onChange={(e) => setAssetKind(e.target.value)} className="mt-1 block bg-bg-input border border-border rounded px-2 py-1 text-sm">
+                  <select
+                    value={assetKind}
+                    onChange={(e) => {
+                      const kind = e.target.value;
+                      setAssetKind(kind);
+                      if (deployment.target_kind === "ios") {
+                        setDisplayTarget(kind === "tablet_screenshot" ? "APP_IPAD_PRO_13" : kind === "app_preview" ? "IPHONE_67" : "APP_IPHONE_67");
+                      } else {
+                        setDisplayTarget(kind === "tablet_screenshot" ? "tablet_7" : "");
+                      }
+                    }}
+                    className="mt-1 block bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
                     <option value="phone_screenshot">Phone screenshot</option>
                     <option value="tablet_screenshot">Tablet screenshot</option>
                     {deployment.target_kind === "ios" && <option value="app_preview">App preview</option>}
@@ -2334,12 +2522,41 @@ function StoreListingDialog({
                 </label>
                 <label className="text-xs text-text-muted">
                   Display target
-                  <input
-                    value={displayTarget}
-                    onChange={(e) => setDisplayTarget(e.target.value)}
-                    placeholder={deployment.target_kind === "ios" ? "APP_IPHONE_67" : "tablet_10"}
-                    className="mt-1 block w-44 bg-bg-input border border-border rounded px-2 py-1 text-sm"
-                  />
+                  {deployment.target_kind === "ios" && assetKind !== "review_attachment" ? (
+                    <select
+                      value={displayTarget}
+                      onChange={(e) => setDisplayTarget(e.target.value)}
+                      className="mt-1 block w-52 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      {assetKind === "tablet_screenshot" ? (
+                        <>
+                          <option value="APP_IPAD_PRO_13">iPad 13-inch</option>
+                          <option value="APP_IPAD_PRO_3GEN_129">iPad Pro 12.9-inch</option>
+                        </>
+                      ) : assetKind === "app_preview" ? (
+                        <option value="IPHONE_67">iPhone 6.7-inch preview</option>
+                      ) : (
+                        <>
+                          <option value="APP_IPHONE_69">iPhone 6.9-inch</option>
+                          <option value="APP_IPHONE_67">iPhone 6.7-inch</option>
+                          <option value="APP_IPHONE_65">iPhone 6.5-inch</option>
+                          <option value="APP_IPHONE_63">iPhone 6.3-inch</option>
+                          <option value="APP_IPHONE_61">iPhone 6.1-inch</option>
+                        </>
+                      )}
+                    </select>
+                  ) : deployment.target_kind === "android" && assetKind === "tablet_screenshot" ? (
+                    <select
+                      value={displayTarget || "tablet_7"}
+                      onChange={(e) => setDisplayTarget(e.target.value)}
+                      className="mt-1 block w-44 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      <option value="tablet_7">7-inch tablet</option>
+                      <option value="tablet_10">10-inch tablet</option>
+                    </select>
+                  ) : (
+                    <span className="mt-1 block text-xs text-text-dim">Selected automatically</span>
+                  )}
                 </label>
                 <label className="px-3 py-1.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg cursor-pointer">
                   Upload
@@ -2375,7 +2592,10 @@ function StoreListingDialog({
                       <td className="py-2">{asset.locale}</td>
                       <td>{asset.kind}</td>
                       <td className="text-text-dim">{asset.display_target || "-"}</td>
-                      <td className="text-text-dim truncate max-w-64">{asset.path.split("/").at(-1)}</td>
+                      <td className="text-text-dim truncate max-w-64">
+                        {asset.path.split("/").at(-1)}
+                        {asset.width && asset.height ? ` · ${asset.width} × ${asset.height}` : ""}
+                      </td>
                       <td className="text-right">
                         <button
                           type="button"
@@ -2391,12 +2611,12 @@ function StoreListingDialog({
           )}
 
           {tab === "review" && (
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <TextField label="First name" value={doc.review.first_name} onChange={(first_name) => setDoc({ ...doc, review: { ...doc.review, first_name } })} />
               <TextField label="Last name" value={doc.review.last_name} onChange={(last_name) => setDoc({ ...doc, review: { ...doc.review, last_name } })} />
               <TextField label="Email" value={doc.review.email} onChange={(email) => setDoc({ ...doc, review: { ...doc.review, email } })} />
               <TextField label="Phone" value={doc.review.phone} onChange={(phone) => setDoc({ ...doc, review: { ...doc.review, phone } })} />
-              <label className="col-span-2 text-xs text-text-muted">
+              <label className="sm:col-span-2 text-xs text-text-muted">
                 Review notes
                 <textarea
                   rows={5}
@@ -2407,7 +2627,7 @@ function StoreListingDialog({
               </label>
               {deployment.target_kind === "ios" && (
                 <>
-                  <label className="col-span-2 flex items-center gap-2 text-xs text-text-muted">
+                  <label className="sm:col-span-2 flex items-center gap-2 text-xs text-text-muted">
                     <input
                       type="checkbox"
                       checked={Boolean(doc.review.demo_account_required)}
@@ -2437,22 +2657,102 @@ function StoreListingDialog({
 
           {tab === "compliance" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <TextField label="Privacy policy URL" value={doc.privacy.policy_url} onChange={(policy_url) => setDoc({ ...doc, privacy: { ...doc.privacy, policy_url } })} />
                 <TextField label="Privacy choices URL" value={doc.privacy.choices_url} onChange={(choices_url) => setDoc({ ...doc, privacy: { ...doc.privacy, choices_url } })} />
+                <label className="text-xs text-text-muted">
+                  Primary category
+                  <select
+                    value={doc.classification.primary_category || ""}
+                    onChange={(e) => setDoc({ ...doc, classification: { ...doc.classification, primary_category: e.target.value } })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="">Select category</option>
+                    {(deployment.target_kind === "ios" ? APPLE_CATEGORIES : GOOGLE_CATEGORIES).map((category) => (
+                      <option key={category} value={category}>{category.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
                 {deployment.target_kind === "ios" && (
-                  <>
-                    <TextField label="Primary category ID" value={doc.classification.primary_category} onChange={(primary_category) => setDoc({ ...doc, classification: { ...doc.classification, primary_category } })} />
-                    <TextField label="Secondary category ID" value={doc.classification.secondary_category} onChange={(secondary_category) => setDoc({ ...doc, classification: { ...doc.classification, secondary_category } })} />
-                  </>
+                  <label className="text-xs text-text-muted">
+                    Secondary category
+                    <select
+                      value={doc.classification.secondary_category || ""}
+                      onChange={(e) => setDoc({ ...doc, classification: { ...doc.classification, secondary_category: e.target.value } })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      <option value="">None</option>
+                      {APPLE_CATEGORIES.map((category) => <option key={category} value={category}>{category.replaceAll("_", " ")}</option>)}
+                    </select>
+                  </label>
                 )}
               </div>
+              <section className="border-t border-border pt-4 space-y-3">
+                <div className="text-xs uppercase text-text-dim">Content rating</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {RATING_FIELDS.map(({ key, label }) => (
+                    <label key={key} className="text-xs text-text-muted">
+                      {label}
+                      <select
+                        value={currentRatingLevel(doc.classification.content_rating?.[key])}
+                        onChange={(e) => setDoc({
+                          ...doc,
+                          classification: {
+                            ...doc.classification,
+                            content_rating: {
+                              ...doc.classification.content_rating,
+                              [key]: e.target.value as StoreRatingLevel,
+                            },
+                          },
+                        })}
+                        className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="">Select</option>
+                        <option value="NONE">None</option>
+                        <option value="INFREQUENT">Infrequent</option>
+                        <option value="FREQUENT">Frequent</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-4">
+                  {([
+                    ["unrestricted_web_access", "Unrestricted web access"],
+                    ["real_money_gambling", "Real-money gambling"],
+                    ["loot_boxes", "Loot boxes"],
+                    ["advertising", "Advertising"],
+                    ["messaging_chat", "Messaging and chat"],
+                    ["user_generated_content", "User-generated content"],
+                    ["parental_controls", "Parental controls"],
+                    ["age_assurance", "Age assurance"],
+                    ["social_media", "Social media"],
+                    ["social_media_age_gate", "Social media restricted under 13"],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-2 text-xs text-text-muted">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(doc.classification.content_rating?.[key])}
+                        onChange={(e) => setDoc({
+                          ...doc,
+                          classification: {
+                            ...doc.classification,
+                            content_rating: { ...doc.classification.content_rating, [key]: e.target.checked },
+                          },
+                        })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {deployment.target_kind === "ios" && (
+                  <details className="text-xs text-text-muted">
+                    <summary className="cursor-pointer">Advanced Apple declaration fields</summary>
+                    <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={6} className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
+                  </details>
+                )}
+              </section>
               {deployment.target_kind === "ios" ? (
                 <>
-                  <label className="text-xs text-text-muted block">
-                    Apple age declaration
-                    <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={8} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
-                  </label>
                   <label className="flex items-center gap-2 text-xs text-text-muted">
                     <input
                       type="checkbox"
@@ -2514,7 +2814,7 @@ function StoreListingDialog({
 
           {tab === "distribution" && (
             <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <TextField
                   label="Territories"
                   value={(doc.distribution.territories || []).join(", ")}
@@ -2535,21 +2835,38 @@ function StoreListingDialog({
                   />
                   Phased release
                 </label>
+                {deployment.target_kind === "android" && doc.release_mode === "staged" && (
+                  <label className="text-xs text-text-muted">
+                    Initial rollout percent
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={Math.round((doc.distribution.rollout_fraction || 0.1) * 100)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        distribution: { ...doc.distribution, rollout_fraction: Number(e.target.value) / 100 },
+                      })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    />
+                  </label>
+                )}
                 {doc.release_mode === "scheduled" && (
                   <label className="text-xs text-text-muted">
                     Earliest release
                     <input
                       type="datetime-local"
-                      value={doc.earliest_release_at || ""}
-                      onChange={(e) => setDoc({ ...doc, earliest_release_at: e.target.value })}
+                      value={(doc.earliest_release_at || "").slice(0, 16)}
+                      onChange={(e) => setDoc({ ...doc, earliest_release_at: e.target.value ? new Date(e.target.value).toISOString() : "" })}
                       className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                     />
                   </label>
                 )}
-                <label className="flex items-center gap-2 text-xs text-text-muted">
+                <label className="flex items-center gap-2 text-xs text-text-muted" title={readiness.availability?.message}>
                   <input
                     type="checkbox"
-                    checked={Boolean(doc.distribution.provider?.availability_configured)}
+                    disabled={readiness.availability?.status === "verified"}
+                    checked={readiness.availability?.status === "verified" || Boolean(doc.distribution.provider?.availability_configured)}
                     onChange={(e) => setDoc({
                       ...doc,
                       distribution: {
@@ -2558,12 +2875,13 @@ function StoreListingDialog({
                       },
                     })}
                   />
-                  Existing store availability verified
+                  {readiness.availability?.status === "verified" ? "Availability verified by provider" : "Existing store availability verified manually"}
                 </label>
-                <label className="flex items-center gap-2 text-xs text-text-muted">
+                <label className="flex items-center gap-2 text-xs text-text-muted" title={readiness.pricing?.message}>
                   <input
                     type="checkbox"
-                    checked={Boolean(doc.distribution.provider?.pricing_configured)}
+                    disabled={readiness.pricing?.status === "verified"}
+                    checked={readiness.pricing?.status === "verified" || Boolean(doc.distribution.provider?.pricing_configured)}
                     onChange={(e) => setDoc({
                       ...doc,
                       distribution: {
@@ -2572,23 +2890,23 @@ function StoreListingDialog({
                       },
                     })}
                   />
-                  Existing store pricing verified
+                  {readiness.pricing?.status === "verified" ? "Pricing verified by provider" : "Existing store pricing verified manually"}
                 </label>
               </div>
-              <label className="text-xs text-text-muted block">
-                Provider extensions
+              <details className="text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced provider extensions</summary>
                 <textarea
                   value={providerExtensionsJSON}
                   onChange={(e) => setProviderExtensionsJSON(e.target.value)}
                   rows={9}
-                  className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
                 />
-              </label>
+              </details>
             </div>
           )}
         </div>
 
-        <footer className="px-5 py-3 border-t border-border flex items-center gap-2">
+        <footer className="px-5 py-3 border-t border-border flex flex-wrap items-center gap-2">
           {err && <span className="text-xs text-red flex-1 truncate" title={err}>{err}</span>}
           {!err && <span className="flex-1 text-xs text-text-dim">Saving does not submit or release the app.</span>}
           <button type="button" onClick={handleSync} disabled={busy || !hasConfig} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-40">
@@ -2616,6 +2934,90 @@ function TextField({ label, value, onChange }: { label: string; value?: string; 
         className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
       />
     </label>
+  );
+}
+
+function parseMobileTargetJSON(raw: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(raw.trim() || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function patchMobileTargetJSON(raw: string, patch: Record<string, unknown>): string {
+  const value = parseMobileTargetJSON(raw);
+  if (!value.version_strategy) value.version_strategy = "auto";
+  for (const [key, next] of Object.entries(patch)) {
+    if (next === "" || next === undefined || next === null || (Array.isArray(next) && next.length === 0)) {
+      delete value[key];
+    } else {
+      value[key] = next;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function MobileTargetFields({
+  targetKind,
+  value,
+  onChange,
+}: {
+  targetKind: "android" | "ios";
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const config = parseMobileTargetJSON(value);
+  const strategy = String(config.version_strategy || "auto");
+  const set = (patch: Record<string, unknown>) => onChange(patchMobileTargetJSON(value, patch));
+  const families = Array.isArray(config.device_families) ? config.device_families.map(String) : [];
+  const toggleFamily = (family: string, checked: boolean) => {
+    const next = checked ? [...new Set([...families, family])] : families.filter((value) => value !== family);
+    set({ device_families: next });
+  };
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {targetKind === "android" ? (
+        <>
+          <TextField label="Package name" value={String(config.package_name || "")} onChange={(package_name) => set({ package_name })} />
+          <TextField label="Marketing version" value={String(config.version_name || "")} onChange={(version_name) => set({ version_name })} />
+          <TextField label="Gradle module" value={String(config.module || "app")} onChange={(module) => set({ module })} />
+          <TextField label="Build variant" value={String(config.variant || "release")} onChange={(variant) => set({ variant })} />
+        </>
+      ) : (
+        <>
+          <TextField label="Bundle ID" value={String(config.bundle_id || "")} onChange={(bundle_id) => set({ bundle_id })} />
+          <TextField label="Xcode scheme" value={String(config.scheme || "")} onChange={(scheme) => set({ scheme })} />
+          <TextField label="Marketing version" value={String(config.version_name || "")} onChange={(version_name) => set({ version_name })} />
+          <TextField label="Apple Team ID" value={String(config.team_id || "")} onChange={(team_id) => set({ team_id })} />
+          <TextField label="App Store app ID" value={String(config.app_store_app_id || "")} onChange={(app_store_app_id) => set({ app_store_app_id })} />
+          <div className="flex items-end gap-4 pb-1">
+            {(["iphone", "ipad"] as const).map((family) => (
+              <label key={family} className="flex items-center gap-2 text-xs text-text-muted">
+                <input type="checkbox" checked={families.includes(family)} onChange={(e) => toggleFamily(family, e.target.checked)} />
+                {family === "iphone" ? "iPhone" : "iPad"}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+      <label className="text-xs text-text-muted">
+        Version allocation
+        <select value={strategy} onChange={(e) => set({ version_strategy: e.target.value })} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm">
+          <option value="auto">Automatic</option>
+          <option value="manual">Manual</option>
+        </select>
+      </label>
+      {strategy === "manual" && (
+        <TextField
+          label={targetKind === "ios" ? "Build number" : "Version code"}
+          value={String(config[targetKind === "ios" ? "build_number" : "version_code"] || "")}
+          onChange={(next) => set({ [targetKind === "ios" ? "build_number" : "version_code"]: next })}
+        />
+      )}
+    </div>
   );
 }
 
@@ -2837,7 +3239,7 @@ function EditConfigDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(false); }}
-        className="w-[520px] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">Edit deployment config</h2>
         <p className="text-xs text-text-dim">
@@ -2936,13 +3338,16 @@ function EditConfigDialog({
           </div>
           {deployment.target_kind !== "service" && (
             <div className="col-span-2">
-              <label className="text-xs text-text-muted block mb-1">Mobile target config</label>
-              <textarea
-                value={targetConfigJSON}
-                onChange={(e) => setTargetConfigJSON(e.target.value)}
-                rows={5}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
+              <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />
+              <details className="mt-3 text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <textarea
+                  value={targetConfigJSON}
+                  onChange={(e) => setTargetConfigJSON(e.target.value)}
+                  rows={6}
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </details>
             </div>
           )}
         </div>

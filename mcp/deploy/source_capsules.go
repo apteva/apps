@@ -71,6 +71,11 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 	if err := fetchSource(globalCtx, d, srcDir, sourceCfg); err != nil {
 		return nil, fmt.Errorf("fetch source capsule: %w", err)
 	}
+	if d.TargetKind == "ios" {
+		if err := a.snapshotIOSDeviceFamilies(srcDir, d, build); err != nil {
+			return nil, fmt.Errorf("detect iOS device families: %w", err)
+		}
+	}
 	if cfg.Preflight != "off" && isMobileDeployment(d, build) {
 		if err := validateMobileSource(srcDir, d, cfg); err != nil {
 			return nil, fmt.Errorf("mobile source preflight: %w", err)
@@ -112,6 +117,31 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 		URL: signedURL, SHA256: sum, Size: size,
 		Format: sourceCapsuleFormat, Expires: expires,
 	}, nil
+}
+
+func (a *App) snapshotIOSDeviceFamilies(root string, d *Deployment, build *Build) error {
+	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
+	if err != nil {
+		return err
+	}
+	if len(target.DeviceFamilies) > 0 {
+		return nil
+	}
+	families, err := detectIOSDeviceFamilies(root)
+	if err != nil {
+		return err
+	}
+	if len(families) == 0 {
+		return nil
+	}
+	target.DeviceFamilies = families
+	raw, err := json.Marshal(target)
+	if err != nil {
+		return err
+	}
+	d.TargetConfigJSON = string(raw)
+	build.TargetConfigJSON = string(raw)
+	return dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"target_config_json": string(raw)})
 }
 
 func sourceCapsuleTTL(cfg cloudBuildConfig) time.Duration {

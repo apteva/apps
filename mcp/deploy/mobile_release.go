@@ -78,6 +78,14 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if err != nil {
 		return nil, err
 	}
+	if platform == "android" && channel == "production" && opts.RolloutFraction == 0 {
+		if _, storeDoc, storeErr := a.mobileStoreConfig(d); storeErr == nil && storeDoc.ReleaseMode == "staged" {
+			opts.RolloutFraction = storeDoc.Distribution.RolloutFraction
+		}
+	}
+	if platform == "android" && channel == "production" && (opts.RolloutFraction < 0 || opts.RolloutFraction > 1) {
+		return nil, errors.New("Android rollout_fraction must be between 0 and 1")
+	}
 	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
 	if err != nil {
 		return nil, err

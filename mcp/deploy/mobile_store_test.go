@@ -59,6 +59,29 @@ func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
 	}
 }
 
+func TestGenericContentRatingTranslatesToAppleAttributes(t *testing.T) {
+	rating := StoreContentRating{
+		Violence: "NONE", SexualContent: "INFREQUENT_OR_MILD", Profanity: "NONE", Drugs: "NONE",
+		GamblingSimulation: "NONE", Contests: "NONE", Weapons: "NONE", HorrorFear: "NONE",
+		MedicalInformation: "NONE", HealthWellness: "NONE", MatureThemes: "NONE",
+		UnrestrictedWebAccess: true, LootBoxes: true,
+	}
+	if !storeContentRatingComplete(rating) {
+		t.Fatal("complete generic content rating was rejected")
+	}
+	attributes := appleAgeDeclaration(StoreClassification{ContentRating: rating})
+	if attributes["sexualContentOrNudity"] != "INFREQUENT" || attributes["unrestrictedWebAccess"] != true || attributes["lootBox"] != true {
+		t.Fatalf("translated attributes=%#v", attributes)
+	}
+}
+
+func TestProviderReadinessCanReplaceManualDistributionAttestation(t *testing.T) {
+	cfg := &MobileStoreConfig{ObservedJSON: `{"readiness":{"pricing":{"status":"verified"},"availability":{"status":"verified"}}}`}
+	if !providerReadinessVerified(cfg, "pricing") || !providerReadinessVerified(cfg, "availability") {
+		t.Fatalf("provider readiness not recognized: %s", cfg.ObservedJSON)
+	}
+}
+
 func TestStorePreflightRejectsBinaryListingVersionMismatch(t *testing.T) {
 	root := t.TempDir()
 	d := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "ios"}

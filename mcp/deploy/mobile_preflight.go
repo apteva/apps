@@ -88,6 +88,9 @@ func validateMobileCloudContract(d *Deployment, cloudCfg cloudBuildConfig) error
 			(strings.TrimSpace(target.VersionName) == "" || strings.TrimSpace(target.BuildNumber) == "") {
 			return errors.New("iOS store_upload requires target_config_json.version_name and build_number")
 		}
+		if mode == "store_upload" && cloudCfg.SourceMode != "bundle" && len(target.DeviceFamilies) == 0 {
+			return errors.New("iOS repository store_upload requires target_config_json.device_families so App Store media can be validated")
+		}
 	case "android":
 		if strings.TrimSpace(target.PackageName) == "" {
 			return errors.New("Android cloud builds require target_config_json.package_name")

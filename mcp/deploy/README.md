@@ -57,6 +57,8 @@ Android `target_config_json` supports:
   "package_name": "com.example.app",
   "module": "app",
   "variant": "release",
+  "version_strategy": "auto",
+  "version_name": "1.2.3",
   "gradle_args": []
 }
 ```
@@ -75,11 +77,17 @@ iOS `target_config_json` supports:
   "bundle_id": "com.example.app",
   "scheme": "App",
   "team_id": "TEAMID",
+  "version_strategy": "auto",
   "version_name": "1.2.3",
-  "build_number": "42",
   "app_store_app_id": "123456789"
 }
 ```
+
+With `version_strategy: auto`, Deploy reads the bound store, reserves the next
+iOS build number or Android version code in its database, snapshots it on the
+build, and sends the same immutable values to every local or cloud backend.
+Explicit `build_number` and `version_code` values retain the previous manual
+behavior.
 
 Bind `app_store` to an App Store Connect connection containing Issuer ID,
 Key ID, and the `.p8` private key. The default build requires macOS and
@@ -291,6 +299,14 @@ state. Store media uses relative paths under
 `/data/store-assets/<deployment>/<environment>/`; files removed from the
 document are pruned when it is saved.
 
+The common document includes localized listing text, review details, category,
+a structured content-rating questionnaire, privacy declarations, release mode,
+territories, pricing, and rollout settings. Provider-only request bodies remain
+available under `provider_extensions`. Images are decoded before apply and
+validated against Apple display targets or Google icon, feature-graphic, and
+screenshot constraints. iPad screenshot requirements are inferred from the
+Xcode project, explicit Info.plist, or built IPA.
+
 The workflow is:
 
 1. `deploy_store_update` saves metadata, media references, review details,
@@ -298,7 +314,8 @@ The workflow is:
 2. Upload media through `POST /api/deployments/<id>/store-assets`.
 3. `deploy_store_plan` or `deploy_store_preflight` reports blocking findings,
    including exact binary/listing version mismatches.
-4. `deploy_store_apply` reconciles supported provider resources.
+4. `deploy_store_apply` reconciles supported provider resources, reads them
+   back, and persists normalized provider readiness.
 5. `deploy_release` attaches the exact build and optionally submits it.
 6. `deploy_store_sync` refreshes observed provider state.
 7. `deploy_store_release_approved` releases an Apple-approved version waiting

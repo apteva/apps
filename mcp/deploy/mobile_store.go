@@ -78,6 +78,9 @@ type StoreAsset struct {
 	Path          string `json:"path"`
 	SHA256        string `json:"sha256"`
 	Order         int    `json:"order,omitempty"`
+	MIME          string `json:"mime,omitempty"`
+	Width         int    `json:"width,omitempty"`
+	Height        int    `json:"height,omitempty"`
 }
 
 type StoreReview struct {
@@ -93,9 +96,36 @@ type StoreReview struct {
 }
 
 type StoreClassification struct {
-	PrimaryCategory   string         `json:"primary_category,omitempty"`
-	SecondaryCategory string         `json:"secondary_category,omitempty"`
-	AgeDeclaration    map[string]any `json:"age_declaration,omitempty"`
+	PrimaryCategory   string             `json:"primary_category,omitempty"`
+	SecondaryCategory string             `json:"secondary_category,omitempty"`
+	ContentRating     StoreContentRating `json:"content_rating,omitempty"`
+	// AgeDeclaration is a provider-specific compatibility escape hatch. New
+	// clients should use ContentRating and let the provider adapter translate it.
+	AgeDeclaration map[string]any `json:"age_declaration,omitempty"`
+}
+
+type StoreContentRating struct {
+	Violence              string `json:"violence,omitempty"`
+	SexualContent         string `json:"sexual_content,omitempty"`
+	Profanity             string `json:"profanity,omitempty"`
+	Drugs                 string `json:"drugs,omitempty"`
+	GamblingSimulation    string `json:"gambling_simulation,omitempty"`
+	Contests              string `json:"contests,omitempty"`
+	Weapons               string `json:"weapons,omitempty"`
+	HorrorFear            string `json:"horror_fear,omitempty"`
+	MedicalInformation    string `json:"medical_information,omitempty"`
+	HealthWellness        string `json:"health_wellness,omitempty"`
+	MatureThemes          string `json:"mature_themes,omitempty"`
+	UnrestrictedWebAccess bool   `json:"unrestricted_web_access,omitempty"`
+	RealMoneyGambling     bool   `json:"real_money_gambling,omitempty"`
+	LootBoxes             bool   `json:"loot_boxes,omitempty"`
+	Advertising           bool   `json:"advertising,omitempty"`
+	MessagingChat         bool   `json:"messaging_chat,omitempty"`
+	UserGeneratedContent  bool   `json:"user_generated_content,omitempty"`
+	ParentalControls      bool   `json:"parental_controls,omitempty"`
+	AgeAssurance          bool   `json:"age_assurance,omitempty"`
+	SocialMedia           bool   `json:"social_media,omitempty"`
+	SocialMediaAgeGate    bool   `json:"social_media_age_gate,omitempty"`
 }
 
 type StoreDistribution struct {
@@ -175,7 +205,7 @@ func defaultStoreDocument(platform string) StoreDocument {
 		ProviderExtensions: map[string]any{},
 	}
 	if platform == "android" {
-		doc.ReleaseMode = "automatic"
+		doc.ReleaseMode = "immediate"
 	}
 	return doc
 }
@@ -194,6 +224,22 @@ func parseStoreDocument(raw string, platform string) (StoreDocument, error) {
 	if doc.SchemaVersion != 1 {
 		return StoreDocument{}, fmt.Errorf("unsupported store schema_version %d", doc.SchemaVersion)
 	}
+	releaseMode, err := normalizeStoreReleaseMode(platform, doc.ReleaseMode)
+	if err != nil {
+		return StoreDocument{}, err
+	}
+	doc.ReleaseMode = releaseMode
+	if doc.ReleaseMode == "scheduled" {
+		if _, err := time.Parse(time.RFC3339, doc.EarliestReleaseAt); err != nil {
+			legacy, legacyErr := time.Parse("2006-01-02T15:04", doc.EarliestReleaseAt)
+			if legacyErr != nil {
+				return StoreDocument{}, errors.New("earliest_release_at must be an RFC3339 timestamp for scheduled release")
+			}
+			doc.EarliestReleaseAt = legacy.UTC().Format(time.RFC3339)
+		}
+	} else {
+		doc.EarliestReleaseAt = ""
+	}
 	doc.DefaultLocale = defaultStr(strings.TrimSpace(doc.DefaultLocale), "en-US")
 	if doc.Localizations == nil {
 		doc.Localizations = map[string]StoreLocalization{}
@@ -208,6 +254,34 @@ func parseStoreDocument(raw string, platform string) (StoreDocument, error) {
 		doc.ProviderExtensions = map[string]any{}
 	}
 	return doc, nil
+}
+
+func normalizeStoreReleaseMode(platform, raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	if platform == "ios" {
+		mode = defaultStr(mode, "manual")
+		if mode == "automatic" {
+			mode = "after_approval"
+		}
+		switch mode {
+		case "manual", "after_approval", "scheduled":
+			return mode, nil
+		default:
+			return "", errors.New("iOS release_mode must be manual, after_approval, or scheduled")
+		}
+	}
+	mode = defaultStr(mode, "immediate")
+	// Older Deploy versions persisted "automatic" for Android. It meant an
+	// immediate rollout, so normalize it without breaking existing listings.
+	if mode == "automatic" {
+		mode = "immediate"
+	}
+	switch mode {
+	case "immediate", "staged":
+		return mode, nil
+	default:
+		return "", errors.New("Android release_mode must be immediate or staged")
+	}
 }
 
 func canonicalStoreDocument(doc StoreDocument) (string, string, error) {
@@ -362,36 +436,8 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 				}
 			}
 		}
-		screenshotCount := 0
-		hasIcon := false
-		hasFeatureGraphic := false
-		for _, asset := range doc.Assets {
-			if asset.Kind == "phone_screenshot" || asset.Kind == "tablet_screenshot" {
-				screenshotCount++
-			}
-			if asset.Kind == "icon" {
-				hasIcon = true
-			}
-			if asset.Kind == "feature_graphic" {
-				hasFeatureGraphic = true
-			}
-			if _, err := resolveStoreAssetPath(dataDir, d, asset.Path); err != nil {
-				add("asset.unavailable", "error", "media", asset.Locale, "path", err.Error(), "Upload the asset again.", true)
-			}
-		}
-		if screenshotCount == 0 {
-			add("screenshots.required", "error", "media", doc.DefaultLocale, "assets", "At least one phone or tablet screenshot is required.", "Upload store screenshots.", true)
-		}
-		if d.TargetKind == "android" {
-			if screenshotCount < 2 {
-				add("screenshots.google_minimum", "error", "media", doc.DefaultLocale, "assets", "Google Play requires at least two screenshots.", "Upload at least two phone or tablet screenshots.", true)
-			}
-			if !hasIcon {
-				add("icon.google_required", "error", "media", doc.DefaultLocale, "assets", "Google Play requires a store icon.", "Upload a 512 x 512 store icon.", true)
-			}
-			if !hasFeatureGraphic {
-				add("feature_graphic.google_required", "error", "media", doc.DefaultLocale, "assets", "Google Play requires a feature graphic.", "Upload a 1024 x 500 feature graphic.", true)
-			}
+		for _, finding := range validateStoreAssets(dataDir, d, build, doc) {
+			findings = append(findings, finding)
 		}
 		if d.TargetKind == "ios" {
 			if doc.Review.FirstName == "" || doc.Review.LastName == "" || doc.Review.Email == "" || doc.Review.Phone == "" {
@@ -403,13 +449,23 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			if doc.Classification.PrimaryCategory == "" {
 				add("category.required", "error", "classification", "", "primary_category", "Primary App Store category is required.", "Select a category.", true)
 			}
-			if len(doc.Classification.AgeDeclaration) == 0 {
-				add("age_rating.required", "error", "classification", "", "age_declaration", "Apple age-rating declarations are required.", "Complete the age-rating questionnaire.", true)
+			if !storeContentRatingComplete(doc.Classification.ContentRating) && len(doc.Classification.AgeDeclaration) == 0 {
+				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are required.", "Complete the age-rating questionnaire.", true)
 			}
 			if !doc.Privacy.ManualAttestations["apple_privacy_published"] {
 				add("privacy.apple_manual", "error", "privacy", "", "apple_privacy_published", "Apple privacy answers must be reviewed and published in App Store Connect.", "Complete and attest the App Privacy questionnaire.", false)
 			}
 		} else {
+			if doc.ReleaseMode == "staged" && (doc.Distribution.RolloutFraction <= 0 || doc.Distribution.RolloutFraction >= 1) {
+				add("rollout_fraction.required", "error", "distribution", "", "rollout_fraction", "A staged Google Play rollout requires a fraction greater than 0 and less than 1.", "Choose the initial production rollout percentage.", true)
+			}
+			legacyAppContentReady := doc.Privacy.ManualAttestations["google_app_content_complete"]
+			if doc.Classification.PrimaryCategory == "" && !legacyAppContentReady {
+				add("category.required", "error", "classification", "", "primary_category", "Google Play category is required.", "Select a Play category before completing App Content.", false)
+			}
+			if !storeContentRatingComplete(doc.Classification.ContentRating) && !legacyAppContentReady {
+				add("content_rating.required", "error", "classification", "", "content_rating", "The content-rating questionnaire is incomplete.", "Complete every content-rating field, then submit the answers in Play Console.", false)
+			}
 			if doc.Privacy.DataSafetyCSV == "" && !doc.Privacy.ManualAttestations["google_data_safety_published"] {
 				add("privacy.google_data_safety", "error", "privacy", "", "data_safety_csv", "Google Data Safety must be provided through CSV or attested as already published.", "Add the Play Data Safety CSV.", true)
 			}
@@ -421,32 +477,34 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			add("privacy_policy.required", "error", "privacy", "", "policy_url", "A privacy-policy URL is required.", "Add the published privacy-policy URL.", true)
 		}
 		providerDistribution := doc.Distribution.Provider
-		if len(doc.Distribution.Territories) == 0 && !boolMapValue(providerDistribution, "availability_configured") {
+		availabilityVerified := providerReadinessVerified(cfg, "availability") || boolMapValue(providerDistribution, "availability_configured")
+		pricingVerified := providerReadinessVerified(cfg, "pricing") || boolMapValue(providerDistribution, "pricing_configured")
+		if len(doc.Distribution.Territories) == 0 && !availabilityVerified {
 			add("availability.required", "error", "distribution", "", "territories", "Store availability has not been configured or verified.", "Set territories or attest the existing provider availability.", d.TargetKind == "ios")
 		}
-		if doc.Distribution.PriceTier == "" && !boolMapValue(providerDistribution, "pricing_configured") {
+		if doc.Distribution.PriceTier == "" && !pricingVerified {
 			add("pricing.required", "error", "distribution", "", "price_tier", "Store pricing has not been configured or verified.", "Set FREE/a provider price point or attest the existing provider pricing.", d.TargetKind == "ios")
 		}
 		if len(doc.Distribution.Territories) > 0 && d.TargetKind == "ios" &&
 			providerExtensionBody(doc, "app_store_connect", "availability_body") == nil &&
-			!boolMapValue(providerDistribution, "availability_configured") {
+			!availabilityVerified {
 			add("availability.apple_payload", "error", "distribution", "", "provider_extensions", "Apple availability requires a provider payload or verification of the existing setting.", "Provide app_store_connect.availability_body or attest the current availability.", true)
 		}
 		if doc.Distribution.PriceTier != "" && doc.Distribution.PriceTier != "FREE" && d.TargetKind == "ios" &&
 			providerExtensionBody(doc, "app_store_connect", "price_schedule_body") == nil &&
-			!boolMapValue(providerDistribution, "pricing_configured") {
+			!pricingVerified {
 			add("pricing.apple_payload", "error", "distribution", "", "provider_extensions", "Paid Apple pricing requires an AppPriceSchedule provider payload.", "Provide app_store_connect.price_schedule_body or attest the current pricing.", true)
 		}
 		if doc.Distribution.PriceTier == "FREE" && d.TargetKind == "ios" &&
-			!boolMapValue(providerDistribution, "pricing_configured") {
+			!pricingVerified {
 			add("pricing.apple_free_verify", "error", "distribution", "", "pricing_configured", "The app's free pricing setting has not been verified.", "Verify the existing App Store pricing.", false)
 		}
 		if d.TargetKind == "android" && len(doc.Distribution.Territories) > 0 &&
-			!boolMapValue(providerDistribution, "availability_configured") {
+			!availabilityVerified {
 			add("availability.google_manual", "error", "distribution", "", "availability_configured", "Google Play availability changes are not writable through the publishing API.", "Configure countries in Play Console and verify the existing setting.", false)
 		}
 		if d.TargetKind == "android" && doc.Distribution.PriceTier != "" &&
-			!boolMapValue(providerDistribution, "pricing_configured") {
+			!pricingVerified {
 			add("pricing.google_manual", "error", "distribution", "", "pricing_configured", "Google Play app pricing is not writable through the publishing API.", "Configure pricing in Play Console and verify the existing setting.", false)
 		}
 		for _, requirement := range doc.ManualRequirements {
@@ -525,30 +583,34 @@ func (a *App) applyStoreConfigWithReviewSecret(d *Deployment, build *Build, stri
 		doc.Review.DemoPassword = reviewPassword
 		doc.Review.DemoPasswordSet = true
 	}
+	// Refresh readable provider state before validating. This lets a first
+	// apply rely on provider-confirmed pricing/availability without requiring
+	// a separate manual Sync click.
+	if fresh, _, observeErr := a.observeStoreConfig(d); observeErr == nil && fresh != nil {
+		cfg = fresh
+	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
 	if !preflight.Ready {
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "blocked", "", mustJSON(preflight), "", "store preflight failed")
 		return nil, fmt.Errorf("store preflight failed with %d error(s)", preflight.Errors)
 	}
 	if cfg.AppliedHash == cfg.DesiredHash && strings.TrimSpace(reviewPassword) == "" {
-		return cfg, nil
+		fresh, _, observeErr := a.observeStoreConfig(d)
+		return fresh, observeErr
 	}
 	_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "applying", "", mustJSON(preflight), "", "")
-	var observed map[string]any
+	var applied map[string]any
 	switch d.TargetKind {
 	case "ios":
-		observed, err = a.applyAppleStoreConfig(d, doc)
+		applied, err = a.applyAppleStoreConfig(d, doc)
 	case "android":
-		observed, err = a.applyGoogleStoreConfig(d, doc)
+		applied, err = a.applyGoogleStoreConfig(d, doc)
 	default:
 		err = fmt.Errorf("unsupported store platform %q", d.TargetKind)
 	}
 	if err != nil {
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", mustJSON(preflight), "", err.Error())
 		return nil, err
-	}
-	if observed == nil {
-		observed = map[string]any{}
 	}
 	if strings.TrimSpace(reviewPassword) != "" {
 		doc.Review.DemoPassword = ""
@@ -558,9 +620,33 @@ func (a *App) applyStoreConfigWithReviewSecret(d *Deployment, build *Build, stri
 			return nil, err
 		}
 	}
+	var observed map[string]any
+	switch d.TargetKind {
+	case "ios":
+		observed, err = a.observeAppleStoreConfig(d, doc)
+	case "android":
+		observed, err = a.observeGoogleStoreConfig(d, doc)
+	}
+	if err != nil {
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", mustJSON(preflight), "", "store applied but provider verification failed: "+err.Error())
+		return nil, fmt.Errorf("store applied but provider verification failed: %w", err)
+	}
+	if observed == nil {
+		observed = map[string]any{}
+	}
+	observed["last_apply"] = applied
 	observed["applied_at"] = nowUTC()
 	observed["desired_hash"] = cfg.DesiredHash
-	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "applied", mustJSON(observed), mustJSON(preflight), cfg.DesiredHash, ""); err != nil {
+	verifiedCfg := *cfg
+	verifiedCfg.ObservedJSON = mustJSON(observed)
+	verified := validateStoreDocument(a.dataDir, d, build, &verifiedCfg, doc, strict)
+	status := "applied"
+	lastError := ""
+	if !verified.Ready {
+		status = "blocked"
+		lastError = "provider verification did not satisfy store preflight"
+	}
+	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, mustJSON(observed), mustJSON(verified), cfg.DesiredHash, lastError); err != nil {
 		return nil, err
 	}
 	return dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
@@ -628,30 +714,55 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	versionID := firstJSONAPIID(versions)
 	observed := map[string]any{
 		"app_id": appID, "version_id": versionID, "versions": decodeJSONValue(versions),
-		"localizations": map[string]any{},
+		"localizations": map[string]any{}, "readiness": map[string]any{},
 	}
 	if versionID == "" {
-		return observed, nil
-	}
-	localizations := observed["localizations"].(map[string]any)
-	for locale := range doc.Localizations {
-		raw, err := executeIntegration(bound, "list_version_localizations", map[string]any{"version_id": versionID, "locale": locale})
-		if err != nil {
-			return nil, err
+		observed["readiness"].(map[string]any)["listing"] = readinessCheck(false, "provider", "The configured store version does not exist yet.")
+	} else {
+		localizations := observed["localizations"].(map[string]any)
+		localizationsReady := len(doc.Localizations) > 0
+		for locale := range doc.Localizations {
+			raw, err := executeIntegration(bound, "list_version_localizations", map[string]any{"version_id": versionID, "locale": locale})
+			if err != nil {
+				return nil, err
+			}
+			value := decodeJSONValue(raw)
+			localizations[locale] = value
+			localizationsReady = localizationsReady && jsonValueHasData(value)
 		}
-		localizations[locale] = decodeJSONValue(raw)
+		readiness := observed["readiness"].(map[string]any)
+		readiness["listing"] = readinessCheck(localizationsReady, "provider", "App Store version and requested localizations were read from Apple.")
+		if review, err := executeIntegration(bound, "get_version_review_detail", map[string]any{"version_id": versionID}); err == nil {
+			value := decodeJSONValue(review)
+			observed["review"] = value
+			readiness["review"] = readinessCheck(jsonValueHasData(value), "provider", "App Review details were read from Apple.")
+		}
 	}
-	if review, err := executeIntegration(bound, "get_version_review_detail", map[string]any{"version_id": versionID}); err == nil {
-		observed["review"] = decodeJSONValue(review)
-	}
+	readiness := observed["readiness"].(map[string]any)
+	appInfoID := ""
 	if infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "limit": 10}); err == nil {
-		observed["app_infos"] = decodeJSONValue(infos)
+		appInfoID = firstJSONAPIID(infos)
+		value := decodeJSONValue(infos)
+		observed["app_infos"] = value
+		readiness["classification"] = readinessCheck(jsonValueHasData(value), "provider", "App information was read from Apple.")
+	}
+	if appInfoID != "" {
+		age, err := executeIntegration(bound, "get_app_age_rating_declaration", map[string]any{"app_info_id": appInfoID})
+		if err == nil {
+			value := decodeJSONValue(age)
+			observed["age_rating"] = value
+			readiness["classification"] = readinessCheck(jsonValueHasData(value), "provider", "Age-rating declarations were read from Apple.")
+		}
 	}
 	if pricing, err := executeIntegration(bound, "get_app_price_schedule", map[string]any{"app_id": appID, "include": "baseTerritory,manualPrices"}); err == nil {
-		observed["pricing"] = decodeJSONValue(pricing)
+		value := decodeJSONValue(pricing)
+		observed["pricing"] = value
+		readiness["pricing"] = readinessCheck(jsonValueHasData(value), "provider", "Pricing was read from Apple.")
 	}
 	if availability, err := executeIntegration(bound, "get_app_availability", map[string]any{"app_id": appID}); err == nil {
-		observed["availability"] = decodeJSONValue(availability)
+		value := decodeJSONValue(availability)
+		observed["availability"] = value
+		readiness["availability"] = readinessCheck(jsonValueHasData(value), "provider", "Availability was read from Apple.")
 	}
 	return observed, nil
 }
@@ -705,9 +816,33 @@ func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument) (map[st
 		}
 		images[key] = decodeJSONValue(raw)
 	}
+	var availability any
+	availabilityVerified := false
+	if raw, availabilityErr := executeIntegration(bound, "get_country_availability", map[string]any{
+		"packageName": target.PackageName, "editId": editID, "track": "production",
+	}); availabilityErr == nil {
+		availability = decodeJSONValue(raw)
+		if value, ok := availability.(map[string]any); ok {
+			_, availabilityVerified = value["countries"]
+		}
+	}
+	listingValue := decodeJSONValue(listings)
+	imagesReady := len(doc.Assets) == 0
+	if len(doc.Assets) > 0 {
+		imagesReady = len(images) > 0
+		for _, value := range images {
+			imagesReady = imagesReady && jsonValueHasData(value)
+		}
+	}
 	return map[string]any{
 		"package_name": target.PackageName, "details": decodeJSONValue(details),
-		"listings": decodeJSONValue(listings), "images": images,
+		"listings": listingValue, "images": images, "availability": availability,
+		"readiness": map[string]any{
+			"listing":      readinessCheck(jsonValueHasData(listingValue), "provider", "Play Store listings were read from Google."),
+			"media":        readinessCheck(imagesReady, "provider", "Configured Play media was read from Google."),
+			"pricing":      readinessCheck(boolMapValue(doc.Distribution.Provider, "pricing_configured"), "manual", "Google Play pricing is not writable through the publishing API."),
+			"availability": readinessCheck(availabilityVerified, "provider", "Production country availability was read from Google Play."),
+		},
 	}, nil
 }
 
@@ -725,6 +860,110 @@ func boolMapValue(values map[string]any, key string) bool {
 	}
 	value, _ := values[key].(bool)
 	return value
+}
+
+func storeContentRatingComplete(rating StoreContentRating) bool {
+	for _, value := range []string{
+		rating.Violence, rating.SexualContent, rating.Profanity, rating.Drugs,
+		rating.GamblingSimulation, rating.Contests, rating.Weapons, rating.HorrorFear,
+		rating.MedicalInformation, rating.HealthWellness, rating.MatureThemes,
+	} {
+		switch strings.ToUpper(strings.TrimSpace(value)) {
+		case "NONE", "INFREQUENT", "FREQUENT", "INFREQUENT_OR_MILD", "FREQUENT_OR_INTENSE":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func appleAgeDeclaration(classification StoreClassification) map[string]any {
+	attributes := map[string]any{}
+	for key, value := range classification.AgeDeclaration {
+		attributes[key] = value
+	}
+	if !storeContentRatingComplete(classification.ContentRating) {
+		return attributes
+	}
+	rating := classification.ContentRating
+	for key, value := range map[string]string{
+		"violenceCartoonOrFantasy":                    rating.Violence,
+		"violenceRealistic":                           rating.Violence,
+		"violenceRealisticProlongedGraphicOrSadistic": rating.Violence,
+		"sexualContentOrNudity":                       rating.SexualContent,
+		"sexualContentGraphicAndNudity":               rating.SexualContent,
+		"profanityOrCrudeHumor":                       rating.Profanity,
+		"alcoholTobaccoOrDrugUseOrReferences":         rating.Drugs,
+		"gamblingSimulated":                           rating.GamblingSimulation,
+		"contests":                                    rating.Contests,
+		"gunsOrOtherWeapons":                          rating.Weapons,
+		"horrorOrFearThemes":                          rating.HorrorFear,
+		"medicalOrTreatmentInformation":               rating.MedicalInformation,
+		"healthOrWellnessTopics":                      rating.HealthWellness,
+		"matureOrSuggestiveThemes":                    rating.MatureThemes,
+	} {
+		attributes[key] = normalizeAppleRatingLevel(value)
+	}
+	attributes["unrestrictedWebAccess"] = rating.UnrestrictedWebAccess
+	attributes["gambling"] = rating.RealMoneyGambling
+	attributes["lootBox"] = rating.LootBoxes
+	attributes["advertising"] = rating.Advertising
+	attributes["messagingAndChat"] = rating.MessagingChat
+	attributes["userGeneratedContent"] = rating.UserGeneratedContent
+	attributes["parentalControls"] = rating.ParentalControls
+	attributes["ageAssurance"] = rating.AgeAssurance
+	attributes["socialMedia"] = rating.SocialMedia
+	attributes["socialMediaAgeRestricted"] = rating.SocialMediaAgeGate
+	return attributes
+}
+
+func normalizeAppleRatingLevel(value string) string {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "INFREQUENT_OR_MILD":
+		return "INFREQUENT"
+	case "FREQUENT_OR_INTENSE":
+		return "FREQUENT"
+	default:
+		return strings.ToUpper(strings.TrimSpace(value))
+	}
+}
+
+func providerReadinessVerified(cfg *MobileStoreConfig, key string) bool {
+	if cfg == nil || strings.TrimSpace(cfg.ObservedJSON) == "" {
+		return false
+	}
+	var observed struct {
+		Readiness map[string]struct {
+			Status string `json:"status"`
+		} `json:"readiness"`
+	}
+	if json.Unmarshal([]byte(cfg.ObservedJSON), &observed) != nil {
+		return false
+	}
+	return strings.EqualFold(observed.Readiness[key].Status, "verified")
+}
+
+func readinessCheck(verified bool, source, message string) map[string]any {
+	status := "unknown"
+	if verified {
+		status = "verified"
+	}
+	return map[string]any{"status": status, "source": source, "message": message}
+}
+
+func jsonValueHasData(value any) bool {
+	values, ok := value.(map[string]any)
+	if !ok {
+		return value != nil
+	}
+	data, exists := values["data"]
+	if !exists || data == nil {
+		return false
+	}
+	if list, ok := data.([]any); ok {
+		return len(list) > 0
+	}
+	return true
 }
 
 func providerExtensionBody(doc StoreDocument, provider, key string) map[string]any {
@@ -848,7 +1087,14 @@ func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc Stor
 			return "", fmt.Errorf("editable App Store version %s already exists; binary/listing version %s must be aligned before Deploy creates another version", version.Attributes.VersionString, doc.VersionName)
 		}
 	}
-	releaseType := strings.ToUpper(defaultStr(doc.ReleaseMode, "MANUAL"))
+	releaseType := map[string]string{
+		"manual":         "MANUAL",
+		"after_approval": "AFTER_APPROVAL",
+		"scheduled":      "SCHEDULED",
+	}[doc.ReleaseMode]
+	if releaseType == "" {
+		return "", fmt.Errorf("unsupported App Store release mode %q", doc.ReleaseMode)
+	}
 	created, err := executeIntegration(bound, "create_app_version", map[string]any{
 		"app_id": appID, "platform": "IOS", "versionString": doc.VersionName,
 		"releaseType": releaseType, "earliestReleaseDate": doc.EarliestReleaseAt,
@@ -977,8 +1223,11 @@ func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc 
 			return err
 		}
 	}
-	if len(doc.Classification.AgeDeclaration) > 0 {
-		age, err := executeIntegration(bound, "get_app_age_rating_declaration", map[string]any{"app_id": appID})
+	if attributes := appleAgeDeclaration(doc.Classification); len(attributes) > 0 {
+		if infoID == "" {
+			return errors.New("App Store Connect has no App Info resource for age-rating declarations")
+		}
+		age, err := executeIntegration(bound, "get_app_age_rating_declaration", map[string]any{"app_info_id": infoID})
 		if err != nil {
 			return err
 		}
@@ -988,7 +1237,7 @@ func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc 
 				"body": map[string]any{
 					"data": map[string]any{
 						"type": "ageRatingDeclarations", "id": id,
-						"attributes": doc.Classification.AgeDeclaration,
+						"attributes": attributes,
 					},
 				},
 			})
@@ -1006,7 +1255,7 @@ func (a *App) uploadAppleScreenshot(bound *sdk.BoundIntegration, d *Deployment, 
 		return err
 	}
 	name := storeUploadFilename(path, asset.SHA256)
-	target := defaultStr(asset.DisplayTarget, "APP_IPHONE_67")
+	target := appleScreenshotDisplayTarget(asset)
 	sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{
 		"localization_id": localizationID, "display_type": target, "limit": 20,
 	})
@@ -1402,7 +1651,11 @@ func (a *App) saveStoreAsset(d *Deployment, filename string, src io.Reader) (Sto
 		_ = os.RemoveAll(filepath.Dir(abs))
 		return StoreAsset{}, errors.New("asset exceeds 100 MB")
 	}
-	return StoreAsset{ID: id, Path: filepath.ToSlash(rel), SHA256: hex.EncodeToString(hash.Sum(nil))}, nil
+	asset := StoreAsset{ID: id, Path: filepath.ToSlash(rel), SHA256: hex.EncodeToString(hash.Sum(nil))}
+	if metadata, inspectErr := inspectStoreAssetFile(abs); inspectErr == nil {
+		asset.MIME, asset.Width, asset.Height = metadata.MIME, metadata.Width, metadata.Height
+	}
+	return asset, nil
 }
 
 func (a *App) pruneUnreferencedStoreAssets(d *Deployment, doc StoreDocument) {

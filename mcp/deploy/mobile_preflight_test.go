@@ -9,6 +9,26 @@ import (
 	"howett.net/plist"
 )
 
+func TestDetectIOSDeviceFamiliesFromProjectAndPlist(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "Example.xcodeproj", "project.pbxproj"), `
+		buildSettings = {
+			TARGETED_DEVICE_FAMILY = "1,2";
+			INFOPLIST_FILE = Example/Info.plist;
+		};
+	`)
+	writeTestFile(t, filepath.Join(root, "Example", "Info.plist"), `<?xml version="1.0" encoding="UTF-8"?>
+	<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+	<plist version="1.0"><dict><key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array></dict></plist>`)
+	families, err := detectIOSDeviceFamilies(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(families, ",") != "iphone,ipad" {
+		t.Fatalf("families=%v", families)
+	}
+}
+
 func TestIOSSourcePreflightRejectsMissingStoreMetadata(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "project.yml"), []byte(`

@@ -73,6 +73,7 @@ type Build struct {
 	BuildCmd             string `json:"build_cmd"`
 	BuildBackend         string `json:"build_backend"`
 	BuildBackendJSON     string `json:"build_backend_config_json"`
+	TargetConfigJSON     string `json:"target_config_json"`
 	Status               string `json:"status"`
 	StartedAt            string `json:"started_at,omitempty"`
 	FinishedAt           string `json:"finished_at,omitempty"`
@@ -645,7 +646,7 @@ func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 	for _, k := range []string{
 		"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code",
 		"artifact_path", "artifact_size", "artifact_manifest_json", "log_path", "error", "framework",
-		"build_backend", "build_backend_config_json", "external_job_id", "external_status",
+		"build_backend", "build_backend_config_json", "target_config_json", "external_job_id", "external_status",
 		"external_meta_json", "release_requested", "release_options_json",
 	} {
 		if v, ok := fields[k]; ok {
@@ -734,7 +735,7 @@ func dbListPendingCloudBuilds(db *sql.DB, limit int) ([]Build, error) {
 }
 
 const buildColumns = `id, deployment_id, COALESCE(environment_id,0), source_sha, framework, build_cmd,
-		build_backend, build_backend_config_json, status,
+		build_backend, build_backend_config_json, target_config_json, status,
 		COALESCE(started_at,''), COALESCE(finished_at,''), duration_ms, exit_code,
 		artifact_path, artifact_size, artifact_manifest_json,
 		external_job_id, external_status, external_meta_json,
@@ -744,7 +745,7 @@ func scanBuild(r rowScanner) (*Build, error) {
 	var b Build
 	if err := r.Scan(
 		&b.ID, &b.DeploymentID, &b.EnvironmentID, &b.SourceSHA, &b.Framework, &b.BuildCmd,
-		&b.BuildBackend, &b.BuildBackendJSON, &b.Status,
+		&b.BuildBackend, &b.BuildBackendJSON, &b.TargetConfigJSON, &b.Status,
 		&b.StartedAt, &b.FinishedAt, &b.DurationMs, &b.ExitCode,
 		&b.ArtifactPath, &b.ArtifactSize, &b.ArtifactManifestJSON,
 		&b.ExternalJobID, &b.ExternalStatus, &b.ExternalMetaJSON,

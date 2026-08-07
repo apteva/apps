@@ -34,6 +34,7 @@ type iosPlistReference struct {
 
 type iosProjectMetadata struct {
 	orientationValues     []string
+	deviceFamilyValues    []string
 	plistReferences       []iosPlistReference
 	entitlementReferences []iosPlistReference
 }
@@ -131,6 +132,8 @@ func collectIOSYAMLSettings(node *yaml.Node, baseDir string, metadata *iosProjec
 			switch {
 			case isIOSOrientationBuildSetting(key):
 				metadata.orientationValues = append(metadata.orientationValues, yamlScalarValues(value)...)
+			case key == "TARGETED_DEVICE_FAMILY":
+				metadata.deviceFamilyValues = append(metadata.deviceFamilyValues, yamlScalarValues(value)...)
 			case key == "INFOPLIST_FILE":
 				for _, ref := range yamlScalarValues(value) {
 					metadata.plistReferences = append(metadata.plistReferences, iosPlistReference{baseDir: baseDir, value: ref})
@@ -168,10 +171,82 @@ func collectIOSPBXSettings(body, baseDir string, metadata *iosProjectMetadata) {
 		switch {
 		case isIOSOrientationBuildSetting(key):
 			metadata.orientationValues = append(metadata.orientationValues, value)
+		case key == "TARGETED_DEVICE_FAMILY":
+			metadata.deviceFamilyValues = append(metadata.deviceFamilyValues, value)
 		case key == "INFOPLIST_FILE":
 			metadata.plistReferences = append(metadata.plistReferences, iosPlistReference{baseDir: baseDir, value: value})
 		case key == "CODE_SIGN_ENTITLEMENTS":
 			metadata.entitlementReferences = append(metadata.entitlementReferences, iosPlistReference{baseDir: baseDir, value: value})
+		}
+	}
+}
+
+func detectIOSDeviceFamilies(root string) ([]string, error) {
+	metadata, err := readIOSProjectMetadata(root)
+	if err != nil {
+		return nil, err
+	}
+	families := map[string]bool{}
+	for _, value := range metadata.deviceFamilyValues {
+		collectIOSDeviceFamilies(value, families)
+	}
+	referenced, err := resolveIOSInfoPlists(root, metadata.plistReferences)
+	if err != nil {
+		return nil, err
+	}
+	paths := referenced
+	if fallback, discoverErr := discoverIOSPlists(root, referenced); discoverErr == nil {
+		paths = append(paths, fallback...)
+	}
+	for _, path := range paths {
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+		var document map[string]any
+		if _, parseErr := plist.Unmarshal(body, &document); parseErr != nil {
+			continue
+		}
+		collectIOSDeviceFamilyValue(document["UIDeviceFamily"], families)
+	}
+	var result []string
+	if families["iphone"] {
+		result = append(result, "iphone")
+	}
+	if families["ipad"] {
+		result = append(result, "ipad")
+	}
+	return result, nil
+}
+
+func collectIOSDeviceFamilies(value string, families map[string]bool) {
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return r != '1' && r != '2' && (r < 'a' || r > 'z')
+	}) {
+		switch token {
+		case "1", "iphone":
+			families["iphone"] = true
+		case "2", "ipad":
+			families["ipad"] = true
+		}
+	}
+}
+
+func collectIOSDeviceFamilyValue(value any, families map[string]bool) {
+	switch typed := value.(type) {
+	case string:
+		collectIOSDeviceFamilies(typed, families)
+	case uint64:
+		collectIOSDeviceFamilies(fmt.Sprint(typed), families)
+	case int64:
+		collectIOSDeviceFamilies(fmt.Sprint(typed), families)
+	case []uint64:
+		for _, item := range typed {
+			collectIOSDeviceFamilyValue(item, families)
+		}
+	case []any:
+		for _, item := range typed {
+			collectIOSDeviceFamilyValue(item, families)
 		}
 	}
 }

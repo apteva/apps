@@ -578,7 +578,7 @@ func TestIOSCloudBuildAdoptsStoreUpload(t *testing.T) {
 		Name: "ios-app", TargetKind: "ios", SourceKind: "code", SourceRef: "repo-1",
 		Framework: "ios", BuildBackend: "codemagic",
 		BuildBackendJSON: `{"app_id":"cm-app","workflow_id":"ios-release","branch":"main","artifact_mode":"store_upload"}`,
-		TargetConfigJSON: `{"bundle_id":"com.example.app","app_store_app_id":"app-1","version_name":"1.0.0","build_number":"42"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app","app_store_app_id":"app-1","version_name":"1.0.0","build_number":"42","device_families":["iphone"]}`,
 	})
 	if err != nil {
 		t.Fatal(err)

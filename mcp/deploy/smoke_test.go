@@ -519,6 +519,7 @@ func openSchemaDB(t *testing.T) *sql.DB {
 		"migrations/006_mobile_signing.sql",
 		"migrations/007_mobile_requirements.sql",
 		"migrations/008_mobile_store_configs.sql",
+		"migrations/009_mobile_version_allocations.sql",
 	} {
 		body, err := os.ReadFile(mig)
 		if err != nil {

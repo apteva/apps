@@ -111,8 +111,22 @@ workflows:
             chmod +x ./gradlew
             task=":${APTEVA_MODULE}:bundle${APTEVA_VARIANT^}"
             args=("$task" --console=plain --no-daemon)
-            [[ -n "${APTEVA_VERSION_CODE:-}" ]] && args+=("-PversionCode=$APTEVA_VERSION_CODE")
-            [[ -n "${APTEVA_VERSION_NAME:-}" ]] && args+=("-PversionName=$APTEVA_VERSION_NAME")
+            if [[ -n "${APTEVA_VERSION_CODE:-}" || -n "${APTEVA_VERSION_NAME:-}" ]]; then
+              cat > "$CM_BUILD_DIR/apteva-mobile-version.gradle" <<'GRADLE'
+          allprojects { targetProject ->
+              targetProject.plugins.withId("com.android.application") {
+                  def androidExt = targetProject.extensions.findByName("android")
+                  if (androidExt != null) {
+                      def code = System.getenv("APTEVA_VERSION_CODE")
+                      def name = System.getenv("APTEVA_VERSION_NAME")
+                      if (code != null && !code.isEmpty()) androidExt.defaultConfig.versionCode = Integer.parseInt(code)
+                      if (name != null && !name.isEmpty()) androidExt.defaultConfig.versionName = name
+                  }
+              }
+          }
+          GRADLE
+              args+=(--init-script "$CM_BUILD_DIR/apteva-mobile-version.gradle")
+            fi
             ./gradlew "${args[@]}"
             cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/app.aab"
             if [[ -n "${CM_KEYSTORE_PATH:-}" ]]; then
@@ -173,6 +187,7 @@ workflows:
               "version_name": os.environ.get("APTEVA_VERSION_NAME", ""),
               "build_number": os.environ.get("APTEVA_BUILD_NUMBER", ""),
               "version_code": os.environ.get("APTEVA_VERSION_CODE", ""),
+              "device_families": json.loads(os.environ.get("APTEVA_DEVICE_FAMILIES_JSON", "[]")),
           }
           if mode == "store_upload":
               manifest.update({
