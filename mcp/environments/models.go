@@ -19,6 +19,7 @@ type EnvironmentSpec struct {
 	HTTPMocks           []sdk.RuntimeHTTPMock           `json:"http_mocks,omitempty"`
 	IntegrationFixtures []sdk.RuntimeIntegrationMock    `json:"integration_fixtures,omitempty"`
 	IntegrationBindings []sdk.RuntimeIntegrationBinding `json:"integration_bindings,omitempty"`
+	ConnectionBindings  []sdk.RuntimeConnectionBinding  `json:"connection_bindings,omitempty"`
 	Subscriptions       []sdk.RuntimeSubscription       `json:"subscriptions,omitempty"`
 	Seeds               []SeedStep                      `json:"seeds,omitempty"`
 	Agents              []AgentSpec                     `json:"agents,omitempty"`

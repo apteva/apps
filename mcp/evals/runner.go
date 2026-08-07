@@ -407,11 +407,7 @@ func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
 }
 
 func judgeRequest(model string, payload map[string]any) map[string]any {
-	request := map[string]any{"model": model, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
-	if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "openai-codex/") {
-		request["temperature"] = 0
-	}
-	return request
+	return map[string]any{"model": model, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
 }
 
 const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`

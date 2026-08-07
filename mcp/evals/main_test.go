@@ -359,14 +359,18 @@ func TestAlignJudgeGoalsUsesConfiguredGoalsAndFailsMissingResults(t *testing.T) 
 	}
 }
 
-func TestJudgeRequestOmitsUnsupportedCodexTemperature(t *testing.T) {
+func TestJudgeRequestOmitsTemperatureForEveryModel(t *testing.T) {
 	codex := judgeRequest("openai-codex/gpt-5.6-terra", map[string]any{"task": "test"})
 	if _, ok := codex["temperature"]; ok {
 		t.Fatalf("Codex request contains unsupported temperature: %#v", codex)
 	}
 	other := judgeRequest("opencode-go/glm-5.2", map[string]any{"task": "test"})
-	if temperature, ok := other["temperature"]; !ok || temperature != 0 {
-		t.Fatalf("non-Codex request temperature=%#v", temperature)
+	if _, ok := other["temperature"]; ok {
+		t.Fatalf("non-Codex request contains model-specific temperature: %#v", other)
+	}
+	claude := judgeRequest("anthropic/claude-fable-5", map[string]any{"task": "test"})
+	if _, ok := claude["temperature"]; ok {
+		t.Fatalf("Claude request contains deprecated temperature: %#v", claude)
 	}
 }
 
@@ -382,7 +386,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.3" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.4" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {

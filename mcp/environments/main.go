@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.6.9
-description: Isolated test environments with project apps, managed MCP servers, fake connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.6.9 adds deterministic end-of-turn silence after conditioned caller audio so short confirmations reliably commit through realtime carrier VAD.
+version: 0.7.0
+description: Isolated test environments with project apps, managed MCP servers, fake or explicitly bound real connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.7.0 can bind an existing project connection to a compatible role on a cloned runtime app without copying credentials.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -71,7 +71,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.6.9, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.0, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

@@ -74,6 +74,29 @@ func TestProtocolFixturePersistenceBindingsAndEvents(t *testing.T) {
 	}
 }
 
+func TestEnvironmentSpecPreservesRealConnectionBindings(t *testing.T) {
+	spec := EnvironmentSpec{
+		ConnectionIDs: []int64{6},
+		ConnectionBindings: []sdk.RuntimeConnectionBinding{{
+			App: "computer", Role: "browserbase", ConnectionID: 6,
+		}},
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("api_key")) || bytes.Contains(raw, []byte("credentials")) {
+		t.Fatalf("environment spec leaked credentials: %s", raw)
+	}
+	var restored EnvironmentSpec
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.ConnectionBindings) != 1 || restored.ConnectionBindings[0].ConnectionID != 6 || restored.ConnectionBindings[0].App != "computer" || restored.ConnectionBindings[0].Role != "browserbase" {
+		t.Fatalf("connection bindings lost: %#v", restored.ConnectionBindings)
+	}
+}
+
 func TestTwilioFixtureSignatureAndCodec(t *testing.T) {
 	form := url.Values{"CallSid": {"CA1"}, "From": {"+15550100002"}}
 	if got := twilioFixtureSignature("https://example.test/inbound", form, "secret"); got != "IOSPEgp/OjWf5/tJEDTAUc/GDDo=" {

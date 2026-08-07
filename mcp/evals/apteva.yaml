@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.5.3
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.3 retries one invalid voice simulation without counting transient provider failures against the agent.
+version: 0.5.4
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of agents inside isolated Environments. v0.5.4 omits model-specific temperature parameters so judges such as Claude Fable 5 can complete normally.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.5.3
+    ref: evals/v0.5.4
     entry: mcp/evals
   port: 8080
   health_check: /health
