@@ -528,7 +528,7 @@ function entityPerformance(response: PerformanceResponse | null, id: string, cur
 function storyField(ad: Ad | null, key: string): string {
   const story = ad?.creative?.object_story_spec || {};
   const data = story.link_data || story.video_data || {};
-  if (key === "image") return ad?.creative?.thumbnail_url || ad?.creative?.image_url || data.picture || data.image_url || "";
+  if (key === "image") return ad?.creative?.image_url || data.picture || data.image_url || ad?.creative?.thumbnail_url || "";
   if (key === "destination") return data.link || data.call_to_action?.value?.link || "";
   if (key === "cta") return data.call_to_action?.type || "";
   return data[key] || "";

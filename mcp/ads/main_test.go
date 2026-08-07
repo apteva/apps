@@ -1289,7 +1289,8 @@ func TestAdListAndCreate_UseMetaCreativeShape(t *testing.T) {
 	if listCall.Tool != "ad_list" || listCall.Input["objectId"] != "adset_1" {
 		t.Fatalf("wrong ad list edge: %#v", listCall)
 	}
-	if !strings.Contains(listCall.Input["fields"].(string), "effective_status") {
+	fields := listCall.Input["fields"].(string)
+	if !strings.Contains(fields, "effective_status") || !strings.Contains(fields, "image_url") {
 		t.Fatalf("ad fields missing: %v", listCall.Input["fields"])
 	}
 
