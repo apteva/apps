@@ -306,8 +306,8 @@ type OpenOptions struct {
 	Proxy *bool
 
 	// ProxyCountry is an ISO-2 country code for the residential
-	// proxy exit (e.g. "US"). Honored by browser-engine; ignored by
-	// browserbase + steel (they need a custom proxy list for that).
+	// proxy exit (e.g. "US"). Honored by browser-engine and
+	// browserbase; ignored by steel.
 	ProxyCountry string
 }
 

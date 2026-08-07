@@ -535,7 +535,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
 				"proxy":               map[string]any{"type": "boolean"},
-				"proxy_country":       map[string]any{"type": "string"},
+				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO country code for the managed proxy exit, for example DE. Supported by Browserbase and Browser Engine; implies proxy=true."},
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -664,7 +664,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
 				"proxy":               map[string]any{"type": "boolean"},
-				"proxy_country":       map[string]any{"type": "string"},
+				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO country code for the managed proxy exit, for example DE. Supported by Browserbase and Browser Engine; implies proxy=true."},
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",

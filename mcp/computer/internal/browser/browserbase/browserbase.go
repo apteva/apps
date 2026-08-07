@@ -172,6 +172,35 @@ type sessionCreateResponse struct {
 	// read the fields we use.
 }
 
+func resolveProxies(defaults any, o computer.OpenOptions) (any, error) {
+	country := strings.ToUpper(strings.TrimSpace(o.ProxyCountry))
+	if country != "" {
+		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+			return nil, fmt.Errorf("proxy_country must be a two-letter ISO country code")
+		}
+		if o.Proxy != nil && !*o.Proxy {
+			return nil, fmt.Errorf("proxy_country cannot be used with proxy=false")
+		}
+		return []map[string]any{
+			{
+				"type": "browserbase",
+				"geolocation": map[string]string{
+					"country": country,
+				},
+			},
+		}, nil
+	}
+
+	// The agent's per-call choice wins over the provider-level default.
+	if o.Proxy != nil {
+		if *o.Proxy {
+			return true, nil
+		}
+		return nil, nil
+	}
+	return defaults, nil
+}
+
 func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	bs := map[string]any{
 		"viewport": map[string]int{
@@ -196,18 +225,11 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	if o.Timeout > 0 {
 		timeout = o.Timeout
 	}
-	// Agent's per-call OpenOptions.Proxy wins over the harness default.
-	// Browserbase encodes "true" as the managed residential proxy; a
-	// custom proxy list can also be passed via Options.Proxies (kept
-	// in c.opts.Proxies). ProxyCountry is not honored here — it
-	// requires a custom proxy list, not the boolean flag.
-	proxies := c.opts.Proxies
-	if o.Proxy != nil {
-		if *o.Proxy {
-			proxies = true
-		} else {
-			proxies = nil
-		}
+	// Browserbase uses a structured managed-proxy entry when a country
+	// is selected. A bare true enables its default residential proxy.
+	proxies, err := resolveProxies(c.opts.Proxies, o)
+	if err != nil {
+		return "", fmt.Errorf("browserbase: %w", err)
 	}
 	req := sessionCreateRequest{
 		ProjectID:       c.projectID,
