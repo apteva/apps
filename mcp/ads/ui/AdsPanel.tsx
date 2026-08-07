@@ -1,31 +1,16 @@
-// AdsPanel — minimal generic ads surface.
-//
-// What this panel does:
-//   - Lists connected ad accounts.
-//   - "Add account" opens a platform picker, starts OAuth in a popup
-//     when needed, then shows an upstream ad-account picker.
-//   - When an account is selected, shows its campaigns (campaign_list)
-//     with pause/resume buttons.
-//
-// What it deliberately doesn't do (v0.1):
-//   - Campaign / ad-set / ad / creative / audience CREATE flows. Those
-//     are the agent's job today; the panel only surfaces state. Adding
-//     forms is straightforward once the unified shape settles, but the
-//     escape-hatch (platform_options) makes a clean form non-trivial
-//     for v0.1 — punt to v0.2.
-
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const API = "/api/apps/ads";
 const PANEL_PROJECT_ID = new URL(import.meta.url).searchParams.get("project_id") || "";
-let activePanelProjectId = PANEL_PROJECT_ID;
-
-function appURL(path: string, projectId?: string | null): string {
-  const scopedProject = projectId || activePanelProjectId || PANEL_PROJECT_ID;
-  if (!scopedProject) return `${API}${path}`;
-  const sep = path.includes("?") ? "&" : "?";
-  return `${API}${path}${sep}project_id=${encodeURIComponent(scopedProject)}`;
-}
 
 interface NativePanelProps {
   appName: string;
@@ -51,17 +36,79 @@ interface PendingAccountPage {
   name: string;
   currency: string;
   timezone: string;
+  test_account?: boolean;
+}
+
+interface ConnectionOption {
+  id: number;
+  name: string;
 }
 
 interface Campaign {
   id: string;
   name: string;
-  objective: string;
-  status: string;
+  objective?: string;
+  status?: string;
   effective_status?: string;
   daily_budget?: string;
-  lifetime_budget?: string;
-  created_time?: string;
+}
+
+interface PerformancePoint {
+  platform: string;
+  ad_account_id: number;
+  level: "account" | "campaign" | "ad_group" | "ad";
+  entity_id: string;
+  entity_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  date: string;
+  currency: string;
+  timezone: string;
+  spend_micros: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  conversions: number;
+  conversion_value_micros: number;
+  video_views: number;
+  ctr: number;
+  cpc_micros: number;
+  cpm_micros: number;
+  cpa_micros: number;
+  roas: number;
+  fetched_at: string;
+}
+
+interface PerformanceSummary {
+  spend_micros: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  conversions: number;
+  conversion_value_micros: number;
+  video_views: number;
+  ctr: number;
+  cpc_micros: number;
+  cpm_micros: number;
+  cpa_micros: number;
+  roas: number;
+  currency: string;
+  timezone: string;
+}
+
+interface PerformanceResponse {
+  data: PerformancePoint[];
+  summary: PerformanceSummary;
+  source: "live" | "cache";
+  freshness: { fetched_at?: string; row_count: number };
+}
+
+interface CampaignPerformance extends PerformanceSummary {
+  campaign_id: string;
+  campaign_name: string;
+  points: PerformancePoint[];
 }
 
 interface PlatformInfo {
@@ -69,154 +116,787 @@ interface PlatformInfo {
   display_name: string;
   integration_slug: string;
   supported: boolean;
+  configured: boolean;
   available: boolean;
+  state: "setup_required" | "ready" | "connected" | "unsupported" | "unavailable";
   can_add: boolean;
-  requires_picker: boolean;
+  setup_url: string;
   connection_count: number;
+  connections: ConnectionOption[];
   active_account: boolean;
   unavailable_reason?: string;
 }
 
-function mcpErrorText(data: any): string | null {
-  if (!data?.isError) return null;
-  return data.content?.find((c: any) => c.type === "text")?.text || "Request returned an error";
+interface AdResource {
+  id: number;
+  ad_account_id: number;
+  kind: string;
+  provider_type: string;
+  name: string;
+  status: string;
+  capabilities: string[];
+  metadata: Record<string, unknown>;
+  parent_resource_id?: number | null;
+  managed_by_app: boolean;
+  refreshed_at?: string;
 }
 
-function campaignStatusClass(status: string): string {
-  if (status === "ACTIVE") return "bg-accent/10 text-accent";
+interface AccountContext {
+  ad_account_id: number;
+  platform: string;
+  resource_kinds: string[];
+  resources: AdResource[];
+  defaults: Record<string, AdResource>;
+  refresh_errors: Record<string, string>;
+}
+
+interface PendingPicker {
+  pendingId: number;
+  platform?: string;
+  pages: PendingAccountPage[];
+}
+
+function mcpErrorText(data: any): string | null {
+  if (!data?.isError) return null;
+  return data.content?.find((item: any) => item.type === "text")?.text || "Request returned an error";
+}
+
+function ProviderMark({ platform, size = "md" }: { platform: string; size?: "sm" | "md" }) {
+  const meta = platform === "meta";
+  return (
+    <span
+      aria-hidden="true"
+      className={`${size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm"} ${meta ? "bg-blue text-white" : "bg-white text-blue"} grid shrink-0 place-items-center rounded border border-border font-semibold shadow-sm`}
+    >
+      {meta ? "M" : "G"}
+    </span>
+  );
+}
+
+function statusStyle(status?: string): string {
+  if (status === "ACTIVE") return "bg-green/15 text-green";
   if (status === "PAUSED") return "bg-yellow/15 text-yellow";
   return "bg-border text-text-muted";
 }
 
-function platformInitial(platform: string): string {
-  if (platform === "meta") return "M";
-  if (platform === "google") return "G";
-  return platform.slice(0, 1).toUpperCase();
+function displayStatus(campaign: Campaign): string {
+  return campaign.status || campaign.effective_status || "UNKNOWN";
 }
 
-async function apiJSON(path: string, init?: RequestInit): Promise<any> {
-  const res = await fetch(appURL(path), {
-    credentials: "same-origin",
-    ...init,
-    headers: {
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...(init?.headers || {}),
-    },
-  });
-  if (!res.ok) throw new Error(`${path}: HTTP ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  const err = mcpErrorText(data);
-  if (err) throw new Error(err);
-  return data;
+function formatBudget(value: string | undefined, currency: string): string {
+  if (!value) return "-";
+  const cents = Number(value);
+  if (!Number.isFinite(cents)) return value;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "USD",
+      maximumFractionDigits: 2,
+    }).format(cents / 100);
+  } catch {
+    return `${(cents / 100).toFixed(2)} ${currency || "USD"}`;
+  }
 }
 
-async function callTool(tool: string, args: Record<string, unknown>): Promise<any> {
-  const res = await fetch(`${API}/mcp`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name: tool, arguments: args },
-    }),
-  });
-  if (!res.ok) throw new Error(`${tool}: ${res.status}`);
-  const j = await res.json();
-  if (j.error) throw new Error(j.error.message || tool);
-  const text = j.result?.content?.[0]?.text;
-  if (!text) return j.result;
-  const parsed = JSON.parse(text);
-  const err = mcpErrorText(parsed);
-  if (err) throw new Error(err);
-  return parsed;
+function formatNumber(value: number, maximumFractionDigits = 0): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(Number(value) || 0);
 }
 
-export default function AdsPanel(props: NativePanelProps) {
-  activePanelProjectId = props.projectId || PANEL_PROJECT_ID;
+function formatMoneyMicros(value: number, currency: string): string {
+  const amount = (Number(value) || 0) / 1_000_000;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "USD",
+      minimumFractionDigits: amount > 0 && amount < 1 ? 2 : 0,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    return `${amount.toFixed(2)} ${currency || "USD"}`;
+  }
+}
+
+function isoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateRange(days: number): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(from.getDate() - Math.max(0, days - 1));
+  return { from: isoDate(from), to: isoDate(to) };
+}
+
+export function previousDateRange(from: string, to: string): { from: string; to: string } {
+  const start = new Date(`${from}T12:00:00`);
+  const end = new Date(`${to}T12:00:00`);
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1;
+  const previousTo = new Date(start);
+  previousTo.setDate(previousTo.getDate() - 1);
+  const previousFrom = new Date(previousTo);
+  previousFrom.setDate(previousFrom.getDate() - days + 1);
+  return { from: isoDate(previousFrom), to: isoDate(previousTo) };
+}
+
+export function percentageChange(current: number, previous?: number): number | null {
+  if (previous == null || previous === 0) return current === 0 ? 0 : null;
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+export function aggregatePerformance(points: PerformancePoint[]): PerformanceSummary {
+  const summary: PerformanceSummary = {
+    spend_micros: 0, impressions: 0, reach: 0, clicks: 0, link_clicks: 0,
+    conversions: 0, conversion_value_micros: 0, video_views: 0,
+    ctr: 0, cpc_micros: 0, cpm_micros: 0, cpa_micros: 0, roas: 0,
+    currency: points[0]?.currency || "", timezone: points[0]?.timezone || "",
+  };
+  for (const point of points) {
+    summary.spend_micros += Number(point.spend_micros) || 0;
+    summary.impressions += Number(point.impressions) || 0;
+    summary.reach += Number(point.reach) || 0;
+    summary.clicks += Number(point.clicks) || 0;
+    summary.link_clicks += Number(point.link_clicks) || 0;
+    summary.conversions += Number(point.conversions) || 0;
+    summary.conversion_value_micros += Number(point.conversion_value_micros) || 0;
+    summary.video_views += Number(point.video_views) || 0;
+  }
+  summary.ctr = summary.impressions > 0 ? (summary.clicks / summary.impressions) * 100 : 0;
+  summary.cpc_micros = summary.clicks > 0 ? summary.spend_micros / summary.clicks : 0;
+  summary.cpm_micros = summary.impressions > 0 ? (summary.spend_micros * 1000) / summary.impressions : 0;
+  summary.cpa_micros = summary.conversions > 0 ? summary.spend_micros / summary.conversions : 0;
+  summary.roas = summary.spend_micros > 0 ? summary.conversion_value_micros / summary.spend_micros : 0;
+  return summary;
+}
+
+const RESOURCE_KIND_LABELS: Record<string, string> = {
+  identity: "Publishing identities",
+  tracking_source: "Conversion tracking",
+  conversion_action: "Conversion actions",
+  lead_form: "Lead forms",
+  audience: "Audiences",
+};
+
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  facebook_page: "Facebook Page",
+  instagram_business: "Instagram account",
+  meta_pixel: "Meta Pixel",
+  meta_lead_form: "Meta lead form",
+  meta_audience: "Meta audience",
+  google_conversion_action: "Google conversion action",
+  google_lead_form: "Google lead form",
+  google_user_list: "Google audience",
+};
+
+const LEAD_QUESTION_OPTIONS = [
+  { type: "full_name", label: "Full name" },
+  { type: "email", label: "Email" },
+  { type: "phone", label: "Phone" },
+  { type: "company_name", label: "Company" },
+  { type: "job_title", label: "Job title" },
+];
+
+function resourcePurpose(resource: AdResource): string | null {
+  if (resource.provider_type === "facebook_page") return "publishing_identity";
+  if (resource.provider_type === "instagram_business") return "instagram_identity";
+  if (resource.kind === "tracking_source" || resource.kind === "conversion_action") return "conversion_source";
+  if (resource.kind === "lead_form") return "lead_form";
+  if (resource.kind === "audience") return "audience";
+  return null;
+}
+
+function Modal({
+  title,
+  description,
+  actions,
+  size = "default",
+  onClose,
+  children,
+  labelledBy,
+}: {
+  title: string;
+  description?: string;
+  actions?: React.ReactNode;
+  size?: "default" | "large";
+  onClose: () => void;
+  children: React.ReactNode;
+  labelledBy: string;
+}) {
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    closeRef.current?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-30 grid place-items-center bg-black/50 p-4" onMouseDown={onClose}>
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={labelledBy}
+        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-3xl" : "max-w-lg"}`}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-start gap-3 border-b border-border px-4 py-3">
+          <div className="min-w-0 flex-1">
+            <h2 id={labelledBy} className="text-sm font-semibold text-text">{title}</h2>
+            {description && <p className="mt-1 text-xs text-text-muted">{description}</p>}
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {actions}
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={onClose}
+              aria-label="Close"
+              title="Close"
+              className="grid h-8 w-8 place-items-center rounded text-lg text-text-muted hover:bg-bg-input hover:text-text"
+            >
+              ×
+            </button>
+          </div>
+        </header>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function KpiStrip({
+  summary,
+  previous,
+  currency,
+}: {
+  summary: PerformanceSummary;
+  previous?: PerformanceSummary | null;
+  currency: string;
+}) {
+  const metrics = [
+    { label: "Spend", value: summary.spend_micros, previous: previous?.spend_micros, display: formatMoneyMicros(summary.spend_micros, currency), direction: "neutral" },
+    { label: "Impressions", value: summary.impressions, previous: previous?.impressions, display: formatNumber(summary.impressions), direction: "neutral" },
+    { label: "Clicks", value: summary.clicks, previous: previous?.clicks, display: formatNumber(summary.clicks), direction: "up" },
+    { label: "CTR", value: summary.ctr, previous: previous?.ctr, display: `${formatNumber(summary.ctr, 2)}%`, direction: "up" },
+    { label: "CPC", value: summary.cpc_micros, previous: previous?.cpc_micros, display: formatMoneyMicros(summary.cpc_micros, currency), direction: "down" },
+    { label: "Conversions", value: summary.conversions, previous: previous?.conversions, display: formatNumber(summary.conversions, 2), direction: "up" },
+    { label: "CPA", value: summary.cpa_micros, previous: previous?.cpa_micros, display: formatMoneyMicros(summary.cpa_micros, currency), direction: "down" },
+    { label: "ROAS", value: summary.roas, previous: previous?.roas, display: `${formatNumber(summary.roas, 2)}x`, direction: "up" },
+  ];
+  return (
+    <div className="grid grid-cols-2 divide-x divide-y divide-border border-b border-border sm:grid-cols-4 xl:grid-cols-8 xl:divide-y-0">
+      {metrics.map((metric) => {
+        const change = percentageChange(metric.value, metric.previous);
+        const favorable = change != null && change !== 0 && (metric.direction === "up" ? change > 0 : metric.direction === "down" ? change < 0 : false);
+        const unfavorable = change != null && change !== 0 && (metric.direction === "up" ? change < 0 : metric.direction === "down" ? change > 0 : false);
+        return (
+          <div key={metric.label} className="min-w-0 px-3 py-3">
+            <div className="text-[11px] font-medium uppercase text-text-dim">{metric.label}</div>
+            <div className="mt-1 truncate text-lg font-semibold tabular-nums text-text" title={metric.display}>{metric.display}</div>
+            {previous && (
+              <div className={`mt-0.5 text-[11px] tabular-nums ${favorable ? "text-green" : unfavorable ? "text-red" : "text-text-dim"}`}>
+                {change == null ? "New" : `${change >= 0 ? "+" : ""}${formatNumber(change, 1)}%`}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PerformanceChart({ points, currency, compact = false }: { points: PerformancePoint[]; currency: string; compact?: boolean }) {
+  const byDate = new Map<string, { date: string; spend: number; clicks: number; conversions: number }>();
+  for (const point of points) {
+    const item = byDate.get(point.date) || { date: point.date, spend: 0, clicks: 0, conversions: 0 };
+    item.spend += (Number(point.spend_micros) || 0) / 1_000_000;
+    item.clicks += Number(point.clicks) || 0;
+    item.conversions += Number(point.conversions) || 0;
+    byDate.set(point.date, item);
+  }
+  const data = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  if (data.length === 0) {
+    return <div className="grid h-44 place-items-center text-sm text-text-muted">No delivery in this date range.</div>;
+  }
+  return (
+    <div
+      className="w-full min-w-0"
+      style={{ height: compact ? 208 : 288, minHeight: compact ? 208 : 288 }}
+      role="img"
+      aria-label="Daily spend and clicks"
+    >
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={0}
+        minHeight={compact ? 208 : 288}
+        initialDimension={{ width: compact ? 720 : 960, height: compact ? 208 : 288 }}
+      >
+        <AreaChart data={data} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id="adsSpendFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f97316" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="adsClicksFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.2} />
+              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.01} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid vertical={false} stroke="#2a2a2a" strokeDasharray="3 3" />
+          <XAxis dataKey="date" tick={{ fill: "#8a8a8a", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} tickFormatter={(value) => String(value).slice(5)} />
+          <YAxis yAxisId="money" tick={{ fill: "#8a8a8a", fontSize: 10 }} axisLine={false} tickLine={false} width={50} tickFormatter={(value) => formatNumber(Number(value), 0)} />
+          <YAxis yAxisId="count" orientation="right" hide />
+          <Tooltip
+            contentStyle={{ background: "#111", border: "1px solid #333", borderRadius: 4, color: "#e5e5e5", fontSize: 12 }}
+            formatter={(value, name) => name === "Spend" ? [formatMoneyMicros(Number(value) * 1_000_000, currency), name] : [formatNumber(Number(value), 2), name]}
+            labelFormatter={(label) => new Date(`${label}T12:00:00`).toLocaleDateString()}
+          />
+          <Area yAxisId="money" type="monotone" dataKey="spend" name="Spend" stroke="#f97316" strokeWidth={2} fill="url(#adsSpendFill)" dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+          <Area yAxisId="count" type="monotone" dataKey="clicks" name="Clicks" stroke="#3b82f6" strokeWidth={1.5} fill="url(#adsClicksFill)" dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function CampaignAnalyticsModal({ campaign, currency, onClose }: { campaign: CampaignPerformance; currency: string; onClose: () => void }) {
+  return (
+    <Modal
+      title={campaign.campaign_name || campaign.campaign_id}
+      description={`Campaign ${campaign.campaign_id}`}
+      size="large"
+      onClose={onClose}
+      labelledBy="ads-campaign-analytics-title"
+    >
+      <KpiStrip summary={campaign} currency={currency} />
+      <div className="px-4 py-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-xs font-medium uppercase text-text-dim">Daily performance</h3>
+          <span className="text-xs text-text-muted">{campaign.points.length} data point{campaign.points.length === 1 ? "" : "s"}</span>
+        </div>
+        <PerformanceChart points={campaign.points} currency={currency} compact />
+      </div>
+    </Modal>
+  );
+}
+
+export default function AdsPanel({ projectId, installId }: NativePanelProps) {
+  const initialRange = useMemo(() => dateRange(30), []);
+  const scopedProject = projectId || PANEL_PROJECT_ID;
   const [accounts, setAccounts] = useState<AdAccount[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
-  const [selected, setSelected] = useState<AdAccount | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [activeView, setActiveView] = useState<"overview" | "campaigns">("overview");
+  const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
+  const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
+  const [loadingPerformance, setLoadingPerformance] = useState(false);
+  const [performanceError, setPerformanceError] = useState<string | null>(null);
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [selectedCampaignID, setSelectedCampaignID] = useState<string | null>(null);
+  const [loadingAccounts, setLoadingAccounts] = useState(true);
+  const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [startingPlatform, setStartingPlatform] = useState<string | null>(null);
-  const [pendingPicker, setPendingPicker] = useState<{
-    pendingId: number;
-    platform?: string;
-    pages: PendingAccountPage[];
-  } | null>(null);
+  const [copyingPlatform, setCopyingPlatform] = useState<string | null>(null);
+  const [copiedPlatform, setCopiedPlatform] = useState<string | null>(null);
+  const [connectionPicker, setConnectionPicker] = useState<PlatformInfo | null>(null);
+  const [connectionPickerMode, setConnectionPickerMode] = useState<"account" | "link">("account");
+  const [pendingPicker, setPendingPicker] = useState<PendingPicker | null>(null);
+  const [accountFilter, setAccountFilter] = useState("");
+  const [disconnectTarget, setDisconnectTarget] = useState<AdAccount | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [setupAccount, setSetupAccount] = useState<AdAccount | null>(null);
+  const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
+  const [loadingResources, setLoadingResources] = useState(false);
+  const [savingResourceId, setSavingResourceId] = useState<number | null>(null);
+  const [resourceError, setResourceError] = useState<string | null>(null);
+  const [leadFormOpen, setLeadFormOpen] = useState(false);
+  const [creatingLeadForm, setCreatingLeadForm] = useState(false);
+  const [leadFormName, setLeadFormName] = useState("");
+  const [leadFormPrivacyURL, setLeadFormPrivacyURL] = useState("");
+  const [leadFormFollowUpURL, setLeadFormFollowUpURL] = useState("");
+  const [leadFormBusinessName, setLeadFormBusinessName] = useState("");
+  const [leadFormCampaignID, setLeadFormCampaignID] = useState("");
+  const [leadFormHigherIntent, setLeadFormHigherIntent] = useState(true);
+  const [leadFormQuestions, setLeadFormQuestions] = useState<string[]>(["full_name", "email", "phone"]);
   const [error, setError] = useState<string | null>(null);
+  const campaignRequest = useRef(0);
+  const performanceRequest = useRef(0);
+  const copyFeedbackTimer = useRef<number | null>(null);
+  const resourceRequest = useRef(0);
+
+  const selected = useMemo(
+    () => accounts.find((account) => account.id === selectedId) || null,
+    [accounts, selectedId],
+  );
+  const filteredPendingPages = useMemo(() => {
+    if (!pendingPicker) return [];
+    const query = accountFilter.trim().toLowerCase();
+    if (!query) return pendingPicker.pages;
+    return pendingPicker.pages.filter((page) =>
+      `${page.name} ${page.id} ${page.currency} ${page.timezone}`.toLowerCase().includes(query),
+    );
+  }, [accountFilter, pendingPicker]);
+  const groupedResources = useMemo(() => {
+    if (!accountContext) return [];
+    return accountContext.resource_kinds.map((kind) => ({
+      kind,
+      resources: accountContext.resources.filter((resource) => resource.kind === kind),
+      error: accountContext.refresh_errors?.[kind],
+    }));
+  }, [accountContext]);
+  const campaignPerformance = useMemo(() => {
+    const grouped = new Map<string, PerformancePoint[]>();
+    for (const point of performance?.data || []) {
+      const id = point.campaign_id || point.entity_id;
+      if (!id) continue;
+      grouped.set(id, [...(grouped.get(id) || []), point]);
+    }
+    const result = new Map<string, CampaignPerformance>();
+    for (const [campaignID, points] of grouped) {
+      result.set(campaignID, {
+        campaign_id: campaignID,
+        campaign_name: points.find((point) => point.campaign_name || point.entity_name)?.campaign_name
+          || points.find((point) => point.entity_name)?.entity_name
+          || campaignID,
+        points,
+        ...aggregatePerformance(points),
+      });
+    }
+    return result;
+  }, [performance]);
+  const rankedCampaigns = useMemo(
+    () => [...campaignPerformance.values()].sort((a, b) => b.spend_micros - a.spend_micros),
+    [campaignPerformance],
+  );
+  const selectedCampaignPerformance = selectedCampaignID ? campaignPerformance.get(selectedCampaignID) || null : null;
+
+  const appURL = useCallback((path: string) => {
+    const url = new URL(`${API}${path}`, window.location.origin);
+    if (scopedProject) url.searchParams.set("project_id", scopedProject);
+    url.searchParams.set("install_id", String(installId));
+    return url.pathname + url.search;
+  }, [installId, scopedProject]);
+
+  const apiJSON = useCallback(async (path: string, init?: RequestInit): Promise<any> => {
+    const response = await fetch(appURL(path), {
+      credentials: "same-origin",
+      ...init,
+      headers: {
+        ...(init?.body ? { "content-type": "application/json" } : {}),
+        ...(init?.headers || {}),
+      },
+    });
+    if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+    const data = await response.json();
+    const message = mcpErrorText(data);
+    if (message) throw new Error(message);
+    return data;
+  }, [appURL]);
+
+  const callTool = useCallback(async (tool: string, args: Record<string, unknown>): Promise<any> => {
+    const response = await fetch(appURL("/mcp"), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: tool,
+          arguments: { ...args, _project_id: scopedProject },
+        },
+      }),
+    });
+    if (!response.ok) throw new Error((await response.text()) || `${tool}: HTTP ${response.status}`);
+    const envelope = await response.json();
+    if (envelope.error) throw new Error(envelope.error.message || tool);
+    const text = envelope.result?.content?.find((item: any) => item.type === "text")?.text;
+    const data = text ? JSON.parse(text) : envelope.result;
+    const message = mcpErrorText(data);
+    if (message) throw new Error(message);
+    return data;
+  }, [appURL, scopedProject]);
 
   const refreshAccounts = useCallback(async () => {
+    setLoadingAccounts(true);
     try {
-      const r = await apiJSON("/accounts");
-      setAccounts(r.accounts || []);
-    } catch (e: any) {
-      setError(e.message);
+      const result = await apiJSON("/accounts");
+      const next = result.accounts || [];
+      setAccounts(next);
+      setSelectedId((current) => current && next.some((account: AdAccount) => account.id === current) ? current : null);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoadingAccounts(false);
     }
-  }, []);
+  }, [apiJSON]);
 
   const refreshPlatforms = useCallback(async () => {
     try {
-      const r = await apiJSON("/platforms");
-      setPlatforms(r.platforms || []);
-    } catch (e: any) {
-      setError(e.message);
+      const result = await apiJSON("/platforms");
+      setPlatforms(result.platforms || []);
+    } catch (err) {
+      setError((err as Error).message);
     }
+  }, [apiJSON]);
+
+  const refreshCampaigns = useCallback(async (account: AdAccount) => {
+    const request = ++campaignRequest.current;
+    setLoadingCampaigns(true);
+    setCampaigns([]);
+    try {
+      const result = await callTool("campaign_list", { ad_account_id: account.id, limit: 50 });
+      if (request !== campaignRequest.current) return;
+      setCampaigns(result.data || result.campaigns || []);
+    } catch (err) {
+      if (request === campaignRequest.current) setError((err as Error).message);
+    } finally {
+      if (request === campaignRequest.current) setLoadingCampaigns(false);
+    }
+  }, [callTool]);
+
+  const refreshPerformance = useCallback(async (account: AdAccount, refresh = true) => {
+    if (!dateFrom || !dateTo || dateFrom > dateTo) return;
+    const request = ++performanceRequest.current;
+    setLoadingPerformance(true);
+    setPerformanceError(null);
+    try {
+      const currentPromise = callTool("performance_get", {
+        ad_account_id: account.id,
+        level: "campaign",
+        date_from: dateFrom,
+        date_to: dateTo,
+        granularity: "day",
+        refresh,
+      });
+      const previous = previousDateRange(dateFrom, dateTo);
+      const comparisonPromise = compareEnabled
+        ? callTool("performance_get", {
+          ad_account_id: account.id,
+          level: "campaign",
+          date_from: previous.from,
+          date_to: previous.to,
+          granularity: "day",
+          refresh,
+        })
+        : Promise.resolve(null);
+      const [currentResult, comparisonResult] = await Promise.all([currentPromise, comparisonPromise]);
+      if (request !== performanceRequest.current) return;
+      setPerformance(currentResult as PerformanceResponse);
+      setComparison(comparisonResult as PerformanceResponse | null);
+    } catch (err) {
+      if (request === performanceRequest.current) setPerformanceError((err as Error).message);
+    } finally {
+      if (request === performanceRequest.current) setLoadingPerformance(false);
+    }
+  }, [callTool, compareEnabled, dateFrom, dateTo]);
+
+  const loadAccountContext = useCallback(async (account: AdAccount, refresh = true) => {
+    const request = ++resourceRequest.current;
+    setLoadingResources(true);
+    setResourceError(null);
+    try {
+      const result = await callTool("account_context_get", { ad_account_id: account.id, refresh });
+      if (request === resourceRequest.current) setAccountContext(result as AccountContext);
+    } catch (err) {
+      if (request === resourceRequest.current) setResourceError((err as Error).message);
+    } finally {
+      if (request === resourceRequest.current) setLoadingResources(false);
+    }
+  }, [callTool]);
+
+  const openAccountResources = useCallback((account: AdAccount) => {
+    setSetupAccount(account);
+    setAccountContext(null);
+    loadAccountContext(account, true);
+  }, [loadAccountContext]);
+
+  const closeAccountResources = useCallback(() => {
+    resourceRequest.current++;
+    setSetupAccount(null);
+    setAccountContext(null);
+    setResourceError(null);
+    setLoadingResources(false);
+    setLeadFormOpen(false);
   }, []);
+
+  const openLeadFormCreate = () => {
+    setLeadFormName("");
+    setLeadFormPrivacyURL("");
+    setLeadFormFollowUpURL("");
+    setLeadFormBusinessName("");
+    setLeadFormCampaignID("");
+    setLeadFormHigherIntent(true);
+    setLeadFormQuestions(["full_name", "email", "phone"]);
+    setResourceError(null);
+    setLeadFormOpen(true);
+  };
+
+  const toggleLeadQuestion = (type: string) => {
+    setLeadFormQuestions((current) => current.includes(type)
+      ? current.filter((item) => item !== type)
+      : [...current, type]);
+  };
+
+  const createLeadForm = async () => {
+    if (!setupAccount || !leadFormName.trim() || !leadFormPrivacyURL.trim() || leadFormQuestions.length === 0) return;
+    setCreatingLeadForm(true);
+    setResourceError(null);
+    try {
+      await callTool("lead_form_create", {
+        ad_account_id: setupAccount.id,
+        name: leadFormName.trim(),
+        privacy_policy_url: leadFormPrivacyURL.trim(),
+        follow_up_url: leadFormFollowUpURL.trim() || undefined,
+        business_name: leadFormBusinessName.trim() || undefined,
+        headline: leadFormName.trim(),
+        description: "Request more information",
+        call_to_action: "get_quote",
+        call_to_action_description: "Submit the form to get in touch",
+        higher_intent: leadFormHigherIntent,
+        campaign_id: leadFormCampaignID || undefined,
+        questions: leadFormQuestions.map((type) => ({ type })),
+      });
+      setLeadFormOpen(false);
+      await loadAccountContext(setupAccount, true);
+    } catch (err) {
+      setResourceError((err as Error).message);
+    } finally {
+      setCreatingLeadForm(false);
+    }
+  };
+
+  const setResourceDefault = async (resource: AdResource) => {
+    if (!setupAccount) return;
+    const purpose = resourcePurpose(resource);
+    if (!purpose) return;
+    setSavingResourceId(resource.id);
+    setResourceError(null);
+    try {
+      const result = await callTool("resource_set_default", {
+        ad_account_id: setupAccount.id,
+        purpose,
+        resource_id: resource.id,
+      });
+      setAccountContext((current) => current ? {
+        ...current,
+        defaults: { ...current.defaults, [purpose]: result.resource },
+      } : current);
+    } catch (err) {
+      setResourceError((err as Error).message);
+    } finally {
+      setSavingResourceId(null);
+    }
+  };
+
+  const resumeOAuth = useCallback(async (pendingId: number) => {
+    try {
+      const result = await apiJSON(`/accounts/${pendingId}/pages`);
+      setPendingPicker({
+        pendingId,
+        platform: result.platform,
+        pages: result.pages || [],
+      });
+      setAccountFilter("");
+      setConnectionPicker(null);
+      setAddOpen(false);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }, [apiJSON]);
 
   useEffect(() => {
     refreshAccounts();
     refreshPlatforms();
-    // After OAuth callback the platform 302s us back with ?pending=N;
-    // pick that up and show the picker without a manual click.
-    const pending = new URLSearchParams(window.location.search).get("pending");
-    if (pending) {
-      handleResumeFromOAuth(Number(pending));
-    }
   }, [refreshAccounts, refreshPlatforms]);
 
   useEffect(() => {
-    const onMsg = (ev: MessageEvent) => {
-      if (ev.data?.type === "ads.oauth_ready" && ev.data.pending_account_id) {
-        handleResumeFromOAuth(Number(ev.data.pending_account_id));
-      }
-      if (ev.data?.type === "ads.oauth_failed") {
-        setError("OAuth authorization failed. Try connecting the account again.");
+    if (selected) refreshPerformance(selected, true);
+  }, [refreshPerformance, selected]);
+
+  useEffect(() => {
+    const pending = Number(new URLSearchParams(window.location.search).get("pending"));
+    if (pending > 0) resumeOAuth(pending);
+  }, [resumeOAuth]);
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type === "ads.oauth_ready" && event.data.pending_account_id) {
+        resumeOAuth(Number(event.data.pending_account_id));
+      } else if (event.data?.type === "ads.oauth_failed") {
+        setError("Authorization failed. Try connecting the account again.");
       }
     };
-    window.addEventListener("message", onMsg);
-    return () => window.removeEventListener("message", onMsg);
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [resumeOAuth]);
+
+  useEffect(() => {
+    return () => {
+      campaignRequest.current++;
+      performanceRequest.current++;
+      resourceRequest.current++;
+      if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
+    };
   }, []);
 
-  const refreshCampaigns = useCallback(async (acct: AdAccount) => {
-    setLoading(true);
-    try {
-      const r = await callTool("campaign_list", { ad_account_id: acct.id, limit: 50 });
-      // Adapters normalize campaign lists to {data:[...]} when needed.
-      setCampaigns(r.data || r.campaigns || []);
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const handleSelect = (acct: AdAccount) => {
-    setSelected(acct);
-    refreshCampaigns(acct);
+  const selectAccount = (account: AdAccount) => {
+    setSelectedId(account.id);
+    setPerformance(null);
+    setComparison(null);
+    setPerformanceError(null);
+    setSelectedCampaignID(null);
+    refreshCampaigns(account);
   };
 
-  const handleAddAccount = () => {
-    setAddOpen(true);
-  };
-
-  const handleStartPlatform = (platform: PlatformInfo) => {
+  const startPlatform = async (platform: PlatformInfo, connectionId?: number) => {
     if (!platform.can_add) {
-      setError(platform.unavailable_reason || "This platform is not available.");
+      setError(platform.unavailable_reason || "Set up this integration before adding an account.");
       return;
     }
+    const activeConnections = platform.connections || [];
+    if (!connectionId && activeConnections.length > 1) {
+      setConnectionPickerMode("account");
+      setConnectionPicker(platform);
+      setAddOpen(false);
+      return;
+    }
+    if (connectionId) setConnectionPicker(null);
+    const reusableConnectionId = connectionId || activeConnections[0]?.id;
+    if (reusableConnectionId) {
+      setStartingPlatform(platform.platform);
+      setError(null);
+      try {
+        const result = await apiJSON("/accounts/start", {
+          method: "POST",
+          body: JSON.stringify({
+            platform: platform.platform,
+            connection_id: reusableConnectionId,
+          }),
+        });
+        if (!result.pending_account_id || !result.reused_connection) {
+          throw new Error("The selected integration connection could not be reused.");
+        }
+        await resumeOAuth(Number(result.pending_account_id));
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setStartingPlatform(null);
+      }
+      return;
+    }
+
     const popup = window.open("about:blank", "ads_oauth", "width=620,height=760");
     if (!popup) {
       setError("Popup blocked. Allow pop-ups for this site and try again.");
@@ -224,56 +904,77 @@ export default function AdsPanel(props: NativePanelProps) {
     }
     setStartingPlatform(platform.platform);
     setError(null);
-    (async () => {
-      const fail = (msg: string) => {
-        setError(msg);
-        setStartingPlatform(null);
-        try { popup.close(); } catch {}
-      };
-      try {
-        const r = await apiJSON("/accounts/start", {
-          method: "POST",
-          body: JSON.stringify({ platform: platform.platform }),
-        });
-        if (!r.authorize_url && r.pending_account_id && r.reused_connection) {
-          try { popup.close(); } catch {}
-          setStartingPlatform(null);
-          setAddOpen(false);
-          await handleResumeFromOAuth(Number(r.pending_account_id));
-          return;
-        }
-        if (!r.authorize_url) {
-          fail("Server did not return an OAuth authorization URL.");
-          return;
-        }
-        popup.location.href = r.authorize_url;
-        setStartingPlatform(null);
+    try {
+      const result = await apiJSON("/accounts/start", {
+        method: "POST",
+        body: JSON.stringify({ platform: platform.platform }),
+      });
+      if (result.pending_account_id && result.reused_connection) {
+        popup.close();
+        await resumeOAuth(Number(result.pending_account_id));
+      } else if (result.authorize_url) {
+        popup.location.href = result.authorize_url;
         setAddOpen(false);
-      } catch (e: any) {
-        fail("Start failed: " + e.message);
+      } else {
+        popup.close();
+        throw new Error("The server did not return an authorization URL.");
       }
-    })();
-  };
-
-  const handleForceOAuth = async () => {
-    try {
-      await refreshPlatforms();
-      setAddOpen(true);
-    } catch (e: any) {
-      setError(e.message);
+    } catch (err) {
+      popup.close();
+      setError((err as Error).message);
+    } finally {
+      setStartingPlatform(null);
     }
   };
 
-  const handleResumeFromOAuth = async (pendingId: number) => {
+  const copyAccessLink = async (platform: PlatformInfo, connectionId?: number) => {
+    const activeConnections = platform.connections || [];
+    if (!connectionId && activeConnections.length > 1) {
+      setConnectionPickerMode("link");
+      setConnectionPicker(platform);
+      setAddOpen(false);
+      return;
+    }
+    const templateConnectionId = connectionId || activeConnections[0]?.id;
+    if (!templateConnectionId) {
+      setError("Set up this integration before creating an access link.");
+      return;
+    }
+
+    setCopyingPlatform(platform.platform);
+    setError(null);
     try {
-      const r = await apiJSON(`/accounts/${pendingId}/pages`);
-      setPendingPicker({ pendingId, platform: r.platform, pages: r.pages || [] });
-    } catch (e: any) {
-      setError(e.message);
+      const response = await fetch("/api/invites", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          app_slug: platform.integration_slug,
+          source: "local",
+          project_id: scopedProject,
+          template_connection_id: templateConnectionId,
+          ttl_seconds: 24 * 60 * 60,
+        }),
+      });
+      if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
+      const result = await response.json();
+      if (!result.url) throw new Error("The server did not return an access link.");
+      await navigator.clipboard.writeText(result.url);
+      setConnectionPicker(null);
+      setCopiedPlatform(platform.platform);
+      if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
+      copyFeedbackTimer.current = window.setTimeout(() => {
+        setCopiedPlatform((current) => current === platform.platform ? null : current);
+        copyFeedbackTimer.current = null;
+      }, 2200);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setCopyingPlatform(null);
     }
   };
 
-  const handleFinalize = async (page: PendingAccountPage) => {
+  const finalizeAccount = async (page: PendingAccountPage) => {
     if (!pendingPicker) return;
     try {
       await apiJSON("/accounts/finalize", {
@@ -285,206 +986,177 @@ export default function AdsPanel(props: NativePanelProps) {
         }),
       });
       setPendingPicker(null);
-      window.history.replaceState({}, "", window.location.pathname);
-      await refreshAccounts();
-    } catch (e: any) {
-      setError(e.message);
+      const cleanURL = new URL(window.location.href);
+      cleanURL.searchParams.delete("pending");
+      window.history.replaceState({}, "", cleanURL.pathname + cleanURL.search);
+      await Promise.all([refreshAccounts(), refreshPlatforms()]);
+    } catch (err) {
+      setError((err as Error).message);
     }
   };
 
-  const handleStatusToggle = async (c: Campaign) => {
-    if (!selected) return;
-    const tool = c.status === "ACTIVE" ? "campaign_pause" : "campaign_resume";
+  const toggleCampaign = async (account: AdAccount, campaign: Campaign) => {
+    const tool = displayStatus(campaign) === "ACTIVE" ? "campaign_pause" : "campaign_resume";
     try {
-      await callTool(tool, { ad_account_id: selected.id, campaign_id: c.id });
-      await refreshCampaigns(selected);
-    } catch (e: any) {
-      setError(e.message);
+      await callTool(tool, { ad_account_id: account.id, campaign_id: campaign.id });
+      if (selectedId === account.id) await refreshCampaigns(account);
+    } catch (err) {
+      setError((err as Error).message);
     }
   };
 
-  const handleDisconnect = async (acct: AdAccount) => {
-    if (!confirm(`Disconnect ${acct.display_name}?`)) return;
+  const disconnectAccount = async () => {
+    if (!disconnectTarget) return;
+    setDisconnecting(true);
     try {
-      await apiJSON(`/accounts/${acct.id}`, { method: "DELETE" });
-      if (selected?.id === acct.id) setSelected(null);
-      await refreshAccounts();
-      await refreshPlatforms();
-    } catch (e: any) {
-      setError(e.message);
+      await apiJSON(`/accounts/${disconnectTarget.id}`, { method: "DELETE" });
+      if (selectedId === disconnectTarget.id) {
+        campaignRequest.current++;
+        performanceRequest.current++;
+        setSelectedId(null);
+        setCampaigns([]);
+        setPerformance(null);
+        setComparison(null);
+      }
+      setDisconnectTarget(null);
+      await Promise.all([refreshAccounts(), refreshPlatforms()]);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setDisconnecting(false);
     }
   };
 
   return (
-    <div className="h-full flex flex-col text-text">
-      <header className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
+    <div className="flex h-full min-h-0 flex-col bg-bg text-text">
+      <header className="flex min-h-16 items-center justify-between gap-4 border-b border-border px-4 py-3 md:px-5">
         <div className="min-w-0">
-          <h1 className="text-lg font-semibold text-text">Ads</h1>
-          <p className="text-xs text-text-muted truncate">
-            {accounts.length} connected account{accounts.length === 1 ? "" : "s"}
-            {selected ? ` · ${selected.display_name}` : ""}
-          </p>
+          <div className="flex items-center gap-2">
+            <h1 className="text-base font-semibold text-text">Ads</h1>
+            <span className="rounded bg-border px-2 py-0.5 text-xs text-text-muted">
+              {accounts.length}
+            </span>
+          </div>
+          <p className="mt-0.5 truncate text-xs text-text-muted">Meta and Google campaign accounts</p>
         </div>
         <button
           type="button"
-          onClick={handleAddAccount}
-          className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg whitespace-nowrap"
+          onClick={() => setAddOpen(true)}
+          className="inline-flex h-9 items-center gap-2 rounded bg-accent px-3 text-sm font-medium text-bg hover:opacity-90"
         >
-          + Add account
+          <span aria-hidden="true" className="text-base">+</span>
+          <span>Add account</span>
         </button>
       </header>
 
       {error && (
-        <div className="mx-4 mt-4 rounded border border-red/40 bg-red/10 px-3 py-2 text-sm text-red flex items-center gap-3">
-          <span className="flex-1 min-w-0">{error}</span>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            className="text-red/80 hover:text-red px-1"
-          >×</button>
-        </div>
-      )}
-
-      {addOpen && (
-        <div className="fixed inset-0 bg-black/40 grid place-items-center z-20 p-4">
-          <div className="w-full max-w-lg bg-bg-card border border-border rounded shadow-xl">
-            <div className="px-4 py-3 border-b border-border flex items-center gap-3">
-              <div className="min-w-0">
-                <h3 className="text-sm font-medium text-text">Add ad account</h3>
-                <p className="text-xs text-text-muted">Choose an available ads integration.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAddOpen(false)}
-                className="ml-auto text-text-muted hover:text-text text-lg leading-none px-1"
-              >×</button>
-            </div>
-            <div className="p-4">
-              {platforms.length === 0 ? (
-                <p className="text-sm text-text-muted">Checking ad integrations…</p>
-              ) : (
-                <div className="grid gap-2">
-                  {platforms.map(p => (
-                    <button
-                      type="button"
-                      key={p.platform}
-                      disabled={!p.can_add || startingPlatform === p.platform}
-                      onClick={() => handleStartPlatform(p)}
-                      className={`w-full text-left border rounded px-3 py-2 transition ${
-                        p.can_add
-                          ? "border-border hover:bg-bg-input"
-                          : "border-border bg-bg-input/40 opacity-70 cursor-not-allowed"
-                      }`}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="w-7 h-7 rounded bg-bg-input border border-border flex items-center justify-center text-xs font-medium text-text-muted shrink-0">
-                          {platformInitial(p.platform)}
-                        </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-medium text-sm text-text truncate">{p.display_name}</span>
-                            {p.active_account && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/10 text-accent shrink-0">added</span>
-                            )}
-                            {p.available && !p.supported && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow/15 text-yellow shrink-0">not wired</span>
-                            )}
-                          </div>
-                          <div className="mt-0.5 text-xs text-text-muted">
-                            {p.can_add
-                              ? `${p.connection_count || 1} active connection${(p.connection_count || 1) === 1 ? "" : "s"} found.`
-                              : p.unavailable_reason}
-                          </div>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={handleForceOAuth}
-                className="mt-3 text-xs text-accent hover:underline"
-              >
-                Refresh available integrations
-              </button>
-            </div>
-          </div>
+        <div role="alert" className="mx-4 mt-3 flex items-start gap-3 rounded border border-red/40 bg-red/10 px-3 py-2 text-sm text-red">
+          <span className="min-w-0 flex-1">{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="Dismiss error" title="Dismiss" className="grid h-6 w-6 place-items-center rounded hover:bg-red/10">
+            ×
+          </button>
         </div>
       )}
 
       {pendingPicker && (
-        <section className="mx-4 mt-4 border border-border rounded bg-bg-input/30">
-          <header className="px-3 py-2 border-b border-border">
-            <h3 className="text-sm font-medium text-text">Pick an ad account</h3>
-            <p className="text-xs text-text-muted">Select the upstream account to manage from this project.</p>
-          </header>
-          {pendingPicker.pages.length === 0 ? (
-            <p className="px-3 py-4 text-sm text-text-muted">No ad accounts found on this connection.</p>
-          ) : (
-            <ul className="divide-y divide-border">
-              {pendingPicker.pages.map(p => (
-                <li key={p.id} className="px-3 py-2 flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-text truncate">{p.name || p.id}</div>
-                    <div className="text-xs text-text-muted truncate">
-                      {p.id} · {p.currency} · {p.timezone}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => handleFinalize(p)}
-                    className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg shrink-0"
-                  >
-                    Use this account
-                  </button>
-                </li>
-              ))}
-            </ul>
+        <Modal
+          title="Choose an ad account"
+          description={`${pendingPicker.pages.length} available from ${pendingPicker.platform === "meta" ? "Meta Ads" : "Google Ads"}.`}
+          size="large"
+          onClose={() => {
+            setPendingPicker(null);
+            setAccountFilter("");
+          }}
+          labelledBy="ads-account-picker-title"
+        >
+          {pendingPicker.pages.length > 5 && (
+            <div className="border-b border-border px-4 py-3">
+              <input
+                type="search"
+                value={accountFilter}
+                onChange={(event) => setAccountFilter(event.target.value)}
+                placeholder="Search accounts"
+                aria-label="Search ad accounts"
+                className="h-9 w-full rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"
+              />
+            </div>
           )}
-        </section>
+          <div className="max-h-[60vh] divide-y divide-border overflow-y-auto">
+            {pendingPicker.pages.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-text-muted">No ad accounts were returned by this connection.</p>
+            ) : filteredPendingPages.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-text-muted">No accounts match that search.</p>
+            ) : filteredPendingPages.map((page) => (
+              <div key={page.id} className="flex items-center gap-3 px-4 py-3">
+                <ProviderMark platform={pendingPicker.platform || ""} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{page.name || page.id}</div>
+                  <div className="truncate text-xs text-text-muted">
+                    {page.id} · {page.currency || "-"} · {page.timezone || "-"}{page.test_account ? " · Test account" : ""}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => finalizeAccount(page)}
+                  aria-label={`Select ${page.name || page.id}`}
+                  className="h-8 w-20 shrink-0 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input"
+                >
+                  Select
+                </button>
+              </div>
+            ))}
+          </div>
+        </Modal>
       )}
 
-      <div className="flex-1 min-h-0 flex">
-        <aside className="w-80 max-w-[40%] shrink-0 border-r border-border flex flex-col">
-          <div className="px-3 py-2 border-b border-border">
-            <h2 className="text-xs uppercase tracking-wide text-text-dim">Connected accounts</h2>
+      <div className="flex min-h-0 flex-1 flex-col md:flex-row">
+        <aside className="flex max-h-56 w-full shrink-0 flex-col border-b border-border md:max-h-none md:w-72 md:border-b-0 md:border-r">
+          <div className="flex h-11 items-center justify-between border-b border-border px-3">
+            <h2 className="text-xs font-medium uppercase text-text-dim">Accounts</h2>
+            <button
+              type="button"
+              onClick={refreshAccounts}
+              disabled={loadingAccounts}
+              aria-label="Refresh accounts"
+              title="Refresh accounts"
+              className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+            >
+              ↻
+            </button>
           </div>
-          <div className="flex-1 overflow-auto">
-            {accounts.length === 0 ? (
-              <div className="py-12 px-4 text-center text-sm text-text-muted">
-                No ad accounts connected.
+          <div className="min-h-0 flex-1 overflow-auto">
+            {loadingAccounts && accounts.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-text-muted">Loading accounts...</p>
+            ) : accounts.length === 0 ? (
+              <div className="px-4 py-8 text-center">
+                <p className="text-sm font-medium">No ad accounts</p>
+                <p className="mt-1 text-xs text-text-muted">Connect Meta Ads or Google Ads to begin.</p>
+                <button type="button" onClick={() => setAddOpen(true)} className="mt-4 h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">
+                  Add account
+                </button>
               </div>
             ) : (
               <ul className="divide-y divide-border">
-                {accounts.map(a => (
-                  <li key={a.id}>
-                    <button
-                      type="button"
-                      onClick={() => handleSelect(a)}
-                      className={`w-full text-left px-3 py-2 hover:bg-bg-input/60 ${
-                        selected?.id === a.id ? "bg-accent/10" : ""
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <span className="w-7 h-7 rounded bg-bg-input border border-border flex items-center justify-center text-xs font-medium text-text-muted shrink-0">
-                          {platformInitial(a.platform)}
+                {accounts.map((account) => (
+                  <li key={account.id} className={selectedId === account.id ? "bg-accent/10" : ""}>
+                    <div className="flex items-center gap-2 px-2 py-2">
+                      <button type="button" onClick={() => selectAccount(account)} className="flex min-w-0 flex-1 items-center gap-3 rounded p-1 text-left hover:bg-bg-input/60">
+                        <ProviderMark platform={account.platform} size="sm" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{account.display_name}</span>
+                          <span className="block truncate text-xs text-text-muted">{account.native_account_id} · {account.currency || "-"}</span>
                         </span>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-text truncate">{a.display_name}</div>
-                          <div className="text-xs text-text-muted truncate">
-                            {a.platform} · {a.native_account_id} · {a.currency || "—"}
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); handleDisconnect(a); }}
-                            className="mt-1 text-[11px] text-red hover:underline"
-                          >
-                            Disconnect
-                          </button>
-                        </div>
-                      </div>
-                    </button>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDisconnectTarget(account)}
+                        aria-label={`Remove ${account.display_name}`}
+                        title="Remove account"
+                        className="grid h-8 w-8 shrink-0 place-items-center rounded text-text-muted hover:bg-red/10 hover:text-red"
+                      >
+                        ×
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -492,79 +1164,196 @@ export default function AdsPanel(props: NativePanelProps) {
           </div>
         </aside>
 
-        <main className="flex-1 min-w-0 flex flex-col">
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {!selected ? (
-            <div className="flex-1 grid place-items-center p-6">
-              <div className="text-center">
-                <h2 className="text-sm font-medium text-text">Select an ad account</h2>
-                <p className="text-sm text-text-muted mt-1">Campaigns appear here after you choose an account.</p>
+            <div className="grid min-h-64 flex-1 place-items-center p-6 text-center">
+              <div>
+                <div className="mx-auto grid h-12 w-12 place-items-center rounded border border-border bg-bg-card text-xl text-text-muted">▥</div>
+                <h2 className="mt-4 text-sm font-medium">Select an account</h2>
+                <p className="mt-1 text-sm text-text-muted">Campaigns for the selected provider appear here.</p>
               </div>
             </div>
           ) : (
             <>
-              <header className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <h2 className="text-sm font-medium text-text truncate">{selected.display_name}</h2>
-                  <p className="text-xs text-text-muted truncate">
-                    {selected.platform} · {selected.native_account_id} · {selected.currency || "—"}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => refreshCampaigns(selected)}
-                  disabled={loading}
-                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-50 shrink-0"
-                >
-                  Refresh
-                </button>
-              </header>
-              <div className="flex-1 overflow-auto">
-                {loading && (
-                  <div className="p-4 text-sm text-text-muted">Loading campaigns…</div>
-                )}
-                {!loading && campaigns.length === 0 && (
-                  <div className="py-12 px-6 text-center text-sm text-text-muted">
-                    No campaigns on this account yet.
+              <header className="flex min-h-16 items-center justify-between gap-3 border-b border-border px-4 py-3">
+                <div className="flex min-w-0 items-center gap-3">
+                  <ProviderMark platform={selected.platform} size="sm" />
+                  <div className="min-w-0">
+                    <h2 className="truncate text-sm font-semibold">{selected.display_name}</h2>
+                    <p className="truncate text-xs text-text-muted">{selected.platform === "meta" ? "Meta Ads" : "Google Ads"} · {selected.native_account_id} · {selected.currency || "-"}</p>
                   </div>
-                )}
-                {!loading && campaigns.length > 0 && (
-                  <table className="w-full text-sm">
-                    <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openAccountResources(selected)}
+                    className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text"
+                  >
+                    Resources
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
+                    disabled={loadingCampaigns || loadingPerformance}
+                    aria-label="Refresh account data"
+                    title="Refresh account data"
+                    className="grid h-9 w-9 place-items-center rounded border border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+                  >
+                    ↻
+                  </button>
+                </div>
+              </header>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
+                <div className="inline-flex h-8 rounded border border-border bg-bg-input p-0.5">
+                  {(["overview", "campaigns"] as const).map((view) => (
+                    <button
+                      key={view}
+                      type="button"
+                      onClick={() => setActiveView(view)}
+                      className={`min-w-24 rounded px-3 text-xs font-medium capitalize ${activeView === view ? "bg-bg-card text-text shadow-sm" : "text-text-muted hover:text-text"}`}
+                    >
+                      {view}
+                    </button>
+                  ))}
+                </div>
+                <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+                  <div className="col-span-3 inline-flex h-8 justify-self-end rounded border border-border p-0.5 sm:col-auto sm:justify-self-auto">
+                    {[7, 30, 90].map((days) => (
+                      <button
+                        key={days}
+                        type="button"
+                        onClick={() => {
+                          const range = dateRange(days);
+                          setDateFrom(range.from);
+                          setDateTo(range.to);
+                        }}
+                        className="w-10 rounded text-xs text-text-muted hover:bg-bg-input hover:text-text"
+                      >
+                        {days}d
+                      </button>
+                    ))}
+                  </div>
+                  <input type="date" value={dateFrom} max={dateTo} onChange={(event) => setDateFrom(event.target.value)} aria-label="Report start date" className="h-8 min-w-0 rounded border border-border bg-bg-input px-2 text-xs text-text outline-none focus:border-accent" />
+                  <span className="text-xs text-text-dim">to</span>
+                  <input type="date" value={dateTo} min={dateFrom} max={isoDate(new Date())} onChange={(event) => setDateTo(event.target.value)} aria-label="Report end date" className="h-8 min-w-0 rounded border border-border bg-bg-input px-2 text-xs text-text outline-none focus:border-accent" />
+                  <label className="col-span-3 flex h-8 items-center justify-self-end gap-2 rounded border border-border px-2.5 text-xs text-text-muted sm:col-auto sm:justify-self-auto">
+                    <input type="checkbox" checked={compareEnabled} onChange={(event) => setCompareEnabled(event.target.checked)} className="h-3.5 w-3.5 accent-accent" />
+                    Compare
+                  </label>
+                </div>
+              </div>
+              {performanceError && (
+                <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{performanceError}</div>
+              )}
+              <div className="min-h-0 flex-1 overflow-auto">
+                {activeView === "overview" ? (
+                  loadingPerformance && !performance ? (
+                    <p className="p-4 text-sm text-text-muted">Loading performance...</p>
+                  ) : performance ? (
+                    <div className={loadingPerformance ? "opacity-70" : ""}>
+                      <KpiStrip summary={performance.summary} previous={comparison?.summary} currency={selected.currency} />
+                      <section className="border-b border-border px-4 py-4">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <h3 className="text-xs font-medium uppercase text-text-dim">Daily delivery</h3>
+                            <p className="mt-0.5 text-xs text-text-muted">Spend and clicks in {selected.timezone || "the account timezone"}</p>
+                          </div>
+                          <div className="flex items-center gap-3 text-xs text-text-muted">
+                            <span><span className="mr-1 inline-block h-2 w-2 bg-accent" />Spend</span>
+                            <span><span className="mr-1 inline-block h-2 w-2 bg-blue" />Clicks</span>
+                            {performance.freshness?.fetched_at && <span>Updated {new Date(performance.freshness.fetched_at).toLocaleString()}</span>}
+                          </div>
+                        </div>
+                        <PerformanceChart points={performance.data} currency={selected.currency} />
+                      </section>
+                      <section>
+                        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2">
+                          <h3 className="text-xs font-medium uppercase text-text-dim">Top campaigns</h3>
+                          <button type="button" onClick={() => setActiveView("campaigns")} className="text-xs font-medium text-accent hover:underline">View all</button>
+                        </div>
+                        {rankedCampaigns.length === 0 ? (
+                          <p className="px-4 py-8 text-center text-sm text-text-muted">No campaign delivery in this range.</p>
+                        ) : (
+                          <table className="w-full table-fixed text-sm" style={{ minWidth: "52rem" }}>
+                            <thead className="bg-bg-input text-xs text-text-dim">
+                              <tr>
+                                <th className="w-2/5 px-4 py-2 text-left font-medium">Campaign</th>
+                                <th className="px-3 py-2 text-right font-medium">Spend</th>
+                                <th className="px-3 py-2 text-right font-medium">Clicks</th>
+                                <th className="px-3 py-2 text-right font-medium">CPC</th>
+                                <th className="px-3 py-2 text-right font-medium">Conversions</th>
+                                <th className="px-4 py-2 text-right font-medium">CPA</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border">
+                              {rankedCampaigns.slice(0, 8).map((item) => (
+                                <tr key={item.campaign_id} className="hover:bg-bg-input/40">
+                                  <td className="px-4 py-2.5">
+                                    <button type="button" onClick={() => setSelectedCampaignID(item.campaign_id)} className="block max-w-full truncate text-left font-medium text-text hover:text-accent">{item.campaign_name}</button>
+                                  </td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.spend_micros, selected.currency)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatNumber(item.clicks)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.cpc_micros, selected.currency)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatNumber(item.conversions, 2)}</td>
+                                  <td className="px-4 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.cpa_micros, selected.currency)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </section>
+                    </div>
+                  ) : (
+                    <div className="grid min-h-64 place-items-center p-6 text-center">
+                      <div><h3 className="text-sm font-medium">Performance unavailable</h3><p className="mt-1 text-sm text-text-muted">Refresh the account to load provider analytics.</p></div>
+                    </div>
+                  )
+                ) : loadingCampaigns ? (
+                  <p className="p-4 text-sm text-text-muted">Loading campaigns...</p>
+                ) : campaigns.length === 0 ? (
+                  <div className="grid min-h-64 place-items-center p-6 text-center">
+                    <div><h3 className="text-sm font-medium">No campaigns found</h3><p className="mt-1 text-sm text-text-muted">This account has no campaigns to display.</p></div>
+                  </div>
+                ) : (
+                  <table className="w-full table-fixed text-sm" style={{ minWidth: "76rem" }}>
+                    <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim">
                       <tr>
-                        <th className="text-left px-4 py-2 font-normal">Name</th>
-                        <th className="text-left px-4 py-2 font-normal w-36">Objective</th>
-                        <th className="text-left px-4 py-2 font-normal w-28">Status</th>
-                        <th className="text-left px-4 py-2 font-normal w-32">Daily budget</th>
-                        <th className="text-right px-4 py-2 font-normal w-28">Actions</th>
+                        <th className="w-64 px-4 py-2 text-left font-medium">Campaign</th>
+                        <th className="w-24 px-3 py-2 text-left font-medium">Status</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Spend</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Impressions</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">Clicks</th>
+                        <th className="w-20 px-3 py-2 text-right font-medium">CTR</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">CPC</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Conversions</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">CPA</th>
+                        <th className="w-32 px-3 py-2 text-right font-medium">Daily budget</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">Action</th>
                       </tr>
                     </thead>
-                    <tbody>
-                      {campaigns.map(c => (
-                        <tr key={c.id} className="border-t border-border hover:bg-bg-input/30">
-                          <td className="px-4 py-2">
-                            <div className="text-text font-medium truncate max-w-lg" title={c.name}>{c.name}</div>
-                            <div className="text-xs text-text-dim font-mono truncate max-w-lg">{c.id}</div>
-                          </td>
-                          <td className="px-4 py-2 text-text-muted">{c.objective || "—"}</td>
-                          <td className="px-4 py-2">
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${campaignStatusClass(c.status)}`}>
-                              {c.status || c.effective_status || "—"}
-                            </span>
-                          </td>
-                          <td className="px-4 py-2 text-text-muted">
-                            {c.daily_budget ? `$${(Number(c.daily_budget) / 100).toFixed(2)}` : "—"}
-                          </td>
-                          <td className="px-4 py-2 text-right">
-                            <button
-                              type="button"
-                              onClick={() => handleStatusToggle(c)}
-                              className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-                            >
-                              {c.status === "ACTIVE" ? "Pause" : "Resume"}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                    <tbody className="divide-y divide-border">
+                      {campaigns.map((campaign) => {
+                        const status = displayStatus(campaign);
+                        const metrics = campaignPerformance.get(campaign.id);
+                        return (
+                          <tr key={campaign.id} className="hover:bg-bg-input/40">
+                            <td className="px-4 py-3">
+                              <button type="button" disabled={!metrics} onClick={() => setSelectedCampaignID(campaign.id)} className="block max-w-full truncate text-left font-medium text-text enabled:hover:text-accent disabled:cursor-default" title={campaign.name}>{campaign.name || campaign.id}</button>
+                              <div className="truncate text-xs text-text-dim">{campaign.objective || campaign.id}</div>
+                            </td>
+                            <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(status)}`}>{status}</span></td>
+                            <td className="px-3 py-3 text-right tabular-nums">{metrics ? formatMoneyMicros(metrics.spend_micros, selected.currency) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.impressions) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.clicks) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? `${formatNumber(metrics.ctr, 2)}%` : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatMoneyMicros(metrics.cpc_micros, selected.currency) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.conversions, 2) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatMoneyMicros(metrics.cpa_micros, selected.currency) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{formatBudget(campaign.daily_budget, selected.currency)}</td>
+                            <td className="px-3 py-3 text-right"><button type="button" onClick={() => toggleCampaign(selected, campaign)} className="h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">{status === "ACTIVE" ? "Pause" : "Resume"}</button></td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 )}
@@ -573,6 +1362,314 @@ export default function AdsPanel(props: NativePanelProps) {
           )}
         </main>
       </div>
+
+      {addOpen && (
+        <Modal
+          title="Add ad account"
+          description="Choose a provider to connect an ad account."
+          actions={(
+            <button
+              type="button"
+              onClick={refreshPlatforms}
+              aria-label="Refresh providers"
+              title="Refresh providers"
+              className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text"
+            >
+              ↻
+            </button>
+          )}
+          size="large"
+          onClose={() => setAddOpen(false)}
+          labelledBy="ads-add-title"
+        >
+          <div className="divide-y divide-border">
+            {platforms.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-text-muted">Checking providers...</p>
+            ) : platforms.map((platform) => (
+              <div key={platform.platform} className="flex items-center gap-3 px-4 py-3">
+                <ProviderMark platform={platform.platform} />
+                <div className="min-w-0 flex-1">
+                  <span className="block text-sm font-medium">
+                    {platform.platform === "meta" ? "Meta Ads" : platform.display_name}
+                  </span>
+                  <span className="mt-0.5 block text-xs text-text-muted">
+                    {platform.state === "connected"
+                      ? `${platform.connection_count} active connection${platform.connection_count === 1 ? "" : "s"}`
+                      : platform.state === "ready"
+                        ? "Ready to connect"
+                        : platform.state === "setup_required"
+                          ? `${platform.platform === "meta" ? "Facebook & Instagram" : platform.display_name} integration required`
+                          : platform.unavailable_reason || "Integration unavailable"}
+                  </span>
+                </div>
+                {platform.state === "setup_required" ? (
+                  <a
+                    href={platform.setup_url || "/integrations"}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex h-8 w-28 shrink-0 items-center justify-center whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10"
+                  >
+                    Set up
+                  </a>
+                ) : (
+                  <div className="flex shrink-0 items-center gap-2">
+                    {platform.configured && (
+                      <button
+                        type="button"
+                        disabled={copyingPlatform === platform.platform}
+                        onClick={() => copyAccessLink(platform)}
+                        className="h-8 w-20 whitespace-nowrap rounded border border-border px-2 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text disabled:cursor-wait disabled:opacity-50"
+                      >
+                        {copyingPlatform === platform.platform
+                          ? "Copying..."
+                          : copiedPlatform === platform.platform
+                            ? "Copied"
+                            : "Copy link"}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={!platform.can_add || startingPlatform === platform.platform}
+                      onClick={() => startPlatform(platform)}
+                      className="h-8 w-24 whitespace-nowrap rounded border border-accent px-3 text-xs font-medium text-accent hover:bg-accent/10 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted disabled:opacity-50"
+                    >
+                      {startingPlatform === platform.platform
+                        ? "Starting..."
+                        : platform.state === "connected"
+                          ? "Choose"
+                          : "Connect"}
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {connectionPicker && (
+        <Modal
+          title={connectionPickerMode === "link"
+            ? `${connectionPicker.display_name} access link`
+            : `Choose ${connectionPicker.display_name} connection`}
+          description={connectionPickerMode === "link"
+            ? "Select the connection to use for this access link."
+            : "Select the dashboard integration connection whose ad accounts you want to use."}
+          size="large"
+          onClose={() => setConnectionPicker(null)}
+          labelledBy="ads-connection-picker-title"
+        >
+          <div className="divide-y divide-border">
+            {(connectionPicker.connections || []).map((connection) => (
+              <button
+                key={connection.id}
+                type="button"
+                disabled={
+                  connectionPickerMode === "link"
+                    ? copyingPlatform === connectionPicker.platform
+                    : startingPlatform === connectionPicker.platform
+                }
+                onClick={() => connectionPickerMode === "link"
+                  ? copyAccessLink(connectionPicker, connection.id)
+                  : startPlatform(connectionPicker, connection.id)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-bg-input disabled:cursor-wait disabled:opacity-50"
+              >
+                <ProviderMark platform={connectionPicker.platform} size="sm" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-text">{connection.name || connectionPicker.display_name}</div>
+                  <div className="text-xs text-text-muted">Connection #{connection.id}</div>
+                </div>
+                <span className="text-xs font-medium text-accent">
+                  {connectionPickerMode === "link"
+                    ? copyingPlatform === connectionPicker.platform ? "Copying..." : "Copy link"
+                    : startingPlatform === connectionPicker.platform ? "Loading..." : "Choose"}
+                </span>
+              </button>
+            ))}
+          </div>
+        </Modal>
+      )}
+
+      {setupAccount && !leadFormOpen && (
+        <Modal
+          title="Account resources"
+          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+          actions={(
+            <button
+              type="button"
+              onClick={() => loadAccountContext(setupAccount, true)}
+              disabled={loadingResources}
+              aria-label="Refresh account resources"
+              title="Refresh account resources"
+              className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+            >
+              ↻
+            </button>
+          )}
+          size="large"
+          onClose={closeAccountResources}
+          labelledBy="ads-resources-title"
+        >
+          <div className="max-h-[70vh] overflow-y-auto">
+            {resourceError && (
+              <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">
+                {resourceError}
+              </div>
+            )}
+            {loadingResources && !accountContext ? (
+              <p className="px-4 py-10 text-center text-sm text-text-muted">Discovering account resources...</p>
+            ) : groupedResources.length === 0 ? (
+              <p className="px-4 py-10 text-center text-sm text-text-muted">No provider resources are available for this account.</p>
+            ) : (
+              <div className="divide-y divide-border">
+                {groupedResources.map((group) => (
+                  <section key={group.kind}>
+                    <div className="flex items-center justify-between gap-3 bg-bg-input px-4 py-2">
+                      <h3 className="text-xs font-medium uppercase text-text-dim">
+                        {RESOURCE_KIND_LABELS[group.kind] || group.kind}
+                      </h3>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
+                        {group.kind === "lead_form" && (
+                          <button
+                            type="button"
+                            onClick={openLeadFormCreate}
+                            className="h-7 rounded border border-border px-2.5 text-xs font-medium text-text hover:bg-bg-card"
+                          >
+                            Create
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {group.error ? (
+                      <p className="px-4 py-3 text-xs text-red">{group.error}</p>
+                    ) : group.resources.length === 0 ? (
+                      <p className="px-4 py-3 text-xs text-text-muted">None available from this provider connection.</p>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {group.resources.map((resource) => {
+                          const purpose = resourcePurpose(resource);
+                          const isDefault = purpose ? accountContext?.defaults?.[purpose]?.id === resource.id : false;
+                          const isActive = resource.status === "active";
+                          return (
+                            <div key={resource.id} className="flex items-center gap-3 px-4 py-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium text-text">{resource.name || RESOURCE_TYPE_LABELS[resource.provider_type] || "Unnamed resource"}</div>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
+                                  <span>{RESOURCE_TYPE_LABELS[resource.provider_type] || resource.provider_type}</span>
+                                  {!isActive && <span className="text-yellow">{resource.status}</span>}
+                                </div>
+                              </div>
+                              {purpose && (
+                                <button
+                                  type="button"
+                                  onClick={() => setResourceDefault(resource)}
+                                  disabled={!isActive || isDefault || savingResourceId !== null}
+                                  className={`h-8 w-24 shrink-0 rounded border px-3 text-xs font-medium disabled:cursor-default ${isDefault ? "border-green/40 bg-green/10 text-green" : "border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"}`}
+                                >
+                                  {isDefault ? "Default" : savingResourceId === resource.id ? "Saving..." : "Use"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                ))}
+              </div>
+            )}
+          </div>
+        </Modal>
+      )}
+
+      {setupAccount && leadFormOpen && (
+        <Modal
+          title="Create lead form"
+          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+          size="large"
+          onClose={() => !creatingLeadForm && setLeadFormOpen(false)}
+          labelledBy="ads-lead-form-title"
+        >
+          <form onSubmit={(event) => { event.preventDefault(); createLeadForm(); }}>
+            {resourceError && (
+              <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">{resourceError}</div>
+            )}
+            <div className="grid gap-4 px-4 py-4 md:grid-cols-2">
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+                Form name
+                <input required value={leadFormName} onChange={(event) => setLeadFormName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              {setupAccount.platform === "google" && (
+                <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+                  Business name
+                  <input required value={leadFormBusinessName} onChange={(event) => setLeadFormBusinessName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+                </label>
+              )}
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                Privacy policy URL
+                <input required type="url" value={leadFormPrivacyURL} onChange={(event) => setLeadFormPrivacyURL(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                Follow-up URL
+                <input type="url" value={leadFormFollowUpURL} onChange={(event) => setLeadFormFollowUpURL(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              {setupAccount.platform === "google" && campaigns.length > 0 && selectedId === setupAccount.id && (
+                <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                  Campaign
+                  <select value={leadFormCampaignID} onChange={(event) => setLeadFormCampaignID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">
+                    <option value="">Not attached</option>
+                    {campaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name || campaign.id}</option>)}
+                  </select>
+                </label>
+              )}
+              <fieldset className="grid gap-2 md:col-span-2">
+                <legend className="mb-1 text-xs font-medium text-text-muted">Questions</legend>
+                <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
+                  {LEAD_QUESTION_OPTIONS.map((question) => (
+                    <label key={question.type} className="flex h-9 items-center gap-2 rounded border border-border bg-bg-input px-3 text-sm text-text">
+                      <input type="checkbox" checked={leadFormQuestions.includes(question.type)} onChange={() => toggleLeadQuestion(question.type)} className="h-4 w-4 accent-accent" />
+                      {question.label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              <label className="flex h-9 items-center gap-2 text-sm text-text md:col-span-2">
+                <input type="checkbox" checked={leadFormHigherIntent} onChange={(event) => setLeadFormHigherIntent(event.target.checked)} className="h-4 w-4 accent-accent" />
+                Higher intent
+              </label>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" disabled={creatingLeadForm} onClick={() => setLeadFormOpen(false)} className="h-9 rounded border border-border px-3 text-sm text-text hover:bg-bg-input disabled:opacity-50">Cancel</button>
+              <button type="submit" disabled={creatingLeadForm || !leadFormName.trim() || !leadFormPrivacyURL.trim() || leadFormQuestions.length === 0 || (setupAccount.platform === "google" && !leadFormBusinessName.trim())} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50">
+                {creatingLeadForm ? "Creating..." : "Create form"}
+              </button>
+            </footer>
+          </form>
+        </Modal>
+      )}
+
+      {selectedCampaignPerformance && selected && (
+        <CampaignAnalyticsModal
+          campaign={selectedCampaignPerformance}
+          currency={selected.currency}
+          onClose={() => setSelectedCampaignID(null)}
+        />
+      )}
+
+      {disconnectTarget && (
+        <Modal title="Remove ad account?" description={disconnectTarget.display_name} onClose={() => !disconnecting && setDisconnectTarget(null)} labelledBy="ads-remove-title">
+          <div className="px-4 py-4 text-sm text-text-muted">
+            The account is removed from this project. The shared provider connection remains available to other apps.
+          </div>
+          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3">
+            <button type="button" disabled={disconnecting} onClick={() => setDisconnectTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input disabled:opacity-50">Cancel</button>
+            <button type="button" disabled={disconnecting} onClick={disconnectAccount} className="h-9 rounded bg-red px-3 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50">
+              {disconnecting ? "Removing..." : "Remove"}
+            </button>
+          </footer>
+        </Modal>
+      )}
     </div>
   );
 }

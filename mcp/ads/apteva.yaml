@@ -2,17 +2,34 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.4
+version: 0.1.31
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
   uses direct Graph API tools; Google Ads uses customer account picking,
   GAQL reads, and mutate operations behind the same generic MCP tools.
-  Connect ad accounts at runtime via the Add Account flow; the underlying
-  integrations system handles OAuth and token refresh.
+  The Add Account flow reuses project-scoped Dashboard integration
+  connections and expands Google manager hierarchies into selectable
+  client advertiser accounts.
+  v0.1.26 adds normalized daily campaign spend and performance reports.
+  v0.1.27 adds secure access links for fresh provider authorization and
+  updates Google Ads reporting for the current API pagination contract.
+  v0.1.28 adds one normalized resource registry for provider identities,
+  tracking sources, conversion actions, lead forms, audiences, and creative
+  assets, with automatic discovery and account-level defaults.
+  v0.1.29 adds normalized Meta and Google lead-form lifecycle tools, automatic
+  Page/campaign wiring, reliable Storage URL resolution, and Meta direct-image
+  fallback when image-library upload is unavailable.
+  v0.1.30 archives Meta lead forms through the supported status update rather
+  than an unsupported Graph DELETE request.
+  v0.1.31 structures Meta provider failures, retries transient idempotent
+  updates, and adds resumable leaf-to-root delivery activation with state
+  verification for Meta and Google Ads.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google]
 
 scopes: [project, global]
@@ -23,32 +40,43 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
-    - platform.connections.manage
     - platform.oauth.start
     - platform.apps.call
-  integrations:
-    - role: storage
-      kind: app
-      compatible_app_names: [storage]
-      capabilities: [files.read]
-      required: false
-      label: "Storage (optional)"
-      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to supported platforms. Without storage, use platform_options for native asset payloads."
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      reason: "Resolve stored image and video files for creative uploads."
 
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: performance_collector
+      schedule: "@every 30m"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
     - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (for Meta act_12345; for Google the customer id without hyphens)." }
     - { name: account_list,                description: "List connected ad accounts in this project." }
-    - { name: account_disconnect,          description: "Remove a connected ad account; releases the underlying connection when the last reference goes." }
+    - { name: account_context_get,         description: "Discover normalized identities, tracking sources, conversion actions, lead forms, audiences, and defaults for an ad account." }
+    - { name: resource_refresh,            description: "Refresh normalized provider resources for an ad account." }
+    - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
+    - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
+    - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
+    - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
+    - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
+    - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }
+    - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
+    - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
+    - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
+    - { name: campaign_performance_get,     description: "Get normalized daily campaign spend and performance for a bounded date range." }
+    - { name: performance_get,              description: "Get cached or fresh normalized account, campaign, ad-group, or ad performance with derived advertising KPIs." }
     - { name: campaign_update,              description: "Update campaign fields (name, status, budget, schedule, bid strategy)." }
     - { name: campaign_pause,               description: "Convenience: set campaign status=PAUSED." }
     - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
+    - { name: delivery_activate,             description: "Safely and resumably activate an ad, its ad set/ad group, and its campaign, returning each resulting provider state." }
     - { name: campaign_delete,              description: "Delete a campaign (and its ad sets / ads upstream)." }
     - { name: adset_create,                 description: "Create an ad set under a campaign. Accepts targeting passthrough via platform_options." }
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
@@ -59,6 +87,11 @@ provides:
     - { name: ad_update,                    description: "Update an ad." }
     - { name: ad_delete,                    description: "Delete an ad." }
     - { name: creative_upload,              description: "Upload an image or video to the platform's creative library. Reads bytes from the storage app when storage_id is given, or accepts a public source_url passthrough." }
+    - { name: creative_create,              description: "Create a provider-native creative from a generic link, image, video, or carousel specification." }
+    - { name: creative_get,                 description: "Get one creative from the selected ad account." }
+    - { name: creative_delete,              description: "Delete one creative from the selected ad account when the provider supports deletion." }
+    - { name: creative_asset_status,        description: "Inspect processing/readiness for an uploaded creative asset such as a Meta video." }
+    - { name: creative_asset_delete,        description: "Delete an uploaded creative asset when supported by the provider." }
     - { name: creative_list,                description: "List creatives in the ad account." }
     - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
