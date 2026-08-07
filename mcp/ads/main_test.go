@@ -1529,7 +1529,7 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 	}
 	var tracked int
 	if err := ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123' AND kind='video'`,
+		`SELECT COUNT(*) FROM ad_resources WHERE ad_account_id=? AND native_asset_id='video_123' AND kind='creative_asset' AND provider_type='video'`,
 		acctID,
 	).Scan(&tracked); err != nil || tracked != 1 {
 		t.Fatalf("uploaded video was not tracked: count=%d err=%v", tracked, err)
@@ -1559,7 +1559,7 @@ func TestCreativeUpload_VideoMapsNameToRequiredTitle(t *testing.T) {
 		t.Fatalf("wrong video delete call: %#v", pf.executeCalls[2])
 	}
 	if err := ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM creative_assets WHERE ad_account_id=? AND native_asset_id='video_123'`,
+		`SELECT COUNT(*) FROM ad_resources WHERE ad_account_id=? AND native_asset_id='video_123'`,
 		acctID,
 	).Scan(&tracked); err != nil || tracked != 0 {
 		t.Fatalf("deleted video tracking remains: count=%d err=%v", tracked, err)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.27
+version: 0.1.28
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -14,6 +14,9 @@ description: |
   v0.1.26 adds normalized daily campaign spend and performance reports.
   v0.1.27 adds secure access links for fresh provider authorization and
   updates Google Ads reporting for the current API pagination contract.
+  v0.1.28 adds one normalized resource registry for provider identities,
+  tracking sources, conversion actions, lead forms, audiences, and creative
+  assets, with automatic discovery and account-level defaults.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -48,6 +51,11 @@ provides:
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
     - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (for Meta act_12345; for Google the customer id without hyphens)." }
     - { name: account_list,                description: "List connected ad accounts in this project." }
+    - { name: account_context_get,         description: "Discover normalized identities, tracking sources, conversion actions, lead forms, audiences, and defaults for an ad account." }
+    - { name: resource_refresh,            description: "Refresh normalized provider resources for an ad account." }
+    - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
+    - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
+    - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }

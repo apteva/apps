@@ -60,6 +60,29 @@ interface PlatformInfo {
   unavailable_reason?: string;
 }
 
+interface AdResource {
+  id: number;
+  ad_account_id: number;
+  kind: string;
+  provider_type: string;
+  name: string;
+  status: string;
+  capabilities: string[];
+  metadata: Record<string, unknown>;
+  parent_resource_id?: number | null;
+  managed_by_app: boolean;
+  refreshed_at?: string;
+}
+
+interface AccountContext {
+  ad_account_id: number;
+  platform: string;
+  resource_kinds: string[];
+  resources: AdResource[];
+  defaults: Record<string, AdResource>;
+  refresh_errors: Record<string, string>;
+}
+
 interface PendingPicker {
   pendingId: number;
   platform?: string;
@@ -108,6 +131,33 @@ function formatBudget(value: string | undefined, currency: string): string {
   }
 }
 
+const RESOURCE_KIND_LABELS: Record<string, string> = {
+  identity: "Publishing identities",
+  tracking_source: "Conversion tracking",
+  conversion_action: "Conversion actions",
+  lead_form: "Lead forms",
+  audience: "Audiences",
+};
+
+const RESOURCE_TYPE_LABELS: Record<string, string> = {
+  facebook_page: "Facebook Page",
+  instagram_business: "Instagram account",
+  meta_pixel: "Meta Pixel",
+  meta_lead_form: "Meta lead form",
+  meta_audience: "Meta audience",
+  google_conversion_action: "Google conversion action",
+  google_user_list: "Google audience",
+};
+
+function resourcePurpose(resource: AdResource): string | null {
+  if (resource.provider_type === "facebook_page") return "publishing_identity";
+  if (resource.provider_type === "instagram_business") return "instagram_identity";
+  if (resource.kind === "tracking_source" || resource.kind === "conversion_action") return "conversion_source";
+  if (resource.kind === "lead_form") return "lead_form";
+  if (resource.kind === "audience") return "audience";
+  return null;
+}
+
 function Modal({
   title,
   description,
@@ -141,7 +191,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-2xl" : "max-w-lg"}`}
+        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-3xl" : "max-w-lg"}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -187,9 +237,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [accountFilter, setAccountFilter] = useState("");
   const [disconnectTarget, setDisconnectTarget] = useState<AdAccount | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [setupAccount, setSetupAccount] = useState<AdAccount | null>(null);
+  const [accountContext, setAccountContext] = useState<AccountContext | null>(null);
+  const [loadingResources, setLoadingResources] = useState(false);
+  const [savingResourceId, setSavingResourceId] = useState<number | null>(null);
+  const [resourceError, setResourceError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const campaignRequest = useRef(0);
   const copyFeedbackTimer = useRef<number | null>(null);
+  const resourceRequest = useRef(0);
 
   const selected = useMemo(
     () => accounts.find((account) => account.id === selectedId) || null,
@@ -203,6 +259,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       `${page.name} ${page.id} ${page.currency} ${page.timezone}`.toLowerCase().includes(query),
     );
   }, [accountFilter, pendingPicker]);
+  const groupedResources = useMemo(() => {
+    if (!accountContext) return [];
+    return accountContext.resource_kinds.map((kind) => ({
+      kind,
+      resources: accountContext.resources.filter((resource) => resource.kind === kind),
+      error: accountContext.refresh_errors?.[kind],
+    }));
+  }, [accountContext]);
 
   const appURL = useCallback((path: string) => {
     const url = new URL(`${API}${path}`, window.location.origin);
@@ -290,6 +354,57 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [callTool]);
 
+  const loadAccountContext = useCallback(async (account: AdAccount, refresh = true) => {
+    const request = ++resourceRequest.current;
+    setLoadingResources(true);
+    setResourceError(null);
+    try {
+      const result = await callTool("account_context_get", { ad_account_id: account.id, refresh });
+      if (request === resourceRequest.current) setAccountContext(result as AccountContext);
+    } catch (err) {
+      if (request === resourceRequest.current) setResourceError((err as Error).message);
+    } finally {
+      if (request === resourceRequest.current) setLoadingResources(false);
+    }
+  }, [callTool]);
+
+  const openAccountResources = useCallback((account: AdAccount) => {
+    setSetupAccount(account);
+    setAccountContext(null);
+    loadAccountContext(account, true);
+  }, [loadAccountContext]);
+
+  const closeAccountResources = useCallback(() => {
+    resourceRequest.current++;
+    setSetupAccount(null);
+    setAccountContext(null);
+    setResourceError(null);
+    setLoadingResources(false);
+  }, []);
+
+  const setResourceDefault = async (resource: AdResource) => {
+    if (!setupAccount) return;
+    const purpose = resourcePurpose(resource);
+    if (!purpose) return;
+    setSavingResourceId(resource.id);
+    setResourceError(null);
+    try {
+      const result = await callTool("resource_set_default", {
+        ad_account_id: setupAccount.id,
+        purpose,
+        resource_id: resource.id,
+      });
+      setAccountContext((current) => current ? {
+        ...current,
+        defaults: { ...current.defaults, [purpose]: result.resource },
+      } : current);
+    } catch (err) {
+      setResourceError((err as Error).message);
+    } finally {
+      setSavingResourceId(null);
+    }
+  };
+
   const resumeOAuth = useCallback(async (pendingId: number) => {
     try {
       const result = await apiJSON(`/accounts/${pendingId}/pages`);
@@ -332,6 +447,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     return () => {
       campaignRequest.current++;
+      resourceRequest.current++;
       if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
     };
   }, []);
@@ -661,16 +777,25 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     <p className="truncate text-xs text-text-muted">{selected.platform === "meta" ? "Meta Ads" : "Google Ads"} · {selected.native_account_id} · {selected.currency || "-"}</p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => refreshCampaigns(selected)}
-                  disabled={loadingCampaigns}
-                  aria-label="Refresh campaigns"
-                  title="Refresh campaigns"
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded border border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
-                >
-                  ↻
-                </button>
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openAccountResources(selected)}
+                    className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text"
+                  >
+                    Resources
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => refreshCampaigns(selected)}
+                    disabled={loadingCampaigns}
+                    aria-label="Refresh campaigns"
+                    title="Refresh campaigns"
+                    className="grid h-9 w-9 place-items-center rounded border border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+                  >
+                    ↻
+                  </button>
+                </div>
               </header>
               <div className="min-h-0 flex-1 overflow-auto">
                 {loadingCampaigns ? (
@@ -847,6 +972,88 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                 </span>
               </button>
             ))}
+          </div>
+        </Modal>
+      )}
+
+      {setupAccount && (
+        <Modal
+          title="Account resources"
+          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+          actions={(
+            <button
+              type="button"
+              onClick={() => loadAccountContext(setupAccount, true)}
+              disabled={loadingResources}
+              aria-label="Refresh account resources"
+              title="Refresh account resources"
+              className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+            >
+              ↻
+            </button>
+          )}
+          size="large"
+          onClose={closeAccountResources}
+          labelledBy="ads-resources-title"
+        >
+          <div className="max-h-[70vh] overflow-y-auto">
+            {resourceError && (
+              <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">
+                {resourceError}
+              </div>
+            )}
+            {loadingResources && !accountContext ? (
+              <p className="px-4 py-10 text-center text-sm text-text-muted">Discovering account resources...</p>
+            ) : groupedResources.length === 0 ? (
+              <p className="px-4 py-10 text-center text-sm text-text-muted">No provider resources are available for this account.</p>
+            ) : (
+              <div className="divide-y divide-border">
+                {groupedResources.map((group) => (
+                  <section key={group.kind}>
+                    <div className="flex items-center justify-between gap-3 bg-bg-input px-4 py-2">
+                      <h3 className="text-xs font-medium uppercase text-text-dim">
+                        {RESOURCE_KIND_LABELS[group.kind] || group.kind}
+                      </h3>
+                      <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
+                    </div>
+                    {group.error ? (
+                      <p className="px-4 py-3 text-xs text-red">{group.error}</p>
+                    ) : group.resources.length === 0 ? (
+                      <p className="px-4 py-3 text-xs text-text-muted">None available from this provider connection.</p>
+                    ) : (
+                      <div className="divide-y divide-border">
+                        {group.resources.map((resource) => {
+                          const purpose = resourcePurpose(resource);
+                          const isDefault = purpose ? accountContext?.defaults?.[purpose]?.id === resource.id : false;
+                          const isActive = resource.status === "active";
+                          return (
+                            <div key={resource.id} className="flex items-center gap-3 px-4 py-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="truncate text-sm font-medium text-text">{resource.name || RESOURCE_TYPE_LABELS[resource.provider_type] || "Unnamed resource"}</div>
+                                <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-muted">
+                                  <span>{RESOURCE_TYPE_LABELS[resource.provider_type] || resource.provider_type}</span>
+                                  {!isActive && <span className="text-yellow">{resource.status}</span>}
+                                </div>
+                              </div>
+                              {purpose && (
+                                <button
+                                  type="button"
+                                  onClick={() => setResourceDefault(resource)}
+                                  disabled={!isActive || isDefault || savingResourceId !== null}
+                                  className={`h-8 w-24 shrink-0 rounded border px-3 text-xs font-medium disabled:cursor-default ${isDefault ? "border-green/40 bg-green/10 text-green" : "border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"}`}
+                                >
+                                  {isDefault ? "Default" : savingResourceId === resource.id ? "Saving..." : "Use"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                ))}
+              </div>
+            )}
           </div>
         </Modal>
       )}

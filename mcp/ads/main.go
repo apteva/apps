@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.27
+version: 0.1.28
 scopes: [project, global]
 requires:
   permissions:
@@ -437,6 +437,62 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAccountList,
 		},
 		{
+			Name:        "account_context_get",
+			Description: "Discover normalized resources and configured defaults for one ad account. Refreshes provider data by default. Args: ad_account_id, refresh? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"refresh":       map[string]any{"type": "boolean", "default": true},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolAccountContextGet,
+		},
+		{
+			Name:        "resource_refresh",
+			Description: "Refresh normalized provider resources for an ad account. Args: ad_account_id, kinds? (identity|tracking_source|conversion_action|lead_form|audience).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"kinds": map[string]any{
+					"type": "array",
+					"items": map[string]any{"type": "string", "enum": []string{
+						resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience,
+					}},
+				},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolResourceRefresh,
+		},
+		{
+			Name:        "resource_list",
+			Description: "List normalized resources belonging to an ad account. Args: ad_account_id, kind?, refresh?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"kind": map[string]any{"type": "string", "enum": []string{
+					resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience, resourceCreativeAsset,
+				}},
+				"refresh": map[string]any{"type": "boolean"},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolResourceList,
+		},
+		{
+			Name:        "resource_get",
+			Description: "Get one normalized resource after validating project and ad-account ownership. Args: ad_account_id, resource_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"resource_id":   map[string]any{"type": "integer"},
+			}, []string{"ad_account_id", "resource_id"}),
+			Handler: a.toolResourceGet,
+		},
+		{
+			Name:        "resource_set_default",
+			Description: "Set or clear a normalized resource default for an ad account. Purposes: publishing_identity, instagram_identity, conversion_source, lead_form, audience. Pass resource_id=0 to clear.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"purpose": map[string]any{"type": "string", "enum": []string{
+					"publishing_identity", "instagram_identity", "conversion_source", "lead_form", "audience",
+				}},
+				"resource_id": map[string]any{"type": "integer"},
+			}, []string{"ad_account_id", "purpose", "resource_id"}),
+			Handler: a.toolResourceSetDefault,
+		},
+		{
 			Name:        "account_disconnect",
 			Description: "Remove a connected ad account. The underlying connection is released when the last reference goes away. Args: id.",
 			InputSchema: schemaObject(map[string]any{
@@ -560,10 +616,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status":                map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}, "default": "PAUSED"},
 				"targeting":             map[string]any{"type": "object"},
 				"promoted_object":       map[string]any{"type": "object"},
-				"destination_type":      map[string]any{"type": "string"},
-				"dsa_beneficiary":       map[string]any{"type": "string"},
-				"dsa_payor":             map[string]any{"type": "string"},
-				"platform_options":      map[string]any{"type": "object"},
+				"tracking_source_resource_id": map[string]any{
+					"type":        "integer",
+					"description": "Normalized conversion tracking resource, such as a Meta Pixel.",
+				},
+				"conversion_event": map[string]any{
+					"type":        "string",
+					"description": "Provider-neutral conversion event name used with tracking_source_resource_id.",
+				},
+				"destination_type": map[string]any{"type": "string"},
+				"dsa_beneficiary":  map[string]any{"type": "string"},
+				"dsa_payor":        map[string]any{"type": "string"},
+				"platform_options": map[string]any{"type": "object"},
 			}, []string{"ad_account_id", "campaign_id", "name", "optimization_goal", "targeting"}),
 			Handler: a.toolAdSetCreate,
 		},
@@ -664,9 +728,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"format":        map[string]any{"type": "string", "enum": []string{"link", "image", "video", "carousel"}},
 				"name":          map[string]any{"type": "string"},
 				"identity_id":   map[string]any{"type": "string"},
+				"identity_resource_id": map[string]any{
+					"type":        "integer",
+					"description": "Normalized publishing identity resource. Preferred over a native identity_id.",
+				},
 				"secondary_identity_id": map[string]any{
 					"type":        "string",
 					"description": "Optional secondary publishing identity; Meta maps this to the Instagram user ID.",
+				},
+				"secondary_identity_resource_id": map[string]any{
+					"type":        "integer",
+					"description": "Optional normalized secondary identity resource.",
 				},
 				"headline":        map[string]any{"type": "string"},
 				"primary_text":    map[string]any{"type": "string"},
@@ -1176,7 +1248,21 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	).Scan(&connID); err != nil {
 		return mcpError("account not found"), nil
 	}
-	if _, err := ctx.AppDB().Exec(`DELETE FROM ad_accounts WHERE id=? AND project_id=?`, id, pid); err != nil {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM ad_resource_defaults WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM ad_resources WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM ad_accounts WHERE id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	ctx.EmitWithProject("account.removed", pid, map[string]any{"ad_account_id": id, "connection_id": connID})
@@ -3190,6 +3276,23 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
+	if acct.Platform == "meta" && len(asMap(args["promoted_object"])) == 0 {
+		resourceID := int64(intArg(args, "tracking_source_resource_id", 0))
+		conversionEvent := strings.TrimSpace(stringArgAny(args, "conversion_event"))
+		if resourceID > 0 || conversionEvent != "" {
+			resource, resourceErr := a.resolveResourceChoice(
+				ctx, acct, "conversion_source", resourceTrackingSource, "meta_pixel", resourceID,
+			)
+			if resourceErr != nil {
+				return resourceErr, nil
+			}
+			promotedObject := map[string]any{"pixel_id": resource.NativeID}
+			if conversionEvent != "" {
+				promotedObject["custom_event_type"] = strings.ToUpper(conversionEvent)
+			}
+			args["promoted_object"] = promotedObject
+		}
+	}
 	return platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
 }
 
@@ -3257,6 +3360,45 @@ func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if acct.Platform == "meta" {
+		var pageResource *adResource
+		if strings.TrimSpace(stringArgAny(args, "identity_id")) == "" {
+			resource, resourceErr := a.resolveResourceChoice(
+				ctx, acct, "publishing_identity", resourceIdentity, "facebook_page",
+				int64(intArg(args, "identity_resource_id", 0)),
+			)
+			if resourceErr != nil {
+				return resourceErr, nil
+			}
+			pageResource = resource
+			args["identity_id"] = resource.NativeID
+		} else if resourceID := int64(intArg(args, "identity_resource_id", 0)); resourceID > 0 {
+			resource, resourceErr := a.resolveResourceChoice(
+				ctx, acct, "publishing_identity", resourceIdentity, "facebook_page", resourceID,
+			)
+			if resourceErr != nil {
+				return resourceErr, nil
+			}
+			pageResource = resource
+		}
+
+		if strings.TrimSpace(stringArgAny(args, "secondary_identity_id")) == "" {
+			secondaryID := int64(intArg(args, "secondary_identity_resource_id", 0))
+			if secondaryID > 0 {
+				resource, resourceErr := a.resolveResourceChoice(
+					ctx, acct, "instagram_identity", resourceIdentity, "instagram_business", secondaryID,
+				)
+				if resourceErr != nil {
+					return resourceErr, nil
+				}
+				args["secondary_identity_id"] = resource.NativeID
+			} else if pageResource != nil {
+				if linked, err := a.linkedInstagramIdentity(ctx, acct, pageResource.ID); err == nil && linked != nil {
+					args["secondary_identity_id"] = linked.NativeID
+				}
+			}
+		}
 	}
 	return platformAdapters[acct.Platform].CreativeCreate(a, ctx, acct, def, args)
 }
@@ -3407,11 +3549,13 @@ func recordCreativeAsset(ctx *sdk.AppCtx, args map[string]any, acct *adAccount, 
 		return
 	}
 	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO creative_assets (project_id, ad_account_id, platform, native_asset_id, kind)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(project_id, ad_account_id, platform, native_asset_id)
-		 DO UPDATE SET kind=excluded.kind`,
-		pid, acct.ID, acct.Platform, assetID, kind,
+		`INSERT INTO ad_resources
+		 (project_id, ad_account_id, platform, native_asset_id, provider_type, kind,
+		  display_name, status, capabilities_json, metadata_json, managed_by_app, refreshed_at)
+		 VALUES (?, ?, ?, ?, ?, 'creative_asset', ?, 'active', '["inspect","delete"]', '{}', 1, CURRENT_TIMESTAMP)
+		 ON CONFLICT(project_id, ad_account_id, kind, provider_type, native_asset_id)
+		 DO UPDATE SET display_name=excluded.display_name, status='active', refreshed_at=CURRENT_TIMESTAMP`,
+		pid, acct.ID, acct.Platform, assetID, kind, stringArgAny(args, "name"),
 	); err != nil {
 		ctx.Logger().Warn("record creative asset failed", "asset_id", assetID, "error", err)
 	}
@@ -3424,8 +3568,9 @@ func creativeAssetTracked(ctx *sdk.AppCtx, args map[string]any, acct *adAccount,
 	}
 	var found int
 	return ctx.AppDB().QueryRow(
-		`SELECT 1 FROM creative_assets
-		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?`,
+		`SELECT 1 FROM ad_resources
+		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?
+		   AND kind='creative_asset' AND status='active'`,
 		pid, acct.ID, acct.Platform, assetID,
 	).Scan(&found) == nil
 }
@@ -3436,8 +3581,9 @@ func deleteCreativeAssetRecord(ctx *sdk.AppCtx, args map[string]any, acct *adAcc
 		return
 	}
 	if _, err := ctx.AppDB().Exec(
-		`DELETE FROM creative_assets
-		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?`,
+		`DELETE FROM ad_resources
+		 WHERE project_id=? AND ad_account_id=? AND platform=? AND native_asset_id=?
+		   AND kind='creative_asset'`,
 		pid, acct.ID, acct.Platform, assetID,
 	); err != nil {
 		ctx.Logger().Warn("delete creative asset record failed", "asset_id", assetID, "error", err)
