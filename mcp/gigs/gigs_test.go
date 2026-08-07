@@ -84,7 +84,7 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 
 func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.1.20" {
+	if manifest.Version != "0.1.21" {
 		t.Fatalf("version=%q", manifest.Version)
 	}
 	var public []sdk.RouteSpec
@@ -103,7 +103,7 @@ func TestWorkerURLUsesExactInstallAndWorkerPagePreservesIt(t *testing.T) {
 		installID: 42,
 		publicURL: "https://agents.example.test/",
 	}))
-	got, err := buildWorkerURL(ctx, "worker-token")
+	got, err := buildWorkerURL(ctx, "worker-token", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestWorkerURLUsesExactInstallAndWorkerPagePreservesIt(t *testing.T) {
 		installID: 84,
 		publicURL: "https://agents.example.test",
 	}))
-	otherURL, err := buildWorkerURL(other, "worker-token")
+	otherURL, err := buildWorkerURL(other, "worker-token", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestWorkerURLUsesExactInstallAndWorkerPagePreservesIt(t *testing.T) {
 
 func TestWorkerURLFailsClosedWithoutInstallIdentity(t *testing.T) {
 	ctx := testCtx(t)
-	if got, err := buildWorkerURL(ctx, "worker-token"); err == nil || got != "" {
+	if got, err := buildWorkerURL(ctx, "worker-token", ""); err == nil || got != "" {
 		t.Fatalf("worker URL=%q err=%v", got, err)
 	}
 }
@@ -161,7 +161,7 @@ func TestAssignGigDoesNotCrossProjectBoundary(t *testing.T) {
 	ctx := testCtx(t)
 	workerID := seedWorker(t, ctx, "project-a", 10)
 	gigID := seedGig(t, ctx, "project-b", "open", `{"type":"object","properties":{}}`)
-	if _, err := assignGig(ctx, "project-a", gigID, workerID, "direct", false); err == nil || !strings.Contains(err.Error(), "gig not found") {
+	if _, err := assignGig(ctx, "project-a", gigID, workerID, "direct", false, 0); err == nil || !strings.Contains(err.Error(), "gig not found") {
 		t.Fatalf("expected project isolation error, got %v", err)
 	}
 }

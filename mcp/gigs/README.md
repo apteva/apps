@@ -1,4 +1,4 @@
-# Gigs (v0.1.20)
+# Gigs (v0.1.21)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -31,13 +31,22 @@ notes/files for that step; otherwise the worker page only shows the instruction.
   logging go through `crm.contacts_send_message` / `contacts_log_activity`.
 - `storage` (required) — audio/video instruction media and worker submissions live
   under `/.gigs/` (configurable).
+- `domains` (optional) — publishes branded worker-link hostnames through
+  Domains-managed DNS and server-native ingress. No CDN app is required.
+
+## Public worker links
+
+The Public links panel can attach multiple hostnames from the Domains inventory
+and select one default. New assignments snapshot that hostname, so links already
+sent to workers do not change when the default changes. Existing gig creation and
+assignment tools may pass `public_domain_id` to select a non-default hostname.
 
 ## Worker flow
 
 1. Agent: `gigs_create_from_template(slug, vars, worker_id?)`.
 2. Sidecar resolves the worker → contact, renders the composition with
    `vars` interpolated, copies it into the gig snapshot, mints a
-   `magic_token`, and notifies via CRM.
+   `magic_token`, and optionally notifies via CRM.
 3. Worker opens `/worker/<token>` → reads instructions in order, ticks
    the checklist, fills the form, uploads attachments → submit.
 4. Sidecar validates against `derived_result_schema_json`, writes a

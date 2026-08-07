@@ -1664,11 +1664,11 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	if !ok {
 		// Schema needs structured fields we couldn't extract — nudge
 		// the worker to open the link.
-		var token string
+		var token, publicBaseURL string
 		_ = ctx.AppDB().QueryRow(
-			`SELECT magic_token FROM gig_assignments WHERE id=?`, assignID,
-		).Scan(&token)
-		workerURL, err := buildWorkerURL(ctx, token)
+			`SELECT magic_token, COALESCE(public_base_url,'') FROM gig_assignments WHERE id=?`, assignID,
+		).Scan(&token, &publicBaseURL)
+		workerURL, err := buildWorkerURL(ctx, token, publicBaseURL)
 		if err != nil {
 			return err
 		}

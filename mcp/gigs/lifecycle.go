@@ -126,11 +126,11 @@ func remindOfferedWorkers(ctx context.Context, app *sdk.AppCtx) error {
 		if err != nil || wk == nil {
 			continue
 		}
-		var token string
-		if err := app.AppDB().QueryRowContext(ctx, `SELECT magic_token FROM gig_assignments WHERE id=?`, item.assignmentID).Scan(&token); err != nil {
+		var token, publicBaseURL string
+		if err := app.AppDB().QueryRowContext(ctx, `SELECT magic_token, COALESCE(public_base_url,'') FROM gig_assignments WHERE id=?`, item.assignmentID).Scan(&token, &publicBaseURL); err != nil {
 			continue
 		}
-		workerURL, err := buildWorkerURL(app, token)
+		workerURL, err := buildWorkerURL(app, token, publicBaseURL)
 		if err != nil {
 			app.Logger().Warn("gig reminder URL failed", "gig_id", item.gigID, "err", err.Error())
 			continue

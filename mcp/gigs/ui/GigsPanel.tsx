@@ -170,6 +170,30 @@ interface StorageFolder {
   file_count?: number;
   size_bytes?: number;
 }
+interface PublicDomain {
+  id: number;
+  hostname: string;
+  apex_domain: string;
+  dns_name: string;
+  dns_type: string;
+  dns_value: string;
+  dns_managed: boolean;
+  is_default: boolean;
+  status: string;
+  status_detail?: string;
+}
+interface AvailableDomain {
+  id: number;
+  name: string;
+  dns_provider_slug?: string;
+}
+interface PublicDomainsResponse {
+  public_domains: PublicDomain[];
+  available_domains: AvailableDomain[];
+  suggested_dns_target?: string;
+  domains_bound: boolean;
+  domains_error?: string;
+}
 
 // ─── api ──────────────────────────────────────────────────────────
 
@@ -425,7 +449,7 @@ function contactLine(c: CrmContact): string {
 
 // ─── shell ───────────────────────────────────────────────────────
 
-type Tab = "queue" | "templates" | "instructions" | "workers";
+type Tab = "queue" | "templates" | "instructions" | "workers" | "public-links";
 
 export default function GigsPanel(props: NativePanelProps) {
   const { projectId } = props;
@@ -433,7 +457,7 @@ export default function GigsPanel(props: NativePanelProps) {
   return (
     <div className="flex flex-col h-full bg-bg text-text">
       <nav className="flex gap-1 border-b border-border px-3 pt-3 overflow-x-auto shrink-0">
-        {(["queue","templates","instructions","workers"] as Tab[]).map((t) => (
+        {(["queue","templates","instructions","workers","public-links"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -444,7 +468,7 @@ export default function GigsPanel(props: NativePanelProps) {
                 : "border-transparent text-text-muted hover:text-text hover:bg-bg-subtle")
             }
           >
-            {t}
+            {t === "public-links" ? "Public links" : t}
           </button>
         ))}
       </nav>
@@ -453,6 +477,7 @@ export default function GigsPanel(props: NativePanelProps) {
         {tab === "templates"    && <TemplatesTab projectId={projectId} />}
         {tab === "instructions" && <InstructionsTab projectId={projectId} />}
         {tab === "workers"      && <WorkersTab projectId={projectId} />}
+        {tab === "public-links" && <PublicLinksTab projectId={projectId} />}
       </div>
     </div>
   );
@@ -629,8 +654,13 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
               projectId={projectId}
               busy={busy}
               onCancel={() => setAssigning(false)}
-              onAssign={(workerId, mode, notifyWorker) =>
-                doAction("assign", { worker_id: workerId, mode, notify_worker: notifyWorker }).then(() => setAssigning(false))
+              onAssign={(workerId, mode, notifyWorker, publicDomainId) =>
+                doAction("assign", {
+                  worker_id: workerId,
+                  mode,
+                  notify_worker: notifyWorker,
+                  public_domain_id: publicDomainId || undefined,
+                }).then(() => setAssigning(false))
               }
             />
           ) : (
@@ -917,6 +947,7 @@ function NewGigForm({
   const [varsText, setVarsText] = useState("{}");
   const [workerId, setWorkerId] = useState("");
   const [notifyWorker, setNotifyWorker] = useState(false);
+  const [publicDomainId, setPublicDomainId] = useState("");
   const [deadlineLocal, setDeadlineLocal] = useState("");
   const [priority, setPriority] = useState("");
   const [selectedInstructionIds, setSelectedInstructionIds] = useState<number[]>([]);
@@ -952,6 +983,7 @@ function NewGigForm({
         priority: priority || undefined,
         worker_id: workerId ? Number(workerId) : undefined,
         notify_worker: workerId ? notifyWorker : undefined,
+        public_domain_id: workerId && publicDomainId ? Number(publicDomainId) : undefined,
       };
       if (mode === "template") {
         if (!templateId) throw new Error("Select a published template");
@@ -1030,15 +1062,18 @@ function NewGigForm({
         </Field>
       </div>
       {workerId && (
-        <label className="inline-flex items-center gap-2 text-sm text-text-muted">
-          <input
-            type="checkbox"
-            checked={notifyWorker}
-            onChange={(e) => setNotifyWorker(e.target.checked)}
-            className="h-4 w-4 rounded border-border"
-          />
-          Notify selected worker now
-        </label>
+        <div className="grid gap-3 md:grid-cols-2">
+          <PublicDomainSelect projectId={projectId} value={publicDomainId} onChange={setPublicDomainId} />
+          <label className="inline-flex items-center gap-2 text-sm text-text-muted">
+            <input
+              type="checkbox"
+              checked={notifyWorker}
+              onChange={(e) => setNotifyWorker(e.target.checked)}
+              className="h-4 w-4 rounded border-border"
+            />
+            Notify selected worker now
+          </label>
+        </div>
       )}
 
       <Field
@@ -1058,15 +1093,16 @@ function NewGigForm({
 
 function AssignGigForm({
   projectId, busy, onAssign, onCancel,
-}: { projectId: string; busy: boolean; onAssign: (workerId: number, mode: string, notifyWorker: boolean) => Promise<void>; onCancel: () => void }) {
+}: { projectId: string; busy: boolean; onAssign: (workerId: number, mode: string, notifyWorker: boolean, publicDomainId: number) => Promise<void>; onCancel: () => void }) {
   const [workerId, setWorkerId] = useState("");
   const [mode, setMode] = useState("direct");
   const [notifyWorker, setNotifyWorker] = useState(false);
+  const [publicDomainId, setPublicDomainId] = useState("");
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (workerId) onAssign(Number(workerId), mode, notifyWorker);
+        if (workerId) onAssign(Number(workerId), mode, notifyWorker, Number(publicDomainId) || 0);
       }}
       className="p-3 border border-border rounded bg-bg-subtle space-y-3"
     >
@@ -1076,6 +1112,7 @@ function AssignGigForm({
         <option value="broadcast">Broadcast</option>
         <option value="first-come">First come</option>
       </Field>
+      <PublicDomainSelect projectId={projectId} value={publicDomainId} onChange={setPublicDomainId} />
       <label className="inline-flex items-center gap-2 text-sm text-text-muted">
         <input
           type="checkbox"
@@ -1109,6 +1146,27 @@ function WorkerSelect({
       {workers.map((w) => (
         <option key={w.id} value={w.id}>
           {w.contact ? contactName(w.contact) : `Worker #${w.id}`}{w.open_assignments != null ? ` (${w.open_assignments} open)` : ""}
+        </option>
+      ))}
+    </Field>
+  );
+}
+
+function PublicDomainSelect({
+  projectId, value, onChange,
+}: { projectId: string; value: string; onChange: (value: string) => void }) {
+  const [domains, setDomains] = useState<PublicDomain[]>([]);
+  useEffect(() => {
+    api<PublicDomainsResponse>("/public-domains", projectId)
+      .then((data) => setDomains((data.public_domains || []).filter((item) => item.status === "active")))
+      .catch(() => setDomains([]));
+  }, [projectId]);
+  return (
+    <Field as="select" value={value} onChange={(event) => onChange(event.target.value)}>
+      <option value="">Default public link</option>
+      {domains.map((item) => (
+        <option key={item.id} value={item.id}>
+          {item.hostname}{item.is_default ? " (default)" : ""}
         </option>
       ))}
     </Field>
@@ -1901,6 +1959,215 @@ function formatBytes(n: number): string {
 }
 
 const ALL_KINDS = ["text", "audio", "video"];
+
+// ─── Public links ──────────────────────────────────────────────
+
+function PublicLinksTab({ projectId }: { projectId: string }) {
+  const [data, setData] = useState<PublicDomainsResponse | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const reload = useCallback(async () => {
+    try {
+      const next = await api<PublicDomainsResponse>("/public-domains", projectId);
+      setData(next);
+      setErr(null);
+    } catch (error) {
+      setErr((error as Error).message);
+    }
+  }, [projectId]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  const makeDefault = async (id: number) => {
+    setBusyId(id);
+    try {
+      await api(`/public-domains/${id}/default`, projectId, { method: "POST", body: "{}" });
+      await reload();
+    } catch (error) {
+      setErr((error as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const detach = async (item: PublicDomain) => {
+    const detail = item.dns_managed
+      ? " Its Gigs-owned DNS record will also be removed."
+      : " Its existing or manually managed DNS record will be left unchanged.";
+    if (!window.confirm(`Detach ${item.hostname}?${detail}`)) return;
+    setBusyId(item.id);
+    try {
+      await api(`/public-domains/${item.id}?remove_dns=true`, projectId, { method: "DELETE" });
+      await reload();
+    } catch (error) {
+      setErr((error as Error).message);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="p-5 space-y-4 max-w-5xl">
+      <SectionHeading
+        title="Public worker links"
+        action={(
+          <Button
+            type="button"
+            tone="primary"
+            size="md"
+            onClick={() => setAdding(true)}
+            disabled={!data?.domains_bound || adding}
+          >
+            <Icon name="plus" /> Add hostname
+          </Button>
+        )}
+      />
+      <p className="text-sm text-text-muted">
+        New assignments use the default hostname. Existing assignment links keep their original hostname.
+      </p>
+
+      {err && <div role="alert" className="rounded border border-red/30 bg-red/10 p-3 text-sm text-red">{err}</div>}
+      {data?.domains_error && <div className="rounded border border-yellow/30 bg-yellow/10 p-3 text-sm text-yellow">{data.domains_error}</div>}
+      {data && !data.domains_bound && (
+        <div className="rounded border border-border bg-bg-subtle p-4 text-sm text-text-muted">
+          Bind the Domains app to Gigs to publish a branded worker-link hostname.
+        </div>
+      )}
+
+      {adding && data && (
+        <AttachPublicDomainForm
+          projectId={projectId}
+          domains={data.available_domains || []}
+          suggestedTarget={data.suggested_dns_target || ""}
+          onDone={() => { setAdding(false); reload(); }}
+          onCancel={() => setAdding(false)}
+        />
+      )}
+
+      <Panel className="divide-y divide-border overflow-hidden">
+        {data && data.public_domains.length === 0 && (
+          <div className="p-5 text-sm text-text-muted">No custom worker-link hostnames.</div>
+        )}
+        {(data?.public_domains || []).map((item) => (
+          <div key={item.id} className="flex flex-wrap items-center justify-between gap-4 p-4">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium break-all">{item.hostname}</span>
+                {item.is_default && <Pill tone="success">default</Pill>}
+                <Pill tone={item.status === "active" ? "success" : "danger"}>{item.status}</Pill>
+              </div>
+              <div className="mt-1 text-xs text-text-muted">
+                {item.dns_type} {item.dns_name}.{item.apex_domain} → {item.dns_value}
+                {item.dns_managed ? " · managed by Gigs" : " · existing/manual DNS"}
+              </div>
+              {item.status_detail && <div className="mt-1 text-xs text-red">{item.status_detail}</div>}
+            </div>
+            <div className="flex items-center gap-2">
+              {!item.is_default && item.status === "active" && (
+                <Button disabled={busyId !== null} onClick={() => makeDefault(item.id)}>
+                  Make default
+                </Button>
+              )}
+              <Button tone="danger" disabled={busyId !== null} onClick={() => detach(item)}>
+                Detach
+              </Button>
+            </div>
+          </div>
+        ))}
+      </Panel>
+    </div>
+  );
+}
+
+function AttachPublicDomainForm({
+  projectId, domains, suggestedTarget, onDone, onCancel,
+}: {
+  projectId: string;
+  domains: AvailableDomain[];
+  suggestedTarget: string;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const [apex, setApex] = useState(domains[0]?.name || "");
+  const [subdomain, setSubdomain] = useState("gigs");
+  const [dnsTarget, setDNSTarget] = useState(suggestedTarget);
+  const [autoDNS, setAutoDNS] = useState(true);
+  const [makeDefault, setMakeDefault] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const hostname = [subdomain.trim().replace(/^\.|\.$/g, ""), apex].filter(Boolean).join(".");
+
+  return (
+    <Panel className="p-4">
+      <form
+        className="space-y-4"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          setBusy(true);
+          setErr(null);
+          try {
+            await api("/public-domains", projectId, {
+              method: "POST",
+              body: JSON.stringify({
+                apex_domain: apex,
+                subdomain,
+                dns_target: dnsTarget,
+                auto_dns: autoDNS,
+                make_default: makeDefault,
+              }),
+            });
+            onDone();
+          } catch (error) {
+            setErr((error as Error).message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      >
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <label className="block">
+            <span className="mb-1 block text-xs text-text-muted">Subdomain</span>
+            <Field value={subdomain} onChange={(event) => setSubdomain(event.target.value)} placeholder="gigs" />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs text-text-muted">Domain</span>
+            <Field as="select" value={apex} onChange={(event) => setApex(event.target.value)} required>
+              {domains.length === 0 && <option value="">No Domains inventory</option>}
+              {domains.map((domain) => <option key={domain.id || domain.name} value={domain.name}>{domain.name}</option>)}
+            </Field>
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-xs text-text-muted">DNS target</span>
+            <Field value={dnsTarget} onChange={(event) => setDNSTarget(event.target.value)} required className="font-mono" />
+          </label>
+        </div>
+
+        <div className="text-sm text-text-muted">
+          Worker links will use <span className="font-mono text-text">https://{hostname || "hostname"}/worker/…</span>
+        </div>
+        <div className="flex flex-wrap gap-4 text-sm text-text-muted">
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={autoDNS} onChange={(event) => setAutoDNS(event.target.checked)} />
+            Create DNS record through Domains
+          </label>
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={makeDefault} onChange={(event) => setMakeDefault(event.target.checked)} />
+            Use for new assignments
+          </label>
+        </div>
+        {err && <div role="alert" className="text-sm text-red">{err}</div>}
+        <div className="flex gap-2">
+          <Button disabled={busy || !apex || !dnsTarget} tone="primary" size="md">
+            {busy ? "Publishing…" : "Publish hostname"}
+          </Button>
+          <Button type="button" onClick={onCancel} disabled={busy} tone="ghost" size="md">Cancel</Button>
+        </div>
+      </form>
+    </Panel>
+  );
+}
 
 // ─── Workers ────────────────────────────────────────────────────
 
