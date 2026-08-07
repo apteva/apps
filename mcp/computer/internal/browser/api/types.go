@@ -309,6 +309,23 @@ type OpenOptions struct {
 	// proxy exit (e.g. "US"). Honored by browser-engine and
 	// browserbase; ignored by steel.
 	ProxyCountry string
+
+	// ExternalProxy is a short-lived, server-resolved upstream proxy.
+	// Credentials must never be logged, persisted, or returned to tool
+	// callers. When set it takes precedence over managed Proxy settings.
+	// Browserbase, Steel, and local Chrome honor it; Browser Engine and
+	// service backends reject it until their APIs gain an upstream hook.
+	ExternalProxy *ExternalProxy
+}
+
+// ExternalProxy contains the minimum provider-neutral connection material
+// needed by a browser backend. Server must be scheme://host:port and must not
+// contain credentials; Username and Password are passed separately so errors
+// and safe session metadata never need to render a credential-bearing URL.
+type ExternalProxy struct {
+	Server   string
+	Username string
+	Password string
 }
 
 // SessionOpener is implemented by Computers that own session lifecycle.

@@ -664,6 +664,15 @@ func (c *Computer) OpenSession(opts computer.OpenOptions) error {
 	if err := c.relaunchIfContextChanged(opts.ContextID); err != nil {
 		return err
 	}
+	if opts.ExternalProxy != nil {
+		proxyURL, err := authenticatedProxyURL(opts.ExternalProxy)
+		if err != nil {
+			return err
+		}
+		c.opts.ProxyURL = proxyURL
+		enabled := true
+		opts.Proxy = &enabled
+	}
 	if err := c.relaunchIfProxyChanged(opts.Proxy); err != nil {
 		return err
 	}
@@ -672,6 +681,20 @@ func (c *Computer) OpenSession(opts computer.OpenOptions) error {
 		return err
 	}
 	return nil
+}
+
+func authenticatedProxyURL(proxy *computer.ExternalProxy) (string, error) {
+	if proxy == nil || strings.TrimSpace(proxy.Server) == "" {
+		return "", fmt.Errorf("local chrome: external proxy server is required")
+	}
+	u, err := url.Parse(strings.TrimSpace(proxy.Server))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("local chrome: invalid external proxy server")
+	}
+	if proxy.Username != "" {
+		u.User = url.UserPassword(proxy.Username, proxy.Password)
+	}
+	return u.String(), nil
 }
 
 func (c *Computer) Execute(action computer.Action) ([]byte, error) {

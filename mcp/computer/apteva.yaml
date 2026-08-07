@@ -21,6 +21,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: browserbase
       kind: integration
@@ -34,6 +35,11 @@ requires:
       kind: integration
       required: false
       compatible_slugs: [browser-engine]
+    - role: proxy-provider
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [dataimpulse]
 
 provides:
   http_routes:
@@ -45,7 +51,8 @@ provides:
         Open a fresh app-owned browser session, inspect it, close it, or switch
         its tabs. Args: action, session_id?, tab_id?, backend?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy?, proxy_country?, viewport?, presentation_mode?. Use
+        proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?,
+        proxy_sticky?, viewport?, presentation_mode?. Use
         presentation_mode=demo for a visible cursor, click feedback, human-paced
         typing, non-interactive cues for structured control changes, and longer
         holds in user-facing walkthroughs; fast is the default and preserves
@@ -74,6 +81,10 @@ provides:
         and lets context state flush cleanly. Open, status, and close results
         include view, a copyable browser-view component reference containing
         only session_id.
+        Proxy routing is provider-neutral: use proxy_mode=managed for the
+        selected browser backend's proxy, proxy_mode=profile with a profile
+        returned by computer_proxy_profile_list for an external provider, or
+        proxy_mode=direct to explicitly disable proxies.
     - name: computer_use
       description: |
         Drive an app-owned browser session. Default workflow: call
@@ -147,6 +158,11 @@ provides:
       description: |
         Delete or unlink an app-managed browser context. Args: id,
         delete_provider?.
+    - name: computer_proxy_profile_list
+      description: |
+        List enabled proxy profiles available for agent-selected browser
+        sessions. Returns only safe routing metadata and never proxy URLs or
+        credentials.
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open). Browserbase
@@ -400,6 +416,9 @@ provides:
       payload:
         default_backend: string
         lock_backend: boolean
+        default_proxy_mode: string
+        default_proxy_profile_id: string
+        lock_proxy_policy: boolean
 
   skills:
     - name: how-to-use-computer

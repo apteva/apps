@@ -162,6 +162,9 @@ type sessionResponse struct {
 }
 
 func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
+	if o.ExternalProxy != nil {
+		return "", fmt.Errorf("browser-engine does not support external proxy profiles")
+	}
 	// Defaults match what frontends/browser/browser-app sends on every
 	// session create — the API rejects requests missing initial_url /
 	// timeout / metadata even though they're nominally optional.

@@ -1850,6 +1850,42 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionPassesResolvedExternalProxyAndReturnsSafeState(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1200, Height: 700}}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	platform := &proxyPlatformStub{connectionID: 77}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	profile, err := dbCreateProxyProfile(appDB(ctx), ProxyProfile{
+		Name: "US browser", ProviderSlug: "dataimpulse", ConnectionID: 77,
+		ExternalRef: "321", Protocol: "http", DefaultCountry: "US", StickyScope: "session", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "local", "proxy_mode": "profile", "proxy_profile": profile.ID,
+	})
+	if err != nil {
+		t.Fatalf("open with external proxy: %v", err)
+	}
+	if fake.openExternalProxy == nil || fake.openExternalProxy.Server != "http://gw.dataimpulse.com:823" {
+		t.Fatalf("external proxy = %#v", fake.openExternalProxy)
+	}
+	encoded, _ := json.Marshal(out)
+	if strings.Contains(string(encoded), "super-secret") || strings.Contains(string(encoded), "base-user") || strings.Contains(string(encoded), "gw.dataimpulse.com") {
+		t.Fatalf("session output leaked proxy secret or endpoint: %s", encoded)
+	}
+	proxyState, ok := out.(map[string]any)["proxy"].(SessionProxyState)
+	if !ok || proxyState.ProfileID != profile.ID || proxyState.Country != "US" {
+		t.Fatalf("session proxy state = %#v", out.(map[string]any)["proxy"])
+	}
+}
+
 func TestHTTPHandlersEmitIntoRequestProject(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -2528,36 +2564,37 @@ func TestAppBusEventForProviderExpiredSession(t *testing.T) {
 // DOMExtractor
 // for handler tests. Mutation is unguarded — tests are single-goroutine.
 type fakeComp struct {
-	display          backends.DisplaySize
-	png              []byte
-	url              string
-	executeErr       error
-	screenshotErr    error
-	executeActionErr error
-	executeHook      func(backends.Action) error
-	openSessionURL   string
-	openSessionID    string
-	openContextID    string
-	openPersist      bool
-	openTimeout      int
-	openProxy        *bool
-	openErr          error
-	lastAction       backends.Action
-	screenshotCalls  int
-	annotateCalls    []bool
-	somTargets       []backends.SetOfMarkTarget
-	closeCalls       int
-	tabs             []backends.TabInfo
-	activeTabID      string
-	switchCalls      []string
-	closeTabCalls    []string
-	addTabOnClick    *backends.TabInfo
-	actionOnlyCalls  []backends.Action
-	lastRecovery     *backends.ScreenshotRecoveryInfo
-	extractResult    backends.ExtractResult
-	extractErr       error
-	extractOptions   backends.ExtractOptions
-	mu               sync.Mutex // for the unlikely concurrent test
+	display           backends.DisplaySize
+	png               []byte
+	url               string
+	executeErr        error
+	screenshotErr     error
+	executeActionErr  error
+	executeHook       func(backends.Action) error
+	openSessionURL    string
+	openSessionID     string
+	openContextID     string
+	openPersist       bool
+	openTimeout       int
+	openProxy         *bool
+	openExternalProxy *backends.ExternalProxy
+	openErr           error
+	lastAction        backends.Action
+	screenshotCalls   int
+	annotateCalls     []bool
+	somTargets        []backends.SetOfMarkTarget
+	closeCalls        int
+	tabs              []backends.TabInfo
+	activeTabID       string
+	switchCalls       []string
+	closeTabCalls     []string
+	addTabOnClick     *backends.TabInfo
+	actionOnlyCalls   []backends.Action
+	lastRecovery      *backends.ScreenshotRecoveryInfo
+	extractResult     backends.ExtractResult
+	extractErr        error
+	extractOptions    backends.ExtractOptions
+	mu                sync.Mutex // for the unlikely concurrent test
 }
 
 func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
@@ -2707,6 +2744,7 @@ func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openPersist = opts.Persist
 	f.openTimeout = opts.Timeout
 	f.openProxy = opts.Proxy
+	f.openExternalProxy = opts.ExternalProxy
 	return f.openErr
 }
 

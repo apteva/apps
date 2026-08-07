@@ -173,6 +173,23 @@ type sessionCreateResponse struct {
 }
 
 func resolveProxies(defaults any, o computer.OpenOptions) (any, error) {
+	if o.ExternalProxy != nil {
+		server := strings.TrimSpace(o.ExternalProxy.Server)
+		if server == "" {
+			return nil, fmt.Errorf("external proxy server is required")
+		}
+		if !strings.HasPrefix(strings.ToLower(server), "http://") && !strings.HasPrefix(strings.ToLower(server), "https://") {
+			return nil, fmt.Errorf("Browserbase external proxies require an HTTP or HTTPS server")
+		}
+		proxy := map[string]any{"type": "external", "server": server}
+		if o.ExternalProxy.Username != "" {
+			proxy["username"] = o.ExternalProxy.Username
+		}
+		if o.ExternalProxy.Password != "" {
+			proxy["password"] = o.ExternalProxy.Password
+		}
+		return []map[string]any{proxy}, nil
+	}
 	country := strings.ToUpper(strings.TrimSpace(o.ProxyCountry))
 	if country != "" {
 		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {

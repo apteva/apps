@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -149,8 +150,17 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	// take a country (custom routing requires the ProxyURL escape
 	// hatch in Options).
 	useProxy := c.opts.UseProxy
+	proxyURL := c.opts.ProxyURL
 	if o.Proxy != nil {
 		useProxy = *o.Proxy
+	}
+	if o.ExternalProxy != nil {
+		resolved, err := authenticatedProxyURL(o.ExternalProxy)
+		if err != nil {
+			return "", err
+		}
+		proxyURL = resolved
+		useProxy = false
 	}
 	req := sessionCreateRequest{
 		Dimensions: map[string]int{
@@ -158,7 +168,7 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 			"height": c.display.Height,
 		},
 		BlockAds:       c.opts.BlockAds,
-		ProxyURL:       c.opts.ProxyURL,
+		ProxyURL:       proxyURL,
 		UseProxy:       useProxy,
 		Region:         c.opts.Region,
 		Timeout:        timeout,
@@ -218,6 +228,20 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 		sep = "&"
 	}
 	return result.WebsocketURL + sep + "apiKey=" + c.apiKey, nil
+}
+
+func authenticatedProxyURL(proxy *computer.ExternalProxy) (string, error) {
+	if proxy == nil || strings.TrimSpace(proxy.Server) == "" {
+		return "", fmt.Errorf("steel: external proxy server is required")
+	}
+	u, err := url.Parse(strings.TrimSpace(proxy.Server))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("steel: invalid external proxy server")
+	}
+	if proxy.Username != "" {
+		u.User = url.UserPassword(proxy.Username, proxy.Password)
+	}
+	return u.String(), nil
 }
 
 // requestRelease ends the session via POST /v1/sessions/{id}/release.

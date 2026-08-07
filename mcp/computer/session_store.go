@@ -26,6 +26,12 @@ type ComputerSession struct {
 	UpdatedAt           string  `json:"updated_at"`
 	FinalScreenshot     []byte  `json:"-"`
 	FinalScreenshotMIME string  `json:"final_screenshot_mime,omitempty"`
+	ProxyMode           string  `json:"proxy_mode,omitempty"`
+	ProxyProvider       string  `json:"proxy_provider,omitempty"`
+	ProxyProfileID      string  `json:"proxy_profile_id,omitempty"`
+	ProxyProfileName    string  `json:"proxy_profile_name,omitempty"`
+	ProxyCountry        string  `json:"proxy_country,omitempty"`
+	ProxyStickyScope    string  `json:"proxy_sticky_scope,omitempty"`
 }
 
 type NavigationStep struct {
@@ -43,8 +49,9 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			id, backend, backend_session_id, app_context_id, context_name,
 			initial_url, current_url, width, height, status, close_reason,
 			recording_status, opened_at, closed_at, updated_at,
-			final_screenshot, final_screenshot_mime
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
+			proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			backend=excluded.backend,
 			backend_session_id=excluded.backend_session_id,
@@ -60,6 +67,12 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			opened_at=excluded.opened_at,
 			closed_at=excluded.closed_at,
 			updated_at=excluded.updated_at,
+			proxy_mode=excluded.proxy_mode,
+			proxy_provider=excluded.proxy_provider,
+			proxy_profile_id=excluded.proxy_profile_id,
+			proxy_profile_name=excluded.proxy_profile_name,
+			proxy_country=excluded.proxy_country,
+			proxy_sticky_scope=excluded.proxy_sticky_scope,
 			final_screenshot=COALESCE(excluded.final_screenshot, computer_sessions.final_screenshot),
 			final_screenshot_mime=CASE
 				WHEN excluded.final_screenshot IS NOT NULL THEN excluded.final_screenshot_mime
@@ -68,7 +81,8 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 		row.ID, row.Backend, row.BackendSessionID, nullableText(row.AppContextID), nullableText(row.ContextName),
 		nullableText(row.InitialURL), nullableText(row.CurrentURL), row.Width, row.Height, row.Status,
 		nullableText(row.CloseReason), row.RecordingStatus, row.OpenedAt, row.ClosedAt, row.UpdatedAt,
-		nullableBytes(row.FinalScreenshot), row.FinalScreenshotMIME,
+		nullableBytes(row.FinalScreenshot), row.FinalScreenshotMIME, row.ProxyMode, row.ProxyProvider,
+		row.ProxyProfileID, row.ProxyProfileName, row.ProxyCountry, row.ProxyStickyScope,
 	)
 	if err != nil {
 		return fmt.Errorf("persist computer session %s: %w", row.ID, err)
@@ -84,7 +98,8 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 		SELECT id, backend, backend_session_id, app_context_id, context_name,
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at,
-		       final_screenshot, final_screenshot_mime
+		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
+		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
 		FROM computer_sessions WHERE id=?`, id))
 }
 
@@ -99,7 +114,8 @@ func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
 		SELECT id, backend, backend_session_id, app_context_id, context_name,
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at,
-		       final_screenshot, final_screenshot_mime
+		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
+		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
 		FROM computer_sessions
 		ORDER BY opened_at DESC
 		LIMIT ?`, limit)
@@ -132,6 +148,8 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		&initialURL, &currentURL, &row.Width, &row.Height, &row.Status, &closeReason,
 		&row.RecordingStatus, &row.OpenedAt, &closedAt, &row.UpdatedAt,
 		&row.FinalScreenshot, &row.FinalScreenshotMIME,
+		&row.ProxyMode, &row.ProxyProvider, &row.ProxyProfileID, &row.ProxyProfileName,
+		&row.ProxyCountry, &row.ProxyStickyScope,
 	)
 	if err != nil {
 		return nil, err

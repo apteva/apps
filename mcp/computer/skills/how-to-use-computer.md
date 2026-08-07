@@ -6,6 +6,7 @@ triggers:
   - computer_context_create
   - computer_context_list
   - computer_context_get
+  - computer_proxy_profile_list
   - browser_recording
   - dialog
   - modal
@@ -207,6 +208,29 @@ Use app contexts when cookies/storage should survive across sessions.
   Browser Engine context id. Prefer app `context_id` or `context_name` unless
   importing an existing provider context.
 - `persist=false` means load the context read-only for that session.
+
+## Proxy routing
+
+Proxy choice is agent-driven unless the operator locked the Computer app's
+proxy policy. Keep the tool contract provider-neutral:
+
+- Omit proxy arguments, or use `proxy_mode="auto"`, when no location or
+  routing requirement exists.
+- Use `proxy_mode="direct"` only when the task explicitly requires bypassing
+  every configured or backend-managed proxy.
+- Use `proxy_mode="managed"` plus an optional two-letter `proxy_country` for
+  the selected browser backend's own proxy network.
+- Use `computer_proxy_profile_list()` before selecting
+  `proxy_mode="profile"`. Pass the returned profile id or exact unique name in
+  `proxy_profile`; never invent a profile or request its credentials.
+- A profile may accept an optional two-letter `proxy_country` override and
+  `proxy_sticky="rotating"|"session"|"context"`. Context stickiness requires
+  an app-managed `context_id` or `context_name`, so the same browser identity
+  deterministically gets the same provider session tag.
+- Session results expose only the safe routing summary (mode, profile name,
+  country, stickiness). Proxy URLs, usernames, passwords, and integration
+  tokens are resolved privately by Computer and must never be requested or
+  copied into the conversation.
 
 **Cookie / consent banners.** Dismiss FIRST. Look for "Accept",
 "Accept all", "OK", "Agree", "Got it". Some live in closed shadow

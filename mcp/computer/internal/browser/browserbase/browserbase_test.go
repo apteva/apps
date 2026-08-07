@@ -91,6 +91,28 @@ func TestResolveProxiesPreservesExistingBooleanSemantics(t *testing.T) {
 	}
 }
 
+func TestResolveProxiesMapsExternalCredentials(t *testing.T) {
+	got, err := resolveProxies(nil, computer.OpenOptions{ExternalProxy: &computer.ExternalProxy{
+		Server: "http://proxy.example:823", Username: "agent-user", Password: "agent-pass",
+	}})
+	if err != nil {
+		t.Fatalf("resolveProxies: %v", err)
+	}
+	proxies, ok := got.([]map[string]any)
+	if !ok || len(proxies) != 1 {
+		t.Fatalf("proxies = %#v", got)
+	}
+	want := map[string]any{
+		"type": "external", "server": "http://proxy.example:823",
+		"username": "agent-user", "password": "agent-pass",
+	}
+	for key, expected := range want {
+		if proxies[0][key] != expected {
+			t.Fatalf("%s = %#v, want %#v", key, proxies[0][key], expected)
+		}
+	}
+}
+
 func TestPickInitialPageTargetReusesExistingContentPage(t *testing.T) {
 	infos := []*target.Info{
 		{TargetID: "worker", Type: "service_worker", URL: "https://example.test/sw.js"},

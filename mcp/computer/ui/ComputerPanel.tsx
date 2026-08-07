@@ -100,6 +100,16 @@ interface SessionRow {
   closed_at?: string;
   width?: number;
   height?: number;
+  proxy?: SessionProxyState;
+}
+
+interface SessionProxyState {
+  mode: "auto" | "direct" | "managed" | "profile" | string;
+  provider?: string;
+  profile_id?: string;
+  profile_name?: string;
+  country?: string;
+  sticky_scope?: "rotating" | "session" | "context" | string;
 }
 
 interface RecordingStream {
@@ -153,6 +163,42 @@ interface ContextListResponse {
 interface ComputerSettings {
   default_backend: "local" | "browserbase" | "steel" | "browser-engine" | "service" | string;
   lock_backend: boolean;
+  default_proxy_mode: "auto" | "direct" | "managed" | "profile" | string;
+  default_proxy_profile_id?: string;
+  lock_proxy_policy: boolean;
+}
+
+interface ProxyProfile {
+  id: string;
+  name: string;
+  provider_slug: string;
+  connection_id: number;
+  external_ref?: string;
+  pool_type: string;
+  protocol: "http" | "https" | "socks5" | string;
+  default_country?: string;
+  sticky_scope: "rotating" | "session" | "context" | string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ProxyConnection {
+  connection_id: number;
+  provider_slug: string;
+  name: string;
+  default?: boolean;
+}
+
+interface ProxyProfilesResponse {
+  profiles?: ProxyProfile[];
+  connections?: ProxyConnection[];
+  error?: string;
+}
+
+interface ProxyResource {
+  id: string;
+  name: string;
 }
 
 interface SettingsResponse {
@@ -164,14 +210,19 @@ interface ComputerEventData extends Partial<SessionRow> {
   id?: string;
   default_backend?: string;
   lock_backend?: boolean;
+  default_proxy_mode?: string;
+  default_proxy_profile_id?: string;
+  lock_proxy_policy?: boolean;
 }
 
 type OpenMode = "open" | "resume" | "context" | "create_context";
-type ProxyMode = "" | "true" | "false";
+type ProxyMode = "" | "auto" | "direct" | "managed" | "profile";
 
 const SESSIONS_URL = "/api/apps/computer/sessions";
 const CONTEXTS_URL = "/api/apps/computer/contexts";
 const SETTINGS_URL = "/api/apps/computer/settings";
+const PROXY_PROFILES_URL = "/api/apps/computer/proxy-profiles";
+const PROXY_RESOURCES_URL = "/api/apps/computer/proxy-resources";
 const POLL_MS = 4000;
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -202,7 +253,14 @@ function appURL(path: string, projectId?: string, extra?: Record<string, string 
 export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
-  const [settings, setSettings] = useState<ComputerSettings>({ default_backend: "local", lock_backend: false });
+  const [settings, setSettings] = useState<ComputerSettings>({
+    default_backend: "local",
+    lock_backend: false,
+    default_proxy_mode: "auto",
+    lock_proxy_policy: false,
+  });
+  const [proxyProfiles, setProxyProfiles] = useState<ProxyProfile[]>([]);
+  const [proxyConnections, setProxyConnections] = useState<ProxyConnection[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(() => {
     const query = new URLSearchParams(window.location.search);
@@ -214,26 +272,34 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [pendingContextDelete, setPendingContextDelete] = useState<string | null>(null);
   const [closedSession, setClosedSession] = useState<SessionRow | null>(null);
+  const [showAddProxy, setShowAddProxy] = useState(false);
+  const [pendingProxyDelete, setPendingProxyDelete] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [sessionsRes, contextsRes, settingsRes] = await Promise.all([
+      const [sessionsRes, contextsRes, settingsRes, proxiesRes] = await Promise.all([
         fetch(appURL(SESSIONS_URL, projectId), { credentials: "include" }),
         fetch(appURL(CONTEXTS_URL, projectId), { credentials: "include" }),
         fetch(appURL(SETTINGS_URL, projectId), { credentials: "include" }),
+        fetch(appURL(PROXY_PROFILES_URL, projectId), { credentials: "include" }),
       ]);
       if (!sessionsRes.ok) throw new Error(`sessions HTTP ${sessionsRes.status}`);
       if (!contextsRes.ok) throw new Error(`contexts HTTP ${contextsRes.status}`);
       if (!settingsRes.ok) throw new Error(`settings HTTP ${settingsRes.status}`);
+      if (!proxiesRes.ok) throw new Error(`proxy profiles HTTP ${proxiesRes.status}`);
       const body = (await sessionsRes.json()) as ListResponse;
       const contextBody = (await contextsRes.json()) as ContextListResponse;
       const settingsBody = (await settingsRes.json()) as SettingsResponse;
+      const proxiesBody = (await proxiesRes.json()) as ProxyProfilesResponse;
       if (body.error) throw new Error(body.error);
       if (contextBody.error) throw new Error(contextBody.error);
       if (settingsBody.error) throw new Error(settingsBody.error);
+      if (proxiesBody.error) throw new Error(proxiesBody.error);
       setRows(body.sessions ?? []);
       setContexts(contextBody.contexts ?? []);
       if (settingsBody.settings) setSettings(settingsBody.settings);
+      setProxyProfiles(proxiesBody.profiles ?? []);
+      setProxyConnections(proxiesBody.connections ?? []);
       setErr(null);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -335,6 +401,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const sel = rows.find((r) => r.session_id === selected) ?? (closedSession?.session_id === selected ? closedSession : null);
   const closeTarget = rows.find((r) => r.session_id === pendingClose) ?? null;
   const contextDeleteTarget = contexts.find((c) => c.id === pendingContextDelete) ?? null;
+  const proxyDeleteTarget = proxyProfiles.find((profile) => profile.id === pendingProxyDelete) ?? null;
 
   const onDeleteContext = useCallback(
     async (id: string) => {
@@ -374,6 +441,22 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
     [projectId, refresh, settings],
   );
 
+  const onDeleteProxy = useCallback(
+    async (id: string) => {
+      const r = await fetch(appURL(`${PROXY_PROFILES_URL}/${encodeURIComponent(id)}`, projectId), {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const body = await r.json();
+      if (!r.ok || body.error) {
+        setErr(`delete proxy profile failed: ${body.error ?? `HTTP ${r.status}`}`);
+        return;
+      }
+      void refresh();
+    },
+    [projectId, refresh],
+  );
+
   return (
     <div className="computer-panel-layout bg-bg">
       <style>{computerPanelLayoutCSS}</style>
@@ -389,6 +472,9 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         onDeleteContext={setPendingContextDelete}
         settings={settings}
         onUpdateSettings={updateSettings}
+        proxyProfiles={proxyProfiles}
+        onAddProxy={() => setShowAddProxy(true)}
+        onDeleteProxy={setPendingProxyDelete}
       />
       <SessionDetail
         session={sel}
@@ -403,10 +489,22 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
           onClose={() => setShowOpen(false)}
           contexts={contexts}
           settings={settings}
+          proxyProfiles={proxyProfiles.filter((profile) => profile.enabled)}
           projectId={projectId}
           onOpened={(newID) => {
             setShowOpen(false);
             setSelected(newID);
+            void refresh();
+          }}
+        />
+      )}
+      {showAddProxy && (
+        <AddProxyProfileModal
+          onClose={() => setShowAddProxy(false)}
+          projectId={projectId}
+          connections={proxyConnections}
+          onCreated={() => {
+            setShowAddProxy(false);
             void refresh();
           }}
         />
@@ -437,6 +535,19 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
           }}
         />
       )}
+      {proxyDeleteTarget && (
+        <ConfirmModal
+          title="Delete Proxy Profile"
+          body={`Delete ${proxyDeleteTarget.name}? Existing session history keeps only its safe routing summary.`}
+          confirmLabel="Delete profile"
+          busyLabel="Deleting..."
+          onCancel={() => setPendingProxyDelete(null)}
+          onConfirm={async () => {
+            await onDeleteProxy(proxyDeleteTarget.id);
+            setPendingProxyDelete(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -453,6 +564,9 @@ function BrowsersList({
   onDeleteContext,
   settings,
   onUpdateSettings,
+  proxyProfiles,
+  onAddProxy,
+  onDeleteProxy,
 }: {
   rows: SessionRow[];
   err: string | null;
@@ -465,6 +579,9 @@ function BrowsersList({
   onDeleteContext: (id: string) => void;
   settings: ComputerSettings;
   onUpdateSettings: (patch: Partial<ComputerSettings>) => void;
+  proxyProfiles: ProxyProfile[];
+  onAddProxy: () => void;
+  onDeleteProxy: (id: string) => void;
 }) {
   const activeRows = rows.filter((row) => !row.status || row.status === "active");
   const pastRows = rows.filter((row) => row.status && row.status !== "active");
@@ -564,6 +681,96 @@ function BrowsersList({
             />
             Force this provider for agents
           </label>
+        </div>
+        <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+          <div
+            className="text-text-muted"
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", fontSize: "11px", fontWeight: 600, textTransform: "uppercase", marginBottom: "8px" }}
+          >
+            <span>Proxy routing</span>
+            <button
+              type="button"
+              onClick={onAddProxy}
+              className="text-text-muted hover:text-text"
+              style={{ background: "transparent", border: 0, padding: 0, cursor: "pointer", fontSize: "11px", textTransform: "none" }}
+            >
+              + Add profile
+            </button>
+          </div>
+          <select
+            value={settings.default_proxy_mode}
+            onChange={(e) => {
+              const mode = e.target.value;
+              const patch: Partial<ComputerSettings> = { default_proxy_mode: mode };
+              if (mode === "profile" && !settings.default_proxy_profile_id && proxyProfiles[0]) {
+                patch.default_proxy_profile_id = proxyProfiles[0].id;
+              }
+              onUpdateSettings(patch);
+            }}
+            className="border border-border bg-bg text-text"
+            style={inputStyle}
+            title="Default proxy policy"
+          >
+            <option value="auto">Provider default</option>
+            <option value="direct">Direct / no proxy</option>
+            <option value="managed">Backend managed proxy</option>
+            <option value="profile" disabled={proxyProfiles.length === 0}>Configured profile</option>
+          </select>
+          {settings.default_proxy_mode === "profile" && (
+            <select
+              value={settings.default_proxy_profile_id ?? ""}
+              onChange={(e) => onUpdateSettings({ default_proxy_profile_id: e.target.value })}
+              className="border border-border bg-bg text-text"
+              style={{ ...inputStyle, marginTop: "7px" }}
+              title="Default proxy profile"
+            >
+              <option value="">Select profile</option>
+              {proxyProfiles.filter((profile) => profile.enabled).map((profile) => (
+                <option key={profile.id} value={profile.id}>{profile.name}</option>
+              ))}
+            </select>
+          )}
+          <label
+            className="text-text-muted"
+            style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "8px", fontSize: "12px" }}
+            title="Ignore per-session proxy overrides from agents"
+          >
+            <input
+              type="checkbox"
+              checked={settings.lock_proxy_policy}
+              onChange={(e) => onUpdateSettings({ lock_proxy_policy: e.target.checked })}
+            />
+            Force this proxy policy for agents
+          </label>
+          {proxyProfiles.length === 0 ? (
+            <div className="text-text-muted" style={{ fontSize: "11px", padding: "8px 2px 2px" }}>
+              No external proxy profiles configured.
+            </div>
+          ) : (
+            <ul style={{ display: "flex", flexDirection: "column", gap: "5px", marginTop: "9px" }}>
+              {proxyProfiles.map((profile) => (
+                <li key={profile.id} className="border border-border bg-bg-subtle" style={{ borderRadius: "6px", padding: "7px 9px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: "8px", alignItems: "center" }}>
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{ display: "block", fontSize: "12px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis" }}>{profile.name}</span>
+                      <span className="text-text-muted" style={{ display: "block", fontSize: "10px" }}>
+                        {profile.provider_slug} · {profile.protocol} · {profile.default_country || "any country"} · {profile.sticky_scope}
+                      </span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onDeleteProxy(profile.id)}
+                      title="Delete proxy profile"
+                      className="text-text-muted hover:text-text"
+                      style={{ background: "transparent", border: 0, padding: "1px", cursor: "pointer", display: "inline-flex" }}
+                    >
+                      <XIcon />
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
         <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
           <div
@@ -1152,6 +1359,7 @@ function SessionDetail({
             { label: "Backend session", value: session.backend_session_id || "-" },
             { label: "App context", value: session.context_name || session.app_context_id || "-" },
             { label: "Provider context", value: session.context_id || "-" },
+            { label: "Proxy", value: sessionProxyLabel(session.proxy) },
             { label: "Recording", value: recordingStatusLabel(session.recording_status ?? (session.recording_supported ? "recording" : "unsupported")) },
             { label: "Persist changes", value: session.persist ? "yes" : "no" },
             { label: "Provider timeout", value: session.timeout_seconds ? formatDurationSeconds(session.timeout_seconds) : "provider default" },
@@ -1418,12 +1626,14 @@ function OpenSessionModal({
   onClose,
   contexts,
   settings,
+  proxyProfiles,
   projectId,
   onOpened,
 }: {
   onClose: () => void;
   contexts: ContextRow[];
   settings: ComputerSettings;
+  proxyProfiles: ProxyProfile[];
   projectId?: string;
   onOpened: (sessionID: string) => void;
 }) {
@@ -1436,8 +1646,10 @@ function OpenSessionModal({
   const [persist, setPersist] = useState(true);
   const [backendSessionID, setBackendSessionID] = useState("");
   const [timeout, setTimeoutValue] = useState("");
-  const [proxy, setProxy] = useState<ProxyMode>("");
+  const [proxyMode, setProxyMode] = useState<ProxyMode>("");
+  const [proxyProfile, setProxyProfile] = useState("");
   const [proxyCountry, setProxyCountry] = useState("");
+  const [proxySticky, setProxySticky] = useState("");
   const [width, setWidth] = useState("1600");
   const [height, setHeight] = useState("800");
   const [busy, setBusy] = useState(false);
@@ -1462,8 +1674,10 @@ function OpenSessionModal({
       if (mode === "resume" && backendSessionID) body.backend_session_id = backendSessionID;
       if (mode !== "resume") body.persist = persist;
       if (timeout) body.timeout = Number(timeout);
-      if (proxy) body.proxy = proxy === "true";
+      if (proxyMode) body.proxy_mode = proxyMode;
+      if (proxyProfile) body.proxy_profile = proxyProfile;
       if (proxyCountry) body.proxy_country = proxyCountry.toUpperCase();
+      if (proxySticky) body.proxy_sticky = proxySticky;
       const viewport: Record<string, number> = {};
       if (width) viewport.width = Number(width);
       if (height) viewport.height = Number(height);
@@ -1591,16 +1805,54 @@ function OpenSessionModal({
           <Field label="Viewport height">
             <input value={height} onChange={(e) => setHeight(e.target.value)} inputMode="numeric" className="border border-border bg-bg text-text" style={inputStyle} />
           </Field>
-          <Field label="Proxy">
-            <select value={proxy} onChange={(e) => setProxy(e.target.value as ProxyMode)} className="border border-border bg-bg text-text" style={inputStyle}>
-              <option value="">Default</option>
-              <option value="true">On</option>
-              <option value="false">Off</option>
+          <Field label="Proxy policy">
+            <select
+              value={proxyMode}
+              onChange={(e) => {
+                const next = e.target.value as ProxyMode;
+                setProxyMode(next);
+                if (next !== "profile") setProxyProfile("");
+                if (next === "direct" || next === "auto") {
+                  setProxyCountry("");
+                  setProxySticky("");
+                }
+              }}
+              className="border border-border bg-bg text-text"
+              style={inputStyle}
+              disabled={settings.lock_proxy_policy}
+            >
+              <option value="">App default ({proxyModeLabel(settings.default_proxy_mode)})</option>
+              <option value="auto">Provider default</option>
+              <option value="direct">Direct / no proxy</option>
+              <option value="managed">Backend managed proxy</option>
+              <option value="profile" disabled={proxyProfiles.length === 0}>Configured profile</option>
             </select>
           </Field>
-          <Field label="Proxy country">
-            <input value={proxyCountry} onChange={(e) => setProxyCountry(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} placeholder="US" />
-          </Field>
+          {proxyMode === "profile" && (
+            <Field label="Proxy profile">
+              <select value={proxyProfile} onChange={(e) => setProxyProfile(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+                <option value="">Select profile</option>
+                {proxyProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>{profile.name}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+          {(proxyMode === "managed" || proxyMode === "profile") && (
+            <Field label="Proxy country">
+              <input value={proxyCountry} onChange={(e) => setProxyCountry(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} placeholder="US" maxLength={2} />
+            </Field>
+          )}
+          {proxyMode === "profile" && (
+            <Field label="Proxy stickiness">
+              <select value={proxySticky} onChange={(e) => setProxySticky(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+                <option value="">Profile default</option>
+                <option value="rotating">Rotate requests</option>
+                <option value="session">Keep for session</option>
+                <option value="context">Keep for context</option>
+              </select>
+            </Field>
+          )}
         </div>
         {mode !== "resume" && (
           <div style={{ display: "grid", gap: "8px", marginTop: "10px", fontSize: "13px" }}>
@@ -1615,6 +1867,148 @@ function OpenSessionModal({
           <IconButton onClick={onClose} disabled={busy} title="Cancel">Cancel</IconButton>
           <IconButton onClick={submit} disabled={busy} title="Open session">
             {busy ? "Opening..." : mode === "resume" ? "Resume" : mode === "create_context" ? "Save and open" : "Open"}
+          </IconButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AddProxyProfileModal({
+  onClose,
+  projectId,
+  connections,
+  onCreated,
+}: {
+  onClose: () => void;
+  projectId?: string;
+  connections: ProxyConnection[];
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [connectionID, setConnectionID] = useState(() => String(connections.find((connection) => connection.default)?.connection_id ?? connections[0]?.connection_id ?? ""));
+  const [subuserID, setSubuserID] = useState("");
+  const [protocol, setProtocol] = useState("http");
+  const [country, setCountry] = useState("");
+  const [sticky, setSticky] = useState("session");
+  const [resources, setResources] = useState<ProxyResource[]>([]);
+  const [resourcesLoading, setResourcesLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const selectedConnection = connections.find((connection) => String(connection.connection_id) === connectionID);
+
+  useEffect(() => {
+    if (!connectionID) {
+      setResources([]);
+      return;
+    }
+    let cancelled = false;
+    setResourcesLoading(true);
+    fetch(appURL(PROXY_RESOURCES_URL, projectId, { connection_id: connectionID }), { credentials: "include" })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok || body.error) throw new Error(body.error ?? `HTTP ${response.status}`);
+        if (!cancelled) setResources(body.resources ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setResources([]);
+      })
+      .finally(() => {
+        if (!cancelled) setResourcesLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [connectionID, projectId]);
+
+  const submit = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      if (!selectedConnection) throw new Error("Select a connected proxy provider");
+      const res = await fetch(appURL(PROXY_PROFILES_URL, projectId), {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          provider_slug: selectedConnection.provider_slug,
+          connection_id: selectedConnection.connection_id,
+          external_ref: subuserID,
+          pool_type: "residential",
+          protocol,
+          default_country: country.toUpperCase(),
+          sticky_scope: sticky,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+      onCreated();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="bg-bg border border-border text-text"
+        style={{ width: "500px", maxWidth: "94vw", padding: "18px", borderRadius: "8px" }}
+      >
+        <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "5px" }}>Add proxy profile</h2>
+        <p className="text-text-muted" style={{ fontSize: "12px", marginBottom: "14px" }}>
+          Computer stores only this routing metadata. Credentials stay in the connected provider integration.
+        </p>
+        {connections.length === 0 ? (
+          <div className="border border-border bg-bg-subtle text-text-muted" style={{ borderRadius: "6px", padding: "12px", fontSize: "12px" }}>
+            Connect and bind a supported proxy provider to Computer first. DataImpulse is supported now.
+          </div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+            <Field label="Profile name">
+              <input value={name} onChange={(e) => setName(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} placeholder="US research" />
+            </Field>
+            <Field label="Provider connection">
+              <select value={connectionID} onChange={(e) => setConnectionID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+                {connections.map((connection) => (
+                  <option key={connection.connection_id} value={connection.connection_id}>{connection.name} ({connection.provider_slug})</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="DataImpulse sub-user ID">
+              <input value={subuserID} onChange={(e) => setSubuserID(e.target.value)} list="computer-proxy-resources" inputMode="numeric" className="border border-border bg-bg text-text" style={inputStyle} placeholder={resourcesLoading ? "Loading..." : "12345"} />
+              <datalist id="computer-proxy-resources">
+                {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
+              </datalist>
+            </Field>
+            <Field label="Protocol">
+              <select value={protocol} onChange={(e) => setProtocol(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+                <option value="socks5">SOCKS5</option>
+              </select>
+            </Field>
+            <Field label="Default country">
+              <input value={country} onChange={(e) => setCountry(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} placeholder="Any" maxLength={2} />
+            </Field>
+            <Field label="Default stickiness">
+              <select value={sticky} onChange={(e) => setSticky(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+                <option value="rotating">Rotate requests</option>
+                <option value="session">Keep for session</option>
+                <option value="context">Keep for context</option>
+              </select>
+            </Field>
+          </div>
+        )}
+        {err && <div style={{ marginTop: "10px", fontSize: "12px", color: "#dc2626" }}>{err}</div>}
+        <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+          <IconButton onClick={onClose} disabled={busy} title="Cancel">Cancel</IconButton>
+          <IconButton onClick={submit} disabled={busy || connections.length === 0 || !name.trim() || !subuserID.trim()} title="Create proxy profile">
+            {busy ? "Creating..." : "Create profile"}
           </IconButton>
         </div>
       </div>
@@ -1957,6 +2351,25 @@ function providerLifetimeLabel(row: SessionRow, now: number): string {
   if (row.provider_expires_at) return relativeUntil(row.provider_expires_at, now);
   if (row.timeout_seconds) return formatDurationSeconds(row.timeout_seconds);
   return row.backend === "browserbase" ? "provider default" : "not tracked";
+}
+
+function proxyModeLabel(mode?: string): string {
+  switch (mode) {
+    case "direct": return "direct";
+    case "managed": return "managed";
+    case "profile": return "configured profile";
+    default: return "provider default";
+  }
+}
+
+function sessionProxyLabel(proxy?: SessionProxyState): string {
+  if (!proxy?.mode) return "provider default";
+  if (proxy.mode === "profile") {
+    const details = [proxy.profile_name || proxy.provider, proxy.country, proxy.sticky_scope].filter(Boolean);
+    return details.length > 0 ? details.join(" · ") : "configured profile";
+  }
+  if (proxy.mode === "managed" && proxy.country) return `managed · ${proxy.country}`;
+  return proxyModeLabel(proxy.mode);
 }
 
 function relativeUntil(iso: string | undefined, now: number): string {
