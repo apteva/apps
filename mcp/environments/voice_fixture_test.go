@@ -20,17 +20,17 @@ func TestVoiceMediaRelayPacesSpeechAndAddsSilenceTail(t *testing.T) {
 	var relay voiceMediaRelay
 	relay.append(voiceAudioChunk{audio: payload, itemID: "item-one", audioEndMS: 30})
 
-	first, started, acks, ok := relay.nextFrame()
-	if !ok || !started || len(acks) != 0 {
-		t.Fatalf("first frame ok=%v started=%v acks=%v", ok, started, acks)
+	first, started, acks, applyConditions, ok := relay.nextFrame()
+	if !ok || !started || len(acks) != 0 || !applyConditions {
+		t.Fatalf("first frame ok=%v started=%v acks=%v apply_conditions=%v", ok, started, acks, applyConditions)
 	}
 	if !bytes.Equal(first, payload[:voiceFrameBytes]) {
 		t.Fatal("first frame did not preserve source audio")
 	}
 
-	second, started, acks, ok := relay.nextFrame()
-	if !ok || started || len(acks) != 1 || acks[0].itemID != "item-one" || acks[0].audioEndMS != 30 {
-		t.Fatalf("second frame ok=%v started=%v acks=%v", ok, started, acks)
+	second, started, acks, applyConditions, ok := relay.nextFrame()
+	if !ok || started || len(acks) != 1 || acks[0].itemID != "item-one" || acks[0].audioEndMS != 30 || !applyConditions {
+		t.Fatalf("second frame ok=%v started=%v acks=%v apply_conditions=%v", ok, started, acks, applyConditions)
 	}
 	if !bytes.Equal(second[:voiceFrameBytes/2], payload[voiceFrameBytes:]) {
 		t.Fatal("second frame did not preserve remaining source audio")
@@ -40,17 +40,17 @@ func TestVoiceMediaRelayPacesSpeechAndAddsSilenceTail(t *testing.T) {
 	}
 
 	for i := 0; i < voiceSilenceFrames; i++ {
-		frame, started, acks, ok := relay.nextFrame()
-		if !ok || started || len(acks) != 0 || !isSilentPCM(frame) {
-			t.Fatalf("silence frame %d ok=%v started=%v acks=%v", i, ok, started, acks)
+		frame, started, acks, applyConditions, ok := relay.nextFrame()
+		if !ok || started || len(acks) != 0 || !isSilentPCM(frame) || !applyConditions {
+			t.Fatalf("silence frame %d ok=%v started=%v acks=%v apply_conditions=%v", i, ok, started, acks, applyConditions)
 		}
 	}
-	if frame, started, acks, ok := relay.nextFrame(); ok || started || len(frame) != 0 || len(acks) != 0 {
+	if frame, started, acks, _, ok := relay.nextFrame(); ok || started || len(frame) != 0 || len(acks) != 0 {
 		t.Fatalf("relay continued after silence tail: frame=%d started=%v acks=%v ok=%v", len(frame), started, acks, ok)
 	}
 
 	relay.append(voiceAudioChunk{audio: bytes.Repeat([]byte{0x42}, voiceFrameBytes)})
-	if _, started, _, ok := relay.nextFrame(); !ok || !started {
+	if _, started, _, _, ok := relay.nextFrame(); !ok || !started {
 		t.Fatalf("new utterance ok=%v started=%v", ok, started)
 	}
 }
@@ -58,7 +58,7 @@ func TestVoiceMediaRelayPacesSpeechAndAddsSilenceTail(t *testing.T) {
 func TestVoiceMediaRelayInterruptDropsQueuedPlayback(t *testing.T) {
 	var relay voiceMediaRelay
 	relay.append(voiceAudioChunk{audio: bytes.Repeat([]byte{0x24}, voiceFrameBytes*2)})
-	if _, started, _, ok := relay.nextFrame(); !ok || !started {
+	if _, started, _, _, ok := relay.nextFrame(); !ok || !started {
 		t.Fatalf("initial frame ok=%v started=%v", ok, started)
 	}
 
@@ -66,7 +66,7 @@ func TestVoiceMediaRelayInterruptDropsQueuedPlayback(t *testing.T) {
 	if relay.queue.bytes != 0 || relay.silenceFrames != 0 || relay.utteranceActive {
 		t.Fatalf("relay retained interrupted state: %#v", relay)
 	}
-	if frame, _, _, ok := relay.nextFrame(); ok || len(frame) != 0 {
+	if frame, _, _, _, ok := relay.nextFrame(); ok || len(frame) != 0 {
 		t.Fatalf("interrupted relay produced frame bytes=%d ok=%v", len(frame), ok)
 	}
 }
@@ -77,19 +77,42 @@ func TestVoiceMediaRelayRemainsPendingUntilBufferedAudioAndTailDrain(t *testing.
 	if !relay.hasPendingPlayback() {
 		t.Fatal("queued audio was not pending")
 	}
-	if _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
+	if _, _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
 		t.Fatal("relay stopped pending before queued audio drained")
 	}
-	if _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
+	if _, _, _, _, ok := relay.nextFrame(); !ok || !relay.hasPendingPlayback() {
 		t.Fatal("relay stopped pending before silence tail drained")
 	}
 	for relay.hasPendingPlayback() {
-		if _, _, _, ok := relay.nextFrame(); !ok {
+		if _, _, _, _, ok := relay.nextFrame(); !ok {
 			t.Fatal("pending relay failed to produce its silence tail")
 		}
 	}
-	if _, _, _, ok := relay.nextFrame(); ok {
+	if _, _, _, _, ok := relay.nextFrame(); ok {
 		t.Fatal("drained relay still produced playback")
+	}
+}
+
+func TestVoiceMediaRelayAddsCleanVADCommitTailAfterConditionedAudio(t *testing.T) {
+	relay := newVoiceMediaRelay(true)
+	relay.append(voiceAudioChunk{audio: bytes.Repeat([]byte{0x24}, voiceFrameBytes)})
+
+	if _, _, _, applyConditions, ok := relay.nextFrame(); !ok || !applyConditions {
+		t.Fatalf("speech frame ok=%v apply_conditions=%v", ok, applyConditions)
+	}
+	for i := 0; i < voiceSilenceFrames; i++ {
+		if _, _, _, applyConditions, ok := relay.nextFrame(); !ok || !applyConditions {
+			t.Fatalf("conditioned tail frame %d ok=%v apply_conditions=%v", i, ok, applyConditions)
+		}
+	}
+	for i := 0; i < voiceVADCommitFrames; i++ {
+		frame, _, _, applyConditions, ok := relay.nextFrame()
+		if !ok || applyConditions || !isSilentPCM(frame) {
+			t.Fatalf("commit tail frame %d ok=%v apply_conditions=%v", i, ok, applyConditions)
+		}
+	}
+	if relay.hasPendingPlayback() {
+		t.Fatal("relay remained pending after VAD commit tail drained")
 	}
 }
 
@@ -185,6 +208,28 @@ func TestVoiceCallValidityAcceptsTargetCompletion(t *testing.T) {
 	validity := assessVoiceCall(call)
 	if validity.Status != "valid" || len(validity.Reasons) != 0 {
 		t.Fatalf("validity=%#v", validity)
+	}
+}
+
+func TestVoiceCallValidityRejectsUnrecognizedCallerTurn(t *testing.T) {
+	call := &VoiceCall{
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Would you like me to reserve it?"},
+			{Speaker: "caller", Text: "Oui."},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "timeout", ReceptionistAudioS: 1.2, CallerAudioS: 1,
+			CallerSourceTurns: 2, ReceptionistReceivedTurns: 1, PendingCallerTurns: 1,
+			CallerResponseUndelivered: true,
+		},
+	}
+
+	validity := assessVoiceCall(call)
+	if validity.Status != "invalid" {
+		t.Fatalf("validity=%#v", validity)
+	}
+	if joined := strings.Join(validity.Reasons, "\n"); !strings.Contains(joined, "generated but not recognized") {
+		t.Fatalf("missing caller turn diagnostic in %q", joined)
 	}
 }
 
@@ -840,7 +885,8 @@ func TestVoiceAudioConditionsProcessSilenceAndTelephoneCodec(t *testing.T) {
 		t.Fatalf("conditioned frame size=%d, want %d", len(delivered), len(silence))
 	}
 	metrics := noisy.metrics()
-	if metrics == nil || metrics.ProcessedFrames != 1 || metrics.Codec != "g711_mulaw" || metrics.TargetSNRDB != 4 {
+	if metrics == nil || metrics.ProcessedFrames != 1 || metrics.Codec != "g711_mulaw" || metrics.TargetSNRDB != 4 ||
+		metrics.VADCommitSilenceMS != int(voiceVADCommitTail/time.Millisecond) {
 		t.Fatalf("unexpected condition metrics: %+v", metrics)
 	}
 }

@@ -27,6 +27,8 @@ const (
 	voiceFrameBytes       = voiceBytesPerSecond / (int(time.Second / voiceFrameDuration))
 	voiceSilenceTail      = 2 * time.Second
 	voiceSilenceFrames    = int(voiceSilenceTail / voiceFrameDuration)
+	voiceVADCommitTail    = time.Second
+	voiceVADCommitFrames  = int(voiceVADCommitTail / voiceFrameDuration)
 	voiceCompletionGrace  = 10 * time.Second
 	voiceCompletionPoll   = 100 * time.Millisecond
 	voiceExitCollectGrace = 2 * time.Second
@@ -134,9 +136,19 @@ func (q *voiceMediaQueue) nextFrame() ([]byte, int, []voicePlaybackAck) {
 }
 
 type voiceMediaRelay struct {
-	queue           voiceMediaQueue
-	silenceFrames   int
-	utteranceActive bool
+	queue                   voiceMediaQueue
+	silenceFrames           int
+	commitSilenceFrames     int
+	configuredCommitSilence int
+	utteranceActive         bool
+}
+
+func newVoiceMediaRelay(requireVADCommitTail bool) voiceMediaRelay {
+	relay := voiceMediaRelay{}
+	if requireVADCommitTail {
+		relay.configuredCommitSilence = voiceVADCommitFrames
+	}
+	return relay
 }
 
 func (r *voiceMediaRelay) append(chunk voiceAudioChunk) {
@@ -146,29 +158,38 @@ func (r *voiceMediaRelay) append(chunk voiceAudioChunk) {
 func (r *voiceMediaRelay) interrupt() {
 	r.queue.clear()
 	r.silenceFrames = 0
+	r.commitSilenceFrames = 0
 	r.utteranceActive = false
 }
 
-func (r *voiceMediaRelay) nextFrame() (frame []byte, speechStarted bool, acks []voicePlaybackAck, ok bool) {
+func (r *voiceMediaRelay) nextFrame() (frame []byte, speechStarted bool, acks []voicePlaybackAck, applyConditions bool, ok bool) {
 	frame, speechBytes, acks := r.queue.nextFrame()
 	if speechBytes > 0 {
 		speechStarted = !r.utteranceActive
 		r.utteranceActive = true
 		r.silenceFrames = voiceSilenceFrames
-		return frame, speechStarted, acks, true
+		r.commitSilenceFrames = r.configuredCommitSilence
+		return frame, speechStarted, acks, true, true
 	}
-	if r.silenceFrames == 0 {
-		return nil, false, nil, false
+	if r.silenceFrames > 0 {
+		r.silenceFrames--
+		return make([]byte, voiceFrameBytes), false, nil, true, true
 	}
-	r.silenceFrames--
-	if r.silenceFrames == 0 {
+	if r.commitSilenceFrames > 0 {
+		r.commitSilenceFrames--
+		if r.commitSilenceFrames == 0 {
+			r.utteranceActive = false
+		}
+		return make([]byte, voiceFrameBytes), false, nil, false, true
+	}
+	if r.utteranceActive {
 		r.utteranceActive = false
 	}
-	return make([]byte, voiceFrameBytes), false, nil, true
+	return nil, false, nil, false, false
 }
 
 func (r *voiceMediaRelay) hasPendingPlayback() bool {
-	return r.queue.bytes > 0 || r.silenceFrames > 0
+	return r.queue.bytes > 0 || r.silenceFrames > 0 || r.commitSilenceFrames > 0
 }
 
 type voiceRelayEvent struct {
@@ -618,7 +639,7 @@ func pumpVoiceAudio(
 
 	ticker := time.NewTicker(voiceFrameDuration)
 	defer ticker.Stop()
-	var relay voiceMediaRelay
+	relay := newVoiceMediaRelay(pipeline != nil && pipeline.hasAmbientNoise())
 	var sourceExit *voiceBridgeExit
 	reporter := newVoiceBridgeExitReporter(ctx, result, leg)
 	defer func() { reporter.finish(sourceExit, sourceEndpoint) }()
@@ -652,7 +673,7 @@ func pumpVoiceAudio(
 				activity.update(speaker, true, time.Now())
 			}
 		case <-ticker.C:
-			frame, speechStarted, acks, ok := relay.nextFrame()
+			frame, speechStarted, acks, applyConditions, ok := relay.nextFrame()
 			if !ok {
 				activity.update(speaker, false, time.Time{})
 				if sourceExit != nil {
@@ -671,7 +692,9 @@ func pumpVoiceAudio(
 					return
 				}
 			}
-			frame = pipeline.process(frame)
+			if applyConditions {
+				frame = pipeline.process(frame)
+			}
 			if delivered != nil {
 				delivered.append(frame)
 			}
@@ -1382,6 +1405,12 @@ func assessVoiceCall(call *VoiceCall) VoiceCallValidity {
 	}
 	if call.Metrics.RealtimeErrors > 0 {
 		reasons = append(reasons, fmt.Sprintf("realtime participants reported %d errors", call.Metrics.RealtimeErrors))
+	}
+	if call.Metrics.PendingCallerTurns > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"%d caller turn(s) were generated but not recognized by the target",
+			call.Metrics.PendingCallerTurns,
+		))
 	}
 	if len(reasons) > 0 {
 		return VoiceCallValidity{Status: "invalid", Reasons: reasons}

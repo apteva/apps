@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"math"
+	"time"
 )
 
 const defaultVoiceAudioSeed int64 = 42
@@ -28,6 +29,10 @@ func newVoiceAudioPipeline(spec *VoiceAudioConditions, applyCodec bool) *voiceAu
 		seed = uint32(defaultVoiceAudioSeed)
 	}
 	return &voiceAudioPipeline{spec: *spec, state: seed, applyCodec: applyCodec}
+}
+
+func (p *voiceAudioPipeline) hasAmbientNoise() bool {
+	return p != nil && p.spec.Preset != "clean"
 }
 
 func (p *voiceAudioPipeline) process(frame []byte) []byte {
@@ -96,10 +101,14 @@ func (p *voiceAudioPipeline) metrics() *VoiceAudioConditionMetrics {
 	if !p.applyCodec {
 		codec = "carrier_g711_mulaw"
 	}
+	vadCommitSilenceMS := 0
+	if p.hasAmbientNoise() {
+		vadCommitSilenceMS = int(voiceVADCommitTail / time.Millisecond)
+	}
 	return &VoiceAudioConditionMetrics{
 		Preset: p.spec.Preset, Intensity: p.spec.Intensity, Codec: codec, Seed: p.spec.Seed,
 		TargetSNRDB: voiceAudioSNR(p.spec.Intensity), ProcessedFrames: p.processedFrames,
-		ClippedSamples: p.clippedSamples,
+		ClippedSamples: p.clippedSamples, VADCommitSilenceMS: vadCommitSilenceMS,
 	}
 }
 

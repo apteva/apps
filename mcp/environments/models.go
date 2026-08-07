@@ -229,13 +229,14 @@ type VoiceBridgeExitResult struct {
 }
 
 type VoiceAudioConditionMetrics struct {
-	Preset          string  `json:"preset"`
-	Intensity       string  `json:"intensity"`
-	Codec           string  `json:"codec"`
-	Seed            int64   `json:"seed"`
-	TargetSNRDB     float64 `json:"target_snr_db,omitempty"`
-	ProcessedFrames int64   `json:"processed_frames"`
-	ClippedSamples  int64   `json:"clipped_samples"`
+	Preset             string  `json:"preset"`
+	Intensity          string  `json:"intensity"`
+	Codec              string  `json:"codec"`
+	Seed               int64   `json:"seed"`
+	TargetSNRDB        float64 `json:"target_snr_db,omitempty"`
+	ProcessedFrames    int64   `json:"processed_frames"`
+	ClippedSamples     int64   `json:"clipped_samples"`
+	VADCommitSilenceMS int     `json:"vad_commit_silence_ms,omitempty"`
 }
 
 type SeedStep struct {

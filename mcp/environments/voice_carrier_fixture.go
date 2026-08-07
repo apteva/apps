@@ -450,7 +450,7 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 
 	ticker := time.NewTicker(voiceFrameDuration)
 	defer ticker.Stop()
-	var relay voiceMediaRelay
+	relay := newVoiceMediaRelay(pipeline != nil && pipeline.hasAmbientNoise())
 	var sourceExit *voiceBridgeExit
 	reporter := newVoiceBridgeExitReporter(ctx, result, voiceBridgeLegCallerToCarrier)
 	defer func() { reporter.finish(sourceExit, voiceBridgeCaller) }()
@@ -485,7 +485,7 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				activity.update("caller", true, time.Now())
 			}
 		case <-ticker.C:
-			frame, _, acks, ok := relay.nextFrame()
+			frame, _, acks, applyConditions, ok := relay.nextFrame()
 			if !ok {
 				activity.update("caller", false, time.Time{})
 				if sourceExit != nil {
@@ -495,7 +495,9 @@ func relayCallerToCarrier(ctx context.Context, caller *voiceSocket, media *carri
 				continue
 			}
 			activity.update("caller", true, time.Now())
-			frame = pipeline.process(frame)
+			if applyConditions {
+				frame = pipeline.process(frame)
+			}
 			if delivered != nil {
 				delivered.append(frame)
 			}
@@ -572,7 +574,7 @@ func relayCarrierToCaller(ctx context.Context, media *carrierMediaSocket, caller
 				activity.update("receptionist", true, time.Now())
 			}
 		case <-ticker.C:
-			frame, speechStarted, _, ok := relay.nextFrame()
+			frame, speechStarted, _, _, ok := relay.nextFrame()
 			if !ok {
 				activity.update("receptionist", false, time.Time{})
 				if sourceExit != nil {
