@@ -281,7 +281,7 @@ func (a *App) toolLeadFormArchive(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return errOut, nil
 	}
 	if acct.Platform == "meta" {
-		if _, providerErr := a.execIntegrationTool(ctx, acct, "leadform_delete", map[string]any{"formId": resource.NativeID}); providerErr != nil {
+		if _, providerErr := a.execIntegrationTool(ctx, acct, "leadform_update", map[string]any{"formId": resource.NativeID, "status": "ARCHIVED"}); providerErr != nil {
 			return providerErr, nil
 		}
 	} else {

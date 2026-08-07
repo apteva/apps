@@ -28,7 +28,10 @@ func TestMetaLeadFormLifecycleAndInstantFormWiring(t *testing.T) {
 		switch tool {
 		case "leadform_create":
 			return executeJSON(`{"id":"form_99"}`), nil
-		case "leadform_delete":
+		case "leadform_update":
+			if input["status"] != "ARCHIVED" {
+				t.Fatalf("Meta forms must be archived with an update: %#v", input)
+			}
 			return executeJSON(`{"success":true}`), nil
 		default:
 			return executeJSON(`{"id":"created_1"}`), nil
