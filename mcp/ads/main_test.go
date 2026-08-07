@@ -1006,6 +1006,43 @@ func TestGoogleCampaignCreate_CreatesBudgetThenCampaign(t *testing.T) {
 	}
 }
 
+func TestGoogleAdUpdate_MapsGenericStatus(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolAdUpdate(ctx, map[string]any{
+		"ad_account_id": acctID,
+		"adset_id":      "456",
+		"ad_id":         "789",
+		"status":        "ACTIVE",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected one ad mutate call, got %#v", pf.executeCalls)
+	}
+	call := pf.executeCalls[0]
+	if call.Tool != "ad_mutate" || call.Input["customer_id"] != "123" {
+		t.Fatalf("wrong google ad update call: %#v", call)
+	}
+	ops := call.Input["operations"].([]any)
+	op := ops[0].(map[string]any)
+	update := op["update"].(map[string]any)
+	if update["resourceName"] != "customers/123/adGroupAds/456~789" || update["status"] != "ENABLED" {
+		t.Fatalf("generic status was not mapped: %#v", update)
+	}
+	if op["updateMask"] != "status" {
+		t.Fatalf("wrong update mask: %#v", op)
+	}
+}
+
 func TestGoogleCampaignCreate_RejectsUnsupportedGenericSemantics(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)

@@ -768,9 +768,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "ad_update",
-			Description: "Update an ad. Args: ad_account_id, ad_id, plus any updatable field.",
+			Description: "Update an ad. Args: ad_account_id, ad_id, adset_id? (required by Google unless ad_id is a full resource name), plus any updatable field.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":    map[string]any{"type": "integer"},
+				"adset_id":         map[string]any{"type": "string"},
 				"ad_id":            map[string]any{"type": "string"},
 				"name":             map[string]any{"type": "string"},
 				"status":           map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}},
@@ -3188,7 +3189,36 @@ func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 		}
 		return a.execOrErr(ctx, acct, def.AdUpdateTool, map[string]any{"customer_id": acct.NativeAccountID, "operations": ops})
 	}
-	return mcpError("google ad_update requires platform_options.operations with native adGroupAds mutate operations"), nil
+	adID := stringArgAny(args, "ad_id")
+	if adID == "" {
+		return mcpError("ad_id required"), nil
+	}
+	resource := adID
+	if strings.HasPrefix(resource, "customers/") {
+		if !strings.HasPrefix(resource, "customers/"+acct.NativeAccountID+"/adGroupAds/") {
+			return mcpError("google ad resource belongs to another customer"), nil
+		}
+	} else {
+		adSetID := stringArgAny(args, "adset_id")
+		if !googleNumericID(adSetID) || !googleNumericID(adID) {
+			return mcpError("google adset_id and ad_id must be numeric"), nil
+		}
+		resource = fmt.Sprintf("customers/%s/adGroupAds/%s~%s", acct.NativeAccountID, adSetID, adID)
+	}
+	status := stringArgAny(args, "status")
+	if status == "" {
+		return mcpError("google generic ad_update currently supports status; use platform_options.operations for other fields"), nil
+	}
+	if !googleValidStatus(status) {
+		return mcpError("status must be ACTIVE or PAUSED"), nil
+	}
+	return a.execUpdateOrErr(ctx, acct, def.AdUpdateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations": []any{map[string]any{
+			"update":     map[string]any{"resourceName": resource, "status": googleCampaignStatus(status)},
+			"updateMask": "status",
+		}},
+	})
 }
 
 func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {

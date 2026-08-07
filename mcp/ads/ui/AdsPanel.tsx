@@ -53,6 +53,41 @@ interface Campaign {
   daily_budget?: string;
 }
 
+interface AdSet {
+  id: string;
+  name: string;
+  campaign_id?: string;
+  status?: string;
+  effective_status?: string;
+  daily_budget?: string;
+  lifetime_budget?: string;
+  optimization_goal?: string;
+  billing_event?: string;
+  targeting?: Record<string, any>;
+  promoted_object?: Record<string, any>;
+  start_time?: string;
+  end_time?: string;
+}
+
+interface AdCreative {
+  id?: string;
+  name?: string;
+  thumbnail_url?: string;
+  image_url?: string;
+  object_story_spec?: Record<string, any>;
+}
+
+interface Ad {
+  id: string;
+  name: string;
+  adset_id?: string;
+  campaign_id?: string;
+  status?: string;
+  effective_status?: string;
+  creative?: AdCreative;
+  tracking_specs?: unknown[];
+}
+
 interface PerformancePoint {
   platform: string;
   ad_account_id: number;
@@ -181,6 +216,10 @@ function statusStyle(status?: string): string {
 
 function displayStatus(campaign: Campaign): string {
   return campaign.status || campaign.effective_status || "UNKNOWN";
+}
+
+function entityStatus(entity: { status?: string; effective_status?: string }): string {
+  return entity.status || entity.effective_status || "UNKNOWN";
 }
 
 function formatBudget(value: string | undefined, currency: string): string {
@@ -319,7 +358,7 @@ function Modal({
   title: string;
   description?: string;
   actions?: React.ReactNode;
-  size?: "default" | "large";
+  size?: "default" | "large" | "workspace";
   onClose: () => void;
   children: React.ReactNode;
   labelledBy: string;
@@ -340,7 +379,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "large" ? "max-w-3xl" : "max-w-lg"}`}
+        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "workspace" ? "max-w-6xl" : size === "large" ? "max-w-3xl" : "max-w-lg"}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -464,25 +503,338 @@ function PerformanceChart({ points, currency, compact = false }: { points: Perfo
   );
 }
 
-function CampaignAnalyticsModal({ campaign, currency, onClose }: { campaign: CampaignPerformance; currency: string; onClose: () => void }) {
+function emptyPerformance(currency: string, timezone = ""): PerformanceSummary {
+  return {
+    spend_micros: 0, impressions: 0, reach: 0, clicks: 0, link_clicks: 0,
+    conversions: 0, conversion_value_micros: 0, video_views: 0,
+    ctr: 0, cpc_micros: 0, cpm_micros: 0, cpa_micros: 0, roas: 0,
+    currency, timezone,
+  };
+}
+
+function entityPerformance(response: PerformanceResponse | null, id: string, currency: string): CampaignPerformance {
+  const points = (response?.data || []).filter((point) => point.entity_id === id || point.campaign_id === id);
+  const summary = points.length > 0 ? aggregatePerformance(points) : emptyPerformance(currency);
+  return {
+    campaign_id: id,
+    campaign_name: points.find((point) => point.entity_name || point.campaign_name)?.entity_name
+      || points.find((point) => point.campaign_name)?.campaign_name
+      || id,
+    points,
+    ...summary,
+  };
+}
+
+function storyField(ad: Ad | null, key: string): string {
+  const story = ad?.creative?.object_story_spec || {};
+  const data = story.link_data || story.video_data || {};
+  if (key === "image") return ad?.creative?.thumbnail_url || ad?.creative?.image_url || data.picture || data.image_url || "";
+  if (key === "destination") return data.link || data.call_to_action?.value?.link || "";
+  if (key === "cta") return data.call_to_action?.type || "";
+  return data[key] || "";
+}
+
+function StatusPill({ status }: { status: string }) {
+  return <span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(status)}`}>{status}</span>;
+}
+
+function CampaignWorkspace({
+  account,
+  campaign,
+  initialPerformance,
+  dateFrom,
+  dateTo,
+  callTool,
+  onCampaignChanged,
+  onClose,
+}: {
+  account: AdAccount;
+  campaign: Campaign;
+  initialPerformance: CampaignPerformance | null;
+  dateFrom: string;
+  dateTo: string;
+  callTool: (tool: string, args: Record<string, unknown>) => Promise<any>;
+  onCampaignChanged: (campaignID: string, status: string) => void;
+  onClose: () => void;
+}) {
+  const [level, setLevel] = useState<"campaign" | "ad_group" | "ad">("campaign");
+  const [adSets, setAdSets] = useState<AdSet[]>([]);
+  const [ads, setAds] = useState<Ad[]>([]);
+  const [selectedAdSetID, setSelectedAdSetID] = useState<string | null>(null);
+  const [selectedAdID, setSelectedAdID] = useState<string | null>(null);
+  const [campaignMetrics, setCampaignMetrics] = useState<PerformanceResponse | null>(() => initialPerformance ? {
+    data: initialPerformance.points,
+    summary: initialPerformance,
+    source: "cache",
+    freshness: { row_count: initialPerformance.points.length },
+  } : null);
+  const [adSetMetrics, setAdSetMetrics] = useState<PerformanceResponse | null>(null);
+  const [adMetrics, setAdMetrics] = useState<PerformanceResponse | null>(null);
+  const [loadingHierarchy, setLoadingHierarchy] = useState(true);
+  const [loadingMetrics, setLoadingMetrics] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const request = useRef(0);
+
+  const selectedAdSet = adSets.find((item) => item.id === selectedAdSetID) || null;
+  const selectedAd = ads.find((item) => item.id === selectedAdID) || null;
+  const currentID = level === "campaign" ? campaign.id : level === "ad_group" ? selectedAdSetID || "" : selectedAdID || "";
+  const currentMetrics = level === "campaign" ? campaignMetrics : level === "ad_group" ? adSetMetrics : adMetrics;
+  const performance = entityPerformance(currentMetrics, currentID, account.currency);
+  const currentEntity = level === "campaign" ? campaign : level === "ad_group" ? selectedAdSet : selectedAd;
+  const currentStatus = currentEntity ? entityStatus(currentEntity) : "UNKNOWN";
+
+  const performanceArgs = useCallback((metricLevel: "campaign" | "ad_group" | "ad", entityIDs: string[], refresh: boolean) => ({
+    ad_account_id: account.id,
+    level: metricLevel,
+    date_from: dateFrom,
+    date_to: dateTo,
+    granularity: "day",
+    entity_ids: entityIDs,
+    refresh,
+  }), [account.id, dateFrom, dateTo]);
+
+  const loadAds = useCallback(async (adSetID: string, refresh: boolean, requestID: number) => {
+    const list = await callTool("ad_list", { ad_account_id: account.id, adset_id: adSetID, limit: 100 });
+    if (request.current !== requestID) return;
+    const nextAds = (list.data || []) as Ad[];
+    setAds(nextAds);
+    setSelectedAdID((current) => current && nextAds.some((ad) => ad.id === current) ? current : nextAds[0]?.id || null);
+    if (nextAds.length === 0) {
+      setAdMetrics(null);
+      return;
+    }
+    const metrics = await callTool("performance_get", performanceArgs("ad", nextAds.map((ad) => ad.id), refresh));
+    if (request.current === requestID) setAdMetrics(metrics as PerformanceResponse);
+  }, [account.id, callTool, performanceArgs]);
+
+  const loadWorkspace = useCallback(async (refresh: boolean) => {
+    const requestID = ++request.current;
+    setLoadingHierarchy(true);
+    setLoadingMetrics(true);
+    setError(null);
+    try {
+      const [campaignResult, adSetList] = await Promise.all([
+        callTool("performance_get", performanceArgs("campaign", [campaign.id], refresh)),
+        callTool("adset_list", { ad_account_id: account.id, campaign_id: campaign.id, limit: 100 }),
+      ]);
+      if (request.current !== requestID) return;
+      setCampaignMetrics(campaignResult as PerformanceResponse);
+      const nextAdSets = (adSetList.data || []) as AdSet[];
+      setAdSets(nextAdSets);
+      const nextAdSetID = selectedAdSetID && nextAdSets.some((item) => item.id === selectedAdSetID)
+        ? selectedAdSetID
+        : nextAdSets[0]?.id || null;
+      setSelectedAdSetID(nextAdSetID);
+      if (nextAdSets.length === 0) {
+        setAdSetMetrics(null);
+        setAds([]);
+        setAdMetrics(null);
+        return;
+      }
+      const adSetResult = await callTool("performance_get", performanceArgs("ad_group", nextAdSets.map((item) => item.id), refresh));
+      if (request.current !== requestID) return;
+      setAdSetMetrics(adSetResult as PerformanceResponse);
+      if (nextAdSetID) await loadAds(nextAdSetID, refresh, requestID);
+    } catch (err) {
+      if (request.current === requestID) setError((err as Error).message);
+    } finally {
+      if (request.current === requestID) {
+        setLoadingHierarchy(false);
+        setLoadingMetrics(false);
+      }
+    }
+  }, [account.id, callTool, campaign.id, loadAds, performanceArgs, selectedAdSetID]);
+
+  useEffect(() => {
+    loadWorkspace(false);
+    return () => { request.current++; };
+  }, [campaign.id]);
+
+  const chooseAdSet = async (adSetID: string) => {
+    setSelectedAdSetID(adSetID);
+    setSelectedAdID(null);
+    setAds([]);
+    setAdMetrics(null);
+    setLevel("ad_group");
+    setLoadingHierarchy(true);
+    setError(null);
+    const requestID = ++request.current;
+    try {
+      await loadAds(adSetID, false, requestID);
+    } catch (err) {
+      if (request.current === requestID) setError((err as Error).message);
+    } finally {
+      if (request.current === requestID) setLoadingHierarchy(false);
+    }
+  };
+
+  const updateStatus = async () => {
+    if (!currentEntity || updating) return;
+    const target = currentStatus === "ACTIVE" ? "PAUSED" : "ACTIVE";
+    setUpdating(true);
+    setError(null);
+    try {
+      if (level === "campaign") {
+        await callTool(target === "ACTIVE" ? "campaign_resume" : "campaign_pause", {
+          ad_account_id: account.id,
+          campaign_id: campaign.id,
+        });
+        onCampaignChanged(campaign.id, target);
+      } else if (level === "ad_group" && selectedAdSet) {
+        await callTool("adset_update", { ad_account_id: account.id, adset_id: selectedAdSet.id, status: target });
+        setAdSets((current) => current.map((item) => item.id === selectedAdSet.id ? { ...item, status: target } : item));
+      } else if (level === "ad" && selectedAd) {
+        await callTool("ad_update", {
+          ad_account_id: account.id,
+          adset_id: selectedAd.adset_id || selectedAdSetID,
+          ad_id: selectedAd.id,
+          status: target,
+        });
+        setAds((current) => current.map((item) => item.id === selectedAd.id ? { ...item, status: target } : item));
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  const target = selectedAdSet?.targeting || {};
+  const countries = target.geo_locations?.countries || [];
+  const platforms = target.publisher_platforms || [];
+  const creativeImage = storyField(selectedAd, "image");
+  const destination = storyField(selectedAd, "destination");
+
   return (
     <Modal
-      title={campaign.campaign_name || campaign.campaign_id}
-      description={`Campaign ${campaign.campaign_id}`}
-      size="large"
+      title={campaign.name || campaign.id}
+      description={`${account.platform === "meta" ? "Meta Ads" : "Google Ads"} · ${dateFrom} to ${dateTo}`}
+      actions={(
+        <button type="button" onClick={() => loadWorkspace(true)} disabled={loadingMetrics} aria-label="Refresh campaign workspace" title="Refresh" className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50">↻</button>
+      )}
+      size="workspace"
       onClose={onClose}
-      labelledBy="ads-campaign-analytics-title"
+      labelledBy="ads-campaign-workspace-title"
     >
-      <KpiStrip summary={campaign} currency={currency} />
-      <div className="px-4 py-4">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <h3 className="text-xs font-medium uppercase text-text-dim">Daily performance</h3>
-          <span className="text-xs text-text-muted">{campaign.points.length} data point{campaign.points.length === 1 ? "" : "s"}</span>
-        </div>
-        <PerformanceChart points={campaign.points} currency={currency} compact />
+      <style>{`
+        .ads-campaign-workspace {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+          grid-template-rows: minmax(10rem, 42%) minmax(0, 1fr);
+        }
+        .ads-performance-layout,
+        .ads-creative-layout {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr);
+        }
+        @media (min-width: 768px) {
+          .ads-campaign-workspace {
+            grid-template-columns: 18rem minmax(0, 1fr);
+            grid-template-rows: minmax(0, 1fr);
+          }
+          .ads-creative-layout {
+            grid-template-columns: 12rem minmax(0, 1fr);
+          }
+        }
+        @media (min-width: 1024px) {
+          .ads-performance-layout {
+            grid-template-columns: minmax(0, 1fr) 18rem;
+          }
+        }
+      `}</style>
+      <div className="ads-campaign-workspace min-h-0" style={{ height: "min(76vh, 760px)" }}>
+        <aside className="min-h-0 overflow-y-auto border-b border-border md:border-b-0 md:border-r">
+          <div className="border-b border-border px-3 py-2 text-[11px] font-medium uppercase text-text-dim">Delivery hierarchy</div>
+          <button type="button" onClick={() => setLevel("campaign")} className={`flex w-full items-center gap-3 border-b border-border px-3 py-3 text-left ${level === "campaign" ? "bg-bg-input" : "hover:bg-bg-input/50"}`}>
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-border text-xs font-semibold text-text-muted">C</span>
+            <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium" title={campaign.name || campaign.id}>{campaign.name || campaign.id}</span><span className="block truncate text-xs text-text-dim">Campaign</span></span>
+            <StatusPill status={entityStatus(campaign)} />
+          </button>
+          <div className="border-b border-border bg-bg-input/40 px-3 py-2 text-[11px] font-medium uppercase text-text-dim">Ad sets · {adSets.length}</div>
+          {loadingHierarchy && adSets.length === 0 ? <p className="px-3 py-4 text-xs text-text-muted">Loading hierarchy...</p> : adSets.length === 0 ? <p className="px-3 py-4 text-xs text-text-muted">No ad sets</p> : adSets.map((item) => (
+            <button key={item.id} type="button" onClick={() => chooseAdSet(item.id)} className={`flex w-full items-center gap-3 border-b border-border px-3 py-3 text-left ${level === "ad_group" && selectedAdSetID === item.id ? "bg-bg-input" : "hover:bg-bg-input/50"}`}>
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-border text-xs font-semibold text-text-muted">S</span>
+              <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium" title={item.name || item.id}>{item.name || item.id}</span><span className="block truncate text-xs text-text-dim">{item.optimization_goal || "Ad set"}</span></span>
+              <StatusPill status={entityStatus(item)} />
+            </button>
+          ))}
+          {selectedAdSetID && <div className="border-b border-border bg-bg-input/40 px-3 py-2 text-[11px] font-medium uppercase text-text-dim">Ads · {ads.length}</div>}
+          {selectedAdSetID && (loadingHierarchy && ads.length === 0 ? <p className="px-3 py-4 text-xs text-text-muted">Loading ads...</p> : ads.length === 0 ? <p className="px-3 py-4 text-xs text-text-muted">No ads</p> : ads.map((ad) => (
+            <button key={ad.id} type="button" onClick={() => { setSelectedAdID(ad.id); setLevel("ad"); }} className={`flex w-full items-center gap-3 border-b border-border px-3 py-3 text-left ${level === "ad" && selectedAdID === ad.id ? "bg-bg-input" : "hover:bg-bg-input/50"}`}>
+              {storyField(ad, "image") ? <img src={storyField(ad, "image")} alt="" className="h-9 w-9 shrink-0 rounded border border-border object-cover" /> : <span className="grid h-9 w-9 shrink-0 place-items-center rounded border border-border text-xs font-semibold text-text-muted">A</span>}
+              <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium" title={ad.name || ad.id}>{ad.name || ad.id}</span><span className="block truncate text-xs text-text-dim">Ad</span></span>
+              <StatusPill status={entityStatus(ad)} />
+            </button>
+          )))}
+        </aside>
+
+        <section className="min-h-0 overflow-y-auto">
+          {error && <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">{error}</div>}
+          <header className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-3">
+            <div className="min-w-0">
+              <div className="mb-1 flex items-center gap-2 text-xs text-text-dim"><span>Campaign</span>{level !== "campaign" && <><span>/</span><span>Ad set</span></>}{level === "ad" && <><span>/</span><span>Ad</span></>}</div>
+              <h3 className="truncate text-base font-semibold text-text">{level === "campaign" ? campaign.name || campaign.id : level === "ad_group" ? selectedAdSet?.name || selectedAdSetID : selectedAd?.name || selectedAdID}</h3>
+              <p className="mt-0.5 truncate text-xs text-text-dim">{currentID}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <StatusPill status={currentStatus} />
+              <button type="button" onClick={updateStatus} disabled={updating || !currentEntity} className="h-8 rounded border border-border px-3 text-xs font-medium text-text hover:bg-bg-input disabled:opacity-50">{updating ? "Updating..." : currentStatus === "ACTIVE" ? "Pause" : "Activate"}</button>
+            </div>
+          </header>
+
+          <KpiStrip summary={performance} currency={account.currency} />
+
+          <div className="ads-performance-layout border-b border-border">
+            <div className="min-w-0 border-b border-border px-4 py-4 lg:border-b-0 lg:border-r">
+              <div className="mb-3 flex items-center justify-between gap-3"><h4 className="text-xs font-medium uppercase text-text-dim">Daily performance</h4><span className="text-xs text-text-muted">{performance.points.length} data point{performance.points.length === 1 ? "" : "s"}</span></div>
+              <PerformanceChart points={performance.points} currency={account.currency} compact />
+            </div>
+            <div className="divide-y divide-border text-sm">
+              {level === "campaign" && <>
+                <DetailRow label="Objective" value={campaign.objective || "-"} />
+                <DetailRow label="Daily budget" value={formatBudget(campaign.daily_budget, account.currency)} />
+                <DetailRow label="Ad sets" value={formatNumber(adSets.length)} />
+              </>}
+              {level === "ad_group" && selectedAdSet && <>
+                <DetailRow label="Optimization" value={selectedAdSet.optimization_goal || "-"} />
+                <DetailRow label="Billing" value={selectedAdSet.billing_event || "-"} />
+                <DetailRow label="Daily budget" value={formatBudget(selectedAdSet.daily_budget, account.currency)} />
+                <DetailRow label="Age" value={target.age_min || target.age_max ? `${target.age_min || "-"}–${target.age_max || "+"}` : "-"} />
+                <DetailRow label="Countries" value={countries.length > 0 ? countries.join(", ") : "-"} />
+                <DetailRow label="Placements" value={platforms.length > 0 ? platforms.join(", ") : "Automatic"} />
+                <DetailRow label="Ads" value={formatNumber(ads.length)} />
+              </>}
+              {level === "ad" && selectedAd && <>
+                <DetailRow label="Creative" value={selectedAd.creative?.name || selectedAd.creative?.id || "-"} />
+                <DetailRow label="Call to action" value={storyField(selectedAd, "cta") || "-"} />
+                <DetailRow label="Tracking rules" value={formatNumber(selectedAd.tracking_specs?.length || 0)} />
+              </>}
+              <DetailRow label="Provider status" value={currentEntity?.effective_status || currentStatus} />
+            </div>
+          </div>
+
+          {level === "ad" && selectedAd && (
+            <div className="ads-creative-layout gap-4 px-4 py-4">
+              <div className="aspect-[4/5] overflow-hidden rounded border border-border bg-bg-input">
+                {creativeImage ? <img src={creativeImage} alt="Ad creative" className="h-full w-full object-cover" /> : <div className="grid h-full place-items-center px-3 text-center text-xs text-text-muted">No creative preview</div>}
+              </div>
+              <div className="min-w-0 space-y-3">
+                <div><div className="text-[11px] font-medium uppercase text-text-dim">Headline</div><div className="mt-1 text-sm font-medium text-text">{storyField(selectedAd, "name") || selectedAd.name}</div></div>
+                <div><div className="text-[11px] font-medium uppercase text-text-dim">Primary text</div><p className="mt-1 whitespace-pre-wrap text-sm leading-5 text-text-muted">{storyField(selectedAd, "message") || "-"}</p></div>
+                {storyField(selectedAd, "description") && <div><div className="text-[11px] font-medium uppercase text-text-dim">Description</div><p className="mt-1 text-sm text-text-muted">{storyField(selectedAd, "description")}</p></div>}
+                {destination && <div><div className="text-[11px] font-medium uppercase text-text-dim">Destination</div><a href={destination} target="_blank" rel="noreferrer" className="mt-1 block truncate text-sm text-accent hover:underline">{destination}</a></div>}
+              </div>
+            </div>
+          )}
+        </section>
       </div>
     </Modal>
   );
+}
+
+function DetailRow({ label, value }: { label: string; value: string }) {
+  return <div className="flex items-start justify-between gap-3 px-4 py-2.5"><span className="text-xs text-text-dim">{label}</span><span className="min-w-0 truncate text-right text-xs font-medium text-text" style={{ maxWidth: "65%" }} title={value}>{value}</span></div>;
 }
 
 export default function AdsPanel({ projectId, installId }: NativePanelProps) {
@@ -577,6 +929,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     () => [...campaignPerformance.values()].sort((a, b) => b.spend_micros - a.spend_micros),
     [campaignPerformance],
   );
+  const selectedCampaign = selectedCampaignID ? campaigns.find((campaign) => campaign.id === selectedCampaignID) || null : null;
   const selectedCampaignPerformance = selectedCampaignID ? campaignPerformance.get(selectedCampaignID) || null : null;
 
   const appURL = useCallback((path: string) => {
@@ -1338,7 +1691,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                         return (
                           <tr key={campaign.id} className="hover:bg-bg-input/40">
                             <td className="px-4 py-3">
-                              <button type="button" disabled={!metrics} onClick={() => setSelectedCampaignID(campaign.id)} className="block max-w-full truncate text-left font-medium text-text enabled:hover:text-accent disabled:cursor-default" title={campaign.name}>{campaign.name || campaign.id}</button>
+                              <button type="button" onClick={() => setSelectedCampaignID(campaign.id)} className="block max-w-full truncate text-left font-medium text-text hover:text-accent" title={campaign.name}>{campaign.name || campaign.id}</button>
                               <div className="truncate text-xs text-text-dim">{campaign.objective || campaign.id}</div>
                             </td>
                             <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(status)}`}>{status}</span></td>
@@ -1649,10 +2002,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
         </Modal>
       )}
 
-      {selectedCampaignPerformance && selected && (
-        <CampaignAnalyticsModal
-          campaign={selectedCampaignPerformance}
-          currency={selected.currency}
+      {selectedCampaign && selected && (
+        <CampaignWorkspace
+          account={selected}
+          campaign={selectedCampaign}
+          initialPerformance={selectedCampaignPerformance}
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          callTool={callTool}
+          onCampaignChanged={(campaignID, status) => setCampaigns((current) => current.map((campaign) => campaign.id === campaignID ? { ...campaign, status } : campaign))}
           onClose={() => setSelectedCampaignID(null)}
         />
       )}

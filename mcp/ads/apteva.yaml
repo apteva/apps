@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.31
+version: 0.1.32
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -25,6 +25,9 @@ description: |
   v0.1.31 structures Meta provider failures, retries transient idempotent
   updates, and adds resumable leaf-to-root delivery activation with state
   verification for Meta and Google Ads.
+  v0.1.32 adds a full campaign workspace with campaign, ad-set, and ad
+  hierarchy navigation, level-specific analytics, creative inspection, and
+  generic Meta and Google delivery controls.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
