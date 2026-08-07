@@ -1,4 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const API = "/api/apps/ads";
 const PANEL_PROJECT_ID = new URL(import.meta.url).searchParams.get("project_id") || "";
@@ -42,6 +51,64 @@ interface Campaign {
   status?: string;
   effective_status?: string;
   daily_budget?: string;
+}
+
+interface PerformancePoint {
+  platform: string;
+  ad_account_id: number;
+  level: "account" | "campaign" | "ad_group" | "ad";
+  entity_id: string;
+  entity_name: string;
+  campaign_id: string;
+  campaign_name: string;
+  date: string;
+  currency: string;
+  timezone: string;
+  spend_micros: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  conversions: number;
+  conversion_value_micros: number;
+  video_views: number;
+  ctr: number;
+  cpc_micros: number;
+  cpm_micros: number;
+  cpa_micros: number;
+  roas: number;
+  fetched_at: string;
+}
+
+interface PerformanceSummary {
+  spend_micros: number;
+  impressions: number;
+  reach: number;
+  clicks: number;
+  link_clicks: number;
+  conversions: number;
+  conversion_value_micros: number;
+  video_views: number;
+  ctr: number;
+  cpc_micros: number;
+  cpm_micros: number;
+  cpa_micros: number;
+  roas: number;
+  currency: string;
+  timezone: string;
+}
+
+interface PerformanceResponse {
+  data: PerformancePoint[];
+  summary: PerformanceSummary;
+  source: "live" | "cache";
+  freshness: { fetched_at?: string; row_count: number };
+}
+
+interface CampaignPerformance extends PerformanceSummary {
+  campaign_id: string;
+  campaign_name: string;
+  points: PerformancePoint[];
 }
 
 interface PlatformInfo {
@@ -129,6 +196,79 @@ function formatBudget(value: string | undefined, currency: string): string {
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency || "USD"}`;
   }
+}
+
+function formatNumber(value: number, maximumFractionDigits = 0): string {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(Number(value) || 0);
+}
+
+function formatMoneyMicros(value: number, currency: string): string {
+  const amount = (Number(value) || 0) / 1_000_000;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "USD",
+      minimumFractionDigits: amount > 0 && amount < 1 ? 2 : 0,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  } catch {
+    return `${amount.toFixed(2)} ${currency || "USD"}`;
+  }
+}
+
+function isoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateRange(days: number): { from: string; to: string } {
+  const to = new Date();
+  const from = new Date(to);
+  from.setDate(from.getDate() - Math.max(0, days - 1));
+  return { from: isoDate(from), to: isoDate(to) };
+}
+
+export function previousDateRange(from: string, to: string): { from: string; to: string } {
+  const start = new Date(`${from}T12:00:00`);
+  const end = new Date(`${to}T12:00:00`);
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000) + 1;
+  const previousTo = new Date(start);
+  previousTo.setDate(previousTo.getDate() - 1);
+  const previousFrom = new Date(previousTo);
+  previousFrom.setDate(previousFrom.getDate() - days + 1);
+  return { from: isoDate(previousFrom), to: isoDate(previousTo) };
+}
+
+export function percentageChange(current: number, previous?: number): number | null {
+  if (previous == null || previous === 0) return current === 0 ? 0 : null;
+  return ((current - previous) / Math.abs(previous)) * 100;
+}
+
+export function aggregatePerformance(points: PerformancePoint[]): PerformanceSummary {
+  const summary: PerformanceSummary = {
+    spend_micros: 0, impressions: 0, reach: 0, clicks: 0, link_clicks: 0,
+    conversions: 0, conversion_value_micros: 0, video_views: 0,
+    ctr: 0, cpc_micros: 0, cpm_micros: 0, cpa_micros: 0, roas: 0,
+    currency: points[0]?.currency || "", timezone: points[0]?.timezone || "",
+  };
+  for (const point of points) {
+    summary.spend_micros += Number(point.spend_micros) || 0;
+    summary.impressions += Number(point.impressions) || 0;
+    summary.reach += Number(point.reach) || 0;
+    summary.clicks += Number(point.clicks) || 0;
+    summary.link_clicks += Number(point.link_clicks) || 0;
+    summary.conversions += Number(point.conversions) || 0;
+    summary.conversion_value_micros += Number(point.conversion_value_micros) || 0;
+    summary.video_views += Number(point.video_views) || 0;
+  }
+  summary.ctr = summary.impressions > 0 ? (summary.clicks / summary.impressions) * 100 : 0;
+  summary.cpc_micros = summary.clicks > 0 ? summary.spend_micros / summary.clicks : 0;
+  summary.cpm_micros = summary.impressions > 0 ? (summary.spend_micros * 1000) / summary.impressions : 0;
+  summary.cpa_micros = summary.conversions > 0 ? summary.spend_micros / summary.conversions : 0;
+  summary.roas = summary.spend_micros > 0 ? summary.conversion_value_micros / summary.spend_micros : 0;
+  return summary;
 }
 
 const RESOURCE_KIND_LABELS: Record<string, string> = {
@@ -228,12 +368,139 @@ function Modal({
   );
 }
 
+function KpiStrip({
+  summary,
+  previous,
+  currency,
+}: {
+  summary: PerformanceSummary;
+  previous?: PerformanceSummary | null;
+  currency: string;
+}) {
+  const metrics = [
+    { label: "Spend", value: summary.spend_micros, previous: previous?.spend_micros, display: formatMoneyMicros(summary.spend_micros, currency), direction: "neutral" },
+    { label: "Impressions", value: summary.impressions, previous: previous?.impressions, display: formatNumber(summary.impressions), direction: "neutral" },
+    { label: "Clicks", value: summary.clicks, previous: previous?.clicks, display: formatNumber(summary.clicks), direction: "up" },
+    { label: "CTR", value: summary.ctr, previous: previous?.ctr, display: `${formatNumber(summary.ctr, 2)}%`, direction: "up" },
+    { label: "CPC", value: summary.cpc_micros, previous: previous?.cpc_micros, display: formatMoneyMicros(summary.cpc_micros, currency), direction: "down" },
+    { label: "Conversions", value: summary.conversions, previous: previous?.conversions, display: formatNumber(summary.conversions, 2), direction: "up" },
+    { label: "CPA", value: summary.cpa_micros, previous: previous?.cpa_micros, display: formatMoneyMicros(summary.cpa_micros, currency), direction: "down" },
+    { label: "ROAS", value: summary.roas, previous: previous?.roas, display: `${formatNumber(summary.roas, 2)}x`, direction: "up" },
+  ];
+  return (
+    <div className="grid grid-cols-2 divide-x divide-y divide-border border-b border-border sm:grid-cols-4 xl:grid-cols-8 xl:divide-y-0">
+      {metrics.map((metric) => {
+        const change = percentageChange(metric.value, metric.previous);
+        const favorable = change != null && change !== 0 && (metric.direction === "up" ? change > 0 : metric.direction === "down" ? change < 0 : false);
+        const unfavorable = change != null && change !== 0 && (metric.direction === "up" ? change < 0 : metric.direction === "down" ? change > 0 : false);
+        return (
+          <div key={metric.label} className="min-w-0 px-3 py-3">
+            <div className="text-[11px] font-medium uppercase text-text-dim">{metric.label}</div>
+            <div className="mt-1 truncate text-lg font-semibold tabular-nums text-text" title={metric.display}>{metric.display}</div>
+            {previous && (
+              <div className={`mt-0.5 text-[11px] tabular-nums ${favorable ? "text-green" : unfavorable ? "text-red" : "text-text-dim"}`}>
+                {change == null ? "New" : `${change >= 0 ? "+" : ""}${formatNumber(change, 1)}%`}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PerformanceChart({ points, currency, compact = false }: { points: PerformancePoint[]; currency: string; compact?: boolean }) {
+  const byDate = new Map<string, { date: string; spend: number; clicks: number; conversions: number }>();
+  for (const point of points) {
+    const item = byDate.get(point.date) || { date: point.date, spend: 0, clicks: 0, conversions: 0 };
+    item.spend += (Number(point.spend_micros) || 0) / 1_000_000;
+    item.clicks += Number(point.clicks) || 0;
+    item.conversions += Number(point.conversions) || 0;
+    byDate.set(point.date, item);
+  }
+  const data = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  if (data.length === 0) {
+    return <div className="grid h-44 place-items-center text-sm text-text-muted">No delivery in this date range.</div>;
+  }
+  return (
+    <div
+      className="w-full min-w-0"
+      style={{ height: compact ? 208 : 288, minHeight: compact ? 208 : 288 }}
+      role="img"
+      aria-label="Daily spend and clicks"
+    >
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={0}
+        minHeight={compact ? 208 : 288}
+        initialDimension={{ width: compact ? 720 : 960, height: compact ? 208 : 288 }}
+      >
+        <AreaChart data={data} margin={{ top: 12, right: 12, bottom: 0, left: 0 }}>
+          <defs>
+            <linearGradient id="adsSpendFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#f97316" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="adsClicksFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.2} />
+              <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.01} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid vertical={false} stroke="#2a2a2a" strokeDasharray="3 3" />
+          <XAxis dataKey="date" tick={{ fill: "#8a8a8a", fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} tickFormatter={(value) => String(value).slice(5)} />
+          <YAxis yAxisId="money" tick={{ fill: "#8a8a8a", fontSize: 10 }} axisLine={false} tickLine={false} width={50} tickFormatter={(value) => formatNumber(Number(value), 0)} />
+          <YAxis yAxisId="count" orientation="right" hide />
+          <Tooltip
+            contentStyle={{ background: "#111", border: "1px solid #333", borderRadius: 4, color: "#e5e5e5", fontSize: 12 }}
+            formatter={(value, name) => name === "Spend" ? [formatMoneyMicros(Number(value) * 1_000_000, currency), name] : [formatNumber(Number(value), 2), name]}
+            labelFormatter={(label) => new Date(`${label}T12:00:00`).toLocaleDateString()}
+          />
+          <Area yAxisId="money" type="monotone" dataKey="spend" name="Spend" stroke="#f97316" strokeWidth={2} fill="url(#adsSpendFill)" dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+          <Area yAxisId="count" type="monotone" dataKey="clicks" name="Clicks" stroke="#3b82f6" strokeWidth={1.5} fill="url(#adsClicksFill)" dot={false} activeDot={{ r: 3 }} isAnimationActive={false} />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function CampaignAnalyticsModal({ campaign, currency, onClose }: { campaign: CampaignPerformance; currency: string; onClose: () => void }) {
+  return (
+    <Modal
+      title={campaign.campaign_name || campaign.campaign_id}
+      description={`Campaign ${campaign.campaign_id}`}
+      size="large"
+      onClose={onClose}
+      labelledBy="ads-campaign-analytics-title"
+    >
+      <KpiStrip summary={campaign} currency={currency} />
+      <div className="px-4 py-4">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <h3 className="text-xs font-medium uppercase text-text-dim">Daily performance</h3>
+          <span className="text-xs text-text-muted">{campaign.points.length} data point{campaign.points.length === 1 ? "" : "s"}</span>
+        </div>
+        <PerformanceChart points={campaign.points} currency={currency} compact />
+      </div>
+    </Modal>
+  );
+}
+
 export default function AdsPanel({ projectId, installId }: NativePanelProps) {
+  const initialRange = useMemo(() => dateRange(30), []);
   const scopedProject = projectId || PANEL_PROJECT_ID;
   const [accounts, setAccounts] = useState<AdAccount[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [activeView, setActiveView] = useState<"overview" | "campaigns">("overview");
+  const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
+  const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
+  const [loadingPerformance, setLoadingPerformance] = useState(false);
+  const [performanceError, setPerformanceError] = useState<string | null>(null);
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [selectedCampaignID, setSelectedCampaignID] = useState<string | null>(null);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
   const [loadingCampaigns, setLoadingCampaigns] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -262,6 +529,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [leadFormQuestions, setLeadFormQuestions] = useState<string[]>(["full_name", "email", "phone"]);
   const [error, setError] = useState<string | null>(null);
   const campaignRequest = useRef(0);
+  const performanceRequest = useRef(0);
   const copyFeedbackTimer = useRef<number | null>(null);
   const resourceRequest = useRef(0);
 
@@ -285,6 +553,31 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       error: accountContext.refresh_errors?.[kind],
     }));
   }, [accountContext]);
+  const campaignPerformance = useMemo(() => {
+    const grouped = new Map<string, PerformancePoint[]>();
+    for (const point of performance?.data || []) {
+      const id = point.campaign_id || point.entity_id;
+      if (!id) continue;
+      grouped.set(id, [...(grouped.get(id) || []), point]);
+    }
+    const result = new Map<string, CampaignPerformance>();
+    for (const [campaignID, points] of grouped) {
+      result.set(campaignID, {
+        campaign_id: campaignID,
+        campaign_name: points.find((point) => point.campaign_name || point.entity_name)?.campaign_name
+          || points.find((point) => point.entity_name)?.entity_name
+          || campaignID,
+        points,
+        ...aggregatePerformance(points),
+      });
+    }
+    return result;
+  }, [performance]);
+  const rankedCampaigns = useMemo(
+    () => [...campaignPerformance.values()].sort((a, b) => b.spend_micros - a.spend_micros),
+    [campaignPerformance],
+  );
+  const selectedCampaignPerformance = selectedCampaignID ? campaignPerformance.get(selectedCampaignID) || null : null;
 
   const appURL = useCallback((path: string) => {
     const url = new URL(`${API}${path}`, window.location.origin);
@@ -371,6 +664,42 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       if (request === campaignRequest.current) setLoadingCampaigns(false);
     }
   }, [callTool]);
+
+  const refreshPerformance = useCallback(async (account: AdAccount, refresh = true) => {
+    if (!dateFrom || !dateTo || dateFrom > dateTo) return;
+    const request = ++performanceRequest.current;
+    setLoadingPerformance(true);
+    setPerformanceError(null);
+    try {
+      const currentPromise = callTool("performance_get", {
+        ad_account_id: account.id,
+        level: "campaign",
+        date_from: dateFrom,
+        date_to: dateTo,
+        granularity: "day",
+        refresh,
+      });
+      const previous = previousDateRange(dateFrom, dateTo);
+      const comparisonPromise = compareEnabled
+        ? callTool("performance_get", {
+          ad_account_id: account.id,
+          level: "campaign",
+          date_from: previous.from,
+          date_to: previous.to,
+          granularity: "day",
+          refresh,
+        })
+        : Promise.resolve(null);
+      const [currentResult, comparisonResult] = await Promise.all([currentPromise, comparisonPromise]);
+      if (request !== performanceRequest.current) return;
+      setPerformance(currentResult as PerformanceResponse);
+      setComparison(comparisonResult as PerformanceResponse | null);
+    } catch (err) {
+      if (request === performanceRequest.current) setPerformanceError((err as Error).message);
+    } finally {
+      if (request === performanceRequest.current) setLoadingPerformance(false);
+    }
+  }, [callTool, compareEnabled, dateFrom, dateTo]);
 
   const loadAccountContext = useCallback(async (account: AdAccount, refresh = true) => {
     const request = ++resourceRequest.current;
@@ -492,6 +821,10 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   }, [refreshAccounts, refreshPlatforms]);
 
   useEffect(() => {
+    if (selected) refreshPerformance(selected, true);
+  }, [refreshPerformance, selected]);
+
+  useEffect(() => {
     const pending = Number(new URLSearchParams(window.location.search).get("pending"));
     if (pending > 0) resumeOAuth(pending);
   }, [resumeOAuth]);
@@ -512,6 +845,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     return () => {
       campaignRequest.current++;
+      performanceRequest.current++;
       resourceRequest.current++;
       if (copyFeedbackTimer.current !== null) window.clearTimeout(copyFeedbackTimer.current);
     };
@@ -519,6 +853,10 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
 
   const selectAccount = (account: AdAccount) => {
     setSelectedId(account.id);
+    setPerformance(null);
+    setComparison(null);
+    setPerformanceError(null);
+    setSelectedCampaignID(null);
     refreshCampaigns(account);
   };
 
@@ -674,8 +1012,11 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       await apiJSON(`/accounts/${disconnectTarget.id}`, { method: "DELETE" });
       if (selectedId === disconnectTarget.id) {
         campaignRequest.current++;
+        performanceRequest.current++;
         setSelectedId(null);
         setCampaigns([]);
+        setPerformance(null);
+        setComparison(null);
       }
       setDisconnectTarget(null);
       await Promise.all([refreshAccounts(), refreshPlatforms()]);
@@ -852,56 +1193,164 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => refreshCampaigns(selected)}
-                    disabled={loadingCampaigns}
-                    aria-label="Refresh campaigns"
-                    title="Refresh campaigns"
+                    onClick={() => Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
+                    disabled={loadingCampaigns || loadingPerformance}
+                    aria-label="Refresh account data"
+                    title="Refresh account data"
                     className="grid h-9 w-9 place-items-center rounded border border-border text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
                   >
                     ↻
                   </button>
                 </div>
               </header>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
+                <div className="inline-flex h-8 rounded border border-border bg-bg-input p-0.5">
+                  {(["overview", "campaigns"] as const).map((view) => (
+                    <button
+                      key={view}
+                      type="button"
+                      onClick={() => setActiveView(view)}
+                      className={`min-w-24 rounded px-3 text-xs font-medium capitalize ${activeView === view ? "bg-bg-card text-text shadow-sm" : "text-text-muted hover:text-text"}`}
+                    >
+                      {view}
+                    </button>
+                  ))}
+                </div>
+                <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+                  <div className="col-span-3 inline-flex h-8 justify-self-end rounded border border-border p-0.5 sm:col-auto sm:justify-self-auto">
+                    {[7, 30, 90].map((days) => (
+                      <button
+                        key={days}
+                        type="button"
+                        onClick={() => {
+                          const range = dateRange(days);
+                          setDateFrom(range.from);
+                          setDateTo(range.to);
+                        }}
+                        className="w-10 rounded text-xs text-text-muted hover:bg-bg-input hover:text-text"
+                      >
+                        {days}d
+                      </button>
+                    ))}
+                  </div>
+                  <input type="date" value={dateFrom} max={dateTo} onChange={(event) => setDateFrom(event.target.value)} aria-label="Report start date" className="h-8 min-w-0 rounded border border-border bg-bg-input px-2 text-xs text-text outline-none focus:border-accent" />
+                  <span className="text-xs text-text-dim">to</span>
+                  <input type="date" value={dateTo} min={dateFrom} max={isoDate(new Date())} onChange={(event) => setDateTo(event.target.value)} aria-label="Report end date" className="h-8 min-w-0 rounded border border-border bg-bg-input px-2 text-xs text-text outline-none focus:border-accent" />
+                  <label className="col-span-3 flex h-8 items-center justify-self-end gap-2 rounded border border-border px-2.5 text-xs text-text-muted sm:col-auto sm:justify-self-auto">
+                    <input type="checkbox" checked={compareEnabled} onChange={(event) => setCompareEnabled(event.target.checked)} className="h-3.5 w-3.5 accent-accent" />
+                    Compare
+                  </label>
+                </div>
+              </div>
+              {performanceError && (
+                <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{performanceError}</div>
+              )}
               <div className="min-h-0 flex-1 overflow-auto">
-                {loadingCampaigns ? (
+                {activeView === "overview" ? (
+                  loadingPerformance && !performance ? (
+                    <p className="p-4 text-sm text-text-muted">Loading performance...</p>
+                  ) : performance ? (
+                    <div className={loadingPerformance ? "opacity-70" : ""}>
+                      <KpiStrip summary={performance.summary} previous={comparison?.summary} currency={selected.currency} />
+                      <section className="border-b border-border px-4 py-4">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <h3 className="text-xs font-medium uppercase text-text-dim">Daily delivery</h3>
+                            <p className="mt-0.5 text-xs text-text-muted">Spend and clicks in {selected.timezone || "the account timezone"}</p>
+                          </div>
+                          <div className="flex items-center gap-3 text-xs text-text-muted">
+                            <span><span className="mr-1 inline-block h-2 w-2 bg-accent" />Spend</span>
+                            <span><span className="mr-1 inline-block h-2 w-2 bg-blue" />Clicks</span>
+                            {performance.freshness?.fetched_at && <span>Updated {new Date(performance.freshness.fetched_at).toLocaleString()}</span>}
+                          </div>
+                        </div>
+                        <PerformanceChart points={performance.data} currency={selected.currency} />
+                      </section>
+                      <section>
+                        <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-2">
+                          <h3 className="text-xs font-medium uppercase text-text-dim">Top campaigns</h3>
+                          <button type="button" onClick={() => setActiveView("campaigns")} className="text-xs font-medium text-accent hover:underline">View all</button>
+                        </div>
+                        {rankedCampaigns.length === 0 ? (
+                          <p className="px-4 py-8 text-center text-sm text-text-muted">No campaign delivery in this range.</p>
+                        ) : (
+                          <table className="w-full table-fixed text-sm" style={{ minWidth: "52rem" }}>
+                            <thead className="bg-bg-input text-xs text-text-dim">
+                              <tr>
+                                <th className="w-2/5 px-4 py-2 text-left font-medium">Campaign</th>
+                                <th className="px-3 py-2 text-right font-medium">Spend</th>
+                                <th className="px-3 py-2 text-right font-medium">Clicks</th>
+                                <th className="px-3 py-2 text-right font-medium">CPC</th>
+                                <th className="px-3 py-2 text-right font-medium">Conversions</th>
+                                <th className="px-4 py-2 text-right font-medium">CPA</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-border">
+                              {rankedCampaigns.slice(0, 8).map((item) => (
+                                <tr key={item.campaign_id} className="hover:bg-bg-input/40">
+                                  <td className="px-4 py-2.5">
+                                    <button type="button" onClick={() => setSelectedCampaignID(item.campaign_id)} className="block max-w-full truncate text-left font-medium text-text hover:text-accent">{item.campaign_name}</button>
+                                  </td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.spend_micros, selected.currency)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatNumber(item.clicks)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.cpc_micros, selected.currency)}</td>
+                                  <td className="px-3 py-2.5 text-right tabular-nums">{formatNumber(item.conversions, 2)}</td>
+                                  <td className="px-4 py-2.5 text-right tabular-nums">{formatMoneyMicros(item.cpa_micros, selected.currency)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                      </section>
+                    </div>
+                  ) : (
+                    <div className="grid min-h-64 place-items-center p-6 text-center">
+                      <div><h3 className="text-sm font-medium">Performance unavailable</h3><p className="mt-1 text-sm text-text-muted">Refresh the account to load provider analytics.</p></div>
+                    </div>
+                  )
+                ) : loadingCampaigns ? (
                   <p className="p-4 text-sm text-text-muted">Loading campaigns...</p>
                 ) : campaigns.length === 0 ? (
                   <div className="grid min-h-64 place-items-center p-6 text-center">
-                    <div>
-                      <h3 className="text-sm font-medium">No campaigns found</h3>
-                      <p className="mt-1 text-sm text-text-muted">This account has no campaigns to display.</p>
-                    </div>
+                    <div><h3 className="text-sm font-medium">No campaigns found</h3><p className="mt-1 text-sm text-text-muted">This account has no campaigns to display.</p></div>
                   </div>
                 ) : (
-                  <table className="w-full table-fixed text-sm" style={{ minWidth: "48rem" }}>
+                  <table className="w-full table-fixed text-sm" style={{ minWidth: "76rem" }}>
                     <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim">
                       <tr>
-                        <th className="w-2/5 px-4 py-2 text-left font-medium">Campaign</th>
-                        <th className="w-1/5 px-3 py-2 text-left font-medium">Objective</th>
-                        <th className="w-28 px-3 py-2 text-left font-medium">Status</th>
-                        <th className="w-36 px-3 py-2 text-right font-medium">Daily budget</th>
+                        <th className="w-64 px-4 py-2 text-left font-medium">Campaign</th>
+                        <th className="w-24 px-3 py-2 text-left font-medium">Status</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Spend</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Impressions</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">Clicks</th>
+                        <th className="w-20 px-3 py-2 text-right font-medium">CTR</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">CPC</th>
+                        <th className="w-28 px-3 py-2 text-right font-medium">Conversions</th>
+                        <th className="w-24 px-3 py-2 text-right font-medium">CPA</th>
+                        <th className="w-32 px-3 py-2 text-right font-medium">Daily budget</th>
                         <th className="w-24 px-3 py-2 text-right font-medium">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
                       {campaigns.map((campaign) => {
                         const status = displayStatus(campaign);
+                        const metrics = campaignPerformance.get(campaign.id);
                         return (
                           <tr key={campaign.id} className="hover:bg-bg-input/40">
                             <td className="px-4 py-3">
-                              <div className="truncate font-medium" title={campaign.name}>{campaign.name || campaign.id}</div>
-                              <div className="truncate font-mono text-xs text-text-dim">{campaign.id}</div>
+                              <button type="button" disabled={!metrics} onClick={() => setSelectedCampaignID(campaign.id)} className="block max-w-full truncate text-left font-medium text-text enabled:hover:text-accent disabled:cursor-default" title={campaign.name}>{campaign.name || campaign.id}</button>
+                              <div className="truncate text-xs text-text-dim">{campaign.objective || campaign.id}</div>
                             </td>
-                            <td className="truncate px-3 py-3 text-text-muted">{campaign.objective || "-"}</td>
-                            <td className="px-3 py-3">
-                              <span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(status)}`}>{status}</span>
-                            </td>
+                            <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(status)}`}>{status}</span></td>
+                            <td className="px-3 py-3 text-right tabular-nums">{metrics ? formatMoneyMicros(metrics.spend_micros, selected.currency) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.impressions) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.clicks) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? `${formatNumber(metrics.ctr, 2)}%` : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatMoneyMicros(metrics.cpc_micros, selected.currency) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatNumber(metrics.conversions, 2) : "-"}</td>
+                            <td className="px-3 py-3 text-right tabular-nums text-text-muted">{metrics ? formatMoneyMicros(metrics.cpa_micros, selected.currency) : "-"}</td>
                             <td className="px-3 py-3 text-right tabular-nums text-text-muted">{formatBudget(campaign.daily_budget, selected.currency)}</td>
-                            <td className="px-3 py-3 text-right">
-                              <button type="button" onClick={() => toggleCampaign(selected, campaign)} className="h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">
-                                {status === "ACTIVE" ? "Pause" : "Resume"}
-                              </button>
-                            </td>
+                            <td className="px-3 py-3 text-right"><button type="button" onClick={() => toggleCampaign(selected, campaign)} className="h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">{status === "ACTIVE" ? "Pause" : "Resume"}</button></td>
                           </tr>
                         );
                       })}
@@ -1198,6 +1647,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
             </footer>
           </form>
         </Modal>
+      )}
+
+      {selectedCampaignPerformance && selected && (
+        <CampaignAnalyticsModal
+          campaign={selectedCampaignPerformance}
+          currency={selected.currency}
+          onClose={() => setSelectedCampaignID(null)}
+        />
       )}
 
       {disconnectTarget && (

@@ -9,11 +9,11 @@
 //     dance, the platform 302s back to /accounts/oauth_done; we look up
 //     the matching pending_accounts row and the user picks an ad account
 //     from the connected platform's account list.
-//   - All campaign / ad set / ad / creative / audience state lives
-//     upstream. Locally we only retain account bindings and uploaded-asset
-//     ownership records needed to enforce project boundaries. Each tool
-//     resolves a local ad_account id to {connection_id, native_account_id},
-//     then proxies through to the integration via ExecuteIntegrationTool.
+//   - Campaign configuration remains upstream. Locally we retain account
+//     bindings, discovered resource ownership, normalized entity snapshots,
+//     and daily performance facts for fast reporting and history. Each
+//     mutation still resolves a local ad_account id to its provider account
+//     and proxies through ExecuteIntegrationTool.
 //   - platform_options is the escape hatch: any field the platform
 //     supports but we haven't unified gets passed through. This keeps
 //     the unified API thin and honest about platform differences
@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.30
+version: 0.1.31
 scopes: [project, global]
 requires:
   permissions:
@@ -55,6 +55,9 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: performance_collector
+      schedule: "@every 30m"
 db:
   driver: sqlite
   path: /data/ads.db
@@ -231,7 +234,10 @@ var platformAdapters = map[string]platformAdapter{
 
 var globalCtx *sdk.AppCtx
 
-type App struct{}
+type App struct {
+	retryDelay func(retry int) time.Duration
+	sleep      func(ctx *sdk.AppCtx, delay time.Duration) bool
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -250,9 +256,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "performance_collector",
+		Schedule: "@every 30m",
+		Run:      a.runPerformanceCollector,
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func main() { sdk.Run(&App{}) }
@@ -580,6 +592,27 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolCampaignPerformanceGet,
 		},
 		{
+			Name: "performance_get",
+			Description: "Get normalized advertising performance for one project-owned account. " +
+				"Supports account, campaign, ad_group, and ad reporting with integer micros for money, " +
+				"derived CTR/CPC/CPM/CPA/ROAS, local caching, and bounded live refreshes. " +
+				"Args: ad_account_id, level?, date_from, date_to, granularity? (day), entity_ids?, refresh? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"level":         map[string]any{"type": "string", "enum": []string{"account", "campaign", "ad_group", "ad"}, "default": "campaign"},
+				"date_from":     map[string]any{"type": "string", "pattern": `^\d{4}-\d{2}-\d{2}$`},
+				"date_to":       map[string]any{"type": "string", "pattern": `^\d{4}-\d{2}-\d{2}$`},
+				"granularity":   map[string]any{"type": "string", "enum": []string{"day"}, "default": "day"},
+				"entity_ids": map[string]any{
+					"type":     "array",
+					"maxItems": 100,
+					"items":    map[string]any{"type": "string", "pattern": `^\d+$`},
+				},
+				"refresh": map[string]any{"type": "boolean", "default": true},
+			}, []string{"ad_account_id", "date_from", "date_to"}),
+			Handler: a.toolPerformanceGet,
+		},
+		{
 			Name:        "campaign_update",
 			Description: "Update a campaign. Args: ad_account_id, campaign_id, plus any of: name, status (PAUSED|ACTIVE), daily_budget_cents, lifetime_budget_cents, bid_strategy, start_time, end_time, platform_options.",
 			InputSchema: schemaObject(map[string]any{
@@ -613,6 +646,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"campaign_id":   map[string]any{"type": "string"},
 			}, []string{"ad_account_id", "campaign_id"}),
 			Handler: a.toolCampaignResume,
+		},
+		{
+			Name:        "delivery_activate",
+			Description: "Safely activate one complete delivery hierarchy. Validates that the ad belongs to the ad set/ad group and campaign, then activates ad, ad set/ad group, and campaign in that order. The operation is resumable and returns each provider state. Args: ad_account_id, campaign_id, adset_id, ad_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"adset_id":      map[string]any{"type": "string"},
+				"ad_id":         map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "campaign_id", "adset_id", "ad_id"}),
+			Handler: a.toolDeliveryActivate,
 		},
 		{
 			Name:        "campaign_delete",
@@ -1293,6 +1337,15 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if _, err := tx.Exec(`DELETE FROM ad_resources WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(`DELETE FROM ad_metric_points WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM ad_entities WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM ad_sync_state WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM ad_accounts WHERE id=? AND project_id=?`, id, pid); err != nil {
 		return nil, err
 	}
@@ -1572,32 +1625,7 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 }
 
 func (a *App) execIntegrationTool(ctx *sdk.AppCtx, acct *adAccount, tool string, input map[string]any) (any, map[string]any) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnectionID, tool, input)
-	if err != nil {
-		return nil, mcpError(tool + ": " + err.Error())
-	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		out := mcpError(tool + ": upstream non-2xx: " + body)
-		if res != nil {
-			out["provider_status"] = res.Status
-		}
-		if providerRateLimited(res, body) {
-			out["code"] = "provider_rate_limited"
-			out["retryable"] = true
-		}
-		return nil, out
-	}
-	var parsed any
-	if len(res.Data) > 0 {
-		if err := json.Unmarshal(res.Data, &parsed); err != nil {
-			return nil, mcpError(tool + ": parse: " + err.Error())
-		}
-	}
-	return parsed, nil
+	return a.execIntegrationToolWithPolicy(ctx, acct, tool, input, integrationExecPolicy{})
 }
 
 func providerRateLimited(res *sdk.ExecuteResult, body string) bool {
@@ -2136,7 +2164,7 @@ func (metaAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		input["stop_time"] = v
 	}
 	mergeOptions(input, args)
-	return a.execOrErr(ctx, acct, def.CampaignUpdateTool, input)
+	return a.execUpdateOrErr(ctx, acct, def.CampaignUpdateTool, input)
 }
 
 func (metaAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2271,7 +2299,7 @@ func (metaAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 		input["targeting"] = v
 	}
 	mergeOptions(input, args)
-	return a.execOrErr(ctx, acct, def.AdSetUpdateTool, input)
+	return a.execUpdateOrErr(ctx, acct, def.AdSetUpdateTool, input)
 }
 
 func (metaAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2341,7 +2369,7 @@ func (metaAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 		input["creative"] = map[string]any{"creative_id": v}
 	}
 	mergeOptions(input, args)
-	return a.execOrErr(ctx, acct, def.AdUpdateTool, input)
+	return a.execUpdateOrErr(ctx, acct, def.AdUpdateTool, input)
 }
 
 func (metaAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -2922,7 +2950,7 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 			return mcpError("could not resolve the campaign budget; pass platform_options.campaignBudgetResource"), nil
 		}
 		var budgetErr map[string]any
-		budgetOut, budgetErr = a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
+		budgetOut, budgetErr = a.execIdempotentUpdate(ctx, acct, "budget_mutate", map[string]any{
 			"customer_id": acct.NativeAccountID,
 			"operations": []any{map[string]any{
 				"update": map[string]any{
@@ -2972,7 +3000,7 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		}
 		return mcpError("no google campaign fields to update"), nil
 	}
-	campaignOut, err := a.execOrErr(ctx, acct, def.CampaignUpdateTool, map[string]any{
+	campaignOut, err := a.execUpdateOrErr(ctx, acct, def.CampaignUpdateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations": []any{map[string]any{
 			"update":     update,
@@ -3081,7 +3109,7 @@ func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 	if len(fields) == 0 {
 		return mcpError("no google ad group fields to update"), nil
 	}
-	return a.execOrErr(ctx, acct, def.AdSetUpdateTool, map[string]any{
+	return a.execUpdateOrErr(ctx, acct, def.AdSetUpdateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"update": update, "updateMask": strings.Join(fields, ",")}},
 	})

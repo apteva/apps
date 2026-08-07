@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.30
+version: 0.1.31
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -22,6 +22,9 @@ description: |
   fallback when image-library upload is unavailable.
   v0.1.30 archives Meta lead forms through the supported status update rather
   than an unsupported Graph DELETE request.
+  v0.1.31 structures Meta provider failures, retries transient idempotent
+  updates, and adds resumable leaf-to-root delivery activation with state
+  verification for Meta and Google Ads.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -47,6 +50,9 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: performance_collector
+      schedule: "@every 30m"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
@@ -66,9 +72,11 @@ provides:
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
     - { name: campaign_performance_get,     description: "Get normalized daily campaign spend and performance for a bounded date range." }
+    - { name: performance_get,              description: "Get cached or fresh normalized account, campaign, ad-group, or ad performance with derived advertising KPIs." }
     - { name: campaign_update,              description: "Update campaign fields (name, status, budget, schedule, bid strategy)." }
     - { name: campaign_pause,               description: "Convenience: set campaign status=PAUSED." }
     - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
+    - { name: delivery_activate,             description: "Safely and resumably activate an ad, its ad set/ad group, and its campaign, returning each resulting provider state." }
     - { name: campaign_delete,              description: "Delete a campaign (and its ad sets / ads upstream)." }
     - { name: adset_create,                 description: "Create an ad set under a campaign. Accepts targeting passthrough via platform_options." }
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
