@@ -146,8 +146,17 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   meta_lead_form: "Meta lead form",
   meta_audience: "Meta audience",
   google_conversion_action: "Google conversion action",
+  google_lead_form: "Google lead form",
   google_user_list: "Google audience",
 };
+
+const LEAD_QUESTION_OPTIONS = [
+  { type: "full_name", label: "Full name" },
+  { type: "email", label: "Email" },
+  { type: "phone", label: "Phone" },
+  { type: "company_name", label: "Company" },
+  { type: "job_title", label: "Job title" },
+];
 
 function resourcePurpose(resource: AdResource): string | null {
   if (resource.provider_type === "facebook_page") return "publishing_identity";
@@ -242,6 +251,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [loadingResources, setLoadingResources] = useState(false);
   const [savingResourceId, setSavingResourceId] = useState<number | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  const [leadFormOpen, setLeadFormOpen] = useState(false);
+  const [creatingLeadForm, setCreatingLeadForm] = useState(false);
+  const [leadFormName, setLeadFormName] = useState("");
+  const [leadFormPrivacyURL, setLeadFormPrivacyURL] = useState("");
+  const [leadFormFollowUpURL, setLeadFormFollowUpURL] = useState("");
+  const [leadFormBusinessName, setLeadFormBusinessName] = useState("");
+  const [leadFormCampaignID, setLeadFormCampaignID] = useState("");
+  const [leadFormHigherIntent, setLeadFormHigherIntent] = useState(true);
+  const [leadFormQuestions, setLeadFormQuestions] = useState<string[]>(["full_name", "email", "phone"]);
   const [error, setError] = useState<string | null>(null);
   const campaignRequest = useRef(0);
   const copyFeedbackTimer = useRef<number | null>(null);
@@ -380,7 +398,54 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     setAccountContext(null);
     setResourceError(null);
     setLoadingResources(false);
+    setLeadFormOpen(false);
   }, []);
+
+  const openLeadFormCreate = () => {
+    setLeadFormName("");
+    setLeadFormPrivacyURL("");
+    setLeadFormFollowUpURL("");
+    setLeadFormBusinessName("");
+    setLeadFormCampaignID("");
+    setLeadFormHigherIntent(true);
+    setLeadFormQuestions(["full_name", "email", "phone"]);
+    setResourceError(null);
+    setLeadFormOpen(true);
+  };
+
+  const toggleLeadQuestion = (type: string) => {
+    setLeadFormQuestions((current) => current.includes(type)
+      ? current.filter((item) => item !== type)
+      : [...current, type]);
+  };
+
+  const createLeadForm = async () => {
+    if (!setupAccount || !leadFormName.trim() || !leadFormPrivacyURL.trim() || leadFormQuestions.length === 0) return;
+    setCreatingLeadForm(true);
+    setResourceError(null);
+    try {
+      await callTool("lead_form_create", {
+        ad_account_id: setupAccount.id,
+        name: leadFormName.trim(),
+        privacy_policy_url: leadFormPrivacyURL.trim(),
+        follow_up_url: leadFormFollowUpURL.trim() || undefined,
+        business_name: leadFormBusinessName.trim() || undefined,
+        headline: leadFormName.trim(),
+        description: "Request more information",
+        call_to_action: "get_quote",
+        call_to_action_description: "Submit the form to get in touch",
+        higher_intent: leadFormHigherIntent,
+        campaign_id: leadFormCampaignID || undefined,
+        questions: leadFormQuestions.map((type) => ({ type })),
+      });
+      setLeadFormOpen(false);
+      await loadAccountContext(setupAccount, true);
+    } catch (err) {
+      setResourceError((err as Error).message);
+    } finally {
+      setCreatingLeadForm(false);
+    }
+  };
 
   const setResourceDefault = async (resource: AdResource) => {
     if (!setupAccount) return;
@@ -976,7 +1041,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
         </Modal>
       )}
 
-      {setupAccount && (
+      {setupAccount && !leadFormOpen && (
         <Modal
           title="Account resources"
           description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
@@ -1014,7 +1079,18 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                       <h3 className="text-xs font-medium uppercase text-text-dim">
                         {RESOURCE_KIND_LABELS[group.kind] || group.kind}
                       </h3>
-                      <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
+                        {group.kind === "lead_form" && (
+                          <button
+                            type="button"
+                            onClick={openLeadFormCreate}
+                            className="h-7 rounded border border-border px-2.5 text-xs font-medium text-text hover:bg-bg-card"
+                          >
+                            Create
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {group.error ? (
                       <p className="px-4 py-3 text-xs text-red">{group.error}</p>
@@ -1055,6 +1131,72 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               </div>
             )}
           </div>
+        </Modal>
+      )}
+
+      {setupAccount && leadFormOpen && (
+        <Modal
+          title="Create lead form"
+          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+          size="large"
+          onClose={() => !creatingLeadForm && setLeadFormOpen(false)}
+          labelledBy="ads-lead-form-title"
+        >
+          <form onSubmit={(event) => { event.preventDefault(); createLeadForm(); }}>
+            {resourceError && (
+              <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">{resourceError}</div>
+            )}
+            <div className="grid gap-4 px-4 py-4 md:grid-cols-2">
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+                Form name
+                <input required value={leadFormName} onChange={(event) => setLeadFormName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              {setupAccount.platform === "google" && (
+                <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+                  Business name
+                  <input required value={leadFormBusinessName} onChange={(event) => setLeadFormBusinessName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+                </label>
+              )}
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                Privacy policy URL
+                <input required type="url" value={leadFormPrivacyURL} onChange={(event) => setLeadFormPrivacyURL(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                Follow-up URL
+                <input type="url" value={leadFormFollowUpURL} onChange={(event) => setLeadFormFollowUpURL(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" />
+              </label>
+              {setupAccount.platform === "google" && campaigns.length > 0 && selectedId === setupAccount.id && (
+                <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">
+                  Campaign
+                  <select value={leadFormCampaignID} onChange={(event) => setLeadFormCampaignID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">
+                    <option value="">Not attached</option>
+                    {campaigns.map((campaign) => <option key={campaign.id} value={campaign.id}>{campaign.name || campaign.id}</option>)}
+                  </select>
+                </label>
+              )}
+              <fieldset className="grid gap-2 md:col-span-2">
+                <legend className="mb-1 text-xs font-medium text-text-muted">Questions</legend>
+                <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3">
+                  {LEAD_QUESTION_OPTIONS.map((question) => (
+                    <label key={question.type} className="flex h-9 items-center gap-2 rounded border border-border bg-bg-input px-3 text-sm text-text">
+                      <input type="checkbox" checked={leadFormQuestions.includes(question.type)} onChange={() => toggleLeadQuestion(question.type)} className="h-4 w-4 accent-accent" />
+                      {question.label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+              <label className="flex h-9 items-center gap-2 text-sm text-text md:col-span-2">
+                <input type="checkbox" checked={leadFormHigherIntent} onChange={(event) => setLeadFormHigherIntent(event.target.checked)} className="h-4 w-4 accent-accent" />
+                Higher intent
+              </label>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" disabled={creatingLeadForm} onClick={() => setLeadFormOpen(false)} className="h-9 rounded border border-border px-3 text-sm text-text hover:bg-bg-input disabled:opacity-50">Cancel</button>
+              <button type="submit" disabled={creatingLeadForm || !leadFormName.trim() || !leadFormPrivacyURL.trim() || leadFormQuestions.length === 0 || (setupAccount.platform === "google" && !leadFormBusinessName.trim())} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50">
+                {creatingLeadForm ? "Creating..." : "Create form"}
+              </button>
+            </footer>
+          </form>
         </Modal>
       )}
 

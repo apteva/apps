@@ -179,6 +179,9 @@ func TestGoogleResourceDiscoveryPaginatesAndKeepsQueriesScoped(t *testing.T) {
 			}
 			return executeJSON(`{"results":[{"conversionAction":{"id":"12","name":"Lead","status":"ENABLED","type":"WEBPAGE","category":"SUBMIT_LEAD_FORM"}}]}`), nil
 		}
+		if strings.Contains(query, "FROM asset") {
+			return executeJSON(`{"results":[{"asset":{"id":"31","resourceName":"customers/1234567890/assets/31","name":"Quote form","type":"LEAD_FORM","leadFormAsset":{"businessName":"Example","headline":"Get a quote","privacyPolicyUrl":"https://example.com/privacy"}}}]}`), nil
+		}
 		if !strings.Contains(query, "user_list") {
 			t.Fatalf("unexpected GAQL query: %s", query)
 		}
@@ -194,10 +197,14 @@ func TestGoogleResourceDiscoveryPaginatesAndKeepsQueriesScoped(t *testing.T) {
 	}
 	context := out.(map[string]any)
 	resources := context["resources"].([]map[string]any)
-	if len(resources) != 3 || conversionPages != 2 {
+	if len(resources) != 4 || conversionPages != 2 {
 		t.Fatalf("unexpected Google resources or pagination: resources=%#v pages=%d", resources, conversionPages)
 	}
 	conversion := resourceByProviderType(t, ctx, accountID, "google_conversion_action")
+	leadForm := resourceByProviderType(t, ctx, accountID, "google_lead_form")
+	if leadForm.Kind != resourceLeadForm || leadForm.NativeID != "customers/1234567890/assets/31" {
+		t.Fatalf("Google lead form was not normalized: %#v", leadForm)
+	}
 	if conversion.Status != "active" {
 		t.Fatalf("Google status was not normalized: %#v", conversion)
 	}

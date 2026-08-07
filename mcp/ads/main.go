@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.28
+version: 0.1.29
 scopes: [project, global]
 requires:
   permissions:
@@ -48,12 +48,10 @@ requires:
     - platform.connections.execute
     - platform.oauth.start
     - platform.apps.call
-  integrations:
-    - role: storage
-      kind: app
-      compatible_app_names: [storage]
-      capabilities: [files.read]
-      required: false
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      reason: "Resolve stored image and video files for creative uploads."
 provides:
   http_routes:
     - prefix: /
@@ -493,6 +491,36 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolResourceSetDefault,
 		},
 		{
+			Name:        "lead_form_create",
+			Description: "Create a normalized lead form. Meta resolves a Facebook Page automatically; Google creates a reusable lead-form asset and can attach it to campaign_id.",
+			InputSchema: leadFormCreateSchema(),
+			Handler:     a.toolLeadFormCreate,
+		},
+		{
+			Name:        "lead_form_list",
+			Description: "List normalized lead forms for an ad account and optionally refresh them from the provider.",
+			InputSchema: leadFormListSchema(),
+			Handler:     a.toolLeadFormList,
+		},
+		{
+			Name:        "lead_form_get",
+			Description: "Get a normalized lead form by project-scoped resource id.",
+			InputSchema: leadFormGetSchema(),
+			Handler:     a.toolLeadFormGet,
+		},
+		{
+			Name:        "lead_form_update",
+			Description: "Update provider-supported fields on a normalized lead form.",
+			InputSchema: leadFormUpdateSchema(),
+			Handler:     a.toolLeadFormUpdate,
+		},
+		{
+			Name:        "lead_form_archive",
+			Description: "Archive a Meta lead form or remove a Google lead-form asset and clear its local default.",
+			InputSchema: leadFormArchiveSchema(),
+			Handler:     a.toolLeadFormArchive,
+		},
+		{
 			Name:        "account_disconnect",
 			Description: "Remove a connected ad account. The underlying connection is released when the last reference goes away. Args: id.",
 			InputSchema: schemaObject(map[string]any{
@@ -624,10 +652,11 @@ func (a *App) MCPTools() []sdk.Tool {
 					"type":        "string",
 					"description": "Provider-neutral conversion event name used with tracking_source_resource_id.",
 				},
-				"destination_type": map[string]any{"type": "string"},
-				"dsa_beneficiary":  map[string]any{"type": "string"},
-				"dsa_payor":        map[string]any{"type": "string"},
-				"platform_options": map[string]any{"type": "object"},
+				"conversion_location": map[string]any{"type": "string", "enum": []string{"website", "instant_form", "calls", "messages"}},
+				"destination_type":    map[string]any{"type": "string"},
+				"dsa_beneficiary":     map[string]any{"type": "string"},
+				"dsa_payor":           map[string]any{"type": "string"},
+				"platform_options":    map[string]any{"type": "object"},
 			}, []string{"ad_account_id", "campaign_id", "name", "optimization_goal", "targeting"}),
 			Handler: a.toolAdSetCreate,
 		},
@@ -740,10 +769,15 @@ func (a *App) MCPTools() []sdk.Tool {
 					"type":        "integer",
 					"description": "Optional normalized secondary identity resource.",
 				},
-				"headline":        map[string]any{"type": "string"},
-				"primary_text":    map[string]any{"type": "string"},
-				"description":     map[string]any{"type": "string"},
-				"destination_url": map[string]any{"type": "string"},
+				"lead_form_resource_id": map[string]any{
+					"type":        "integer",
+					"description": "Normalized Meta lead form. The account default is used for conversion_location=instant_form when omitted.",
+				},
+				"conversion_location": map[string]any{"type": "string", "enum": []string{"website", "instant_form"}},
+				"headline":            map[string]any{"type": "string"},
+				"primary_text":        map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+				"destination_url":     map[string]any{"type": "string"},
 				"call_to_action": map[string]any{"type": "string", "enum": []string{
 					"learn_more", "shop_now", "sign_up", "book_travel", "contact_us",
 					"download", "get_offer", "get_quote", "subscribe", "watch_more",
@@ -2172,6 +2206,17 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	}
 	if v, _ := args["destination_type"].(string); v != "" {
 		input["destination_type"] = v
+	} else {
+		switch strings.ToLower(stringArgAny(args, "conversion_location")) {
+		case "instant_form":
+			input["destination_type"] = "ON_AD"
+		case "website":
+			input["destination_type"] = "WEBSITE"
+		case "calls":
+			input["destination_type"] = "PHONE_CALL"
+		case "messages":
+			input["destination_type"] = "MESSENGER"
+		}
 	}
 	if v, _ := args["dsa_beneficiary"].(string); v != "" {
 		input["dsa_beneficiary"] = v
@@ -2453,8 +2498,8 @@ func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 			Filename string `json:"filename"`
 			MimeType string `json:"mime_type"`
 		}
-		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": storageID}, &fetched); err != nil {
-			return mcpError("storage.files_get: " + err.Error()), nil
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{"id": storageID, "ttl_seconds": 3600}, &fetched); err != nil {
+			return mcpError("storage.files_get_url: " + err.Error()), nil
 		}
 		if fetched.URL == "" {
 			return mcpError("storage returned no URL for file id"), nil
@@ -2473,6 +2518,13 @@ func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	mergeOptions(input, args)
 	parsed, errOut := a.execIntegrationTool(ctx, acct, tool, input)
 	if errOut != nil {
+		if kind == "image" && metaImageLibraryUnavailable(errOut) {
+			return map[string]any{
+				"kind": kind, "provider_upload": false, "upload_mode": "direct_url",
+				"source_url": sourceURL,
+				"warning":    "Meta image-library upload is unavailable for this app; pass source_url as creative_create.image_url.",
+			}, nil
+		}
 		return errOut, nil
 	}
 	if assetID := creativeAssetID(parsed, kind); assetID != "" {
@@ -3277,6 +3329,13 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return errOut, nil
 	}
 	if acct.Platform == "meta" && len(asMap(args["promoted_object"])) == 0 {
+		if strings.EqualFold(stringArgAny(args, "conversion_location"), "instant_form") {
+			page, selectionErr := a.resolveResourceChoice(ctx, acct, "publishing_identity", resourceIdentity, "facebook_page", 0)
+			if selectionErr != nil {
+				return selectionErr, nil
+			}
+			args["promoted_object"] = map[string]any{"page_id": page.NativeID}
+		}
 		resourceID := int64(intArg(args, "tracking_source_resource_id", 0))
 		conversionEvent := strings.TrimSpace(stringArgAny(args, "conversion_event"))
 		if resourceID > 0 || conversionEvent != "" {
@@ -3399,6 +3458,19 @@ func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 				}
 			}
 		}
+		if strings.EqualFold(stringArgAny(args, "conversion_location"), "instant_form") || intArg(args, "lead_form_resource_id", 0) > 0 {
+			form, formErr := a.resolveResourceChoice(
+				ctx, acct, "lead_form", resourceLeadForm, "meta_lead_form",
+				int64(intArg(args, "lead_form_resource_id", 0)),
+			)
+			if formErr != nil {
+				return formErr, nil
+			}
+			if pageResource != nil && form.ParentResourceID != pageResource.ID {
+				return mcpError("lead form belongs to a different Facebook Page than the publishing identity"), nil
+			}
+			args["lead_form_id"] = form.NativeID
+		}
 	}
 	return platformAdapters[acct.Platform].CreativeCreate(a, ctx, acct, def, args)
 }
@@ -3487,11 +3559,16 @@ func putString(dst map[string]any, dstKey string, src map[string]any, srcKey str
 
 func metaCTA(args map[string]any, destination string) map[string]any {
 	raw := strings.ToLower(stringArgAny(args, "call_to_action"))
-	if raw == "" && destination == "" {
+	leadFormID := stringArgAny(args, "lead_form_id")
+	if raw == "" && destination == "" && leadFormID == "" {
 		return nil
 	}
 	if raw == "" {
-		raw = "learn_more"
+		if leadFormID != "" {
+			raw = "sign_up"
+		} else {
+			raw = "learn_more"
+		}
 	}
 	types := map[string]string{
 		"learn_more":  "LEARN_MORE",
@@ -3510,10 +3587,27 @@ func metaCTA(args map[string]any, destination string) map[string]any {
 		ctaType = strings.ToUpper(raw)
 	}
 	cta := map[string]any{"type": ctaType}
+	value := map[string]any{}
 	if destination != "" {
-		cta["value"] = map[string]any{"link": destination}
+		value["link"] = destination
+	}
+	if leadFormID != "" {
+		value["lead_gen_form_id"] = leadFormID
+	}
+	if len(value) > 0 {
+		cta["value"] = value
 	}
 	return cta
+}
+
+func metaImageLibraryUnavailable(errOut map[string]any) bool {
+	content, _ := errOut["content"].([]map[string]any)
+	text := ""
+	for _, item := range content {
+		text += " " + toString(item["text"])
+	}
+	upper := strings.ToUpper(text)
+	return strings.Contains(upper, "(#3)") && strings.Contains(upper, "CAPABILITY")
 }
 
 func creativeAssetID(parsed any, kind string) string {

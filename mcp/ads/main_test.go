@@ -1440,8 +1440,8 @@ func TestGoogleCreativeCreateVideo_MapsYouTubeAsset(t *testing.T) {
 
 func TestCreativeUpload_FetchesFromStorage(t *testing.T) {
 	pf := newRecordingPlatform()
-	// Storage app's files_get returns an MCP envelope wrapping our shape.
-	pf.callAppResponses["storage:files_get"] = json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":42,\"url\":\"https://cdn.example.com/abc.jpg\",\"filename\":\"abc.jpg\",\"mime_type\":\"image/jpeg\"}"}]}}`)
+	// Storage app's files_get_url returns an MCP envelope wrapping our shape.
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"id\":42,\"url\":\"https://cdn.example.com/abc.jpg\",\"filename\":\"abc.jpg\",\"mime_type\":\"image/jpeg\"}"}]}}`)
 	ctx := newAdsCtx(t, pf)
 	app := &App{}
 
@@ -1458,14 +1458,52 @@ func TestCreativeUpload_FetchesFromStorage(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_get" {
-		t.Fatalf("expected storage:files_get call, got %#v", pf.callAppCalls)
+	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_get_url" {
+		t.Fatalf("expected storage:files_get_url call, got %#v", pf.callAppCalls)
+	}
+	if pf.callAppCalls[0].Input["ttl_seconds"] != 3600 {
+		t.Fatalf("storage URL must be long enough for provider ingestion: %#v", pf.callAppCalls[0].Input)
 	}
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "creative_upload_image" {
 		t.Fatalf("expected creative_upload_image execute call, got %#v", pf.executeCalls)
 	}
 	if pf.executeCalls[0].Input["url"] != "https://cdn.example.com/abc.jpg" {
 		t.Fatalf("storage url not forwarded: %v", pf.executeCalls[0].Input["url"])
+	}
+}
+
+func TestCreativeUpload_MetaImageCapabilityFallsBackToDirectURL(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["creative_upload_image"] = &sdk.ExecuteResult{
+		Success: false, Status: 403,
+		Data: json.RawMessage(`{"error":{"code":3,"message":"(#3) Application does not have the capability to make this API call."}}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name) VALUES ('test-proj','meta',7,'act_42','Test')`)
+	acctID, _ := res.LastInsertId()
+
+	out, err := app.toolCreativeUpload(ctx, map[string]any{"ad_account_id": acctID, "kind": "image", "source_url": "https://cdn.example.com/ad.jpg"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["upload_mode"] != "direct_url" || result["source_url"] != "https://cdn.example.com/ad.jpg" || result["provider_upload"] != false {
+		t.Fatalf("unexpected direct URL fallback: %#v", result)
+	}
+}
+
+func TestCreativeUpload_MetaOtherErrorsRemainErrors(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["creative_upload_image"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":{"code":100,"message":"invalid URL"}}`)}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name) VALUES ('test-proj','meta',7,'act_42','Test')`)
+	acctID, _ := res.LastInsertId()
+
+	out, _ := app.toolCreativeUpload(ctx, map[string]any{"ad_account_id": acctID, "kind": "image", "source_url": "https://cdn.example.com/ad.jpg"})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("non-capability provider failure was hidden: %#v", out)
 	}
 }
 

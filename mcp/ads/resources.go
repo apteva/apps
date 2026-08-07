@@ -21,7 +21,7 @@ const (
 
 var platformResourceKinds = map[string][]string{
 	"meta":   {resourceIdentity, resourceTrackingSource, resourceLeadForm, resourceAudience},
-	"google": {resourceConversionAction, resourceAudience},
+	"google": {resourceConversionAction, resourceLeadForm, resourceAudience},
 }
 
 type discoveredResource struct {
@@ -439,6 +439,8 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	switch kind {
 	case resourceConversionAction:
 		query = "SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type, conversion_action.category, conversion_action.owner_customer FROM conversion_action ORDER BY conversion_action.id"
+	case resourceLeadForm:
+		query = "SELECT asset.id, asset.name, asset.resource_name, asset.type, asset.lead_form_asset.business_name, asset.lead_form_asset.headline, asset.lead_form_asset.description, asset.lead_form_asset.privacy_policy_url, asset.lead_form_asset.fields, asset.lead_form_asset.call_to_action_type, asset.lead_form_asset.call_to_action_description, asset.lead_form_asset.desired_intent, asset.lead_form_asset.post_submit_headline, asset.lead_form_asset.post_submit_description, asset.lead_form_asset.post_submit_call_to_action_type FROM asset WHERE asset.type = LEAD_FORM ORDER BY asset.id"
 	case resourceAudience:
 		query = "SELECT user_list.id, user_list.name, user_list.type, user_list.description, user_list.membership_status, user_list.size_for_display, user_list.size_for_search FROM user_list ORDER BY user_list.id"
 	default:
@@ -467,6 +469,29 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 			})
 			continue
 		}
+		if kind == resourceLeadForm {
+			item := mapAt(row, "asset")
+			id := firstString(item, "resourceName", "resource_name", "id")
+			if id == "" {
+				continue
+			}
+			leadForm := mapAt(item, "leadFormAsset")
+			if len(leadForm) == 0 {
+				leadForm = mapAt(item, "lead_form_asset")
+			}
+			out = append(out, discoveredResource{
+				Kind: kind, ProviderType: "google_lead_form", NativeID: id,
+				DisplayName: firstString(item, "name"), Status: "active",
+				Capabilities: []string{"lead_generation"},
+				Metadata: map[string]any{
+					"business_name": leadForm["businessName"], "headline": leadForm["headline"],
+					"description": leadForm["description"], "privacy_policy_url": leadForm["privacyPolicyUrl"],
+					"questions": googleDiscoveredLeadQuestions(leadForm["fields"]), "call_to_action": leadForm["callToActionType"],
+					"call_to_action_description": leadForm["callToActionDescription"], "intent": leadForm["desiredIntent"],
+				},
+			})
+			continue
+		}
 		item := mapAt(row, "userList")
 		if len(item) == 0 {
 			item = mapAt(row, "user_list")
@@ -483,6 +508,77 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 		})
 	}
 	return out, nil
+}
+
+func googleDiscoveredLeadQuestions(raw any) []any {
+	rows, _ := raw.([]any)
+	out := make([]any, 0, len(rows))
+	for _, rawRow := range rows {
+		row := asMap(rawRow)
+		providerType := strings.ToUpper(firstString(row, "inputType", "input_type"))
+		genericType := strings.ToLower(providerType)
+		switch providerType {
+		case "PHONE_NUMBER":
+			genericType = "phone"
+		case "COMPANY_NAME":
+			genericType = "company_name"
+		}
+		if genericType != "" {
+			out = append(out, map[string]any{"type": genericType})
+		}
+	}
+	return out
+}
+
+func (a *App) upsertResource(ctx *sdk.AppCtx, acct *adAccount, resource discoveredResource) (*adResource, error) {
+	pid := strings.TrimSpace(ctx.CurrentProject())
+	capabilities, _ := json.Marshal(resource.Capabilities)
+	metadata, _ := json.Marshal(resource.Metadata)
+	status := resource.Status
+	if status == "" {
+		status = "active"
+	}
+	managed := 0
+	if resource.ManagedByApp {
+		managed = 1
+	}
+	_, err := ctx.AppDB().Exec(
+		`INSERT INTO ad_resources
+		 (project_id, ad_account_id, platform, native_asset_id, provider_type, kind,
+		  display_name, status, capabilities_json, metadata_json, managed_by_app, refreshed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(project_id, ad_account_id, kind, provider_type, native_asset_id) DO UPDATE SET
+		  display_name=excluded.display_name, status=excluded.status,
+		  capabilities_json=excluded.capabilities_json, metadata_json=excluded.metadata_json,
+		  managed_by_app=MAX(ad_resources.managed_by_app, excluded.managed_by_app),
+		  refreshed_at=CURRENT_TIMESTAMP`,
+		pid, acct.ID, acct.Platform, resource.NativeID, resource.ProviderType, resource.Kind,
+		resource.DisplayName, status, string(capabilities), string(metadata), managed,
+	)
+	if err != nil {
+		return nil, err
+	}
+	var id int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id FROM ad_resources
+		 WHERE project_id=? AND ad_account_id=? AND kind=? AND provider_type=? AND native_asset_id=?`,
+		pid, acct.ID, resource.Kind, resource.ProviderType, resource.NativeID,
+	).Scan(&id); err != nil {
+		return nil, err
+	}
+	if resource.ParentNativeID != "" {
+		var parentID int64
+		_ = ctx.AppDB().QueryRow(
+			`SELECT id FROM ad_resources
+			 WHERE project_id=? AND ad_account_id=? AND native_asset_id=? AND status!='stale'
+			 ORDER BY id LIMIT 1`,
+			pid, acct.ID, resource.ParentNativeID,
+		).Scan(&parentID)
+		if parentID > 0 {
+			_, _ = ctx.AppDB().Exec(`UPDATE ad_resources SET parent_resource_id=? WHERE id=?`, parentID, id)
+		}
+	}
+	return a.getResource(ctx, acct, id)
 }
 
 func (a *App) googleResourceRows(ctx *sdk.AppCtx, acct *adAccount, query string) ([]map[string]any, map[string]any) {

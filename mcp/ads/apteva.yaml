@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.28
+version: 0.1.29
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
@@ -17,6 +17,9 @@ description: |
   v0.1.28 adds one normalized resource registry for provider identities,
   tracking sources, conversion actions, lead forms, audiences, and creative
   assets, with automatic discovery and account-level defaults.
+  v0.1.29 adds normalized Meta and Google lead-form lifecycle tools, automatic
+  Page/campaign wiring, reliable Storage URL resolution, and Meta direct-image
+  fallback when image-library upload is unavailable.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -34,14 +37,10 @@ requires:
     - platform.connections.execute
     - platform.oauth.start
     - platform.apps.call
-  integrations:
-    - role: storage
-      kind: app
-      compatible_app_names: [storage]
-      capabilities: [files.read]
-      required: false
-      label: "Storage (optional)"
-      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to supported platforms. Without storage, use platform_options for native asset payloads."
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      reason: "Resolve stored image and video files for creative uploads."
 
 provides:
   http_routes:
@@ -56,6 +55,11 @@ provides:
     - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
     - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
+    - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
+    - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
+    - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }
+    - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
+    - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
