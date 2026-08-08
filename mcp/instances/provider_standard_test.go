@@ -79,6 +79,7 @@ func TestParseAPIProviderResources(t *testing.T) {
 		{"vultr", `{"instance":{"id":"vultr-1","plan":"vc2","main_ip":"203.0.113.2"}}`, "vultr-1", "203.0.113.2"},
 		{"linode", `{"id":456,"region":"eu-west","ipv4":["192.0.2.2","203.0.113.3"]}`, "456", "192.0.2.2"},
 		{"scaleway", `{"server":{"id":"scw-1","commercial_type":"DEV1-S","public_ip":{"address":"203.0.113.4"}}}`, "scw-1", "203.0.113.4"},
+		{"scaleway", `{"id":"mac-1","type":"M4-S","ip":"203.0.113.8","ssh_username":"m4"}`, "mac-1", "203.0.113.8"},
 		{"huawei-cloud", `{"server":{"id":"hw-1","OS-EXT-STS:vm_state":"active","addresses":{"net":[{"addr":"203.0.113.5","OS-EXT-IPS:type":"floating","version":4}]}}}`, "hw-1", "203.0.113.5"},
 		{"ovhcloud", `{"id":"ovh-1","flavorId":"f1","ipAddresses":[{"ip":"203.0.113.6","type":"public","version":4}]}`, "ovh-1", "203.0.113.6"},
 		{"aws-ec2", `{"reservationSet":{"item":{"instancesSet":{"item":{"instanceId":"i-123","ipAddress":"203.0.113.7"}}}}}`, "i-123", "203.0.113.7"},

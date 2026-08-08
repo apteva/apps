@@ -29,6 +29,9 @@ interface Instance {
   region?: string;
   size?: string;
   image?: string;
+  platform?: string;
+  resource_class?: string;
+  deletable_at?: string;
   ssh_user?: string;
   ssh_public_key?: string;
   resources_json?: string;
@@ -134,6 +137,13 @@ function formatRemoteTotal(instances: Instance[]): string {
   const providers = new Set(priced.map((i) => i.provider));
   const total = priced.reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
   return providers.size === 1 ? formatProviderPrice(total, priced[0]?.provider) : "";
+}
+
+function deletionLockLabel(inst: Instance): string {
+  if (!inst.deletable_at || inst.capabilities?.destroy) return "";
+  const date = new Date(inst.deletable_at);
+  if (!Number.isFinite(date.getTime()) || date.getTime() <= Date.now()) return "";
+  return `Delete after ${date.toLocaleString()}`;
 }
 
 function resourceSummary(inst: Instance): string {
@@ -837,6 +847,7 @@ function InstanceCard({
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
   const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
+  const deleteLocked = deletionLockLabel(inst);
   const resources = resourceSummary(inst);
   const memPct = metrics?.mem.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
   const loadPct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
@@ -867,6 +878,7 @@ function InstanceCard({
         </div>
         <span className="flex-1" />
         <span className={statusColor(inst.status) + " text-[10px] uppercase tracking-wider font-medium"}>{inst.status}</span>
+        {deleteLocked && <span className="text-[10px] text-amber" title={deleteLocked}>24h lock</span>}
         {canUpgrade && (
           <button type="button" onClick={onUpgrade} disabled={busy || inst.status !== "ready"}
             className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50">
@@ -1024,6 +1036,7 @@ function ExpandedInstanceCardLegacy({
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
   const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
+  const deleteLocked = deletionLockLabel(inst);
   const resources = resourceSummary(inst);
   const resourceModel = resources.toLowerCase().replace(/^[0-9]+x\s+/, "");
   const showResources = resources && (!resources.startsWith("1x ") || !inst.size?.toLowerCase().includes(resourceModel));
@@ -1084,6 +1097,7 @@ function ExpandedInstanceCardLegacy({
         <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
           {inst.status}
         </span>
+        {deleteLocked && <span className="text-[10px] text-amber" title={deleteLocked}>24h lock</span>}
         {(canUpgrade || canDestroy) && (
           <>
             {canUpgrade && <button
@@ -1287,6 +1301,9 @@ interface ServerTypeWire {
   disk_gb: number;
   cpu_type?: string;
   architecture?: string;
+  platform?: string;
+  resource_class?: string;
+  accelerators?: Array<{ kind: string; vendor?: string; model?: string; count?: number; memory_gb?: number }>;
   deprecated?: boolean;
   monthly_price_eur?: number;
   hourly_price_eur?: number;
@@ -1309,6 +1326,10 @@ interface ImageWire {
   os_flavor?: string;
   os_version?: string;
   architecture?: string;
+  platform?: string;
+  resource_class?: string;
+  available_in?: string[];
+  compatible_types?: string[];
 }
 
 function catalogMonthlyPrice(t?: ServerTypeWire): number {
@@ -1346,6 +1367,36 @@ function CreateDialog({
   const [catalogProvider, setCatalogProvider] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
+
+  const selectedType = serverTypes.find((candidate) => candidate.name === size);
+  const compatibleLocations = locations.filter((candidate) =>
+    !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
+  );
+  const compatibleImages = images.filter((candidate) => {
+    if (selectedType?.resource_class && candidate.resource_class && candidate.resource_class !== selectedType.resource_class) return false;
+    if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
+    if (candidate.available_in?.length && region && !candidate.available_in.includes(region)) return false;
+    if (candidate.compatible_types?.length && size && !candidate.compatible_types.includes(size)) return false;
+    return true;
+  });
+
+  useEffect(() => {
+    if (!selectedType) return;
+    const nextRegion = compatibleLocations.some((candidate) => candidate.name === region)
+      ? region
+      : compatibleLocations[0]?.name || "";
+    if (nextRegion !== region) setRegion(nextRegion);
+  }, [size, selectedType, compatibleLocations, region]);
+
+  useEffect(() => {
+    const preferred = compatibleImages.find((candidate) =>
+      candidate.os_flavor === "ubuntu" && candidate.os_version?.endsWith(".04")
+    );
+    const nextImage = compatibleImages.some((candidate) => candidate.name === image)
+      ? image
+      : preferred?.name || compatibleImages[0]?.name || "";
+    if (nextImage !== image) setImage(nextImage);
+  }, [size, region, compatibleImages, image]);
 
   useEffect(() => {
     (async () => {
@@ -1389,10 +1440,6 @@ function CreateDialog({
         // alphabetically, ubuntu LTS if present otherwise first image.
         if (types.length && !size) setSize(types[0].name);
         if (locs.length && !region) setRegion(locs[0].name);
-        if (imgs.length && !image) {
-          const ubuntu = imgs.find((i) => i.os_flavor === "ubuntu" && i.os_version?.endsWith(".04"));
-          setImage(ubuntu?.name || imgs[0].name);
-        }
       } catch (e) {
         setCatalogError((e as Error).message);
       } finally {
@@ -1432,7 +1479,9 @@ function CreateDialog({
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
     const specs = parts.join(", ");
     const price = formatCatalogMonthlyPrice(t);
-    return [t.name, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
+    const displayName = t.name.replace(/^apple-silicon\//, "");
+    const hostKind = t.resource_class === "bare_metal" ? "Mac mini bare metal" : "";
+    return [displayName, hostKind && `· ${hostKind}`, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
       .filter(Boolean)
       .join(" ");
   };
@@ -1532,7 +1581,7 @@ function CreateDialog({
                   className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
                 >
                   {locations.length === 0 && <option value="">—</option>}
-                  {locations.map((l) => (
+                  {compatibleLocations.map((l) => (
                     <option key={l.name} value={l.name}>{locLabel(l)}</option>
                   ))}
                 </select>
@@ -1555,8 +1604,8 @@ function CreateDialog({
                   disabled={catalogLoading}
                   className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
                 >
-                  {images.length === 0 && <option value="">—</option>}
-                  {images.map((i) => (
+                  {compatibleImages.length === 0 && <option value="">—</option>}
+                  {compatibleImages.map((i) => (
                     <option key={i.name} value={i.name}>{imageLabel(i)}</option>
                   ))}
                 </select>
@@ -1565,6 +1614,9 @@ function CreateDialog({
           </div>
         </div>
         <div className="flex justify-end gap-2 pt-1">
+          {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
+            <span className="mr-auto text-[11px] text-amber">24-hour minimum allocation</span>
+          )}
           <button
             type="button"
             onClick={onClose}
@@ -1573,7 +1625,7 @@ function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim() || catalogLoading || !size || !region}
+            disabled={busy || !name.trim() || catalogLoading || !size || !region || !image}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

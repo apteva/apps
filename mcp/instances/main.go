@@ -40,12 +40,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.23
+version: 0.4.24
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
-  Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Foundation layer
+  Scaleway (virtual instances and Apple silicon Mac minis), Huawei Cloud,
+  Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
 author: Apteva
@@ -68,7 +69,8 @@ requires:
         to provision remote instances through the generic Instances interface.
         Every compatible provider has catalog, provisioning, readiness, and
         recovery adapters. Immediate destroy is available except on Contabo,
-        whose API only schedules contract cancellation.
+        whose API only schedules contract cancellation. Scaleway macOS hosts
+        have a mandatory 24-hour minimum allocation before Destroy is enabled.
 provides:
   http_routes:
     - prefix: /
@@ -85,10 +87,10 @@ provides:
     - { name: instance_open_tunnel,  description: "Open or reuse a loopback-only TCP tunnel through remote SSH. Args: id, target_port." }
     - { name: instance_close_tunnel, description: "Close a loopback TCP tunnel. Args: id, target_port." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
-    - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
-    - { name: instance_list_server_types, description: "Live list of active, non-deprecated VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, available_in. Use to discover valid sizes for instance_create. Args: provider? (default: bound provider)." }
+    - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime for local, remote Linux, and remote macOS hosts. Args: id." }
+    - { name: instance_list_server_types, description: "Live list of active, non-deprecated compute types from the bound provider — name, cores, memory_gb, disk_gb, platform, resource_class, price, available_in. Includes virtual and bare-metal types where supported. Args: provider? (default: bound provider)." }
     - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default: bound provider)." }
-    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default: bound provider)." }
+    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider, with platform, resource class, location, and server-type compatibility. Args: provider? (default: bound provider)." }
   publishes:
     - name: instance.created
       description: A new instance row was created in Instances.
@@ -158,7 +160,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.23
+    ref: instances/v0.4.24
     entry: mcp/instances
   port: 8080
   health_check: /health

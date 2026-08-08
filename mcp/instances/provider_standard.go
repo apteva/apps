@@ -90,6 +90,28 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 	if err != nil {
 		return nil, err
 	}
+	for i := range types {
+		if types[i].Platform == "" {
+			types[i].Platform = "linux"
+		}
+		if types[i].ResourceClass == "" {
+			types[i].ResourceClass = "virtual"
+		}
+	}
+	if provider == "scaleway" {
+		appleData, appleErr := executeProviderTool(ctx, provider, "apple_products_list", map[string]any{
+			"product_types": []string{"apple_silicon"}, "page_size": 100,
+		})
+		if appleErr == nil {
+			appleTypes, parseErr := parseScalewayAppleProducts(appleData)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			types = append(types, appleTypes...)
+		} else {
+			ctx.Logger().Warn("instances: Scaleway Apple silicon catalog unavailable", "err", appleErr)
+		}
+	}
 	sort.SliceStable(types, func(i, j int) bool {
 		pi, pj := providerTypePrice(types[i]), providerTypePrice(types[j])
 		if pi > 0 && pj > 0 && pi != pj {
@@ -165,6 +187,29 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	for i := range images {
+		if images[i].Platform == "" {
+			images[i].Platform = "linux"
+		}
+		if images[i].ResourceClass == "" {
+			images[i].ResourceClass = "virtual"
+		}
+	}
+	if provider == "scaleway" {
+		for _, zone := range scalewayAppleZones {
+			appleData, appleErr := executeProviderTool(ctx, provider, "apple_os_list", map[string]any{"zone": zone, "page_size": 100})
+			if appleErr != nil {
+				ctx.Logger().Warn("instances: Scaleway Apple silicon OS catalog unavailable", "zone", zone, "err", appleErr)
+				continue
+			}
+			appleImages, parseErr := parseScalewayAppleImages(appleData, zone)
+			if parseErr != nil {
+				return nil, parseErr
+			}
+			images = append(images, appleImages...)
+		}
+		images = mergeCatalogImages(images)
+	}
 	sort.SliceStable(images, func(i, j int) bool { return images[i].Description < images[j].Description })
 	return images, nil
 }
@@ -190,6 +235,27 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	in.SSHPrivateKey = privKey
 	in.SSHPublicKey = pubKey
 	in.SSHUser = "root"
+	in.Platform = "linux"
+	in.ResourceClass = "virtual"
+	appleMac := provider == "scaleway" && isScalewayAppleSize(in.Size)
+	if appleMac {
+		in.Platform = "macos"
+		in.ResourceClass = "bare_metal"
+		if types, catalogErr := apiProviderListServerTypes(ctx, provider); catalogErr == nil {
+			for _, serverType := range types {
+				if serverType.Name != in.Size {
+					continue
+				}
+				in.Platform = serverType.Platform
+				in.ResourceClass = serverType.ResourceClass
+				in.ResourcesJSON = scalewayAppleResources(serverType)
+				if in.MonthlyCostCents == 0 {
+					in.MonthlyCostCents = int(providerTypePrice(serverType)*100 + 0.5)
+				}
+				break
+			}
+		}
+	}
 	if in.MonthlyCostCents == 0 {
 		in.MonthlyCostCents = apiProviderMonthlyCostCents(ctx, provider, in.Size)
 	}
@@ -201,13 +267,37 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
-	tool, args, err := apiProviderCreateRequest(ctx, provider, in, pubKey)
+	tool, args := "", map[string]any(nil)
+	if appleMac {
+		metadata, accessErr := registerScalewayAppleSSHKey(ctx, inst.ID, in.Name, pubKey)
+		if accessErr != nil {
+			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": accessErr.Error()})
+			return nil, accessErr
+		}
+		inst.ProviderMetadataJSON = scalewayAppleMetadataJSON(metadata)
+		if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"provider_metadata_json": inst.ProviderMetadataJSON}); err != nil {
+			cleanupErr := deleteScalewayAppleSSHKey(ctx, metadata.SSHKeyID)
+			return nil, fmt.Errorf("persist Scaleway Mac SSH key: %w (cleanup: %v)", err, cleanupErr)
+		}
+		tool, args = "apple_server_create", map[string]any{
+			"zone": in.Region, "project_id": metadata.ProjectID, "name": in.Name,
+			"type": scalewayAppleID(in.Size), "os_id": scalewayAppleID(in.Image),
+			"commitment_type": "duration_24h", "enable_vpc": false, "enable_kext": false,
+		}
+	} else {
+		tool, args, err = apiProviderCreateRequest(ctx, provider, in, pubKey)
+	}
 	if err != nil {
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
 	data, err := executeProviderTool(ctx, provider, tool, args)
 	if err != nil {
+		if appleMac {
+			if cleanupErr := deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
+				ctx.Logger().Error("instances: failed to clean up Scaleway Mac SSH key after create failure", "id", inst.ID, "err", cleanupErr)
+			}
+		}
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
@@ -216,10 +306,21 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		if err == nil {
 			err = fmt.Errorf("%s.%s response missing provider id", provider, tool)
 		}
+		if appleMac {
+			if cleanupErr := deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID); cleanupErr != nil {
+				ctx.Logger().Error("instances: failed to clean up Scaleway Mac SSH key after invalid create response", "id", inst.ID, "err", cleanupErr)
+			}
+		}
 		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": err.Error()})
 		return nil, err
 	}
-	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6}); err != nil {
+	persistFields := map[string]any{"provider_id": provID, "public_ipv4": ipv4, "public_ipv6": ipv6}
+	if appleMac {
+		for key, value := range scalewayAppleResponseFields(data) {
+			persistFields[key] = value
+		}
+	}
+	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, persistFields); err != nil {
 		orphan := *inst
 		orphan.ProviderID, orphan.PublicIPv4, orphan.PublicIPv6 = provID, ipv4, ipv6
 		cleanupErr := apiProviderDestroy(ctx, &orphan)
@@ -230,7 +331,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 		return nil, fmt.Errorf("persist created %s instance %s: %w; upstream instance was cleaned up", provider, provID, err)
 	}
 
-	if provider == "scaleway" {
+	if provider == "scaleway" && !appleMac {
 		_, err = executeProviderTool(ctx, provider, "server_set_cloud_init", map[string]any{
 			"zone": in.Region, "server_id": provID, "content": buildCloudInit(pubKey),
 		})
@@ -277,7 +378,29 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		if len(images) == 0 {
 			return fmt.Errorf("%s returned no provisionable images", provider)
 		}
-		in.Image = preferredLinuxImage(images)
+		if provider == "scaleway" && isScalewayAppleSize(in.Size) {
+			for _, image := range images {
+				if image.ResourceClass == "bare_metal" &&
+					(len(image.AvailableIn) == 0 || containsString(image.AvailableIn, in.Region)) &&
+					(len(image.CompatibleTypes) == 0 || containsString(image.CompatibleTypes, in.Size)) {
+					in.Image = image.Name
+					break
+				}
+			}
+			if in.Image == "" {
+				return fmt.Errorf("Scaleway returned no Apple silicon OS compatible with %s in %s", in.Size, in.Region)
+			}
+		} else {
+			in.Image = preferredLinuxImage(images)
+		}
+	}
+	if provider == "scaleway" && isScalewayAppleSize(in.Size) {
+		if !containsString(scalewayAppleZones, in.Region) {
+			return fmt.Errorf("Scaleway Apple silicon is not available in %s; choose one of %s", in.Region, strings.Join(scalewayAppleZones, ", "))
+		}
+		if !strings.HasPrefix(in.Image, scalewayApplePrefix) {
+			return fmt.Errorf("Scaleway Apple silicon size %s requires a compatible Apple silicon OS image", in.Size)
+		}
 	}
 	return nil
 }
@@ -383,6 +506,12 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 
 func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	provider := normalizeProvider(inst.Provider)
+	if isScalewayAppleInstance(inst) {
+		if inst.ProviderID == "" {
+			return deleteScalewayAppleSSHKey(ctx, parseScalewayAppleMetadata(inst.ProviderMetadataJSON).SSHKeyID)
+		}
+		return scalewayAppleDestroy(ctx, inst)
+	}
 	if inst.ProviderID == "" {
 		return nil
 	}
@@ -456,7 +585,13 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 		}
 		_, ipv4, ipv6 := parseProviderResource(inst.Provider, data)
 		if ipv4 != "" || ipv6 != "" {
-			if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"public_ipv4": ipv4, "public_ipv6": ipv6}); err != nil {
+			fields := map[string]any{"public_ipv4": ipv4, "public_ipv6": ipv6}
+			if isScalewayAppleInstance(inst) {
+				for key, value := range scalewayAppleResponseFields(data) {
+					fields[key] = value
+				}
+			}
+			if err := dbUpdateInstance(ctx.AppDB(), inst.ID, fields); err != nil {
 				return nil, err
 			}
 			return dbGetInstance(ctx.AppDB(), inst.ID)
@@ -477,6 +612,9 @@ func apiProviderGetRequest(inst *Instance) (string, map[string]any, error) {
 	case "aws-ec2":
 		return "list_instances", map[string]any{"Action": "DescribeInstances", "Version": "2016-11-15", "InstanceId.1": inst.ProviderID}, nil
 	case "scaleway":
+		if isScalewayAppleInstance(inst) {
+			return "apple_server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
+		}
 		return "server_get", map[string]any{"zone": inst.Region, "server_id": inst.ProviderID}, nil
 	case "huawei-cloud":
 		return "get_server", map[string]any{"server_id": inst.ProviderID}, nil

@@ -29,18 +29,21 @@ import (
 // ServerType is the per-call shape returned to MCP + HTTP callers.
 // Fields that don't apply to a given provider stay zero.
 type ServerType struct {
-	Name            string  `json:"name"`
-	Description     string  `json:"description,omitempty"`
-	Cores           int     `json:"cores"`
-	MemoryGB        float64 `json:"memory_gb"`
-	DiskGB          int     `json:"disk_gb"`
-	CPUType         string  `json:"cpu_type,omitempty"`     // shared | dedicated
-	Architecture    string  `json:"architecture,omitempty"` // x86 | arm
-	Deprecated      bool    `json:"deprecated,omitempty"`
-	MonthlyPriceEUR float64 `json:"monthly_price_eur,omitempty"`
-	HourlyPriceEUR  float64 `json:"hourly_price_eur,omitempty"`
-	MonthlyPriceUSD float64 `json:"monthly_price_usd,omitempty"`
-	HourlyPriceUSD  float64 `json:"hourly_price_usd,omitempty"`
+	Name            string           `json:"name"`
+	Description     string           `json:"description,omitempty"`
+	Cores           int              `json:"cores"`
+	MemoryGB        float64          `json:"memory_gb"`
+	DiskGB          int              `json:"disk_gb"`
+	CPUType         string           `json:"cpu_type,omitempty"`       // shared | dedicated
+	Architecture    string           `json:"architecture,omitempty"`   // x86 | arm
+	Platform        string           `json:"platform,omitempty"`       // linux | macos | windows
+	ResourceClass   string           `json:"resource_class,omitempty"` // virtual | bare_metal | container
+	Accelerators    []AcceleratorDef `json:"accelerators,omitempty"`
+	Deprecated      bool             `json:"deprecated,omitempty"`
+	MonthlyPriceEUR float64          `json:"monthly_price_eur,omitempty"`
+	HourlyPriceEUR  float64          `json:"hourly_price_eur,omitempty"`
+	MonthlyPriceUSD float64          `json:"monthly_price_usd,omitempty"`
+	HourlyPriceUSD  float64          `json:"hourly_price_usd,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
 	AvailableIn []string `json:"available_in,omitempty"`
@@ -59,12 +62,16 @@ type Location struct {
 
 // Image is one bootable OS image.
 type Image struct {
-	Name         string `json:"name"`
-	Description  string `json:"description,omitempty"`
-	OSFlavor     string `json:"os_flavor,omitempty"`  // ubuntu | debian | …
-	OSVersion    string `json:"os_version,omitempty"` // 24.04 | 12 | …
-	Architecture string `json:"architecture,omitempty"`
-	DiskSizeGB   int    `json:"disk_size_gb,omitempty"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description,omitempty"`
+	OSFlavor        string   `json:"os_flavor,omitempty"`  // ubuntu | debian | …
+	OSVersion       string   `json:"os_version,omitempty"` // 24.04 | 12 | …
+	Architecture    string   `json:"architecture,omitempty"`
+	DiskSizeGB      int      `json:"disk_size_gb,omitempty"`
+	Platform        string   `json:"platform,omitempty"`
+	ResourceClass   string   `json:"resource_class,omitempty"`
+	AvailableIn     []string `json:"available_in,omitempty"`
+	CompatibleTypes []string `json:"compatible_types,omitempty"`
 }
 
 // ─── entry points ──────────────────────────────────────────────────

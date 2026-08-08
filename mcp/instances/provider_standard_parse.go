@@ -445,10 +445,13 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 			}
 		case "scaleway":
 			candidateID = mapString(obj, "id")
-			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil) {
+			if candidateID != "" && (mapValue(obj, "commercial_type") != nil || mapValue(obj, "public_ip") != nil || mapValue(obj, "ssh_username") != nil) {
 				ipv4 = nestedMapString(obj, "public_ip", "address")
 				if ipv4 == "" {
 					ipv4 = firstAddress(obj, "public_ips", 4)
+				}
+				if ipv4 == "" {
+					ipv4 = mapString(obj, "ip")
 				}
 				ipv6 = firstNonEmpty(nestedMapString(obj, "ipv6", "address"), firstAddress(obj, "public_ips", 6))
 			}

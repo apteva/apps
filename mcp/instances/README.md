@@ -1,4 +1,4 @@
-# Instances (v0.1)
+# Instances
 
 Compute-host inventory for Apteva. Manages the local machine + remote VPS
 instances under one MCP/REST surface.
@@ -28,7 +28,7 @@ registered as externally managed SSH machines.
 
 | Tool | Purpose |
 |---|---|
-| `instance_create` | Provision a new VPS (v0.1: Hetzner Cloud only) |
+| `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, and Scaleway Apple silicon. |
 | `instance_register` | Register an existing SSH host, including a Mac, and generate its dedicated SSH key. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
@@ -48,26 +48,45 @@ API — only `ensureLocalInstance` touches it.
 with a 30s default timeout. `instance_upload_file` writes under
 `<dataDir>/local-files/` with path-allowlist + traversal guards.
 
-## Remote instances (Hetzner v0.1)
+## Managed remote instances
 
-`instance_create` with `provider=hetzner`:
+The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
+AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
+provisioning, SSH readiness, recovery, and deletion are normalized into the
+same instance contract.
+
+A normal VPS provision:
 
 1. Generates a per-instance Ed25519 SSH keypair.
 2. Persists the row at `status='provisioning'`.
-3. Calls `hetzner.server_create` via the bound integration with cloud-init
-   that seeds `authorized_keys` with the public key.
+3. Calls the bound provider's create tool and installs the public key through
+   cloud-init, user data, or the provider's native SSH-key mechanism.
 4. Records `provider_id` + public IPv4 from the response.
 5. Background goroutine probes SSH readiness; flips to `status='ready'`
    when the box accepts the key (typically 30-60s).
 
-`instance_destroy` calls `hetzner.server_delete` and removes the row.
-404 from upstream is treated as success (already gone).
+`instance_destroy` calls the matching provider delete tool and removes the
+row. A 404/410 from upstream is treated as success (already gone). Contabo
+does not expose immediate deletion, so Destroy is not advertised there.
 
 Destroy is strictly ID-bound: the app only calls `server_delete` with
 the `provider_id` captured from the original `server_create` response.
 If a sidecar restart interrupts provisioning before that ID is
 persisted, the row is marked error and the operator must inspect
-Hetzner manually; Instances will not infer or recover a server by name.
+the provider manually; Instances will not infer or recover a server by name.
+
+### Scaleway Apple silicon
+
+Scaleway Mac minis are normalized as `bare_metal` instances with
+`platform=macos` (or Linux for Asahi types). Catalog rows use namespaced type
+and image IDs so they cannot be sent accidentally to Scaleway's virtual
+Instance API.
+
+For each Mac, Instances creates one project-scoped IAM SSH key, records only
+the returned key ID privately, and deletes exactly that key after the matching
+Mac is deleted. Provisioning uses a non-renewing 24-hour commitment. The
+mandatory minimum allocation is exposed as `deletable_at`; Destroy remains
+disabled until that timestamp. No account password is stored.
 
 ## Existing SSH hosts and Macs
 
@@ -80,16 +99,16 @@ and mark the row ready.
 These hosts use the same command, file-transfer, and loopback tunnel tools as
 managed instances. `instance_destroy` only forgets an external row; it never
 shuts down, deletes, or reconfigures the machine. The current remote metrics
-collector reads Linux `/proc`, so metrics are not advertised for external Macs.
+collector requires a declared platform, so metrics are not advertised for
+external hosts by default.
 
 ## Metrics
 
 Local: `gopsutil` for CPU / memory / disk / network / load / uptime.
 
-Remote: SSH-execute a small bash script that parses `/proc/loadavg`,
-`/proc/meminfo`, `/proc/stat`, `df -P`, `/proc/net/dev`, and prints
-JSON. Tolerant of preamble noise on first SSH connect (picks the last
-line that parses as JSON).
+Remote Linux: SSH-execute a shell collector that parses `/proc` and `df`.
+Remote macOS: use `top`, `vm_stat`, `sysctl`, `df`, and `netstat`. Both emit
+the same JSON shape and tolerate SSH preamble noise.
 
 Cached 5s per-instance to avoid duplicate SSH sessions on rapid panel
 refreshes.
@@ -102,24 +121,18 @@ project) — same word, different scope, no code overlap. A future
 apteva-server release renames core's concept to "agent" and removes
 the linguistic collision.
 
-## v0.1 limitations
+## Current limitations
 
-- Hetzner is the only remote provider. DigitalOcean / Vultr / AWS EC2
-  in v0.2 once the catalog API mappings are validated.
-- SSH key pinning on first connect is `InsecureIgnoreHostKey`. v0.2
-  pins the host key seen at provisioning.
-- Private SSH keys are stored plaintext in the DB. v0.2 encrypts at
-  rest with the platform secret.
-- No metrics streaming (SSE) yet. Pull-only via `instance_metrics`,
-  cached 5s.
-- No host-key-based audit trail for who-ran-what. v0.3 addition if
-  multi-user installs need it.
+- Provider bindings are one-per-install; one Instances install cannot
+  provision from multiple cloud accounts simultaneously.
+- In-place resizing is currently available only for Hetzner.
+- Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
 
 ## Tests
 
 ```bash
-go test ./...          # tier 1: schema, idempotency, local exec
+go test ./...
 ```
 
-Tier 2 (real Hetzner provisioning + real SSH round-trip) requires API
-credentials and is run manually before each release.
+Real provider provisioning is opt-in and requires separately scoped test
+credentials; unit tests never create billable resources.
