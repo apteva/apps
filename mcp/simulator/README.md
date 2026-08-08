@@ -28,8 +28,9 @@ enables clicks.
 
 The Linux production host can run the Android backend; iOS requires macOS.
 Simulator runs locally by default and can optionally use a host managed by the
-**Instances** app. This makes an existing Mac a remote iOS runner while the
-Simulator panel and public API remain on the primary Apteva installation.
+**Instances** app. Provider-provisioned macOS compute, such as a Scaleway Apple
+silicon Mac mini, can be an iOS runner while the Simulator panel and public API
+remain on the primary Apteva installation.
 
 System images / runtimes are **not** auto-installed (they're large and
 slow). Install them once:
@@ -43,9 +44,11 @@ xcodebuild -downloadPlatform iOS
 
 ## Optional remote runners
 
-Install and bind the Instances app, then register or provision a host. For an
-existing Mac, call `instance_register`, authorize the returned public key in
-the Mac user's `~/.ssh/authorized_keys`, and call `instance_wait_ready`.
+Install and bind the Instances app, then provision compute with
+`instance_create`. Simulator accepts provider-managed Instances only: Linux or
+macOS VPS/bare-metal resources created through a configured provider adapter.
+For iOS, select a ready `platform=macos` instance such as Scaleway Apple
+silicon. Arbitrary externally registered SSH hosts are not supported.
 
 Choose that instance in Simulator's optional `ios_host_id` or
 `android_host_id` setting. A single operation can override the configured host
@@ -58,7 +61,7 @@ artifacts, screenshots, logs, and live WebSockets stay on that runner. Public
 stream URLs still terminate at the Simulator app, which proxies the selected
 worker without exposing it publicly.
 
-By default the bootstrap resolves the immutable `simulator/v0.1.25` app release
+By default the bootstrap resolves the immutable `simulator/v0.1.26` app release
 tag and uses the remote Go toolchain to install that exact commit. Set
 `remote_worker_binary_path` when the matching worker binary is already
 installed, or change `remote_worker_module_ref` to a Go revision for

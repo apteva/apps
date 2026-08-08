@@ -100,7 +100,7 @@ func TestNegativeHostIDIsRejected(t *testing.T) {
 }
 
 func TestWorkerModuleRefValidation(t *testing.T) {
-	for _, value := range []string{"simulator/v0.1.25", "main", "97035005b48e"} {
+	for _, value := range []string{"simulator/v0.1.26", "main", "97035005b48e"} {
 		if !validWorkerModuleRef(value) {
 			t.Fatalf("expected %q to be valid", value)
 		}
@@ -108,6 +108,26 @@ func TestWorkerModuleRefValidation(t *testing.T) {
 	for _, value := range []string{"", "main;reboot", "$(id)", "tag with spaces"} {
 		if validWorkerModuleRef(value) {
 			t.Fatalf("expected %q to be invalid", value)
+		}
+	}
+}
+
+func TestRemoteInstanceMustBeProviderManaged(t *testing.T) {
+	mac := &instanceSummary{ID: 7, Provider: "scaleway", Platform: "macos", ResourceClass: "bare_metal"}
+	if err := validateRemoteInstance(mac); err != nil {
+		t.Fatalf("provider-managed Scaleway Mac rejected: %v", err)
+	}
+	linux := &instanceSummary{ID: 8, Provider: "hetzner", Platform: "linux", ResourceClass: "virtual"}
+	if err := validateRemoteInstance(linux); err != nil {
+		t.Fatalf("provider-managed Linux VPS rejected: %v", err)
+	}
+	for _, inst := range []*instanceSummary{
+		{ID: 9, Provider: "external", Platform: "macos"},
+		{ID: 10, Provider: "local", Platform: "macos"},
+		{ID: 11, Provider: "scaleway", Platform: "windows"},
+	} {
+		if err := validateRemoteInstance(inst); err == nil {
+			t.Fatalf("expected unmanaged/unsupported host to be rejected: %+v", inst)
 		}
 	}
 }

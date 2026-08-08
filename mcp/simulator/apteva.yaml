@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.25
+version: 0.1.26
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -31,6 +31,10 @@ description: |
   v0.1.25 adds optional Instances-backed remote runners. Local execution stays
   the default; Android and iOS may independently target a ready Instances host.
 
+  v0.1.26 restricts remote runners to provider-managed Instances compute while
+  supporting both Linux VPSs and provider-provisioned macOS hosts such as
+  Scaleway Apple silicon.
+
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.
   sims_capabilities reports availability with hints when something's
@@ -50,9 +54,9 @@ requires:
     - platform.apps.call
   apps:
     - name: instances
-      version: ">=0.2.0"
+      version: ">=0.4.25"
       optional: true
-      reason: optional remote simulator host inventory, worker bootstrap, and SSH tunnels
+      reason: optional provider-managed remote simulator compute, worker bootstrap, and SSH tunnels
   binaries:
     - name: adb
       executables: [adb]
@@ -172,7 +176,7 @@ config_schema:
     fallback: text
     default: "0"
     label: iOS simulator host
-    description: "0 runs locally; a positive Instances id selects a remote Mac."
+    description: "0 runs locally; a positive Instances id selects a provider-managed macOS host such as Scaleway Apple silicon."
   - name: android_image
     type: text
     label: Android system image
@@ -237,6 +241,6 @@ config_schema:
     type: text
     label: Remote worker module ref
     description: "Immutable app release tag or Go revision used to install the remote worker when no binary path is configured."
-    default: "simulator/v0.1.25"
+    default: "simulator/v0.1.26"
 
 upgrade_policy: auto-patch

@@ -22,15 +22,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const simulatorVersion = "0.1.25"
+const simulatorVersion = "0.1.26"
 
 var remoteHostLocks sync.Map // map[int64]*sync.Mutex
 
 type instanceSummary struct {
-	ID       int64  `json:"id"`
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Provider string `json:"provider"`
+	ID            int64  `json:"id"`
+	Name          string `json:"name"`
+	Status        string `json:"status"`
+	Provider      string `json:"provider"`
+	Platform      string `json:"platform"`
+	ResourceClass string `json:"resource_class"`
 }
 
 type remoteWorkerClient struct {
@@ -134,6 +136,9 @@ func (a *App) ensureRemoteWorker(ctx *sdk.AppCtx, instanceID int64) (*remoteWork
 	if err != nil {
 		return nil, fmt.Errorf("runner_unavailable: Instances host %d: %w", instanceID, err)
 	}
+	if err := validateRemoteInstance(inst); err != nil {
+		return nil, fmt.Errorf("runner_unavailable: Instances host %d: %w", instanceID, err)
+	}
 	if inst.Status != "ready" {
 		return nil, fmt.Errorf("runner_unavailable: Instances host %d is %s", instanceID, inst.Status)
 	}
@@ -183,6 +188,21 @@ func (a *App) ensureRemoteWorker(ctx *sdk.AppCtx, instanceID int64) (*remoteWork
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+func validateRemoteInstance(inst *instanceSummary) error {
+	if inst == nil {
+		return errors.New("instance is required")
+	}
+	provider := strings.ToLower(strings.TrimSpace(inst.Provider))
+	if provider == "" || provider == "local" || provider == "external" {
+		return fmt.Errorf("provider-managed VPS required, got provider %q", inst.Provider)
+	}
+	platform := strings.ToLower(strings.TrimSpace(inst.Platform))
+	if platform != "" && platform != "linux" && platform != "macos" {
+		return fmt.Errorf("simulator runner does not support platform %q", inst.Platform)
+	}
+	return nil
 }
 
 func getInstance(ctx *sdk.AppCtx, instanceID int64) (*instanceSummary, error) {
