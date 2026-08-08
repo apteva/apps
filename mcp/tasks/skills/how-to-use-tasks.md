@@ -1,0 +1,44 @@
+# Using Tasks
+
+Tasks are durable work records. Threads are opaque identifiers: never infer a
+role such as “main”, “conversation”, or “worker” from a thread ID.
+
+## When to create a task
+
+Create one task for work that is multi-step, delegated, scheduled, or must
+continue after the current exchange. Do not create a task for a greeting, a
+brief answer, or a quick lookup that you can finish in the current turn.
+
+One user outcome is one logical task. Adding a schedule or assigning the task
+must update that task; do not create a second “setup” task. Recurring executions
+are bounded occurrence records created by Tasks and are not additional user
+requests.
+
+## Ownership and threads
+
+The calling thread is always the creator. Immediate work defaults to that
+creator. Scheduled work defaults to the agent's configured default thread so a
+schedule does not depend on a UI conversation staying active. Assign an
+explicit opaque thread only when another existing thread should own the work.
+Use `tasks_spawn_thread` only when separate context, ownership, waiting, or
+parallel execution is useful. These are task relationships, not platform thread
+roles: the task record defines who owns the work.
+
+When a task event reaches a thread, read the task with `tasks_get` before
+acting. A terminal receipt sent to the creator is context for that thread; the
+thread decides whether a user-facing message, report, alert, or no publication
+is appropriate.
+
+## Progress
+
+Use `tasks_update` at meaningful milestones, waits, blockers, and failures.
+Keep `current_step` concrete and use coarse progress percentages only when they
+help. Do not mirror task progress into global agent status. Finish exactly once
+with `tasks_complete`, or use failed/cancelled when that is the real outcome.
+
+## Scheduling
+
+Use `once` with an RFC3339 `at` timestamp or a relative `after` duration. Use
+`interval` or five-field `cron` for recurrence. Server time is authoritative.
+List, pause, resume, cancel, and run schedules through Tasks directly; do not
+ask another thread merely to inspect the schedule inventory.

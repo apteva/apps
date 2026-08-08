@@ -1,355 +1,360 @@
-// TasksPanel — mission board for an agent.
-//
-// Layout: a list grouped by status (open / in_progress / blocked /
-// done / cancelled). The agent creates tasks via MCP; the panel adds
-// + edits them via REST. Live updates land via /api/app-events when
-// the app emits — for now updates only happen via re-fetch (the app
-// doesn't emit task.* events yet; v0.2 plumbs them through OnMount).
-//
-// The agent picker at the top lets the operator browse boards across
-// agents. The agent's tasks_list / tasks_create tool calls are scoped
-// by agent_id; the panel mirrors that. The platform still passes its
-// running-agent handle in as `instanceId` (NativePanelProps contract
-// shared by every app), and we use it as the initial agent id.
+import { useEffect, useMemo, useState } from "react";
+import {
+  Agent,
+  HostProps,
+  Task,
+  TaskDetails,
+  TaskRow,
+  isSchedule,
+  isTerminal,
+  taskAPI,
+  useAgentNames,
+  useTasks,
+} from "./taskShared";
 
-import { useCallback, useEffect, useState } from "react";
+type View = "active" | "attention" | "scheduled" | "completed" | "all";
 
-const API = "/api/apps/tasks";
+export default function TasksPanel(props: HostProps) {
+  const { tasks, loading, error, reload } = useTasks(props, { limit: "500" });
+  const names = useAgentNames(props.projectId);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [view, setView] = useState<View>("active");
+  const [agentId, setAgentId] = useState(0);
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Task | null>(null);
+  const [creating, setCreating] = useState(false);
 
-interface NativePanelProps {
-  appName: string;
-  installId: number;
-  projectId: string;
-  instanceId?: number;
-}
+  useEffect(() => {
+    if (!props.projectId) return;
+    fetch(`/api/agents?project_id=${encodeURIComponent(props.projectId)}`, {
+      credentials: "same-origin",
+    })
+      .then((response) => (response.ok ? response.json() : []))
+      .then(setAgents)
+      .catch(() => setAgents([]));
+  }, [props.projectId]);
 
-interface Task {
-  id: number;
-  agent_id: number;
-  title: string;
-  notes: string;
-  status: string;
-  created_at: string;
-  updated_at: string;
-}
-
-const STATUSES: { key: string; label: string; tone: string }[] = [
-  { key: "open",        label: "Open",        tone: "text-text" },
-  { key: "planning",    label: "Planning",    tone: "text-accent" },
-  { key: "in_progress", label: "In progress", tone: "text-info" },
-  { key: "blocked",     label: "Blocked",     tone: "text-warn" },
-  { key: "done",        label: "Done",        tone: "text-success" },
-  { key: "cancelled",   label: "Cancelled",   tone: "text-text-dim" },
-];
-
-export default function TasksPanel({ instanceId }: NativePanelProps) {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [pickedAgent, setPickedAgent] = useState<number>(instanceId ?? 0);
-  const [status, setStatus] = useState("");
-  const [adding, setAdding] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
-  const [newNotes, setNewNotes] = useState("");
-  const [newAskForPlan, setNewAskForPlan] = useState(false);
-  const [editing, setEditing] = useState<Task | null>(null);
-
-  const load = useCallback(async () => {
-    if (!pickedAgent) {
-      setTasks([]);
-      return;
-    }
-    try {
-      const res = await fetch(
-        `${API}/agents/${pickedAgent}?status=all`,
-        { credentials: "same-origin" },
-      );
-      if (!res.ok) {
-        setStatus(`Load: ${res.status}`);
-        return;
-      }
-      const data = await res.json();
-      setTasks(data || []);
-      setStatus(`${(data || []).length} tasks`);
-    } catch (e) {
-      setStatus("Load: " + (e as Error).message);
-    }
-  }, [pickedAgent]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const create = async () => {
-    if (!newTitle.trim() || !pickedAgent) return;
-    try {
-      const res = await fetch(`${API}/agents/${pickedAgent}`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          Title: newTitle,
-          Notes: newNotes,
-          status: newAskForPlan ? "planning" : "open",
-        }),
-      });
-      if (!res.ok) {
-        setStatus("Create: " + (await res.text()));
-        return;
-      }
-      setNewTitle(""); setNewNotes(""); setNewAskForPlan(false); setAdding(false);
-      load();
-    } catch (e) {
-      setStatus("Create: " + (e as Error).message);
-    }
-  };
-
-  const updateStatus = async (id: number, newStatus: string) => {
-    try {
-      await fetch(`${API}/tasks/${id}`, {
-        method: "PUT",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
-      });
-      load();
-    } catch (e) {
-      setStatus("Update: " + (e as Error).message);
-    }
-  };
-
-  const remove = async (id: number) => {
-    if (!confirm("Delete this task?")) return;
-    try {
-      await fetch(`${API}/tasks/${id}`, { method: "DELETE", credentials: "same-origin" });
-      load();
-    } catch (e) {
-      setStatus("Delete: " + (e as Error).message);
-    }
-  };
-
-  const grouped: Record<string, Task[]> = {};
-  for (const s of STATUSES) grouped[s.key] = [];
-  for (const t of tasks) (grouped[t.status] ?? grouped.open).push(t);
+  const visible = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return tasks.filter((task) => {
+      if (task.parent_task_id) return false;
+      if (agentId && task.agent_id !== agentId) return false;
+      if (view === "active" && (isTerminal(task) || isSchedule(task)))
+        return false;
+      if (view === "attention" && !["blocked", "failed"].includes(task.state))
+        return false;
+      if (view === "scheduled" && (!isSchedule(task) || isTerminal(task)))
+        return false;
+      if (view === "completed" && task.state !== "completed") return false;
+      if (
+        needle &&
+        !`${task.title} ${task.description || ""} ${task.current_step || ""} ${task.result || ""}`
+          .toLowerCase()
+          .includes(needle)
+      )
+        return false;
+      return true;
+    });
+  }, [tasks, view, agentId, search]);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="flex items-center gap-3 border-b border-border px-4 py-2">
-        <div className="text-text font-medium">Mission board</div>
-        <input
-          type="number"
-          placeholder="agent id"
-          value={pickedAgent || ""}
-          onChange={(e) => setPickedAgent(parseInt(e.target.value) || 0)}
-          className="bg-bg-input border border-border rounded px-2 py-1 text-sm w-32"
-        />
-        <button
-          onClick={() => setAdding(true)}
-          disabled={!pickedAgent}
-          className="px-3 py-1 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        >
-          + Task
-        </button>
-        <span className="ml-auto text-text-dim text-xs">{status}</span>
-      </header>
-
-      <div className="flex-1 overflow-auto p-4">
-        {!pickedAgent ? (
-          <div className="py-12 text-center text-text-muted text-sm">
-            Pick an agent ID to view its mission board.
+    <div className="flex h-full min-h-0 flex-col bg-bg">
+      <header className="border-b border-border px-4 py-4 sm:px-6">
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-bold text-text">Tasks</h1>
+              <span className="rounded border border-green/25 bg-green/10 px-1.5 py-0.5 text-[8px] font-bold uppercase text-green">
+                Live
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-text-dim">
+              Durable work, schedules, and outcomes owned by this app.
+            </p>
           </div>
-        ) : tasks.length === 0 ? (
-          <div className="py-12 text-center text-text-muted text-sm">
-            No tasks yet for agent {pickedAgent}. Add one or have the agent call <code>tasks_create</code>.
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-3">
-            {STATUSES.map((s) => (
-              <div key={s.key} className="border border-border rounded p-2 flex flex-col">
-                <div className={`text-xs uppercase font-medium mb-2 ${s.tone}`}>
-                  {s.label} <span className="text-text-dim">({grouped[s.key].length})</span>
-                </div>
-                <div className="flex flex-col gap-2">
-                  {grouped[s.key].map((t) => (
-                    <TaskCard
-                      key={t.id}
-                      task={t}
-                      onMove={(newStatus) => updateStatus(t.id, newStatus)}
-                      onEdit={() => setEditing(t)}
-                      onDelete={() => remove(t.id)}
-                    />
-                  ))}
-                </div>
-              </div>
+          <button
+            onClick={() => setCreating(true)}
+            className="ml-auto rounded border border-accent bg-accent/10 px-4 py-2 text-xs font-bold text-accent hover:bg-accent/20"
+          >
+            + New task
+          </button>
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <select
+            value={agentId}
+            onChange={(event) => setAgentId(Number(event.target.value))}
+            className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
+          >
+            <option value={0}>All agents</option>
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}
+              </option>
             ))}
-          </div>
-        )}
-      </div>
-
-      {adding && (
-        <Dialog onClose={() => setAdding(false)} title="New task">
+          </select>
           <input
-            type="text"
-            placeholder="Title"
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            autoFocus
-            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search tasks…"
+            className="min-w-[14rem] flex-1 rounded border border-border bg-bg-input px-3 py-2 text-xs text-text placeholder:text-text-dim"
           />
-          <textarea
-            placeholder="Notes (optional)"
-            value={newNotes}
-            onChange={(e) => setNewNotes(e.target.value)}
-            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[80px]"
-          />
-          <label className="flex items-center gap-2 text-sm text-text-muted cursor-pointer">
-            <input
-              type="checkbox"
-              checked={newAskForPlan}
-              onChange={(e) => setNewAskForPlan(e.target.checked)}
-            />
-            Ask the agent for a plan first
-          </label>
-          <div className="flex gap-2 justify-end">
-            <button onClick={() => setAdding(false)} className="px-3 py-1.5 text-sm text-text-muted">
-              Cancel
-            </button>
-            <button
-              onClick={create}
-              disabled={!newTitle.trim()}
-              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-            >
-              Create
-            </button>
-          </div>
-        </Dialog>
-      )}
-
-      {editing && (
-        <Dialog onClose={() => setEditing(null)} title="Edit task">
-          <EditForm
-            task={editing}
-            onSaved={() => { setEditing(null); load(); }}
-            onCancel={() => setEditing(null)}
-          />
-        </Dialog>
-      )}
-    </div>
-  );
-}
-
-function TaskCard({
-  task, onMove, onEdit, onDelete,
-}: {
-  task: Task;
-  onMove: (status: string) => void;
-  onEdit: () => void;
-  onDelete: () => void;
-}) {
-  return (
-    <div className="border border-border rounded p-2 hover:border-text-dim transition-colors group">
-      <div className="flex items-start gap-2">
-        <button onClick={onEdit} className="text-left flex-1 min-w-0">
-          <div className="text-text text-sm truncate">{task.title}</div>
-          {task.notes && (
-            <div className={
-              task.status === "planning"
-                ? "text-text-dim text-xs mt-0.5 whitespace-pre-wrap"
-                : "text-text-dim text-xs mt-0.5 line-clamp-2"
-            }>
-              {task.notes}
+        </div>
+      </header>
+      <main className="min-h-0 flex-1 overflow-auto p-4 sm:p-6">
+        <div className="overflow-hidden rounded border border-border bg-bg-card">
+          <nav className="flex flex-wrap gap-1 border-b border-border p-2">
+            {(
+              ["active", "attention", "scheduled", "completed", "all"] as View[]
+            ).map((item) => (
+              <button
+                key={item}
+                onClick={() => setView(item)}
+                className={`rounded px-3 py-2 text-[10px] font-bold capitalize ${view === item ? "bg-accent/15 text-accent" : "text-text-dim hover:bg-bg-hover hover:text-text"}`}
+              >
+                {item === "attention" ? "Needs attention" : item}
+              </button>
+            ))}
+            <span className="ml-auto self-center px-2 text-[9px] text-text-dim">
+              {visible.length} shown
+            </span>
+          </nav>
+          {error ? (
+            <p className="p-6 text-xs text-red">{error}</p>
+          ) : loading ? (
+            <p className="p-6 text-xs text-text-dim">Loading tasks…</p>
+          ) : visible.length ? (
+            visible.map((task) => (
+              <TaskRow
+                key={task.id}
+                task={task}
+                agentName={names.get(task.agent_id)}
+                onOpen={() => setSelected(task)}
+              />
+            ))
+          ) : (
+            <div className="grid min-h-64 place-items-center p-8 text-xs text-text-dim">
+              No matching tasks.
             </div>
           )}
-        </button>
-        <button
-          onClick={onDelete}
-          className="opacity-0 group-hover:opacity-100 text-text-muted hover:text-error text-xs"
-          title="Delete"
-        >
-          ×
-        </button>
-      </div>
-      <div className="flex flex-wrap gap-1 mt-2">
-        {STATUSES.filter((s) => s.key !== task.status).map((s) => (
+        </div>
+      </main>
+      {creating && (
+        <NewTask
+          props={props}
+          agents={agents}
+          initialAgent={agentId || props.instanceId || 0}
+          onClose={() => setCreating(false)}
+          onCreated={(task) => {
+            setCreating(false);
+            setSelected(task);
+            void reload();
+          }}
+        />
+      )}
+      {selected && (
+        <TaskDetails
+          props={props}
+          task={selected}
+          onClose={() => setSelected(null)}
+          onChanged={reload}
+        />
+      )}
+    </div>
+  );
+}
+
+function NewTask({
+  props,
+  agents,
+  initialAgent,
+  onClose,
+  onCreated,
+}: {
+  props: HostProps;
+  agents: Agent[];
+  initialAgent: number;
+  onClose: () => void;
+  onCreated: (task: Task) => void;
+}) {
+  const [agentId, setAgentId] = useState(initialAgent || agents[0]?.id || 0);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [scheduleKind, setScheduleKind] = useState<
+    "" | "once" | "interval" | "cron"
+  >("");
+  const [scheduleValue, setScheduleValue] = useState("");
+  const [timezone, setTimezone] = useState("UTC");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const create = async () => {
+    if (!agentId || !title.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      let schedule: Record<string, string> | undefined;
+      if (scheduleKind === "once")
+        schedule = {
+          kind: "once",
+          at: new Date(scheduleValue).toISOString(),
+          timezone,
+        };
+      if (scheduleKind === "interval")
+        schedule = { kind: "interval", every: scheduleValue, timezone };
+      if (scheduleKind === "cron")
+        schedule = { kind: "cron", cron: scheduleValue, timezone };
+      const response = await taskAPI.create(props, {
+        agent_id: agentId,
+        title: title.trim(),
+        description: description.trim(),
+        ...(schedule ? { schedule } : {}),
+      });
+      onCreated(response.task);
+    } catch (reason) {
+      setError(
+        reason instanceof Error ? reason.message : "Unable to create task",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="fixed inset-0 z-[100] grid place-items-center p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="New task"
+    >
+      <button
+        className="absolute inset-0 bg-black/65"
+        onClick={onClose}
+        aria-label="Close"
+      />
+      <div className="relative w-full max-w-xl rounded border border-border bg-bg-card shadow-2xl">
+        <header className="flex items-center border-b border-border px-5 py-4">
+          <div>
+            <h2 className="text-sm font-bold text-text">New task</h2>
+            <p className="mt-1 text-[10px] text-text-dim">
+              Assign durable work to an agent thread.
+            </p>
+          </div>
           <button
-            key={s.key}
-            onClick={() => onMove(s.key)}
-            className="text-[10px] px-1.5 py-0.5 border border-border rounded text-text-dim hover:text-text hover:border-accent transition-colors"
+            onClick={onClose}
+            className="ml-auto text-lg text-text-dim hover:text-text"
           >
-            → {s.label}
+            ×
           </button>
-        ))}
+        </header>
+        <div className="space-y-4 p-5">
+          <Field label="Agent">
+            <select
+              value={agentId}
+              onChange={(event) => setAgentId(Number(event.target.value))}
+              className="w-full rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
+            >
+              {agents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Task">
+            <input
+              autoFocus
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              placeholder="Prepare the weekly client briefing"
+              className="w-full rounded border border-border bg-bg-input px-3 py-2 text-xs text-text placeholder:text-text-dim"
+            />
+          </Field>
+          <Field label="Instructions (optional)">
+            <textarea
+              value={description}
+              onChange={(event) => setDescription(event.target.value)}
+              placeholder="Outcome, constraints, and what successful completion looks like."
+              className="min-h-28 w-full rounded border border-border bg-bg-input px-3 py-2 text-xs leading-5 text-text placeholder:text-text-dim"
+            />
+          </Field>
+          <Field label="Schedule (optional)">
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <select
+                value={scheduleKind}
+                onChange={(event) => {
+                  setScheduleKind(event.target.value as any);
+                  setScheduleValue("");
+                }}
+                className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
+              >
+                <option value="">Start now</option>
+                <option value="once">One time</option>
+                <option value="interval">Recurring interval</option>
+                <option value="cron">Recurring cron</option>
+              </select>
+              {scheduleKind && (
+                <input
+                  type={scheduleKind === "once" ? "datetime-local" : "text"}
+                  value={scheduleValue}
+                  onChange={(event) => setScheduleValue(event.target.value)}
+                  placeholder={
+                    scheduleKind === "interval"
+                      ? "e.g. 1h"
+                      : scheduleKind === "cron"
+                        ? "0 9 * * *"
+                        : ""
+                  }
+                  className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text placeholder:text-text-dim"
+                />
+              )}
+              {scheduleKind && (
+                <input
+                  value={timezone}
+                  onChange={(event) => setTimezone(event.target.value)}
+                  placeholder="UTC"
+                  className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
+                />
+              )}
+            </div>
+          </Field>
+          {error && <p className="text-xs text-red">{error}</p>}
+        </div>
+        <footer className="flex justify-end gap-2 border-t border-border px-5 py-4">
+          <button
+            onClick={onClose}
+            className="rounded border border-border px-4 py-2 text-xs text-text-muted hover:bg-bg-hover"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={
+              busy ||
+              !agentId ||
+              !title.trim() ||
+              (!!scheduleKind && !scheduleValue)
+            }
+            onClick={() => void create()}
+            className="rounded border border-accent bg-accent/10 px-4 py-2 text-xs font-bold text-accent hover:bg-accent/20 disabled:opacity-40"
+          >
+            {busy ? "Creating…" : "Create task"}
+          </button>
+        </footer>
       </div>
     </div>
   );
 }
 
-function EditForm({
-  task, onSaved, onCancel,
-}: { task: Task; onSaved: () => void; onCancel: () => void }) {
-  const [title, setTitle] = useState(task.title);
-  const [notes, setNotes] = useState(task.notes || "");
-  const [status, setStatus] = useState(task.status);
-
-  const save = async () => {
-    try {
-      await fetch(`${API}/tasks/${task.id}`, {
-        method: "PUT",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, notes, status }),
-      });
-      onSaved();
-    } catch {}
-  };
-
-  return (
-    <>
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-      />
-      <textarea
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[80px]"
-      />
-      <select
-        value={status}
-        onChange={(e) => setStatus(e.target.value)}
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-      >
-        {STATUSES.map((s) => (
-          <option key={s.key} value={s.key}>{s.label}</option>
-        ))}
-      </select>
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
-        <button
-          onClick={save}
-          disabled={!title.trim()}
-          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        >
-          Save
-        </button>
-      </div>
-    </>
-  );
-}
-
-function Dialog({ children, onClose, title }: {
-  children: React.ReactNode; onClose: () => void; title: string;
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
-      <div
-        className="bg-bg-card border border-border rounded p-4 w-[480px] max-w-[90vw] flex flex-col gap-3"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between">
-          <div className="text-text font-medium">{title}</div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
-        </div>
-        {children}
-      </div>
-    </div>
+    <label className="block">
+      <span className="mb-1.5 block text-[10px] font-bold uppercase tracking-wide text-text-dim">
+        {label}
+      </span>
+      {children}
+    </label>
   );
 }

@@ -1,0 +1,150 @@
+package main
+
+import (
+	"errors"
+	"time"
+)
+
+const (
+	stateQueued    = "queued"
+	stateRunning   = "running"
+	stateWaiting   = "waiting"
+	stateBlocked   = "blocked"
+	stateCompleted = "completed"
+	stateFailed    = "failed"
+	stateCancelled = "cancelled"
+)
+
+var (
+	errTaskNotFound    = errors.New("task not found")
+	errInvalidState    = errors.New("invalid task state")
+	errTerminalTask    = errors.New("task is already terminal")
+	errInvalidProgress = errors.New("progress must be between 0 and 100")
+)
+
+type ThreadRef struct {
+	AgentID  int64  `json:"agent_id"`
+	ThreadID string `json:"thread_id"`
+}
+
+type Task struct {
+	ID                    string     `json:"id"`
+	AgentID               int64      `json:"agent_id"`
+	ProjectID             string     `json:"project_id"`
+	Title                 string     `json:"title"`
+	Description           string     `json:"description,omitempty"`
+	State                 string     `json:"state"`
+	Progress              *int       `json:"progress,omitempty"`
+	CurrentStep           string     `json:"current_step,omitempty"`
+	CreatedByThreadID     string     `json:"created_by_thread_id,omitempty"`
+	AssignedThreadID      string     `json:"assigned_thread_id"`
+	ExecutionThreadID     string     `json:"execution_thread_id,omitempty"`
+	ParentTaskID          string     `json:"parent_task_id,omitempty"`
+	IdempotencyKey        string     `json:"idempotency_key,omitempty"`
+	ScheduleKind          string     `json:"schedule_kind,omitempty"`
+	ScheduleExpression    string     `json:"schedule_expression,omitempty"`
+	ScheduleTimezone      string     `json:"schedule_timezone,omitempty"`
+	ScheduleEnabled       bool       `json:"schedule_enabled,omitempty"`
+	ScheduleOverlapPolicy string     `json:"schedule_overlap_policy,omitempty"`
+	ScheduleCatchupPolicy string     `json:"schedule_catchup_policy,omitempty"`
+	NextRunAt             *time.Time `json:"next_run_at,omitempty"`
+	LastRunAt             *time.Time `json:"last_run_at,omitempty"`
+	ScheduledFor          *time.Time `json:"scheduled_for,omitempty"`
+	ScheduleOccurrenceKey string     `json:"schedule_occurrence_key,omitempty"`
+	Result                string     `json:"result,omitempty"`
+	Error                 string     `json:"error,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	StartedAt             *time.Time `json:"started_at,omitempty"`
+	CompletedAt           *time.Time `json:"completed_at,omitempty"`
+}
+
+type TaskEvent struct {
+	ID        string         `json:"id"`
+	TaskID    string         `json:"task_id"`
+	AgentID   int64          `json:"agent_id"`
+	EventType string         `json:"event_type"`
+	ThreadID  string         `json:"thread_id,omitempty"`
+	FromState string         `json:"from_state,omitempty"`
+	ToState   string         `json:"to_state,omitempty"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+}
+
+type CreateTaskInput struct {
+	AgentID           int64
+	ProjectID         string
+	Title             string
+	Description       string
+	State             string
+	Progress          *int
+	CurrentStep       string
+	CreatedByThreadID string
+	AssignedThreadID  string
+	ParentTaskID      string
+	IdempotencyKey    string
+	Schedule          *ScheduleInput
+	ScheduledFor      *time.Time
+	OccurrenceKey     string
+}
+
+type UpdateTaskInput struct {
+	State             *string
+	Progress          *int
+	ClearProgress     bool
+	CurrentStep       *string
+	AssignedThreadID  *string
+	ExecutionThreadID *string
+	Result            *string
+	Error             *string
+}
+
+type TaskFilter struct {
+	ProjectID        string
+	AgentID          int64
+	States           []string
+	AssignedThread   string
+	CreatedByThread  string
+	AssociatedThread string
+	ParentTaskID     *string
+	Limit            int
+}
+
+type TaskCounts struct {
+	Active    int `json:"active"`
+	Queued    int `json:"queued"`
+	Running   int `json:"running"`
+	Waiting   int `json:"waiting"`
+	Blocked   int `json:"blocked"`
+	Completed int `json:"completed"`
+	Failed    int `json:"failed"`
+	Cancelled int `json:"cancelled"`
+	Scheduled int `json:"scheduled"`
+	Paused    int `json:"paused"`
+}
+
+func validState(state string) bool {
+	switch state {
+	case stateQueued, stateRunning, stateWaiting, stateBlocked, stateCompleted, stateFailed, stateCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+func terminalState(state string) bool {
+	return state == stateCompleted || state == stateFailed || state == stateCancelled
+}
+
+func validTransition(from, to string) bool {
+	if from == to {
+		return true
+	}
+	if terminalState(from) {
+		return false
+	}
+	if to == stateQueued {
+		return from == stateWaiting || from == stateBlocked
+	}
+	return validState(to)
+}
