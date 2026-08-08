@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -390,7 +391,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.0" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -400,6 +401,17 @@ func TestManifestAndToolContract(t *testing.T) {
 	if len(manifest.Provides.UIPanels) != 1 || !manifest.Provides.UIPanels[0].Suggested {
 		t.Fatalf("task page should be a generic suggested sidebar contribution: %+v", manifest.Provides.UIPanels)
 	}
+	normalizedManifestSkill := strings.Join(strings.Fields(manifest.Provides.Skills[0].Body), " ")
+	for _, required := range []string{
+		"combines multiple sources or independent checks",
+		"even when its calls can run in parallel",
+		"one bounded lookup or action",
+		"does not imply delegation",
+	} {
+		if !strings.Contains(normalizedManifestSkill, required) {
+			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
+		}
+	}
 	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "spawn_thread": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false}
 	for _, tool := range app.MCPTools() {
 		if _, ok := want[tool.Name]; !ok {
@@ -408,6 +420,18 @@ func TestManifestAndToolContract(t *testing.T) {
 		want[tool.Name] = true
 		if tool.HandlerCtx == nil || tool.Description == "" || tool.InputSchema["type"] != "object" {
 			t.Fatalf("invalid tool contract: %+v", tool)
+		}
+		if tool.Name == "create" {
+			for _, required := range []string{
+				"combines multiple sources or independent checks",
+				"even when calls run in parallel or finish in one turn",
+				"one bounded read or action with no multi-source synthesis",
+				"does not imply delegation",
+			} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("create tool description missing classification rule %q: %s", required, tool.Description)
+				}
+			}
 		}
 		if tool.Name == "list" {
 			properties, _ := tool.InputSchema["properties"].(map[string]any)
@@ -427,6 +451,24 @@ func TestManifestAndToolContract(t *testing.T) {
 	for name, found := range want {
 		if !found {
 			t.Errorf("missing tool %q", name)
+		}
+	}
+	skillBody, err := os.ReadFile("skills/how-to-use-tasks.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Provides.Skills[0].Body != string(skillBody) || manifest.Provides.Skills[0].BodyFile != "" {
+		t.Fatal("runtime manifest does not embed the canonical Tasks skill body")
+	}
+	normalizedSkill := strings.Join(strings.Fields(string(skillBody)), " ")
+	for _, required := range []string{
+		"combines multiple sources or independent checks",
+		"even when its calls can run in parallel",
+		"one bounded lookup or action",
+		"does not imply delegation",
+	} {
+		if !strings.Contains(normalizedSkill, required) {
+			t.Fatalf("Tasks skill missing classification rule %q", required)
 		}
 	}
 }

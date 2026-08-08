@@ -32,6 +32,8 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `05-chat-recurring-schedule.yaml` | Chat creates one recurring schedule without setup work, delegation messages, or early execution. |
 | `06-scheduled-execution-and-receipt.yaml` | Due work executes on the default thread and its terminal receipt returns one requested result to the creator conversation. |
 | `07-chat-lists-agent-inventory.yaml` | Chat lists the agent-wide Tasks inventory directly without a thread-to-thread status query. |
+| `08-chat-natural-multisource-task.yaml` | A natural multi-area review creates and completes one conversation-owned task without task-oriented wording. |
+| `09-chat-bounded-lookup-no-task.yaml` | A single bounded lookup remains task-free, preserving the other side of the classification boundary. |
 
 Conversation scenarios use `setup.interaction: conversation`: `directive` is
 the agent's durable role and `prompt` is sent as a real dashboard-channel user

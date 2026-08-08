@@ -1,0 +1,33 @@
+name: bounded-lookup-does-not-create-task
+description: |
+  A single bounded fact lookup remains an immediate chat answer. This keeps the
+  stronger multi-source rule from manufacturing tasks for every useful answer.
+
+timeout: 90s
+settle_for: 6s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  interaction: conversation
+  app:
+    path: ./
+
+directive: |
+  You are a concise CRM operations assistant. The authoritative CRM snapshot
+  says there are nineteen active contacts. The Tasks capability is active:
+  create one task for multi-step or multi-source work, but do not create one for
+  a single bounded lookup or answer. Answer bounded fact lookups directly.
+
+prompt: |
+  How many active contacts are currently in the CRM? Reply with just the number.
+
+assert:
+  - chat_response_contains: '19'
+  - chat_final_messages: 1
+  - tool_not_called: tasks_create | tasks_update | tasks_complete
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 100000
+  cost_usd: 1.00

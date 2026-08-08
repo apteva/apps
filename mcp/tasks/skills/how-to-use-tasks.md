@@ -12,9 +12,17 @@ are provenance and routing metadata, not visibility boundaries.
 
 ## When to create a task
 
-Create one task for work that is multi-step, delegated, scheduled, or must
-continue after the current exchange. Do not create a task for a greeting, a
-brief answer, or a quick lookup that you can finish in the current turn.
+Create one task before substantive work begins when the requested outcome is
+multi-step, combines multiple sources or independent checks, is delegated,
+scheduled, or must continue after the current exchange. A review that inspects
+several areas and synthesizes them is task work even when its calls can run in
+parallel or the result can be finished in the current turn.
+
+Do not create a task for a greeting, a brief answer, or one bounded lookup or
+action that needs no multi-source synthesis. Finishing quickly does not by
+itself make multi-step work a quick lookup. Creating a task also does not imply
+delegation: the calling thread may create, execute, update, and complete its own
+task.
 
 One user outcome is one logical task. Adding a schedule or assigning the task
 must update that task; do not create a second “setup” task. Recurring executions

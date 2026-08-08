@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tasks
 display_name: Tasks
-version: 3.2.0
+version: 3.2.1
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -23,7 +23,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: create, description: Create one durable task. }
+    - { name: create, description: "Create one durable task for multi-step, multi-source, delegated, scheduled, or resumable work." }
     - { name: list, description: List durable tasks visible to the calling agent. }
     - { name: get, description: Get one task and its event history. }
     - { name: update, description: Update meaningful task progress or state. }
@@ -86,8 +86,9 @@ provides:
       command: /tasks
       body_file: skills/how-to-use-tasks.md
       description: |
-        Durable task ownership, progress, delegation, schedules, and terminal
-        receipts. Load for multi-step, scheduled, delegated, or resumable work.
+        Task-selection, ownership, progress, delegation, schedules, and terminal
+        receipts. Load before multi-step or multi-source reviews, scheduled,
+        delegated, or resumable work.
       metadata:
         category: productivity
         icon: list-checks
