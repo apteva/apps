@@ -17,11 +17,14 @@ const (
 	resourceLeadForm         = "lead_form"
 	resourceAudience         = "audience"
 	resourceCreativeAsset    = "creative_asset"
+	resourceFundingSource    = "funding_source"
 )
 
 var platformResourceKinds = map[string][]string{
 	"meta":   {resourceIdentity, resourceTrackingSource, resourceLeadForm, resourceAudience},
 	"google": {resourceConversionAction, resourceLeadForm, resourceAudience},
+	"x":      {resourceIdentity, resourceFundingSource, resourceAudience},
+	"reddit": {resourceIdentity, resourceTrackingSource, resourceFundingSource, resourceLeadForm, resourceAudience},
 }
 
 type discoveredResource struct {
@@ -205,7 +208,7 @@ func (a *App) toolResourceSetDefault(ctx *sdk.AppCtx, args map[string]any) (any,
 func resourceMatchesPurpose(resource *adResource, purpose string) bool {
 	switch purpose {
 	case "publishing_identity":
-		return resource.Kind == resourceIdentity && resource.ProviderType == "facebook_page"
+		return resource.Kind == resourceIdentity && resource.ProviderType != "instagram_business"
 	case "instagram_identity":
 		return resource.Kind == resourceIdentity && resource.ProviderType == "instagram_business"
 	case "conversion_source":
@@ -214,6 +217,8 @@ func resourceMatchesPurpose(resource *adResource, purpose string) bool {
 		return resource.Kind == resourceLeadForm
 	case "audience":
 		return resource.Kind == resourceAudience
+	case "funding_source":
+		return resource.Kind == resourceFundingSource
 	default:
 		return false
 	}
@@ -280,7 +285,139 @@ func (a *App) discoverResources(ctx *sdk.AppCtx, acct *adAccount, kind string) (
 	if acct.Platform == "google" {
 		return a.discoverGoogleResources(ctx, acct, kind)
 	}
+	if acct.Platform == "x" {
+		return a.discoverXResources(ctx, acct, kind)
+	}
+	if acct.Platform == "reddit" {
+		return a.discoverRedditResources(ctx, acct, kind)
+	}
 	return nil, mcpError("resource discovery unsupported for " + acct.Platform)
+}
+
+func (a *App) discoverXResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]discoveredResource, map[string]any) {
+	tool := ""
+	input := map[string]any{"account_id": acct.NativeAccountID, "count": 1000}
+	providerType := ""
+	capabilities := []string{}
+	switch kind {
+	case resourceIdentity:
+		tool, providerType, capabilities = "list_promotable_users", "x_promotable_user", []string{"advertise", "publish"}
+	case resourceFundingSource:
+		tool, providerType, capabilities = "list_funding_instruments", "x_funding_instrument", []string{"fund_campaign"}
+	case resourceAudience:
+		tool, providerType, capabilities = "list_custom_audiences", "x_custom_audience", []string{"target"}
+	default:
+		return nil, mcpError("unsupported X resource kind: " + kind)
+	}
+	rows, errOut := a.providerResourceRows(ctx, acct, tool, input, "x")
+	if errOut != nil {
+		return nil, errOut
+	}
+	out := make([]discoveredResource, 0, len(rows))
+	for _, row := range rows {
+		id := firstString(row, "id", "user_id")
+		if id == "" {
+			continue
+		}
+		name := firstString(row, "name", "screen_name")
+		if name == "" {
+			name = id
+		}
+		status := "active"
+		if deleted, _ := row["deleted"].(bool); deleted {
+			status = "deleted"
+		}
+		out = append(out, discoveredResource{
+			Kind: kind, ProviderType: providerType, NativeID: id, DisplayName: name,
+			Status: status, Capabilities: capabilities, Metadata: row,
+		})
+	}
+	return out, nil
+}
+
+func (a *App) discoverRedditResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]discoveredResource, map[string]any) {
+	tool := ""
+	providerType := ""
+	capabilities := []string{}
+	switch kind {
+	case resourceIdentity:
+		tool, providerType, capabilities = "list_profiles", "reddit_profile", []string{"advertise", "publish"}
+	case resourceTrackingSource:
+		tool, providerType, capabilities = "list_pixels", "reddit_pixel", []string{"conversion_tracking"}
+	case resourceFundingSource:
+		tool, providerType, capabilities = "list_funding_instruments", "reddit_funding_instrument", []string{"fund_campaign"}
+	case resourceLeadForm:
+		tool, providerType, capabilities = "list_lead_forms", "reddit_lead_form", []string{"read_only", "lead_generation"}
+	case resourceAudience:
+		tool, providerType, capabilities = "list_custom_audiences", "reddit_custom_audience", []string{"target"}
+	default:
+		return nil, mcpError("unsupported Reddit resource kind: " + kind)
+	}
+	input := map[string]any{"ad_account_id": acct.NativeAccountID, "page.size": 200}
+	rows, errOut := a.providerResourceRows(ctx, acct, tool, input, "reddit")
+	if errOut != nil {
+		return nil, errOut
+	}
+	out := make([]discoveredResource, 0, len(rows))
+	for _, row := range rows {
+		id := firstString(row, "id", "profile_id", "pixel_id")
+		if id == "" {
+			continue
+		}
+		name := firstString(row, "name", "username")
+		if name == "" {
+			name = id
+		}
+		status := normalizedResourceStatus(firstString(row, "status", "effective_status", "configured_status"))
+		if kind == resourceLeadForm {
+			status = "read_only"
+		}
+		out = append(out, discoveredResource{
+			Kind: kind, ProviderType: providerType, NativeID: id, DisplayName: name,
+			Status: status, Capabilities: capabilities, Metadata: row,
+		})
+	}
+	return out, nil
+}
+
+func (a *App) providerResourceRows(ctx *sdk.AppCtx, acct *adAccount, tool string, input map[string]any, platform string) ([]map[string]any, map[string]any) {
+	rows := make([]map[string]any, 0)
+	continuation := ""
+	for page := 0; page < 20; page++ {
+		if continuation != "" {
+			if platform == "x" {
+				input["cursor"] = continuation
+			} else {
+				input["next_url"] = continuation
+			}
+		}
+		parsed, errOut := a.execIntegrationTool(ctx, acct, tool, input)
+		if errOut != nil {
+			return nil, errOut
+		}
+		rows = append(rows, resultRows(parsed)...)
+		next := xNextCursor(parsed)
+		if platform == "reddit" {
+			next = redditNextURL(parsed)
+		}
+		if next == "" {
+			return rows, nil
+		}
+		if next == continuation {
+			return nil, mcpError(tool + " returned a repeated pagination value")
+		}
+		continuation = next
+	}
+	return nil, mcpError(tool + " pagination exceeded the safety limit")
+}
+
+func xNextCursor(parsed any) string {
+	root := asMap(parsed)
+	return firstString(root, "next_cursor", "nextCursor")
+}
+
+func redditNextURL(parsed any) string {
+	return firstString(asMap(asMap(parsed)["pagination"]), "next_url", "nextUrl")
 }
 
 func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind string) ([]discoveredResource, map[string]any) {

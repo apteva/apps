@@ -381,7 +381,7 @@ func TestPlatforms_ReportsSetupRequired(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Platforms) != 2 {
+	if len(payload.Platforms) != 4 {
 		t.Fatalf("platforms=%#v", payload.Platforms)
 	}
 	for _, platform := range payload.Platforms {

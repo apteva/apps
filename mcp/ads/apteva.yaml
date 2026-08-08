@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.34
+version: 0.1.35
 description: |
   Manage paid advertising across networks behind one MCP surface.
-  v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
-  uses direct Graph API tools; Google Ads uses customer account picking,
-  GAQL reads, and mutate operations behind the same generic MCP tools.
+  v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
+  same account, resource, campaign, creative, delivery, and analytics tools.
+  Meta uses direct Graph API tools; Google Ads uses customer account picking,
+  GAQL reads, and mutate operations. X uses Ads API v12 with OAuth 1.0a,
+  and Reddit uses Ads API v3 with structured creative jobs.
   The Add Account flow reuses project-scoped Dashboard integration
   connections and expands Google manager hierarchies into selectable
   client advertiser accounts.
@@ -33,12 +35,15 @@ description: |
   v0.1.34 adds coordinated near-real-time performance collection, persistent
   provider backoff, AppBus invalidation events, and live cache updates in the
   Ads panel.
+  v0.1.35 adds current X Ads and Reddit Ads account discovery, required-resource
+  auto-wiring, normalized campaign hierarchy and analytics, image/video/carousel
+  creatives, resumable delivery activation, and four-provider panel support.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google]
+tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google, x, twitter, reddit]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"

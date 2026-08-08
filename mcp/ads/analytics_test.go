@@ -121,6 +121,81 @@ func TestPerformanceGetMeta_UsesGenericLevelAndRichMetrics(t *testing.T) {
 	}
 }
 
+func TestPerformanceGetX_ChunksNativeStatsAndNormalizesMicros(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		switch tool {
+		case "list_active_entities":
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":["abc123"]}`)}, nil
+		case "get_stats":
+			if input["entity"] != "CAMPAIGN" || input["granularity"] != "DAY" || input["entity_ids"] != "abc123" {
+				t.Fatalf("X stats input=%#v", input)
+			}
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+				"data":[{"id":"abc123","id_data":[{"metrics":{
+					"billed_charge_local_micro":[1250000],"impressions":[1000],"clicks":[25],
+					"url_clicks":[20],"video_total_views":[80],"conversion_purchases":[3]
+				}}]}]
+			}`)}, nil
+		default:
+			t.Fatalf("unexpected X tool %s", tool)
+			return nil, nil
+		}
+	}
+	ctx := newAdsCtx(t, pf)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "x", "18ce54d4x5t", "EUR", "UTC")
+	out, err := (&App{}).toolPerformanceGet(ctx, map[string]any{
+		"ad_account_id": accountID, "level": "campaign", "date_from": "2026-08-07", "date_to": "2026-08-07",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := out.(map[string]any)["data"].([]map[string]any)[0]
+	if row["entity_id"] != "abc123" || row["spend_micros"] != int64(1250000) || row["conversions"] != float64(3) || row["video_views"] != int64(80) {
+		t.Fatalf("X normalized row=%#v", row)
+	}
+}
+
+func TestPerformanceGetReddit_FollowsOpaqueReportPagination(t *testing.T) {
+	pf := newRecordingPlatform()
+	calls := 0
+	pf.executeResponder = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		if tool != "get_report" {
+			t.Fatalf("tool=%s", tool)
+		}
+		calls++
+		if calls == 1 {
+			data := asMap(input["data"])
+			if data == nil || data["breakdowns"] == nil || data["starts_at"] != "2026-08-01T00:00:00Z" {
+				t.Fatalf("Reddit report input=%#v", input)
+			}
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+				"data":{"metrics":[{"date":"2026-08-01","campaign_id":"c1","spend":1000000,"impressions":100,"clicks":5}]},
+				"pagination":{"next_url":"https://ads-api.reddit.com/api/v3/reports?page=2"}
+			}`)}, nil
+		}
+		if input["next_url"] != "https://ads-api.reddit.com/api/v3/reports?page=2" || input["data"] != nil {
+			t.Fatalf("Reddit continuation input=%#v", input)
+		}
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+			"data":{"metrics":[{"date":"2026-08-02","campaign_id":"c1","spend":2000000,"impressions":200,"clicks":8}]},
+			"pagination":{}
+		}`)}, nil
+	}
+	ctx := newAdsCtx(t, pf)
+	accountID := addPerformanceAccount(t, ctx, "test-proj", "reddit", "a2_client", "EUR", "UTC")
+	out, err := (&App{}).toolPerformanceGet(ctx, map[string]any{
+		"ad_account_id": accountID, "level": "campaign", "date_from": "2026-08-01", "date_to": "2026-08-02",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := out.(map[string]any)["data"].([]map[string]any)
+	if calls != 2 || len(rows) != 2 || rows[1]["spend_micros"] != int64(2000000) {
+		t.Fatalf("calls=%d rows=%#v", calls, rows)
+	}
+}
+
 func TestPerformanceGetRejectsUnscopedAndUnsafeQueries(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)

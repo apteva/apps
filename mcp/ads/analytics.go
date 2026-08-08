@@ -224,6 +224,10 @@ func (a *App) fetchAnalyticsPoints(ctx *sdk.AppCtx, acct *adAccount, request *ge
 		return a.fetchMetaAnalytics(ctx, acct, request)
 	case "google":
 		return a.fetchGoogleAnalytics(ctx, acct, request)
+	case "x":
+		return a.fetchXAnalytics(ctx, acct, request)
+	case "reddit":
+		return a.fetchRedditAnalytics(ctx, acct, request)
 	default:
 		return nil, mcpError("performance reporting is not supported for " + acct.Platform)
 	}
@@ -290,6 +294,9 @@ func (a *App) fetchMetaAnalytics(ctx *sdk.AppCtx, acct *adAccount, request *gene
 }
 
 func (a *App) fetchGoogleAnalytics(ctx *sdk.AppCtx, acct *adAccount, request *genericPerformanceRequest) ([]analyticsPoint, map[string]any) {
+	if err := validateProviderAnalyticsIDs(acct.Platform, request.EntityIDs); err != nil {
+		return nil, mcpError(err.Error())
+	}
 	resource := map[string]string{
 		"account": "customer", "campaign": "campaign", "ad_group": "ad_group", "ad": "ad_group_ad",
 	}[request.Level]

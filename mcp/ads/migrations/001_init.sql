@@ -17,8 +17,8 @@
 CREATE TABLE IF NOT EXISTS pending_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
-    platform TEXT NOT NULL,                  -- meta (= facebook + instagram); future: google, twitter
-    integration_slug TEXT NOT NULL,          -- "facebook-ads", "google-ads", "twitter-ads"
+    platform TEXT NOT NULL,                  -- meta | google | x | reddit
+    integration_slug TEXT NOT NULL,          -- provider integration catalog slug
     connection_id INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,                    -- pending_oauth | ready | finalized | expired
     expires_at TIMESTAMP NOT NULL,
@@ -31,7 +31,7 @@ CREATE INDEX IF NOT EXISTS idx_pending_conn ON pending_accounts(connection_id);
 CREATE TABLE IF NOT EXISTS ad_accounts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id TEXT NOT NULL,
-    platform TEXT NOT NULL,                  -- meta | google | twitter
+    platform TEXT NOT NULL,                  -- meta | google | x | reddit
     connection_id INTEGER NOT NULL,
     native_account_id TEXT NOT NULL,         -- Meta act_*, Google customers/123, X account id
     display_name TEXT NOT NULL,

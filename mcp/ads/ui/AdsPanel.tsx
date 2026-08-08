@@ -276,15 +276,30 @@ function useAppEvents<T = unknown>(
 }
 
 function ProviderMark({ platform, size = "md" }: { platform: string; size?: "sm" | "md" }) {
-  const meta = platform === "meta";
-  return (
-    <span
-      aria-hidden="true"
-      className={`${size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm"} ${meta ? "bg-blue text-white" : "bg-white text-blue"} grid shrink-0 place-items-center rounded border border-border font-semibold shadow-sm`}
-    >
-      {meta ? "M" : "G"}
-    </span>
-  );
+	const provider = providerInfo(platform);
+	return (
+		<span
+			aria-hidden="true"
+			className={`${size === "sm" ? "h-7 w-7 text-xs" : "h-9 w-9 text-sm"} ${provider.markClass} grid shrink-0 place-items-center rounded border border-border font-semibold shadow-sm`}
+		>
+			{provider.mark}
+		</span>
+	);
+}
+
+const PROVIDERS: Record<string, { name: string; integration: string; mark: string; markClass: string }> = {
+  meta: { name: "Meta Ads", integration: "Facebook & Instagram", mark: "M", markClass: "bg-blue text-white" },
+  google: { name: "Google Ads", integration: "Google Ads", mark: "G", markClass: "bg-white text-blue" },
+  x: { name: "X Ads", integration: "X Ads", mark: "X", markClass: "bg-text text-bg" },
+  reddit: { name: "Reddit Ads", integration: "Reddit Ads", mark: "R", markClass: "bg-[#ff4500] text-white" },
+};
+
+function providerInfo(platform: string) {
+  return PROVIDERS[platform] || { name: platform || "Ads", integration: platform || "Ads", mark: "A", markClass: "bg-border text-text" };
+}
+
+function providerName(platform: string): string {
+  return providerInfo(platform).name;
 }
 
 function statusStyle(status?: string): string {
@@ -406,6 +421,7 @@ const RESOURCE_KIND_LABELS: Record<string, string> = {
   conversion_action: "Conversion actions",
   lead_form: "Lead forms",
   audience: "Audiences",
+  funding_source: "Funding sources",
 };
 
 const RESOURCE_TYPE_LABELS: Record<string, string> = {
@@ -417,6 +433,14 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   google_conversion_action: "Google conversion action",
   google_lead_form: "Google lead form",
   google_user_list: "Google audience",
+  x_promotable_user: "X identity",
+  x_funding_instrument: "X funding source",
+  x_custom_audience: "X audience",
+  reddit_profile: "Reddit profile",
+  reddit_pixel: "Reddit Pixel",
+  reddit_funding_instrument: "Reddit funding source",
+  reddit_lead_form: "Reddit lead form",
+  reddit_custom_audience: "Reddit audience",
 };
 
 const LEAD_QUESTION_OPTIONS = [
@@ -430,9 +454,11 @@ const LEAD_QUESTION_OPTIONS = [
 function resourcePurpose(resource: AdResource): string | null {
   if (resource.provider_type === "facebook_page") return "publishing_identity";
   if (resource.provider_type === "instagram_business") return "instagram_identity";
+	if (resource.kind === "identity") return "publishing_identity";
   if (resource.kind === "tracking_source" || resource.kind === "conversion_action") return "conversion_source";
   if (resource.kind === "lead_form") return "lead_form";
   if (resource.kind === "audience") return "audience";
+	if (resource.kind === "funding_source") return "funding_source";
   return null;
 }
 
@@ -808,7 +834,7 @@ function CampaignWorkspace({
   return (
     <Modal
       title={campaign.name || campaign.id}
-      description={`${account.platform === "meta" ? "Meta Ads" : "Google Ads"} · ${dateFrom} to ${dateTo}`}
+		description={`${providerName(account.platform)} · ${dateFrom} to ${dateTo}`}
       actions={(
         <button type="button" onClick={() => loadWorkspace(true)} disabled={loadingMetrics} aria-label="Refresh campaign workspace" title="Refresh" className="grid h-8 w-8 place-items-center rounded text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50">↻</button>
       )}
@@ -1538,7 +1564,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               {accounts.length}
             </span>
           </div>
-          <p className="mt-0.5 truncate text-xs text-text-muted">Meta and Google campaign accounts</p>
+		  <p className="mt-0.5 truncate text-xs text-text-muted">Campaign accounts across Meta, Google, X, and Reddit</p>
         </div>
         <button
           type="button"
@@ -1562,7 +1588,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       {pendingPicker && (
         <Modal
           title="Choose an ad account"
-          description={`${pendingPicker.pages.length} available from ${pendingPicker.platform === "meta" ? "Meta Ads" : "Google Ads"}.`}
+		  description={`${pendingPicker.pages.length} available from ${providerName(pendingPicker.platform || "")}.`}
           size="large"
           onClose={() => {
             setPendingPicker(null);
@@ -1631,7 +1657,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
             ) : accounts.length === 0 ? (
               <div className="px-4 py-8 text-center">
                 <p className="text-sm font-medium">No ad accounts</p>
-                <p className="mt-1 text-xs text-text-muted">Connect Meta Ads or Google Ads to begin.</p>
+				<p className="mt-1 text-xs text-text-muted">Connect an ads provider to begin.</p>
                 <button type="button" onClick={() => setAddOpen(true)} className="mt-4 h-8 rounded border border-border px-3 text-xs font-medium hover:bg-bg-input">
                   Add account
                 </button>
@@ -1681,7 +1707,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   <ProviderMark platform={selected.platform} size="sm" />
                   <div className="min-w-0">
                     <h2 className="truncate text-sm font-semibold">{selected.display_name}</h2>
-                    <p className="truncate text-xs text-text-muted">{selected.platform === "meta" ? "Meta Ads" : "Google Ads"} · {selected.native_account_id} · {selected.currency || "-"}</p>
+					<p className="truncate text-xs text-text-muted">{providerName(selected.platform)} · {selected.native_account_id} · {selected.currency || "-"}</p>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
@@ -1823,20 +1849,20 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     <div><h3 className="text-sm font-medium">No campaigns found</h3><p className="mt-1 text-sm text-text-muted">This account has no campaigns to display.</p></div>
                   </div>
                 ) : (
-                  <table className="w-full table-fixed text-sm" style={{ minWidth: "76rem" }}>
+				  <table className="w-full table-fixed text-sm" style={{ minWidth: "69rem" }}>
                     <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim">
                       <tr>
-                        <th className="w-64 px-4 py-2 text-left font-medium">Campaign</th>
-                        <th className="w-24 px-3 py-2 text-left font-medium">Status</th>
-                        <th className="w-28 px-3 py-2 text-right font-medium">Spend</th>
-                        <th className="w-28 px-3 py-2 text-right font-medium">Impressions</th>
-                        <th className="w-24 px-3 py-2 text-right font-medium">Clicks</th>
-                        <th className="w-20 px-3 py-2 text-right font-medium">CTR</th>
-                        <th className="w-24 px-3 py-2 text-right font-medium">CPC</th>
-                        <th className="w-28 px-3 py-2 text-right font-medium">Conversions</th>
-                        <th className="w-24 px-3 py-2 text-right font-medium">CPA</th>
-                        <th className="w-32 px-3 py-2 text-right font-medium">Daily budget</th>
-                        <th className="w-24 px-3 py-2 text-right font-medium">Action</th>
+						<th className="w-56 px-4 py-2 text-left font-medium">Campaign</th>
+						<th className="w-24 px-3 py-2 text-left font-medium">Status</th>
+						<th className="w-24 px-3 py-2 text-right font-medium">Spend</th>
+						<th className="w-24 px-3 py-2 text-right font-medium">Impressions</th>
+						<th className="w-20 px-3 py-2 text-right font-medium">Clicks</th>
+						<th className="w-16 px-3 py-2 text-right font-medium">CTR</th>
+						<th className="w-20 px-3 py-2 text-right font-medium">CPC</th>
+						<th className="w-24 px-3 py-2 text-right font-medium">Conversions</th>
+						<th className="w-20 px-3 py-2 text-right font-medium">CPA</th>
+						<th className="w-28 px-3 py-2 text-right font-medium">Daily budget</th>
+						<th className="w-20 px-3 py-2 text-right font-medium">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
@@ -1898,7 +1924,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                 <ProviderMark platform={platform.platform} />
                 <div className="min-w-0 flex-1">
                   <span className="block text-sm font-medium">
-                    {platform.platform === "meta" ? "Meta Ads" : platform.display_name}
+					{providerName(platform.platform)}
                   </span>
                   <span className="mt-0.5 block text-xs text-text-muted">
                     {platform.state === "connected"
@@ -1906,7 +1932,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                       : platform.state === "ready"
                         ? "Ready to connect"
                         : platform.state === "setup_required"
-                          ? `${platform.platform === "meta" ? "Facebook & Instagram" : platform.display_name} integration required`
+						  ? `${providerInfo(platform.platform).integration} integration required`
                           : platform.unavailable_reason || "Integration unavailable"}
                   </span>
                 </div>
@@ -2001,7 +2027,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       {setupAccount && !leadFormOpen && (
         <Modal
           title="Account resources"
-          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+		  description={`${setupAccount.display_name} · ${providerName(setupAccount.platform)}`}
           actions={(
             <button
               type="button"
@@ -2038,7 +2064,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                       </h3>
                       <div className="flex items-center gap-3">
                         <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
-                        {group.kind === "lead_form" && (
+						{group.kind === "lead_form" && (setupAccount.platform === "meta" || setupAccount.platform === "google") && (
                           <button
                             type="button"
                             onClick={openLeadFormCreate}
@@ -2094,7 +2120,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       {setupAccount && leadFormOpen && (
         <Modal
           title="Create lead form"
-          description={`${setupAccount.display_name} · ${setupAccount.platform === "meta" ? "Meta Ads" : "Google Ads"}`}
+		  description={`${setupAccount.display_name} · ${providerName(setupAccount.platform)}`}
           size="large"
           onClose={() => !creatingLeadForm && setLeadFormOpen(false)}
           labelledBy="ads-lead-form-title"

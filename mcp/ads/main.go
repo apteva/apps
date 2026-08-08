@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.34
+version: 0.1.35
 scopes: [project, global]
 requires:
   permissions:
@@ -208,6 +208,60 @@ var platforms = map[string]platformDef{
 		AudienceListTool:         "search",
 		AudienceCreateCustomTool: "user_list_mutate",
 	},
+	"x": {
+		Platform:                    "x",
+		IntegrationSlug:             "twitter-ads",
+		DisplayName:                 "X Ads",
+		NativeIDFormat:              "base-36 account id",
+		ListAccountsTool:            "list_accounts",
+		CampaignCreateTool:          "create_campaign",
+		CampaignListTool:            "list_campaigns",
+		CampaignUpdateTool:          "update_campaign",
+		CampaignDeleteTool:          "delete_campaign",
+		AdSetCreateTool:             "create_line_item",
+		AdSetListTool:               "list_line_items",
+		AdSetUpdateTool:             "update_line_item",
+		AdSetDeleteTool:             "delete_line_item",
+		AdCreateTool:                "create_promoted_tweet",
+		AdListTool:                  "list_promoted_tweets",
+		AdDeleteTool:                "delete_promoted_tweet",
+		CreativeCreateTool:          "create_tweet",
+		CreativeGetTool:             "list_tweets",
+		CreativeListTool:            "list_tweets",
+		CreativeUploadImageTool:     "upload_media",
+		CreativeUploadVideoTool:     "upload_media",
+		AudienceListTool:            "list_custom_audiences",
+		AudienceCreateCustomTool:    "create_custom_audience",
+		AudienceCreateLookalikeTool: "",
+		AccountIDInputField:         "account_id",
+	},
+	"reddit": {
+		Platform:                    "reddit",
+		IntegrationSlug:             "reddit-ads",
+		DisplayName:                 "Reddit Ads",
+		NativeIDFormat:              "a2_<id>",
+		ListAccountsTool:            "list_ad_accounts_by_business",
+		CampaignCreateTool:          "create_campaign",
+		CampaignListTool:            "list_campaigns",
+		CampaignUpdateTool:          "update_campaign",
+		CampaignDeleteTool:          "update_campaign",
+		AdSetCreateTool:             "create_ad_group",
+		AdSetListTool:               "list_ad_groups",
+		AdSetUpdateTool:             "update_ad_group",
+		AdSetDeleteTool:             "update_ad_group",
+		AdCreateTool:                "create_ad",
+		AdListTool:                  "list_ads",
+		AdUpdateTool:                "update_ad",
+		AdDeleteTool:                "update_ad",
+		CreativeCreateTool:          "create_structured_post_job",
+		CreativeGetTool:             "get_structured_post",
+		CreativeListTool:            "list_structured_posts",
+		CreativeAssetStatusTool:     "get_structured_post_job",
+		AudienceListTool:            "list_custom_audiences",
+		AudienceCreateCustomTool:    "create_custom_audience",
+		AudienceCreateLookalikeTool: "",
+		AccountIDInputField:         "ad_account_id",
+	},
 }
 
 type platformAdapter interface {
@@ -240,6 +294,8 @@ type platformAdapter interface {
 var platformAdapters = map[string]platformAdapter{
 	"meta":   metaAdapter{},
 	"google": googleAdapter{},
+	"x":      xRedditAdapter{},
+	"reddit": xRedditAdapter{},
 }
 
 var globalCtx *sdk.AppCtx
@@ -419,7 +475,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "account_add",
 			Description: "Begin connecting an ads account. Returns authorize_url + pending_account_id; visit the URL to authorize. " +
 				"After OAuth completes, call account_list_pending_pages to pick a specific ad account, then account_finalize. " +
-				"Args: platform (meta|google), connection_id? (reuse a specific active integration connection), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
+				"Args: platform (meta|google|x|reddit), connection_id? (reuse a specific active integration connection), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
 			InputSchema: schemaObject(map[string]any{
 				"platform":      map[string]any{"type": "string", "enum": platformKeys()},
 				"connection_id": map[string]any{"type": "integer", "description": "Active provider connection to reuse. Use when more than one connection exists for the platform."},
@@ -469,13 +525,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "resource_refresh",
-			Description: "Refresh normalized provider resources for an ad account. Args: ad_account_id, kinds? (identity|tracking_source|conversion_action|lead_form|audience).",
+			Description: "Refresh normalized provider resources for an ad account. Args: ad_account_id, kinds? (identity|tracking_source|conversion_action|lead_form|audience|funding_source).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"kinds": map[string]any{
 					"type": "array",
 					"items": map[string]any{"type": "string", "enum": []string{
-						resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience,
+						resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience, resourceFundingSource,
 					}},
 				},
 			}, []string{"ad_account_id"}),
@@ -487,7 +543,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"kind": map[string]any{"type": "string", "enum": []string{
-					resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience, resourceCreativeAsset,
+					resourceIdentity, resourceTrackingSource, resourceConversionAction, resourceLeadForm, resourceAudience, resourceCreativeAsset, resourceFundingSource,
 				}},
 				"refresh": map[string]any{"type": "boolean"},
 			}, []string{"ad_account_id"}),
@@ -504,11 +560,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "resource_set_default",
-			Description: "Set or clear a normalized resource default for an ad account. Purposes: publishing_identity, instagram_identity, conversion_source, lead_form, audience. Pass resource_id=0 to clear.",
+			Description: "Set or clear a normalized resource default for an ad account. Purposes: publishing_identity, instagram_identity, conversion_source, lead_form, audience, funding_source. Pass resource_id=0 to clear.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
 				"purpose": map[string]any{"type": "string", "enum": []string{
-					"publishing_identity", "instagram_identity", "conversion_source", "lead_form", "audience",
+					"publishing_identity", "instagram_identity", "conversion_source", "lead_form", "audience", "funding_source",
 				}},
 				"resource_id": map[string]any{"type": "integer"},
 			}, []string{"ad_account_id", "purpose", "resource_id"}),
@@ -570,6 +626,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"start_time":            map[string]any{"type": "string"},
 				"end_time":              map[string]any{"type": "string"},
 				"platform_options":      map[string]any{"type": "object"},
+				"funding_source_resource_id": map[string]any{
+					"type": "integer", "description": "Normalized funding source. Used automatically when only one is available.",
+				},
 			}, []string{"ad_account_id", "name", "objective"}),
 			Handler: a.toolCampaignCreate,
 		},
@@ -598,7 +657,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"campaign_ids": map[string]any{
 					"type":     "array",
 					"maxItems": 100,
-					"items":    map[string]any{"type": "string", "pattern": `^\d+$`},
+					"items":    map[string]any{"type": "string", "pattern": `^[A-Za-z0-9_~-]+$`},
 				},
 			}, []string{"ad_account_id", "date_from", "date_to"}),
 			Handler: a.toolCampaignPerformanceGet,
@@ -618,7 +677,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"entity_ids": map[string]any{
 					"type":     "array",
 					"maxItems": 100,
-					"items":    map[string]any{"type": "string", "pattern": `^\d+$`},
+					"items":    map[string]any{"type": "string", "pattern": `^[A-Za-z0-9_~-]+$`},
 				},
 				"refresh": map[string]any{"type": "boolean", "default": true},
 			}, []string{"ad_account_id", "date_from", "date_to"}),
@@ -1507,6 +1566,8 @@ type adsPlatformOption struct {
 var adsPlatformOptions = []adsPlatformOption{
 	{Platform: "meta", DisplayName: "Meta Ads (Facebook + Instagram)", IntegrationSlug: "facebook-ads", Supported: true},
 	{Platform: "google", DisplayName: "Google Ads", IntegrationSlug: "google-ads", Supported: true},
+	{Platform: "x", DisplayName: "X Ads", IntegrationSlug: "twitter-ads", Supported: true},
+	{Platform: "reddit", DisplayName: "Reddit Ads", IntegrationSlug: "reddit-ads", Supported: true},
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
@@ -1868,7 +1929,7 @@ func performanceCampaignIDs(value any) ([]string, error) {
 			raw = append(raw, strings.TrimSpace(toString(id)))
 		}
 	default:
-		return nil, errors.New("campaign_ids must be an array of numeric strings")
+		return nil, errors.New("campaign_ids must be an array of provider IDs")
 	}
 	if len(raw) > maxPerformanceCampaigns {
 		return nil, fmt.Errorf("campaign_ids supports at most %d ids", maxPerformanceCampaigns)
@@ -1877,8 +1938,8 @@ func performanceCampaignIDs(value any) ([]string, error) {
 	seen := make(map[string]bool, len(raw))
 	for _, id := range raw {
 		id = strings.TrimSpace(id)
-		if id == "" || !asciiDigits(id) {
-			return nil, errors.New("campaign_ids must contain numeric provider campaign ids")
+		if id == "" || !safeProviderID(id) {
+			return nil, errors.New("campaign_ids contain an invalid provider ID")
 		}
 		if !seen[id] {
 			seen[id] = true
@@ -1896,6 +1957,20 @@ func asciiDigits(value string) bool {
 		if char < '0' || char > '9' {
 			return false
 		}
+	}
+	return true
+}
+
+func safeProviderID(value string) bool {
+	if value == "" || len(value) > 256 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '_' || char == '-' || char == '~' {
+			continue
+		}
+		return false
 	}
 	return true
 }
@@ -2833,6 +2908,11 @@ func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccoun
 		"metrics.cost_micros, metrics.impressions, metrics.clicks, metrics.conversions " +
 		"FROM campaign WHERE segments.date BETWEEN '" + request.DateFrom + "' AND '" + request.DateTo + "'"
 	if len(request.CampaignIDs) > 0 {
+		for _, id := range request.CampaignIDs {
+			if !googleNumericID(id) {
+				return mcpError("Google campaign IDs must be numeric"), nil
+			}
+		}
 		query += " AND campaign.id IN (" + strings.Join(request.CampaignIDs, ",") + ")"
 	}
 

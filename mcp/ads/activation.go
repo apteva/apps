@@ -103,6 +103,10 @@ func (a *App) loadDeliveryHierarchy(
 	}
 	ad := states["ad"]
 	adSet := states["adset"]
+	if ad.CampaignID == "" && ad.ParentID == adSetID {
+		ad.CampaignID = adSet.CampaignID
+		states["ad"] = ad
+	}
 	if ad.ParentID != adSetID || ad.CampaignID != campaignID || adSet.CampaignID != campaignID {
 		return nil, mcpError("ad, ad set/ad group, and campaign do not form one delivery hierarchy")
 	}
@@ -118,7 +122,62 @@ func (a *App) loadDeliveryEntity(
 	if acct.Platform == "google" {
 		return a.loadGoogleDeliveryEntity(ctx, acct, campaignID, adSetID, adID, entity)
 	}
+	if acct.Platform == "x" || acct.Platform == "reddit" {
+		return a.loadXRedditDeliveryEntity(ctx, acct, campaignID, adSetID, adID, entity)
+	}
 	return a.loadMetaDeliveryEntity(ctx, acct, def, campaignID, adSetID, adID, entity)
+}
+
+func (a *App) loadXRedditDeliveryEntity(
+	ctx *sdk.AppCtx,
+	acct *adAccount,
+	campaignID, adSetID, adID, entity string,
+) (deliveryState, map[string]any) {
+	tool, input, id := "", map[string]any{}, ""
+	if acct.Platform == "x" {
+		input["account_id"] = acct.NativeAccountID
+		switch entity {
+		case "ad":
+			tool, id, input["promoted_tweet_id"] = "get_promoted_tweet", adID, adID
+		case "adset":
+			tool, id, input["line_item_id"] = "get_line_item", adSetID, adSetID
+		case "campaign":
+			tool, id, input["campaign_id"] = "get_campaign", campaignID, campaignID
+		}
+	} else {
+		switch entity {
+		case "ad":
+			tool, id, input["ad_id"] = "get_ad", adID, adID
+		case "adset":
+			tool, id, input["ad_group_id"] = "get_ad_group", adSetID, adSetID
+		case "campaign":
+			tool, id, input["campaign_id"] = "get_campaign", campaignID, campaignID
+		}
+	}
+	if tool == "" {
+		return deliveryState{}, mcpError("unsupported activation entity " + entity)
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, tool, input)
+	if errOut != nil {
+		return deliveryState{}, errOut
+	}
+	row := asMap(asMap(parsed)["data"])
+	if len(row) == 0 {
+		rows := resultRows(parsed)
+		if len(rows) > 0 {
+			row = rows[0]
+		}
+	}
+	if len(row) == 0 || firstString(row, "id") != id {
+		return deliveryState{}, mcpError(fmt.Sprintf("%s %s does not belong to the selected ad account", entity, id))
+	}
+	return deliveryState{
+		Entity: entity, ID: id,
+		ParentID:        firstString(row, "adset_id", "ad_group_id", "line_item_id"),
+		CampaignID:      firstString(row, "campaign_id"),
+		Status:          firstString(row, "status", "entity_status", "configured_status"),
+		EffectiveStatus: firstString(row, "effective_status", "delivery_status"),
+	}, nil
 }
 
 func (a *App) loadMetaDeliveryEntity(
@@ -231,7 +290,7 @@ func (a *App) activateDeliveryEntity(
 		case "campaign":
 			tool, input = def.CampaignUpdateTool, map[string]any{"campaignId": state.ID, "status": "ACTIVE"}
 		}
-	} else {
+	} else if acct.Platform == "google" {
 		var resourceName string
 		switch state.Entity {
 		case "ad":
@@ -250,6 +309,27 @@ func (a *App) activateDeliveryEntity(
 				"update":     map[string]any{"resourceName": resourceName, "status": "ENABLED"},
 				"updateMask": "status",
 			}},
+		}
+	} else if acct.Platform == "x" {
+		if state.Entity == "ad" {
+			// A promoted Tweet association is active when it exists and cannot
+			// be resumed with PUT. Parent activation is sufficient.
+			return nil
+		}
+		switch state.Entity {
+		case "adset":
+			tool, input = def.AdSetUpdateTool, map[string]any{"account_id": acct.NativeAccountID, "line_item_id": state.ID, "entity_status": "ACTIVE"}
+		case "campaign":
+			tool, input = def.CampaignUpdateTool, map[string]any{"account_id": acct.NativeAccountID, "campaign_id": state.ID, "entity_status": "ACTIVE"}
+		}
+	} else if acct.Platform == "reddit" {
+		switch state.Entity {
+		case "ad":
+			tool, input = def.AdUpdateTool, map[string]any{"ad_id": state.ID, "data": map[string]any{"configured_status": "ACTIVE"}}
+		case "adset":
+			tool, input = def.AdSetUpdateTool, map[string]any{"ad_group_id": state.ID, "data": map[string]any{"configured_status": "ACTIVE"}}
+		case "campaign":
+			tool, input = def.CampaignUpdateTool, map[string]any{"campaign_id": state.ID, "data": map[string]any{"configured_status": "ACTIVE"}}
 		}
 	}
 	if tool == "" {
