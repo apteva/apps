@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"strings"
 	"time"
@@ -10,10 +11,13 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+//go:embed skills/how-to-use-tasks.md
+var taskSkillBody string
+
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.0
+version: 3.2.1
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -31,7 +35,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: create, description: Create one durable task. }
+    - { name: create, description: "Create one durable task for multi-step, multi-source, delegated, scheduled, or resumable work." }
     - { name: list, description: List durable tasks visible to the calling agent. }
     - { name: get, description: Get one task and its event history. }
     - { name: update, description: Update meaningful task progress or state. }
@@ -92,19 +96,11 @@ provides:
   skills:
     - name: how-to-use-tasks
       command: /tasks
-      body: |
-        Use Tasks for multi-step, scheduled, delegated, or resumable work, not
-        for brief answers or quick lookups. One user outcome is one logical
-        task. Task inventory is agent-wide within the project; use Tasks
-        directly from any thread and never narrow listing to the current thread.
-        Treat thread IDs as opaque provenance and routing metadata.
-        Immediate work defaults to the creator; scheduled work defaults to the
-        agent's configured default thread and reports terminal context to the creator.
-        Update meaningful milestones and finish exactly once. For schedules,
-        use Tasks directly rather than asking another thread to inspect them.
-        A terminal receipt is context for the creator thread, which decides if
-        and how to surface the outcome to a user.
-      description: Durable task ownership, progress, delegation, and schedules.
+      body_file: skills/how-to-use-tasks.md
+      description: |
+        Task-selection, ownership, progress, delegation, schedules, and terminal
+        receipts. Load before multi-step or multi-source reviews, scheduled,
+        delegated, or resumable work.
 runtime:
   kind: source
   source: { repo: github.com/apteva/apps, ref: main, entry: mcp/tasks }
@@ -128,6 +124,12 @@ func (a *App) Manifest() sdk.Manifest {
 	if err != nil {
 		panic(err)
 	}
+	for index := range m.Provides.Skills {
+		if m.Provides.Skills[index].Name == "how-to-use-tasks" {
+			m.Provides.Skills[index].Body = taskSkillBody
+			m.Provides.Skills[index].BodyFile = ""
+		}
+	}
 	return *m
 }
 
@@ -140,7 +142,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.0")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.1")
 	return nil
 }
 
