@@ -120,7 +120,7 @@ function formatCPUDetail(cpu: MetricsWire["cpu"]): string {
 }
 
 function providerCurrencySymbol(provider?: string): string {
-  return provider === "digitalocean" || provider === "runpod" ? "$" : "€";
+  return ["digitalocean", "runpod", "vultr", "aws-ec2", "huawei-cloud", "linode", "ovhcloud"].includes(provider || "") ? "$" : "€";
 }
 
 function formatProviderPrice(cents: number, provider?: string): string {
@@ -836,7 +836,7 @@ function InstanceCard({
   const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
-  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "runpod"].includes(inst.provider);
+  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
   const resources = resourceSummary(inst);
   const memPct = metrics?.mem.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
   const loadPct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
@@ -1023,7 +1023,7 @@ function ExpandedInstanceCardLegacy({
   const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
   const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
-  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "runpod"].includes(inst.provider);
+  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
   const resources = resourceSummary(inst);
   const resourceModel = resources.toLowerCase().replace(/^[0-9]+x\s+/, "");
   const showResources = resources && (!resources.startsWith("1x ") || !inst.size?.toLowerCase().includes(resourceModel));

@@ -82,6 +82,9 @@ func listServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
 	case "runpod":
 		return runPodListServerTypes(ctx)
 	default:
+		if isAPIProvider(resolved) {
+			return apiProviderListServerTypes(ctx, resolved)
+		}
 		return nil, providerAdapterUnavailable(resolved, "server type catalog")
 	}
 }
@@ -99,6 +102,9 @@ func listLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
 	case "runpod":
 		return runPodListLocations(ctx)
 	default:
+		if isAPIProvider(resolved) {
+			return apiProviderListLocations(ctx, resolved)
+		}
 		return nil, providerAdapterUnavailable(resolved, "location catalog")
 	}
 }
@@ -116,6 +122,9 @@ func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 	case "runpod":
 		return runPodListImages(ctx)
 	default:
+		if isAPIProvider(resolved) {
+			return apiProviderListImages(ctx, resolved)
+		}
 		return nil, providerAdapterUnavailable(resolved, "image catalog")
 	}
 }

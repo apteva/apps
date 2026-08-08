@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.21
+version: 0.4.22
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Scaleway, Huawei Cloud, Linode, OVHcloud, or RunPod; provider-specific
+  Contabo, Scaleway, Huawei Cloud, Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
   Foundation layer for higher-level apps that run workloads
@@ -43,28 +43,28 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS provider
       hint: |
         Optional — local instance always available. Bind a VPS
         integration to provision remote instances through the generic
-        Instances interface. Hetzner, DigitalOcean, and RunPod have
-        provisioning and catalog adapters; the other compatible provider
-        integrations are exposed here and fail clearly until their
-        provider adapters are implemented.
+        Instances interface. Every compatible provider has catalog,
+        provisioning, readiness, and recovery adapters. Immediate
+        destroy is available except on Contabo, whose API only schedules
+        contract cancellation.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: instance_create
-      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod; Hetzner, DigitalOcean, and RunPod provisioning are implemented today.
+      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
       description: List instances, optionally filtered by provider or status.
     - name: instance_destroy
-      description: Terminate the upstream resource and remove the row. Refused for local (id 0).
+      description: Terminate the upstream resource and remove the row where the provider supports immediate deletion. Refused for local (id 0) and Contabo.
     - name: instance_upgrade
       description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today and the operation always waits for SSH readiness.
     - name: instance_run_command
@@ -169,7 +169,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.21
+    ref: instances/v0.4.22
     entry: mcp/instances
   port: 8080
   health_check: /health
