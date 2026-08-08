@@ -1,9 +1,8 @@
-name: list-and-update
+name: schedule-list-and-pause
 description: |
-  Agent creates a couple of tasks, lists them back, then updates one.
-  Validates tasks_list returns shapes the agent can reason over, and
-  tasks_update accepts partial field updates (status + notes change
-  on a row identified by id from the list response).
+  The agent creates one recurring schedule, queries the Tasks app directly,
+  and pauses that same logical task. This guards against setup-task duplicates
+  and thread-to-thread status queries.
 
 timeout: 90s
 max_iterations: 10
@@ -14,22 +13,18 @@ setup:
     path: ./
 
 directive: |
-  You are managing the mission board for agent 5. Add two tasks:
-
-    1. "Triage incoming reports"
-    2. "Write weekly summary"
-
-  Then call tasks_list to confirm they're there. Pick the first one
-  in the response and call tasks_update on it: change status to
-  "in_progress" and set notes to "started — checking inbox". Stop
-  after that.
+  Create one recurring task named "Review new CRM leads" that runs every 15
+  minutes. List the authoritative task inventory directly, identify that same
+  schedule, and pause it. Do not ask another thread to inspect schedules and do
+  not create a second setup task. Then stop.
 
 assert:
   - tool_called: tasks_create
   - tool_called: tasks_list
-  - tool_called: tasks_update
-  - http: GET /api/apps/tasks/agents/5?status=in_progress
+  - tool_called: tasks_pause
+  - http: GET /api/apps/tasks/tasks
     expect_status: 200
+    expect_count_at: tasks
     expect_count: 1
   - iterations_at_most: 10
 

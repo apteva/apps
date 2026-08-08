@@ -25,5 +25,5 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 
 | File | What it exercises |
 |---|---|
-| `01-create-and-complete.yaml` | Flagship `tasks_create` + `tasks_complete` loop. Three creates, one completion. |
-| `02-list-and-update.yaml` | Seeded data → `tasks_list` → `tasks_update`. Validates the "agent reads then acts" pattern. |
+| `01-create-and-complete.yaml` | One opaque-thread-owned task moves through create → progress → complete without duplication. |
+| `02-list-and-update.yaml` | One recurring task is created, listed directly from Tasks, and paused without a setup-task duplicate. |
