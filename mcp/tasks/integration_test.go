@@ -95,6 +95,32 @@ func TestSidecar_RejectsMissingTrustedCallerAndUnknownTool(t *testing.T) {
 	}
 }
 
+func TestSidecar_ListIsAgentWideAcrossThreads(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
+	for _, item := range []struct {
+		thread string
+		title  string
+	}{
+		{thread: "opaque-default", title: "Default-thread work"},
+		{thread: "conversation-a", title: "Conversation-created work"},
+	} {
+		sc.MCPAs("create", map[string]any{"title": item.title}, 7, item.thread, testProject)
+	}
+	sc.MCPAs("create", map[string]any{"title": "Other-agent work"}, 8, "other-default", testProject)
+
+	listed := sc.MCPAs("list", map[string]any{}, 7, "conversation-reader", testProject)
+	tasks, ok := listed["tasks"].([]any)
+	if !ok || len(tasks) != 2 {
+		t.Fatalf("agent-wide list from unrelated thread=%#v", listed)
+	}
+	for _, value := range tasks {
+		task, _ := value.(map[string]any)
+		if task["agent_id"] != float64(7) {
+			t.Fatalf("cross-agent task leaked into inventory: %#v", task)
+		}
+	}
+}
+
 func TestSidecar_CrossProjectHTTPIsolation(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
 	created := sc.MCPAs("create", map[string]any{"title": "Scoped"}, 7, testThread, testProject)

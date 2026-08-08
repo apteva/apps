@@ -13,7 +13,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.1.1
+version: 3.2.0
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -86,13 +86,6 @@ provides:
       slots: [dashboard.agent_card, dashboard.agent_detail]
       suggested: true
       default_width: 1
-    - name: thread-tasks
-      label: Thread tasks
-      description: Tasks created by or assigned to this thread.
-      entry: /ui/ThreadTasksWidget.mjs
-      slots: [dashboard.thread_sidebar]
-      suggested: true
-      default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
       slots: [chat.message_attachment]
@@ -102,7 +95,9 @@ provides:
       body: |
         Use Tasks for multi-step, scheduled, delegated, or resumable work, not
         for brief answers or quick lookups. One user outcome is one logical
-        task. Treat thread IDs as opaque; task ownership defines responsibility.
+        task. Task inventory is agent-wide within the project; use Tasks
+        directly from any thread and never narrow listing to the current thread.
+        Treat thread IDs as opaque provenance and routing metadata.
         Immediate work defaults to the creator; scheduled work defaults to the
         agent's configured default thread and reports terminal context to the creator.
         Update meaningful milestones and finish exactly once. For schedules,
@@ -145,7 +140,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.1.1")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.0")
 	return nil
 }
 

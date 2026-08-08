@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tasks
 display_name: Tasks
-version: 3.1.1
+version: 3.2.0
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -76,13 +76,6 @@ provides:
       description: Work and schedules associated with an agent.
       entry: /ui/AgentTasksWidget.mjs
       slots: [dashboard.agent_card, dashboard.agent_detail]
-      suggested: true
-      default_width: 1
-    - name: thread-tasks
-      label: Thread tasks
-      description: Tasks created by or assigned to this thread.
-      entry: /ui/ThreadTasksWidget.mjs
-      slots: [dashboard.thread_sidebar]
       suggested: true
       default_width: 1
     - name: task-card

@@ -51,11 +51,12 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		agentID, _ := strconv.ParseInt(r.URL.Query().Get("agent_id"), 10, 64)
-		filter := TaskFilter{ProjectID: projectID, AgentID: agentID, States: splitStates(r.URL.Query().Get("states")), AssignedThread: strings.TrimSpace(r.URL.Query().Get("assigned_thread_id")), AssociatedThread: strings.TrimSpace(r.URL.Query().Get("thread_id"))}
+		filter := TaskFilter{ProjectID: projectID, AgentID: agentID, States: splitStates(r.URL.Query().Get("states"))}
 		if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 {
 			filter.Limit = limit
 		}
-		if r.URL.Query().Get("include_runs") != "1" {
+		includeRuns := r.URL.Query().Get("include_runs") == "1"
+		if !includeRuns {
 			empty := ""
 			filter.ParentTaskID = &empty
 		}
@@ -64,7 +65,7 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 			writeTaskError(w, err)
 			return
 		}
-		counts, _ := a.store.Counts(projectID)
+		counts, _ := a.store.Counts(projectID, agentID, includeRuns)
 		writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks, "counts": counts, "enabled": true, "scheduling_enabled": true})
 	case http.MethodPost:
 		var body struct {

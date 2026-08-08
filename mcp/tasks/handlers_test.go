@@ -106,6 +106,37 @@ func TestTaskLifecycleUsesOpaqueThreadOwnership(t *testing.T) {
 	}
 }
 
+func TestEmptyStructuredScheduleRemainsImmediate(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	caller := callerContext(7, "thread-immediate", "project-a")
+	emptySchedule := map[string]any{
+		"kind": "once", "at": "", "after": "", "every": "", "cron": "", "timezone": "UTC",
+	}
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Immediate work", "schedule": emptySchedule,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := raw.(map[string]any)["task"].(*Task)
+	if task.State != stateQueued || task.ScheduleKind != "" || task.NextRunAt != nil {
+		t.Fatalf("empty optional schedule changed immediate task semantics: %+v", task)
+	}
+
+	running, progress, step := stateRunning, 25, "Working"
+	updatedRaw, err := app.toolUpdate(caller, appCtx, map[string]any{
+		"task_id": task.ID, "state": running, "progress": progress,
+		"current_step": step, "schedule": emptySchedule,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := updatedRaw.(*Task)
+	if updated.State != stateRunning || updated.Progress == nil || *updated.Progress != progress || updated.CurrentStep != step {
+		t.Fatalf("empty optional schedule swallowed progress update: %+v", updated)
+	}
+}
+
 func TestAssignmentSpawnAndSingleCreatorReceipt(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	creator := callerContext(7, "thread-origin", "project-a")
@@ -160,27 +191,63 @@ func TestToolsRejectMissingOrCrossProjectCaller(t *testing.T) {
 	}
 }
 
-func TestAssociatedThreadFilterUsesOnlyOpaqueTaskRelationships(t *testing.T) {
+func TestListIsAgentWideAcrossOpaqueThreads(t *testing.T) {
 	app, appCtx, _ := newTestApp(t)
-	creator := callerContext(7, "thread-origin-31", "project-a")
-	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Related work"})
+	for _, item := range []struct {
+		thread string
+		title  string
+	}{
+		{thread: "opaque-default", title: "Created by default thread"},
+		{thread: "conversation-a", title: "Created by conversation"},
+		{thread: "execution-b", title: "Created by another thread"},
+	} {
+		if _, err := app.toolCreate(callerContext(7, item.thread, "project-a"), appCtx, map[string]any{"title": item.title}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	otherAgent, _, err := app.store.Create(CreateTaskInput{AgentID: 8, ProjectID: "project-a", Title: "Other agent", AssignedThreadID: "other-default"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := raw.(map[string]any)["task"].(*Task)
-	if _, err := app.toolAssign(creator, appCtx, map[string]any{"task_id": task.ID, "thread_id": "thread-owner-92"}); err != nil {
+	rootTasks, err := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, Limit: 10})
+	if err != nil || len(rootTasks) != 3 {
+		t.Fatalf("seed roots=%+v err=%v", rootTasks, err)
+	}
+	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a", Title: "Occurrence", AssignedThreadID: "opaque-default", ParentTaskID: rootTasks[0].ID}); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, threadID := range []string{"thread-origin-31", "thread-owner-92"} {
-		tasks, err := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, AssociatedThread: threadID})
-		if err != nil || len(tasks) != 1 || tasks[0].ID != task.ID {
-			t.Fatalf("associated thread %q tasks=%+v err=%v", threadID, tasks, err)
+	// Legacy thread filters are intentionally ignored by the handler. They are
+	// also absent from the public schema, so no caller can turn provenance into
+	// a visibility boundary.
+	raw, err := app.toolList(callerContext(7, "conversation-reader", "project-a"), appCtx, map[string]any{
+		"created_by_me": true, "assigned_thread_id": "conversation-reader",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := raw.(map[string]any)
+	tasks := listed["tasks"].([]Task)
+	counts := listed["counts"].(TaskCounts)
+	if len(tasks) != 3 || counts.Active != 3 {
+		t.Fatalf("agent-wide root inventory tasks=%+v counts=%+v", tasks, counts)
+	}
+	for _, task := range tasks {
+		if task.AgentID != 7 || task.ID == otherAgent.ID || task.ParentTaskID != "" {
+			t.Fatalf("inventory leaked another agent or occurrence: %+v", task)
 		}
 	}
-	tasks, err := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, AssociatedThread: "unrelated-thread"})
-	if err != nil || len(tasks) != 0 {
-		t.Fatalf("unrelated opaque thread tasks=%+v err=%v", tasks, err)
+
+	withRunsRaw, err := app.toolList(callerContext(7, "unrelated-reader", "project-a"), appCtx, map[string]any{"include_runs": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withRuns := withRunsRaw.(map[string]any)
+	if got := len(withRuns["tasks"].([]Task)); got != 4 {
+		t.Fatalf("include_runs task count=%d, want 4", got)
+	}
+	if got := withRuns["counts"].(TaskCounts).Active; got != 4 {
+		t.Fatalf("include_runs active count=%d, want 4", got)
 	}
 }
 
@@ -272,6 +339,36 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 	if created.Task.AssignedThreadID != "opaque-default" {
 		t.Fatalf("UI task not assigned to agent default thread: %+v", created.Task)
 	}
+	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 7, ProjectID: "project-a", Title: "Conversation-created", CreatedByThreadID: "conversation-a", AssignedThreadID: "conversation-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := app.store.Create(CreateTaskInput{AgentID: 8, ProjectID: "project-a", Title: "Other agent", AssignedThreadID: "other-default"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Public inventory queries are agent-wide. Obsolete thread query
+	// parameters cannot hide tasks created or assigned through another thread.
+	listURL := server.URL + "/tasks?project_id=project-a&agent_id=7&thread_id=opaque-default&assigned_thread_id=opaque-default"
+	var inventory struct {
+		Tasks  []Task     `json:"tasks"`
+		Counts TaskCounts `json:"counts"`
+	}
+	listResp, err := http.Get(listURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp.Body.Close()
+	if err := json.NewDecoder(listResp.Body).Decode(&inventory); err != nil {
+		t.Fatal(err)
+	}
+	if listResp.StatusCode != http.StatusOK || len(inventory.Tasks) != 2 || inventory.Counts.Active != 2 {
+		t.Fatalf("agent-wide HTTP inventory status=%d payload=%+v", listResp.StatusCode, inventory)
+	}
+	for _, task := range inventory.Tasks {
+		if task.AgentID != 7 {
+			t.Fatalf("HTTP inventory leaked another agent: %+v", task)
+		}
+	}
 
 	cross, _ := http.NewRequest(http.MethodGet, server.URL+"/tasks/"+created.Task.ID, nil)
 	cross.Header.Set("X-Apteva-Project-ID", "project-b")
@@ -293,7 +390,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.1.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 4 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.0" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -311,6 +408,20 @@ func TestManifestAndToolContract(t *testing.T) {
 		want[tool.Name] = true
 		if tool.HandlerCtx == nil || tool.Description == "" || tool.InputSchema["type"] != "object" {
 			t.Fatalf("invalid tool contract: %+v", tool)
+		}
+		if tool.Name == "list" {
+			properties, _ := tool.InputSchema["properties"].(map[string]any)
+			if _, ok := properties["created_by_me"]; ok {
+				t.Fatalf("list exposes creator-thread visibility filter: %+v", properties)
+			}
+			if _, ok := properties["assigned_thread_id"]; ok {
+				t.Fatalf("list exposes assignee-thread visibility filter: %+v", properties)
+			}
+			for _, name := range []string{"states", "include_runs", "limit"} {
+				if _, ok := properties[name]; !ok {
+					t.Fatalf("list missing generic filter %q: %+v", name, properties)
+				}
+			}
 		}
 	}
 	for name, found := range want {
