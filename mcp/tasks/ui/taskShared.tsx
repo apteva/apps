@@ -199,9 +199,22 @@ export function isRecurring(task: Task) {
 export function isTerminal(task: Task) {
   return ["completed", "failed", "cancelled"].includes(task.state);
 }
+export function isScheduleDefinition(task: Task) {
+  return isSchedule(task) && task.state === "waiting" && !isTerminal(task);
+}
+export function isPendingSchedule(task: Task) {
+  return (
+    isScheduleDefinition(task) &&
+    task.schedule_enabled === true &&
+    Boolean(task.next_run_at)
+  );
+}
+export function isPausedSchedule(task: Task) {
+  return isScheduleDefinition(task) && task.schedule_enabled === false;
+}
 export function isActive(task: Task) {
   return (
-    !isSchedule(task) &&
+    !isScheduleDefinition(task) &&
     ["queued", "running", "waiting", "blocked"].includes(task.state)
   );
 }
@@ -239,12 +252,18 @@ export function relativeWhen(value?: string) {
 }
 
 export function scheduleLabel(task: Task) {
-  if (task.schedule_kind === "once")
-    return `One time · ${formatWhen(task.next_run_at || task.schedule_expression)}`;
-  if (task.schedule_kind === "interval")
-    return `Repeats every ${task.schedule_expression || "interval"}`;
-  if (task.schedule_kind === "cron")
-    return `Recurring · ${task.schedule_expression} · ${task.schedule_timezone || "UTC"}`;
+  if (task.schedule_kind === "once") {
+    const label = isPendingSchedule(task) ? "One time" : "One-time run";
+    return `${label} · ${formatWhen(task.next_run_at || task.scheduled_for || task.schedule_expression)}`;
+  }
+  if (task.schedule_kind === "interval") {
+    const label = isPausedSchedule(task) ? "Paused" : "Repeats";
+    return `${label} every ${task.schedule_expression || "interval"}`;
+  }
+  if (task.schedule_kind === "cron") {
+    const label = isPausedSchedule(task) ? "Paused" : "Recurring";
+    return `${label} · ${task.schedule_expression} · ${task.schedule_timezone || "UTC"}`;
+  }
   return "";
 }
 
@@ -258,18 +277,24 @@ const stateTone: Record<Task["state"], string> = {
   cancelled: "border-border bg-bg-hover text-text-dim",
 };
 
+export function taskStateLabel(task: Task) {
+  if (isTerminal(task) || ["queued", "running", "blocked"].includes(task.state))
+    return task.state;
+  if (isPendingSchedule(task))
+    return isRecurring(task) ? "recurring" : "scheduled";
+  if (isPausedSchedule(task)) return "paused";
+  return task.state;
+}
+
 export function StatePill({ task }: { task: Task }) {
-  const label =
-    isRecurring(task) && task.schedule_enabled !== false
-      ? "recurring"
-      : task.schedule_kind === "once" && task.schedule_enabled !== false
-        ? "scheduled"
-        : task.state;
+  const label = taskStateLabel(task);
   const tone =
     label === "recurring"
       ? "border-purple-400/35 bg-purple-400/10 text-purple-300"
       : label === "scheduled"
         ? "border-blue/35 bg-blue/10 text-blue"
+        : label === "paused"
+          ? "border-border bg-bg-hover text-text-dim"
         : stateTone[task.state];
   return (
     <span
@@ -491,7 +516,7 @@ export function TaskDetails({
         </div>
         {!isTerminal(current) && (
           <footer className="flex justify-end gap-2 border-t border-border p-4">
-            {isSchedule(current) && (
+            {isScheduleDefinition(current) && (
               <>
                 <button
                   disabled={busy}
@@ -542,8 +567,8 @@ function eventLabel(event: TaskEvent) {
 export function selectGroups(tasks: Task[]) {
   const roots = tasks.filter((task) => !task.parent_task_id);
   return {
-    active: roots.filter((task) => isActive(task) || task.state === "failed"),
-    upcoming: roots.filter((task) => isSchedule(task) && !isTerminal(task)),
+    active: roots.filter((task) => isActive(task)),
+    upcoming: roots.filter((task) => isPendingSchedule(task)),
     recent: roots.filter((task) => isTerminal(task)).slice(0, 8),
   };
 }
