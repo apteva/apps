@@ -266,12 +266,53 @@ func TestSchedulesMaterializeOnceAndRecurringWithoutSetupDuplicates(t *testing.T
 	if once.State != stateWaiting || once.NextRunAt == nil {
 		t.Fatalf("bad one-time schedule: %+v", once)
 	}
+	type liveSnapshot struct {
+		event TaskEvent
+		task  *Task
+	}
+	live := []liveSnapshot{}
+	app.store.onEvent = func(event TaskEvent) {
+		if event.TaskID != once.ID {
+			return
+		}
+		snapshot, getErr := app.store.Get(event.TaskID)
+		if getErr != nil {
+			t.Errorf("load emitted task snapshot: %v", getErr)
+			return
+		}
+		live = append(live, liveSnapshot{event: event, task: snapshot})
+	}
 	if err := app.scheduler.Tick(once.NextRunAt.Add(time.Second), "project-a"); err != nil {
 		t.Fatal(err)
 	}
 	once, _ = app.store.Get(once.ID)
-	if once.State != stateQueued || once.ScheduleEnabled || once.ScheduledFor == nil {
+	if once.State != stateQueued || once.ScheduleEnabled || once.NextRunAt != nil || once.ScheduledFor == nil {
 		t.Fatalf("one-time task should become the runnable task itself: %+v", once)
+	}
+	if len(live) != 1 || live[0].event.ToState != stateQueued || live[0].task.State != stateQueued || live[0].task.ScheduleEnabled || live[0].task.NextRunAt != nil {
+		t.Fatalf("queued live event exposed a partial schedule transition: %+v", live)
+	}
+	if enabled, ok := live[0].event.Data["schedule_enabled"].(bool); !ok || enabled {
+		t.Fatalf("queued event must explicitly disable the one-time schedule: %+v", live[0].event.Data)
+	}
+	encoded, err := json.Marshal(once)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"schedule_enabled":false`) {
+		t.Fatalf("inactive schedule state omitted from JSON: %s", encoded)
+	}
+
+	running, progress, step := stateRunning, 10, "Reviewing CRM leads"
+	if _, _, err := app.store.Update(once.ID, "opaque-default", UpdateTaskInput{State: &running, Progress: &progress, CurrentStep: &step}); err != nil {
+		t.Fatal(err)
+	}
+	done, result := stateCompleted, "No newly active leads"
+	if _, _, err := app.store.Update(once.ID, "opaque-default", UpdateTaskInput{State: &done, Result: &result}); err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 3 || live[1].task.State != stateRunning || live[1].task.ScheduleEnabled || live[2].task.State != stateCompleted || live[2].task.ScheduleEnabled {
+		t.Fatalf("live lifecycle snapshots=%+v", live)
 	}
 	roots, _ := app.store.List(TaskFilter{ProjectID: "project-a", AgentID: 7, Limit: 50})
 	if len(roots) != 1 {
@@ -391,7 +432,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.2" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]

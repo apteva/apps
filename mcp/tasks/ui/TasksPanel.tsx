@@ -5,7 +5,8 @@ import {
   Task,
   TaskDetails,
   TaskRow,
-  isSchedule,
+  isActive,
+  isScheduleDefinition,
   isTerminal,
   taskAPI,
   useAgentNames,
@@ -39,11 +40,10 @@ export default function TasksPanel(props: HostProps) {
     return tasks.filter((task) => {
       if (task.parent_task_id) return false;
       if (agentId && task.agent_id !== agentId) return false;
-      if (view === "active" && (isTerminal(task) || isSchedule(task)))
-        return false;
+      if (view === "active" && !isActive(task)) return false;
       if (view === "attention" && !["blocked", "failed"].includes(task.state))
         return false;
-      if (view === "scheduled" && (!isSchedule(task) || isTerminal(task)))
+      if (view === "scheduled" && !isScheduleDefinition(task))
         return false;
       if (view === "completed" && task.state !== "completed") return false;
       if (

@@ -44,7 +44,7 @@ type Task struct {
 	ScheduleKind          string     `json:"schedule_kind,omitempty"`
 	ScheduleExpression    string     `json:"schedule_expression,omitempty"`
 	ScheduleTimezone      string     `json:"schedule_timezone,omitempty"`
-	ScheduleEnabled       bool       `json:"schedule_enabled,omitempty"`
+	ScheduleEnabled       bool       `json:"schedule_enabled"`
 	ScheduleOverlapPolicy string     `json:"schedule_overlap_policy,omitempty"`
 	ScheduleCatchupPolicy string     `json:"schedule_catchup_policy,omitempty"`
 	NextRunAt             *time.Time `json:"next_run_at,omitempty"`

@@ -235,6 +235,60 @@ func (s *taskStore) recordSimpleEvent(id, actor, eventType, from, to string, dat
 	return s.Get(id)
 }
 
+// activateOneTime turns a due one-time schedule into its runnable task in a
+// single transaction. The event is emitted only after every scheduling field
+// is committed, so an event-driven UI reload cannot observe a queued task that
+// still appears to have an active schedule.
+func (s *taskStore) activateOneTime(id, actor string, scheduledFor, now time.Time) (*Task, bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+
+	current, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, id))
+	if err != nil {
+		return nil, false, err
+	}
+	if current.ScheduleKind != scheduleOnce || !current.ScheduleEnabled || current.NextRunAt == nil || current.State != stateWaiting || !current.NextRunAt.Equal(scheduledFor) {
+		return current, false, nil
+	}
+
+	now = now.UTC()
+	scheduledFor = scheduledFor.UTC()
+	step := "Scheduled work is ready"
+	_, err = tx.Exec(`UPDATE tasks SET
+		state=?, progress=NULL, current_step=?, schedule_enabled=0,
+		last_run_at=?, scheduled_for=?, next_run_at=NULL, updated_at=?
+		WHERE id=?`, stateQueued, step, now.Format(time.RFC3339Nano),
+		scheduledFor.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), id)
+	if err != nil {
+		return nil, false, err
+	}
+	event, err := insertEvent(tx, TaskEvent{
+		TaskID: id, AgentID: current.AgentID, EventType: "state_changed",
+		ThreadID: actor, FromState: current.State, ToState: stateQueued,
+		Data: map[string]any{
+			"progress": nil, "current_step": step,
+			"assigned_thread_id":  current.AssignedThreadID,
+			"execution_thread_id": current.ExecutionThreadID,
+			"schedule_enabled":    false, "next_run_at": nil,
+			"scheduled_for": scheduledFor,
+		},
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	updated, err := s.Get(id)
+	if err == nil {
+		s.emit(event)
+	}
+	return updated, true, err
+}
+
 type scheduler struct {
 	store *taskStore
 	app   *App
@@ -279,15 +333,12 @@ func (s *scheduler) materialize(parent *Task, now time.Time) error {
 	}
 	scheduledFor := parent.NextRunAt.UTC()
 	if parent.ScheduleKind == scheduleOnce {
-		state := stateQueued
-		step := "Scheduled work is ready"
-		_, _, err := s.store.Update(parent.ID, "tasks:scheduler", UpdateTaskInput{State: &state, ClearProgress: true, CurrentStep: &step})
+		_, activated, err := s.store.activateOneTime(parent.ID, "tasks:scheduler", scheduledFor, now)
 		if err != nil {
 			return err
 		}
-		_, err = s.store.db.Exec(`UPDATE tasks SET schedule_enabled=0, last_run_at=?, scheduled_for=?, next_run_at=NULL WHERE id=?`, now.Format(time.RFC3339Nano), scheduledFor.Format(time.RFC3339Nano), parent.ID)
-		if err != nil {
-			return err
+		if !activated {
+			return nil
 		}
 		return s.app.notifyAssigned(parent.ID, "task.ready")
 	}
