@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.22
+version: 0.4.23
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -74,9 +74,10 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_register,     description: "Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
-    - { name: instance_destroy,      description: "Terminate the instance where immediate provider deletion is supported (refused for local id 0 and Contabo). Args: id." }
+    - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
@@ -157,7 +158,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.22
+    ref: instances/v0.4.23
     entry: mcp/instances
   port: 8080
   health_check: /health

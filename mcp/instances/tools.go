@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -24,6 +25,18 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tags_json": map[string]any{"type": "string"},
 			}, []string{"name"}),
 			Handler: a.toolCreate,
+		},
+		{
+			Name:        "instance_register",
+			Description: "Register an externally managed SSH host such as a Mac. Instances generates a dedicated keypair and returns the public key to add to the remote user's authorized_keys. The row remains provisioning until instance_wait_ready succeeds. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":      map[string]any{"type": "string"},
+				"ssh_host":  map[string]any{"type": "string"},
+				"ssh_user":  map[string]any{"type": "string"},
+				"ssh_port":  map[string]any{"type": "integer"},
+				"tags_json": map[string]any{"type": "string"},
+			}, []string{"name", "ssh_host", "ssh_user"}),
+			Handler: a.toolRegister,
 		},
 		{
 			Name:        "instance_get",
@@ -171,6 +184,48 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"instance": inst.stripSecrets()}, nil
+}
+
+func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	name := strings.TrimSpace(strArg(args, "name"))
+	host := strings.TrimSpace(strArg(args, "ssh_host"))
+	user := strings.TrimSpace(strArg(args, "ssh_user"))
+	port := intArg(args, "ssh_port", 22)
+	if name == "" || host == "" || user == "" {
+		return nil, errors.New("name, ssh_host, and ssh_user are required")
+	}
+	if strings.ContainsAny(host, " /\\\t\r\n") {
+		return nil, errors.New("ssh_host must be a hostname or IP address without whitespace")
+	}
+	if strings.ContainsAny(user, " /\\\t\r\n@:") {
+		return nil, errors.New("ssh_user contains invalid characters")
+	}
+	if port <= 0 || port > 65535 {
+		return nil, errors.New("ssh_port must be between 1 and 65535")
+	}
+	privateKey, publicKey, err := generateSSHKeypair()
+	if err != nil {
+		return nil, err
+	}
+	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
+		Name: name, Provider: "external", ProviderID: host + ":" + fmt.Sprint(port),
+		Status: "provisioning", SSHHost: host, SSHPort: port, SSHUser: user,
+		SSHPrivateKey: privateKey, SSHPublicKey: publicKey,
+		TagsJSON: strArg(args, "tags_json"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	emitInstanceCreated(ctx, inst)
+	emitInstanceStatus(ctx, inst)
+	return map[string]any{
+		"instance": inst.stripSecrets(),
+		"authorization": map[string]any{
+			"ssh_user": user, "ssh_host": host, "ssh_port": port,
+			"public_key": publicKey,
+			"next_step":  "Add public_key as one line in the remote user's ~/.ssh/authorized_keys, then call instance_wait_ready with this instance id.",
+		},
+	}, nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

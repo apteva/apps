@@ -73,6 +73,9 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	}
 	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
 	switch normalizeProvider(inst.Provider) {
+	case "external":
+		cap.Metrics = false // the current remote collector is Linux-/proc-specific
+		cap.Destroy = true  // forget the inventory row; never destroys the host
 	case "hetzner":
 		cap.Destroy, cap.Upgrade = true, true
 	case "digitalocean", "runpod":
@@ -109,6 +112,8 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 
 func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	switch normalizeProvider(inst.Provider) {
+	case "external":
+		return nil
 	case "hetzner":
 		return hetznerDestroy(ctx, inst)
 	case "digitalocean":
