@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.3
+version: 3.2.4
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -142,7 +142,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.3")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.4")
 	return nil
 }
 

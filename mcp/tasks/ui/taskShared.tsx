@@ -23,6 +23,12 @@ export interface TaskOverviewPreferences {
   recentLimit: number;
 }
 
+export type TaskQueueFilter =
+  | "active"
+  | "scheduled"
+  | "recurring"
+  | "recent";
+
 export function taskOverviewPreferences(
   settings?: Record<string, unknown>,
 ): TaskOverviewPreferences {
@@ -615,6 +621,7 @@ function taskTime(task: Task, scheduled: boolean) {
 export function selectTaskQueue(
   tasks: Task[],
   preferences: TaskOverviewPreferences = taskOverviewPreferences(),
+  filters: TaskQueueFilter[] = [],
 ) {
   const roots = tasks.filter((task) => !task.parent_task_id);
   const operational = roots.filter((task) => {
@@ -634,13 +641,51 @@ export function selectTaskQueue(
         .slice(0, preferences.recentLimit)
     : [];
 
-  return [...operational, ...recent].sort((a, b) => {
+  const queue = [...operational, ...recent].sort((a, b) => {
     const rank = taskQueueRank(a) - taskQueueRank(b);
     if (rank !== 0) return rank;
     if (isPendingSchedule(a) && isPendingSchedule(b))
       return taskTime(a, true) - taskTime(b, true);
     return taskTime(b, false) - taskTime(a, false);
   });
+
+  if (filters.length === 0) return queue;
+  return queue.filter((task) =>
+    filters.some((filter) => taskMatchesQueueFilter(task, filter)),
+  );
+}
+
+export function normalizeTaskQueueFilters(value: unknown): TaskQueueFilter[] {
+  if (!Array.isArray(value)) return [];
+  const valid = new Set<TaskQueueFilter>([
+    "active",
+    "scheduled",
+    "recurring",
+    "recent",
+  ]);
+  return Array.from(
+    new Set(
+      value.filter(
+        (item): item is TaskQueueFilter =>
+          typeof item === "string" && valid.has(item as TaskQueueFilter),
+      ),
+    ),
+  );
+}
+
+export function taskMatchesQueueFilter(
+  task: Task,
+  filter: TaskQueueFilter,
+) {
+  if (filter === "active") return task.state === "failed" || isActive(task);
+  if (filter === "scheduled")
+    return (
+      task.schedule_kind === "once" &&
+      (isPendingSchedule(task) || isPausedSchedule(task))
+    );
+  if (filter === "recurring")
+    return isRecurring(task) && (isPendingSchedule(task) || isPausedSchedule(task));
+  return task.state === "completed" || task.state === "cancelled";
 }
 
 export function useAgentNames(projectId?: string) {

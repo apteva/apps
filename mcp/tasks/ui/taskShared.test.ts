@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   isPendingSchedule,
+  normalizeTaskQueueFilters,
   scheduleLabel,
   selectGroups,
   selectTaskQueue,
@@ -176,6 +177,39 @@ describe("Tasks app UI model", () => {
     );
     expect(queue.map((item) => item.id)).toEqual(["failed", "done-new"]);
     expect(taskRowSummary(queue[0])).toBe("CRM unavailable");
+  });
+
+  test("combines scheduled and recurring filters without losing queue priority", () => {
+    const queue = selectTaskQueue(
+      [
+        task({ id: "running", state: "running" }),
+        task({
+          id: "once",
+          state: "waiting",
+          schedule_kind: "once",
+          schedule_enabled: true,
+          next_run_at: "2026-08-08T11:00:00Z",
+        }),
+        task({
+          id: "recurring",
+          state: "waiting",
+          schedule_kind: "interval",
+          schedule_enabled: true,
+          next_run_at: "2026-08-08T12:00:00Z",
+        }),
+        task({ id: "done", state: "completed" }),
+      ],
+      undefined,
+      ["scheduled", "recurring"],
+    );
+    expect(queue.map((item) => item.id)).toEqual(["once", "recurring"]);
+  });
+
+  test("normalizes persisted task filters", () => {
+    expect(
+      normalizeTaskQueueFilters(["recurring", "invalid", "scheduled", "recurring"]),
+    ).toEqual(["recurring", "scheduled"]);
+    expect(normalizeTaskQueueFilters("recurring")).toEqual([]);
   });
 
   test("uses terminal results instead of stale execution steps in compact rows", () => {
