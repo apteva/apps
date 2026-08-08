@@ -13,6 +13,7 @@ package main
 //     the SDK's restricted connection credential API and never stored here.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,14 +33,27 @@ import (
 type Destination_writer interface { // disambiguates from the DB row type
 	Put(ctx context.Context, key string, body io.Reader, size int64) error
 	Get(ctx context.Context, key string) (io.ReadCloser, error)
-	List(ctx context.Context) ([]storedObject, error)
+	List(ctx context.Context, prefix string) ([]storedObject, error)
 	Delete(ctx context.Context, key string) error
+	Check(ctx context.Context) error
 }
 
 type storedObject struct {
 	Key      string
 	Size     int64
 	Modified time.Time
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.r.Read(p)
 }
 
 const (
@@ -49,6 +63,8 @@ const (
 )
 
 func validateDestination(d *Destination) error {
+	d.Name = strings.TrimSpace(d.Name)
+	d.Kind = strings.TrimSpace(d.Kind)
 	if d.Name == "" {
 		return errors.New("name required")
 	}
@@ -142,7 +158,7 @@ func (d *localDest) pathForKey(key string) (string, error) {
 	return filepath.Join(d.cfg.Path, clean), nil
 }
 
-func (d *localDest) Put(_ context.Context, key string, body io.Reader, _ int64) error {
+func (d *localDest) Put(ctx context.Context, key string, body io.Reader, _ int64) error {
 	dst, err := d.pathForKey(key)
 	if err != nil {
 		return err
@@ -161,7 +177,7 @@ func (d *localDest) Put(_ context.Context, key string, body io.Reader, _ int64) 
 			_ = os.Remove(tmp)
 		}
 	}()
-	if _, err := io.Copy(f, body); err != nil {
+	if _, err := io.Copy(f, contextReader{ctx: ctx, r: body}); err != nil {
 		_ = f.Close()
 		return err
 	}
@@ -179,6 +195,27 @@ func (d *localDest) Put(_ context.Context, key string, body io.Reader, _ int64) 
 	return nil
 }
 
+func (d *localDest) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(d.cfg.Path, ".apteva-backup-check-*")
+	if err != nil {
+		return fmt.Errorf("local destination is not writable: %w", err)
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if _, err := f.Write([]byte("ok")); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("local destination is not writable: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("local destination sync: %w", err)
+	}
+	return f.Close()
+}
+
 func (d *localDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	path, err := d.pathForKey(key)
 	if err != nil {
@@ -187,13 +224,24 @@ func (d *localDest) Get(_ context.Context, key string) (io.ReadCloser, error) {
 	return os.Open(path)
 }
 
-func (d *localDest) List(_ context.Context) ([]storedObject, error) {
+func (d *localDest) List(ctx context.Context, prefix string) ([]storedObject, error) {
 	out := []storedObject{}
 	root := d.cfg.Path
-	if _, err := os.Stat(root); os.IsNotExist(err) {
+	walkRoot := root
+	if strings.TrimSpace(prefix) != "" {
+		var err error
+		walkRoot, err = d.pathForKey(strings.TrimSuffix(prefix, "/"))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := os.Stat(walkRoot); os.IsNotExist(err) {
 		return out, nil
 	}
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(walkRoot, func(path string, info os.FileInfo, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
 			return err
 		}
@@ -201,6 +249,7 @@ func (d *localDest) List(_ context.Context) ([]storedObject, error) {
 			return nil
 		}
 		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
 		out = append(out, storedObject{Key: rel, Size: info.Size(), Modified: info.ModTime()})
 		return nil
 	})
@@ -298,6 +347,26 @@ func (d *cloudDest) Put(ctx context.Context, key string, body io.Reader, size in
 	return nil
 }
 
+func (d *cloudDest) Check(ctx context.Context) error {
+	exists, err := d.client.BucketExists(ctx, d.cfg.Bucket)
+	if err != nil {
+		return fmt.Errorf("check S3 bucket %s: %w", d.cfg.Bucket, err)
+	}
+	if !exists {
+		return fmt.Errorf("S3 bucket %s does not exist or is not accessible", d.cfg.Bucket)
+	}
+	probeKey := d.prefixedKey(fmt.Sprintf(".apteva-backup-check-%d", time.Now().UnixNano()))
+	if _, err := d.client.PutObject(ctx, d.cfg.Bucket, probeKey, bytes.NewReader([]byte("ok")), 2, minio.PutObjectOptions{
+		ContentType: "application/octet-stream",
+	}); err != nil {
+		return fmt.Errorf("write S3 bucket %s: %w", d.cfg.Bucket, err)
+	}
+	if err := d.client.RemoveObject(ctx, d.cfg.Bucket, probeKey, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("clean up S3 bucket check %s: %w", d.cfg.Bucket, err)
+	}
+	return nil
+}
+
 func (d *cloudDest) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	object, err := d.client.GetObject(ctx, d.cfg.Bucket, d.prefixedKey(key), minio.GetObjectOptions{})
 	if err != nil {
@@ -310,17 +379,19 @@ func (d *cloudDest) Get(ctx context.Context, key string) (io.ReadCloser, error) 
 	return object, nil
 }
 
-func (d *cloudDest) List(ctx context.Context) ([]storedObject, error) {
+func (d *cloudDest) List(ctx context.Context, keyPrefix string) ([]storedObject, error) {
 	out := []storedObject{}
 	prefix := strings.TrimSuffix(d.cfg.KeyPrefix, "/")
 	if prefix != "" {
 		prefix += "/"
 	}
+	destinationPrefix := prefix
+	prefix += strings.TrimPrefix(keyPrefix, "/")
 	for object := range d.client.ListObjects(ctx, d.cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if object.Err != nil {
 			return nil, fmt.Errorf("S3 list: %w", object.Err)
 		}
-		key := strings.TrimPrefix(object.Key, prefix)
+		key := strings.TrimPrefix(object.Key, destinationPrefix)
 		out = append(out, storedObject{Key: key, Size: object.Size, Modified: object.LastModified})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })

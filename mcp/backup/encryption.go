@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,18 @@ import (
 	"filippo.io/age"
 	sdk "github.com/apteva/app-sdk"
 )
+
+type decryptedReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+type countWriter struct{ n int64 }
+
+func (w *countWriter) Write(p []byte) (int, error) {
+	w.n += int64(len(p))
+	return len(p), nil
+}
 
 func backupPassphrase(ctx *sdk.AppCtx) string {
 	if ctx == nil {
@@ -66,6 +79,71 @@ func prepareStoredSnapshot(ctx *sdk.AppCtx, rawPath string, rawSize int64, rawSH
 	return path, info.Size(), hex.EncodeToString(hash.Sum(nil)), true, cleanup, nil
 }
 
+// putStoredSnapshot streams validated plaintext directly to the destination,
+// encrypting through a pipe when configured. This avoids keeping raw and
+// encrypted copies on the local disk at the same time.
+func putStoredSnapshot(opCtx context.Context, ctx *sdk.AppCtx, destination Destination_writer, key, rawPath string, rawSize int64, rawSHA string) (size int64, sha string, encrypted bool, err error) {
+	passphrase := backupPassphrase(ctx)
+	if passphrase == "" {
+		in, openErr := os.Open(rawPath)
+		if openErr != nil {
+			return 0, "", false, openErr
+		}
+		defer in.Close()
+		if putErr := destination.Put(opCtx, key, in, rawSize); putErr != nil {
+			return 0, "", false, putErr
+		}
+		return rawSize, rawSHA, false, nil
+	}
+	recipient, err := age.NewScryptRecipient(passphrase)
+	if err != nil {
+		return 0, "", false, err
+	}
+	in, err := os.Open(rawPath)
+	if err != nil {
+		return 0, "", false, err
+	}
+	pipeReader, pipeWriter := io.Pipe()
+	type streamResult struct {
+		size int64
+		sha  string
+		err  error
+	}
+	result := make(chan streamResult, 1)
+	go func() {
+		defer in.Close()
+		hash := sha256.New()
+		counter := &countWriter{}
+		encryptedWriter, encryptErr := age.Encrypt(io.MultiWriter(pipeWriter, hash, counter), recipient)
+		if encryptErr == nil {
+			_, encryptErr = io.Copy(encryptedWriter, contextReader{ctx: opCtx, r: in})
+			if closeErr := encryptedWriter.Close(); encryptErr == nil {
+				encryptErr = closeErr
+			}
+		}
+		if encryptErr != nil {
+			_ = pipeWriter.CloseWithError(encryptErr)
+		} else {
+			_ = pipeWriter.Close()
+		}
+		result <- streamResult{size: counter.n, sha: hex.EncodeToString(hash.Sum(nil)), err: encryptErr}
+	}()
+	putErr := destination.Put(opCtx, key, pipeReader, -1)
+	if putErr != nil {
+		_ = pipeReader.CloseWithError(putErr)
+	} else {
+		_ = pipeReader.Close()
+	}
+	streamed := <-result
+	if putErr != nil {
+		return streamed.size, streamed.sha, true, putErr
+	}
+	if streamed.err != nil {
+		return streamed.size, streamed.sha, true, streamed.err
+	}
+	return streamed.size, streamed.sha, true, nil
+}
+
 func decryptStoredSnapshot(ctx *sdk.AppCtx, encryptedPath string) (string, func(), error) {
 	passphrase := backupPassphrase(ctx)
 	if passphrase == "" {
@@ -105,4 +183,29 @@ func decryptStoredSnapshot(ctx *sdk.AppCtx, encryptedPath string) (string, func(
 		return "", func() {}, err
 	}
 	return path, cleanup, nil
+}
+
+// openDecryptedSnapshot avoids materialising a second plaintext archive during
+// restore. The stored encrypted object has already been downloaded and
+// SHA-verified before this is called, so streaming preserves verify-before-
+// restore semantics while cutting temporary disk usage roughly in half.
+func openDecryptedSnapshot(ctx *sdk.AppCtx, encryptedPath string) (io.ReadCloser, error) {
+	passphrase := backupPassphrase(ctx)
+	if passphrase == "" {
+		return nil, fmt.Errorf("backup is encrypted but encryption_passphrase is not configured")
+	}
+	identity, err := age.NewScryptIdentity(passphrase)
+	if err != nil {
+		return nil, err
+	}
+	in, err := os.Open(encryptedPath)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := age.Decrypt(in, identity)
+	if err != nil {
+		_ = in.Close()
+		return nil, fmt.Errorf("decrypt backup: %w", err)
+	}
+	return &decryptedReadCloser{Reader: reader, Closer: in}, nil
 }

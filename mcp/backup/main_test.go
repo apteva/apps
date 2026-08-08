@@ -18,7 +18,9 @@ package main
 //     a real apteva-server
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -31,12 +33,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	_ "modernc.org/sqlite"
 )
 
@@ -193,7 +198,7 @@ func TestLocalDestination_RoundTrip(t *testing.T) {
 	if !bytes.Equal(got, payload) {
 		t.Errorf("get returned %q want %q", got, payload)
 	}
-	objs, err := d.List(ctx)
+	objs, err := d.List(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +232,7 @@ func TestLocalDestination_ListNewestFirst(t *testing.T) {
 		when := time.Date(2026, 1, i+1, 0, 0, 0, 0, time.UTC)
 		_ = os.Chtimes(filepath.Join(dir, key), when, when)
 	}
-	objs, _ := d.List(ctx)
+	objs, _ := d.List(ctx, "")
 	if len(objs) != 3 {
 		t.Fatalf("want 3, got %d", len(objs))
 	}
@@ -433,7 +438,7 @@ func TestPruneRetention_KeepsNewestN(t *testing.T) {
 	if err := pruneRetention(context.Background(), ctx, w, dest, policy); err != nil {
 		t.Fatal(err)
 	}
-	objs, _ := w.List(context.Background())
+	objs, _ := w.List(context.Background(), "")
 	if len(objs) != 2 {
 		t.Errorf("want 2 left after prune, got %d (%v)", len(objs), objs)
 	}
@@ -463,7 +468,7 @@ func TestPruneRetention_IgnoresUnrelatedFiles(t *testing.T) {
 	if err := pruneRetention(context.Background(), ctx, w, dest, &Policy{ID: 1, RetentionKeep: 1, Scope: defaultScope()}); err != nil {
 		t.Fatal(err)
 	}
-	objs, _ := w.List(context.Background())
+	objs, _ := w.List(context.Background(), "")
 	if len(objs) != 2 {
 		t.Errorf("expected both files to survive, got %d", len(objs))
 	}
@@ -490,7 +495,7 @@ func TestPruneRetention_IsolatedByPolicyAndScope(t *testing.T) {
 	if err := pruneRetention(context.Background(), ctx, w, dest, &Policy{ID: 1, RetentionKeep: 1, Scope: defaultScope()}); err != nil {
 		t.Fatal(err)
 	}
-	objects, err := w.List(context.Background())
+	objects, err := w.List(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,6 +505,164 @@ func TestPruneRetention_IsolatedByPolicyAndScope(t *testing.T) {
 	}
 	if remaining[keys[0]] || !remaining[keys[1]] || !remaining[keys[2]] || !remaining[keys[3]] {
 		t.Fatalf("retention crossed a namespace boundary: %#v", remaining)
+	}
+}
+
+func TestLocalDestination_ListUsesPrefix(t *testing.T) {
+	dir := t.TempDir()
+	w := &localDest{cfg: localConfig{Path: dir}}
+	for _, key := range []string{
+		"platform/policy-1/apteva-one.tar.gz",
+		"platform/policy-2/apteva-two.tar.gz",
+		"unrelated.txt",
+	} {
+		if err := w.Put(context.Background(), key, strings.NewReader("x"), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	objects, err := w.List(context.Background(), "platform/policy-1/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].Key != "platform/policy-1/apteva-one.tar.gz" {
+		t.Fatalf("prefix list returned %#v", objects)
+	}
+}
+
+func makeSnapshotArchive(t *testing.T, includeManifest bool) []byte {
+	t.Helper()
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	tw := tar.NewWriter(gz)
+	if includeManifest {
+		manifest := []byte(`{"format_version":1}`)
+		if err := tw.WriteHeader(&tar.Header{Name: "manifest.json", Mode: 0o600, Size: int64(len(manifest))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(manifest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := []byte("database")
+	if err := tw.WriteHeader(&tar.Header{Name: "server/apteva-server.db", Mode: 0o600, Size: int64(len(payload))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
+func TestValidateSnapshotArchiveReadsThroughGzipTrailer(t *testing.T) {
+	valid := makeSnapshotArchive(t, true)
+	path := filepath.Join(t.TempDir(), "snapshot.tar.gz")
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := validateSnapshotArchive(path)
+	if err != nil || !strings.Contains(manifest, "format_version") {
+		t.Fatalf("valid archive: manifest=%q err=%v", manifest, err)
+	}
+	if err := os.WriteFile(path, valid[:len(valid)-8], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateSnapshotArchive(path); err == nil {
+		t.Fatal("truncated gzip archive was accepted")
+	}
+	if err := os.WriteFile(path, makeSnapshotArchive(t, false), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateSnapshotArchive(path); err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("missing-manifest error = %v", err)
+	}
+}
+
+func TestOperationCoordinatorExcludesBackupAndRestore(t *testing.T) {
+	release, err := acquireOperation("backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireOperation("restore"); err == nil || !strings.Contains(err.Error(), "backup is running") {
+		t.Fatalf("concurrent operation error = %v", err)
+	}
+	release()
+	releaseRestore, err := acquireOperation("restore")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRestore()
+}
+
+func TestReconcileInterruptedRuns(t *testing.T) {
+	ctx := newTestCtx(t)
+	dest, _ := dbCreateDestination(ctx.AppDB(), &Destination{Name: "local", Kind: "local", Config: json.RawMessage(`{"path":"/tmp"}`)})
+	id, _ := dbInsertRun(ctx.AppDB(), &Run{DestinationID: dest.ID, DestinationName: dest.Name})
+	if err := reconcileInterruptedRuns(ctx); err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetRun(ctx.AppDB(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status != "failed" || run.Stage != "failed" || !strings.Contains(run.Error, "restarted") {
+		t.Fatalf("interrupted run was not reconciled: %+v", run)
+	}
+}
+
+func TestPruneFailedRunHistoryKeepsSuccessfulRuns(t *testing.T) {
+	ctx := newTestCtx(t)
+	old := time.Now().UTC().AddDate(-1, 0, 0).Format(time.RFC3339Nano)
+	failedID, err := dbInsertRun(ctx.AppDB(), &Run{DestinationID: 1, DestinationName: "local", StartedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbFinishRun(ctx.AppDB(), failedID, "failed", 0, "", "", "", "old failure", false); err != nil {
+		t.Fatal(err)
+	}
+	successID, err := dbInsertRun(ctx.AppDB(), &Run{DestinationID: 1, DestinationName: "local", StartedAt: old})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbFinishRun(ctx.AppDB(), successID, "success", 1, "sha", "key", "{}", "", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneFailedRunHistory(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbGetRun(ctx.AppDB(), failedID); err == nil {
+		t.Fatal("old failed run was not pruned")
+	}
+	if _, err := dbGetRun(ctx.AppDB(), successID); err != nil {
+		t.Fatalf("successful run was pruned: %v", err)
+	}
+}
+
+func TestAnnotateRestoreReportSurfacesPartialFailure(t *testing.T) {
+	report := annotateRestoreReport(map[string]any{
+		"installs": []any{
+			map[string]any{"install_id": float64(1), "status": "applied"},
+			map[string]any{"install_id": float64(2), "archive_path": "apps/2-crm/app.db", "status": "error", "note": "missing install"},
+		},
+	})
+	if report["partial_failure"] != true || report["failure_count"] != 1 {
+		t.Fatalf("partial report = %#v", report)
+	}
+	failures, _ := report["failures"].([]string)
+	if len(failures) != 1 || !strings.Contains(failures[0], "missing install") {
+		t.Fatalf("failures = %#v", failures)
+	}
+	missingFields := annotateRestoreReport(map[string]any{
+		"installs": []any{map[string]any{"status": "error"}},
+	})
+	missingFailures, _ := missingFields["failures"].([]string)
+	if len(missingFailures) != 1 || missingFailures[0] != "install" {
+		t.Fatalf("missing field failure = %#v", missingFailures)
 	}
 }
 
@@ -585,6 +748,13 @@ type jobsPlatform struct {
 	input       map[string]any
 }
 
+func (p *jobsPlatform) CallApp(appName, tool string, input map[string]any) (json.RawMessage, error) {
+	if appName != "jobs" || tool != "jobs_cancel" {
+		return nil, fmt.Errorf("unexpected app call %s.%s", appName, tool)
+	}
+	return json.RawMessage(`{"cancelled":true}`), nil
+}
+
 func (p *jobsPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	if appName != "jobs" || tool != "jobs_schedule" {
 		return fmt.Errorf("unexpected app call %s.%s", appName, tool)
@@ -621,6 +791,9 @@ func TestBackupSchedule_UsesAppToolAndStoresProject(t *testing.T) {
 	if input["policy_id"] != policy.ID {
 		t.Fatalf("scheduled input = %#v, want policy_id %d", input, policy.ID)
 	}
+	if input["async"] != true {
+		t.Fatalf("scheduled backup must be asynchronous: %#v", input)
+	}
 }
 
 func TestBackupSchedule_RollsBackPolicyWhenJobsFails(t *testing.T) {
@@ -641,6 +814,91 @@ func TestBackupSchedule_RollsBackPolicyWhenJobsFails(t *testing.T) {
 	}
 	if len(policies) != 0 {
 		t.Fatalf("failed schedule left policy rows: %+v", policies)
+	}
+}
+
+func TestHTTPRoutes_LocalLifecycle(t *testing.T) {
+	db := openTestDB(t)
+	platform := &jobsPlatform{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, platform, silentLogger{})
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	app := &App{}
+	dir := t.TempDir()
+
+	request := func(method, target, body string, handler http.HandlerFunc) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		recorder := httptest.NewRecorder()
+		handler(recorder, req)
+		return recorder
+	}
+
+	created := request(http.MethodPost, "/destinations", fmt.Sprintf(`{"name":"local","kind":"local","config":{"path":%q}}`, dir), app.handleDestinationsCollection)
+	if created.Code != http.StatusOK {
+		t.Fatalf("create destination: status=%d body=%s", created.Code, created.Body.String())
+	}
+	destinations, _ := dbListDestinations(db)
+	if len(destinations) != 1 {
+		t.Fatalf("destinations = %#v", destinations)
+	}
+	destinationID := destinations[0].ID
+
+	checked := request(http.MethodPost, fmt.Sprintf("/destinations/%d/test", destinationID), "", app.handleDestinationItem)
+	if checked.Code != http.StatusOK {
+		t.Fatalf("test destination: status=%d body=%s", checked.Code, checked.Body.String())
+	}
+	listed := request(http.MethodGet, "/destinations", "", app.handleDestinationsCollection)
+	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), `"local"`) {
+		t.Fatalf("list destinations: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+
+	policyBody := fmt.Sprintf(`{"name":"nightly","schedule":"0 3 * * *","destination_id":%d,"retention_keep":2,"scope":{"kind":"platform"}}`, destinationID)
+	policyResponse := request(http.MethodPost, "/policies?project_id=project-a", policyBody, app.handlePoliciesCollection)
+	if policyResponse.Code != http.StatusOK {
+		t.Fatalf("create policy: status=%d body=%s", policyResponse.Code, policyResponse.Body.String())
+	}
+	policies, _ := dbListPolicies(db)
+	if len(policies) != 1 || policies[0].JobsID == "" {
+		t.Fatalf("policies = %#v", policies)
+	}
+
+	t.Setenv("APTEVA_GATEWAY_URL", "")
+	runResponse := request(http.MethodPost, "/run", fmt.Sprintf(`{"destination_id":%d}`, destinationID), app.handleRunNow)
+	if runResponse.Code != http.StatusInternalServerError || !strings.Contains(runResponse.Body.String(), "APTEVA_GATEWAY_URL") {
+		t.Fatalf("run now: status=%d body=%s", runResponse.Code, runResponse.Body.String())
+	}
+	allRuns, _ := dbListRuns(db, destinationID, 10)
+	if len(allRuns) != 1 || allRuns[0].Status != "failed" {
+		t.Fatalf("failed runs = %#v", allRuns)
+	}
+	runItem := request(http.MethodGet, fmt.Sprintf("/runs/%d", allRuns[0].ID), "", app.handleRunItem)
+	if runItem.Code != http.StatusOK {
+		t.Fatalf("run item: status=%d body=%s", runItem.Code, runItem.Body.String())
+	}
+	restoreResponse := request(http.MethodPost, "/restore", fmt.Sprintf(`{"run_id":%d}`, allRuns[0].ID), app.handleRestore)
+	if restoreResponse.Code != http.StatusInternalServerError || !strings.Contains(restoreResponse.Body.String(), "only successful") {
+		t.Fatalf("restore failed run: status=%d body=%s", restoreResponse.Code, restoreResponse.Body.String())
+	}
+
+	runs := request(http.MethodGet, "/runs?limit=1", "", app.handleRunsCollection)
+	if runs.Code != http.StatusOK || !strings.Contains(runs.Body.String(), `"has_more":false`) {
+		t.Fatalf("list runs: status=%d body=%s", runs.Code, runs.Body.String())
+	}
+	scopes := request(http.MethodGet, "/scopes", "", app.handleScopes)
+	if scopes.Code != http.StatusOK || !strings.Contains(scopes.Body.String(), `"platform"`) {
+		t.Fatalf("scopes: status=%d body=%s", scopes.Code, scopes.Body.String())
+	}
+
+	deletedPolicy := request(http.MethodDelete, fmt.Sprintf("/policies/%d", policies[0].ID), "", app.handlePolicyItem)
+	if deletedPolicy.Code != http.StatusOK {
+		t.Fatalf("delete policy: status=%d body=%s", deletedPolicy.Code, deletedPolicy.Body.String())
+	}
+	deletedDestination := request(http.MethodDelete, fmt.Sprintf("/destinations/%d", destinationID), "", app.handleDestinationItem)
+	if deletedDestination.Code != http.StatusOK {
+		t.Fatalf("delete destination: status=%d body=%s", deletedDestination.Code, deletedDestination.Body.String())
 	}
 }
 
@@ -689,11 +947,105 @@ func TestOpenCloudDestination_UsesBoundCredentialAPI(t *testing.T) {
 	}
 }
 
+func TestCloudDestination_RoundTripAndPrefixList(t *testing.T) {
+	var stored []byte
+	var deleted bool
+	modified := time.Now().UTC().Format(http.TimeFormat)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("list-type") == "2" {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = fmt.Fprintf(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>backups</Name><Prefix>root/platform/policy-1/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated>
+  <Contents><Key>root/platform/policy-1/apteva-one.tar.gz</Key><LastModified>%s</LastModified><ETag>&quot;abc&quot;</ETag><Size>%d</Size><StorageClass>STANDARD</StorageClass></Contents>
+</ListBucketResult>`, time.Now().UTC().Format(time.RFC3339), len(stored))
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			raw, _ := io.ReadAll(r.Body)
+			stored = raw
+			if bytes.Contains(raw, []byte("snapshot")) {
+				stored = []byte("snapshot")
+			}
+			w.Header().Set("ETag", `"abc"`)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodHead:
+			w.Header().Set("Content-Length", strconv.Itoa(len(stored)))
+			w.Header().Set("Last-Modified", modified)
+			w.Header().Set("ETag", `"abc"`)
+			w.WriteHeader(http.StatusOK)
+		case http.MethodGet:
+			w.Header().Set("Content-Length", strconv.Itoa(len(stored)))
+			w.Header().Set("Last-Modified", modified)
+			w.Header().Set("ETag", `"abc"`)
+			_, _ = w.Write(stored)
+		case http.MethodDelete:
+			deleted = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+		}
+	}))
+	defer server.Close()
+	client, err := minio.New(strings.TrimPrefix(server.URL, "http://"), &minio.Options{
+		Creds: credentials.NewStaticV4("access", "secret", ""), Secure: false,
+		Region: "us-east-1", BucketLookup: minio.BucketLookupPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := &cloudDest{cfg: s3Config{Bucket: "backups", KeyPrefix: "root"}, client: client, region: "us-east-1"}
+	key := "platform/policy-1/apteva-one.tar.gz"
+	if err := destination.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := destination.Put(context.Background(), key, strings.NewReader("snapshot"), 8); err != nil {
+		t.Fatal(err)
+	}
+	body, err := destination.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil || string(got) != "snapshot" {
+		t.Fatalf("get body=%q err=%v", got, err)
+	}
+	objects, err := destination.List(context.Background(), "platform/policy-1/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(objects) != 1 || objects[0].Key != key {
+		t.Fatalf("objects = %#v", objects)
+	}
+	if err := destination.Delete(context.Background(), key); err != nil || !deleted {
+		t.Fatalf("delete err=%v deleted=%v", err, deleted)
+	}
+}
+
+func TestCreateCloudDestinationRejectsUnboundConnectionID(t *testing.T) {
+	platform := &cloudPlatform{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, openTestDB(t), sdk.Config{}, platform, silentLogger{})
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	body := `{"name":"r2","kind":"s3","connection_id":88,"config":{"bucket":"backups"}}`
+	req := httptest.NewRequest(http.MethodPost, "/destinations", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	(&App{}).handleDestinationsCollection(recorder, req)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "currently bound") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 // ─── snapshot streamer ─────────────────────────────────────────────
 
 func TestStreamSnapshot_NoGatewayEnv(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", "")
-	if _, err := streamSnapshot(io.Discard); err == nil {
+	if _, err := streamSnapshot(context.Background(), io.Discard); err == nil {
 		t.Errorf("expected error when APTEVA_GATEWAY_URL unset")
 	}
 }
@@ -714,7 +1066,7 @@ func TestStreamSnapshot_HappyPath(t *testing.T) {
 	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
 
 	var buf bytes.Buffer
-	n, err := streamSnapshot(&buf)
+	n, err := streamSnapshot(context.Background(), &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,8 +1086,23 @@ func TestStreamSnapshot_NonOKResponse(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
 	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
 
-	if _, err := streamSnapshot(io.Discard); err == nil || !strings.Contains(err.Error(), "403") {
+	if _, err := streamSnapshot(context.Background(), io.Discard); err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected 403 in error, got %v", err)
+	}
+}
+
+func TestStreamSnapshot_RespectsCancellation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, err := streamSnapshot(ctx, io.Discard); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
 	}
 }
 

@@ -38,6 +38,38 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+const (
+	transferTimeout     = 2 * time.Hour
+	responseHeaderLimit = 30 * time.Second
+	maxManifestBytes    = 4 << 20
+)
+
+var platformTransferClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = responseHeaderLimit
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{Transport: transport}
+}()
+
+var operationState struct {
+	sync.Mutex
+	active string
+}
+
+func acquireOperation(kind string) (func(), error) {
+	operationState.Lock()
+	defer operationState.Unlock()
+	if operationState.active != "" {
+		return nil, fmt.Errorf("%s cannot start while %s is running", kind, operationState.active)
+	}
+	operationState.active = kind
+	return func() {
+		operationState.Lock()
+		operationState.active = ""
+		operationState.Unlock()
+	}, nil
+}
+
 // runBackup executes a backup against dest. policy may be nil for
 // ad-hoc / "run now" calls; retention pruning is skipped in that case
 // (only policy-driven runs prune, since ad-hoc runs typically share
@@ -60,19 +92,22 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		return nil, err
 	}
 	run.ID = id
-	lockKey := fmt.Sprintf("%d:%s", dest.ID, storagePrefix(scope, run.PolicyID))
-	if !acquireBackupRun(lockKey) {
-		msg := "another backup is already running for this destination and scope"
+	release, err := acquireOperation("backup")
+	if err != nil {
+		msg := err.Error()
 		_ = dbFinishRun(ctx.AppDB(), id, "failed", 0, "", "", "", msg, false)
 		out, _ := dbGetRun(ctx.AppDB(), id)
 		return out, errors.New(msg)
 	}
-	defer releaseBackupRun(lockKey)
+	defer release()
+	opCtx, cancelOperation := context.WithTimeout(context.Background(), transferTimeout)
+	defer cancelOperation()
 
 	finish := func(status, errMsg string, bytes int64, sha, key, manifestJSON string, encrypted bool) (*Run, error) {
 		if err := dbFinishRun(ctx.AppDB(), id, status, bytes, sha, key, manifestJSON, errMsg, encrypted); err != nil {
 			return nil, fmt.Errorf("record backup result: %w", err)
 		}
+		_ = pruneFailedRunHistory(ctx)
 		out, err := dbGetRun(ctx.AppDB(), id)
 		if err != nil {
 			return nil, err
@@ -86,6 +121,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 
 	// 1) Open the destination first so credentials/endpoint failures
 	// don't waste a snapshot.
+	_ = dbUpdateRunStage(ctx.AppDB(), id, "opening destination")
 	writer, err := openDestination(dest, ctx, defaultLocalBackupDir(ctx))
 	if err != nil {
 		return finish("failed", "open destination: "+err.Error(), 0, "", "", "", false)
@@ -100,7 +136,8 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	defer os.Remove(tmpPath)
 
 	hash := sha256.New()
-	written, providerManifest, err := writeSnapshot(ctx, io.MultiWriter(tmp, hash), scope)
+	_ = dbUpdateRunStage(ctx.AppDB(), id, "snapshotting")
+	written, providerManifest, err := writeSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), scope)
 	if errClose := tmp.Close(); err == nil {
 		err = errClose
 	}
@@ -111,63 +148,56 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 
 	// 3) Crack the tar to extract manifest.json — useful for forensic
 	// diffs across runs ("which install was added between these two?").
-	manifestJSON, _ := extractManifestJSON(tmpPath)
-	if manifestJSON == "" && providerManifest != "" {
-		manifestJSON = providerManifest
+	_ = dbUpdateRunStage(ctx.AppDB(), id, "validating")
+	manifestJSON, err := validateSnapshotArchive(tmpPath)
+	if err != nil {
+		return finish("failed", "validate snapshot: "+err.Error(), written, sha, "", "", false)
+	}
+	if providerManifest != "" && !json.Valid([]byte(providerManifest)) {
+		return finish("failed", "validate provider manifest: invalid JSON", written, sha, "", manifestJSON, false)
 	}
 
-	// 4) Encrypt when configured, then upload exactly those stored bytes.
-	uploadPath, uploadSize, sha, encrypted, cleanupEncrypted, err := prepareStoredSnapshot(ctx, tmpPath, written, sha)
-	defer cleanupEncrypted()
-	if err != nil {
-		return finish("failed", "encrypt snapshot: "+err.Error(), 0, "", "", manifestJSON, false)
-	}
+	// 4) Upload the validated snapshot. Encryption streams through a pipe so
+	// the host never needs a second full encrypted temporary file.
+	encrypted := backupPassphrase(ctx) != ""
 	key := buildRemoteKey(run, encrypted)
-	src, err := os.Open(uploadPath)
-	if err != nil {
-		return finish("failed", "reopen tempfile: "+err.Error(), 0, "", "", manifestJSON, encrypted)
+	stage := "uploading"
+	if encrypted {
+		stage = "encrypting and uploading"
 	}
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-	if err := writer.Put(uploadCtx, key, src, uploadSize); err != nil {
-		_ = src.Close()
-		return finish("failed", "upload: "+err.Error(), uploadSize, sha, "", manifestJSON, encrypted)
-	}
-	_ = src.Close()
-
-	// 5) Success — record the row.
-	successful, err := finish("success", "", uploadSize, sha, key, manifestJSON, encrypted)
+	_ = dbUpdateRunStage(ctx.AppDB(), id, stage)
+	uploadSize, uploadSHA, encrypted, err := putStoredSnapshot(opCtx, ctx, writer, key, tmpPath, written, sha)
 	if err != nil {
-		_ = writer.Delete(uploadCtx, key)
-		return nil, err
+		_ = writer.Delete(opCtx, key)
+		return finish("failed", "upload: "+err.Error(), uploadSize, uploadSHA, "", manifestJSON, encrypted)
 	}
 
-	// 6) Retention prune. Best-effort; failures here don't taint the
-	// successful run.
+	// 5) Retention prune. Best-effort; failures here don't taint the
+	// successful run, but the stage remains visible while large prefixes
+	// are being cleaned up.
 	if policy != nil && policy.RetentionKeep > 0 {
-		if err := pruneRetention(uploadCtx, ctx, writer, dest, policy); err != nil {
+		_ = dbUpdateRunStage(ctx.AppDB(), id, "pruning")
+		if err := pruneRetention(opCtx, ctx, writer, dest, policy); err != nil {
 			ctx.Logger().Warn("retention prune failed",
 				"destination", dest.Name, "err", err.Error())
 		}
 	}
+
+	// 6) Success — record the row after all observable work is complete.
+	successful, err := finish("success", "", uploadSize, uploadSHA, key, manifestJSON, encrypted)
+	if err != nil {
+		_ = writer.Delete(opCtx, key)
+		return nil, err
+	}
 	return successful, nil
 }
-
-var activeBackupRuns sync.Map
-
-func acquireBackupRun(key string) bool {
-	_, loaded := activeBackupRuns.LoadOrStore(key, struct{}{})
-	return !loaded
-}
-
-func releaseBackupRun(key string) { activeBackupRuns.Delete(key) }
 
 // streamSnapshot copies /api/platform/snapshot into dst. Returns the
 // number of bytes written. Auth uses the install's APTEVA_APP_TOKEN —
 // the auth middleware resolves it to the install's installed_by user
 // (admin id=1 for self-host setups), which the snapshot endpoint then
 // gates on.
-func streamSnapshot(dst io.Writer) (int64, error) {
+func streamSnapshot(ctx context.Context, dst io.Writer) (int64, error) {
 	gateway := os.Getenv("APTEVA_GATEWAY_URL")
 	if gateway == "" {
 		return 0, fmt.Errorf("APTEVA_GATEWAY_URL not set — backup cannot reach the platform")
@@ -176,12 +206,12 @@ func streamSnapshot(dst io.Writer) (int64, error) {
 	if token == "" {
 		return 0, fmt.Errorf("APTEVA_APP_TOKEN not set — backup cannot authenticate")
 	}
-	req, err := http.NewRequest("GET", strings.TrimRight(gateway, "/")+"/api/platform/snapshot", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(gateway, "/")+"/api/platform/snapshot", nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := platformTransferClient.Do(req)
 	if err != nil {
 		return 0, err
 	}
@@ -193,12 +223,12 @@ func streamSnapshot(dst io.Writer) (int64, error) {
 	return io.Copy(dst, resp.Body)
 }
 
-func writeSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
+func writeSnapshot(opCtx context.Context, ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
 	if scope.Kind == "" || scope.Kind == "platform" {
-		n, err := streamSnapshot(dst)
+		n, err := streamSnapshot(opCtx, dst)
 		return n, "", err
 	}
-	return streamProviderSnapshot(ctx, dst, scope)
+	return streamProviderSnapshot(opCtx, ctx, dst, scope)
 }
 
 type providerSnapshotResponse struct {
@@ -206,7 +236,7 @@ type providerSnapshotResponse struct {
 	Manifest   json.RawMessage `json:"manifest"`
 }
 
-func streamProviderSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
+func streamProviderSnapshot(opCtx context.Context, ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
 	if ctx == nil {
 		return 0, "", fmt.Errorf("app context required for %s backup", scope.Kind)
 	}
@@ -234,9 +264,7 @@ func streamProviderSnapshot(ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64,
 		if err := validateProviderStreamURL(resp.ArchiveURL); err != nil {
 			return 0, "", err
 		}
-		downloadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-		defer cancel()
-		req, err := http.NewRequestWithContext(downloadCtx, http.MethodGet, resp.ArchiveURL, nil)
+		req, err := http.NewRequestWithContext(opCtx, http.MethodGet, resp.ArchiveURL, nil)
 		if err != nil {
 			return 0, "", err
 		}
@@ -271,7 +299,7 @@ func validateProviderStreamURL(raw string) error {
 }
 
 func providerHTTPClient() *http.Client {
-	return &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	return &http.Client{Transport: platformTransferClient.Transport, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
 			return errors.New("too many provider stream redirects")
 		}
@@ -303,10 +331,11 @@ func providerRestoreTool(scope Scope) (string, error) {
 	}
 }
 
-// extractManifestJSON decompresses the tar.gz at path and returns the
-// raw manifest.json bytes if present. Used purely as a sidecar record
-// in the runs table; failure is non-fatal.
-func extractManifestJSON(path string) (string, error) {
+// validateSnapshotArchive reads the entire gzip/tar stream, verifies its
+// checksum/trailer, and returns the required bounded manifest.json. A digest
+// alone only proves stored bytes were unchanged; this pass proves those bytes
+// are structurally restorable before a run is marked successful.
+func validateSnapshotArchive(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -318,10 +347,11 @@ func extractManifestJSON(path string) (string, error) {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	manifest := ""
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return "", nil
+			break
 		}
 		if err != nil {
 			return "", err
@@ -329,12 +359,28 @@ func extractManifestJSON(path string) (string, error) {
 		if h.Name != "manifest.json" {
 			continue
 		}
-		bs, err := io.ReadAll(tr)
+		if manifest != "" {
+			return "", errors.New("snapshot contains multiple manifest.json entries")
+		}
+		if h.Size < 0 || h.Size > maxManifestBytes {
+			return "", fmt.Errorf("manifest.json is too large: %d bytes", h.Size)
+		}
+		bs, err := io.ReadAll(io.LimitReader(tr, maxManifestBytes+1))
 		if err != nil {
 			return "", err
 		}
-		return string(bs), nil
+		if len(bs) > maxManifestBytes || !json.Valid(bs) {
+			return "", errors.New("manifest.json is invalid")
+		}
+		manifest = string(bs)
 	}
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return "", fmt.Errorf("gzip trailer: %w", err)
+	}
+	if manifest == "" {
+		return "", errors.New("snapshot missing manifest.json")
+	}
+	return manifest, nil
 }
 
 // buildRemoteKey produces a deterministic, sortable key per run.
@@ -388,14 +434,14 @@ func safeKeySegment(value string) string {
 // table — so that pruning still works after a database reset (the
 // objects are the source of truth for "what's on the destination").
 func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, d *Destination, policy *Policy) error {
-	objects, err := w.List(ctx)
+	prefix := storagePrefix(policy.Scope, policy.ID)
+	objects, err := w.List(ctx, prefix)
 	if err != nil {
 		return err
 	}
 	// Filter to apteva-*.tar.gz so we don't accidentally delete files
 	// the operator put in the same bucket.
 	filtered := objects[:0]
-	prefix := storagePrefix(policy.Scope, policy.ID)
 	for _, o := range objects {
 		if strings.HasPrefix(o.Key, prefix) && strings.HasPrefix(filepathBase(o.Key), "apteva-") &&
 			(strings.HasSuffix(o.Key, ".tar.gz") || strings.HasSuffix(o.Key, ".tar.gz.age")) {
@@ -466,10 +512,13 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
 			"cron": p.Schedule,
 		},
 		"target": map[string]any{
-			"kind":  "app_tool",
-			"app":   "backup",
-			"tool":  "backup_now",
-			"input": map[string]any{"policy_id": p.ID},
+			"kind": "app_tool",
+			"app":  "backup",
+			"tool": "backup_now",
+			// Jobs' app-to-app request has a shorter deadline than a large
+			// snapshot. Queue the durable run and return immediately; the run
+			// row and Backup history remain the source of execution status.
+			"input": map[string]any{"policy_id": p.ID, "async": true},
 		},
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
