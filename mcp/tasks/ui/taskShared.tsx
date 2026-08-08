@@ -11,6 +11,30 @@ export interface HostProps {
   eventRevision?: number;
   taskId?: string;
   preview?: boolean;
+  widgetId?: string;
+  widgetSize?: "half" | "full";
+  widgetSettings?: Record<string, unknown>;
+}
+
+export interface TaskOverviewPreferences {
+  showActive: boolean;
+  showUpcoming: boolean;
+  showRecent: boolean;
+  recentLimit: number;
+}
+
+export function taskOverviewPreferences(
+  settings?: Record<string, unknown>,
+): TaskOverviewPreferences {
+  const rawLimit = Number(settings?.recent_limit ?? 4);
+  return {
+    showActive: settings?.show_active !== false,
+    showUpcoming: settings?.show_upcoming !== false,
+    showRecent: settings?.show_recent !== false,
+    recentLimit: Number.isFinite(rawLimit)
+      ? Math.max(1, Math.min(12, Math.round(rawLimit)))
+      : 4,
+  };
 }
 
 export interface Task {

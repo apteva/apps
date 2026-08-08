@@ -5,6 +5,7 @@ import {
   TaskDetails,
   TaskRow,
   selectGroups,
+  taskOverviewPreferences,
   useAgentNames,
   useTasks,
 } from "./taskShared";
@@ -13,11 +14,27 @@ export default function TaskOverviewWidget(props: HostProps) {
   const { tasks, loading, error, reload } = useTasks(props, { limit: "200" });
   const names = useAgentNames(props.projectId);
   const groups = useMemo(() => selectGroups(tasks), [tasks]);
+  const preferences = taskOverviewPreferences(props.widgetSettings);
   const [selected, setSelected] = useState<Task | null>(null);
-  const total =
-    groups.active.length + groups.upcoming.length + groups.recent.length;
+  const sections = [
+    preferences.showActive
+      ? { label: "Active & attention", tasks: groups.active }
+      : null,
+    preferences.showUpcoming
+      ? { label: "Upcoming", tasks: groups.upcoming }
+      : null,
+    preferences.showRecent
+      ? { label: "Recent", tasks: groups.recent.slice(0, preferences.recentLimit) }
+      : null,
+  ].filter((section): section is { label: string; tasks: Task[] } => Boolean(section));
+  const full = props.widgetSize === "full";
+  const fullColumns = sections.length <= 1
+    ? "xl:grid-cols-1"
+    : sections.length === 2
+      ? "xl:grid-cols-2"
+      : "xl:grid-cols-3";
   return (
-    <section className="flex min-h-[28rem] flex-col overflow-hidden rounded border border-border bg-bg-card">
+    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-border bg-bg-card">
       <header className="flex items-center gap-2 border-b border-border px-4 py-3">
         <div>
           <h2 className="text-sm font-bold text-text">Tasks</h2>
@@ -25,37 +42,26 @@ export default function TaskOverviewWidget(props: HostProps) {
             Live work, upcoming schedules, and recent outcomes
           </p>
         </div>
-        <span className="rounded bg-bg-hover px-1.5 py-0.5 text-[9px] text-text-dim">
-          {total}
-        </span>
-        <span className="ml-auto rounded border border-green/25 bg-green/10 px-1.5 py-0.5 text-[8px] font-bold uppercase text-green">
-          Live
-        </span>
       </header>
       {error ? (
         <p className="p-4 text-xs text-red">{error}</p>
       ) : loading ? (
         <p className="p-4 text-xs text-text-dim">Loading tasks…</p>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto">
-          <Group
-            label="Active & attention"
-            tasks={groups.active}
-            names={names}
-            onOpen={setSelected}
-          />
-          <Group
-            label="Upcoming"
-            tasks={groups.upcoming}
-            names={names}
-            onOpen={setSelected}
-          />
-          <Group
-            label="Recent"
-            tasks={groups.recent}
-            names={names}
-            onOpen={setSelected}
-          />
+        <div className={`min-h-0 flex-1 overflow-auto ${full ? `grid grid-cols-1 ${fullColumns}` : ""}`}>
+          {sections.map((section) => (
+            <Group
+              key={section.label}
+              label={section.label}
+              tasks={section.tasks}
+              names={names}
+              horizontal={full}
+              onOpen={setSelected}
+            />
+          ))}
+          {sections.length === 0 && (
+            <p className="p-4 text-xs text-text-dim">All task sections are hidden.</p>
+          )}
         </div>
       )}
       {selected && (
@@ -75,17 +81,19 @@ function Group({
   tasks,
   names,
   onOpen,
+  horizontal,
 }: {
   label: string;
   tasks: Task[];
   names: Map<number, string>;
   onOpen: (task: Task) => void;
+  horizontal?: boolean;
 }) {
   return (
-    <div className="border-b border-border last:border-b-0">
+    <div className={`border-b border-border last:border-b-0 ${horizontal ? "xl:border-b-0 xl:border-r xl:last:border-r-0" : ""}`}>
       <div className="flex items-center px-4 py-2 text-[9px] font-bold uppercase tracking-wide text-text-dim">
         <span>{label}</span>
-        <span className="ml-auto">{tasks.length}</span>
+        {tasks.length > 0 && <span className="ml-auto">{tasks.length}</span>}
       </div>
       {tasks.length ? (
         tasks.map((task) => (

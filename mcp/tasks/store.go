@@ -230,18 +230,6 @@ func (s *taskStore) List(filter TaskFilter) ([]Task, error) {
 		}
 		query += ` AND state IN (` + strings.Join(marks, ",") + `)`
 	}
-	if filter.AssignedThread != "" {
-		query += ` AND assigned_thread_id=?`
-		args = append(args, filter.AssignedThread)
-	}
-	if filter.CreatedByThread != "" {
-		query += ` AND created_by_thread_id=?`
-		args = append(args, filter.CreatedByThread)
-	}
-	if filter.AssociatedThread != "" {
-		query += ` AND (created_by_thread_id=? OR assigned_thread_id=? OR execution_thread_id=?)`
-		args = append(args, filter.AssociatedThread, filter.AssociatedThread, filter.AssociatedThread)
-	}
 	if filter.ParentTaskID != nil {
 		query += ` AND parent_task_id=?`
 		args = append(args, *filter.ParentTaskID)
@@ -390,9 +378,18 @@ func (s *taskStore) Events(taskID string) ([]TaskEvent, error) {
 	return out, rows.Err()
 }
 
-func (s *taskStore) Counts(projectID string) (TaskCounts, error) {
+func (s *taskStore) Counts(projectID string, agentID int64, includeRuns bool) (TaskCounts, error) {
 	var out TaskCounts
-	rows, err := s.db.Query(`SELECT state, COUNT(*) FROM tasks WHERE project_id=? GROUP BY state`, projectID)
+	where := ` WHERE project_id=?`
+	args := []any{projectID}
+	if agentID > 0 {
+		where += ` AND agent_id=?`
+		args = append(args, agentID)
+	}
+	if !includeRuns {
+		where += ` AND parent_task_id=''`
+	}
+	rows, err := s.db.Query(`SELECT state, COUNT(*) FROM tasks`+where+` GROUP BY state`, args...)
 	if err != nil {
 		return out, err
 	}
@@ -421,7 +418,7 @@ func (s *taskStore) Counts(projectID string) (TaskCounts, error) {
 		}
 	}
 	out.Active = out.Queued + out.Running + out.Waiting + out.Blocked
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE project_id=? AND schedule_kind<>'' AND schedule_enabled=1`, projectID).Scan(&out.Scheduled)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks WHERE project_id=? AND schedule_kind<>'' AND schedule_enabled=0 AND state='waiting'`, projectID).Scan(&out.Paused)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks`+where+` AND schedule_kind<>'' AND schedule_enabled=1`, args...).Scan(&out.Scheduled)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM tasks`+where+` AND schedule_kind<>'' AND schedule_enabled=0 AND state='waiting'`, args...).Scan(&out.Paused)
 	return out, nil
 }

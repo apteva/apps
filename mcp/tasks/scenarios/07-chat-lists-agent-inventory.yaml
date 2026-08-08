@@ -1,0 +1,41 @@
+name: conversation-lists-agent-task-inventory
+description: |
+  A user conversation answers a task-inventory question with Tasks directly.
+  It does not ask the default thread for status and does not describe the
+  inventory as belonging only to the current conversation.
+
+timeout: 90s
+settle_for: 6s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  interaction: conversation
+  app:
+    path: ./
+
+directive: |
+  You help the operator inspect durable work. Task inventory belongs to the
+  agent across all of its threads. Use the Tasks app directly for task and
+  schedule questions; never ask another thread merely to list tasks.
+
+prompt: |
+  List all of your current tasks and schedules.
+
+assert:
+  - tool_called_with:
+      tool: tasks_list
+      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+      count: 1
+  - tool_not_called: tasks_create
+  - tool_not_called_with:
+      tool: send
+      exact: true
+      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+  - chat_response_matches: '(?i)\b(task|schedule|current|none|no)\b'
+  - chat_final_messages: 1
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 100000
+  cost_usd: 1.00

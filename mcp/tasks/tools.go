@@ -31,8 +31,8 @@ func (a *App) tools() []sdk.Tool {
 		{Name: "create", Description: "Create exactly one durable task for multi-step, scheduled, delegated, or leave-and-return work. Do not create tasks for brief answers or quick lookups. The current opaque thread becomes creator. Immediate work defaults to that creator; scheduled work defaults to the agent's configured default thread. assigned_thread_id overrides either default.", InputSchema: objectSchema([]string{"title"}, map[string]any{
 			"title": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "assigned_thread_id": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
 		}), Meta: wakeAlways, HandlerCtx: a.toolCreate},
-		{Name: "list", Description: "List the agent's durable task inventory directly. Use this for task and schedule questions instead of asking another thread. The result is authoritative; do not repeat the same list call.", InputSchema: objectSchema(nil, map[string]any{
-			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "assigned_thread_id": map[string]any{"type": "string"}, "created_by_me": map[string]any{"type": "boolean"}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
+		{Name: "list", Description: "List this agent's durable task inventory across all of its threads. Tasks are independent of conversations; creator, assignee, and executor thread IDs are provenance only and never limit visibility. Use this directly for task and schedule questions instead of asking another thread. The result is authoritative; do not repeat the same list call.", InputSchema: objectSchema(nil, map[string]any{
+			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
 		}), HandlerCtx: a.toolList},
 		{Name: "get", Description: "Get a task and its chronological event history. Read this before resuming assigned work.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), HandlerCtx: a.toolGet},
 		{Name: "update", Description: "Update task state, coarse progress, or current step only at meaningful milestones, waits, blockers, or failures. This is the task's progress record; do not mirror it into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
@@ -74,6 +74,14 @@ func decodeSchedule(v any) (*ScheduleInput, error) {
 	var input ScheduleInput
 	if err := json.Unmarshal(raw, &input); err != nil {
 		return nil, err
+	}
+	// Some structured-output providers materialize every optional nested
+	// property. An omitted schedule can therefore arrive as
+	// {kind:"once", at:"", after:"", ...}. It carries no scheduling intent
+	// and must retain the tool contract's immediate-task default.
+	if strings.TrimSpace(input.At) == "" && strings.TrimSpace(input.After) == "" &&
+		strings.TrimSpace(input.Every) == "" && strings.TrimSpace(input.Cron) == "" {
+		return nil, nil
 	}
 	return &input, nil
 }
@@ -132,12 +140,10 @@ func (a *App) toolList(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	filter := TaskFilter{ProjectID: projectID, AgentID: caller.AgentID, AssignedThread: stringArg(args, "assigned_thread_id"), Limit: intArg(args, "limit")}
-	if boolArg(args, "created_by_me") {
-		filter.CreatedByThread = caller.ThreadID
-	}
+	filter := TaskFilter{ProjectID: projectID, AgentID: caller.AgentID, Limit: intArg(args, "limit")}
 	filter.States = stringSliceArg(args, "states")
-	if !boolArg(args, "include_runs") {
+	includeRuns := boolArg(args, "include_runs")
+	if !includeRuns {
 		empty := ""
 		filter.ParentTaskID = &empty
 	}
@@ -145,7 +151,7 @@ func (a *App) toolList(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	if err != nil {
 		return nil, err
 	}
-	counts, _ := a.store.Counts(projectID)
+	counts, _ := a.store.Counts(projectID, caller.AgentID, includeRuns)
 	return map[string]any{"tasks": tasks, "counts": counts}, nil
 }
 

@@ -3,6 +3,13 @@
 Tasks are durable work records. Threads are opaque identifiers: never infer a
 role such as “main”, “conversation”, or “worker” from a thread ID.
 
+Task inventory is agent-wide within the current project. A task created,
+assigned, or executed by any thread of the agent remains visible from every
+other thread of that agent. Use `tasks_list` directly for task or schedule
+questions. Never narrow the inventory by the current thread and never ask
+another thread merely to list tasks. Creator, assignee, and executor thread IDs
+are provenance and routing metadata, not visibility boundaries.
+
 ## When to create a task
 
 Create one task for work that is multi-step, delegated, scheduled, or must

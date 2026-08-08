@@ -100,14 +100,11 @@ type UpdateTaskInput struct {
 }
 
 type TaskFilter struct {
-	ProjectID        string
-	AgentID          int64
-	States           []string
-	AssignedThread   string
-	CreatedByThread  string
-	AssociatedThread string
-	ParentTaskID     *string
-	Limit            int
+	ProjectID    string
+	AgentID      int64
+	States       []string
+	ParentTaskID *string
+	Limit        int
 }
 
 type TaskCounts struct {

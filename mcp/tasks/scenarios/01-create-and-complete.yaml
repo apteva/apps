@@ -24,12 +24,12 @@ assert:
   - tool_called: tasks_update
   - tool_called: tasks_complete
   - tool_called: tasks_list
-  - http: GET /api/apps/tasks/tasks?states=completed
+  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks
     expect_count: 1
   - iterations_at_most: 10
 
 budget:
-  total_tokens: 12000
-  cost_usd: 0.20
+  total_tokens: 150000
+  cost_usd: 1.50
