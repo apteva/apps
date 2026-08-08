@@ -293,8 +293,12 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.0.0" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 4 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.1.1" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 4 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
+	}
+	overview := manifest.Provides.UIComponents[0]
+	if overview.Name != "task-overview" || overview.DefaultSize != "half" || len(overview.SupportedSizes) != 2 || overview.SettingsSchema["type"] != "object" {
+		t.Fatalf("task overview widget contract incomplete: %+v", overview)
 	}
 	if len(manifest.Provides.UIPanels) != 1 || !manifest.Provides.UIPanels[0].Suggested {
 		t.Fatalf("task page should be a generic suggested sidebar contribution: %+v", manifest.Provides.UIPanels)

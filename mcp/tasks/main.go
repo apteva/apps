@@ -13,7 +13,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.0.0
+version: 3.1.1
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -55,7 +55,30 @@ provides:
       entry: /ui/TaskOverviewWidget.mjs
       slots: [dashboard.home]
       suggested: true
-      default_width: 1
+      supported_sizes: [half, full]
+      default_size: half
+      settings_schema:
+        type: object
+        properties:
+          show_active:
+            type: boolean
+            title: Active and attention
+            default: true
+          show_upcoming:
+            type: boolean
+            title: Upcoming schedules
+            default: true
+          show_recent:
+            type: boolean
+            title: Recent outcomes
+            default: true
+          recent_limit:
+            type: integer
+            title: Recent task limit
+            description: Maximum recent outcomes displayed in this widget.
+            default: 4
+            minimum: 1
+            maximum: 12
     - name: agent-tasks
       label: Agent tasks
       description: Work and schedules associated with an agent.
@@ -122,7 +145,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.0.0")
+	ctx.Logger().Info("tasks app mounted", "version", "3.1.1")
 	return nil
 }
 

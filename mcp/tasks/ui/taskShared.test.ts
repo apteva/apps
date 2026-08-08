@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { scheduleLabel, selectGroups, type Task } from "./taskShared";
+import {
+  scheduleLabel,
+  selectGroups,
+  taskOverviewPreferences,
+  type Task,
+} from "./taskShared";
 
 function task(overrides: Partial<Task>): Task {
   return {
@@ -52,5 +57,24 @@ describe("Tasks app UI model", () => {
     expect(groups.active.map((item) => item.id)).toEqual(["active"]);
     expect(groups.upcoming.map((item) => item.id)).toEqual(["schedule"]);
     expect(groups.recent.map((item) => item.id)).toEqual(["done"]);
+  });
+
+  test("normalizes per-instance task overview settings", () => {
+    expect(taskOverviewPreferences()).toEqual({
+      showActive: true,
+      showUpcoming: true,
+      showRecent: true,
+      recentLimit: 4,
+    });
+    expect(taskOverviewPreferences({
+      show_active: false,
+      show_recent: false,
+      recent_limit: 99,
+    })).toEqual({
+      showActive: false,
+      showUpcoming: true,
+      showRecent: false,
+      recentLimit: 12,
+    });
   });
 });
