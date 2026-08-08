@@ -44,6 +44,62 @@ func TestAudienceCapabilitiesAreProviderSpecific(t *testing.T) {
 	}
 }
 
+func TestMetaEngagementAudienceResolvesPageResource(t *testing.T) {
+	platform := newRecordingPlatform()
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+	acct := &adAccount{ID: accountID, ProjectID: "test-proj", Platform: "meta"}
+	page, err := app.upsertResource(ctx, acct, discoveredResource{
+		Kind: resourceIdentity, ProviderType: "facebook_page", NativeID: "page_123",
+		DisplayName: "Apteva", Status: "active", Capabilities: []string{"advertise"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.audienceCreate(ctx, map[string]any{
+		"ad_account_id": accountID, "name": "Apteva engagement", "type": "engagement",
+		"source_resource_id": page.ID, "retention_days": 365,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asMap(out)["isError"] == true {
+		t.Fatalf("create failed: %#v", out)
+	}
+	call := findExecuteCall(t, platform, "audience_create_custom")
+	if _, sent := call.Input["subtype"]; sent {
+		t.Fatalf("Meta Page engagement request must omit subtype: %#v", call.Input)
+	}
+	rule := call.Input["rule"].(map[string]any)
+	inclusions := rule["inclusions"].(map[string]any)
+	rules := inclusions["rules"].([]map[string]any)
+	sources := rules[0]["event_sources"].([]map[string]any)
+	if sources[0]["id"] != "page_123" || sources[0]["type"] != "page" || rules[0]["retention_seconds"] != 365*86400 {
+		t.Fatalf("Meta Page engagement rule=%#v", rule)
+	}
+	filters := rules[0]["filter"].(map[string]any)["filters"].([]map[string]any)
+	if filters[0]["value"] != "page_engaged" {
+		t.Fatalf("Meta Page engagement filter=%#v", filters)
+	}
+}
+
+func TestMetaEngagementAudienceRejectsForeignResource(t *testing.T) {
+	ctx := newAdsCtx(t, newRecordingPlatform())
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+	out, err := app.audienceCreate(ctx, map[string]any{
+		"ad_account_id": accountID, "name": "Invalid", "type": "engagement", "source_resource_id": 999,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asMap(out)["isError"] != true || !strings.Contains(mcpErrorMessage(asMap(out)), "Facebook Page") {
+		t.Fatalf("foreign source was accepted: %#v", out)
+	}
+}
+
 func TestAudienceSyncHashesInMemoryAndIsIdempotent(t *testing.T) {
 	platform := newRecordingPlatform()
 	csvBody := "email,phone\nAlice@Example.com,+1 (415) 555-0100\n"

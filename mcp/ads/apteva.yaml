@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.36
+version: 0.1.37
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -41,6 +41,8 @@ description: |
   v0.1.36 adds normalized audience lifecycle management across all four providers,
   privacy-safe Storage and CRM member sync jobs, provider diagnostics, audience
   usage checks, AppBus updates, and a capability-driven Audiences workspace.
+  v0.1.37 adds native Meta Page-engagement audience creation from project-scoped
+  Page resources, including automatic rule construction and retention controls.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads

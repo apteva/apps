@@ -1059,6 +1059,9 @@ function AudienceWorkspace({
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("customer_list");
   const [sourceAudienceID, setSourceAudienceID] = useState("");
+  const [sourceResourceID, setSourceResourceID] = useState("");
+  const [sourceResources, setSourceResources] = useState<AdResource[]>([]);
+  const [retentionDays, setRetentionDays] = useState("365");
   const [country, setCountry] = useState("US");
   const [ratio, setRatio] = useState("0.01");
   const [sourceKind, setSourceKind] = useState<"storage" | "crm_segment">("storage");
@@ -1074,12 +1077,16 @@ function AudienceWorkspace({
     setLoading(true);
     setError(null);
     try {
-      const [list, supported] = await Promise.all([
+      const [list, supported, resources] = await Promise.all([
         callTool("audience_list", { ad_account_id: account.id, refresh }),
         callTool("audience_capabilities_get", { ad_account_id: account.id }),
+        account.platform === "meta"
+          ? callTool("resource_list", { ad_account_id: account.id, kind: "identity", refresh })
+          : Promise.resolve({ data: [] }),
       ]);
       setAudiences(list.data || []);
       setCapabilities(supported);
+      setSourceResources((resources.data || []).filter((resource: AdResource) => resource.provider_type === "facebook_page" && resource.status === "active"));
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -1111,7 +1118,7 @@ function AudienceWorkspace({
   }, [account.id, callTool, load, syncJob]);
 
   const openCreate = () => {
-    setName(""); setDescription(""); setKind("customer_list"); setSourceAudienceID(""); setCountry("US"); setRatio("0.01");
+    setName(""); setDescription(""); setKind("customer_list"); setSourceAudienceID(""); setSourceResourceID(""); setRetentionDays("365"); setCountry("US"); setRatio("0.01");
     setError(null); setCreateOpen(true);
   };
 
@@ -1122,6 +1129,8 @@ function AudienceWorkspace({
       await callTool("audience_create", {
         ad_account_id: account.id, name: name.trim(), description: description.trim() || undefined, type: kind,
         source_audience_id: kind === "lookalike" ? Number(sourceAudienceID) : undefined,
+        source_resource_id: kind === "engagement" ? Number(sourceResourceID) : undefined,
+        retention_days: kind === "engagement" ? Number(retentionDays) : undefined,
         country: kind === "lookalike" ? country.trim().toUpperCase() : undefined,
         ratio: kind === "lookalike" ? Number(ratio) : undefined,
       });
@@ -1170,7 +1179,7 @@ function AudienceWorkspace({
     } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
   };
 
-  const createKinds = (capabilities?.kinds || []).filter((value) => value === "customer_list" || (account.platform === "meta" && value === "lookalike"));
+  const createKinds = (capabilities?.kinds || []).filter((value) => value === "customer_list" || (account.platform === "meta" && ["engagement", "lookalike"].includes(value)));
 
   return (
     <div className="min-h-full">
@@ -1238,12 +1247,13 @@ function AudienceWorkspace({
       {createOpen && <Modal title="Create audience" description={providerName(account.platform)} size="large" onClose={() => !busy && setCreateOpen(false)} labelledBy="ads-audience-create-title">
         <form onSubmit={(event) => { event.preventDefault(); createAudience(); }}>
           <div className="grid gap-4 px-4 py-4 md:grid-cols-2">
-            <label className="grid gap-1.5 text-xs font-medium text-text-muted">Type<select value={kind} onChange={(event) => setKind(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{createKinds.map((value) => <option key={value} value={value}>{audienceTypeLabel(value)}</option>)}</select></label>
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted">Type<select value={kind} onChange={(event) => { setKind(event.target.value); setSourceAudienceID(""); setSourceResourceID(""); }} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{createKinds.map((value) => <option key={value} value={value}>{audienceTypeLabel(value)}</option>)}</select></label>
             <label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label>
             <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label>
             {kind === "lookalike" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source audience<select required value={sourceAudienceID} onChange={(event) => setSourceAudienceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select audience</option>{audiences.filter((item) => item.type === "customer_list").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Country<input required maxLength={2} value={country} onChange={(event) => setCountry(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm uppercase text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Similarity<select value={ratio} onChange={(event) => setRatio(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="0.01">1%</option><option value="0.02">2%</option><option value="0.05">5%</option><option value="0.1">10%</option></select></label></div></>}
+            {kind === "engagement" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Facebook Page<select required value={sourceResourceID} onChange={(event) => setSourceResourceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select Page</option>{sourceResources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}</select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Retention<select value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="30">30 days</option><option value="90">90 days</option><option value="180">180 days</option><option value="365">365 days</option></select></label></>}
           </div>
-          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && !sourceAudienceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
+          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && !sourceAudienceID) || (kind === "engagement" && !sourceResourceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
         </form>
       </Modal>}
 

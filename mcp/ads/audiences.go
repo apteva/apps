@@ -190,6 +190,37 @@ func (a *App) audienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	var providerErr map[string]any
 	switch acct.Platform {
 	case "meta":
+		if kind == "engagement" {
+			sourceID := int64(intArg(args, "source_resource_id", 0))
+			source, err := a.getResource(ctx, acct, sourceID)
+			if err != nil || source.Kind != resourceIdentity || source.ProviderType != "facebook_page" || source.Status != "active" {
+				return mcpError("source_resource_id must reference an active Facebook Page in this ad account"), nil
+			}
+			retentionDays := intArg(args, "retention_days", 365)
+			if retentionDays < 1 || retentionDays > 365 {
+				return mcpError("retention_days must be between 1 and 365 for Meta Page engagement audiences"), nil
+			}
+			input := map[string]any{
+				def.AccountIDInputField: acct.NativeAccountID,
+				"name":                  name,
+				"prefill":               true,
+				"rule": map[string]any{"inclusions": map[string]any{
+					"operator": "or",
+					"rules": []map[string]any{{
+						"event_sources":     []map[string]any{{"id": source.NativeID, "type": "page"}},
+						"retention_seconds": retentionDays * 86400,
+						"filter": map[string]any{"operator": "and", "filters": []map[string]any{{
+							"field": "event", "operator": "eq", "value": "page_engaged",
+						}}},
+					}},
+				}},
+			}
+			if description := stringArgAny(args, "description"); description != "" {
+				input["description"] = description
+			}
+			parsed, providerErr = a.execIntegrationTool(ctx, acct, def.AudienceCreateCustomTool, input)
+			break
+		}
 		legacy := cloneMap(args)
 		legacy["subtype"] = metaAudienceSubtype(kind)
 		if kind == "lookalike" {
@@ -255,7 +286,10 @@ func (a *App) audienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	resource, err := a.upsertResource(ctx, acct, discoveredResource{
 		Kind: resourceAudience, ProviderType: providerType, NativeID: nativeID, DisplayName: name,
 		Status: "active", Capabilities: audienceResourceCapabilities(acct.Platform, kind),
-		Metadata: map[string]any{"type": kind, "description": stringArgAny(args, "description")}, ManagedByApp: true,
+		Metadata: map[string]any{
+			"type": kind, "description": stringArgAny(args, "description"),
+			"retention_days": intArg(args, "retention_days", 0), "source_resource_id": intArg(args, "source_resource_id", 0),
+		}, ManagedByApp: true,
 	})
 	if err != nil {
 		return nil, err
