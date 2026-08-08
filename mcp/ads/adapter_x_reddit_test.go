@@ -88,6 +88,8 @@ func TestRedditResourcesAutomaticallyWireCampaignAdGroupAndCarousel(t *testing.T
 			return executeJSON(`{"data":[]}`), nil
 		case "list_custom_audiences":
 			return executeJSON(`{"data":[{"id":"audience_1","name":"Customers","status":"ACTIVE"}]}`), nil
+		case "list_saved_audiences":
+			return executeJSON(`{"data":[]}`), nil
 		case "create_campaign":
 			data := asMap(input["data"])
 			if data["funding_instrument_id"] != "funding_1" || data["objective"] != "CLICKS" {

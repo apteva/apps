@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.35
+version: 0.1.36
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -38,6 +38,9 @@ description: |
   v0.1.35 adds current X Ads and Reddit Ads account discovery, required-resource
   auto-wiring, normalized campaign hierarchy and analytics, image/video/carousel
   creatives, resumable delivery activation, and four-provider panel support.
+  v0.1.36 adds normalized audience lifecycle management across all four providers,
+  privacy-safe Storage and CRM member sync jobs, provider diagnostics, audience
+  usage checks, AppBus updates, and a capability-driven Audiences workspace.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -58,7 +61,10 @@ requires:
   apps:
     - name: storage
       version: ">=0.1.0"
-      reason: "Resolve stored image and video files for creative uploads."
+      reason: "Resolve stored creative files and privacy-safe audience CSV sources."
+    - name: crm
+      version: ">=0.5.0"
+      reason: "Resolve saved CRM segments for privacy-safe audience member sync."
 
 provides:
   http_routes:
@@ -66,6 +72,8 @@ provides:
   workers:
     - name: performance_collector
       schedule: "@every 1m"
+    - name: audience_sync_processor
+      schedule: "@every 30s"
   publishes:
     - name: account.changed
       description: "An ad-account binding was added or removed."
@@ -75,6 +83,18 @@ provides:
       description: "Normalized performance cache was refreshed for an account and level."
     - name: performance.sync_failed
       description: "A performance refresh failed and was scheduled for retry."
+    - name: audience.created
+      description: "An audience was created and normalized into the account resource registry."
+    - name: audience.updated
+      description: "Audience metadata or targeting was updated."
+    - name: audience.deleted
+      description: "An audience was deleted after its targeting usage was checked."
+    - name: audience.sync.progress
+      description: "A privacy-safe audience member sync was queued, processed, or accepted upstream."
+    - name: audience.ready
+      description: "An audience member sync completed."
+    - name: audience.sync.failed
+      description: "An audience member sync failed or was scheduled for retry."
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
@@ -118,6 +138,17 @@ provides:
     - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
     - { name: audience_list,                description: "List audiences in the ad account." }
+    - { name: audience_capabilities_get,    description: "Get provider-supported audience kinds, operations, sources, and privacy behavior." }
+    - { name: audience_get,                 description: "Get one normalized project-scoped audience." }
+    - { name: audience_create,              description: "Create a normalized provider audience using capability-driven fields." }
+    - { name: audience_update,              description: "Update supported audience metadata or saved targeting." }
+    - { name: audience_delete,              description: "Delete an audience after checking targeting usage." }
+    - { name: audience_members_sync,        description: "Queue privacy-safe member add/remove from Storage CSV or CRM segment." }
+    - { name: audience_sync_status,         description: "Inspect audience member sync progress and provider diagnostics." }
+    - { name: audience_usage_get,           description: "List campaigns or ad groups using an audience." }
+    - { name: audience_refresh,             description: "Refresh normalized audiences from the provider." }
+    - { name: audience_source_list,         description: "List Storage CSV or CRM segment sources for audience sync." }
+    - { name: targeting_catalog_search,     description: "Search normalized provider targeting values without manually locating native IDs." }
   ui_panels:
     - slot: project.page
       label: Ads

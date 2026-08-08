@@ -233,7 +233,7 @@ func TestPerformanceToolAndCollectorAreDeclared(t *testing.T) {
 		t.Fatal("performance_get is not declared")
 	}
 	workers := (&App{}).Workers()
-	if len(workers) != 1 || workers[0].Name != "performance_collector" || workers[0].Schedule != "@every 1m" {
+	if len(workers) != 2 || workers[0].Name != "performance_collector" || workers[0].Schedule != "@every 1m" || workers[1].Name != "audience_sync_processor" || workers[1].Schedule != "@every 30s" {
 		t.Fatalf("workers=%#v", workers)
 	}
 	if performanceCollectorIntervals["campaign"] != 5*time.Minute || performanceCollectorIntervals["ad_group"] != 15*time.Minute || performanceCollectorIntervals["ad"] != 15*time.Minute {

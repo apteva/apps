@@ -305,7 +305,7 @@ func (a *App) discoverXResources(ctx *sdk.AppCtx, acct *adAccount, kind string) 
 	case resourceFundingSource:
 		tool, providerType, capabilities = "list_funding_instruments", "x_funding_instrument", []string{"fund_campaign"}
 	case resourceAudience:
-		tool, providerType, capabilities = "list_custom_audiences", "x_custom_audience", []string{"target"}
+		tool, providerType, capabilities = "list_custom_audiences", "x_custom_audience", audienceResourceCapabilities("x", "customer_list")
 	default:
 		return nil, mcpError("unsupported X resource kind: " + kind)
 	}
@@ -349,7 +349,7 @@ func (a *App) discoverRedditResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 	case resourceLeadForm:
 		tool, providerType, capabilities = "list_lead_forms", "reddit_lead_form", []string{"read_only", "lead_generation"}
 	case resourceAudience:
-		tool, providerType, capabilities = "list_custom_audiences", "reddit_custom_audience", []string{"target"}
+		tool, providerType, capabilities = "list_custom_audiences", "reddit_custom_audience", audienceResourceCapabilities("reddit", "customer_list")
 	default:
 		return nil, mcpError("unsupported Reddit resource kind: " + kind)
 	}
@@ -376,6 +376,23 @@ func (a *App) discoverRedditResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 			Kind: kind, ProviderType: providerType, NativeID: id, DisplayName: name,
 			Status: status, Capabilities: capabilities, Metadata: row,
 		})
+	}
+	if kind == resourceAudience {
+		savedRows, savedErr := a.providerResourceRows(ctx, acct, "list_saved_audiences", map[string]any{"ad_account_id": acct.NativeAccountID, "page.size": 200}, "reddit")
+		if savedErr != nil {
+			return nil, savedErr
+		}
+		for _, row := range savedRows {
+			id := firstString(row, "id")
+			if id == "" {
+				continue
+			}
+			out = append(out, discoveredResource{
+				Kind: kind, ProviderType: "reddit_saved_audience", NativeID: id, DisplayName: firstString(row, "name"),
+				Status: normalizedResourceStatus(firstString(row, "status")), Capabilities: audienceResourceCapabilities("reddit", "saved_targeting"),
+				Metadata: map[string]any{"type": "saved_targeting", "description": row["description"], "targeting": row["targeting"]},
+			})
+		}
 	}
 	return out, nil
 }
@@ -487,7 +504,7 @@ func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind strin
 	case resourceAudience:
 		rows, errOut := a.metaResourceRows(ctx, acct, "audience_list", map[string]any{
 			"adAccountId": acct.NativeAccountID,
-			"fields":      "id,name,subtype,delivery_status,description",
+			"fields":      "id,name,subtype,approximate_count_lower_bound,approximate_count_upper_bound,delivery_status,description,retention_days",
 			"limit":       100,
 		})
 		if errOut != nil {
@@ -502,8 +519,12 @@ func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind strin
 			out = append(out, discoveredResource{
 				Kind: resourceAudience, ProviderType: "meta_audience", NativeID: id,
 				DisplayName: firstString(row, "name"), Status: "active",
-				Capabilities: []string{"target"},
-				Metadata:     map[string]any{"subtype": row["subtype"], "delivery_status": row["delivery_status"], "description": row["description"]},
+				Capabilities: audienceResourceCapabilities("meta", normalizedAudienceType(firstString(row, "subtype"))),
+				Metadata: map[string]any{
+					"subtype": row["subtype"], "delivery_status": row["delivery_status"], "description": row["description"],
+					"approximate_count_lower_bound": row["approximate_count_lower_bound"], "approximate_count_upper_bound": row["approximate_count_upper_bound"],
+					"retention_days": row["retention_days"],
+				},
 			})
 		}
 		return out, nil
@@ -640,7 +661,7 @@ func (a *App) discoverGoogleResources(ctx *sdk.AppCtx, acct *adAccount, kind str
 		out = append(out, discoveredResource{
 			Kind: kind, ProviderType: "google_user_list", NativeID: id,
 			DisplayName: firstString(item, "name"), Status: normalizedResourceStatus(firstString(item, "membershipStatus", "membership_status")),
-			Capabilities: []string{"target"},
+			Capabilities: audienceResourceCapabilities("google", normalizedAudienceType(firstString(item, "type"))),
 			Metadata:     map[string]any{"type": item["type"], "description": item["description"], "size_for_display": item["sizeForDisplay"], "size_for_search": item["sizeForSearch"]},
 		})
 	}

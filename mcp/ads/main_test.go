@@ -745,6 +745,9 @@ func TestGoogleAccountPicker_ExpandsManagerHierarchy(t *testing.T) {
 	if pages[1]["id"] != "4444444444" || pages[1]["currency"] != "USD" {
 		t.Fatalf("nested client not normalized: %#v", pages[1])
 	}
+	if pages[0]["login_account_id"] != "1111111111" || pages[1]["login_account_id"] != "1111111111" {
+		t.Fatalf("manager login account not retained: %#v", pages)
+	}
 }
 
 // --- account_disconnect --------------------------------------------

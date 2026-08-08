@@ -152,11 +152,57 @@ interface AppEventEnvelope<T = unknown> {
 
 interface AdsEventData {
   ad_account_id?: number;
+  audience_id?: number;
+  job_id?: number;
+  status?: string;
   level?: string;
   levels?: string[];
   fetched_at?: string;
   next_attempt_at?: string;
   message?: string;
+}
+
+interface Audience {
+  id: number;
+  ad_account_id: number;
+  platform: string;
+  native_id: string;
+  name: string;
+  type: string;
+  status: string;
+  capabilities: string[];
+  metadata: Record<string, any>;
+  managed_by_app: boolean;
+  refreshed_at?: string;
+}
+
+interface AudienceCapabilities {
+  platform: string;
+  kinds: string[];
+  operations: string[];
+  sync_modes: string[];
+  sources: string[];
+  privacy: { normalizes: boolean; hashes_before_provider: boolean; persists_identifiers: boolean };
+}
+
+interface AudienceSource {
+  id: number | string;
+  name: string;
+  description?: string;
+  count?: number;
+  size_bytes?: number;
+}
+
+interface AudienceSyncJob {
+  id: number;
+  status: "queued" | "processing" | "provider_processing" | "completed" | "failed";
+  operation: string;
+  total_rows: number;
+  processed_rows: number;
+  accepted_rows: number;
+  rejected_rows: number;
+  error?: string;
+  updated_at?: string;
 }
 
 type PerformanceSyncState = {
@@ -495,7 +541,7 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className={`min-w-0 w-full overflow-hidden rounded border border-border bg-bg-card shadow-xl ${size === "workspace" ? "max-w-6xl" : size === "large" ? "max-w-3xl" : "max-w-lg"}`}
+		className={`max-h-[calc(100dvh-2rem)] min-w-0 w-full overflow-y-auto rounded border border-border bg-bg-card shadow-xl ${size === "workspace" ? "max-w-6xl" : size === "large" ? "max-w-3xl" : "max-w-lg"}`}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="flex items-start gap-3 border-b border-border px-4 py-3">
@@ -962,6 +1008,258 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   return <div className="flex items-start justify-between gap-3 px-4 py-2.5"><span className="text-xs text-text-dim">{label}</span><span className="min-w-0 truncate text-right text-xs font-medium text-text" style={{ maxWidth: "65%" }} title={value}>{value}</span></div>;
 }
 
+function audienceTypeLabel(type: string): string {
+  return ({
+    customer_list: "Customer list",
+    website: "Website visitors",
+    app_activity: "App activity",
+    engagement: "Engagement",
+    lookalike: "Lookalike",
+    saved_targeting: "Saved targeting",
+  } as Record<string, string>)[type] || type.replaceAll("_", " ");
+}
+
+function audienceSize(audience: Audience): string {
+  const lower = Number(audience.metadata?.approximate_count_lower_bound || 0);
+  const upper = Number(audience.metadata?.approximate_count_upper_bound || 0);
+  if (lower || upper) return lower && upper ? `${formatNumber(lower)}–${formatNumber(upper)}` : formatNumber(upper || lower);
+  const value = Number(audience.metadata?.size_for_display || audience.metadata?.size || audience.metadata?.member_count || 0);
+  return value > 0 ? formatNumber(value) : "-";
+}
+
+function audienceStatusClass(status: string): string {
+  const normalized = status.toLowerCase();
+  if (["active", "ready", "completed", "success"].includes(normalized)) return "bg-green/15 text-green";
+  if (["processing", "pending", "populating"].some((value) => normalized.includes(value))) return "bg-yellow/15 text-yellow";
+  if (["failed", "error", "deleted", "stale"].some((value) => normalized.includes(value))) return "bg-red/15 text-red";
+  return "bg-border text-text-muted";
+}
+
+function AudienceWorkspace({
+  account,
+  callTool,
+  refreshKey,
+}: {
+  account: AdAccount;
+  callTool: (tool: string, args: Record<string, unknown>) => Promise<any>;
+  refreshKey: number;
+}) {
+  const [audiences, setAudiences] = useState<Audience[]>([]);
+  const [capabilities, setCapabilities] = useState<AudienceCapabilities | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Audience | null>(null);
+  const [syncTarget, setSyncTarget] = useState<Audience | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Audience | null>(null);
+  const [usageTarget, setUsageTarget] = useState<Audience | null>(null);
+  const [usageRows, setUsageRows] = useState<Record<string, any>[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [kind, setKind] = useState("customer_list");
+  const [sourceAudienceID, setSourceAudienceID] = useState("");
+  const [country, setCountry] = useState("US");
+  const [ratio, setRatio] = useState("0.01");
+  const [sourceKind, setSourceKind] = useState<"storage" | "crm_segment">("storage");
+  const [sources, setSources] = useState<AudienceSource[]>([]);
+  const [sourceRef, setSourceRef] = useState("");
+  const [operation, setOperation] = useState<"add" | "remove">("add");
+  const [emailColumn, setEmailColumn] = useState("");
+  const [phoneColumn, setPhoneColumn] = useState("");
+  const [googleConsent, setGoogleConsent] = useState(false);
+  const [syncJob, setSyncJob] = useState<AudienceSyncJob | null>(null);
+
+  const load = useCallback(async (refresh = true) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [list, supported] = await Promise.all([
+        callTool("audience_list", { ad_account_id: account.id, refresh }),
+        callTool("audience_capabilities_get", { ad_account_id: account.id }),
+      ]);
+      setAudiences(list.data || []);
+      setCapabilities(supported);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [account.id, callTool]);
+
+  useEffect(() => { load(true); }, [load, refreshKey]);
+
+  useEffect(() => {
+    if (!syncTarget) return;
+    setSources([]);
+    setSourceRef("");
+    callTool("audience_source_list", { source_kind: sourceKind })
+      .then((result) => setSources(result.data || []))
+      .catch((err) => setError((err as Error).message));
+  }, [callTool, sourceKind, syncTarget]);
+
+  useEffect(() => {
+    if (!syncJob || !["queued", "processing", "provider_processing"].includes(syncJob.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await callTool("audience_sync_status", { ad_account_id: account.id, job_id: syncJob.id });
+        setSyncJob(next);
+        if (["completed", "failed"].includes(next.status)) load(false);
+      } catch {}
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [account.id, callTool, load, syncJob]);
+
+  const openCreate = () => {
+    setName(""); setDescription(""); setKind("customer_list"); setSourceAudienceID(""); setCountry("US"); setRatio("0.01");
+    setError(null); setCreateOpen(true);
+  };
+
+  const createAudience = async () => {
+    if (!name.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await callTool("audience_create", {
+        ad_account_id: account.id, name: name.trim(), description: description.trim() || undefined, type: kind,
+        source_audience_id: kind === "lookalike" ? Number(sourceAudienceID) : undefined,
+        country: kind === "lookalike" ? country.trim().toUpperCase() : undefined,
+        ratio: kind === "lookalike" ? Number(ratio) : undefined,
+      });
+      setCreateOpen(false); await load(true);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const saveAudience = async () => {
+    if (!editTarget || !name.trim()) return;
+    setBusy(true); setError(null);
+    try {
+      await callTool("audience_update", { ad_account_id: account.id, audience_id: editTarget.id, name: name.trim(), description: description.trim() });
+      setEditTarget(null); await load(true);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const queueSync = async () => {
+    if (!syncTarget || !sourceRef) return;
+    setBusy(true); setError(null);
+    try {
+      const job = await callTool("audience_members_sync", {
+        ad_account_id: account.id, audience_id: syncTarget.id, operation,
+        source: { kind: sourceKind, ref: sourceRef },
+        mapping: sourceKind === "storage" ? { email: emailColumn || undefined, phone: phoneColumn || undefined } : undefined,
+        consent: account.platform === "google" && googleConsent ? { ad_user_data: "granted", ad_personalization: "granted" } : undefined,
+        idempotency_key: globalThis.crypto?.randomUUID?.() || `audience-${Date.now()}`,
+      });
+      setSyncJob(job);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const deleteAudience = async () => {
+    if (!deleteTarget) return;
+    setBusy(true); setError(null);
+    try {
+      await callTool("audience_delete", { ad_account_id: account.id, audience_id: deleteTarget.id });
+      setDeleteTarget(null); await load(true);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const inspectUsage = async (audience: Audience) => {
+    setUsageTarget(audience); setUsageRows([]); setBusy(true); setError(null);
+    try {
+      const result = await callTool("audience_usage_get", { ad_account_id: account.id, audience_id: audience.id });
+      setUsageRows(result.data || []);
+    } catch (err) { setError((err as Error).message); } finally { setBusy(false); }
+  };
+
+  const createKinds = (capabilities?.kinds || []).filter((value) => value === "customer_list" || (account.platform === "meta" && value === "lookalike"));
+
+  return (
+    <div className="min-h-full">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <div>
+          <h3 className="text-sm font-semibold text-text">Audiences</h3>
+          <p className="mt-0.5 text-xs text-text-muted">Reusable targeting and privacy-safe customer matching</p>
+        </div>
+        <button type="button" onClick={openCreate} disabled={!capabilities?.operations.includes("create")} className="h-8 shrink-0 whitespace-nowrap rounded bg-accent px-3 text-xs font-medium text-black hover:opacity-90 disabled:opacity-50">Create audience</button>
+      </div>
+      {error && <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{error}</div>}
+      {loading ? (
+        <p className="px-4 py-10 text-center text-sm text-text-muted">Loading audiences...</p>
+      ) : audiences.length === 0 ? (
+        <div className="grid min-h-64 place-items-center p-6 text-center"><div><h3 className="text-sm font-medium">No audiences</h3><p className="mt-1 text-sm text-text-muted">Create a customer list to start reusable targeting.</p></div></div>
+      ) : (
+        <>
+        <div className="divide-y divide-border md:hidden">
+          {audiences.map((audience) => (
+            <div key={audience.id} className="px-4 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div>
+                  <div className="mt-0.5 truncate text-xs text-text-dim">{audienceTypeLabel(audience.type)} · {audience.native_id}</div>
+                </div>
+                <span className={`shrink-0 rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <div className="text-xs text-text-muted"><span className="text-text-dim">Size </span>{audienceSize(audience)}</div>
+                <div className="flex flex-wrap justify-end gap-1.5">
+                  {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
+                  {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
+                  {audience.capabilities.includes("update") && <button type="button" onClick={() => { setEditTarget(audience); setName(audience.name); setDescription(String(audience.metadata?.description || "")); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
+                  {audience.capabilities.includes("delete") && <button type="button" onClick={() => setDeleteTarget(audience)} aria-label={`Delete ${audience.name}`} title="Delete audience" className="grid h-8 w-8 place-items-center rounded border border-border text-text-muted hover:border-red/50 hover:text-red">×</button>}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="hidden overflow-auto md:block">
+          <table className="w-full table-fixed text-sm" style={{ minWidth: "58rem" }}>
+            <thead className="sticky top-0 z-10 bg-bg-input text-xs text-text-dim"><tr><th className="w-72 px-4 py-2 text-left font-medium">Audience</th><th className="w-36 px-3 py-2 text-left font-medium">Type</th><th className="w-28 px-3 py-2 text-left font-medium">Status</th><th className="w-28 px-3 py-2 text-right font-medium">Size</th><th className="w-44 px-3 py-2 text-left font-medium">Updated</th><th className="px-4 py-2 text-right font-medium">Actions</th></tr></thead>
+            <tbody className="divide-y divide-border">
+              {audiences.map((audience) => (
+                <tr key={audience.id} className="hover:bg-bg-input/40">
+                  <td className="px-4 py-3"><div className="truncate font-medium text-text" title={audience.name}>{audience.name || audience.native_id}</div><div className="truncate text-xs text-text-dim">{audience.native_id}</div></td>
+                  <td className="px-3 py-3 text-text-muted">{audienceTypeLabel(audience.type)}</td>
+                  <td className="px-3 py-3"><span className={`rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(audience.status)}`}>{audience.status || "unknown"}</span></td>
+                  <td className="px-3 py-3 text-right tabular-nums text-text-muted">{audienceSize(audience)}</td>
+                  <td className="px-3 py-3 text-xs text-text-muted">{audience.refreshed_at ? new Date(audience.refreshed_at).toLocaleString() : "-"}</td>
+                  <td className="px-4 py-3"><div className="flex justify-end gap-1.5">
+                    {audience.capabilities.includes("usage") && <button type="button" onClick={() => inspectUsage(audience)} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Usage</button>}
+                    {audience.capabilities.includes("members_add") && <button type="button" onClick={() => { setSyncTarget(audience); setSyncJob(null); setSourceKind("storage"); setOperation("add"); setGoogleConsent(false); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Sync</button>}
+                    {audience.capabilities.includes("update") && <button type="button" onClick={() => { setEditTarget(audience); setName(audience.name); setDescription(String(audience.metadata?.description || "")); }} className="h-8 rounded border border-border px-2.5 text-xs hover:bg-bg-input">Edit</button>}
+                    {audience.capabilities.includes("delete") && <button type="button" onClick={() => setDeleteTarget(audience)} aria-label={`Delete ${audience.name}`} title="Delete audience" className="grid h-8 w-8 place-items-center rounded border border-border text-text-muted hover:border-red/50 hover:text-red">×</button>}
+                  </div></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        </>
+      )}
+
+      {createOpen && <Modal title="Create audience" description={providerName(account.platform)} size="large" onClose={() => !busy && setCreateOpen(false)} labelledBy="ads-audience-create-title">
+        <form onSubmit={(event) => { event.preventDefault(); createAudience(); }}>
+          <div className="grid gap-4 px-4 py-4 md:grid-cols-2">
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted">Type<select value={kind} onChange={(event) => setKind(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{createKinds.map((value) => <option key={value} value={value}>{audienceTypeLabel(value)}</option>)}</select></label>
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label>
+            <label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label>
+            {kind === "lookalike" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source audience<select required value={sourceAudienceID} onChange={(event) => setSourceAudienceID(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select audience</option>{audiences.filter((item) => item.type === "customer_list").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><div className="grid grid-cols-2 gap-3"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Country<input required maxLength={2} value={country} onChange={(event) => setCountry(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm uppercase text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Similarity<select value={ratio} onChange={(event) => setRatio(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="0.01">1%</option><option value="0.02">2%</option><option value="0.05">5%</option><option value="0.1">10%</option></select></label></div></>}
+          </div>
+          <footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setCreateOpen(false)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim() || (kind === "lookalike" && !sourceAudienceID)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Creating..." : "Create"}</button></footer>
+        </form>
+      </Modal>}
+
+      {editTarget && <Modal title="Edit audience" description={editTarget.name} onClose={() => !busy && setEditTarget(null)} labelledBy="ads-audience-edit-title"><form onSubmit={(event) => { event.preventDefault(); saveAudience(); }}><div className="grid gap-4 px-4 py-4"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Name<input required value={name} onChange={(event) => setName(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Description<textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} className="resize-none rounded border border-border bg-bg-input px-3 py-2 text-sm text-text outline-none focus:border-accent" /></label></div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setEditTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !name.trim()} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Saving..." : "Save"}</button></footer></form></Modal>}
+
+      {syncTarget && <Modal title="Sync audience members" description={syncTarget.name} size="large" onClose={() => !busy && setSyncTarget(null)} labelledBy="ads-audience-sync-title">
+        {syncJob ? <div><div className="px-4 py-5"><div className="flex items-center justify-between gap-3"><span className={`rounded px-2 py-1 text-xs font-medium ${audienceStatusClass(syncJob.status)}`}>{syncJob.status.replaceAll("_", " ")}</span><span className="text-xs tabular-nums text-text-muted">{formatNumber(syncJob.processed_rows)} / {formatNumber(syncJob.total_rows)}</span></div><div className="mt-3 h-2 overflow-hidden rounded bg-bg-input"><div className="h-full bg-accent transition-all" style={{ width: `${syncJob.total_rows ? Math.min(100, (syncJob.processed_rows / syncJob.total_rows) * 100) : 5}%` }} /></div>{syncJob.rejected_rows > 0 && <p className="mt-2 text-xs text-yellow">{formatNumber(syncJob.rejected_rows)} rows had no usable identifiers.</p>}{syncJob.error && <p className="mt-2 text-xs text-red">{syncJob.error}</p>}</div><footer className="flex justify-end border-t border-border px-4 py-3"><button type="button" onClick={() => setSyncTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Close</button></footer></div> : <form onSubmit={(event) => { event.preventDefault(); queueSync(); }}><div className="grid gap-4 px-4 py-4 md:grid-cols-2"><label className="grid gap-1.5 text-xs font-medium text-text-muted">Operation<select value={operation} onChange={(event) => setOperation(event.target.value as "add" | "remove")} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="add">Add members</option><option value="remove">Remove members</option></select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Source<select value={sourceKind} onChange={(event) => setSourceKind(event.target.value as "storage" | "crm_segment")} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent">{capabilities?.sources.includes("storage") && <option value="storage">Storage CSV</option>}{capabilities?.sources.includes("crm_segment") && <option value="crm_segment">CRM segment</option>}</select></label><label className="grid gap-1.5 text-xs font-medium text-text-muted md:col-span-2">{sourceKind === "storage" ? "CSV file" : "CRM segment"}<select required value={sourceRef} onChange={(event) => setSourceRef(event.target.value)} className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"><option value="">Select source</option>{sources.map((source) => <option key={source.id} value={source.id}>{source.name || `Source ${source.id}`}</option>)}</select></label>{sourceKind === "storage" && <><label className="grid gap-1.5 text-xs font-medium text-text-muted">Email column <span className="font-normal text-text-dim">optional</span><input value={emailColumn} onChange={(event) => setEmailColumn(event.target.value)} placeholder="email" className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label><label className="grid gap-1.5 text-xs font-medium text-text-muted">Phone column <span className="font-normal text-text-dim">optional</span><input value={phoneColumn} onChange={(event) => setPhoneColumn(event.target.value)} placeholder="phone" className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent" /></label></>}{account.platform === "google" && <label className="flex items-start gap-2 rounded border border-border bg-bg-input px-3 py-3 text-sm text-text md:col-span-2"><input type="checkbox" checked={googleConsent} onChange={(event) => setGoogleConsent(event.target.checked)} className="mt-0.5 h-4 w-4 accent-accent" /><span>I confirm the selected records have the required consent for ad user data and personalization, and the Google Customer Match terms are accepted.</span></label>}</div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setSyncTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="submit" disabled={busy || !sourceRef || (account.platform === "google" && !googleConsent)} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black disabled:opacity-50">{busy ? "Queuing..." : "Start sync"}</button></footer></form>}
+      </Modal>}
+
+      {usageTarget && <Modal title="Audience usage" description={usageTarget.name} size="large" onClose={() => setUsageTarget(null)} labelledBy="ads-audience-usage-title"><div className="max-h-[60vh] overflow-auto">{busy ? <p className="px-4 py-10 text-center text-sm text-text-muted">Checking usage...</p> : usageRows.length === 0 ? <p className="px-4 py-10 text-center text-sm text-text-muted">No active targeting uses this audience.</p> : <div className="divide-y divide-border">{usageRows.map((row, index) => <div key={String(row.id || row.campaign_id || index)} className="px-4 py-3"><div className="text-sm font-medium text-text">{row.name || row.campaign_name || row.id || row.campaign_id}</div><div className="mt-0.5 text-xs text-text-muted">{row.status || row.effective_status || "In use"}</div></div>)}</div>}</div></Modal>}
+
+      {deleteTarget && <Modal title="Delete audience?" description={deleteTarget.name} onClose={() => !busy && setDeleteTarget(null)} labelledBy="ads-audience-delete-title"><div className="px-4 py-4 text-sm text-text-muted">The app checks active campaign and ad-group targeting before deleting this provider audience.</div><footer className="flex justify-end gap-2 border-t border-border px-4 py-3"><button type="button" disabled={busy} onClick={() => setDeleteTarget(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input">Cancel</button><button type="button" disabled={busy} onClick={deleteAudience} className="h-9 rounded bg-red px-3 text-sm font-medium text-white disabled:opacity-50">{busy ? "Deleting..." : "Delete"}</button></footer></Modal>}
+    </div>
+  );
+}
+
 export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const initialRange = useMemo(() => dateRange(30), []);
   const scopedProject = projectId || PANEL_PROJECT_ID;
@@ -969,13 +1267,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
-  const [activeView, setActiveView] = useState<"overview" | "campaigns">("overview");
+  const [activeView, setActiveView] = useState<"overview" | "campaigns" | "audiences">("overview");
   const [performance, setPerformance] = useState<PerformanceResponse | null>(null);
   const [comparison, setComparison] = useState<PerformanceResponse | null>(null);
   const [loadingPerformance, setLoadingPerformance] = useState(false);
   const [performanceError, setPerformanceError] = useState<string | null>(null);
   const [performanceSync, setPerformanceSync] = useState<PerformanceSyncState>({ status: "live" });
   const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
+  const [audienceRefreshKey, setAudienceRefreshKey] = useState(0);
   const [dateFrom, setDateFrom] = useState(initialRange.from);
   const [dateTo, setDateTo] = useState(initialRange.to);
   const [compareEnabled, setCompareEnabled] = useState(false);
@@ -1332,6 +1631,8 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     } else if (event.topic === "entity.changed") {
       refreshCampaigns(selected);
       setWorkspaceRefreshKey((current) => current + 1);
+    } else if (event.topic.startsWith("audience.")) {
+      setAudienceRefreshKey((current) => current + 1);
     }
   });
 
@@ -1720,7 +2021,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   </button>
                   <button
                     type="button"
-                    onClick={() => Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
+                    onClick={() => activeView === "audiences" ? setAudienceRefreshKey((current) => current + 1) : Promise.all([refreshCampaigns(selected), refreshPerformance(selected, true)])}
                     disabled={loadingCampaigns || loadingPerformance}
                     aria-label="Refresh account data"
                     title="Refresh account data"
@@ -1739,7 +2040,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               </header>
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2">
                 <div className="inline-flex h-8 rounded border border-border bg-bg-input p-0.5">
-                  {(["overview", "campaigns"] as const).map((view) => (
+                  {(["overview", "campaigns", "audiences"] as const).map((view) => (
                     <button
                       key={view}
                       type="button"
@@ -1750,7 +2051,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     </button>
                   ))}
                 </div>
-                <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
+                {activeView !== "audiences" && <div className="grid w-full grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-2 sm:flex sm:w-auto sm:flex-wrap sm:justify-end">
                   <div className="col-span-3 inline-flex h-8 justify-self-end rounded border border-border p-0.5 sm:col-auto sm:justify-self-auto">
                     {[7, 30, 90].map((days) => (
                       <button
@@ -1774,13 +2075,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     <input type="checkbox" checked={compareEnabled} onChange={(event) => setCompareEnabled(event.target.checked)} className="h-3.5 w-3.5 accent-accent" />
                     Compare
                   </label>
-                </div>
+                </div>}
               </div>
               {performanceError && (
                 <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{performanceError}</div>
               )}
               <div className="min-h-0 flex-1 overflow-auto">
-                {activeView === "overview" ? (
+                {activeView === "audiences" ? (
+                  <AudienceWorkspace account={selected} callTool={callTool} refreshKey={audienceRefreshKey} />
+                ) : activeView === "overview" ? (
                   loadingPerformance && !performance ? (
                     <p className="p-4 text-sm text-text-muted">Loading performance...</p>
                   ) : performance ? (

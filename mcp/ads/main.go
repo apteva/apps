@@ -327,11 +327,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name:     "performance_collector",
-		Schedule: "@every 1m",
-		Run:      a.runPerformanceCollector,
-	}}
+	return []sdk.Worker{
+		{Name: "performance_collector", Schedule: "@every 1m", Run: a.runPerformanceCollector},
+		{Name: "audience_sync_processor", Schedule: "@every 30s", Run: a.runAudienceSyncProcessor},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -997,14 +996,97 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── Audiences ──
 		{
+			Name:        "audience_capabilities_get",
+			Description: "Get provider-supported audience types, lifecycle operations, sync modes, sources, and privacy behavior for an ad account.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}}, []string{"ad_account_id"}),
+			Handler:     a.toolAudienceCapabilitiesGet,
+		},
+		{
 			Name:        "audience_list",
-			Description: "List audiences in the ad account. Args: ad_account_id, limit?, after?.",
+			Description: "List normalized, project-scoped audiences in the ad account and optionally refresh provider state. Args: ad_account_id, refresh?.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
-				"limit":         map[string]any{"type": "integer"},
-				"after":         map[string]any{"type": "string"},
+				"refresh":       map[string]any{"type": "boolean"},
 			}, []string{"ad_account_id"}),
 			Handler: a.toolAudienceList,
+		},
+		{
+			Name:        "audience_get",
+			Description: "Get one normalized audience by its local project-scoped audience id.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}, "audience_id": map[string]any{"type": "integer"}}, []string{"ad_account_id", "audience_id"}),
+			Handler:     a.toolAudienceGet,
+		},
+		{
+			Name:        "audience_create",
+			Description: "Create a normalized audience. Supported types are capability-driven: customer_list, website, app_activity, engagement, lookalike, and saved_targeting.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
+				"type": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+				"retention_days": map[string]any{"type": "integer"}, "source_audience_id": map[string]any{"type": "integer"},
+				"country": map[string]any{"type": "string"}, "ratio": map[string]any{"type": "number"},
+				"targeting": map[string]any{"type": "object"}, "platform_options": map[string]any{"type": "object"},
+			}, []string{"ad_account_id", "name", "type"}),
+			Handler: a.toolAudienceCreate,
+		},
+		{
+			Name:        "audience_update",
+			Description: "Update provider-supported audience metadata or saved targeting using a local audience id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"}, "audience_id": map[string]any{"type": "integer"},
+				"name": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+				"retention_days": map[string]any{"type": "integer"}, "targeting": map[string]any{"type": "object"},
+			}, []string{"ad_account_id", "audience_id"}),
+			Handler: a.toolAudienceUpdate,
+		},
+		{
+			Name:        "audience_delete",
+			Description: "Delete an audience after checking its active targeting usage. Set force only after intentionally removing targeting dependencies.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}, "audience_id": map[string]any{"type": "integer"}, "force": map[string]any{"type": "boolean"}}, []string{"ad_account_id", "audience_id"}),
+			Handler:     a.toolAudienceDelete,
+		},
+		{
+			Name:        "audience_members_sync",
+			Description: "Queue privacy-safe audience member add/remove from a Storage CSV or CRM segment. Values are normalized and SHA-256 hashed in memory and never persisted by Ads.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"}, "audience_id": map[string]any{"type": "integer"},
+				"operation": map[string]any{"type": "string", "enum": []string{"add", "remove"}},
+				"source":    map[string]any{"type": "object"}, "mapping": map[string]any{"type": "object"},
+				"consent": map[string]any{"type": "object"}, "idempotency_key": map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "audience_id", "operation", "source", "idempotency_key"}),
+			Handler: a.toolAudienceMembersSync,
+		},
+		{
+			Name:        "audience_sync_status",
+			Description: "Get counts, provider request id, retry state, and diagnostics for one audience sync job.",
+			InputSchema: schemaObject(map[string]any{"job_id": map[string]any{"type": "integer"}, "ad_account_id": map[string]any{"type": "integer"}}, []string{"job_id"}),
+			Handler:     a.toolAudienceSyncStatus,
+		},
+		{
+			Name:        "audience_usage_get",
+			Description: "List campaigns or ad groups currently using an audience before update or deletion.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}, "audience_id": map[string]any{"type": "integer"}}, []string{"ad_account_id", "audience_id"}),
+			Handler:     a.toolAudienceUsageGet,
+		},
+		{
+			Name:        "audience_refresh",
+			Description: "Refresh normalized audience resources from the provider.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}}, []string{"ad_account_id"}),
+			Handler:     a.toolAudienceRefresh,
+		},
+		{
+			Name:        "audience_source_list",
+			Description: "List selectable Storage CSV files or CRM segments for an audience sync form.",
+			InputSchema: schemaObject(map[string]any{"source_kind": map[string]any{"type": "string", "enum": []string{"storage", "crm_segment"}}, "q": map[string]any{"type": "string"}}, nil),
+			Handler:     a.toolAudienceSourceList,
+		},
+		{
+			Name:        "targeting_catalog_search",
+			Description: "Search normalized provider targeting catalogs such as locations, interests, languages, communities, devices, and third-party audiences.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"}, "type": map[string]any{"type": "string", "enum": []string{"location", "interest", "language", "community", "device", "third_party"}},
+				"query": map[string]any{"type": "string"}, "country_code": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}, "cursor": map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "type"}),
+			Handler: a.toolTargetingCatalogSearch,
 		},
 		{
 			Name:        "audience_create_custom",
@@ -1238,6 +1320,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	displayName, _ := args["name"].(string)
 	currency := ""
 	timezone := ""
+	loginAccountID := ""
 
 	adapter, ok := platformAdapters[row.platform]
 	if !ok {
@@ -1265,6 +1348,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	currency = toString(matched["currency"])
 	timezone = toString(matched["timezone"])
+	loginAccountID = toString(matched["login_account_id"])
 
 	pid := row.projectID
 	var existingID int64
@@ -1291,15 +1375,16 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return mcpError("pending account was already finalized or expired"), nil
 	}
 	_, err = tx.Exec(
-		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, login_account_id, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
 		 ON CONFLICT(project_id, platform, native_account_id) DO UPDATE SET
 		   connection_id=excluded.connection_id,
 		   display_name=excluded.display_name,
 		   currency=excluded.currency,
 		   timezone_name=excluded.timezone_name,
+		   login_account_id=excluded.login_account_id,
 		   status='active'`,
-		pid, def.Platform, row.connectionID, pageID, displayName, nullable(currency), nullable(timezone),
+		pid, def.Platform, row.connectionID, pageID, displayName, nullable(currency), nullable(timezone), nullable(loginAccountID),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("save ad_account: %w", err)
@@ -1406,6 +1491,9 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM ad_audience_jobs WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM ad_resource_defaults WHERE ad_account_id=? AND project_id=?`, id, pid); err != nil {
 		return nil, err
 	}
@@ -1666,6 +1754,7 @@ type adAccount struct {
 	NativeAccountID string
 	Currency        string
 	Timezone        string
+	LoginAccountID  string
 }
 
 func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount, *platformDef, map[string]any) {
@@ -1680,7 +1769,7 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 	var acct adAccount
 	if err := ctx.AppDB().QueryRow(
 		`SELECT id, platform, connection_id, native_account_id,
-		        COALESCE(currency,''), COALESCE(timezone_name,'')
+		        COALESCE(currency,''), COALESCE(timezone_name,''), COALESCE(login_account_id,'')
 		 FROM ad_accounts WHERE id=? AND project_id=? AND status='active'`,
 		id, pid,
 	).Scan(
@@ -1690,6 +1779,7 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 		&acct.NativeAccountID,
 		&acct.Currency,
 		&acct.Timezone,
+		&acct.LoginAccountID,
 	); err != nil {
 		return nil, nil, mcpError("ad_account not found or not active")
 	}
@@ -3722,27 +3812,23 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── Audience tools ────────────────────────────────────────────────
 
 func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
-	return platformAdapters[acct.Platform].AudienceList(a, ctx, acct, def, args)
+	return a.audienceList(ctx, args)
 }
 
 func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
-	return platformAdapters[acct.Platform].AudienceCreateCustom(a, ctx, acct, def, args)
+	copyArgs := cloneMap(args)
+	copyArgs["type"] = "customer_list"
+	return a.audienceCreate(ctx, copyArgs)
 }
 
 func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
-	return platformAdapters[acct.Platform].AudienceCreateLookalike(a, ctx, acct, def, args)
+	copyArgs := cloneMap(args)
+	copyArgs["type"] = "lookalike"
+	return a.audienceCreate(ctx, copyArgs)
+}
+
+func (a *App) toolAudienceCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.audienceCreate(ctx, args)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -3961,13 +4047,14 @@ func googleFetchClientAccounts(ctx *sdk.AppCtx, connID int64, managerID string) 
 			name = id
 		}
 		accounts = append(accounts, map[string]any{
-			"id":           id,
-			"name":         name,
-			"currency":     firstString(client, "currencyCode", "currency_code"),
-			"timezone":     firstString(client, "timeZone", "time_zone"),
-			"manager":      googleBool(client["manager"]),
-			"status":       firstString(client, "status"),
-			"test_account": googleBool(client["testAccount"]) || googleBool(client["test_account"]),
+			"id":               id,
+			"name":             name,
+			"currency":         firstString(client, "currencyCode", "currency_code"),
+			"timezone":         firstString(client, "timeZone", "time_zone"),
+			"manager":          googleBool(client["manager"]),
+			"status":           firstString(client, "status"),
+			"test_account":     googleBool(client["testAccount"]) || googleBool(client["test_account"]),
+			"login_account_id": managerID,
 		})
 	}
 	return accounts, nil
