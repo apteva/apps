@@ -363,7 +363,13 @@ func (a *App) toolAudienceDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return errOut, nil
 	}
 	usage, usageErr := a.audienceUsage(ctx, acct, resource)
-	if usageErr == nil && len(resultRows(usage)) > 0 && !boolArg(args, "force") {
+	if usageErr != nil {
+		return nil, usageErr
+	}
+	if errOut := mcpResultError(usage); errOut != nil {
+		return errOut, nil
+	}
+	if len(resultRows(usage)) > 0 && !boolArg(args, "force") {
 		return mcpError("audience is used by active targeting; remove it first or set force=true"), nil
 	}
 	tool := map[string]string{"meta": "audience_delete", "google": "data_manager_user_list_delete", "x": "delete_custom_audience", "reddit": "delete_custom_audience"}[acct.Platform]
@@ -418,7 +424,7 @@ func (a *App) audienceUsage(ctx *sdk.AppCtx, acct *adAccount, resource *adResour
 	case "x":
 		return a.execOrErr(ctx, acct, "get_custom_audience_usage", map[string]any{"account_id": acct.NativeAccountID, "custom_audience_id": resource.NativeID, "with_active": true})
 	case "meta":
-		parsed, errOut := a.execIntegrationTool(ctx, acct, "adset_list", map[string]any{"adAccountId": acct.NativeAccountID, "fields": "id,name,status,campaign_id,targeting", "limit": 500})
+		parsed, errOut := a.execIntegrationTool(ctx, acct, "adset_list", map[string]any{"objectId": acct.NativeAccountID, "fields": "id,name,status,campaign_id,targeting", "limit": 500})
 		if errOut != nil {
 			return errOut, nil
 		}

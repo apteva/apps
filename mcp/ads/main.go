@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.35
+version: 0.1.38
 scopes: [project, global]
 requires:
   permissions:
@@ -4453,17 +4453,20 @@ func resultRows(v any) []map[string]any {
 	if !ok {
 		raw = m["data"]
 	}
-	items, ok := raw.([]any)
-	if !ok {
+	switch items := raw.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if row := asMap(item); row != nil {
+				out = append(out, row)
+			}
+		}
+		return out
+	default:
 		return nil
 	}
-	out := make([]map[string]any, 0, len(items))
-	for _, item := range items {
-		if row := asMap(item); row != nil {
-			out = append(out, row)
-		}
-	}
-	return out
 }
 
 func mapAt(m map[string]any, key string) map[string]any {

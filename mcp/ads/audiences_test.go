@@ -100,6 +100,56 @@ func TestMetaEngagementAudienceRejectsForeignResource(t *testing.T) {
 	}
 }
 
+func TestMetaAudienceUsageUsesAdAccountObjectID(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.executeResponses["adset_list"] = executeJSON(`{"data":[{"id":"set_1","targeting":{"custom_audiences":[{"id":"aud_1"}]}}]}`)
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+	audience := seedAudience(t, app, ctx, accountID, "meta", "aud_1")
+
+	out, err := app.toolAudienceUsageGet(ctx, map[string]any{"ad_account_id": accountID, "audience_id": audience.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := findExecuteCall(t, platform, "adset_list")
+	if call.Input["objectId"] != "act_42" {
+		t.Fatalf("Meta audience usage objectId=%#v", call.Input)
+	}
+	if _, exists := call.Input["adAccountId"]; exists {
+		t.Fatalf("Meta audience usage sent unsupported adAccountId: %#v", call.Input)
+	}
+	if rows := resultRows(out); len(rows) != 1 || firstString(rows[0], "id") != "set_1" {
+		t.Fatalf("Meta audience usage=%#v", out)
+	}
+}
+
+func TestAudienceDeleteStopsWhenUsageCheckFails(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.executeResponses["adset_list"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data:    json.RawMessage(`{"error":{"code":100,"message":"usage unavailable"}}`),
+	}
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+	audience := seedAudience(t, app, ctx, accountID, "meta", "aud_1")
+
+	out, err := app.toolAudienceDelete(ctx, map[string]any{"ad_account_id": accountID, "audience_id": audience.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asMap(out)["isError"] != true {
+		t.Fatalf("delete ignored failed usage check: %#v", out)
+	}
+	for _, call := range platform.executeCalls {
+		if call.Tool == "audience_delete" {
+			t.Fatalf("provider delete ran after failed usage check: %#v", platform.executeCalls)
+		}
+	}
+}
+
 func TestAudienceSyncHashesInMemoryAndIsIdempotent(t *testing.T) {
 	platform := newRecordingPlatform()
 	csvBody := "email,phone\nAlice@Example.com,+1 (415) 555-0100\n"
