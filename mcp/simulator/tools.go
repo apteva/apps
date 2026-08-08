@@ -112,7 +112,7 @@ func (a *App) toolSimsCapabilities() sdk.Tool {
 			},
 		}, nil),
 		Handler: func(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-			return probeCapabilities(ctx), nil
+			return a.configuredCapabilities(ctx), nil
 		},
 	}
 }
@@ -173,6 +173,7 @@ func (a *App) toolSimsBoot() sdk.Tool {
 				"type":        "string",
 				"description": "Android: avdmanager device profile. iOS: simctl device-type id. Empty = use install config default.",
 			},
+			"host_id": map[string]any{"type": "integer", "description": "Optional Instances host override. 0 runs locally."},
 		}, []string{"platform"}),
 		Handler: a.handleSimsBoot,
 	}
@@ -180,7 +181,8 @@ func (a *App) toolSimsBoot() sdk.Tool {
 
 func (a *App) handleSimsBoot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	platform := strArg(args, "platform")
-	if err := capabilityCheckFor(ctx, platform); err != nil {
+	hostID := resolvedHostID(ctx, args, platform)
+	if err := a.capabilityCheckForHost(ctx, platform, hostID, false, false); err != nil {
 		return nil, err
 	}
 	image := strArg(args, "image")
@@ -189,11 +191,11 @@ func (a *App) handleSimsBoot(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	case "android":
 		image = valueOrConfigDefault(ctx, image, "android_image")
 		deviceType = valueOrConfigDefault(ctx, deviceType, "android_device_type")
-		return a.bootAndroid(ctx, image, deviceType)
+		return a.bootOnHost(ctx, platform, image, deviceType, hostID)
 	case "ios":
 		image = valueOrConfigDefault(ctx, image, "ios_runtime")
 		deviceType = valueOrConfigDefault(ctx, deviceType, "ios_device_type")
-		return a.bootIOS(ctx, image, deviceType)
+		return a.bootOnHost(ctx, platform, image, deviceType, hostID)
 	}
 	return nil, fmt.Errorf("platform %q invalid", platform)
 }
@@ -279,27 +281,9 @@ func (a *App) toolSimsShutdown() sdk.Tool {
 				return map[string]any{"ok": true, "note": "sim not known to this project"}, nil
 			}
 			a.stopStream(simID)
-			if p := a.sup.get(simID); p != nil {
-				a.sup.shutdownProcess(p)
-				a.sup.drop(simID)
+			if err := a.shutdownSim(ctx, row); err != nil {
+				return nil, err
 			}
-			// Belt-and-suspenders graceful paths: even if the
-			// supervisor didn't have a tracked entry (sidecar
-			// restarted, etc.), send the platform-native shutdown
-			// signal so the device-manager service flushes state.
-			switch row.Platform {
-			case "android":
-				if row.Serial != "" {
-					_ = shutdownAndroidSim(row.Serial)
-				}
-			case "ios":
-				_ = shutdownIOSSim(simID)
-			}
-			_ = dbUpdateSim(ctx.AppDB(), simID, map[string]any{
-				"status": "shutdown", "pid": 0,
-			})
-			_ = dbDeleteStreamToken(ctx.AppDB(), simID)
-			_ = dbStopActiveSimRuns(ctx.AppDB(), simID)
 			return map[string]any{"ok": true}, nil
 		},
 	}
@@ -332,15 +316,7 @@ func (a *App) toolSimsScreenshot() sdk.Tool {
 			if row.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted (status=%s)", simID, row.Status)
 			}
-			var png []byte
-			switch row.Platform {
-			case "android":
-				png, err = androidScreenshot(row.Serial)
-			case "ios":
-				png, err = iosScreenshot(row.ID)
-			default:
-				return nil, fmt.Errorf("unknown platform %q for sim %q", row.Platform, simID)
-			}
+			png, err := a.screenshotSim(ctx, row)
 			if err != nil {
 				return nil, err
 			}

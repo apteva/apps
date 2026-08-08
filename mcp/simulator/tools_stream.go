@@ -49,17 +49,7 @@ func (a *App) toolSimsInput() sdk.Tool {
 				DurationMS: int(floatArg(args, "ms")),
 				Key:        strArg(args, "key"), Text: rawStringArg(args, "text"),
 			}
-			if err := validateInputEvent(ev); err != nil {
-				return nil, err
-			}
-			switch sim.Platform {
-			case "android":
-				err = androidSendInput(sim.Serial, ev)
-			case "ios":
-				err = a.iosSendInput(sim.ID, ev)
-			default:
-				err = fmt.Errorf("unknown platform %q", sim.Platform)
-			}
+			err = a.inputForSim(ctx, sim, ev)
 			if err != nil {
 				return nil, err
 			}
@@ -91,15 +81,7 @@ func (a *App) toolSimsLogs() sdk.Tool {
 				return nil, fmt.Errorf("sim %q not known", simID)
 			}
 			lines := normalizeLogLines(int(floatArg(args, "lines")))
-			var content string
-			switch sim.Platform {
-			case "android":
-				content, err = androidLogs(sim.Serial, lines)
-			case "ios":
-				content, err = iosLogs(sim.ID, lines)
-			default:
-				err = fmt.Errorf("unknown platform %q", sim.Platform)
-			}
+			content, err := a.logsForSim(ctx, sim, lines)
 			if err != nil {
 				return nil, err
 			}
@@ -129,7 +111,7 @@ func (a *App) toolSimsStreamURL() sdk.Tool {
 			if sim == nil || sim.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted", simID)
 			}
-			if err := streamingCapabilityCheckFor(ctx, sim.Platform); err != nil {
+			if err := a.capabilityCheckForHost(ctx, sim.Platform, sim.InstanceID, false, true); err != nil {
 				return nil, err
 			}
 			stream, err := dbMintStreamToken(ctx.AppDB(), simID, 1*time.Hour)

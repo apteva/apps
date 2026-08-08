@@ -33,7 +33,7 @@ import (
 )
 
 func (a *App) handleCapabilities(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, probeCapabilities(a.appCtx))
+	writeJSON(w, http.StatusOK, a.configuredCapabilities(a.appCtx))
 }
 
 func (a *App) handleSimsList(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +57,7 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 		Platform   string `json:"platform"`
 		Image      string `json:"image"`
 		DeviceType string `json:"device_type"`
+		HostID     *int64 `json:"host_id,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, err)
@@ -68,7 +69,12 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestCtx := a.appCtx.WithProject(projectID)
-	if err := capabilityCheckFor(requestCtx, body.Platform); err != nil {
+	args := map[string]any{}
+	if body.HostID != nil {
+		args["host_id"] = *body.HostID
+	}
+	hostID := resolvedHostID(requestCtx, args, body.Platform)
+	if err := a.capabilityCheckForHost(requestCtx, body.Platform, hostID, false, false); err != nil {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
@@ -77,11 +83,11 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 	case "android":
 		img := orConfig(requestCtx, body.Image, "android_image")
 		dt := orConfig(requestCtx, body.DeviceType, "android_device_type")
-		sim, err = a.bootAndroid(requestCtx, img, dt)
+		sim, err = a.bootOnHost(requestCtx, body.Platform, img, dt, hostID)
 	case "ios":
 		rt := orConfig(requestCtx, body.Image, "ios_runtime")
 		dt := orConfig(requestCtx, body.DeviceType, "ios_device_type")
-		sim, err = a.bootIOS(requestCtx, rt, dt)
+		sim, err = a.bootOnHost(requestCtx, body.Platform, rt, dt, hostID)
 	default:
 		writeErr(w, http.StatusBadRequest, errBadPlatform)
 		return
@@ -113,7 +119,12 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestCtx := a.appCtx.WithProject(proj)
-	if err := capabilityCheckForNeeds(requestCtx, framework, true, true); err != nil {
+	hostArgs := map[string]any{}
+	if raw := strings.TrimSpace(r.FormValue("host_id")); raw != "" {
+		hostArgs["host_id"] = raw
+	}
+	hostID := resolvedHostID(requestCtx, hostArgs, framework)
+	if err := a.capabilityCheckForHost(requestCtx, framework, hostID, true, true); err != nil {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
@@ -141,7 +152,7 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sim, err := a.ensureBootedSim(requestCtx, framework)
+	sim, err := a.ensureBootedSimOnHost(requestCtx, framework, hostID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("boot: %w", err))
 		return
@@ -155,7 +166,8 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 	run, err := dbInsertSimRun(requestCtx.AppDB(), SimRun{
 		SimID: sim.ID, ProjectID: proj, SourceApp: "panel",
 		SourceRef: header.Filename, Framework: framework, Status: "building",
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
+		RunnerKind: sim.RunnerKind, InstanceID: sim.InstanceID,
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
@@ -176,14 +188,35 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	br, err := a.runBuildFromSourceDir(r.Context(), requestCtx, buildRoot, buildParams{
-		Framework: framework,
-		Module:    r.FormValue("android_module"),
-		Scheme:    r.FormValue("ios_scheme"),
-		BuildCmd:  r.FormValue("build_cmd"),
-		SimUDID:   sim.ID,
-		SimRunID:  run.ID,
-	})
+	var (
+		br         *buildResult
+		artifactID string
+	)
+	if sim.IsRemote() {
+		sourceB64, archiveErr := sourceDirToTarGzB64(buildRoot)
+		if archiveErr != nil {
+			a.failRun(requestCtx, run.ID, "archive: "+archiveErr.Error())
+			writeErr(w, http.StatusInternalServerError, archiveErr)
+			return
+		}
+		br, artifactID, err = a.buildForSim(r.Context(), requestCtx, sim, buildParams{
+			Framework: framework, SourceTGZB64: sourceB64,
+			Module: r.FormValue("android_module"), Scheme: r.FormValue("ios_scheme"),
+			BuildCmd: r.FormValue("build_cmd"), SimUDID: sim.NativeID(), SimRunID: run.ID,
+		})
+	} else {
+		br, err = a.runBuildFromSourceDir(r.Context(), requestCtx, buildRoot, buildParams{
+			Framework: framework,
+			Module:    r.FormValue("android_module"),
+			Scheme:    r.FormValue("ios_scheme"),
+			BuildCmd:  r.FormValue("build_cmd"),
+			SimUDID:   sim.NativeID(),
+			SimRunID:  run.ID,
+		})
+		if err == nil {
+			artifactID = filepath.Base(br.ArtifactPath)
+		}
+	}
 	if err != nil {
 		a.failRun(requestCtx, run.ID, "build: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, err)
@@ -193,9 +226,10 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		"status":        "installing",
 		"bundle_id":     br.BundleID,
 		"artifact_path": br.ArtifactPath,
+		"artifact_id":   artifactID,
 		"log_path":      fmt.Sprintf("%d.log", run.ID),
 	})
-	if err := a.installAndLaunch(sim, br); err != nil {
+	if err := a.installAndLaunchForSim(requestCtx, sim, br, artifactID); err != nil {
 		a.failRun(requestCtx, run.ID, "install/launch: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -213,6 +247,9 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		"platform":      sim.Platform,
 		"bundle_id":     br.BundleID,
 		"artifact_path": br.ArtifactPath,
+		"artifact_id":   artifactID,
+		"runner":        sim.RunnerKind,
+		"instance_id":   sim.InstanceID,
 		"stream_url":    a.streamURL(requestCtx, sim.ID, stream.WSToken),
 		"status":        "running",
 	})
@@ -253,22 +290,10 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
 			return
 		}
-		a.stopStream(simID)
-		if p := a.sup.get(simID); p != nil {
-			a.sup.shutdownProcess(p)
-			a.sup.drop(simID)
+		if err := a.shutdownSim(a.appCtx.WithProject(projectID), sim); err != nil {
+			writeErr(w, http.StatusInternalServerError, err)
+			return
 		}
-		switch sim.Platform {
-		case "android":
-			if sim.Serial != "" {
-				_ = shutdownAndroidSim(sim.Serial)
-			}
-		case "ios":
-			_ = shutdownIOSSim(simID)
-		}
-		_ = dbUpdateSim(a.appCtx.AppDB(), simID, map[string]any{"status": "shutdown", "pid": 0})
-		_ = dbDeleteStreamToken(a.appCtx.AppDB(), simID)
-		_ = dbStopActiveSimRuns(a.appCtx.AppDB(), simID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
 	case "screenshot":
@@ -280,13 +305,7 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, errNotBooted)
 			return
 		}
-		var png []byte
-		switch sim.Platform {
-		case "android":
-			png, err = androidScreenshot(sim.Serial)
-		case "ios":
-			png, err = iosScreenshot(sim.ID)
-		}
+		png, err := a.screenshotSim(a.appCtx.WithProject(projectID), sim)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -304,7 +323,7 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusConflict, errNotBooted)
 			return
 		}
-		if err := streamingCapabilityCheckFor(a.appCtx, sim.Platform); err != nil {
+		if err := a.capabilityCheckForHost(a.appCtx.WithProject(projectID), sim.Platform, sim.InstanceID, false, true); err != nil {
 			writeErr(w, http.StatusConflict, err)
 			return
 		}
@@ -333,7 +352,7 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err)
 			return
 		}
-		if err := a.sendInput(sim, ev); err != nil {
+		if err := a.inputForSim(a.appCtx.WithProject(projectID), sim, ev); err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
 		}
@@ -350,13 +369,7 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 				lines = normalizeLogLines(n)
 			}
 		}
-		var content string
-		switch sim.Platform {
-		case "android":
-			content, err = androidLogs(sim.Serial, lines)
-		case "ios":
-			content, err = iosLogs(sim.ID, lines)
-		}
+		content, err := a.logsForSim(a.appCtx.WithProject(projectID), sim, lines)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err)
 			return
@@ -397,10 +410,13 @@ func (a *App) refreshSimStatus(sim *Sim) *Sim {
 	if sim == nil || a == nil || a.appCtx == nil || a.appCtx.AppDB() == nil {
 		return sim
 	}
+	if sim.IsRemote() {
+		return a.refreshRemoteSim(a.appCtx.WithProject(sim.ProjectID), sim)
+	}
 	if sim.Platform != "ios" || (sim.Status != "booting" && sim.Status != "booted") {
 		return sim
 	}
-	state, err := simctlDeviceState(sim.ID)
+	state, err := simctlDeviceState(sim.NativeID())
 	if err != nil {
 		return sim
 	}

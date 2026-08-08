@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.24
+version: 0.1.25
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -62,6 +62,11 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+  apps:
+    - name: instances
+      version: ">=0.2.0"
+      optional: true
+      reason: optional remote simulator host inventory, worker bootstrap, and SSH tunnels
   binaries:
     - name: adb
       executables: [adb]
@@ -136,6 +141,22 @@ db:
   path: /data/simulator.db
   migrations: migrations/
 config_schema:
+  - name: android_host_id
+    type: select_from_app
+    app: instances
+    discovery: { route: /api/instances, response_path: instances, value_field: id, label_field: name }
+    fallback: text
+    default: "0"
+    label: Android simulator host
+    description: "0 runs locally; a positive Instances id runs Android remotely."
+  - name: ios_host_id
+    type: select_from_app
+    app: instances
+    discovery: { route: /api/instances, response_path: instances, value_field: id, label_field: name }
+    fallback: text
+    default: "0"
+    label: iOS simulator host
+    description: "0 runs locally; a positive Instances id selects a remote Mac."
   - { name: android_image,         type: text, label: "Android system image",   description: "SDK Manager-style identifier used by auto-created AVDs.", default: "system-images;android-34;google_apis;x86_64" }
   - { name: android_device_type,   type: text, label: "Android device profile", description: "avdmanager device profile name.", default: "pixel_6" }
   - { name: emulator_extra_args,   type: text, label: "Extra emulator args",    description: "Appended verbatim to every emulator boot.", default: "-no-window -no-audio -no-snapshot-save" }
@@ -147,6 +168,8 @@ config_schema:
   - { name: idb_companion_path,    type: text, label: "idb_companion path",     description: "Override the PATH lookup. Empty = use PATH.", default: "" }
   - { name: max_concurrent_sims,   type: text, label: "Max booted sims",        description: "Global cap across android + ios.", default: "2" }
   - { name: stream_codec,          type: text, label: "Stream codec",           description: "h264 is the only supported value in v0.1.", default: "h264" }
+  - { name: remote_worker_binary_path, type: text, label: "Remote worker binary path", description: "Optional preinstalled simulator binary path on remote hosts. Empty installs from the app module with Go.", default: "" }
+  - { name: remote_worker_module_ref, type: text, label: "Remote worker module ref", description: "Immutable app release tag or Go revision used to install the remote worker when no binary path is configured.", default: "simulator/v0.1.25" }
 upgrade_policy: auto-patch
 `
 
@@ -266,4 +289,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // on boot/lifecycle and concentrates schema declarations next to the
 // handlers that use them.
 
-func main() { sdk.Run(&App{}) }
+func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "--worker" && os.Args[2] != "" {
+		if err := runWorker(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	sdk.Run(&App{})
+}

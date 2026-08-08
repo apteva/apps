@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.24
+version: 0.1.25
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -28,6 +28,9 @@ description: |
   v0.1.23 reconnects the live-view WebSocket after transient proxy or sidecar
   interruptions instead of leaving the panel permanently on Stream closed.
 
+  v0.1.25 adds optional Instances-backed remote runners. Local execution stays
+  the default; Android and iOS may independently target a ready Instances host.
+
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.
   sims_capabilities reports availability with hints when something's
@@ -45,6 +48,11 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+  apps:
+    - name: instances
+      version: ">=0.2.0"
+      optional: true
+      reason: optional remote simulator host inventory, worker bootstrap, and SSH tunnels
   binaries:
     - name: adb
       executables: [adb]
@@ -141,6 +149,30 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: android_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: Android simulator host
+    description: "0 runs locally; a positive Instances id runs Android remotely."
+  - name: ios_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: iOS simulator host
+    description: "0 runs locally; a positive Instances id selects a remote Mac."
   - name: android_image
     type: text
     label: Android system image
@@ -196,5 +228,15 @@ config_schema:
     label: Stream codec
     description: h264 is the only supported value in v0.1; placeholder for future codec switching.
     default: "h264"
+  - name: remote_worker_binary_path
+    type: text
+    label: Remote worker binary path
+    description: "Optional preinstalled simulator binary path on remote hosts. Empty installs from the app module with Go."
+    default: ""
+  - name: remote_worker_module_ref
+    type: text
+    label: Remote worker module ref
+    description: "Immutable app release tag or Go revision used to install the remote worker when no binary path is configured."
+    default: "simulator/v0.1.25"
 
 upgrade_policy: auto-patch

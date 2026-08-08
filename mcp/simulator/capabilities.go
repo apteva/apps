@@ -27,6 +27,7 @@ import (
 type Capabilities struct {
 	Android PlatformCapability `json:"android"`
 	IOS     PlatformCapability `json:"ios"`
+	Hosts   map[string]int64   `json:"hosts,omitempty"`
 }
 
 // PlatformCapability is the per-backend probe result.

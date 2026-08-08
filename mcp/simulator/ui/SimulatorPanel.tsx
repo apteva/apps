@@ -34,6 +34,7 @@ interface PlatformCapability {
 interface Capabilities {
   android: PlatformCapability;
   ios: PlatformCapability;
+  hosts?: { android?: number; ios?: number };
 }
 
 interface Sim {
@@ -43,10 +44,18 @@ interface Sim {
   device_type: string;
   status: string;
   serial: string;
+  runner?: "local" | "instances";
+  instance_id?: number;
   booted_at?: string;
 }
 
 const API = "/api/apps/simulator/api";
+
+function runnerLabel(sim: Sim) {
+  return sim.runner === "instances" && sim.instance_id
+    ? `host ${sim.instance_id}`
+    : "local";
+}
 
 export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const [caps, setCaps] = useState<Capabilities | null>(null);
@@ -252,13 +261,13 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
           Settings
         </button>
         <BootButton
-          label="Boot Android"
+          label={`Boot Android${caps?.hosts?.android ? ` · host ${caps.hosts.android}` : ""}`}
           enabled={!!caps?.android.available && !busy}
           reasons={caps?.android.reasons ?? []}
           onClick={() => boot("android")}
         />
         <BootButton
-          label="Boot iOS"
+          label={`Boot iOS${caps?.hosts?.ios ? ` · host ${caps.hosts.ios}` : ""}`}
           enabled={!!caps?.ios.available && !busy}
           reasons={caps?.ios.reasons ?? []}
           onClick={() => boot("ios")}
@@ -290,7 +299,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
                       <span className="text-xs font-medium truncate">{s.device_type || s.id}</span>
                     </div>
                     <div className="text-[11px] text-text-muted mt-0.5">
-                      {s.platform} · {s.status}
+                      {s.platform} · {s.status} · {runnerLabel(s)}
                     </div>
                   </button>
                 </li>
@@ -309,7 +318,7 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
             <div className="flex flex-col items-center gap-4">
               <div className="w-full flex items-center gap-2">
                 <span className="text-xs text-text-muted">
-                  {selectedSim.device_type} · {selectedSim.platform} · {selectedSim.status}
+                  {selectedSim.device_type} · {selectedSim.platform} · {selectedSim.status} · {runnerLabel(selectedSim)}
                 </span>
                 <span className="flex-1" />
                 {selectedSim.status === "shutdown" ? (
@@ -409,6 +418,12 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
                     {p}
                   </button>
                 ))}
+              </div>
+              <div className="text-[11px] text-text-muted">
+                Runs on {runFramework === "ios"
+                  ? (caps?.hosts?.ios ? `Instances host ${caps.hosts.ios}` : "this host")
+                  : (caps?.hosts?.android ? `Instances host ${caps.hosts.android}` : "this host")}.
+                Change the default host in the app configuration.
               </div>
               <label className="flex flex-col gap-1 text-[11px] text-text-muted">
                 Source archive
