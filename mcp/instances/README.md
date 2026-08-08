@@ -21,18 +21,17 @@ instance_metrics(host_id)
 ```
 
 `host_id=0` is the **local Apteva machine**, auto-seeded at app mount.
-Other ids are remote hosts provisioned via a bound cloud integration or
-registered as externally managed SSH machines.
+Other ids are provider-managed compute provisioned through a bound cloud
+integration.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
 | `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, and Scaleway Apple silicon. |
-| `instance_register` | Register an existing SSH host, including a Mac, and generate its dedicated SSH key. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
-| `instance_destroy` | Terminate managed upstream + remove row, or only forget an external host (refused for local id 0) |
+| `instance_destroy` | Terminate the provider-managed resource and remove its row where supported (refused for local id 0) |
 | `instance_run_command` | Shell command. Local: in-process exec. Remote: SSH. |
 | `instance_upload_file` | Write a file. Local: filesystem (path-allowlisted to `<dataDir>/local-files/`). Remote: SCP-equivalent over SSH. |
 | `instance_wait_ready` | Poll until SSH reachable. |
@@ -87,20 +86,6 @@ the returned key ID privately, and deletes exactly that key after the matching
 Mac is deleted. Provisioning uses a non-renewing 24-hour commitment. The
 mandatory minimum allocation is exposed as `deletable_at`; Destroy remains
 disabled until that timestamp. No account password is stored.
-
-## Existing SSH hosts and Macs
-
-`instance_register(name, ssh_host, ssh_user, ssh_port?)` adds an existing
-machine without provisioning or otherwise changing it. Instances returns a
-new Ed25519 public key. Add that key to the selected user's
-`~/.ssh/authorized_keys`, then call `instance_wait_ready(id)` to verify access
-and mark the row ready.
-
-These hosts use the same command, file-transfer, and loopback tunnel tools as
-managed instances. `instance_destroy` only forgets an external row; it never
-shuts down, deletes, or reconfigures the machine. The current remote metrics
-collector requires a declared platform, so metrics are not advertised for
-external hosts by default.
 
 ## Metrics
 

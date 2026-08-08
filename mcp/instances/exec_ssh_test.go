@@ -18,9 +18,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func TestDialSSHRejectsUnmanagedProvider(t *testing.T) {
+	_, err := dialSSH(&Instance{ID: 42, Provider: "external"}, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "not a managed VPS provider") {
+		t.Fatalf("expected unmanaged provider rejection, got %v", err)
+	}
+}
 
 func TestLockedWriter_NoLostBytesUnderConcurrentWrites(t *testing.T) {
 	w := &lockedWriter{}
