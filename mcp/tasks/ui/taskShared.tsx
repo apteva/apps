@@ -306,7 +306,12 @@ export function StatePill({ task }: { task: Task }) {
 }
 
 export function Progress({ task }: { task: Task }) {
-  if (task.progress === undefined) return null;
+  if (
+    task.progress === undefined ||
+    isTerminal(task) ||
+    isScheduleDefinition(task)
+  )
+    return null;
   return (
     <div className="mt-2 flex items-center gap-2">
       <div className="h-1 flex-1 overflow-hidden rounded-full bg-bg-hover">
@@ -329,11 +334,18 @@ export function TaskRow({
   onOpen?: () => void;
   agentName?: string;
 }) {
+  const summary = taskRowSummary(task);
+  const attentionTone =
+    task.state === "failed"
+      ? "border-l-2 border-l-red bg-red/5"
+      : task.state === "blocked"
+        ? "border-l-2 border-l-yellow bg-yellow/5"
+        : "";
   return (
     <button
       type="button"
       onClick={onOpen}
-      className="block w-full border-b border-border px-4 py-3 text-left last:border-b-0 hover:bg-bg-hover/60"
+      className={`block w-full border-b border-border px-4 py-3 text-left last:border-b-0 hover:bg-bg-hover/60 ${attentionTone}`}
     >
       <div className="flex min-w-0 items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text">
@@ -344,9 +356,9 @@ export function TaskRow({
           {relativeWhen(task.updated_at)}
         </span>
       </div>
-      {(task.current_step || task.description) && (
+      {summary && (
         <p className="mt-1 truncate text-[10px] text-text-muted">
-          {task.current_step || task.description}
+          {summary}
         </p>
       )}
       <Progress task={task} />
@@ -369,6 +381,12 @@ export function TaskRow({
       </div>
     </button>
   );
+}
+
+export function taskRowSummary(task: Task) {
+  if (task.error) return task.error;
+  if (isTerminal(task) && task.result) return task.result;
+  return task.current_step || task.description || "";
 }
 
 export function TaskDetails({
@@ -571,6 +589,58 @@ export function selectGroups(tasks: Task[]) {
     upcoming: roots.filter((task) => isPendingSchedule(task)),
     recent: roots.filter((task) => isTerminal(task)).slice(0, 8),
   };
+}
+
+export function taskQueueRank(task: Task) {
+  if (task.state === "failed") return 0;
+  if (task.state === "blocked") return 1;
+  if (task.state === "running") return 2;
+  if (task.state === "queued") return 3;
+  if (isActive(task)) return 4;
+  if (isPendingSchedule(task)) return 5;
+  if (isPausedSchedule(task)) return 6;
+  if (task.state === "completed") return 7;
+  if (task.state === "cancelled") return 8;
+  return 9;
+}
+
+function taskTime(task: Task, scheduled: boolean) {
+  const value = scheduled
+    ? task.next_run_at || task.schedule_expression
+    : task.completed_at || task.updated_at || task.created_at;
+  const time = value ? new Date(value).getTime() : Number.NaN;
+  return Number.isNaN(time) ? 0 : time;
+}
+
+export function selectTaskQueue(
+  tasks: Task[],
+  preferences: TaskOverviewPreferences = taskOverviewPreferences(),
+) {
+  const roots = tasks.filter((task) => !task.parent_task_id);
+  const operational = roots.filter((task) => {
+    if (task.state === "failed" || isActive(task))
+      return preferences.showActive;
+    if (isPendingSchedule(task) || isPausedSchedule(task))
+      return preferences.showUpcoming;
+    return false;
+  });
+  const recent = preferences.showRecent
+    ? roots
+        .filter(
+          (task) =>
+            task.state === "completed" || task.state === "cancelled",
+        )
+        .sort((a, b) => taskTime(b, false) - taskTime(a, false))
+        .slice(0, preferences.recentLimit)
+    : [];
+
+  return [...operational, ...recent].sort((a, b) => {
+    const rank = taskQueueRank(a) - taskQueueRank(b);
+    if (rank !== 0) return rank;
+    if (isPendingSchedule(a) && isPendingSchedule(b))
+      return taskTime(a, true) - taskTime(b, true);
+    return taskTime(b, false) - taskTime(a, false);
+  });
 }
 
 export function useAgentNames(projectId?: string) {

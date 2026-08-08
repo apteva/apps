@@ -3,6 +3,9 @@ import {
   isPendingSchedule,
   scheduleLabel,
   selectGroups,
+  selectTaskQueue,
+  taskQueueRank,
+  taskRowSummary,
   taskStateLabel,
   taskOverviewPreferences,
   type Task,
@@ -110,6 +113,81 @@ describe("Tasks app UI model", () => {
     expect(groups.active.map((item) => item.id)).toEqual(["active"]);
     expect(groups.upcoming.map((item) => item.id)).toEqual(["schedule"]);
     expect(groups.recent.map((item) => item.id)).toEqual(["done"]);
+  });
+
+  test("orders the Home widget as one operational priority queue", () => {
+    const queue = selectTaskQueue([
+      task({ id: "cancelled", state: "cancelled" }),
+      task({ id: "completed", state: "completed" }),
+      task({
+        id: "later",
+        state: "waiting",
+        schedule_kind: "interval",
+        schedule_enabled: true,
+        next_run_at: "2026-08-08T12:00:00Z",
+      }),
+      task({
+        id: "sooner",
+        state: "waiting",
+        schedule_kind: "once",
+        schedule_enabled: true,
+        next_run_at: "2026-08-08T11:00:00Z",
+      }),
+      task({
+        id: "paused",
+        state: "waiting",
+        schedule_kind: "interval",
+        schedule_enabled: false,
+      }),
+      task({ id: "queued", state: "queued" }),
+      task({ id: "running", state: "running" }),
+      task({ id: "blocked", state: "blocked" }),
+      task({ id: "failed", state: "failed" }),
+      task({ id: "occurrence", parent_task_id: "later", state: "running" }),
+    ]);
+
+    expect(queue.map((item) => item.id)).toEqual([
+      "failed",
+      "blocked",
+      "running",
+      "queued",
+      "sooner",
+      "later",
+      "paused",
+      "completed",
+      "cancelled",
+    ]);
+    expect(taskQueueRank(queue[0])).toBeLessThan(taskQueueRank(queue[1]));
+  });
+
+  test("keeps failures visible with active work and applies recent limits only to history", () => {
+    const queue = selectTaskQueue(
+      [
+        task({ id: "failed", state: "failed", error: "CRM unavailable" }),
+        task({ id: "done-new", state: "completed", updated_at: "2026-08-08T12:00:00Z" }),
+        task({ id: "done-old", state: "completed", updated_at: "2026-08-08T11:00:00Z" }),
+      ],
+      {
+        showActive: true,
+        showUpcoming: true,
+        showRecent: true,
+        recentLimit: 1,
+      },
+    );
+    expect(queue.map((item) => item.id)).toEqual(["failed", "done-new"]);
+    expect(taskRowSummary(queue[0])).toBe("CRM unavailable");
+  });
+
+  test("uses terminal results instead of stale execution steps in compact rows", () => {
+    expect(
+      taskRowSummary(
+        task({
+          state: "completed",
+          current_step: "Reviewing leads",
+          result: "No newly active leads found.",
+        }),
+      ),
+    ).toBe("No newly active leads found.");
   });
 
   test("normalizes per-instance task overview settings", () => {
