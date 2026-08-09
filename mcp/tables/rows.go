@@ -463,8 +463,10 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	emit(ctx, topicRowUpdated, map[string]any{
-		"table": tableName,
-		"id":    id,
+		"table":  tableName,
+		"id":     id,
+		"fields": fields,
+		"row":    row,
 	})
 	return map[string]any{"row": row}, nil
 }
