@@ -929,8 +929,8 @@ func (a *App) toolStorePreflight(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, boolArg(args, "strict"))
 	appendProviderReadinessFindings(&preflight, d, cfg)
-	if cfg != nil {
-		_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
+	if err := persistStorePreflightState(ctx.AppDB(), cfg, preflight); err != nil {
+		return nil, err
 	}
 	return preflight, nil
 }

@@ -403,6 +403,28 @@ func dbUpdateMobileStoreState(db *sql.DB, id int64, status, observedJSON, valida
 	return err
 }
 
+func persistStorePreflightState(db *sql.DB, cfg *MobileStoreConfig, preflight StorePreflight) error {
+	if cfg == nil {
+		return nil
+	}
+	status, lastError := cfg.Status, cfg.LastError
+	if preflight.Ready && status == "blocked" {
+		status = "ready"
+		if cfg.AppliedHash != "" && cfg.AppliedHash == cfg.DesiredHash {
+			status = "applied"
+		}
+		lastError = ""
+	}
+	validationJSON := mustJSON(preflight)
+	if err := dbUpdateMobileStoreState(db, cfg.ID, status, "", validationJSON, "", lastError); err != nil {
+		return err
+	}
+	cfg.Status = status
+	cfg.LastError = lastError
+	cfg.ValidationJSON = validationJSON
+	return nil
+}
+
 func (a *App) mobileStoreConfig(d *Deployment) (*MobileStoreConfig, StoreDocument, error) {
 	cfg, err := dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 	if err != nil {
@@ -422,8 +444,8 @@ func (a *App) storePreflight(d *Deployment, build *Build, strict bool) (StorePre
 	}
 	out := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
 	appendProviderReadinessFindings(&out, d, cfg)
-	if cfg != nil {
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(out), "", cfg.LastError)
+	if err := persistStorePreflightState(globalCtx.AppDB(), cfg, out); err != nil {
+		return StorePreflight{}, err
 	}
 	return out, nil
 }
@@ -630,6 +652,9 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
 	appendProviderReadinessFindings(&preflight, d, cfg)
+	if err := persistStorePreflightState(globalCtx.AppDB(), cfg, preflight); err != nil {
+		return StorePlan{}, err
+	}
 	plan := StorePlan{
 		Provider: mobileStoreProvider(d.TargetKind), Platform: d.TargetKind,
 		Preflight: preflight,
@@ -698,7 +723,15 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 		return nil, nil, err
 	}
 	cfg, err = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
-	return cfg, observed, err
+	if err != nil {
+		return nil, nil, err
+	}
+	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, true)
+	appendProviderReadinessFindings(&preflight, d, cfg)
+	if err := persistStorePreflightState(globalCtx.AppDB(), cfg, preflight); err != nil {
+		return nil, nil, err
+	}
+	return cfg, observed, nil
 }
 
 func preserveStoreObservationState(observed map[string]any, previousJSON string) {

@@ -89,6 +89,90 @@ func TestMobileStorePartialStatusAndUnchangedSavePreserveFailureHistory(t *testi
 	}
 }
 
+func TestReadyStorePreflightClearsStaleBlockedState(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-ready", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	cfg, err := dbUpsertMobileStoreConfig(db, d, completeIOSStoreDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "blocked", "", "{}", "", "old preflight failure"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistStorePreflightState(db, cfg, StorePreflight{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "ready" || cfg.LastError != "" {
+		t.Fatalf("stale blocked state was not cleared: %+v", cfg)
+	}
+}
+
+func TestReadyStorePreflightRestoresAppliedStateAndPreservesApplyFailures(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-applied", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	cfg, err := dbUpsertMobileStoreConfig(db, d, completeIOSStoreDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "blocked", "", "{}", cfg.DesiredHash, "old preflight failure"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistStorePreflightState(db, cfg, StorePreflight{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "applied" || cfg.LastError != "" {
+		t.Fatalf("matching applied configuration was not restored: %+v", cfg)
+	}
+
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", "", "{}", "", "provider apply failed"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistStorePreflightState(db, cfg, StorePreflight{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "failed" || cfg.LastError != "provider apply failed" {
+		t.Fatalf("apply failure history was overwritten: %+v", cfg)
+	}
+}
+
 func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
 	doc := completeIOSStoreDocument()
 	doc.Review.DemoAccountRequired = true
