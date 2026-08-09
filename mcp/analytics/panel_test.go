@@ -24,9 +24,38 @@ func TestHTTPRoutesRegistered(t *testing.T) {
 	for _, r := range (&App{}).HTTPRoutes() {
 		got[r.Pattern] = true
 	}
-	for _, want := range []string{"/summary", "/series", "/top", "/feed", "/dimensions", "/ui/tag.js", "/collect", "/keys", "/keys/revoke", "/capture", "/dashboards", "/dashboards/", "/widgets/", "/query-widget", "/query-dashboard", "/dashboard-filter-options", "/event-specs", "/event-specs/", "/event-spec-violations"} {
+	for _, want := range []string{"/summary", "/series", "/top", "/feed", "/dimensions", "/ui/tag.js", "/collect", "/keys", "/keys/revoke", "/capture", "/dashboards", "/dashboards/", "/widgets/", "/query-widget", "/query-dashboard", "/dashboard-filter-options", "/objectives", "/objectives/", "/objective-metrics", "/event-specs", "/event-specs/", "/event-spec-violations"} {
 		if !got[want] {
 			t.Errorf("missing route %s", want)
+		}
+	}
+}
+
+func TestDiskEmbeddedAndRuntimeToolsAgree(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets := []map[string]bool{{}, {}, {}}
+	for _, tool := range disk.Provides.MCPTools {
+		sets[0][tool.Name] = true
+	}
+	for _, tool := range (&App{}).Manifest().Provides.MCPTools {
+		sets[1][tool.Name] = true
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		sets[2][tool.Name] = true
+	}
+	if len(sets[0]) != len(sets[1]) || len(sets[1]) != len(sets[2]) {
+		t.Fatalf("tool counts differ: disk=%d embedded=%d runtime=%d", len(sets[0]), len(sets[1]), len(sets[2]))
+	}
+	for name := range sets[0] {
+		if !sets[1][name] || !sets[2][name] {
+			t.Errorf("tool %q is not declared by disk, embedded and runtime manifests", name)
 		}
 	}
 }

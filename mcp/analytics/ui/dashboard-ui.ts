@@ -51,3 +51,40 @@ export function partitionDashboardWidgets<T extends { type: string }>(widgets: T
     charts: widgets.filter((widget) => widget.type !== "stat"),
   };
 }
+
+export function objectiveMonthBounds(month: string): { start: number; end: number } {
+  if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("month must be YYYY-MM");
+  const [year, monthNumber] = month.split("-").map(Number);
+  if (monthNumber < 1 || monthNumber > 12) throw new Error("invalid month");
+  return {
+    start: Date.UTC(year, monthNumber - 1, 1),
+    end: Date.UTC(year, monthNumber, 1),
+  };
+}
+
+export function objectiveProgressWidth(percent?: number): number {
+  if (!Number.isFinite(percent)) return 0;
+  return Math.max(0, Math.min(100, percent as number));
+}
+
+export function formatObjectiveValue(value: number, unit: string, currency = ""): string {
+  if (unit === "money") {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency || "USD",
+      maximumFractionDigits: 2,
+    }).format(value);
+  }
+  if (unit === "percent") return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+export function formatObjectivePeriod(start: number, end: number, timezone = "UTC"): string {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    timeZone: timezone || "UTC",
+  });
+  return `${formatter.format(new Date(start))} - ${formatter.format(new Date(end - 1))}`;
+}

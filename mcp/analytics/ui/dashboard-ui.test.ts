@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { batchResultsByID, formatMetric, isCurrentRequest, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 describe("dashboard UI helpers", () => {
   test("formats normalized Patreon money with an explicit USD unit", () => {
@@ -34,5 +34,29 @@ describe("dashboard UI helpers", () => {
     const { stats, charts } = partitionDashboardWidgets(widgets);
     expect(stats).toHaveLength(3);
     expect(charts).toHaveLength(4);
+  });
+
+  test("builds an exclusive UTC month range for objective targets", () => {
+    expect(objectiveMonthBounds("2026-08")).toEqual({
+      start: Date.UTC(2026, 7, 1),
+      end: Date.UTC(2026, 8, 1),
+    });
+    expect(() => objectiveMonthBounds("2026-13")).toThrow("invalid month");
+  });
+
+  test("clamps objective progress bars while preserving the real percentage elsewhere", () => {
+    expect(objectiveProgressWidth(142)).toBe(100);
+    expect(objectiveProgressWidth(-4)).toBe(0);
+    expect(objectiveProgressWidth(undefined)).toBe(0);
+  });
+
+  test("formats target units explicitly", () => {
+    expect(formatObjectiveValue(25000, "money", "USD")).toBe("$25,000.00");
+    expect(formatObjectiveValue(12.5, "percent")).toBe("12.5%");
+  });
+
+  test("renders an exclusive UTC month end without leaking into the local timezone", () => {
+    const { start, end } = objectiveMonthBounds("2026-08");
+    expect(formatObjectivePeriod(start, end, "UTC")).toBe("Aug 1, 2026 - Aug 31, 2026");
   });
 });

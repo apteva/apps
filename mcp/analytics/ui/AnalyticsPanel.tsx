@@ -18,7 +18,8 @@
 // top,events,dimensions}.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { batchResultsByID, formatMetric, isCurrentRequest, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
+import { Archive, Plus, RefreshCw } from "lucide-react";
+import { batchResultsByID, formatMetric, formatObjectivePeriod, formatObjectiveValue, isCurrentRequest, objectiveMonthBounds, objectiveProgressWidth, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -220,6 +221,54 @@ interface EventViolation {
   message: string;
   property_key?: string;
   seen_at: number;
+}
+
+interface ObjectiveMetricQuery {
+  aggregation: "count" | "sum" | "distinct";
+  app?: string;
+  topic?: string;
+  source?: "track" | "auto";
+  value?: string;
+  by?: string;
+  where?: Record<string, unknown>;
+}
+
+interface TargetProgress {
+  target_id: number;
+  actual_value?: number;
+  target_value: number;
+  progress_percent?: number;
+  achieved: boolean;
+  period_state: "upcoming" | "active" | "ended";
+  status: "ok" | "error";
+  error?: string;
+  measured_at?: number;
+}
+
+interface ObjectiveTarget {
+  id: number;
+  name: string;
+  metric_key: string;
+  target_value: number;
+  unit: "money" | "count" | "percent" | "number";
+  currency?: string;
+  direction: "at_least" | "at_most";
+  period_start: number;
+  period_end: number;
+  timezone: string;
+  query: ObjectiveMetricQuery;
+  last_progress?: TargetProgress;
+}
+
+interface Objective {
+  id: number;
+  name: string;
+  description: string;
+  owner_type?: string;
+  owner_id?: string;
+  status: "draft" | "active" | "paused" | "archived";
+  targets: ObjectiveTarget[];
+  updated_at: number;
 }
 
 const WINDOWS = [
@@ -455,6 +504,251 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
     >
       {done ? "Copied" : label || "Copy"}
     </button>
+  );
+}
+
+function currentMonth(): string {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function ObjectivesTab({ projectId }: { projectId: string }) {
+  const [objectives, setObjectives] = useState<Objective[]>([]);
+  const [dims, setDims] = useState<Dimensions>({ apps: [], topics: [] });
+  const [showForm, setShowForm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [refreshingId, setRefreshingId] = useState(0);
+  const [err, setErr] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [targetName, setTargetName] = useState("");
+  const [targetValue, setTargetValue] = useState("");
+  const [unit, setUnit] = useState<ObjectiveTarget["unit"]>("count");
+  const [currency, setCurrency] = useState("USD");
+  const [direction, setDirection] = useState<ObjectiveTarget["direction"]>("at_least");
+  const [month, setMonth] = useState(currentMonth());
+  const [aggregation, setAggregation] = useState<ObjectiveMetricQuery["aggregation"]>("count");
+  const [app, setApp] = useState("");
+  const [topic, setTopic] = useState("");
+  const [value, setValue] = useState("props.amount_usd");
+  const [by, setBy] = useState("session_id");
+  const [whereKey, setWhereKey] = useState("");
+  const [whereValue, setWhereValue] = useState("");
+
+  const scopedURL = useCallback((path: string) => scopedAppURL(path, projectId), [projectId]);
+
+  const load = useCallback(async () => {
+    setErr("");
+    try {
+      const r = await fetch(scopedURL(`${API}/objectives`), { credentials: "same-origin" });
+      if (!r.ok) throw new Error((await r.text()) || `Objectives ${r.status}`);
+      setObjectives((await r.json()).objectives ?? []);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  }, [scopedURL]);
+
+  useEffect(() => {
+    load();
+    fetch(scopedURL(`${API}/dimensions`), { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : { apps: [], topics: [] }))
+      .then((d) => setDims({ apps: d.apps ?? [], topics: d.topics ?? [] }))
+      .catch(() => {});
+  }, [load, scopedURL]);
+
+  const resetForm = () => {
+    setName("");
+    setDescription("");
+    setTargetName("");
+    setTargetValue("");
+    setUnit("count");
+    setCurrency("USD");
+    setDirection("at_least");
+    setMonth(currentMonth());
+    setAggregation("count");
+    setApp("");
+    setTopic("");
+    setValue("props.amount_usd");
+    setBy("session_id");
+    setWhereKey("");
+    setWhereValue("");
+  };
+
+  const create = async () => {
+    setErr("");
+    const numericTarget = Number(targetValue);
+    if (!name.trim() || !targetName.trim() || !Number.isFinite(numericTarget)) {
+      setErr("Objective name, target name and target value are required.");
+      return;
+    }
+    let bounds: { start: number; end: number };
+    try {
+      bounds = objectiveMonthBounds(month);
+    } catch (e) {
+      setErr((e as Error).message);
+      return;
+    }
+    const query: ObjectiveMetricQuery = { aggregation };
+    if (app.trim()) query.app = app.trim();
+    if (topic.trim()) query.topic = topic.trim();
+    if (aggregation === "sum") query.value = value.trim();
+    if (aggregation === "distinct") query.by = by.trim();
+    if (whereKey.trim() && whereValue.trim()) query.where = { [whereKey.trim()]: whereValue.trim() };
+    setBusy(true);
+    try {
+      const r = await fetch(scopedURL(`${API}/objectives`), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: name.trim(),
+          description: description.trim(),
+          status: "active",
+          targets: [{
+            name: targetName.trim(),
+            metric_key: aggregation === "sum" ? "custom_sum" : aggregation === "distinct" ? "custom_distinct" : "custom_count",
+            target_value: numericTarget,
+            unit,
+            currency: unit === "money" ? currency.trim().toUpperCase() : "",
+            direction,
+            period_start: bounds.start,
+            period_end: bounds.end,
+            timezone: "UTC",
+            query,
+          }],
+        }),
+      });
+      if (!r.ok) throw new Error((await r.text()) || `Create ${r.status}`);
+      resetForm();
+      setShowForm(false);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshObjective = async (id: number) => {
+    setRefreshingId(id);
+    setErr("");
+    try {
+      const r = await fetch(scopedURL(`${API}/objectives/${id}/progress`), {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!r.ok) throw new Error((await r.text()) || `Refresh ${r.status}`);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setRefreshingId(0);
+    }
+  };
+
+  const archive = async (id: number) => {
+    if (!window.confirm("Archive this objective?")) return;
+    setErr("");
+    try {
+      const r = await fetch(scopedURL(`${API}/objectives/${id}`), { method: "DELETE", credentials: "same-origin" });
+      if (!r.ok) throw new Error((await r.text()) || `Archive ${r.status}`);
+      await load();
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+
+  const inputCls = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text";
+  const labelCls = "flex flex-col gap-1 text-xs text-text-dim";
+
+  return (
+    <div className="flex-1 overflow-auto">
+      <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+        <div>
+          <div className="text-text font-medium">Objectives</div>
+          <div className="text-text-dim text-xs">{objectives.length} {objectives.length === 1 ? "objective" : "objectives"}</div>
+        </div>
+        {err && <span className="text-error text-xs truncate">{err}</span>}
+        <button
+          onClick={() => setShowForm((v) => !v)}
+          className="ml-auto px-3 py-1.5 text-sm border border-accent rounded text-accent hover:text-text flex items-center gap-1.5"
+        >
+          {!showForm && <Plus size={14} aria-hidden="true" />}
+          {showForm ? "Cancel" : "New objective"}
+        </button>
+      </div>
+
+      {showForm && (
+        <section className="border-b border-border px-4 py-4">
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))" }}>
+            <label className={labelCls}>Objective name<input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} /></label>
+            <label className={labelCls}>Target name<input className={inputCls} value={targetName} onChange={(e) => setTargetName(e.target.value)} /></label>
+            <label className={labelCls}>Month<input type="month" className={inputCls} value={month} onChange={(e) => setMonth(e.target.value)} /></label>
+            <label className={labelCls}>Aggregation<select className={inputCls} value={aggregation} onChange={(e) => setAggregation(e.target.value as ObjectiveMetricQuery["aggregation"])}><option value="count">Count</option><option value="sum">Sum</option><option value="distinct">Distinct</option></select></label>
+            <label className={labelCls}>App<input list="objective-apps" className={inputCls} value={app} onChange={(e) => setApp(e.target.value)} /><datalist id="objective-apps">{dims.apps.map((v) => <option key={v} value={v} />)}</datalist></label>
+            <label className={labelCls}>Event topic<input list="objective-topics" className={inputCls} value={topic} onChange={(e) => setTopic(e.target.value)} /><datalist id="objective-topics">{dims.topics.map((v) => <option key={v} value={v} />)}</datalist></label>
+            {aggregation === "sum" && <label className={labelCls}>Value field<input className={inputCls} value={value} onChange={(e) => setValue(e.target.value)} /></label>}
+            {aggregation === "distinct" && <label className={labelCls}>Distinct field<input className={inputCls} value={by} onChange={(e) => setBy(e.target.value)} /></label>}
+            <label className={labelCls}>Target value<input type="number" step="any" className={inputCls} value={targetValue} onChange={(e) => setTargetValue(e.target.value)} /></label>
+            <label className={labelCls}>Direction<select className={inputCls} value={direction} onChange={(e) => setDirection(e.target.value as ObjectiveTarget["direction"])}><option value="at_least">At least</option><option value="at_most">At most</option></select></label>
+            <label className={labelCls}>Unit<select className={inputCls} value={unit} onChange={(e) => setUnit(e.target.value as ObjectiveTarget["unit"])}><option value="count">Count</option><option value="money">Money</option><option value="percent">Percent</option><option value="number">Number</option></select></label>
+            {unit === "money" && <label className={labelCls}>Currency<input className={inputCls} maxLength={3} value={currency} onChange={(e) => setCurrency(e.target.value)} /></label>}
+            <label className={labelCls}>Property filter<input className={inputCls} placeholder="props.site" value={whereKey} onChange={(e) => setWhereKey(e.target.value)} /></label>
+            <label className={labelCls}>Filter value<input className={inputCls} value={whereValue} onChange={(e) => setWhereValue(e.target.value)} /></label>
+          </div>
+          <label className={`${labelCls} mt-3`}>Description<textarea className={inputCls} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} /></label>
+          <div className="flex justify-end mt-3">
+            <button disabled={busy} onClick={create} className="px-4 py-1.5 text-sm bg-accent text-bg rounded disabled:opacity-50">{busy ? "Creating…" : "Create objective"}</button>
+          </div>
+        </section>
+      )}
+
+      <main className="px-4 py-4 flex flex-col gap-3">
+        {!objectives.length ? <Empty label="No objectives yet." /> : objectives.map((objective) => (
+          <section key={objective.id} className="border border-border rounded overflow-hidden">
+            <div className="flex items-center gap-3 px-3 py-2 border-b border-border">
+              <div className="min-w-0">
+                <div className="text-text font-medium truncate">{objective.name}</div>
+                {objective.description && <div className="text-text-dim text-xs truncate">{objective.description}</div>}
+              </div>
+              <span className="text-text-dim text-xs uppercase">{objective.status}</span>
+              <button aria-label="Refresh progress" title="Refresh progress" disabled={refreshingId === objective.id} onClick={() => refreshObjective(objective.id)} className="ml-auto w-8 h-8 inline-flex items-center justify-center border border-border rounded text-text-muted hover:text-text disabled:opacity-50"><RefreshCw size={14} className={refreshingId === objective.id ? "animate-spin" : ""} /></button>
+              <button aria-label="Archive objective" title="Archive objective" onClick={() => archive(objective.id)} className="w-8 h-8 inline-flex items-center justify-center border border-border rounded text-text-muted hover:text-error"><Archive size={14} /></button>
+            </div>
+            {objective.targets.map((target) => {
+              const p = target.last_progress;
+              const actual = p?.actual_value;
+              const width = objectiveProgressWidth(p?.progress_percent);
+              return (
+                <div key={target.id} className="px-3 py-3 border-t first:border-t-0 border-border">
+                  <div className="flex items-start gap-4 flex-wrap">
+                    <div className="flex-1" style={{ minWidth: "220px" }}>
+                      <div className="flex items-center gap-2">
+                        <span className="text-text text-sm font-medium">{target.name}</span>
+                        {p?.achieved && <span className="text-success text-xs">Achieved</span>}
+                        {p?.status === "error" && <span className="text-error text-xs">Stale</span>}
+                      </div>
+                      <div className="text-text-dim text-xs mt-0.5">
+                        {[target.query.app, target.query.topic, target.query.value || target.query.by || target.query.aggregation].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                    <div className="text-right tabular-nums">
+                      <div className="text-text font-semibold">{actual == null ? "—" : formatObjectiveValue(actual, target.unit, target.currency)}</div>
+                      <div className="text-text-dim text-xs">{target.direction === "at_least" ? "of" : "limit"} {formatObjectiveValue(target.target_value, target.unit, target.currency)}</div>
+                    </div>
+                  </div>
+                  <div className="bg-bg-input rounded overflow-hidden mt-2" style={{ height: "6px" }}><div className={p?.status === "error" ? "h-full bg-error" : p?.achieved ? "h-full bg-success" : "h-full bg-accent"} style={{ width: `${width}%` }} /></div>
+                  <div className="flex items-center justify-between text-text-dim text-xs mt-1">
+                    <span>{formatObjectivePeriod(target.period_start, target.period_end, target.timezone)}</span>
+                    <span>{p?.error || (p?.measured_at ? `Updated ${relTime(p.measured_at)}` : "Not measured")}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+        ))}
+      </main>
+    </div>
   );
 }
 
@@ -1592,7 +1886,7 @@ function CatalogTab({ projectId }: { projectId: string }) {
 }
 
 export default function AnalyticsPanel({ projectId }: NativePanelProps) {
-  const [view, setView] = useState<"overview" | "dashboards" | "catalog" | "tracking" | "capture">("overview");
+  const [view, setView] = useState<"overview" | "dashboards" | "objectives" | "catalog" | "tracking" | "capture">("overview");
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
   const [appF, setAppF] = useState("");
@@ -1728,7 +2022,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           Analytics
         </div>
 		<div className="flex items-center gap-1 ml-2 flex-shrink-0">
-          {(["overview", "dashboards", "catalog", "tracking", "capture"] as const).map((v) => (
+		  {(["overview", "dashboards", "objectives", "catalog", "tracking", "capture"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -1743,6 +2037,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
                 ? "Overview"
                 : v === "dashboards"
                   ? "Dashboards"
+                  : v === "objectives"
+                    ? "Objectives"
                   : v === "catalog"
                     ? "Catalog"
                     : v === "tracking"
@@ -1793,6 +2089,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
         <CaptureTab projectId={projectId} />
       ) : view === "dashboards" ? (
         <DashboardsTab projectId={projectId} />
+      ) : view === "objectives" ? (
+        <ObjectivesTab projectId={projectId} />
       ) : view === "catalog" ? (
         <CatalogTab projectId={projectId} />
       ) : (
