@@ -1446,6 +1446,20 @@ func TestProdigiQuoteAndStatusNormalization(t *testing.T) {
 	}
 }
 
+func TestSyncedSourceCostPreservesKnownCostWhenProviderOmitsPricing(t *testing.T) {
+	source := &VariantSource{UnitCostCents: 1100, Currency: "USD"}
+
+	cost, currency := syncedSourceCost(source, ProviderVariant{Currency: "USD"})
+	if cost != 1100 || currency != "USD" {
+		t.Fatalf("missing provider cost = %d %s, want 1100 USD", cost, currency)
+	}
+
+	cost, currency = syncedSourceCost(source, ProviderVariant{CostCents: 1250, Currency: "EUR"})
+	if cost != 1250 || currency != "EUR" {
+		t.Fatalf("new provider cost = %d %s, want 1250 EUR", cost, currency)
+	}
+}
+
 func TestProviderStorageUsesThreeCommerceTables(t *testing.T) {
 	db := openCommerceTestDB(t)
 	rows, err := db.Query(`SELECT name FROM sqlite_master

@@ -749,17 +749,27 @@ func (a *App) syncVariantSource(ctx *sdk.AppCtx, pid string, source *VariantSour
 		if !variant.Available {
 			availability = "unavailable"
 		}
+		costCents, currency := syncedSourceCost(source, variant)
 		_, err := ctx.AppDB().Exec(
 			`UPDATE commerce_variant_sources
 			    SET provider_sku=?, unit_cost_cents=?, currency=?, availability=?,
 			        available_quantity=?, source_json=?, last_synced_at=CURRENT_TIMESTAMP,
 			        updated_at=CURRENT_TIMESTAMP
 			  WHERE project_id=? AND id=?`,
-			variant.SKU, variant.CostCents, firstNonEmpty(variant.Currency, source.Currency), availability,
+			variant.SKU, costCents, currency, availability,
 			nullableFloat(variant.AvailableQuantity), jsonText(variant.Raw, "{}"), pid, source.ID)
 		return err
 	}
 	return errors.New("provider variant no longer exists")
+}
+
+func syncedSourceCost(source *VariantSource, variant ProviderVariant) (int64, string) {
+	costCents := variant.CostCents
+	currency := firstNonEmpty(variant.Currency, source.Currency)
+	if costCents <= 0 && source.UnitCostCents > 0 {
+		return source.UnitCostCents, source.Currency
+	}
+	return costCents, currency
 }
 
 func cartSourceGroups(db *sql.DB, pid string, cart *Cart) (map[int64][]dispatchLine, error) {
