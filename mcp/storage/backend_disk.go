@@ -104,7 +104,7 @@ func (d *diskBackend) LocalPath(key string) (string, bool) {
 	return d.absPath(key), true
 }
 
-func (d *diskBackend) PresignGet(_ context.Context, _, _, _ string, _ time.Duration) (string, error) {
+func (d *diskBackend) PresignGet(_ context.Context, _ string, _ GetObjectOptions, _ time.Duration) (string, error) {
 	return "", ErrPresignNotSupported
 }
 

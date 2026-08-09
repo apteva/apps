@@ -245,7 +245,7 @@ func (s *s3Backend) Stat(ctx context.Context, key string) (int64, error) {
 // to the presigned-redirect path.
 func (s *s3Backend) LocalPath(_ string) (string, bool) { return "", false }
 
-func (s *s3Backend) PresignGet(ctx context.Context, key, filename, contentType string, ttl time.Duration) (string, error) {
+func (s *s3Backend) PresignGet(ctx context.Context, key string, options GetObjectOptions, ttl time.Duration) (string, error) {
 	if ttl <= 0 {
 		ttl = 1 * time.Hour
 	}
@@ -253,15 +253,12 @@ func (s *s3Backend) PresignGet(ctx context.Context, key, filename, contentType s
 		// SigV4 cap.
 		ttl = 7 * 24 * time.Hour
 	}
+	contentType := safeResponseContentType(options.ContentType)
+	disposition := effectiveContentDisposition(options.Disposition, contentType)
 	reqParams := url.Values{}
-	if filename != "" {
-		// %22 quoting handled by Set; UA gets a sensible Save-As name.
-		reqParams.Set("response-content-disposition",
-			`attachment; filename="`+sanitiseFilename(filename)+`"`)
-	}
-	if contentType != "" {
-		reqParams.Set("response-content-type", contentType)
-	}
+	reqParams.Set("response-content-disposition", contentDispositionHeader(disposition, options.Filename))
+	reqParams.Set("response-content-type", contentType)
+	reqParams.Set("response-cache-control", presignedResponseCacheControl(ttl))
 	u, err := s.client.PresignedGetObject(ctx, s.bucket, key, ttl, reqParams)
 	if err != nil {
 		return "", fmt.Errorf("s3 presign get %s: %w", key, err)

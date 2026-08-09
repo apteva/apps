@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"strings"
 	"time"
 
@@ -39,6 +40,22 @@ var ErrPresignNotSupported = errors.New("backend does not support presigned URLs
 // methods report not-found via os.IsNotExist-style nil errors where
 // it's harmless (Delete is idempotent).
 var ErrNotFound = errors.New("object not found")
+
+type ContentDisposition string
+
+const (
+	DispositionInline     ContentDisposition = "inline"
+	DispositionAttachment ContentDisposition = "attachment"
+)
+
+// GetObjectOptions describes how a fetched object should be presented. The
+// disposition is normalized against ContentType before use so executable or
+// unknown content cannot be rendered inline on the Storage origin.
+type GetObjectOptions struct {
+	Filename    string
+	ContentType string
+	Disposition ContentDisposition
+}
 
 // Backend is the abstract blob store. Implementations live in
 // backend_disk.go and backend_s3.go.
@@ -65,18 +82,129 @@ type Backend interface {
 	// presigned redirect.
 	LocalPath(key string) (string, bool)
 
-	// PresignGet mints a direct download URL with the given TTL.
-	// filename and contentType are advisory — backends use them to set
+	// PresignGet mints a direct delivery URL with the given TTL.
+	// options are advisory — backends use them to set
 	// Content-Disposition / Content-Type on the presigned response so
 	// the user-agent gets the right behaviour. Disk returns
 	// ErrPresignNotSupported.
-	PresignGet(ctx context.Context, key, filename, contentType string, ttl time.Duration) (string, error)
+	PresignGet(ctx context.Context, key string, options GetObjectOptions, ttl time.Duration) (string, error)
 
 	// PresignPut mints a direct upload URL with the given TTL. Used by
 	// the /files/init endpoint to hand a client an S3 PUT URL it can
 	// upload to without proxying through us. Disk returns
 	// ErrPresignNotSupported.
 	PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (string, error)
+}
+
+func parseContentDisposition(raw string) (ContentDisposition, error) {
+	switch ContentDisposition(strings.ToLower(strings.TrimSpace(raw))) {
+	case "", DispositionInline:
+		return DispositionInline, nil
+	case DispositionAttachment:
+		return DispositionAttachment, nil
+	default:
+		return "", fmt.Errorf("disposition must be one of: inline, attachment")
+	}
+}
+
+// effectiveContentDisposition refuses inline rendering for active or unknown
+// formats. This matters most on disk-backed installs, where bytes are served
+// from the same origin as the application.
+func effectiveContentDisposition(requested ContentDisposition, contentType string) ContentDisposition {
+	if requested == DispositionAttachment {
+		return DispositionAttachment
+	}
+	if isSafeInlineContentType(contentType) {
+		return DispositionInline
+	}
+	return DispositionAttachment
+}
+
+func isSafeInlineContentType(raw string) bool {
+	mediaType, _, err := mime.ParseMediaType(raw)
+	if err != nil {
+		return false
+	}
+	mediaType = strings.ToLower(mediaType)
+	if strings.HasPrefix(mediaType, "audio/") || strings.HasPrefix(mediaType, "video/") {
+		return true
+	}
+	switch mediaType {
+	case "application/pdf", "text/plain",
+		"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif",
+		"image/apng", "image/bmp", "image/tiff", "image/x-icon", "image/vnd.microsoft.icon":
+		return true
+	default:
+		return false
+	}
+}
+
+func safeResponseContentType(raw string) string {
+	mediaType, params, err := mime.ParseMediaType(raw)
+	if err != nil || mediaType == "" {
+		return "application/octet-stream"
+	}
+	if formatted := mime.FormatMediaType(strings.ToLower(mediaType), params); formatted != "" {
+		return formatted
+	}
+	return strings.ToLower(mediaType)
+}
+
+// contentDispositionHeader emits both a conservative ASCII fallback and an
+// RFC 5987 UTF-8 filename. Header-breaking bytes never survive either form.
+func contentDispositionHeader(disposition ContentDisposition, filename string) string {
+	if disposition != DispositionInline && disposition != DispositionAttachment {
+		disposition = DispositionAttachment
+	}
+	fallback := asciiFilenameFallback(filename)
+	encoded := encodeRFC5987Filename(filename)
+	return fmt.Sprintf(`%s; filename="%s"; filename*=UTF-8''%s`, disposition, fallback, encoded)
+}
+
+func asciiFilenameFallback(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' || r == '/' {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "download"
+	}
+	return b.String()
+}
+
+func encodeRFC5987Filename(name string) string {
+	if name == "" {
+		name = "download"
+	}
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+			strings.ContainsRune("!#$&+-.^_`|~", rune(c)) {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&0x0f])
+	}
+	return b.String()
+}
+
+// presignedResponseCacheControl keeps cached S3 responses inside the URL's
+// validity window. The skew allowance covers time spent following the 302.
+func presignedResponseCacheControl(ttl time.Duration) string {
+	seconds := int64(ttl / time.Second)
+	const skew = int64(30)
+	if seconds <= skew {
+		return "private, no-store"
+	}
+	return fmt.Sprintf("private, max-age=%d", seconds-skew)
 }
 
 // constrainedPutPresigner is an optional S3 capability used by direct

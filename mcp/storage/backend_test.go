@@ -9,10 +9,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 )
 
 func TestObjectKey_PrefixesBy2HexChars(t *testing.T) {
@@ -105,7 +110,7 @@ func TestDiskBackend_Put_HonoursSizeLimit(t *testing.T) {
 func TestDiskBackend_PresignsUnsupported(t *testing.T) {
 	d := newDiskBackend(nil)
 	ctx := context.Background()
-	if _, err := d.PresignGet(ctx, "k", "f", "ct", 0); !errors.Is(err, ErrPresignNotSupported) {
+	if _, err := d.PresignGet(ctx, "k", GetObjectOptions{Filename: "f", ContentType: "ct"}, 0); !errors.Is(err, ErrPresignNotSupported) {
 		t.Errorf("PresignGet: %v", err)
 	}
 	if _, err := d.PresignPut(ctx, "k", "ct", 0); !errors.Is(err, ErrPresignNotSupported) {
@@ -138,6 +143,72 @@ func TestSanitiseFilename_StripsTroublesomeBytes(t *testing.T) {
 		if got := sanitiseFilename(in); got != want {
 			t.Errorf("sanitise(%q)=%q want %q", in, got, want)
 		}
+	}
+}
+
+func TestContentDispositionHeader_EncodesUnicodeAndHostileFilename(t *testing.T) {
+	header := contentDispositionHeader(DispositionInline, "résumé\"\r\n.png")
+	if strings.ContainsAny(header, "\r\n") {
+		t.Fatalf("header contains a newline: %q", header)
+	}
+	if !strings.HasPrefix(header, `inline; filename="`) {
+		t.Fatalf("missing inline ASCII fallback: %q", header)
+	}
+	if !strings.Contains(header, `filename*=UTF-8''r%C3%A9sum%C3%A9%22%0D%0A.png`) {
+		t.Fatalf("missing RFC 5987 filename: %q", header)
+	}
+}
+
+func TestEffectiveContentDisposition_RestrictsExecutableTypes(t *testing.T) {
+	for _, contentType := range []string{"image/png", "video/mp4", "audio/mpeg", "application/pdf", "text/plain; charset=utf-8"} {
+		if got := effectiveContentDisposition(DispositionInline, contentType); got != DispositionInline {
+			t.Errorf("%s disposition=%q, want inline", contentType, got)
+		}
+	}
+	for _, contentType := range []string{"text/html", "application/javascript", "image/svg+xml", "application/octet-stream", ""} {
+		if got := effectiveContentDisposition(DispositionInline, contentType); got != DispositionAttachment {
+			t.Errorf("%s disposition=%q, want attachment", contentType, got)
+		}
+	}
+}
+
+func TestPresignedResponseCacheControl_StaysInsideTTL(t *testing.T) {
+	if got := presignedResponseCacheControl(15 * time.Minute); got != "private, max-age=870" {
+		t.Fatalf("cache control=%q", got)
+	}
+	if got := presignedResponseCacheControl(20 * time.Second); got != "private, no-store" {
+		t.Fatalf("short TTL cache control=%q", got)
+	}
+}
+
+func TestS3PresignGet_SignsDispositionTypeAndBoundedCache(t *testing.T) {
+	client, err := minio.New("s3.example.com", &minio.Options{
+		Creds: credentials.NewStaticV4("access", "secret", ""), Secure: true, Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	be := &s3Backend{client: client, bucket: "bucket", region: "us-east-1"}
+	raw, err := be.PresignGet(context.Background(), "ab/file", GetObjectOptions{
+		Filename: "café.png", ContentType: "image/png", Disposition: DispositionInline,
+	}, 15*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if got := query.Get("response-content-type"); got != "image/png" {
+		t.Fatalf("response content type=%q", got)
+	}
+	if got := query.Get("response-cache-control"); got != "private, max-age=870" {
+		t.Fatalf("response cache control=%q", got)
+	}
+	disposition := query.Get("response-content-disposition")
+	if !strings.HasPrefix(disposition, "inline;") || !strings.Contains(disposition, "filename*=UTF-8''caf%C3%A9.png") {
+		t.Fatalf("response disposition=%q", disposition)
 	}
 }
 

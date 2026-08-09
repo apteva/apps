@@ -182,10 +182,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "files_get_url",
-			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?. Returns {url, expires_at}.",
+			Description: "Mint a signed time-limited URL. Args: id, ttl_seconds?, disposition? (inline|attachment), delivery? (apteva|direct). Existing S3 callers that omit delivery retain direct delivery; new callers should choose explicitly.",
 			InputSchema: schemaObject(map[string]any{
 				"id":          map[string]any{"type": "integer"},
 				"ttl_seconds": map[string]any{"type": "integer"},
+				"disposition": map[string]any{"type": "string"},
+				"delivery":    map[string]any{"type": "string"},
 			}, []string{"id"}),
 			HandlerCtx: a.toolGetURLCtx,
 		},
@@ -669,33 +671,62 @@ func (a *App) toolGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	exp := time.Now().Add(time.Duration(ttl) * time.Second).Unix()
 
-	// On s3-backed installs, mint a presigned S3 URL directly so
-	// downstream consumers (Deepgram, Cloudinary, Mux, browser
-	// players) fetch bytes from the bucket without bouncing through
-	// our gateway. Disk falls back to the HMAC path-style URL the
-	// gateway resolves locally — same as pre-v0.6.
-	if be := backend(); be.Kind() == "s3" {
+	requestedDisposition, err := parseContentDisposition(strArg(args, "disposition"))
+	if err != nil {
+		return nil, err
+	}
+	be := backend()
+	delivery := strings.ToLower(strings.TrimSpace(strArg(args, "delivery")))
+	legacyDirect := delivery == "" && be.Kind() == "s3"
+	if delivery == "" {
+		if legacyDirect {
+			delivery = "direct"
+		} else {
+			delivery = "apteva"
+		}
+	}
+	if delivery != "apteva" && delivery != "direct" {
+		return nil, errors.New("delivery must be one of: apteva, direct")
+	}
+	// Preserve the pre-v0.10.25 behavior for S3 consumers that omit both
+	// fields: they still receive an attachment-oriented direct URL. Explicit
+	// calls and stable Apteva URLs default to inline.
+	if legacyDirect && strings.TrimSpace(strArg(args, "disposition")) == "" {
+		requestedDisposition = DispositionAttachment
+	}
+	disposition := effectiveContentDisposition(requestedDisposition, f.ContentType)
+	options := GetObjectOptions{
+		Filename: f.Name, ContentType: f.ContentType, Disposition: disposition,
+	}
+
+	if delivery == "direct" && be.Kind() == "s3" {
 		key := objectKey(f.SHA256, f.StorageKey)
-		url, err := be.PresignGet(context.Background(), key, f.Name, f.ContentType,
-			time.Duration(ttl)*time.Second)
+		url, err := be.PresignGet(context.Background(), key, options, time.Duration(ttl)*time.Second)
 		if err != nil {
 			return nil, fmt.Errorf("presign: %w", err)
 		}
 		return map[string]any{
-			"url":        url,
-			"expires_at": exp,
-			"file_id":    f.ID,
-			"presigned":  true,
+			"url":         url,
+			"expires_at":  exp,
+			"file_id":     f.ID,
+			"presigned":   true,
+			"delivery":    "direct",
+			"disposition": string(disposition),
 		}, nil
 	}
 
+	// Disk has no direct backend URL, so an explicit direct request falls
+	// back to the stable Apteva route and reports the effective delivery.
 	sig := signFile(f.ID, exp)
 	// Absolute URL so callers can hand it to third-party services
 	// (Deepgram, Cloudinary, plain links shared with humans) without
 	// having to know the platform's host. Falls back to relative
 	// when public_url isn't configured (dev, no-network installs).
-	url := signedAbsoluteURL(ctx, f, sig, exp)
-	return map[string]any{"url": url, "expires_at": exp, "file_id": f.ID}, nil
+	url := signedAbsoluteURLWithDisposition(ctx, f, sig, exp, disposition)
+	return map[string]any{
+		"url": url, "expires_at": exp, "file_id": f.ID,
+		"presigned": false, "delivery": "apteva", "disposition": string(disposition),
+	}, nil
 }
 
 // toolGetContent reads bytes inline and returns them as base64. Built
@@ -743,7 +774,9 @@ func (a *App) toolGetContent(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	} else {
 		// S3 / remote backend — presign briefly + http.GET.
-		signedURL, err := backend().PresignGet(context.Background(), key, f.Name, f.ContentType, 5*time.Minute)
+		signedURL, err := backend().PresignGet(context.Background(), key, GetObjectOptions{
+			Filename: f.Name, ContentType: f.ContentType, Disposition: DispositionAttachment,
+		}, 5*time.Minute)
 		if err != nil {
 			return nil, fmt.Errorf("presign: %w", err)
 		}
@@ -1052,13 +1085,24 @@ func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch firstSeg {
 	case "content":
-		a.httpServeContent(w, r, id)
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+			return
+		}
+		a.httpServeContent(w, r, id, DispositionInline)
+	case "download":
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+			return
+		}
+		a.httpServeContent(w, r, id, DispositionAttachment)
 	case "url":
 		// POST /files/:id/url — mint a signed time-limited URL.
 		// Mirrors the files_get_url MCP tool but available over plain
 		// HTTP for callers that aren't speaking MCP (the dashboard,
 		// the media app's storageclient, ad-hoc scripts).
-		// Body: {ttl_seconds?: int}. Response: {url, expires_at, file_id}.
+		// Body: {ttl_seconds?, delivery?, disposition?}.
+		// Response: {url, expires_at, file_id, delivery, disposition}.
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST only")
 			return
@@ -1096,11 +1140,17 @@ func (a *App) handlePublicFilesItem(w http.ResponseWriter, r *http.Request) {
 	if i := strings.IndexByte(tail, '/'); i >= 0 {
 		tail = tail[:i]
 	}
-	if tail != "content" {
+	var disposition ContentDisposition
+	switch tail {
+	case "content":
+		disposition = DispositionInline
+	case "download":
+		disposition = DispositionAttachment
+	default:
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	a.httpServeContent(w, r, id)
+	a.httpServeContent(w, r, id, disposition)
 }
 
 // httpMintSignedURL is the HTTP-protocol wrapper around the
@@ -1115,7 +1165,9 @@ func (a *App) httpMintSignedURL(w http.ResponseWriter, r *http.Request, id int64
 		return
 	}
 	var body struct {
-		TTLSeconds int `json:"ttl_seconds"`
+		TTLSeconds  int    `json:"ttl_seconds"`
+		Delivery    string `json:"delivery"`
+		Disposition string `json:"disposition"`
 	}
 	if r.ContentLength > 0 {
 		// Body is optional — a TTL of 0 / missing falls back to the
@@ -1128,6 +1180,12 @@ func (a *App) httpMintSignedURL(w http.ResponseWriter, r *http.Request, id int64
 	args := map[string]any{"_project_id": pid, "id": id}
 	if body.TTLSeconds > 0 {
 		args["ttl_seconds"] = body.TTLSeconds
+	}
+	if strings.TrimSpace(body.Delivery) != "" {
+		args["delivery"] = body.Delivery
+	}
+	if strings.TrimSpace(body.Disposition) != "" {
+		args["disposition"] = body.Disposition
 	}
 	out, err := a.toolGetURL(ctx, args)
 	if err != nil {
@@ -1533,8 +1591,12 @@ func (a *App) httpGetMetadata(w http.ResponseWriter, r *http.Request, id int64) 
 	httpJSON(w, map[string]any{"file": f})
 }
 
-func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64) {
+func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64, requested ...ContentDisposition) {
 	ctx := globalCtx
+	requestedDisposition := DispositionInline
+	if len(requested) > 0 {
+		requestedDisposition = requested[0]
+	}
 	pid, err := resolveProjectFromRequest(r)
 	// For signed/public access we don't require a project_id query
 	// param — visibility + signature are the only auth that matters.
@@ -1573,7 +1635,12 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 	sig := q.Get("sig")
 	exp, _ := strconv.ParseInt(q.Get("exp"), 10, 64)
 	authed := r.Header.Get("X-User-ID") != ""
-	switch f.Visibility {
+	authorizedBySignature := false
+	visibility := f.Visibility
+	if visibility != "public" && visibility != "signed" && visibility != "private" {
+		visibility = "private"
+	}
+	switch visibility {
 	case "public":
 		// Anyone can fetch — no auth, no signature.
 	case "signed":
@@ -1584,6 +1651,7 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 			httpErr(w, http.StatusForbidden, "invalid or expired signature")
 			return
 		}
+		authorizedBySignature = !authed
 	case "private":
 		// Authenticated request, OR a valid sig (private files can
 		// still be shared via files_get_url). Anonymous requests with
@@ -1594,34 +1662,16 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 				httpErr(w, http.StatusForbidden, "private file requires authentication or a valid signature")
 				return
 			}
+			authorizedBySignature = true
 		}
-	}
-
-	// ETag + cache headers.
-	etag := `"` + f.SHA256 + `"`
-	w.Header().Set("ETag", etag)
-	switch f.Visibility {
-	case "public":
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	case "signed":
-		remaining := exp - time.Now().Unix()
-		if remaining < 0 {
-			remaining = 0
-		}
-		w.Header().Set("Cache-Control", fmt.Sprintf("private, max-age=%d", remaining))
-	default:
-		w.Header().Set("Cache-Control", "private, no-store")
-	}
-	if im := r.Header.Get("If-None-Match"); im == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	if ct := f.ContentType; ct != "" {
-		w.Header().Set("Content-Type", ct)
 	}
 
 	key := objectKey(f.SHA256, f.StorageKey)
+	contentType := safeResponseContentType(f.ContentType)
+	disposition := effectiveContentDisposition(requestedDisposition, contentType)
+	options := GetObjectOptions{
+		Filename: f.Name, ContentType: contentType, Disposition: disposition,
+	}
 
 	// Disk: serve via http.ServeFile (Range + Last-Modified + 304 for
 	// free). S3 / remote: 302-redirect to a freshly-minted presigned
@@ -1629,15 +1679,66 @@ func (a *App) httpServeContent(w http.ResponseWriter, r *http.Request, id int64)
 	// enough to cover slow downloads, short enough that the URL
 	// shouldn't be useful past the request that minted it.
 	if path, ok := backend().LocalPath(key); ok {
+		etag := `"` + f.SHA256 + `"`
+		w.Header().Set("ETag", etag)
+		switch visibility {
+		case "public":
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		case "signed":
+			if authorizedBySignature {
+				remaining := exp - time.Now().Unix()
+				if remaining < 0 {
+					remaining = 0
+				}
+				w.Header().Set("Cache-Control", fmt.Sprintf("private, max-age=%d", remaining))
+			} else {
+				w.Header().Set("Cache-Control", "private, no-store")
+			}
+		default:
+			w.Header().Set("Cache-Control", "private, no-store")
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", contentDispositionHeader(disposition, f.Name))
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if im := r.Header.Get("If-None-Match"); im == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
 		http.ServeFile(w, r, path)
 		return
 	}
-	url, err := backend().PresignGet(r.Context(), key, f.Name, f.ContentType, 15*time.Minute)
+
+	// A canonical remote URL must never cache the short-lived Location value.
+	// It also never answers 304: each GET needs a fresh backend signature.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if r.Method == http.MethodHead {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Disposition", contentDispositionHeader(disposition, f.Name))
+		w.Header().Set("Content-Length", strconv.FormatInt(f.SizeBytes, 10))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	presignTTL := 15 * time.Minute
+	if authorizedBySignature {
+		remaining := time.Until(time.Unix(exp, 0))
+		if remaining <= 0 {
+			httpErr(w, http.StatusForbidden, "invalid or expired signature")
+			return
+		}
+		if remaining < presignTTL {
+			presignTTL = remaining
+		}
+	}
+	url, err := backend().PresignGet(r.Context(), key, options, presignTTL)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "presign: "+err.Error())
 		return
 	}
-	http.Redirect(w, r, url, http.StatusFound)
+	w.Header().Set("Location", url)
+	w.WriteHeader(http.StatusFound)
 }
 
 func (a *App) httpPatch(w http.ResponseWriter, r *http.Request, id int64) {
@@ -2374,10 +2475,25 @@ func blobPath(ctx *sdk.AppCtx, sha256 string, storageKey string) string {
 // defensive against junk data), falls back to the bare id form
 // rather than producing a trailing slash.
 func buildContentURL(f *File) string {
-	if f == nil || f.Name == "" {
-		return fmt.Sprintf("/files/%d/content", f.ID)
+	return buildDeliveryURL(f, DispositionInline)
+}
+
+func buildDownloadURL(f *File) string {
+	return buildDeliveryURL(f, DispositionAttachment)
+}
+
+func buildDeliveryURL(f *File, disposition ContentDisposition) string {
+	action := "content"
+	if disposition == DispositionAttachment {
+		action = "download"
 	}
-	return fmt.Sprintf("/files/%d/content/%s", f.ID, url.PathEscape(f.Name))
+	if f == nil {
+		return "/files/0/" + action
+	}
+	if f.Name == "" {
+		return fmt.Sprintf("/files/%d/%s", f.ID, action)
+	}
+	return fmt.Sprintf("/files/%d/%s/%s", f.ID, action, url.PathEscape(f.Name))
 }
 
 // buildPublicContentURL is the read-only, no-auth gateway path used for
@@ -2385,6 +2501,10 @@ func buildContentURL(f *File) string {
 // under /files and require platform authentication.
 func buildPublicContentURL(f *File) string {
 	return strings.Replace(buildContentURL(f), "/files/", "/public/files/", 1)
+}
+
+func buildPublicDownloadURL(f *File) string {
+	return strings.Replace(buildDownloadURL(f), "/files/", "/public/files/", 1)
 }
 
 func extOf(name, contentType string) string {
