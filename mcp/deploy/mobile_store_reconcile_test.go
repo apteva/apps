@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -15,6 +16,40 @@ import (
 type pagedApplePlatform struct {
 	tk.BasePlatformClient
 	calls []integrationCall
+}
+
+type availabilityApplePlatform struct {
+	tk.BasePlatformClient
+	calls          []integrationCall
+	usaAvailable   bool
+	availableInNew bool
+}
+
+func (p *availabilityApplePlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	var data json.RawMessage
+	switch tool {
+	case "list_territories":
+		data = json.RawMessage(`{"data":[{"id":"USA"},{"id":"CHN"}],"links":{"next":null}}`)
+	case "get_app_availability":
+		data, _ = json.Marshal(map[string]any{"data": map[string]any{
+			"type": "appAvailabilities", "id": "availability-1",
+			"attributes": map[string]any{"availableInNewTerritories": p.availableInNew},
+		}})
+	case "list_app_availability_territories":
+		data, _ = json.Marshal(map[string]any{
+			"data": []any{
+				map[string]any{"type": "territoryAvailabilities", "id": "usa-1", "attributes": map[string]any{"available": p.usaAvailable}, "relationships": map[string]any{"territory": map[string]any{"data": map[string]any{"id": "USA"}}}},
+				map[string]any{"type": "territoryAvailabilities", "id": "chn-1", "attributes": map[string]any{"available": false}, "relationships": map[string]any{"territory": map[string]any{"data": map[string]any{"id": "CHN"}}}},
+			},
+			"links": map[string]any{"next": nil},
+		})
+	case "update_territory_availability":
+		data = json.RawMessage(`{"data":{"id":"updated"}}`)
+	default:
+		data = json.RawMessage(`{"data":[]}`)
+	}
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
 }
 
 func (p *pagedApplePlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
@@ -156,6 +191,67 @@ func TestAppleAvailabilityCreateBodyUsesGenericTerritorySelection(t *testing.T) 
 	linkages := data["relationships"].(map[string]any)["territoryAvailabilities"].(map[string]any)["data"].([]any)
 	if linkages[0].(map[string]any)["id"] != first["id"] || linkages[1].(map[string]any)["id"] != second["id"] {
 		t.Fatalf("territory linkage IDs do not match included IDs: %#v", linkages)
+	}
+}
+
+func TestAppleAvailabilityReconcileSkipsMatchingProviderState(t *testing.T) {
+	platform := &availabilityApplePlatform{usaAvailable: true, availableInNew: false}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	distribution := StoreDistribution{Availability: StoreAvailability{
+		Mode: "only", IncludedTerritories: []string{"USA"},
+	}}
+	if err := reconcileAppleAvailability(&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}, "app-1", distribution); err != nil {
+		t.Fatal(err)
+	}
+	if got := countIntegrationCalls(platform.calls, "update_app_availability"); got != 0 {
+		t.Fatalf("parent availability updates=%d calls=%#v", got, platform.calls)
+	}
+	if got := countIntegrationCalls(platform.calls, "update_territory_availability"); got != 0 {
+		t.Fatalf("matching territory updates=%d calls=%#v", got, platform.calls)
+	}
+}
+
+func TestAppleAvailabilityReconcileUpdatesOnlyChangedTerritories(t *testing.T) {
+	platform := &availabilityApplePlatform{usaAvailable: false, availableInNew: false}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	distribution := StoreDistribution{Availability: StoreAvailability{
+		Mode: "only", IncludedTerritories: []string{"USA"},
+	}}
+	if err := reconcileAppleAvailability(&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}, "app-1", distribution); err != nil {
+		t.Fatal(err)
+	}
+	if got := countIntegrationCalls(platform.calls, "update_app_availability"); got != 0 {
+		t.Fatalf("parent availability updates=%d calls=%#v", got, platform.calls)
+	}
+	if got := countIntegrationCalls(platform.calls, "update_territory_availability"); got != 1 {
+		t.Fatalf("changed territory updates=%d calls=%#v", got, platform.calls)
+	}
+}
+
+func TestAppleAvailabilityReconcileRejectsImmutableParentChange(t *testing.T) {
+	platform := &availabilityApplePlatform{usaAvailable: true, availableInNew: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	distribution := StoreDistribution{Availability: StoreAvailability{
+		Mode: "only", IncludedTerritories: []string{"USA"},
+	}}
+	err := reconcileAppleAvailability(&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}, "app-1", distribution)
+	if err == nil || !strings.Contains(err.Error(), "cannot be updated") {
+		t.Fatalf("error=%v", err)
+	}
+	if got := countIntegrationCalls(platform.calls, "update_app_availability"); got != 0 {
+		t.Fatalf("parent availability updates=%d calls=%#v", got, platform.calls)
 	}
 }
 

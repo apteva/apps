@@ -173,6 +173,78 @@ func TestReadyStorePreflightRestoresAppliedStateAndPreservesApplyFailures(t *tes
 	}
 }
 
+func TestFullyVerifiedStoreSyncMarksDesiredHashApplied(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-synced", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	cfg, err := dbUpsertMobileStoreConfig(db, d, completeIOSStoreDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"pricing":{"status":"verified"},"availability":{"status":"verified"}}}`
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", observed, "{}", "", "old provider failure"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistVerifiedStoreSyncState(db, d, cfg, StorePreflight{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "applied" || cfg.AppliedHash != cfg.DesiredHash || cfg.LastError != "" {
+		t.Fatalf("verified sync did not become applied: %+v", cfg)
+	}
+}
+
+func TestIncompleteProviderSyncPreservesApplyFailure(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-incomplete-sync", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	cfg, err := dbUpsertMobileStoreConfig(db, d, completeIOSStoreDocument())
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"pricing":{"status":"verified"}}}`
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", observed, "{}", "", "provider failure"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = dbGetMobileStoreConfig(db, d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := persistVerifiedStoreSyncState(db, d, cfg, StorePreflight{Ready: true}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "failed" || cfg.AppliedHash != "" || cfg.LastError != "provider failure" {
+		t.Fatalf("incomplete sync overwrote failure: %+v", cfg)
+	}
+}
+
 func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
 	doc := completeIOSStoreDocument()
 	doc.Review.DemoAccountRequired = true

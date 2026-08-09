@@ -112,6 +112,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		cfg = fresh
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	result := &StoreApplyResult{Status: "applied", AppliedScopes: []string{}, Blocked: []StoreApplyIssue{}, Failed: []StoreApplyIssue{}}
 	if len(request.Scopes) == 0 && cfg.AppliedHash != "" && cfg.AppliedHash == cfg.DesiredHash && preflight.Ready && strings.TrimSpace(request.ReviewDemoPassword) == "" {
 		result.Status = "no_op"

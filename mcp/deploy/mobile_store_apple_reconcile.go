@@ -28,11 +28,15 @@ func (a *App) applyAppleDistribution(bound *sdk.BoundIntegration, appID string, 
 	availability := func() error {
 		if body := providerExtensionBody(doc, "app_store_connect", "availability_body"); body != nil {
 			availabilityID := jsonStringFromValue(body, "data", "id")
-			if availabilityID == "" {
-				_, err := executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
+			if availabilityID != "" {
+				return errors.New("App Store availability resources cannot be updated; use structured distribution availability")
+			}
+			if _, err := executeIntegration(bound, "get_app_availability", map[string]any{"app_id": appID}); err == nil {
+				return errors.New("App Store availability already exists; use structured distribution availability to reconcile territories")
+			} else if integrationErrorStatus(err) != http.StatusNotFound {
 				return err
 			}
-			_, err := executeIntegration(bound, "update_app_availability", map[string]any{"availability_id": availabilityID, "body": body})
+			_, err := executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
 			return err
 		}
 		if storeAvailabilityConfigured(doc.Distribution) {
@@ -144,25 +148,29 @@ func reconcileAppleAvailability(bound *sdk.BoundIntegration, appID string, distr
 	if availabilityID == "" {
 		return errors.New("App Store availability response missing id")
 	}
-	_, err = executeIntegration(bound, "update_app_availability", map[string]any{
-		"availability_id": availabilityID,
-		"body": map[string]any{"data": map[string]any{
-			"type": "appAvailabilities", "id": availabilityID,
-			"attributes": map[string]any{"availableInNewTerritories": availableInNew},
-		}},
-	})
-	if err != nil {
-		return err
-	}
 	territoryPages, err := executeAppleCollectionPages(bound, "list_app_availability_territories", map[string]any{
 		"availability_id": availabilityID, "include": "territory", "limit": 200,
 	})
 	if err != nil {
 		return err
 	}
-	for resourceID, territoryID := range appleTerritoryAvailabilityIDsFromPages(territoryPages) {
+	currentAvailableInNew, ok := appleAvailableInNewTerritories(current)
+	if !ok {
+		return errors.New("App Store availability response missing availableInNewTerritories")
+	}
+	if currentAvailableInNew != availableInNew {
+		return errors.New("App Store available-in-new-territories setting cannot be updated through this API; change it in App Store Connect")
+	}
+	actual := appleTerritoryAvailabilityStateFromPages(territoryPages)
+	resources := appleTerritoryAvailabilityIDsFromPages(territoryPages)
+	seen := map[string]bool{}
+	for resourceID, territoryID := range resources {
 		available, ok := desired[territoryID]
 		if !ok {
+			continue
+		}
+		seen[territoryID] = true
+		if actual[territoryID] == available {
 			continue
 		}
 		_, err := executeIntegration(bound, "update_territory_availability", map[string]any{
@@ -174,6 +182,11 @@ func reconcileAppleAvailability(bound *sdk.BoundIntegration, appID string, distr
 		})
 		if err != nil {
 			return err
+		}
+	}
+	for territoryID := range desired {
+		if !seen[territoryID] {
+			return fmt.Errorf("App Store availability is missing territory %s", territoryID)
 		}
 	}
 	return nil
@@ -290,9 +303,13 @@ func appleAvailabilityMatches(bound *sdk.BoundIntegration, distribution StoreDis
 		return false, nil, err
 	}
 	actual := appleTerritoryAvailabilityStateFromPages(pages)
-	desired, _, err := desiredAppleTerritories(bound, distribution)
+	desired, desiredAvailableInNew, err := desiredAppleTerritories(bound, distribution)
 	if err != nil {
 		return false, actual, err
+	}
+	actualAvailableInNew, ok := appleAvailableInNewTerritories(availability)
+	if !ok || actualAvailableInNew != desiredAvailableInNew {
+		return false, actual, nil
 	}
 	if len(actual) != len(desired) {
 		return false, actual, nil
@@ -303,6 +320,20 @@ func appleAvailabilityMatches(bound *sdk.BoundIntegration, distribution StoreDis
 		}
 	}
 	return true, actual, nil
+}
+
+func appleAvailableInNewTerritories(raw json.RawMessage) (bool, bool) {
+	var payload struct {
+		Data struct {
+			Attributes struct {
+				AvailableInNewTerritories *bool `json:"availableInNewTerritories"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || payload.Data.Attributes.AvailableInNewTerritories == nil {
+		return false, false
+	}
+	return *payload.Data.Attributes.AvailableInNewTerritories, true
 }
 
 func appleTerritoryAvailabilityState(raw json.RawMessage) map[string]bool {
