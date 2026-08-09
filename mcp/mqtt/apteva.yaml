@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.2.1
+version: 0.3.0
 description: |
   Embedded MQTT broker for Apteva. Acts as the LAN message bus for
   smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
@@ -13,7 +13,7 @@ description: |
   to named bus events (e.g. `mqtt.motion.frontdoor`).
 
   Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
-  retained-message persistence, MQTT session support, and MQTT 5 properties.
+  durable retained messages, bounded traffic controls, and MQTT 5 properties.
   Auth is username/password against this app's own DB; per-user
   topic ACLs (publish + subscribe filter lists) gate every operation.
 
@@ -42,17 +42,25 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: mqtt_publish,            description: "Publish one message. Args: topic, payload, retain?, qos? (0|1|2)." }
+    - { name: mqtt_publish,            description: "Publish one message. Payload may be a string or JSON value; non-strings are JSON-encoded. Args: topic, payload, retain?, qos?." }
     - { name: mqtt_topics_recent,      description: "Last N topics seen by the broker. Args: limit? (default 50)." }
+    - { name: mqtt_clients_list,       description: "List currently connected network MQTT clients with authenticated identity and protocol metadata." }
     - { name: mqtt_subscribe,          description: "Persist a subscription pattern that re-emits matches as `mqtt.<bus_topic>` on the platform bus. Args: topic_pattern, bus_topic." }
+    - { name: mqtt_subscribe_ensure,   description: "Idempotently ensure a subscription bridge exists. Repeated calls return the same row. Args: topic_pattern, bus_topic." }
     - { name: mqtt_subscribe_list,     description: "List persisted bus subscriptions." }
     - { name: mqtt_subscribe_delete,   description: "Delete a bus subscription. Args: id." }
-    - { name: mqtt_users_add,          description: "Create an MQTT user. Args: username, password, allow_publish? (glob list), allow_subscribe? (glob list)." }
+    - { name: mqtt_users_add,          description: "Legacy create-or-replace user operation. Prefer the explicit credential tools." }
+    - { name: mqtt_users_create,       description: "Create a new MQTT user without replacing an existing credential. Args: username, password, allow_publish?, allow_subscribe?." }
+    - { name: mqtt_users_update_acl,   description: "Update a user's publish and/or subscribe ACL without changing its password." }
+    - { name: mqtt_users_rotate_password, description: "Rotate a user's password without changing ACLs; disconnects active sessions for that user." }
     - { name: mqtt_users_list,         description: "List users (no passwords)." }
     - { name: mqtt_users_delete,       description: "Delete a user. Args: username." }
     - { name: mqtt_users_set_enabled,  description: "Enable / disable a user. Args: username, enabled (bool)." }
+    - { name: mqtt_retained_list,      description: "List retained MQTT state. Args: topic_pattern?, limit?." }
+    - { name: mqtt_retained_get,       description: "Get one retained MQTT message. Args: topic." }
+    - { name: mqtt_retained_delete,    description: "Delete one retained MQTT message from memory and durable storage. Args: topic." }
     - { name: mqtt_devices,            description: "List HA-discovered devices. Args: filter? (substring on slug or model)." }
-    - { name: mqtt_status,             description: "Broker status: port, client count, retained count, uptime, free disk." }
+    - { name: mqtt_status,             description: "Broker endpoint, uptime, client/retained counts, traffic counters, rejection/drop metrics, and active safety limits." }
   ui_panels:
     - slot: project.page
       label: MQTT
@@ -60,7 +68,13 @@ provides:
       entry: /ui/MQTTPanel.mjs
   publishes:
     - name: mqtt.message
-      description: An MQTT message was published; includes topic, payload, qos, retain, and client_id.
+      description: An MQTT message was published; includes topic, payload, qos, retain, client_id, and authenticated username.
+    - name: mqtt.client.connected
+      description: An authenticated MQTT client established a session; includes identity, network, protocol, and session metadata.
+    - name: mqtt.client.disconnected
+      description: An MQTT client disconnected; includes identity, timestamps, session expiry, and reason.
+    - name: mqtt.devices.message
+      description: Stable filtered device event emitted when a devices/+/+ bridge is ensured with bus_topic devices.message.
 
 runtime:
   kind: source
@@ -86,12 +100,17 @@ config_schema:
     type: text
     default: "1883"
     label: MQTT listener port
-    description: TCP port the broker binds for client connections. 0 = kernel-assigned (forces clients to read mqtt_status to discover the actual port). 1883 is conventional but the engine falls back to a free port if it's busy.
+    description: Managed installs use strict port 1883 and fail if it is unavailable. 0 is accepted only for local development/tests and uses a kernel-assigned port; other values are rejected because they would contradict runtime.ports.
   - name: bind_interface
     type: text
     default: ""
     label: Bind interface (advanced)
     description: Pin the listener to an IP address (for example 192.168.1.20). Empty = all interfaces. Interface names such as en0 are not accepted.
+  - name: advertised_host
+    type: text
+    default: ""
+    label: Client-facing hostname
+    description: Hostname or IP returned by mqtt_status for client enrollment. Empty uses bind_interface when it is an IP, otherwise the machine hostname.
   - name: allow_anonymous
     type: select
     options: ["true", "false"]
@@ -109,6 +128,56 @@ config_schema:
     default: "10000"
     label: Max retained messages
     description: Hard ceiling on retained messages stored in the broker. Oldest pruned beyond this.
+  - name: max_payload_bytes
+    type: text
+    default: "1048576"
+    label: Maximum MQTT packet size
+    description: Reject client packets and app-originated payloads larger than this many bytes. Default 1 MiB.
+  - name: max_clients
+    type: text
+    default: "1000"
+    label: Maximum connected clients
+    description: Hard ceiling on simultaneous network MQTT clients.
+  - name: max_inflight_per_client
+    type: text
+    default: "128"
+    label: Maximum inflight messages per client
+    description: Maximum concurrent QoS messages retained for a client.
+  - name: max_pending_writes_per_client
+    type: text
+    default: "1024"
+    label: Maximum pending writes per client
+    description: Bounds each client's outbound queue so slow consumers cannot grow memory without limit.
+  - name: max_publish_per_second
+    type: text
+    default: "100"
+    label: Publish rate per client
+    description: Sustained accepted publishes per second for each network client. 0 disables the limiter.
+  - name: max_publish_burst
+    type: text
+    default: "200"
+    label: Publish burst per client
+    description: Short burst capacity for the per-client publish limiter.
+  - name: max_event_per_second
+    type: text
+    default: "1000"
+    label: Platform event rate
+    description: Sustained MQTT-derived platform events per second. Excess events are counted and dropped without blocking MQTT delivery. 0 disables the limiter.
+  - name: max_event_burst
+    type: text
+    default: "2000"
+    label: Platform event burst
+    description: Short burst capacity for MQTT-derived platform events.
+  - name: max_event_payload_bytes
+    type: text
+    default: "131072"
+    label: Maximum event payload preview
+    description: Maximum MQTT payload bytes copied into a platform event. Larger values are represented by a bounded preview and original size.
+  - name: max_log_payload_bytes
+    type: text
+    default: "65536"
+    label: Maximum logged payload preview
+    description: Maximum MQTT payload bytes retained in each audit row. Larger values keep their original size and a truncated preview.
   - name: message_log_retention_hours
     type: text
     default: "168"

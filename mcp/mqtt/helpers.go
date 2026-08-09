@@ -39,6 +39,17 @@ func configInt(ctx *sdk.AppCtx, key string, def int) int {
 	return n
 }
 
+func clampConfigInt(ctx *sdk.AppCtx, key string, def, min, max int) int {
+	n := configInt(ctx, key, def)
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
 func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 	s := strings.ToLower(configString(ctx, key, ""))
 	switch s {
@@ -48,6 +59,22 @@ func configFlag(ctx *sdk.AppCtx, key string, def bool) bool {
 		return false
 	}
 	return def
+}
+
+func encodePayload(value any, present bool) ([]byte, error) {
+	switch value := value.(type) {
+	case string:
+		return []byte(value), nil
+	case []byte:
+		return append([]byte(nil), value...), nil
+	case nil:
+		if present {
+			return []byte("null"), nil
+		}
+		return nil, nil
+	default:
+		return json.Marshal(value)
+	}
 }
 
 // ─── project scope ──────────────────────────────────────────────────

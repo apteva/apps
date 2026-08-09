@@ -75,7 +75,7 @@ func addBusSubscription(db *sql.DB, projectID, topicPattern, busTopic, createdBy
 	_, err := db.Exec(
 		`INSERT INTO mqtt_subscriptions(project_id, topic_pattern, bus_topic, created_by)
 		 VALUES (?,?,?,?)
-		 ON CONFLICT(project_id, topic_pattern, bus_topic) DO UPDATE SET created_at = CURRENT_TIMESTAMP`,
+		 ON CONFLICT(project_id, topic_pattern, bus_topic) DO NOTHING`,
 		projectID, topicPattern, busTopic, createdBy)
 	if err != nil {
 		return nil, err

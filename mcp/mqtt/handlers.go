@@ -8,7 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,26 +26,7 @@ func (a *App) handleClients(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	out := []map[string]any{}
-	if a.broker != nil {
-		for _, client := range a.broker.Clients() {
-			client.RLock()
-			row := map[string]any{
-				"client_id":        client.ID,
-				"username":         string(client.Properties.Username),
-				"remote":           client.Net.Remote,
-				"listener":         client.Net.Listener,
-				"protocol_version": int(client.Properties.ProtocolVersion),
-				"clean_session":    client.Properties.Clean,
-			}
-			client.RUnlock()
-			out = append(out, row)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i]["client_id"].(string) < out[j]["client_id"].(string)
-	})
-	writeJSON(w, out)
+	writeJSON(w, a.snapshotClients())
 }
 
 // /messages?limit=N&topic_pattern=foo/+
@@ -72,7 +52,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			batchSize = limit - len(out)
 		}
 		rows, err := a.ctx.AppDB().Query(
-			`SELECT id, ts, topic, payload, qos, retain, client_id, is_printable
+			`SELECT id, ts, topic, payload, payload_size, payload_truncated, qos, retain, client_id, username, is_printable
 			   FROM mqtt_message_log
 			  WHERE id < ?
 			  ORDER BY id DESC
@@ -84,12 +64,13 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 		seen := 0
 		for rows.Next() {
 			var (
-				id                       int64
-				ts, topic, clientID      string
-				payload                  []byte
-				qos, retain, isPrintable int
+				id                            int64
+				ts, topic, clientID, username string
+				payload                       []byte
+				payloadSize, payloadTruncated int
+				qos, retain, isPrintable      int
 			)
-			if err := rows.Scan(&id, &ts, &topic, &payload, &qos, &retain, &clientID, &isPrintable); err != nil {
+			if err := rows.Scan(&id, &ts, &topic, &payload, &payloadSize, &payloadTruncated, &qos, &retain, &clientID, &username, &isPrintable); err != nil {
 				rows.Close()
 				httpErr(w, 500, err.Error())
 				return
@@ -101,12 +82,12 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			}
 			row := map[string]any{
 				"id": id, "ts": ts, "topic": topic, "qos": qos,
-				"retain": retain == 1, "client_id": clientID,
+				"retain": retain == 1, "client_id": clientID, "username": username,
+				"payload_size_bytes": payloadSize, "payload_truncated": payloadTruncated == 1,
 			}
 			if isPrintable == 1 {
 				row["payload"] = string(payload)
 			} else {
-				row["payload_size_bytes"] = len(payload)
 				row["payload_binary"] = true
 			}
 			out = append(out, row)
@@ -148,7 +129,7 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.Username = strings.TrimSpace(body.Username)
-		if err := addUser(a.ctx.AppDB(), body.Username, body.Password, body.AllowPublish, body.AllowSubscribe); err != nil {
+		if err := createUser(a.ctx.AppDB(), body.Username, body.Password, body.AllowPublish, body.AllowSubscribe); err != nil {
 			httpErr(w, 400, err.Error())
 			return
 		}
@@ -184,30 +165,94 @@ func (a *App) handleUserItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": true})
 	case http.MethodPatch:
 		var body struct {
-			Enabled *bool `json:"enabled"`
+			Enabled        *bool    `json:"enabled"`
+			Password       string   `json:"password"`
+			AllowPublish   []string `json:"allow_publish"`
+			AllowSubscribe []string `json:"allow_subscribe"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
 			httpErr(w, 400, "invalid json: "+err.Error())
 			return
 		}
-		if body.Enabled == nil {
-			httpErr(w, 400, "enabled required")
+		if body.Enabled == nil && body.Password == "" && body.AllowPublish == nil && body.AllowSubscribe == nil {
+			httpErr(w, 400, "enabled, password, allow_publish, or allow_subscribe required")
 			return
 		}
-		if err := setUserEnabled(a.ctx.AppDB(), username, *body.Enabled); err != nil {
-			httpErr(w, 500, err.Error())
-			return
+		if body.AllowPublish != nil || body.AllowSubscribe != nil {
+			if err := updateUserACL(a.ctx.AppDB(), username, body.AllowPublish, body.AllowSubscribe); err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+		}
+		if body.Password != "" {
+			if err := rotateUserPassword(a.ctx.AppDB(), username, body.Password); err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+		}
+		if body.Enabled != nil {
+			if err := setUserEnabled(a.ctx.AppDB(), username, *body.Enabled); err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
 		}
 		if err := a.reloadUserCache(); err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
-		if !*body.Enabled {
-			a.broker.DisconnectUser(username)
-		}
-		writeJSON(w, map[string]any{"ok": true, "enabled": *body.Enabled})
+		a.broker.DisconnectUser(username)
+		writeJSON(w, map[string]any{"ok": true, "username": username})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "DELETE or PATCH")
+	}
+}
+
+func (a *App) handleRetained(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	out, err := listRetainedMessages(a.ctx.AppDB(), r.URL.Query().Get("topic_pattern"), limit)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleRetainedItem(w http.ResponseWriter, r *http.Request) {
+	topic := strings.TrimPrefix(r.URL.Path, "/retained/")
+	if topic == "" {
+		httpErr(w, 400, "topic required")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := getRetainedMessage(a.ctx.AppDB(), topic)
+		if err != nil {
+			httpErr(w, 404, err.Error())
+			return
+		}
+		writeJSON(w, out)
+	case http.MethodDelete:
+		if _, err := getRetainedMessage(a.ctx.AppDB(), topic); err != nil {
+			httpErr(w, 404, err.Error())
+			return
+		}
+		if a.broker != nil {
+			if err := a.broker.DeleteRetained(topic); err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+		}
+		if _, err := a.ctx.AppDB().Exec(`DELETE FROM mqtt_retained WHERE topic = ?`, topic); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "topic": topic})
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or DELETE")
 	}
 }
 
@@ -298,11 +343,16 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 		Retain  bool   `json:"retain"`
 		QoS     int    `json:"qos"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+	maxBody := int64(clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455)) + 64<<10
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&body); err != nil {
 		httpErr(w, 400, "invalid json: "+err.Error())
 		return
 	}
 	if err := validatePublish(body.Topic, body.QoS); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if err := a.validatePayloadSize([]byte(body.Payload)); err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}

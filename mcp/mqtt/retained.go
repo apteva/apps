@@ -1,7 +1,11 @@
 package main
 
 import (
+	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"time"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
@@ -16,6 +20,82 @@ import (
 type retainedHook struct {
 	mqtt.HookBase
 	app *App
+}
+
+type retainedMessage struct {
+	Topic     string `json:"topic"`
+	QoS       int    `json:"qos"`
+	Payload   any    `json:"payload"`
+	SizeBytes int    `json:"size_bytes"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+func listRetainedMessages(db *sql.DB, topicPattern string, limit int) ([]retainedMessage, error) {
+	if topicPattern != "" && !mqtt.IsValidFilter(topicPattern, false) {
+		return nil, fmt.Errorf("topic_pattern %q is not a valid MQTT filter", topicPattern)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := db.Query(`SELECT topic, substr(payload, 1, 4096), length(payload), qos, updated_at FROM mqtt_retained ORDER BY topic`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]retainedMessage, 0, limit)
+	for rows.Next() {
+		var topic, updated string
+		var payload []byte
+		var qos, payloadSize int
+		if err := rows.Scan(&topic, &payload, &payloadSize, &qos, &updated); err != nil {
+			return nil, err
+		}
+		if topicPattern != "" && !mqttTopicMatch(topicPattern, topic) {
+			continue
+		}
+		out = append(out, makeRetainedMessage(topic, payload, payloadSize, qos, updated, false))
+		if len(out) == limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
+func getRetainedMessage(db *sql.DB, topic string) (*retainedMessage, error) {
+	var updated string
+	var payload []byte
+	var qos int
+	err := db.QueryRow(`SELECT payload, qos, updated_at FROM mqtt_retained WHERE topic = ?`, topic).
+		Scan(&payload, &qos, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("retained message %q not found", topic)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := makeRetainedMessage(topic, payload, len(payload), qos, updated, true)
+	return &out, nil
+}
+
+func makeRetainedMessage(topic string, payload []byte, payloadSize, qos int, updated string, full bool) retainedMessage {
+	const previewLimit = 4096
+	visible := payload
+	omitted := !full && payloadSize > len(visible)
+	if !full && len(visible) > previewLimit {
+		visible = visible[:previewLimit]
+		omitted = true
+	}
+	value := any(string(visible))
+	if !isPrintableUTF8(visible) {
+		value = map[string]any{"binary": true, "base64": base64.StdEncoding.EncodeToString(visible)}
+	}
+	if omitted {
+		value = map[string]any{"preview": value, "truncated": true}
+	}
+	return retainedMessage{Topic: topic, QoS: qos, Payload: value, SizeBytes: payloadSize, UpdatedAt: updated}
 }
 
 func (h *retainedHook) ID() string { return "apteva-retained" }

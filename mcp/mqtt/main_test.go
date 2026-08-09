@@ -18,9 +18,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -28,6 +31,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/apteva/app-sdk/testkit"
+	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
@@ -40,12 +44,19 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	body, err := os.ReadFile("migrations/001_init.sql")
+	paths, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
-		t.Fatal(err)
+	sort.Strings(paths)
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
 	}
 	return db
 }
@@ -112,10 +123,49 @@ func TestUserAuth_AddListVerify(t *testing.T) {
 	}
 }
 
-// TestPortFallback — listen on a port, then ask pickListenerPort
-// for that same port; should return a different free one without
-// erroring out, mirroring the torrent-engine fallback behavior.
-func TestPortFallback(t *testing.T) {
+func TestExplicitCredentialLifecycleKeepsPasswordAndACLSeparate(t *testing.T) {
+	db := openTestDB(t)
+	if err := createUser(db, "device-1", "first", []string{"devices/1/#"}, []string{"devices/1/commands"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := createUser(db, "device-1", "replacement", nil, nil); err == nil {
+		t.Fatal("duplicate create unexpectedly replaced user")
+	}
+	before, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateUserACL(db, "device-1", []string{"devices/1/telemetry"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterACL, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.passwordHash != afterACL.passwordHash {
+		t.Fatal("ACL update changed password hash")
+	}
+	if len(afterACL.AllowPublishTopics) != 1 || afterACL.AllowPublishTopics[0] != "devices/1/telemetry" || afterACL.AllowSubscribeTopics[0] != "devices/1/commands" {
+		t.Fatalf("ACL after update=%#v", afterACL)
+	}
+	if err := rotateUserPassword(db, "device-1", "second"); err != nil {
+		t.Fatal(err)
+	}
+	afterRotate, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRotate.passwordHash == afterACL.passwordHash {
+		t.Fatal("password rotation did not change hash")
+	}
+	if afterRotate.AllowPublishTopics[0] != "devices/1/telemetry" {
+		t.Fatal("password rotation changed ACL")
+	}
+}
+
+// TestFixedPortConflictFails — a declared fixed port must never silently
+// relocate, because clients and runtime metadata depend on it.
+func TestFixedPortConflictFails(t *testing.T) {
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -127,15 +177,35 @@ func TestPortFallback(t *testing.T) {
 		testkit.WithConfig(map[string]string{"listen_port": strconv.Itoa(busy)}),
 	)
 	app := &App{ctx: ctx}
-	got, err := pickListenerPort(app)
-	if err != nil {
-		t.Fatalf("pickListenerPort: %v", err)
+	server := mqtt.New(nil)
+	_, _, err = attachTCPListener(server, app, busy)
+	if err == nil {
+		t.Fatalf("NewBroker accepted busy fixed port %d", busy)
 	}
-	if got == busy {
-		t.Errorf("returned busy port %d; expected fallback to a different one", busy)
+	if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if got <= 0 {
-		t.Errorf("invalid port %d", got)
+}
+
+func TestDynamicPortRequiresExplicitZero(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("test"),
+		testkit.WithConfig(map[string]string{"listen_port": "0"}),
+	)
+	broker, err := NewBroker(&App{ctx: ctx})
+	if err != nil || broker.Port() <= 0 {
+		t.Fatalf("dynamic port=%d err=%v", broker.Port(), err)
+	}
+	t.Cleanup(func() { _ = broker.Close() })
+}
+
+func TestManagedPortDeclarationCannotDrift(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("test"),
+		testkit.WithConfig(map[string]string{"listen_port": "1884"}),
+	)
+	if _, err := pickListenerPort(&App{ctx: ctx}); err == nil || !strings.Contains(err.Error(), "managed installs") {
+		t.Fatalf("unexpected drift validation error: %v", err)
 	}
 }
 
@@ -198,6 +268,49 @@ func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
 	}
 }
 
+func TestRetainedPublicHelpersFilterGetAndDelete(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`INSERT INTO mqtt_retained(topic,payload,qos,properties) VALUES
+		('devices/one/state','on',1,'{}'), ('other/state','off',0,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	list, err := listRetainedMessages(db, "devices/+/state", 100)
+	if err != nil || len(list) != 1 || list[0].Topic != "devices/one/state" || list[0].Payload != "on" {
+		t.Fatalf("retained list=%#v err=%v", list, err)
+	}
+	got, err := getRetainedMessage(db, "devices/one/state")
+	if err != nil || got.Topic != "devices/one/state" || got.QoS != 1 {
+		t.Fatalf("retained get=%#v err=%v", got, err)
+	}
+}
+
+func TestPublishGuardDropsOverLimit(t *testing.T) {
+	app := &App{}
+	hook := &publishGuardHook{app: app, clients: map[*mqtt.Client]*tokenBucket{}, rate: 1, burst: 1}
+	client := &mqtt.Client{ID: "noisy"}
+	pk := packets.Packet{TopicName: "devices/noisy/state"}
+	if _, err := hook.OnPublish(client, pk); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if _, err := hook.OnPublish(client, pk); !errors.Is(err, packets.CodeSuccessIgnore) {
+		t.Fatalf("second publish error=%v", err)
+	}
+	if app.rateLimitedMessages.Load() != 1 {
+		t.Fatalf("rate limited=%d", app.rateLimitedMessages.Load())
+	}
+}
+
+func TestAuditPayloadIsBounded(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"max_log_payload_bytes": "4"}))
+	app := &App{ctx: ctx, messageLogCh: make(chan messageRecord, 1)}
+	hook := &busHook{app: app}
+	hook.recordMessage("client", "device", packets.Packet{Payload: []byte("abcdef")})
+	rec := <-app.messageLogCh
+	if string(rec.payload) != "abcd" || rec.payloadSize != 6 || !rec.truncated {
+		t.Fatalf("record=%#v", rec)
+	}
+}
+
 func TestBusSubscriptionUpsertReturnsStableIDAndScopesByProject(t *testing.T) {
 	db := openTestDB(t)
 	first, err := addBusSubscription(db, "p1", "devices/+/state", "device.state", "test")
@@ -237,6 +350,17 @@ func TestPublishValidation(t *testing.T) {
 	}
 }
 
+func TestEncodePayloadSupportsStructuredValues(t *testing.T) {
+	payload, err := encodePayload(map[string]any{"on": true, "level": float64(2)}, true)
+	if err != nil || string(payload) != `{"level":2,"on":true}` {
+		t.Fatalf("payload=%s err=%v", payload, err)
+	}
+	payload, err = encodePayload(nil, false)
+	if err != nil || len(payload) != 0 {
+		t.Fatalf("missing payload=%q err=%v", payload, err)
+	}
+}
+
 func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 	recorder := testkit.NewEmitRecorder()
 	ctx := testkit.NewAppCtx(t, "apteva.yaml",
@@ -244,10 +368,13 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		testkit.WithEmitter(recorder),
 		testkit.WithConfig(map[string]string{
 			"listen_port":          "0",
-			"allow_anonymous":      "true",
+			"allow_anonymous":      "false",
 			"ha_discovery_enabled": "false",
 		}),
 	)
+	if err := createUser(ctx.AppDB(), "device-one", "secret", []string{"devices/#"}, []string{"devices/#"}); err != nil {
+		t.Fatal(err)
+	}
 	app := &App{}
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatal(err)
@@ -275,11 +402,14 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 
-	// MQTT 3.1.1 CONNECT with clean-session and client id "test1".
+	// MQTT 3.1.1 CONNECT with clean-session, client id "test1", and
+	// an authenticated device identity.
 	connectPacket := []byte{
-		0x10, 0x11,
-		0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0x02, 0x00, 0x3c,
+		0x10, 0x25,
+		0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0xc2, 0x00, 0x3c,
 		0x00, 0x05, 't', 'e', 's', 't', '1',
+		0x00, 0x0a, 'd', 'e', 'v', 'i', 'c', 'e', '-', 'o', 'n', 'e',
+		0x00, 0x06, 's', 'e', 'c', 'r', 'e', 't',
 	}
 	if _, err := conn.Write(connectPacket); err != nil {
 		t.Fatal(err)
@@ -290,6 +420,23 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 	}
 	if connack[0] != 0x20 || connack[3] != 0x00 {
 		t.Fatalf("CONNACK = %x", connack)
+	}
+	firstBridge, err := app.toolSubscribe(ctx, map[string]any{
+		"topic_pattern": "devices/+/+",
+		"bus_topic":     "devices.message",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBridge, err := app.toolSubscribe(ctx, map[string]any{
+		"topic_pattern": "devices/+/+",
+		"bus_topic":     "devices.message",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstBridge.(*BusSubscription).ID != secondBridge.(*BusSubscription).ID {
+		t.Fatalf("ensure bridge IDs differ: %#v %#v", firstBridge, secondBridge)
 	}
 
 	topic := "devices/test/state"
@@ -321,8 +468,24 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if data == nil || data["payload"] != string(payload) {
+	if data == nil || data["payload"] != string(payload) || data["username"] != "device-one" {
 		t.Fatalf("matching mqtt.message data = %#v", data)
+	}
+	deviceEvents := recorder.EventsByTopic("mqtt.devices.message")
+	if len(deviceEvents) != 1 {
+		t.Fatalf("filtered device events=%#v", deviceEvents)
+	}
+	deviceData, _ := deviceEvents[0].Data.(map[string]any)
+	if deviceData["username"] != "device-one" || deviceData["topic"] != topic {
+		t.Fatalf("filtered device data=%#v", deviceData)
+	}
+	connected := recorder.EventsByTopic("mqtt.client.connected")
+	if len(connected) != 1 {
+		t.Fatalf("connected events=%#v", connected)
+	}
+	connectedData, _ := connected[0].Data.(map[string]any)
+	if connectedData["username"] != "device-one" || connectedData["client_id"] != "test1" {
+		t.Fatalf("connected data=%#v", connectedData)
 	}
 	logDeadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(logDeadline) {
@@ -335,6 +498,20 @@ func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
 	var count int
 	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("message log count=%d err=%v", count, err)
+	}
+	var loggedUsername string
+	if err := ctx.AppDB().QueryRow(`SELECT username FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&loggedUsername); err != nil || loggedUsername != "device-one" {
+		t.Fatalf("logged username=%q err=%v", loggedUsername, err)
+	}
+
+	_ = conn.Close()
+	disconnectDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(disconnectDeadline) && len(recorder.EventsByTopic("mqtt.client.disconnected")) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	disconnected := recorder.EventsByTopic("mqtt.client.disconnected")
+	if len(disconnected) != 1 {
+		t.Fatalf("disconnected events=%#v", disconnected)
 	}
 
 	cancel()
@@ -367,11 +544,24 @@ func TestManifestValidates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("embedded manifest invalid: %v", err)
 	}
-	if len(m.Provides.Publishes) != 1 || m.Provides.Publishes[0].Name != "mqtt.message" {
+	if len(m.Provides.Publishes) != 4 || m.Provides.Publishes[0].Name != "mqtt.message" {
 		t.Fatalf("publishes=%#v", m.Provides.Publishes)
 	}
 	if len(m.Runtime.Ports) != 1 || m.Runtime.Ports[0].ContainerPort != 1883 {
 		t.Fatalf("embedded runtime ports=%#v", m.Runtime.Ports)
+	}
+	declaredTools := map[string]bool{}
+	for _, tool := range m.Provides.MCPTools {
+		declaredTools[tool.Name] = true
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if !declaredTools[tool.Name] {
+			t.Errorf("runtime MCP tool %q missing from manifest", tool.Name)
+		}
+		delete(declaredTools, tool.Name)
+	}
+	if len(declaredTools) != 0 {
+		t.Errorf("manifest declares MCP tools not implemented at runtime: %v", declaredTools)
 	}
 	body, err := os.ReadFile("apteva.yaml")
 	if err != nil {
@@ -407,7 +597,7 @@ func TestPanelContract(t *testing.T) {
 	// Every fetch(`${API}/foo…`) — extract the literal path segment
 	// and assert the route exists. Simple-grep, not a parser; good
 	// enough until someone aliases API.
-	for _, want := range []string{"/status", "/clients", "/messages", "/users", "/subscriptions", "/devices", "/test_publish"} {
+	for _, want := range []string{"/status", "/clients", "/messages", "/users", "/subscriptions", "/retained", "/devices", "/test_publish"} {
 		if !strings.Contains(tsx, "${API}"+want) {
 			t.Errorf("panel doesn't fetch %s — drift?", want)
 		}

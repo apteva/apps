@@ -1,7 +1,7 @@
 // MQTTPanel — three tabs over the embedded broker.
 //
 //   Live      streaming feed of recent broker traffic (events bus)
-//   Devices   HA-discovered device cards
+//   Discovery HA-discovered device cards
 //   Settings  users + bus subscriptions + test publish
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
@@ -102,6 +102,25 @@ interface BrokerStatus {
   users_enabled: number;
   devices: number;
   audit_rows_dropped: number;
+  events_dropped: number;
+  events_emitted: number;
+  rate_limited_messages: number;
+  auth_rejected: number;
+  acl_rejected: number;
+  endpoint: string;
+  bind_address: string;
+  advertised_host: string;
+  uptime_seconds: number;
+  limits: {
+    max_clients: number;
+    max_payload_bytes: number;
+    max_publish_per_second: number;
+    max_publish_burst: number;
+    max_event_per_second: number;
+    max_event_burst: number;
+    max_event_payload_bytes: number;
+    max_log_payload_bytes: number;
+  };
 }
 
 interface MQTTClient {
@@ -128,6 +147,14 @@ interface BusSubscription {
   created_at: string;
 }
 
+interface RetainedMessage {
+  topic: string;
+  qos: number;
+  payload: unknown;
+  size_bytes: number;
+  updated_at: string;
+}
+
 interface Device {
   id: number;
   slug: string;
@@ -140,7 +167,7 @@ interface Device {
   last_seen?: string;
 }
 
-type Tab = "live" | "devices" | "settings";
+type Tab = "live" | "discovery" | "settings";
 
 export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("live");
@@ -152,7 +179,7 @@ export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
     <APIContext.Provider value={api}>
       <div className="flex flex-col h-full">
         <div className="flex border-b border-border">
-          {(["live", "devices", "settings"] as Tab[]).map((t) => (
+          {(["live", "discovery", "settings"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -164,7 +191,7 @@ export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
         </div>
         <div className="flex-1 overflow-auto">
           {tab === "live" && <LiveTab projectId={projectId} />}
-          {tab === "devices" && <DevicesTab />}
+          {tab === "discovery" && <DiscoveryTab />}
           {tab === "settings" && <SettingsTab />}
         </div>
       </div>
@@ -181,9 +208,11 @@ interface LiveMessage {
   qos: number;
   retain: boolean;
   client_id: string;
+  username: string;
   payload?: string;
   payload_size_bytes?: number;
   payload_binary?: boolean;
+  payload_truncated?: boolean;
 }
 
 function LiveTab({ projectId }: { projectId: string }) {
@@ -234,7 +263,7 @@ function LiveTab({ projectId }: { projectId: string }) {
 
   // Coalesce a burst of events into at most two refreshes per second.
   useAppEvents("mqtt", projectId, (ev) => {
-    if (ev.topic !== "mqtt.message" || eventRefreshTimer.current) return;
+    if (!["mqtt.message", "mqtt.client.connected", "mqtt.client.disconnected"].includes(ev.topic) || eventRefreshTimer.current) return;
     eventRefreshTimer.current = window.setTimeout(() => {
       eventRefreshTimer.current = null;
       refresh();
@@ -256,6 +285,7 @@ function LiveTab({ projectId }: { projectId: string }) {
             <span>{status.devices} devices</span>
             <span>{status.retained_count} retained</span>
             <span>{status.message_count} msgs logged</span>
+            <span>{Math.floor(status.uptime_seconds / 60)}m uptime</span>
           </div>
         ) : (
           <div className="text-xs text-text-dim italic">Loading…</div>
@@ -284,6 +314,11 @@ function LiveTab({ projectId }: { projectId: string }) {
           {status.audit_rows_dropped.toLocaleString()} audit rows were dropped because broker traffic exceeded the persistence queue. MQTT delivery was not blocked.
         </div>
       )}
+      {status && (status.events_dropped > 0 || status.rate_limited_messages > 0) && (
+        <div className="mx-4 mt-3 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+          {status.events_dropped.toLocaleString()} platform events dropped · {status.rate_limited_messages.toLocaleString()} client publishes rate-limited.
+        </div>
+      )}
       <div className="px-4 py-2">
         {visible.length === 0 ? (
           <div className="text-text-dim text-xs italic">No messages yet. Publish something or wait for a client.</div>
@@ -304,10 +339,10 @@ function LiveTab({ projectId }: { projectId: string }) {
                   <td className="py-1">{new Date(m.ts).toLocaleTimeString()}</td>
                   <td className="py-1 font-mono">{m.topic}</td>
                   <td className="py-1 font-mono truncate max-w-md" title={m.payload}>
-                    {m.payload_binary ? `<binary, ${m.payload_size_bytes}B>` : m.payload}
+                    {m.payload_binary ? `<binary preview, ${m.payload_size_bytes}B total>` : `${m.payload ?? ""}${m.payload_truncated ? `… (${m.payload_size_bytes}B total)` : ""}`}
                   </td>
                   <td className="py-1">{m.qos}{m.retain && " R"}</td>
-                  <td className="py-1 text-text-dim">{m.client_id}</td>
+                  <td className="py-1 text-text-dim">{m.client_id}{m.username && <span> · {m.username}</span>}</td>
                 </tr>
               ))}
             </tbody>
@@ -320,7 +355,7 @@ function LiveTab({ projectId }: { projectId: string }) {
 
 // ─── Devices ───────────────────────────────────────────────────────
 
-function DevicesTab() {
+function DiscoveryTab() {
   const API = useAPI();
   const [devices, setDevices] = useState<Device[]>([]);
   const [filter, setFilter] = useState("");
@@ -390,6 +425,7 @@ function SettingsTab() {
       <ConnectionSection />
       <UsersSection />
       <SubscriptionsSection />
+      <RetainedSection />
       <TestPublishSection />
     </div>
   );
@@ -405,7 +441,11 @@ function ConnectionSection() {
     <div>
       <h3 className="text-sm font-medium mb-2">Broker connection</h3>
       <div className="border border-border rounded px-3 py-2 text-xs">
-        <div>TCP listener: <code className="font-mono">{status?.listen_address ?? "…"}</code></div>
+        <div>Client endpoint: <code className="font-mono">{status?.endpoint || "…"}</code></div>
+        {status && <div className="text-text-dim mt-1">Bind address: <code className="font-mono">{status.bind_address}</code></div>}
+        {status && <div className="text-text-dim mt-1">
+          Limits: {status.limits.max_clients.toLocaleString()} clients · {(status.limits.max_payload_bytes / 1024).toLocaleString()} KiB packets · {status.limits.max_publish_per_second}/s per client
+        </div>}
         <div className="text-text-dim mt-1">
           Connect to the host running this sidecar. Authentication is required by default; TLS is not terminated by this app, so expose it only on a trusted network, VPN, or protected TCP proxy.
         </div>
@@ -418,6 +458,7 @@ function UsersSection() {
   const API = useAPI();
   const [users, setUsers] = useState<MQTTUser[]>([]);
   const [showAdd, setShowAdd] = useState(false);
+  const [editing, setEditing] = useState<{ user: MQTTUser; mode: "acl" | "password" } | null>(null);
   const refresh = useCallback(async () => {
     const r = await fetch(`${API}/users`);
     if (r.ok) setUsers(await r.json());
@@ -452,6 +493,12 @@ function UsersSection() {
               >
                 {u.enabled ? "disable" : "enable"}
               </button>
+              <button onClick={() => setEditing({ user: u, mode: "acl" })} className="text-xs text-text-dim hover:text-text mr-2">
+                ACL
+              </button>
+              <button onClick={() => setEditing({ user: u, mode: "password" })} className="text-xs text-text-dim hover:text-text mr-2">
+                password
+              </button>
               <button
                 onClick={async () => {
                   if (!window.confirm(`Delete MQTT user ${u.username}? Connected clients using it will fail their next authentication.`)) return;
@@ -467,7 +514,58 @@ function UsersSection() {
         </div>
       )}
       {showAdd && <AddUserModal onClose={() => setShowAdd(false)} onAdded={() => { setShowAdd(false); refresh(); }} />}
+      {editing && <EditUserModal user={editing.user} mode={editing.mode} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); refresh(); }} />}
     </div>
+  );
+}
+
+function EditUserModal({ user, mode, onClose, onSaved }: { user: MQTTUser; mode: "acl" | "password"; onClose: () => void; onSaved: () => void }) {
+  const API = useAPI();
+  const [password, setPassword] = useState("");
+  const [pub, setPub] = useState(user.allow_publish.join(","));
+  const [sub, setSub] = useState(user.allow_subscribe.join(","));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const submit = async () => {
+    setBusy(true);
+    setErr("");
+    const body = mode === "password"
+      ? { password }
+      : {
+          allow_publish: pub.split(",").map((s) => s.trim()).filter(Boolean),
+          allow_subscribe: sub.split(",").map((s) => s.trim()).filter(Boolean),
+        };
+    try {
+      const r = await fetch(`${API}/users/${encodeURIComponent(user.username)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      onSaved();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not update user");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title={mode === "password" ? `Rotate password · ${user.username}` : `Edit ACL · ${user.username}`} onClose={onClose}>
+      {mode === "password" ? (
+        <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="new password" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
+      ) : (
+        <>
+          <input value={pub} onChange={(e) => setPub(e.target.value)} placeholder="publish allow (comma-separated filters)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
+          <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="subscribe allow (comma-separated filters)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
+        </>
+      )}
+      <p className="text-xs text-text-dim mb-2">Saving disconnects active sessions for this user so the change takes effect immediately.</p>
+      {err && <div className="text-error text-xs mb-2">{err}</div>}
+      <div className="flex gap-2 justify-end">
+        <button className="px-3 py-1 text-sm" onClick={onClose}>Cancel</button>
+        <button className="bg-accent text-bg px-3 py-1 rounded text-sm" disabled={busy || (mode === "password" && !password)} onClick={submit}>Save</button>
+      </div>
+    </Modal>
   );
 }
 
@@ -569,6 +667,56 @@ function SubscriptionsSection() {
               >
                 ✕
               </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RetainedSection() {
+  const API = useAPI();
+  const [messages, setMessages] = useState<RetainedMessage[]>([]);
+  const [filter, setFilter] = useState("");
+  const [error, setError] = useState("");
+  const refresh = useCallback(async () => {
+    const suffix = filter ? `?topic_pattern=${encodeURIComponent(filter)}` : "";
+    const r = await fetch(`${API}/retained${suffix}`);
+    if (!r.ok) {
+      setError(await r.text());
+      return;
+    }
+    setMessages(await r.json());
+    setError("");
+  }, [API, filter]);
+  useEffect(() => { refresh(); }, [refresh]);
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <h3 className="text-sm font-medium flex-1">Retained state ({messages.length})</h3>
+        <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="devices/+/state" className="bg-bg-elev border border-border rounded px-2 py-1 text-xs font-mono" />
+      </div>
+      {error && <div className="text-error text-xs mb-2">{error}</div>}
+      {messages.length === 0 ? (
+        <div className="text-text-dim text-xs italic">No retained messages.</div>
+      ) : (
+        <div className="border border-border rounded max-h-64 overflow-auto">
+          {messages.map((m) => (
+            <div key={m.topic} className="flex items-center gap-3 px-3 py-2 border-b border-border last:border-b-0">
+              <span className="font-mono text-xs flex-1 truncate" title={m.topic}>{m.topic}</span>
+              <span className="font-mono text-xs text-text-dim max-w-xs truncate" title={typeof m.payload === "string" ? m.payload : JSON.stringify(m.payload)}>
+                {typeof m.payload === "string" ? m.payload : JSON.stringify(m.payload)}
+              </span>
+              <span className="text-xs text-text-dim">{m.size_bytes}B · Q{m.qos}</span>
+              <button
+                className="text-xs text-text-dim hover:text-error"
+                onClick={async () => {
+                  if (!window.confirm(`Delete retained message ${m.topic}?`)) return;
+                  await fetch(`${API}/retained/${encodeURIComponent(m.topic)}`, { method: "DELETE" });
+                  refresh();
+                }}
+              >delete</button>
             </div>
           ))}
         </div>

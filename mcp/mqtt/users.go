@@ -70,19 +70,23 @@ func (h *aclHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool
 			return true
 		}
 		h.logACL("", "connect", "", false, "anonymous refused (allow_anonymous=false)")
+		h.app.authRejected.Add(1)
 		return false
 	}
 	u := h.app.cachedUser(username)
 	if u == nil {
 		h.logACL(username, "connect", "", false, "no such user")
+		h.app.authRejected.Add(1)
 		return false
 	}
 	if !u.Enabled {
 		h.logACL(username, "connect", "", false, "user disabled")
+		h.app.authRejected.Add(1)
 		return false
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(u.passwordHash), []byte(password)); err != nil {
 		h.logACL(username, "connect", "", false, "bad password")
+		h.app.authRejected.Add(1)
 		return false
 	}
 	h.logACL(username, "connect", "", true, "")
@@ -102,6 +106,7 @@ func (h *aclHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	}
 	if username == "" {
 		if !configFlag(h.app.ctx, "allow_anonymous", false) {
+			h.app.aclRejected.Add(1)
 			return false
 		}
 		// Anonymous: allow everything. Operators wanting tighter
@@ -113,6 +118,7 @@ func (h *aclHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 	u := h.app.cachedUser(username)
 	if u == nil || !u.Enabled {
 		h.logACL(username, action, topic, false, "user gone")
+		h.app.aclRejected.Add(1)
 		return false
 	}
 	allow := u.AllowPublishTopics
@@ -124,6 +130,7 @@ func (h *aclHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		return true
 	}
 	h.logACL(username, action, topic, false, "no matching ACL")
+	h.app.aclRejected.Add(1)
 	return false
 }
 
@@ -219,12 +226,26 @@ func listUsers(db *sql.DB) ([]MQTTUser, error) {
 }
 
 func addUser(db *sql.DB, username, password string, allowPub, allowSub []string) error {
+	return writeUser(db, username, password, allowPub, allowSub, true)
+}
+
+func createUser(db *sql.DB, username, password string, allowPub, allowSub []string) error {
+	return writeUser(db, username, password, allowPub, allowSub, false)
+}
+
+func writeUser(db *sql.DB, username, password string, allowPub, allowSub []string, upsert bool) error {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("username required")
 	}
+	if len(username) > 256 {
+		return fmt.Errorf("username must be at most 256 characters")
+	}
 	if password == "" {
 		return fmt.Errorf("password required")
+	}
+	if len(password) > 4096 {
+		return fmt.Errorf("password must be at most 4096 bytes")
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -246,18 +267,94 @@ func addUser(db *sql.DB, username, password string, allowPub, allowSub []string)
 	}
 	pubJSON, _ := json.Marshal(allowPub)
 	subJSON, _ := json.Marshal(allowSub)
-	_, err = db.Exec(
-		`INSERT INTO mqtt_users
+	query := `INSERT INTO mqtt_users
 		   (username, password_hash, allow_publish_topics_json,
 		    allow_subscribe_topics_json, enabled)
-		 VALUES (?, ?, ?, ?, 1)
-		 ON CONFLICT(username) DO UPDATE SET
+		 VALUES (?, ?, ?, ?, 1)`
+	if upsert {
+		query += ` ON CONFLICT(username) DO UPDATE SET
 		   password_hash = excluded.password_hash,
 		   allow_publish_topics_json = excluded.allow_publish_topics_json,
 		   allow_subscribe_topics_json = excluded.allow_subscribe_topics_json,
-		   enabled = 1`,
+		   enabled = 1`
+	}
+	_, err = db.Exec(query,
 		username, string(hash), string(pubJSON), string(subJSON))
+	if err != nil && !upsert && strings.Contains(strings.ToLower(err.Error()), "unique") {
+		return fmt.Errorf("mqtt user %q already exists", username)
+	}
 	return err
+}
+
+func updateUserACL(db *sql.DB, username string, allowPub, allowSub []string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("username required")
+	}
+	if allowPub == nil && allowSub == nil {
+		return fmt.Errorf("allow_publish or allow_subscribe required")
+	}
+	var (
+		sets []string
+		args []any
+	)
+	if allowPub != nil {
+		normalized, err := normalizeTopicFilters(allowPub)
+		if err != nil {
+			return err
+		}
+		encoded, _ := json.Marshal(normalized)
+		sets = append(sets, "allow_publish_topics_json = ?")
+		args = append(args, string(encoded))
+	}
+	if allowSub != nil {
+		normalized, err := normalizeTopicFilters(allowSub)
+		if err != nil {
+			return err
+		}
+		encoded, _ := json.Marshal(normalized)
+		sets = append(sets, "allow_subscribe_topics_json = ?")
+		args = append(args, string(encoded))
+	}
+	args = append(args, username)
+	result, err := db.Exec(`UPDATE mqtt_users SET `+strings.Join(sets, ", ")+` WHERE username = ?`, args...)
+	if err != nil {
+		return err
+	}
+	return requireAffectedUser(result, username)
+}
+
+func rotateUserPassword(db *sql.DB, username, password string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("username required")
+	}
+	if password == "" {
+		return fmt.Errorf("password required")
+	}
+	if len(password) > 4096 {
+		return fmt.Errorf("password must be at most 4096 bytes")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	result, err := db.Exec(`UPDATE mqtt_users SET password_hash = ? WHERE username = ?`, string(hash), username)
+	if err != nil {
+		return err
+	}
+	return requireAffectedUser(result, username)
+}
+
+func requireAffectedUser(result sql.Result, username string) error {
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("mqtt user %q not found", username)
+	}
+	return nil
 }
 
 func normalizeTopicFilters(filters []string) ([]string, error) {
@@ -303,8 +400,11 @@ func (a *App) cachedUser(username string) *MQTTUser {
 }
 
 func deleteUser(db *sql.DB, username string) error {
-	_, err := db.Exec(`DELETE FROM mqtt_users WHERE username = ?`, username)
-	return err
+	result, err := db.Exec(`DELETE FROM mqtt_users WHERE username = ?`, username)
+	if err != nil {
+		return err
+	}
+	return requireAffectedUser(result, username)
 }
 
 func setUserEnabled(db *sql.DB, username string, enabled bool) error {
@@ -312,8 +412,11 @@ func setUserEnabled(db *sql.DB, username string, enabled bool) error {
 	if enabled {
 		v = 1
 	}
-	_, err := db.Exec(`UPDATE mqtt_users SET enabled = ? WHERE username = ?`, v, username)
-	return err
+	result, err := db.Exec(`UPDATE mqtt_users SET enabled = ? WHERE username = ?`, v, username)
+	if err != nil {
+		return err
+	}
+	return requireAffectedUser(result, username)
 }
 
 // seedDefaultUserIfNeeded creates an `apteva-default` user with a
