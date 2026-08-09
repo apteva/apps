@@ -348,7 +348,7 @@ func TestExtensionLayoutWrapsOrdinaryContentPages(t *testing.T) {
 	for _, expected := range []string{
 		"Store header", "Store footer", "<h1>About us</h1>",
 		"/api/apps/content/_theme/default/2/style.css?project_id=p1&amp;site=main",
-		"/api/apps/content/_extensions/store/assets/store.css?project_id=p1&amp;site=main",
+		"/api/apps/content/_extensions/store/assets/store.css?project_id=p1&amp;site=main&amp;v=" + extensionAssetRevision(extensionManifest.Assets["store.css"]),
 		"/api/apps/content/cart?project_id=p1&amp;site=main",
 	} {
 		if !strings.Contains(body, expected) {
@@ -357,6 +357,78 @@ func TestExtensionLayoutWrapsOrdinaryContentPages(t *testing.T) {
 	}
 	if policy == nil || len(policy.ConnectOrigins) != 1 {
 		t.Fatalf("extension layout browser policy missing: %#v", policy)
+	}
+}
+
+func TestExtensionAssetURLsUseContentRevision(t *testing.T) {
+	ext := Extension{
+		Key: "store",
+		PublishedManifest: ExtensionManifest{
+			Templates: map[string]string{"page": `{{asset "store.css"}}`},
+			Assets:    map[string]string{"store.css": "body{color:red}"},
+		},
+	}
+	render := func(extension Extension) string {
+		body, err := renderExtensionSource(extension, "page", extensionPageData{
+			URLPrefix: "/api/apps/content/", ResourceQuery: "?project_id=p1&site=main",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	first := render(ext)
+	firstRevision := extensionAssetRevision("body{color:red}")
+	if !strings.Contains(first, "project_id=p1&amp;site=main&amp;v="+firstRevision) {
+		t.Fatalf("revisioned asset URL missing: %s", first)
+	}
+	ext.PublishedManifest.Assets["store.css"] = "body{color:blue}"
+	second := render(ext)
+	if first == second || strings.Contains(second, firstRevision) {
+		t.Fatalf("asset URL did not change with content: first=%s second=%s", first, second)
+	}
+}
+
+func TestExtensionAssetCachingRequiresMatchingRevision(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "p1")
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionManifest := testExtensionManifest()
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	revision := extensionAssetRevision(extensionManifest.Assets["store.css"])
+
+	immutable := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision, nil)
+	(&App{}).handleExtensionAsset(immutable, request)
+	if immutable.Code != http.StatusOK || immutable.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("revisioned asset response = %d, cache=%q", immutable.Code, immutable.Header().Get("Cache-Control"))
+	}
+	if got := immutable.Header().Get("ETag"); got != `"`+revision+`"` {
+		t.Fatalf("asset ETag = %q", got)
+	}
+
+	legacy := httptest.NewRecorder()
+	(&App{}).handleExtensionAsset(legacy, httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css", nil))
+	if legacy.Code != http.StatusOK || legacy.Header().Get("Cache-Control") != "public, max-age=300" {
+		t.Fatalf("legacy asset response = %d, cache=%q", legacy.Code, legacy.Header().Get("Cache-Control"))
+	}
+
+	notModified := httptest.NewRecorder()
+	conditional := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision, nil)
+	conditional.Header.Set("If-None-Match", `"`+revision+`"`)
+	(&App{}).handleExtensionAsset(notModified, conditional)
+	if notModified.Code != http.StatusNotModified {
+		t.Fatalf("conditional asset status = %d", notModified.Code)
 	}
 }
 

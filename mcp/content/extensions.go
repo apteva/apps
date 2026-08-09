@@ -737,6 +737,25 @@ func resourceQuery(r *http.Request) string {
 	return ""
 }
 
+func extensionAssetRevision(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func extensionAssetQuery(resourceQuery, revision string) string {
+	values, err := url.ParseQuery(strings.TrimPrefix(resourceQuery, "?"))
+	if err != nil {
+		values = url.Values{}
+	}
+	if revision != "" {
+		values.Set("v", revision)
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return "?" + encoded
+	}
+	return ""
+}
+
 func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extensionPageData) (string, error) {
 	return renderExtensionSource(ext, route.Template, data)
 }
@@ -745,7 +764,13 @@ func renderExtensionSource(ext Extension, templateName string, data extensionPag
 	source := ext.PublishedManifest.Templates[templateName]
 	funcs := template.FuncMap{
 		"asset": func(name string) string {
-			return data.URLPrefix + "_extensions/" + url.PathEscape(ext.Key) + "/assets/" + strings.TrimPrefix(name, "/") + data.ResourceQuery
+			cleanName := strings.TrimPrefix(name, "/")
+			revision := ""
+			if body, ok := ext.PublishedManifest.Assets[cleanName]; ok {
+				revision = extensionAssetRevision(body)
+			}
+			return data.URLPrefix + "_extensions/" + url.PathEscape(ext.Key) + "/assets/" + cleanName +
+				extensionAssetQuery(data.ResourceQuery, revision)
 		},
 		"action": func(name string) string {
 			return data.URLPrefix + "_actions/" + url.PathEscape(ext.Key) + "/" + url.PathEscape(name) + data.ResourceQuery
@@ -918,7 +943,18 @@ func (a *App) handleExtensionAsset(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	revision := extensionAssetRevision(body)
+	etag := `"` + revision + `"`
+	w.Header().Set("ETag", etag)
+	if r.URL.Query().Get("v") == revision {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "public, max-age=300")
+	}
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	if r.Method != http.MethodHead {
 		_, _ = w.Write([]byte(body))
 	}
