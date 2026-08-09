@@ -203,9 +203,7 @@ func (a *App) httpDeploymentStoreApply(w http.ResponseWriter, r *http.Request, d
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	var body struct {
-		ReviewDemoPassword string `json:"review_demo_password"`
-	}
+	var body StoreApplyRequest
 	if r.Body != nil {
 		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
 	}
@@ -214,13 +212,13 @@ func (a *App) httpDeploymentStoreApply(w http.ResponseWriter, r *http.Request, d
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	cfg, err := a.applyStoreConfigWithReviewSecret(d, build, true, body.ReviewDemoPassword)
+	result, err := a.applyStoreConfigScoped(d, build, true, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
-	httpJSON(w, map[string]any{"config": cfg, "applied": true})
+	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": result.Config.Provider, "status": result.Status})
+	httpJSON(w, result)
 }
 
 func (a *App) httpDeploymentStoreSync(w http.ResponseWriter, r *http.Request, d *Deployment) {

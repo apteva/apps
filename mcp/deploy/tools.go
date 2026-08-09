@@ -244,9 +244,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_store_apply", Handler: a.toolStoreApply,
-			Description: "Idempotently apply the desired listing to App Store Connect or Google Play without building or submitting it. Args: name OR id, environment?, build_id?, review_demo_password?.",
+			Description: "Idempotently reconcile selected listing scopes with App Store Connect or Google Play without building or submitting. Args: name OR id, environment?, build_id?, scopes?, allow_partial?, review_demo_password?.",
 			InputSchema: storeToolDeploymentSchema(map[string]any{
 				"build_id":             map[string]any{"type": "integer"},
+				"scopes":               map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": storeScopeOrder}},
+				"allow_partial":        map[string]any{"type": "boolean", "description": "Apply independent ready scopes and return blocked/failed scopes separately."},
 				"review_demo_password": map[string]any{"type": "string", "description": "One-shot Apple review password; sent to Apple and never stored by Deploy."},
 			}),
 		},
@@ -949,12 +951,15 @@ func (a *App) toolStoreApply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := a.applyStoreConfigWithReviewSecret(d, build, true, strArg(args, "review_demo_password"))
+	result, err := a.applyStoreConfigScoped(d, build, true, StoreApplyRequest{
+		Scopes: stringSliceValue(args["scopes"]), AllowPartial: boolArg(args, "allow_partial"),
+		ReviewDemoPassword: strArg(args, "review_demo_password"),
+	})
 	if err != nil {
 		return nil, err
 	}
-	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
-	return map[string]any{"config": cfg, "applied": true}, nil
+	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": result.Config.Provider, "status": result.Status})
+	return result, nil
 }
 
 func (a *App) toolStoreSync(_ *sdk.AppCtx, args map[string]any) (any, error) {

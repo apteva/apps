@@ -1,0 +1,489 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+func (a *App) applyAppleDistribution(bound *sdk.BoundIntegration, appID string, doc StoreDocument) error {
+	if body := providerExtensionBody(doc, "app_store_connect", "price_schedule_body"); body != nil && !strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
+		if _, err := executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body}); err != nil {
+			return err
+		}
+	} else if strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
+		if err := reconcileAppleFreePrice(bound, appID, doc); err != nil {
+			return err
+		}
+	}
+	if body := providerExtensionBody(doc, "app_store_connect", "availability_body"); body != nil {
+		availabilityID := jsonStringFromValue(body, "data", "id")
+		if availabilityID == "" {
+			_, err := executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
+			return err
+		}
+		_, err := executeIntegration(bound, "update_app_availability", map[string]any{"availability_id": availabilityID, "body": body})
+		return err
+	}
+	if storeAvailabilityConfigured(doc.Distribution) {
+		return reconcileAppleAvailability(bound, appID, doc.Distribution)
+	}
+	return nil
+}
+
+func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc StoreDocument) error {
+	current, err := executeIntegration(bound, "get_app_price_schedule", map[string]any{"app_id": appID, "include": "baseTerritory,manualPrices"})
+	if err == nil && applePriceScheduleIsFree(bound, current) {
+		return nil
+	}
+	if err != nil && integrationErrorStatus(err) != http.StatusNotFound {
+		return err
+	}
+	baseTerritory := "USA"
+	if value := strings.TrimSpace(jsonStringFromValue(doc.Distribution.Provider, "base_territory")); value != "" {
+		baseTerritory = strings.ToUpper(value)
+	}
+	points, err := executeIntegration(bound, "list_app_price_points", map[string]any{
+		"app_id": appID, "territory": baseTerritory, "fields": "customerPrice,proceeds", "include": "territory", "limit": 200,
+	})
+	if err != nil {
+		return err
+	}
+	zeroID := firstZeroApplePricePoint(points)
+	if zeroID == "" {
+		return fmt.Errorf("App Store Connect returned no zero price point for base territory %s", baseTerritory)
+	}
+	manualPriceID := "deploy-free-" + strings.ToLower(baseTerritory)
+	body := map[string]any{
+		"data": map[string]any{
+			"type": "appPriceSchedules",
+			"relationships": map[string]any{
+				"app":           map[string]any{"data": map[string]any{"type": "apps", "id": appID}},
+				"baseTerritory": map[string]any{"data": map[string]any{"type": "territories", "id": baseTerritory}},
+				"manualPrices":  map[string]any{"data": []any{map[string]any{"type": "appPrices", "id": manualPriceID}}},
+			},
+		},
+		"included": []any{map[string]any{
+			"type": "appPrices", "id": manualPriceID,
+			"relationships": map[string]any{
+				"appPricePoint": map[string]any{"data": map[string]any{"type": "appPricePoints", "id": zeroID}},
+			},
+		}},
+	}
+	_, err = executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body})
+	return err
+}
+
+func firstZeroApplePricePoint(raw json.RawMessage) string {
+	var payload struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				CustomerPrice string `json:"customerPrice"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	for _, point := range payload.Data {
+		price, err := strconv.ParseFloat(point.Attributes.CustomerPrice, 64)
+		if err == nil && price == 0 {
+			return point.ID
+		}
+	}
+	return ""
+}
+
+func reconcileAppleAvailability(bound *sdk.BoundIntegration, appID string, distribution StoreDistribution) error {
+	desired, availableInNew, err := desiredAppleTerritories(bound, distribution)
+	if err != nil {
+		return err
+	}
+	current, err := executeIntegration(bound, "get_app_availability", map[string]any{"app_id": appID})
+	if err != nil {
+		if integrationErrorStatus(err) != http.StatusNotFound {
+			return err
+		}
+		body := appleAvailabilityCreateBody(appID, desired, availableInNew)
+		_, err = executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
+		return err
+	}
+	availabilityID := firstJSONAPIID(current)
+	if availabilityID == "" {
+		return errors.New("App Store availability response missing id")
+	}
+	_, err = executeIntegration(bound, "update_app_availability", map[string]any{
+		"availability_id": availabilityID,
+		"body": map[string]any{"data": map[string]any{
+			"type": "appAvailabilities", "id": availabilityID,
+			"attributes": map[string]any{"availableInNewTerritories": availableInNew},
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	territories, err := executeIntegration(bound, "list_app_availability_territories", map[string]any{
+		"availability_id": availabilityID, "include": "territory", "limit": 200,
+	})
+	if err != nil {
+		return err
+	}
+	for resourceID, territoryID := range appleTerritoryAvailabilityIDs(territories) {
+		available, ok := desired[territoryID]
+		if !ok {
+			continue
+		}
+		_, err := executeIntegration(bound, "update_territory_availability", map[string]any{
+			"territory_availability_id": resourceID,
+			"body": map[string]any{"data": map[string]any{
+				"type": "territoryAvailabilities", "id": resourceID,
+				"attributes": map[string]any{"available": available},
+			}},
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func desiredAppleTerritories(bound *sdk.BoundIntegration, distribution StoreDistribution) (map[string]bool, bool, error) {
+	raw, err := executeIntegration(bound, "list_territories", map[string]any{"fields": "currency", "limit": 200})
+	if err != nil {
+		return nil, false, err
+	}
+	all := jsonAPIResourceIDs(raw)
+	if len(all) == 0 {
+		return nil, false, errors.New("App Store Connect returned no territories")
+	}
+	availability := distribution.Availability
+	if availability.Mode == "" {
+		availability.Mode = "only"
+		availability.IncludedTerritories = distribution.Territories
+	}
+	included := upperStringSet(availability.IncludedTerritories)
+	excluded := upperStringSet(availability.ExcludedTerritories)
+	desired := map[string]bool{}
+	for _, territory := range all {
+		switch availability.Mode {
+		case "all":
+			desired[territory] = true
+		case "all_except":
+			desired[territory] = !excluded[territory]
+		case "only":
+			desired[territory] = included[territory]
+		default:
+			return nil, false, fmt.Errorf("unsupported availability mode %q", availability.Mode)
+		}
+	}
+	availableInNew := availability.Mode == "all" || availability.Mode == "all_except"
+	if availability.AvailableInNewTerritories != nil {
+		availableInNew = *availability.AvailableInNewTerritories
+	}
+	return desired, availableInNew, nil
+}
+
+func appleAvailabilityCreateBody(appID string, desired map[string]bool, availableInNew bool) map[string]any {
+	ids := make([]string, 0, len(desired))
+	for territory := range desired {
+		ids = append(ids, territory)
+	}
+	sort.Strings(ids)
+	linkages := make([]any, 0, len(ids))
+	included := make([]any, 0, len(ids))
+	for _, territory := range ids {
+		id := "deploy-territory-" + strings.ToLower(territory)
+		linkages = append(linkages, map[string]any{"type": "territoryAvailabilities", "id": id})
+		included = append(included, map[string]any{
+			"type": "territoryAvailabilities", "id": id,
+			"attributes":    map[string]any{"available": desired[territory]},
+			"relationships": map[string]any{"territory": map[string]any{"data": map[string]any{"type": "territories", "id": territory}}},
+		})
+	}
+	return map[string]any{
+		"data": map[string]any{
+			"type": "appAvailabilities", "attributes": map[string]any{"availableInNewTerritories": availableInNew},
+			"relationships": map[string]any{
+				"app":                     map[string]any{"data": map[string]any{"type": "apps", "id": appID}},
+				"territoryAvailabilities": map[string]any{"data": linkages},
+			},
+		},
+		"included": included,
+	}
+}
+
+func appleTerritoryAvailabilityIDs(raw json.RawMessage) map[string]string {
+	var payload struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Relationships struct {
+				Territory struct {
+					Data struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				} `json:"territory"`
+			} `json:"relationships"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := map[string]string{}
+	for _, item := range payload.Data {
+		out[item.ID] = strings.ToUpper(item.Relationships.Territory.Data.ID)
+	}
+	return out
+}
+
+func appleAvailabilityMatches(bound *sdk.BoundIntegration, distribution StoreDistribution, availability json.RawMessage) (bool, map[string]bool, error) {
+	if !storeAvailabilityConfigured(distribution) {
+		return jsonValueHasData(decodeJSONValue(availability)), nil, nil
+	}
+	availabilityID := firstJSONAPIID(availability)
+	if availabilityID == "" {
+		return false, nil, errors.New("App Store availability response missing id")
+	}
+	raw, err := executeIntegration(bound, "list_app_availability_territories", map[string]any{
+		"availability_id": availabilityID, "include": "territory", "limit": 200,
+	})
+	if err != nil {
+		return false, nil, err
+	}
+	actual := appleTerritoryAvailabilityState(raw)
+	desired, _, err := desiredAppleTerritories(bound, distribution)
+	if err != nil {
+		return false, actual, err
+	}
+	if len(actual) != len(desired) {
+		return false, actual, nil
+	}
+	for territory, available := range desired {
+		if actual[territory] != available {
+			return false, actual, nil
+		}
+	}
+	return true, actual, nil
+}
+
+func appleTerritoryAvailabilityState(raw json.RawMessage) map[string]bool {
+	var payload struct {
+		Data []struct {
+			Attributes struct {
+				Available bool `json:"available"`
+			} `json:"attributes"`
+			Relationships struct {
+				Territory struct {
+					Data struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				} `json:"territory"`
+			} `json:"relationships"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := map[string]bool{}
+	for _, item := range payload.Data {
+		if territory := strings.ToUpper(item.Relationships.Territory.Data.ID); territory != "" {
+			out[territory] = item.Attributes.Available
+		}
+	}
+	return out
+}
+
+func jsonAPIResourceIDs(raw json.RawMessage) []string {
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := make([]string, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		if item.ID != "" {
+			out = append(out, strings.ToUpper(item.ID))
+		}
+	}
+	return out
+}
+
+func upperStringSet(values []string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range values {
+		out[strings.ToUpper(strings.TrimSpace(value))] = true
+	}
+	return out
+}
+
+type appleScreenshotResource struct {
+	ID       string
+	Filename string
+	State    string
+}
+
+func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment, localizationIDs map[string]string, doc StoreDocument) error {
+	grouped := map[string][]StoreAsset{}
+	for _, asset := range doc.Assets {
+		if !strings.Contains(asset.Kind, "screenshot") {
+			continue
+		}
+		locale := defaultStr(asset.Locale, doc.DefaultLocale)
+		key := locale + "\x00" + appleScreenshotDisplayTarget(asset)
+		grouped[key] = append(grouped[key], asset)
+	}
+	for locale, localizationID := range localizationIDs {
+		setsRaw, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID, "limit": 200})
+		if err != nil {
+			return err
+		}
+		for _, set := range parseAppleScreenshotSets(setsRaw) {
+			if _, desired := grouped[locale+"\x00"+set.DisplayType]; desired {
+				continue
+			}
+			existingRaw, listErr := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": set.ID, "limit": 200})
+			if listErr != nil {
+				return listErr
+			}
+			for _, screenshot := range parseAppleScreenshots(existingRaw) {
+				if _, deleteErr := executeIntegration(bound, "delete_screenshot", map[string]any{"screenshot_id": screenshot.ID}); deleteErr != nil {
+					return deleteErr
+				}
+			}
+		}
+	}
+	for key, assets := range grouped {
+		parts := strings.SplitN(key, "\x00", 2)
+		localizationID := localizationIDs[parts[0]]
+		if localizationID == "" {
+			return fmt.Errorf("asset group references unknown locale %s", parts[0])
+		}
+		sort.SliceStable(assets, func(i, j int) bool { return assets[i].Order < assets[j].Order })
+		sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID, "display_type": parts[1], "limit": 20})
+		if err != nil {
+			return err
+		}
+		setID := firstJSONAPIID(sets)
+		if setID == "" {
+			created, createErr := executeIntegration(bound, "create_screenshot_set", map[string]any{"localization_id": localizationID, "screenshotDisplayType": parts[1]})
+			if createErr != nil {
+				return createErr
+			}
+			setID = firstJSONAPIID(created)
+		}
+		existingRaw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID, "limit": 200})
+		if err != nil {
+			return err
+		}
+		existing := parseAppleScreenshots(existingRaw)
+		desiredNames := make([]string, 0, len(assets))
+		for _, asset := range assets {
+			path, pathErr := resolveStoreAssetPath(a.dataDir, d, asset.Path)
+			if pathErr != nil {
+				return pathErr
+			}
+			desiredNames = append(desiredNames, storeUploadFilename(path, asset.SHA256))
+		}
+		if !sameAppleScreenshotOrder(existing, desiredNames) {
+			for _, screenshot := range existing {
+				if _, err := executeIntegration(bound, "delete_screenshot", map[string]any{"screenshot_id": screenshot.ID}); err != nil {
+					return err
+				}
+			}
+			for _, asset := range assets {
+				if err := a.uploadAppleScreenshot(bound, d, localizationID, asset); err != nil {
+					return err
+				}
+			}
+		}
+		if err := waitForAppleScreenshots(bound, setID, desiredNames); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type appleScreenshotSet struct {
+	ID          string
+	DisplayType string
+}
+
+func parseAppleScreenshotSets(raw json.RawMessage) []appleScreenshotSet {
+	var payload struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				DisplayType string `json:"screenshotDisplayType"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := make([]appleScreenshotSet, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		out = append(out, appleScreenshotSet{ID: item.ID, DisplayType: item.Attributes.DisplayType})
+	}
+	return out
+}
+
+func parseAppleScreenshots(raw json.RawMessage) []appleScreenshotResource {
+	var payload struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				FileName           string `json:"fileName"`
+				AssetDeliveryState struct {
+					State string `json:"state"`
+				} `json:"assetDeliveryState"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	out := make([]appleScreenshotResource, 0, len(payload.Data))
+	for _, item := range payload.Data {
+		out = append(out, appleScreenshotResource{ID: item.ID, Filename: item.Attributes.FileName, State: item.Attributes.AssetDeliveryState.State})
+	}
+	return out
+}
+
+func sameAppleScreenshotOrder(existing []appleScreenshotResource, desired []string) bool {
+	if len(existing) != len(desired) {
+		return false
+	}
+	for i := range desired {
+		if existing[i].Filename != desired[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func waitForAppleScreenshots(bound *sdk.BoundIntegration, setID string, desired []string) error {
+	for attempt := 0; attempt < 20; attempt++ {
+		raw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID, "limit": 200})
+		if err != nil {
+			return err
+		}
+		resources := parseAppleScreenshots(raw)
+		if sameAppleScreenshotOrder(resources, desired) {
+			pending := false
+			for _, resource := range resources {
+				state := strings.ToUpper(resource.State)
+				if strings.Contains(state, "FAIL") {
+					return fmt.Errorf("Apple screenshot %s delivery failed", resource.Filename)
+				}
+				if state != "" && state != "COMPLETE" {
+					pending = true
+				}
+			}
+			if !pending {
+				return nil
+			}
+		}
+		if attempt < 19 {
+			time.Sleep(3 * time.Second)
+		}
+	}
+	return errors.New("timed out waiting for Apple screenshot delivery")
+}

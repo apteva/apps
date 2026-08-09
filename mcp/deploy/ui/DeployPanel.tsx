@@ -315,6 +315,12 @@ interface StoreDocument {
   };
   distribution: {
     territories?: string[];
+    availability?: {
+      mode?: "all" | "all_except" | "only";
+      included_territories?: string[];
+      excluded_territories?: string[];
+      available_in_new_territories?: boolean;
+    };
     price_tier?: string;
     phased_release?: boolean;
     rollout_fraction?: number;
@@ -343,6 +349,14 @@ interface StoreConfigState {
   } | null;
   desired: StoreDocument;
   preflight: StorePreflight;
+}
+
+interface StoreApplyResult {
+  status: string;
+  applied: boolean;
+  applied_scopes: string[];
+  blocked: { scope: string; code?: string; message: string }[];
+  failed: { scope: string; code?: string; message: string }[];
 }
 
 const APPLE_CATEGORIES = [
@@ -2168,6 +2182,7 @@ function StoreListingDialog({
   onSaved: (next: StoreConfigState) => void;
 }) {
   const [doc, setDoc] = useState<StoreDocument>(() => structuredClone(initial.desired));
+  const [applyResult, setApplyResult] = useState<StoreApplyResult | null>(null);
   const [preflight, setPreflight] = useState(initial.preflight);
   const [tab, setTab] = useState<"listing" | "media" | "review" | "compliance" | "distribution">("listing");
   const [locale, setLocale] = useState(initial.desired.default_locale || "en-US");
@@ -2252,18 +2267,12 @@ function StoreListingDialog({
     setErr("");
     try {
       const saved = await save();
-      const blocking = saved.preflight.findings.filter((finding) => finding.severity === "error");
-      const passwordUnblocksReview = deployment.target_kind === "ios"
-        && reviewPassword.length > 0
-        && blocking.length > 0
-        && blocking.every((finding) => finding.code === "review_demo.required");
-      if (!saved.preflight.ready && !passwordUnblocksReview) {
-        setErr(`Resolve ${saved.preflight.errors} blocking issue(s) before applying.`);
-        return;
-      }
-      await api("POST", `/deployments/${deployment.id}/store-apply`, {
+      const result = await api<StoreApplyResult>("POST", `/deployments/${deployment.id}/store-apply`, {
+        scopes: ["version", "localizations", "media", "review", "classification", "privacy", "distribution", "compliance"],
+        allow_partial: true,
         review_demo_password: reviewPassword || undefined,
       });
+      setApplyResult(result);
       setReviewPassword("");
       const next = await api<StoreConfigState>("GET", `/deployments/${deployment.id}/store-config`);
       setDoc(structuredClone(next.desired));
@@ -2352,7 +2361,9 @@ function StoreListingDialog({
             <h2 className="text-text font-semibold">Store listing</h2>
             <div className="text-xs text-text-dim">
               {deployment.target_kind === "ios" ? "App Store Connect" : "Google Play"}
-              {initial.config?.status ? ` · ${initial.config.status}` : " · not configured"}
+              {initial.config?.status
+                ? ` · ${initial.config.desired_hash === initial.config.applied_hash && initial.config.applied_hash ? "applied and verified" : initial.config.status}`
+                : " · not configured"}
             </div>
           </div>
           <span className={`text-xs ${preflight.ready ? "text-green" : "text-yellow"}`}>
@@ -2815,17 +2826,39 @@ function StoreListingDialog({
           {tab === "distribution" && (
             <div className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <TextField
-                  label="Territories"
-                  value={(doc.distribution.territories || []).join(", ")}
-                  onChange={(value) => setDoc({
-                    ...doc,
-                    distribution: {
+                <label className="text-xs text-text-muted">
+                  Availability
+                  <select
+                    value={doc.distribution.availability?.mode || (doc.distribution.territories?.length ? "only" : "")}
+                    onChange={(e) => setDoc({ ...doc, distribution: {
                       ...doc.distribution,
-                      territories: value.split(",").map((item) => item.trim()).filter(Boolean),
-                    },
-                  })}
-                />
+                      availability: { ...doc.distribution.availability, mode: e.target.value as "all" | "all_except" | "only" },
+                    } })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="">Select availability</option>
+                    <option value="all">All storefronts</option>
+                    <option value="all_except">All except selected</option>
+                    <option value="only">Only selected</option>
+                  </select>
+                </label>
+                {(doc.distribution.availability?.mode === "all_except" || doc.distribution.availability?.mode === "only" || (!doc.distribution.availability?.mode && doc.distribution.territories?.length)) && (
+                  <TextField
+                    label={doc.distribution.availability?.mode === "all_except" ? "Excluded territories" : "Included territories"}
+                    value={(doc.distribution.availability?.mode === "all_except"
+                      ? doc.distribution.availability?.excluded_territories
+                      : doc.distribution.availability?.included_territories || doc.distribution.territories || []).join(", ")}
+                    onChange={(value) => {
+                      const territories = value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);
+                      const mode = doc.distribution.availability?.mode || "only";
+                      setDoc({ ...doc, distribution: { ...doc.distribution, territories: undefined, availability: {
+                        ...doc.distribution.availability,
+                        mode,
+                        ...(mode === "all_except" ? { excluded_territories: territories } : { included_territories: territories }),
+                      } } });
+                    }}
+                  />
+                )}
                 <TextField label="Price point / tier" value={doc.distribution.price_tier} onChange={(price_tier) => setDoc({ ...doc, distribution: { ...doc.distribution, price_tier } })} />
                 <label className="flex items-center gap-2 text-xs text-text-muted">
                   <input
@@ -2908,7 +2941,10 @@ function StoreListingDialog({
 
         <footer className="px-5 py-3 border-t border-border flex flex-wrap items-center gap-2">
           {err && <span className="text-xs text-red flex-1 truncate" title={err}>{err}</span>}
-          {!err && <span className="flex-1 text-xs text-text-dim">Saving does not submit or release the app.</span>}
+          {!err && applyResult && <span className="flex-1 text-xs text-text-dim">
+            {applyResult.applied_scopes.length} applied · {applyResult.blocked.length} blocked · {applyResult.failed.length} failed
+          </span>}
+          {!err && !applyResult && <span className="flex-1 text-xs text-text-dim">Saving does not submit or release the app.</span>}
           <button type="button" onClick={handleSync} disabled={busy || !hasConfig} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-40">
             Sync
           </button>
