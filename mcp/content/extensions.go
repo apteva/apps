@@ -756,6 +756,10 @@ func extensionAssetQuery(resourceQuery, revision string) string {
 	return ""
 }
 
+func extensionAssetRevisionMatches(raw, revision string) bool {
+	return raw == revision || strings.HasPrefix(raw, revision+"?")
+}
+
 func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extensionPageData) (string, error) {
 	return renderExtensionSource(ext, route.Template, data)
 }
@@ -946,7 +950,7 @@ func (a *App) handleExtensionAsset(w http.ResponseWriter, r *http.Request) {
 	revision := extensionAssetRevision(body)
 	etag := `"` + revision + `"`
 	w.Header().Set("ETag", etag)
-	if r.URL.Query().Get("v") == revision {
+	if extensionAssetRevisionMatches(r.URL.Query().Get("v"), revision) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	} else {
 		w.Header().Set("Cache-Control", "public, max-age=300")

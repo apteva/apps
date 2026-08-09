@@ -417,6 +417,13 @@ func TestExtensionAssetCachingRequiresMatchingRevision(t *testing.T) {
 		t.Fatalf("asset ETag = %q", got)
 	}
 
+	explicitRevision := httptest.NewRecorder()
+	explicitRequest := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision+"?v=storefront-theme-3", nil)
+	(&App{}).handleExtensionAsset(explicitRevision, explicitRequest)
+	if explicitRevision.Code != http.StatusOK || explicitRevision.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("explicit revision compatibility response = %d, cache=%q", explicitRevision.Code, explicitRevision.Header().Get("Cache-Control"))
+	}
+
 	legacy := httptest.NewRecorder()
 	(&App{}).handleExtensionAsset(legacy, httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css", nil))
 	if legacy.Code != http.StatusOK || legacy.Header().Get("Cache-Control") != "public, max-age=300" {
