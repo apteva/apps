@@ -69,12 +69,45 @@ func TestEvalConditionTokensWithQuotedSpace(t *testing.T) {
 	}
 }
 
+func TestEvalConditionLogicalOperators(t *testing.T) {
+	ctx := TemplateContext{Input: map[string]any{
+		"appel_id":        nil,
+		"appel_source_id": float64(42),
+		"status":          "ready",
+		"enabled":         true,
+	}}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{"input.appel_id or input.appel_source_id", true},
+		{"input.appel_id and input.enabled", false},
+		{"input.status == 'ready' and input.enabled", true},
+		{"input.status == 'pending' or input.appel_source_id", true},
+		{"true or input.status > 2", true}, // short-circuit avoids the invalid numeric comparison
+		{"false and input.status > 2", false},
+		{"true or false and false", true}, // and binds more tightly than or
+	}
+	for _, tc := range cases {
+		got, err := EvalCondition(tc.expr, ctx)
+		if err != nil {
+			t.Errorf("%q: %v", tc.expr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}
+
 func TestValidateTriggerCondition(t *testing.T) {
 	valid := []string{
 		"input.data.table == 'ventes'",
 		`input.data.status == "ready"`,
 		"input.data.count >= 2",
 		"input.data.enabled",
+		"input.data.table == 'ventes' and input.data.row.status == 'ready'",
+		"input.data.appel_id or input.data.appel_source_id",
 		"true",
 	}
 	for _, expr := range valid {

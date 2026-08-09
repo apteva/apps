@@ -101,11 +101,12 @@ trigger:
   when: "input.data.table == 'ventes'"
 ```
 
-Predicates use the same small condition language as branch steps: a path
-truthiness check, or one comparison using `==`, `!=`, `>`, `<`, `>=`, or
-`<=`. String literals must be quoted. Invalid predicates are rejected when
-the workflow is created or updated; invalid legacy definitions fail closed
-at dispatch time.
+Predicates use the same small condition language as branch steps: path
+truthiness checks and comparisons using `==`, `!=`, `>`, `<`, `>=`, or
+`<=`, joined when needed with short-circuit `and` / `or` (`and` binds more
+tightly). String literals must be quoted. Invalid predicates are rejected
+when the workflow is created or updated; invalid legacy definitions fail
+closed at dispatch time.
 
 Reconnect-with-`since` handles transient drops; the bus's 256-event
 ring buffer covers brief outages. A sidecar restart re-subscribes
