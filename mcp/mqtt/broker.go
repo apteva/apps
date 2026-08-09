@@ -44,6 +44,9 @@ func NewBroker(a *App) (*Broker, error) {
 	if err := server.AddHook(&busHook{app: a}, nil); err != nil {
 		return nil, fmt.Errorf("bus hook: %w", err)
 	}
+	if err := server.AddHook(&retainedHook{app: a}, nil); err != nil {
+		return nil, fmt.Errorf("retained storage hook: %w", err)
+	}
 
 	port, err := pickListenerPort(a)
 	if err != nil {
@@ -105,6 +108,45 @@ func (b *Broker) Publish(topic string, payload []byte, retain bool, qos byte) er
 // pass distinct ints to register multiple subs against the same filter.
 func (b *Broker) Subscribe(filter string, subID int, fn func(cl *mqtt.Client, sub packets.Subscription, pk packets.Packet)) error {
 	return b.server.Subscribe(filter, subID, fn)
+}
+
+func (b *Broker) Unsubscribe(filter string, subID int) error {
+	return b.server.Unsubscribe(filter, subID)
+}
+
+func (b *Broker) Clients() []*mqtt.Client {
+	if b == nil || b.server == nil {
+		return nil
+	}
+	out := make([]*mqtt.Client, 0, b.server.Clients.Len())
+	for _, client := range b.server.Clients.GetAll() {
+		if client.Net.Inline || client.Closed() {
+			continue
+		}
+		out = append(out, client)
+	}
+	return out
+}
+
+func (b *Broker) DisconnectUser(username string) {
+	if b == nil || b.server == nil {
+		return
+	}
+	for _, client := range b.Clients() {
+		client.RLock()
+		matches := string(client.Properties.Username) == username
+		client.RUnlock()
+		if matches {
+			_ = b.server.DisconnectClient(client, packets.ErrNotAuthorized)
+		}
+	}
+}
+
+func (b *Broker) DeleteRetained(topic string) {
+	if b == nil || b.server == nil {
+		return
+	}
+	b.server.Topics.RetainMessage(packets.Packet{TopicName: topic})
 }
 
 // pickListenerPort resolves config["listen_port"] to a free TCP port.

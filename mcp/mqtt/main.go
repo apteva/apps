@@ -15,7 +15,8 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
+	"sync"
+	"sync/atomic"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -24,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: mqtt
 display_name: MQTT Broker
-version: 0.1.1
+version: 0.2.0
 description: Embedded MQTT broker. LAN message bus for IoT devices; bridges to the platform event bus.
 author: Apteva
 icon: /ui/icon.svg
@@ -52,6 +53,9 @@ provides:
       label: MQTT
       icon: radio
       entry: /ui/MQTTPanel.mjs
+  publishes:
+    - name: mqtt.message
+      description: "An MQTT message was published; includes topic, payload, qos, retain, and client_id."
 runtime:
   kind: source
   source:
@@ -59,6 +63,11 @@ runtime:
     ref: main
     entry: mcp/mqtt
   port: 8080
+  ports:
+    - name: mqtt
+      container_port: 1883
+      host_port: 1883
+      protocol: tcp
   health_check: /health
 db:
   driver: sqlite
@@ -68,8 +77,13 @@ upgrade_policy: auto-patch
 `
 
 type App struct {
-	ctx    *sdk.AppCtx
-	broker *Broker
+	ctx          *sdk.AppCtx
+	broker       *Broker
+	messageLogCh chan messageRecord
+	aclLogCh     chan aclRecord
+	droppedLogs  atomic.Uint64
+	usersMu      sync.RWMutex
+	users        map[string]*MQTTUser
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -85,9 +99,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("mqtt: requires a db block")
 	}
 	a.ctx = ctx
+	a.messageLogCh = make(chan messageRecord, 2048)
+	a.aclLogCh = make(chan aclRecord, 2048)
 
 	if err := a.seedDefaultUserIfNeeded(); err != nil {
 		ctx.Logger().Warn("seed default user", "err", err.Error())
+	}
+	if err := a.reloadUserCache(); err != nil {
+		return err
 	}
 
 	br, err := NewBroker(a)
@@ -106,8 +125,17 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{
+			Event: "mqtt.publish_request",
+			Handler: func(ctx *sdk.AppCtx, event sdk.Event) error {
+				return a.handleOutboundPublishRequest(ctx, event.Data)
+			},
+		},
+	}
+}
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
@@ -115,6 +143,12 @@ func (a *App) Workers() []sdk.Worker {
 			Name: "broker",
 			Run: func(ctx context.Context, app *sdk.AppCtx) error {
 				return a.broker.Serve(ctx)
+			},
+		},
+		{
+			Name: "persistence",
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return a.runPersistence(ctx)
 			},
 		},
 		{
@@ -147,5 +181,3 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() {
 	sdk.Run(&App{})
 }
-
-var _ = log.Println // reserve log for future use

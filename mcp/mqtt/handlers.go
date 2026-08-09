@@ -5,8 +5,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,11 +22,31 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, a.snapshotStatus())
 }
 
-// /clients — currently a stub. mochi exposes a clients map but
-// there's no public iterator we can rely on across versions; the
-// operator gets the count via /status, which is enough for v0.1.
 func (a *App) handleClients(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, []any{})
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	out := []map[string]any{}
+	if a.broker != nil {
+		for _, client := range a.broker.Clients() {
+			client.RLock()
+			row := map[string]any{
+				"client_id":        client.ID,
+				"username":         string(client.Properties.Username),
+				"remote":           client.Net.Remote,
+				"listener":         client.Net.Listener,
+				"protocol_version": int(client.Properties.ProtocolVersion),
+				"clean_session":    client.Properties.Clean,
+			}
+			client.RUnlock()
+			out = append(out, row)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["client_id"].(string) < out[j]["client_id"].(string)
+	})
+	writeJSON(w, out)
 }
 
 // /messages?limit=N&topic_pattern=foo/+
@@ -42,42 +64,65 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	pat := r.URL.Query().Get("topic_pattern")
 
-	rows, err := a.ctx.AppDB().Query(
-		`SELECT id, ts, topic, payload, qos, retain, client_id, is_printable
-		   FROM mqtt_message_log
-		  ORDER BY id DESC
-		  LIMIT ?`, limit)
-	if err != nil {
-		httpErr(w, 500, err.Error())
-		return
-	}
-	defer rows.Close()
 	out := []map[string]any{}
-	for rows.Next() {
-		var (
-			id                          int64
-			ts, topic, clientID         string
-			payload                     []byte
-			qos, retain, isPrintable    int
-		)
-		if err := rows.Scan(&id, &ts, &topic, &payload, &qos, &retain, &clientID, &isPrintable); err != nil {
+	beforeID := int64(1<<63 - 1)
+	for len(out) < limit {
+		batchSize := 500
+		if pat == "" && limit-len(out) < batchSize {
+			batchSize = limit - len(out)
+		}
+		rows, err := a.ctx.AppDB().Query(
+			`SELECT id, ts, topic, payload, qos, retain, client_id, is_printable
+			   FROM mqtt_message_log
+			  WHERE id < ?
+			  ORDER BY id DESC
+			  LIMIT ?`, beforeID, batchSize)
+		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
-		if pat != "" && !mqttTopicMatch(pat, topic) {
-			continue
+		seen := 0
+		for rows.Next() {
+			var (
+				id                       int64
+				ts, topic, clientID      string
+				payload                  []byte
+				qos, retain, isPrintable int
+			)
+			if err := rows.Scan(&id, &ts, &topic, &payload, &qos, &retain, &clientID, &isPrintable); err != nil {
+				rows.Close()
+				httpErr(w, 500, err.Error())
+				return
+			}
+			seen++
+			beforeID = id
+			if pat != "" && !mqttTopicMatch(pat, topic) {
+				continue
+			}
+			row := map[string]any{
+				"id": id, "ts": ts, "topic": topic, "qos": qos,
+				"retain": retain == 1, "client_id": clientID,
+			}
+			if isPrintable == 1 {
+				row["payload"] = string(payload)
+			} else {
+				row["payload_size_bytes"] = len(payload)
+				row["payload_binary"] = true
+			}
+			out = append(out, row)
+			if len(out) == limit {
+				break
+			}
 		}
-		row := map[string]any{
-			"id": id, "ts": ts, "topic": topic, "qos": qos,
-			"retain": retain == 1, "client_id": clientID,
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			httpErr(w, 500, err.Error())
+			return
 		}
-		if isPrintable == 1 {
-			row["payload"] = string(payload)
-		} else {
-			row["payload_size_bytes"] = len(payload)
-			row["payload_binary"] = true
+		rows.Close()
+		if seen < batchSize {
+			break
 		}
-		out = append(out, row)
 	}
 	writeJSON(w, out)
 }
@@ -98,14 +143,20 @@ func (a *App) handleUsers(w http.ResponseWriter, r *http.Request) {
 			AllowPublish   []string `json:"allow_publish"`
 			AllowSubscribe []string `json:"allow_subscribe"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
 			httpErr(w, 400, "invalid json: "+err.Error())
 			return
 		}
+		body.Username = strings.TrimSpace(body.Username)
 		if err := addUser(a.ctx.AppDB(), body.Username, body.Password, body.AllowPublish, body.AllowSubscribe); err != nil {
 			httpErr(w, 400, err.Error())
 			return
 		}
+		if err := a.reloadUserCache(); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		a.broker.DisconnectUser(body.Username)
 		writeJSON(w, map[string]any{"ok": true, "username": body.Username})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
@@ -125,12 +176,17 @@ func (a *App) handleUserItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 500, err.Error())
 			return
 		}
+		if err := a.reloadUserCache(); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		a.broker.DisconnectUser(username)
 		writeJSON(w, map[string]any{"ok": true})
 	case http.MethodPatch:
 		var body struct {
 			Enabled *bool `json:"enabled"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
 			httpErr(w, 400, "invalid json: "+err.Error())
 			return
 		}
@@ -142,6 +198,13 @@ func (a *App) handleUserItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 500, err.Error())
 			return
 		}
+		if err := a.reloadUserCache(); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		if !*body.Enabled {
+			a.broker.DisconnectUser(username)
+		}
 		writeJSON(w, map[string]any{"ok": true, "enabled": *body.Enabled})
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "DELETE or PATCH")
@@ -151,7 +214,7 @@ func (a *App) handleUserItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		subs, err := listBusSubscriptions(a.ctx.AppDB())
+		subs, err := listBusSubscriptions(a.ctx.AppDB(), projectScope(a.ctx))
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -162,7 +225,7 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			TopicPattern string `json:"topic_pattern"`
 			BusTopic     string `json:"bus_topic"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
 			httpErr(w, 400, "invalid json: "+err.Error())
 			return
 		}
@@ -193,9 +256,17 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "DELETE only")
 		return
 	}
-	if err := deleteBusSubscription(a.ctx.AppDB(), id); err != nil {
+	sub, err := deleteBusSubscription(a.ctx.AppDB(), projectScope(a.ctx), id)
+	if err == sql.ErrNoRows {
+		httpErr(w, http.StatusNotFound, "subscription not found")
+		return
+	}
+	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
+	}
+	if a.broker != nil {
+		_ = a.broker.Unsubscribe(sub.TopicPattern, int(100+sub.ID))
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
@@ -227,12 +298,12 @@ func (a *App) handleTestPublish(w http.ResponseWriter, r *http.Request) {
 		Retain  bool   `json:"retain"`
 		QoS     int    `json:"qos"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 		httpErr(w, 400, "invalid json: "+err.Error())
 		return
 	}
-	if body.Topic == "" {
-		httpErr(w, 400, "topic required")
+	if err := validatePublish(body.Topic, body.QoS); err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
 	if a.broker == nil {

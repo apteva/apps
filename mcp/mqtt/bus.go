@@ -24,9 +24,12 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"unicode/utf8"
 
+	sdk "github.com/apteva/app-sdk"
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
 )
@@ -36,6 +39,23 @@ import (
 type busHook struct {
 	mqtt.HookBase
 	app *App
+}
+
+type messageRecord struct {
+	topic     string
+	payload   []byte
+	qos       byte
+	retain    bool
+	clientID  string
+	printable bool
+}
+
+type aclRecord struct {
+	username string
+	action   string
+	topic    string
+	allowed  bool
+	reason   string
 }
 
 func (h *busHook) ID() string { return "apteva-bus" }
@@ -50,15 +70,16 @@ func (h *busHook) OnPublished(cl *mqtt.Client, pk packets.Packet) {
 }
 
 func (h *busHook) recordMessage(clientID string, pk packets.Packet) {
-	printable := isPrintableUTF8(pk.Payload)
-	retain := 0
-	if pk.FixedHeader.Retain {
-		retain = 1
+	record := messageRecord{
+		topic: pk.TopicName, payload: append([]byte(nil), pk.Payload...),
+		qos: pk.FixedHeader.Qos, retain: pk.FixedHeader.Retain,
+		clientID: clientID, printable: isPrintableUTF8(pk.Payload),
 	}
-	_, _ = h.app.ctx.AppDB().Exec(
-		`INSERT INTO mqtt_message_log(topic, payload, qos, retain, client_id, is_printable)
-		 VALUES (?,?,?,?,?,?)`,
-		pk.TopicName, pk.Payload, pk.FixedHeader.Qos, retain, clientID, boolToInt(printable))
+	select {
+	case h.app.messageLogCh <- record:
+	default:
+		h.app.droppedLogs.Add(1)
+	}
 }
 
 func boolToInt(b bool) int {
@@ -66,6 +87,63 @@ func boolToInt(b bool) int {
 		return 1
 	}
 	return 0
+}
+
+// runPersistence moves broker audit writes off Mochi's packet-processing
+// goroutines. The bounded queues keep a traffic burst from consuming
+// unbounded memory; dropped audit rows are exposed by mqtt_status.
+func (a *App) runPersistence(ctx context.Context) error {
+	for {
+		messages := make([]messageRecord, 0, 100)
+		acls := make([]aclRecord, 0, 100)
+		select {
+		case <-ctx.Done():
+			return nil
+		case rec := <-a.messageLogCh:
+			messages = append(messages, rec)
+		case rec := <-a.aclLogCh:
+			acls = append(acls, rec)
+		}
+		for len(messages)+len(acls) < 100 {
+			select {
+			case rec := <-a.messageLogCh:
+				messages = append(messages, rec)
+			case rec := <-a.aclLogCh:
+				acls = append(acls, rec)
+			default:
+				goto persist
+			}
+		}
+	persist:
+		if err := a.persistRecords(messages, acls); err != nil {
+			a.droppedLogs.Add(uint64(len(messages) + len(acls)))
+			a.ctx.Logger().Warn("persist mqtt audit batch", "err", err.Error())
+		}
+	}
+}
+
+func (a *App) persistRecords(messages []messageRecord, acls []aclRecord) error {
+	tx, err := a.ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, rec := range messages {
+		if _, err := tx.Exec(
+			`INSERT INTO mqtt_message_log(topic, payload, qos, retain, client_id, is_printable)
+			 VALUES (?,?,?,?,?,?)`,
+			rec.topic, rec.payload, rec.qos, boolToInt(rec.retain), rec.clientID, boolToInt(rec.printable)); err != nil {
+			return err
+		}
+	}
+	for _, rec := range acls {
+		if _, err := tx.Exec(
+			`INSERT INTO mqtt_acl_log(username, action, topic, allowed, reason) VALUES (?,?,?,?,?)`,
+			rec.username, rec.action, rec.topic, boolToInt(rec.allowed), rec.reason); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // isPrintableUTF8 is the panel's "should I show this as a string or
@@ -98,14 +176,14 @@ func (a *App) bridgeBusLoopback(b *Broker) error {
 		return err
 	}
 
-	subs, err := listBusSubscriptions(a.ctx.AppDB())
+	subs, err := listAllBusSubscriptions(a.ctx.AppDB())
 	if err != nil {
 		return err
 	}
 	for _, s := range subs {
 		s := s
 		_ = b.Subscribe(s.TopicPattern, int(100+s.ID), func(cl *mqtt.Client, sub packets.Subscription, pk packets.Packet) {
-			a.emitBusMessage(s.BusTopic, pk)
+			a.emitBusMessageForProject(s.BusTopic, s.ProjectID, pk)
 		})
 	}
 	return nil
@@ -115,18 +193,29 @@ func (a *App) bridgeBusLoopback(b *Broker) error {
 // Strings stay strings (UTF-8 cheap to inspect), binary becomes a
 // length hint instead of bloating the bus with base64.
 func (a *App) emitBusMessage(busTopic string, pk packets.Packet) {
+	a.emitBusMessageForProject(busTopic, projectScope(a.ctx), pk)
+}
+
+func (a *App) emitBusMessageForProject(busTopic, projectID string, pk packets.Packet) {
 	payloadField := any(string(pk.Payload))
 	if !isPrintableUTF8(pk.Payload) {
-		payloadField = map[string]any{
+		binary := map[string]any{
 			"binary":     true,
 			"size_bytes": len(pk.Payload),
 		}
+		if len(pk.Payload) <= 128<<10 {
+			binary["base64"] = base64.StdEncoding.EncodeToString(pk.Payload)
+		} else {
+			binary["omitted"] = true
+		}
+		payloadField = binary
 	}
-	a.ctx.Emit("mqtt."+busTopic, map[string]any{
-		"topic":   pk.TopicName,
-		"payload": payloadField,
-		"qos":     int(pk.FixedHeader.Qos),
-		"retain":  pk.FixedHeader.Retain,
+	a.ctx.EmitWithProject("mqtt."+busTopic, projectID, map[string]any{
+		"topic":     pk.TopicName,
+		"payload":   payloadField,
+		"qos":       int(pk.FixedHeader.Qos),
+		"retain":    pk.FixedHeader.Retain,
+		"client_id": pk.Origin,
 	})
 }
 
@@ -136,7 +225,7 @@ func (a *App) emitBusMessage(busTopic string, pk packets.Packet) {
 // app cares about. mqtt.publish_request lets sibling apps publish
 // to MQTT without speaking the protocol themselves: emit
 //
-//   ctx.Emit("mqtt.publish_request", {topic, payload, retain?, qos?})
+//	ctx.Emit("mqtt.publish_request", {topic, payload, retain?, qos?})
 //
 // and we forward into the broker.
 //
@@ -144,31 +233,33 @@ func (a *App) emitBusMessage(busTopic string, pk packets.Packet) {
 // runs on the framework's dispatcher goroutine.)
 //
 // (See main.go where EventHandlers() is overridden to surface this.)
-func (a *App) eventHandlers() []func(ctx context.Context, evt map[string]any) error {
-	return []func(ctx context.Context, evt map[string]any) error{
-		a.handleOutboundPublishRequest,
-	}
-}
-
-func (a *App) handleOutboundPublishRequest(ctx context.Context, evt map[string]any) error {
+func (a *App) handleOutboundPublishRequest(_ *sdk.AppCtx, evt map[string]any) error {
 	if a.broker == nil {
 		return fmt.Errorf("broker not running yet")
 	}
 	topic, _ := evt["topic"].(string)
-	if topic == "" {
-		return fmt.Errorf("topic required")
-	}
 	var payload []byte
-	switch p := evt["payload"].(type) {
+	p, hasPayload := evt["payload"]
+	switch p := p.(type) {
 	case string:
 		payload = []byte(p)
 	case []byte:
-		payload = p
+		payload = append([]byte(nil), p...)
+	case nil:
+		if hasPayload {
+			payload = []byte("null")
+		}
+	default:
+		var err error
+		payload, err = json.Marshal(p)
+		if err != nil {
+			return fmt.Errorf("encode payload: %w", err)
+		}
 	}
 	retain, _ := evt["retain"].(bool)
-	qos := byte(0)
-	if v, ok := evt["qos"].(float64); ok {
-		qos = byte(v)
+	qos := intArg(evt, "qos", 0)
+	if err := validatePublish(topic, qos); err != nil {
+		return err
 	}
-	return a.broker.Publish(topic, payload, retain, qos)
+	return a.broker.Publish(topic, payload, retain, byte(qos))
 }

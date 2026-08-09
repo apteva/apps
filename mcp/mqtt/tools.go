@@ -19,7 +19,7 @@ import (
 func (a *App) mcpTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
-			Name: "mqtt_publish",
+			Name:        "mqtt_publish",
 			Description: "Publish one MQTT message. Args: topic (str, required), payload (str), retain (bool), qos (int 0|1|2).",
 			InputSchema: schemaObj(map[string]any{
 				"topic":   map[string]any{"type": "string"},
@@ -128,8 +128,11 @@ func (a *App) toolPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	payload := []byte(strArg(args, "payload"))
 	retain := boolArg(args, "retain", false)
-	qos := byte(intArg(args, "qos", 0))
-	if err := a.broker.Publish(topic, payload, retain, qos); err != nil {
+	qos := intArg(args, "qos", 0)
+	if err := validatePublish(topic, qos); err != nil {
+		return nil, err
+	}
+	if err := a.broker.Publish(topic, payload, retain, byte(qos)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "topic": topic, "bytes": len(payload)}, nil
@@ -139,6 +142,9 @@ func (a *App) toolTopicsRecent(ctx *sdk.AppCtx, args map[string]any) (any, error
 	limit := intArg(args, "limit", 50)
 	if limit <= 0 {
 		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
 	}
 	rows, err := a.ctx.AppDB().Query(
 		`SELECT topic, MAX(ts) AS last_ts, COUNT(*) AS n
@@ -159,27 +165,33 @@ func (a *App) toolTopicsRecent(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 		out = append(out, map[string]any{"topic": topic, "last_seen": ts, "count": n})
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (a *App) toolSubscribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pat := strArg(args, "topic_pattern")
 	bus := strArg(args, "bus_topic")
-	sub, err := addBusSubscription(a.ctx.AppDB(), projectScope(), pat, bus, callerLabel(ctx))
+	sub, err := addBusSubscription(a.ctx.AppDB(), projectScope(ctx), pat, bus, callerLabel(ctx))
 	if err != nil {
 		return nil, err
 	}
 	// Wire it into the broker right now so the operator doesn't
 	// have to wait for a restart.
-	_ = a.broker.Subscribe(sub.TopicPattern, int(100+sub.ID),
+	if a.broker == nil {
+		return nil, errors.New("broker not running")
+	}
+	_ = a.broker.Unsubscribe(sub.TopicPattern, int(100+sub.ID))
+	if err := a.broker.Subscribe(sub.TopicPattern, int(100+sub.ID),
 		func(_ *mqtt.Client, _ packets.Subscription, pk packets.Packet) {
-			a.emitBusMessage(sub.BusTopic, pk)
-		})
+			a.emitBusMessageForProject(sub.BusTopic, sub.ProjectID, pk)
+		}); err != nil {
+		return nil, err
+	}
 	return sub, nil
 }
 
 func (a *App) toolSubscribeList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	subs, err := listBusSubscriptions(a.ctx.AppDB())
+	subs, err := listBusSubscriptions(a.ctx.AppDB(), projectScope(ctx))
 	if err != nil {
 		return nil, err
 	}
@@ -191,20 +203,28 @@ func (a *App) toolSubscribeDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := deleteBusSubscription(a.ctx.AppDB(), id); err != nil {
+	sub, err := deleteBusSubscription(a.ctx.AppDB(), projectScope(ctx), id)
+	if err != nil {
 		return nil, err
+	}
+	if a.broker != nil {
+		_ = a.broker.Unsubscribe(sub.TopicPattern, int(100+sub.ID))
 	}
 	return map[string]any{"ok": true}, nil
 }
 
 func (a *App) toolUsersAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strArg(args, "username")
+	username := strings.TrimSpace(strArg(args, "username"))
 	password := strArg(args, "password")
 	pub := strArrayArg(args, "allow_publish")
 	sub := strArrayArg(args, "allow_subscribe")
 	if err := addUser(a.ctx.AppDB(), username, password, pub, sub); err != nil {
 		return nil, err
 	}
+	if err := a.reloadUserCache(); err != nil {
+		return nil, err
+	}
+	a.broker.DisconnectUser(username)
 	return map[string]any{"ok": true, "username": username}, nil
 }
 
@@ -213,21 +233,31 @@ func (a *App) toolUsersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolUsersDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strArg(args, "username")
+	username := strings.TrimSpace(strArg(args, "username"))
 	if username == "" {
 		return nil, errors.New("username required")
 	}
 	if err := deleteUser(a.ctx.AppDB(), username); err != nil {
 		return nil, err
 	}
+	if err := a.reloadUserCache(); err != nil {
+		return nil, err
+	}
+	a.broker.DisconnectUser(username)
 	return map[string]any{"ok": true}, nil
 }
 
 func (a *App) toolUsersSetEnabled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	username := strArg(args, "username")
+	username := strings.TrimSpace(strArg(args, "username"))
 	enabled := boolArg(args, "enabled", true)
 	if err := setUserEnabled(a.ctx.AppDB(), username, enabled); err != nil {
 		return nil, err
+	}
+	if err := a.reloadUserCache(); err != nil {
+		return nil, err
+	}
+	if !enabled {
+		a.broker.DisconnectUser(username)
 	}
 	return map[string]any{"ok": true, "username": username, "enabled": enabled}, nil
 }
@@ -237,7 +267,7 @@ func (a *App) toolDevices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	q := `SELECT id, project_id, slug, component, object_id, display_name,
 	             manufacturer, model, state_topic, command_topic, last_seen
 	        FROM mqtt_devices WHERE project_id = ?`
-	params := []any{projectScope()}
+	params := []any{projectScope(ctx)}
 	if filter != "" {
 		q += ` AND (LOWER(slug) LIKE ? OR LOWER(model) LIKE ? OR LOWER(manufacturer) LIKE ?)`
 		like := "%" + filter + "%"
@@ -252,9 +282,9 @@ func (a *App) toolDevices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id                                                                int64
-			pid, slug, component, objectID, name, manuf, model, st, cmd       string
-			lastSeen                                                          *string
+			id                                                          int64
+			pid, slug, component, objectID, name, manuf, model, st, cmd string
+			lastSeen                                                    *string
 		)
 		if err := rows.Scan(&id, &pid, &slug, &component, &objectID, &name, &manuf, &model, &st, &cmd, &lastSeen); err != nil {
 			return nil, err
@@ -269,14 +299,14 @@ func (a *App) toolDevices(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, row)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return a.snapshotStatus(), nil
+	return a.snapshotStatus(ctx), nil
 }
 
-func (a *App) snapshotStatus() map[string]any {
+func (a *App) snapshotStatus(ctxs ...*sdk.AppCtx) map[string]any {
 	port := 0
 	if a.broker != nil {
 		port = a.broker.Port()
@@ -286,14 +316,35 @@ func (a *App) snapshotStatus() map[string]any {
 	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_retained`).Scan(&retained)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_message_log`).Scan(&msgs)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_users WHERE enabled = 1`).Scan(&users)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_devices WHERE project_id = ?`, projectScope()).Scan(&devices)
-	return map[string]any{
-		"port":           port,
-		"retained_count": retained,
-		"message_count":  msgs,
-		"users_enabled":  users,
-		"devices":        devices,
+	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_devices WHERE project_id = ?`, projectScope(ctxs...)).Scan(&devices)
+	clients := 0
+	if a.broker != nil {
+		clients = len(a.broker.Clients())
 	}
+	return map[string]any{
+		"port":               port,
+		"listen_address":     bindAddress(a, port),
+		"clients":            clients,
+		"retained_count":     retained,
+		"message_count":      msgs,
+		"users_enabled":      users,
+		"devices":            devices,
+		"audit_rows_dropped": a.droppedLogs.Load(),
+	}
+}
+
+func validatePublish(topic string, qos int) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("topic required")
+	}
+	if !mqtt.IsValidFilter(topic, true) {
+		return fmt.Errorf("topic %q is not a valid MQTT publish topic", topic)
+	}
+	if qos < 0 || qos > 2 {
+		return errors.New("qos must be 0, 1, or 2")
+	}
+	return nil
 }
 
 // ─── arg helpers ────────────────────────────────────────────────────

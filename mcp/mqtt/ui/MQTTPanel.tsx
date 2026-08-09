@@ -90,10 +90,21 @@ function useAppEvents<T = unknown>(
 
 interface BrokerStatus {
   port: number;
+  listen_address: string;
+  clients: number;
   retained_count: number;
   message_count: number;
   users_enabled: number;
   devices: number;
+  audit_rows_dropped: number;
+}
+
+interface MQTTClient {
+  client_id: string;
+  username: string;
+  remote: string;
+  protocol_version: number;
+  clean_session: boolean;
 }
 
 interface MQTTUser {
@@ -167,15 +178,36 @@ interface LiveMessage {
 function LiveTab({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   const [messages, setMessages] = useState<LiveMessage[]>([]);
+  const [clients, setClients] = useState<MQTTClient[]>([]);
   const [filter, setFilter] = useState("");
+  const [error, setError] = useState("");
+  const refreshRunning = useRef(false);
+  const eventRefreshTimer = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
-    const [s, m] = await Promise.all([
-      fetch(`${API}/status`).then((r) => r.json()).catch(() => null),
-      fetch(`${API}/messages?limit=200`).then((r) => r.json()).catch(() => []),
-    ]);
-    if (s) setStatus(s);
-    if (Array.isArray(m)) setMessages(m);
+    if (refreshRunning.current) return;
+    refreshRunning.current = true;
+    try {
+      const [statusResponse, messagesResponse, clientsResponse] = await Promise.all([
+        fetch(`${API}/status`),
+        fetch(`${API}/messages?limit=200`),
+        fetch(`${API}/clients`),
+      ]);
+      if (!statusResponse.ok || !messagesResponse.ok || !clientsResponse.ok) {
+        throw new Error("Could not load broker state");
+      }
+      const [s, m, c] = await Promise.all([
+        statusResponse.json(), messagesResponse.json(), clientsResponse.json(),
+      ]);
+      setStatus(s);
+      if (Array.isArray(m)) setMessages(m);
+      if (Array.isArray(c)) setClients(c);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load broker state");
+    } finally {
+      refreshRunning.current = false;
+    }
   }, []);
 
   useEffect(() => {
@@ -184,10 +216,17 @@ function LiveTab({ projectId }: { projectId: string }) {
     return () => clearInterval(t);
   }, [refresh]);
 
-  // Live mqtt.message bus events — refresh on each so the feed stays fresh
-  // without spamming the network at high message rates.
+  useEffect(() => () => {
+    if (eventRefreshTimer.current) window.clearTimeout(eventRefreshTimer.current);
+  }, []);
+
+  // Coalesce a burst of events into at most two refreshes per second.
   useAppEvents("mqtt", projectId, (ev) => {
-    if (ev.topic === "mqtt.message") refresh();
+    if (ev.topic !== "mqtt.message" || eventRefreshTimer.current) return;
+    eventRefreshTimer.current = window.setTimeout(() => {
+      eventRefreshTimer.current = null;
+      refresh();
+    }, 500);
   });
 
   const visible = filter
@@ -200,6 +239,7 @@ function LiveTab({ projectId }: { projectId: string }) {
         {status ? (
           <div className="text-xs text-text-dim flex gap-3">
             <span>:{status.port}</span>
+            <span>{status.clients} connected</span>
             <span>{status.users_enabled} users</span>
             <span>{status.devices} devices</span>
             <span>{status.retained_count} retained</span>
@@ -216,6 +256,22 @@ function LiveTab({ projectId }: { projectId: string }) {
           className="bg-bg-elev border border-border rounded px-2 py-1 text-xs"
         />
       </div>
+      {error && <div className="mx-4 mt-3 rounded border border-error/40 bg-error/10 px-3 py-2 text-xs text-error">{error}</div>}
+      {clients.length > 0 && (
+        <div className="flex flex-wrap gap-2 px-4 py-2 border-b border-border">
+          {clients.map((client) => (
+            <span key={client.client_id} className="rounded bg-bg-elev px-2 py-1 text-xs" title={`${client.remote} · MQTT ${client.protocol_version === 5 ? "5" : "3.1.1"}`}>
+              <span className="font-mono">{client.client_id}</span>
+              {client.username && <span className="text-text-dim"> · {client.username}</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {status && status.audit_rows_dropped > 0 && (
+        <div className="mx-4 mt-3 rounded border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+          {status.audit_rows_dropped.toLocaleString()} audit rows were dropped because broker traffic exceeded the persistence queue. MQTT delivery was not blocked.
+        </div>
+      )}
       <div className="px-4 py-2">
         {visible.length === 0 ? (
           <div className="text-text-dim text-xs italic">No messages yet. Publish something or wait for a client.</div>
@@ -318,9 +374,28 @@ function DevicesTab() {
 function SettingsTab() {
   return (
     <div className="px-4 py-3 space-y-6">
+      <ConnectionSection />
       <UsersSection />
       <SubscriptionsSection />
       <TestPublishSection />
+    </div>
+  );
+}
+
+function ConnectionSection() {
+  const [status, setStatus] = useState<BrokerStatus | null>(null);
+  useEffect(() => {
+    fetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then(setStatus).catch(() => {});
+  }, []);
+  return (
+    <div>
+      <h3 className="text-sm font-medium mb-2">Broker connection</h3>
+      <div className="border border-border rounded px-3 py-2 text-xs">
+        <div>TCP listener: <code className="font-mono">{status?.listen_address ?? "…"}</code></div>
+        <div className="text-text-dim mt-1">
+          Connect to the host running this sidecar. Authentication is required by default; TLS is not terminated by this app, so expose it only on a trusted network, VPN, or protected TCP proxy.
+        </div>
+      </div>
     </div>
   );
 }
@@ -364,6 +439,7 @@ function UsersSection() {
               </button>
               <button
                 onClick={async () => {
+                  if (!window.confirm(`Delete MQTT user ${u.username}? Connected clients using it will fail their next authentication.`)) return;
                   await fetch(`${API}/users/${encodeURIComponent(u.username)}`, { method: "DELETE" });
                   refresh();
                 }}
@@ -411,7 +487,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
   return (
     <Modal title="Add MQTT user" onClose={onClose}>
       <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
-      <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
+      <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="password" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-sm mb-2" />
       <input value={pub} onChange={(e) => setPub(e.target.value)} placeholder="publish allow (comma-separated globs)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
       <input value={sub} onChange={(e) => setSub(e.target.value)} placeholder="subscribe allow (comma-separated globs)" className="w-full bg-bg-elev border border-border rounded px-2 py-1 text-xs mb-2 font-mono" />
       {err && <div className="text-error text-xs mb-2">{err}</div>}
@@ -468,6 +544,7 @@ function SubscriptionsSection() {
               <span className="text-text-dim text-xs">→ mqtt.{s.bus_topic}</span>
               <button
                 onClick={async () => {
+                  if (!window.confirm(`Delete bridge ${s.topic_pattern} → mqtt.${s.bus_topic}?`)) return;
                   await fetch(`${API}/subscriptions/${s.id}`, { method: "DELETE" });
                   refresh();
                 }}
