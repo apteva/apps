@@ -191,7 +191,7 @@ func TestFullyVerifiedStoreSyncMarksDesiredHashApplied(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"pricing":{"status":"verified"},"availability":{"status":"verified"}}}`
+	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"copyright":{"status":"verified"},"content_rights":{"status":"verified"},"pricing":{"status":"verified"},"availability":{"status":"verified"}}}`
 	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", observed, "{}", "", "old provider failure"); err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +229,7 @@ func TestIncompleteProviderSyncPreservesApplyFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"pricing":{"status":"verified"}}}`
+	observed := `{"readiness":{"listing":{"status":"verified"},"media":{"status":"verified"},"review":{"status":"verified"},"classification":{"status":"verified"},"copyright":{"status":"verified"},"content_rights":{"status":"verified"},"pricing":{"status":"verified"}}}`
 	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", observed, "{}", "", "provider failure"); err != nil {
 		t.Fatal(err)
 	}
@@ -438,6 +438,7 @@ func TestApplePendingReleaseIsNotMarkedLive(t *testing.T) {
 func completeIOSStoreDocument() StoreDocument {
 	return StoreDocument{
 		SchemaVersion: 1, VersionName: "1.0", DefaultLocale: "en-US", ReleaseMode: "manual",
+		Copyright: "2026 Example", ContentRights: StoreContentRights{RightsConfirmed: true},
 		Localizations: map[string]StoreLocalization{
 			"en-US": {
 				Title: "Example", Description: "A complete description.", Keywords: []string{"example"},

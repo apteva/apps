@@ -25,6 +25,31 @@ type availabilityApplePlatform struct {
 	availableInNew bool
 }
 
+type appleSettingsPlatform struct {
+	tk.BasePlatformClient
+	calls []integrationCall
+}
+
+func (p *appleSettingsPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	var data json.RawMessage
+	switch tool {
+	case "list_app_versions":
+		data = json.RawMessage(`{"data":[{"id":"version-1","attributes":{"versionString":"1.0","appStoreState":"PREPARE_FOR_SUBMISSION","copyright":"old"}}]}`)
+	case "update_app_version":
+		data, _ = json.Marshal(map[string]any{"data": map[string]any{
+			"id": "version-1", "attributes": map[string]any{"copyright": input["copyright"]},
+		}})
+	case "update_app":
+		data, _ = json.Marshal(map[string]any{"data": map[string]any{
+			"id": "app-1", "attributes": map[string]any{"contentRightsDeclaration": input["contentRightsDeclaration"]},
+		}})
+	default:
+		data = json.RawMessage(`{"data":[]}`)
+	}
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
+}
+
 func (p *availabilityApplePlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
 	var data json.RawMessage
@@ -101,6 +126,15 @@ func TestVersionMismatchBlocksOnlyDependentScopes(t *testing.T) {
 	}
 }
 
+func TestProviderReadinessFindingDoesNotBlockItsApplyScope(t *testing.T) {
+	finding := StoreFinding{
+		Code: "provider.content_rights_unverified", Severity: "error", Scope: "compliance", Automatable: true,
+	}
+	if findingBlocksStoreScope(finding, "compliance") {
+		t.Fatal("provider readiness prevented the apply operation that resolves it")
+	}
+}
+
 func TestManualPrivacyDoesNotBlockIndependentStoreScopes(t *testing.T) {
 	finding := StoreFinding{Code: "privacy.apple_manual", Severity: "error", Scope: "compliance"}
 	for _, scope := range []string{"version", "localizations", "media", "review", "classification", "privacy", "distribution"} {
@@ -133,6 +167,75 @@ func TestApplePrivacyIsDeferredToProviderCommit(t *testing.T) {
 	}
 	if privacy == nil || privacy.Severity != "warning" || privacy.Verification != "provider_commit" || !privacy.Automatable {
 		t.Fatalf("privacy finding=%#v", privacy)
+	}
+}
+
+func TestIOSPreflightRequiresCopyrightAndConfirmedContentRights(t *testing.T) {
+	doc := completeIOSStoreDocument()
+	doc.Copyright = ""
+	doc.ContentRights = StoreContentRights{}
+	preflight := validateStoreDocument(t.TempDir(), &Deployment{TargetKind: "ios"}, nil, &MobileStoreConfig{}, doc, true)
+	if !hasStoreFinding(preflight, "copyright.required") || !hasStoreFinding(preflight, "content_rights.required") {
+		t.Fatalf("findings=%#v", preflight.Findings)
+	}
+}
+
+func TestAppleContentRightsUsesCanonicalDeclaration(t *testing.T) {
+	rights := StoreContentRights{UsesThirdPartyContent: true, RightsConfirmed: true}
+	if got := appleContentRightsDeclaration(rights); got != "USES_THIRD_PARTY_CONTENT" {
+		t.Fatalf("declaration=%q", got)
+	}
+	raw := json.RawMessage(`{"data":{"attributes":{"contentRightsDeclaration":"USES_THIRD_PARTY_CONTENT"}}}`)
+	if !appleContentRightsMatches(raw, rights) {
+		t.Fatal("matching Apple content-rights declaration was rejected")
+	}
+	rights.UsesThirdPartyContent = false
+	if appleContentRightsMatches(raw, rights) {
+		t.Fatal("mismatched Apple content-rights declaration was accepted")
+	}
+}
+
+func TestExistingAppleVersionSettingsAreUpdatedAndVerified(t *testing.T) {
+	platform := &appleSettingsPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	doc := completeIOSStoreDocument()
+	doc.Copyright = "2026 Apteva"
+	doc.ReleaseMode = "after_approval"
+
+	versionID, err := ensureAppleStoreVersion(&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}, "app-1", doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if versionID != "version-1" || countIntegrationCalls(platform.calls, "update_app_version") != 1 {
+		t.Fatalf("version=%q calls=%#v", versionID, platform.calls)
+	}
+	input := platform.calls[1].Input
+	if input["copyright"] != "2026 Apteva" || input["releaseType"] != "AFTER_APPROVAL" {
+		t.Fatalf("update input=%#v", input)
+	}
+}
+
+func TestAppleContentRightsApplyWritesAndVerifiesApp(t *testing.T) {
+	platform := &appleSettingsPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	doc := completeIOSStoreDocument()
+	doc.ContentRights = StoreContentRights{UsesThirdPartyContent: true, RightsConfirmed: true}
+
+	err := (&App{}).applyAppleMetadata(
+		&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"},
+		"app-1", doc, storeScopeSet{"compliance": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.calls) != 1 || platform.calls[0].Tool != "update_app" || platform.calls[0].Input["contentRightsDeclaration"] != "USES_THIRD_PARTY_CONTENT" {
+		t.Fatalf("calls=%#v", platform.calls)
 	}
 }
 
@@ -384,6 +487,42 @@ func TestProviderCommitValidationErrorReturnsStructured422(t *testing.T) {
 	operationalErr := &integrationToolError{Slug: "app-store-connect", Tool: "submit_review_submission", Status: http.StatusInternalServerError}
 	if got := wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", operationalErr); got != operationalErr {
 		t.Fatalf("operational error was misclassified: %T %v", got, got)
+	}
+}
+
+func TestProviderValidationPreservesAssociatedErrors(t *testing.T) {
+	raw := json.RawMessage(`{"errors":[{"code":"STATE_ERROR.VALIDATION_ERROR","title":"Submission failed","detail":"Resolve the associated errors.","meta":{"associatedErrors":{"/v1/appStoreVersions/version-1":[{"code":"ENTITY_ERROR.ATTRIBUTE.REQUIRED","title":"Missing copyright","detail":"Copyright is required.","source":{"pointer":"/data/attributes/copyright"}},{"code":"ENTITY_ERROR.ATTRIBUTE.REQUIRED","title":"Missing content rights","detail":"Content rights are required.","source":{"pointer":"/data/attributes/contentRightsDeclaration"}}]}}}]}`)
+	err := wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", &integrationToolError{
+		Slug: "app-store-connect", Tool: "submit_review_submission", Status: http.StatusUnprocessableEntity, Data: raw,
+	})
+	var validationErr *providerValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("error=%T", err)
+	}
+	if len(validationErr.Findings) != 3 {
+		t.Fatalf("findings=%#v", validationErr.Findings)
+	}
+	if validationErr.Findings[1].Pointer != "/data/attributes/copyright" || validationErr.Findings[2].Pointer != "/data/attributes/contentRightsDeclaration" {
+		t.Fatalf("associated findings=%#v", validationErr.Findings)
+	}
+	payload := providerValidationErrorPayload(validationErr)
+	if findings, ok := payload["findings"].([]providerErrorFinding); !ok || len(findings) != 3 {
+		t.Fatalf("payload=%#v", payload)
+	}
+}
+
+func TestReusableAppleReviewSubmissionPrefersMatchingOrEmptyDraft(t *testing.T) {
+	matching := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-1","relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-1"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-1","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-1"}}}}]}`)
+	if id, attached, conflict := reusableAppleReviewSubmission(matching, "version-1"); id != "draft-1" || !attached || conflict != "" {
+		t.Fatalf("matching draft id=%q attached=%v conflict=%q", id, attached, conflict)
+	}
+	empty := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-empty","relationships":{"items":{"data":[]}}}]}`)
+	if id, attached, conflict := reusableAppleReviewSubmission(empty, "version-1"); id != "draft-empty" || attached || conflict != "" {
+		t.Fatalf("empty draft id=%q attached=%v conflict=%q", id, attached, conflict)
+	}
+	conflicting := json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"draft-other","relationships":{"items":{"data":[{"type":"reviewSubmissionItems","id":"item-2"}]}}}],"included":[{"type":"reviewSubmissionItems","id":"item-2","relationships":{"appStoreVersion":{"data":{"type":"appStoreVersions","id":"version-2"}}}}]}`)
+	if id, attached, conflict := reusableAppleReviewSubmission(conflicting, "version-1"); id != "" || attached || conflict != "draft-other" {
+		t.Fatalf("conflicting draft id=%q attached=%v conflict=%q", id, attached, conflict)
 	}
 }
 

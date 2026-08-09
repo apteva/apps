@@ -61,15 +61,36 @@ type providerValidationEvidence struct {
 }
 
 type providerValidationError struct {
-	Provider    string          `json:"provider"`
-	Requirement string          `json:"requirement"`
-	Action      string          `json:"action"`
-	Status      int             `json:"provider_status"`
-	Details     json.RawMessage `json:"details,omitempty"`
-	Err         error           `json:"-"`
+	Provider    string                 `json:"provider"`
+	Requirement string                 `json:"requirement"`
+	Action      string                 `json:"action"`
+	Status      int                    `json:"provider_status"`
+	Details     json.RawMessage        `json:"details,omitempty"`
+	Findings    []providerErrorFinding `json:"findings,omitempty"`
+	Err         error                  `json:"-"`
+}
+
+type providerErrorFinding struct {
+	Code    string `json:"code,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Pointer string `json:"pointer,omitempty"`
 }
 
 func (e *providerValidationError) Error() string {
+	if len(e.Findings) > 0 {
+		details := make([]string, 0, len(e.Findings))
+		for _, finding := range e.Findings {
+			if finding.Detail != "" {
+				details = append(details, finding.Detail)
+			} else if finding.Title != "" {
+				details = append(details, finding.Title)
+			}
+		}
+		if len(details) > 0 {
+			return fmt.Sprintf("%s rejected %s validation during %s: %s", e.Provider, e.Requirement, e.Action, strings.Join(details, "; "))
+		}
+	}
 	return fmt.Sprintf("%s rejected %s validation during %s: %v", e.Provider, e.Requirement, e.Action, e.Err)
 }
 
@@ -87,7 +108,7 @@ func wrapProviderCommitValidationError(provider, requirement, action string, err
 	}
 	return &providerValidationError{
 		Provider: provider, Requirement: requirement, Action: action,
-		Status: status, Details: details, Err: err,
+		Status: status, Details: details, Findings: providerErrorFindings(details), Err: err,
 	}
 }
 
@@ -100,7 +121,68 @@ func providerValidationErrorPayload(err *providerValidationError) map[string]any
 	if len(err.Details) > 0 {
 		payload["details"] = err.Details
 	}
+	if len(err.Findings) > 0 {
+		payload["findings"] = err.Findings
+	}
 	return payload
+}
+
+func providerErrorFindings(raw json.RawMessage) []providerErrorFinding {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	errorsValue, ok := payload["errors"]
+	if !ok {
+		return nil
+	}
+	findings := []providerErrorFinding{}
+	seen := map[string]bool{}
+	var walk func(any, string)
+	walk = func(value any, fallbackPointer string) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				walk(item, fallbackPointer)
+			}
+		case map[string]any:
+			code, _ := typed["code"].(string)
+			title, _ := typed["title"].(string)
+			detail, _ := typed["detail"].(string)
+			pointer := fallbackPointer
+			if source, ok := typed["source"].(map[string]any); ok {
+				if value, ok := source["pointer"].(string); ok && value != "" {
+					pointer = value
+				}
+			}
+			if code != "" || title != "" || detail != "" {
+				key := code + "\x00" + title + "\x00" + detail + "\x00" + pointer
+				if !seen[key] {
+					seen[key] = true
+					findings = append(findings, providerErrorFinding{Code: code, Title: title, Detail: detail, Pointer: pointer})
+				}
+			}
+			if meta, ok := typed["meta"].(map[string]any); ok {
+				if associated, ok := meta["associatedErrors"]; ok {
+					walk(associated, pointer)
+				}
+			}
+			if associated, ok := typed["associatedErrors"]; ok {
+				walk(associated, pointer)
+			}
+			if code == "" && title == "" && detail == "" {
+				for key, nested := range typed {
+					nextPointer := fallbackPointer
+					if strings.HasPrefix(key, "/") {
+						nextPointer = key
+					}
+					walk(nested, nextPointer)
+				}
+			}
+		}
+	}
+	walk(errorsValue, "")
+	return findings
 }
 
 func recordStoreProviderValidation(rel *Release, platform string, evidence providerValidationEvidence) error {
@@ -696,20 +778,18 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	})
 	status := "ready_for_review"
 	if meta.SubmitForReview {
-		created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": meta.AppID, "platform": "IOS"})
+		submissionID, itemAttached, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID)
 		if err != nil {
 			return err
-		}
-		submissionID := jsonStringAt(created, "data", "id")
-		if submissionID == "" {
-			return errors.New("review submission response missing id")
 		}
 		meta.ReviewSubmissionID = submissionID
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 			"external_status": "validating_submission", "release_meta_json": mustJSON(meta),
 		})
-		if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
-			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "create_review_submission_item", err)
+		if !itemAttached {
+			if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
+				return wrapProviderCommitValidationError("app_store_connect", "store_submission", "create_review_submission_item", err)
+			}
 		}
 		if _, err := executeIntegration(bound, "submit_review_submission", map[string]any{"submission_id": submissionID, "submitted": true}); err != nil {
 			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", err)
@@ -732,6 +812,84 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 		"external_id": buildID, "external_status": status, "release_meta_json": mustJSON(meta),
 	})
 	return nil
+}
+
+func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string) (string, bool, error) {
+	listed, err := executeIntegration(bound, "list_review_submissions", map[string]any{
+		"app_id": appID, "platform": "IOS", "state": "READY_FOR_REVIEW",
+		"include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if submissionID, itemAttached, conflictingID := reusableAppleReviewSubmission(listed, versionID); submissionID != "" {
+		return submissionID, itemAttached, nil
+	} else if conflictingID != "" {
+		return "", false, fmt.Errorf("App Store Connect draft review submission %s already contains another version", conflictingID)
+	}
+	created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": appID, "platform": "IOS"})
+	if err != nil {
+		return "", false, err
+	}
+	submissionID := jsonStringAt(created, "data", "id")
+	if submissionID == "" {
+		return "", false, errors.New("review submission response missing id")
+	}
+	return submissionID, false, nil
+}
+
+func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (string, bool, string) {
+	type relationshipData struct {
+		ID string `json:"id"`
+	}
+	type relationships struct {
+		AppStoreVersionForReview struct {
+			Data relationshipData `json:"data"`
+		} `json:"appStoreVersionForReview"`
+		AppStoreVersion struct {
+			Data relationshipData `json:"data"`
+		} `json:"appStoreVersion"`
+		Items struct {
+			Data []relationshipData `json:"data"`
+		} `json:"items"`
+	}
+	type resource struct {
+		ID            string        `json:"id"`
+		Type          string        `json:"type"`
+		Relationships relationships `json:"relationships"`
+	}
+	var payload struct {
+		Data     []resource `json:"data"`
+		Included []resource `json:"included"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return "", false, ""
+	}
+	itemVersions := map[string]string{}
+	for _, item := range payload.Included {
+		if item.Type == "reviewSubmissionItems" {
+			itemVersions[item.ID] = item.Relationships.AppStoreVersion.Data.ID
+		}
+	}
+	conflictingID := ""
+	for _, submission := range payload.Data {
+		if submission.Relationships.AppStoreVersionForReview.Data.ID == versionID {
+			return submission.ID, true, ""
+		}
+		items := submission.Relationships.Items.Data
+		for _, item := range items {
+			if itemVersions[item.ID] == versionID {
+				return submission.ID, true, ""
+			}
+		}
+		if len(items) == 0 {
+			return submission.ID, false, ""
+		}
+		if conflictingID == "" {
+			conflictingID = submission.ID
+		}
+	}
+	return "", false, conflictingID
 }
 
 func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release, meta *mobileReleaseMeta) error {

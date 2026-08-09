@@ -85,6 +85,9 @@ func findingBlocksStoreScope(finding StoreFinding, scope string) bool {
 	if finding.Severity != "error" {
 		return false
 	}
+	if strings.HasPrefix(finding.Code, "provider.") && finding.Automatable {
+		return false
+	}
 	findingScope := normalizeStoreScope(finding.Scope)
 	if findingScope == scope {
 		return true

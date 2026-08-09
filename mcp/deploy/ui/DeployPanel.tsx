@@ -296,6 +296,10 @@ interface StoreDocument {
   earliest_release_at?: string;
   copyright?: string;
   uses_idfa?: boolean;
+  content_rights?: {
+    uses_third_party_content?: boolean;
+    rights_confirmed?: boolean;
+  };
   localizations: Record<string, StoreLocalization>;
   assets: StoreAsset[];
   review: {
@@ -2447,6 +2451,34 @@ function StoreListingDialog({
                   </select>
                 </label>
               </section>
+
+              {deployment.target_kind === "ios" && (
+                <section className="grid grid-cols-1 sm:grid-cols-3 gap-3 border-t border-border pt-4">
+                  <TextField label="Copyright" value={doc.copyright} onChange={(copyright) => setDoc({ ...doc, copyright })} />
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.content_rights?.uses_third_party_content)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        content_rights: { ...doc.content_rights, uses_third_party_content: e.target.checked },
+                      })}
+                    />
+                    Uses third-party content
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.content_rights?.rights_confirmed)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        content_rights: { ...doc.content_rights, rights_confirmed: e.target.checked },
+                      })}
+                    />
+                    Content rights confirmed
+                  </label>
+                </section>
+              )}
 
               <section className="border-t border-border pt-4">
                 <div className="flex items-center gap-2 mb-3">

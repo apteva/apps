@@ -47,6 +47,7 @@ type StoreDocument struct {
 	EarliestReleaseAt  string                       `json:"earliest_release_at,omitempty"`
 	Copyright          string                       `json:"copyright,omitempty"`
 	UsesIDFA           *bool                        `json:"uses_idfa,omitempty"`
+	ContentRights      StoreContentRights           `json:"content_rights,omitempty"`
 	Localizations      map[string]StoreLocalization `json:"localizations,omitempty"`
 	Assets             []StoreAsset                 `json:"assets,omitempty"`
 	Review             StoreReview                  `json:"review,omitempty"`
@@ -55,6 +56,11 @@ type StoreDocument struct {
 	Privacy            StorePrivacy                 `json:"privacy,omitempty"`
 	ManualRequirements []StoreManualRequirement     `json:"manual_requirements,omitempty"`
 	ProviderExtensions map[string]any               `json:"provider_extensions,omitempty"`
+}
+
+type StoreContentRights struct {
+	UsesThirdPartyContent bool `json:"uses_third_party_content"`
+	RightsConfirmed       bool `json:"rights_confirmed"`
 }
 
 type StoreLocalization struct {
@@ -450,7 +456,7 @@ func providerStoreStateFullyVerified(d *Deployment, cfg *MobileStoreConfig) bool
 	var keys []string
 	switch d.TargetKind {
 	case "ios":
-		keys = []string{"listing", "media", "review", "classification", "pricing", "availability"}
+		keys = []string{"listing", "media", "review", "classification", "copyright", "content_rights", "pricing", "availability"}
 	case "android":
 		keys = []string{"listing", "media", "pricing", "availability"}
 	default:
@@ -500,6 +506,8 @@ func appendProviderReadinessFindings(out *StorePreflight, d *Deployment, cfg *Mo
 		{"media", "media", "The required App Store screenshots have not been verified at Apple.", "Apply media and wait for Apple to finish processing every screenshot."},
 		{"review", "review", "App Review contact details have not been verified at Apple.", "Apply or sync App Review details."},
 		{"classification", "classification", "The App Store category and age rating have not been verified at Apple.", "Apply classification after updating the App Store integration."},
+		{"copyright", "version", "The App Store version copyright has not been verified at Apple.", "Apply or sync the App Store version settings."},
+		{"content_rights", "compliance", "The app content-rights declaration has not been verified at Apple.", "Confirm and apply the app content-rights declaration."},
 		{"pricing", "distribution", "App Store pricing has not been verified at Apple.", "Apply and verify the desired App Store price."},
 		{"availability", "distribution", "App Store country availability has not been verified at Apple.", "Apply and verify the desired territory availability."},
 	}
@@ -591,6 +599,12 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			findings = append(findings, finding)
 		}
 		if d.TargetKind == "ios" {
+			if strings.TrimSpace(doc.Copyright) == "" {
+				add("copyright.required", "error", "version", "", "copyright", "Copyright is required for App Store review.", "Set the copyright for this App Store version.", true)
+			}
+			if !doc.ContentRights.RightsConfirmed {
+				add("content_rights.required", "error", "compliance", "", "content_rights", "The app content-rights declaration must be confirmed.", "Declare whether the app uses third-party content and confirm the necessary rights.", true)
+			}
 			if doc.Review.FirstName == "" || doc.Review.LastName == "" || doc.Review.Email == "" || doc.Review.Phone == "" {
 				add("review_contact.required", "error", "review", "", "contact", "Apple review contact name, email, and phone are required.", "Complete the review contact.", true)
 			}
@@ -718,8 +732,12 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 		StorePlanOp{Scope: "classification", Action: "upsert"},
 		StorePlanOp{Scope: "privacy", Action: "reconcile"},
 		StorePlanOp{Scope: "distribution", Action: "reconcile"},
-		StorePlanOp{Scope: "compliance", Action: "verify"},
 	)
+	complianceAction := "verify"
+	if d.TargetKind == "ios" {
+		complianceAction = "reconcile"
+	}
+	plan.Operations = append(plan.Operations, StorePlanOp{Scope: "compliance", Action: complianceAction})
 	return plan, nil
 }
 
@@ -863,9 +881,11 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		versionRaw, versionErr := executeIntegration(bound, "get_app_version", map[string]any{"version_id": versionID, "include": "build"})
 		if versionErr == nil {
 			observed["version"] = decodeJSONValue(versionRaw)
+			readiness["copyright"] = readinessCheck(appleVersionCopyrightMatches(versionRaw, doc.Copyright), "provider", "App Store version copyright was compared with the desired value.")
 			readiness["build"] = readinessCheck(jsonStringAt(versionRaw, "data", "relationships", "build", "data", "id") != "", "provider", "The App Store version's selected build was read from Apple.")
 		} else {
 			observed["build_error"] = storeObservationError(versionErr, false, "retry_sync")
+			readiness["copyright"] = readinessCheck(false, "provider", "App Store version copyright could not be read from Apple.")
 			readiness["build"] = readinessCheck(false, "provider", "The selected App Store build could not be verified.")
 		}
 		if review, err := executeIntegration(bound, "get_version_review_detail", map[string]any{"version_id": versionID}); err == nil {
@@ -875,6 +895,13 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		}
 	}
 	readiness := observed["readiness"].(map[string]any)
+	if appRaw, appErr := executeIntegration(bound, "get_app", map[string]any{"app_id": appID}); appErr == nil {
+		observed["app"] = decodeJSONValue(appRaw)
+		readiness["content_rights"] = readinessCheck(appleContentRightsMatches(appRaw, doc.ContentRights), "provider", "App content rights were compared with the desired declaration.")
+	} else {
+		observed["app_error"] = storeObservationError(appErr, false, "retry_sync")
+		readiness["content_rights"] = readinessCheck(false, "provider", "App content rights could not be read from Apple.")
+	}
 	appInfoID := ""
 	classificationInfoReady := false
 	if infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "fields": "state,appStoreState,primaryCategory,secondaryCategory", "include": "primaryCategory,secondaryCategory", "limit": 10}); err == nil {
@@ -1560,6 +1587,13 @@ func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc Stor
 	_ = json.Unmarshal(versions, &payload)
 	for _, version := range payload.Data {
 		if version.Attributes.VersionString == doc.VersionName {
+			updated, err := executeIntegration(bound, "update_app_version", appleVersionSettingsInput(version.ID, doc))
+			if err != nil {
+				return "", err
+			}
+			if !appleVersionCopyrightMatches(updated, doc.Copyright) {
+				return "", errors.New("App Store Connect did not persist the requested copyright")
+			}
 			return version.ID, nil
 		}
 	}
@@ -1577,11 +1611,11 @@ func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc Stor
 	if releaseType == "" {
 		return "", fmt.Errorf("unsupported App Store release mode %q", doc.ReleaseMode)
 	}
-	created, err := executeIntegration(bound, "create_app_version", map[string]any{
-		"app_id": appID, "platform": "IOS", "versionString": doc.VersionName,
-		"releaseType": releaseType, "earliestReleaseDate": doc.EarliestReleaseAt,
-		"copyright": doc.Copyright, "usesIdfa": doc.UsesIDFA,
-	})
+	input := appleVersionSettingsInput("", doc)
+	input["app_id"] = appID
+	input["platform"] = "IOS"
+	input["versionString"] = doc.VersionName
+	created, err := executeIntegration(bound, "create_app_version", input)
 	if err != nil {
 		return "", err
 	}
@@ -1590,6 +1624,38 @@ func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc Stor
 		return "", errors.New("create App Store version response missing id")
 	}
 	return id, nil
+}
+
+func appleVersionSettingsInput(versionID string, doc StoreDocument) map[string]any {
+	releaseType := map[string]string{
+		"manual": "MANUAL", "after_approval": "AFTER_APPROVAL", "scheduled": "SCHEDULED",
+	}[doc.ReleaseMode]
+	input := map[string]any{"copyright": doc.Copyright, "releaseType": releaseType}
+	if versionID != "" {
+		input["version_id"] = versionID
+	}
+	if doc.EarliestReleaseAt != "" {
+		input["earliestReleaseDate"] = doc.EarliestReleaseAt
+	}
+	if doc.UsesIDFA != nil {
+		input["usesIdfa"] = *doc.UsesIDFA
+	}
+	return input
+}
+
+func appleVersionCopyrightMatches(raw json.RawMessage, copyright string) bool {
+	return strings.TrimSpace(jsonStringAt(raw, "data", "attributes", "copyright")) == strings.TrimSpace(copyright)
+}
+
+func appleContentRightsDeclaration(rights StoreContentRights) string {
+	if rights.UsesThirdPartyContent {
+		return "USES_THIRD_PARTY_CONTENT"
+	}
+	return "DOES_NOT_USE_THIRD_PARTY_CONTENT"
+}
+
+func appleContentRightsMatches(raw json.RawMessage, rights StoreContentRights) bool {
+	return rights.RightsConfirmed && jsonStringAt(raw, "data", "attributes", "contentRightsDeclaration") == appleContentRightsDeclaration(rights)
 }
 
 func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, locale string, loc StoreLocalization) (string, error) {
@@ -1672,12 +1738,23 @@ func (a *App) applyAppleReviewDetail(bound *sdk.BoundIntegration, versionID stri
 }
 
 func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc StoreDocument, scopes storeScopeSet) error {
-	if !scopes.any("localizations", "classification", "privacy", "distribution") {
+	if !scopes.any("localizations", "classification", "privacy", "distribution", "compliance") {
 		return nil
 	}
 	if scopes.has("distribution") {
 		if err := a.applyAppleDistribution(bound, appID, doc); err != nil {
 			return err
+		}
+	}
+	if scopes.has("compliance") && doc.ContentRights.RightsConfirmed {
+		updated, err := executeIntegration(bound, "update_app", map[string]any{
+			"app_id": appID, "contentRightsDeclaration": appleContentRightsDeclaration(doc.ContentRights),
+		})
+		if err != nil {
+			return err
+		}
+		if !appleContentRightsMatches(updated, doc.ContentRights) {
+			return errors.New("App Store Connect did not persist the requested content-rights declaration")
 		}
 	}
 	if !scopes.any("localizations", "classification", "privacy") {
