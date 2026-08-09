@@ -10,7 +10,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "8"
+const commerceStorefrontExtensionVersion = "9"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -81,6 +81,7 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			"connect_origins": []any{"https://api.stripe.com", "https://checkout.stripe.com"},
 			"image_origins":   []any{"https://*.stripe.com"},
 		},
+		"layout": map[string]any{"template": "site_layout"},
 		"routes": []any{
 			map[string]any{"name": "home", "pattern": "/", "template": "home", "data_sources": []any{"products", "collections"}},
 			map[string]any{"name": "product", "pattern": "/products/:handle", "template": "product", "data_sources": []any{"product"}},
@@ -188,6 +189,7 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			},
 		},
 		"templates": map[string]any{
+			"site_layout":     storefrontSiteLayoutDocument(),
 			"home":            storefrontDocument(homeStorefrontBody),
 			"product":         storefrontDocument(productStorefrontBody),
 			"collections":     storefrontDocument(collectionsStorefrontBody),
@@ -202,6 +204,35 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			"store.js":  storefrontJS,
 		},
 	}
+}
+
+func storefrontSiteLayoutDocument() string {
+	return `<!doctype html>
+<html lang="{{.Locale}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="{{default "#176b45" (get .Settings "accent")}}">
+  <title>{{if .PageTitle}}{{.PageTitle}} | {{end}}{{default .SiteTitle (get .Settings "logo_text")}}</title>
+  <link rel="stylesheet" href="{{themeAsset "style.css"}}">
+  <link rel="stylesheet" href="{{asset "store.css"}}">
+  <script defer src="{{asset "store.js"}}"></script>
+</head>
+<body style="--accent:{{default "#176b45" (get .Settings "accent")}}">
+  <div class="announcement">{{default "Made to order. Shipping calculated at checkout." (get .Settings "announcement")}}</div>
+  <header class="site-header">
+    <a class="brand" href="{{href "/"}}">{{default .SiteTitle (get .Settings "logo_text")}}</a>
+    <nav aria-label="Main navigation">
+      <a href="{{href "/collections"}}">Collections</a>
+      <a href="{{href "/search"}}">Search</a>
+      <a class="cart-link" href="{{href "/cart"}}">Cart <span data-cart-count></span></a>
+    </nav>
+  </header>
+  <main class="storefront-content">{{.Content}}</main>
+  <footer class="site-footer"><span>{{default .SiteTitle (get .Settings "logo_text")}}</span><span>Secure commerce by Apteva</span></footer>
+  <div class="toast" data-toast role="status" aria-live="polite"></div>
+</body>
+</html>`
 }
 
 func mergeMaps(base map[string]any, extra map[string]any) map[string]any {

@@ -260,6 +260,114 @@ func TestExtensionProviderRefreshPreservesSiteSettings(t *testing.T) {
 	}
 }
 
+func TestExtensionsUpdateSettingsToolSupportsDraftAndPublish(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	cacheKey := cacheKeyMulti("example.com", "/about", "", "/", site.ID)
+	cacheSet(cacheKey, "cached", "text/html", "etag", "", false)
+
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store",
+		"settings": map[string]any{"accent": "#abcdef"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := dbExtensionGet(db, "p1", site.ID, "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.DraftManifest.Settings["accent"] != "#abcdef" || draft.PublishedManifest.Settings["accent"] != "#111111" {
+		t.Fatalf("unexpected draft settings state: %#v / %#v", draft.DraftManifest.Settings, draft.PublishedManifest.Settings)
+	}
+	if _, ok := cacheGet(cacheKey); ok {
+		t.Fatal("extension settings update did not invalidate the site cache")
+	}
+
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store", "publish": true,
+		"settings": map[string]any{"accent": "#123456"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := dbExtensionGet(db, "p1", site.ID, "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.PublishedManifest.Settings["accent"] != "#123456" || published.HasDraftChanges {
+		t.Fatalf("settings were not published: %#v", published)
+	}
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store",
+		"settings": map[string]any{"unknown": true},
+	}); err == nil {
+		t.Fatal("unknown extension setting was accepted")
+	}
+}
+
+func TestExtensionLayoutWrapsOrdinaryContentPages(t *testing.T) {
+	if err := initializeThemes(); err != nil {
+		t.Fatal(err)
+	}
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Example Shop", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionManifest := testExtensionManifest()
+	extensionManifest.Routes = append(extensionManifest.Routes, ExtensionRoute{
+		Name: "home", Pattern: "/", Template: "home",
+	})
+	extensionManifest.Templates["home"] = "<!doctype html><title>Store home</title>"
+	extensionManifest.Templates["site_layout"] = `<!doctype html><html><head><link rel="stylesheet" href="{{themeAsset "style.css"}}"><link rel="stylesheet" href="{{asset "store.css"}}"></head><body><header>Store header</header><main>{{.Content}}</main><footer><a href="{{href "/cart"}}">Store footer</a></footer></body></html>`
+	extensionManifest.Layout = &ExtensionLayout{Template: "site_layout"}
+	extensionManifest.BrowserPolicy = ExtensionBrowserPolicy{ConnectOrigins: []string{"https://api.example.com"}}
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	body, policy, err := renderSingleForSite(ctx, "p1", site.ID, PageData{
+		Theme: getTheme("default"), SiteID: site.ID, SiteTitle: "Example Shop", Locale: "en",
+		URLPrefix: "/api/apps/content/", ResourceQuery: "?project_id=p1&site=main",
+		PageTitle: "About", Post: &Post{Kind: "page", BodyBlocks: Document{Version: 1, Blocks: []Block{{
+			Type: "core/heading", Attrs: map[string]any{"level": 1, "text": "About us"},
+		}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"Store header", "Store footer", "<h1>About us</h1>",
+		"/api/apps/content/_theme/default/2/style.css?project_id=p1&amp;site=main",
+		"/api/apps/content/_extensions/store/assets/store.css?project_id=p1&amp;site=main",
+		"/api/apps/content/cart?project_id=p1&amp;site=main",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("extension layout output missing %q: %s", expected, body)
+		}
+	}
+	if policy == nil || len(policy.ConnectOrigins) != 1 {
+		t.Fatalf("extension layout browser policy missing: %#v", policy)
+	}
+}
+
+func TestExtensionLayoutRequiresRootRoute(t *testing.T) {
+	manifest := testExtensionManifest()
+	manifest.Layout = &ExtensionLayout{Template: "product"}
+	if err := validateExtensionManifest("store", "commerce", manifest); err == nil {
+		t.Fatal("extension layout without root route was accepted")
+	}
+}
+
 func TestExtensionSessionRejectsTamperedCookie(t *testing.T) {
 	token := "abcdefghijklmnopqrstuvwxyz123456"
 	signed := signExtensionSession(token)

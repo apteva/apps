@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.14.0
+version: 2.14.1
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -212,6 +212,8 @@ provides:
       description: Install or update a generic provider extension with routes, templates, assets, data sources, actions, and editor schemas.
     - name: extensions_remove
       description: Remove a generic provider extension from a Content site.
+    - name: extensions_update_settings
+      description: Update validated extension settings as a draft or publish them immediately.
     - name: extensions_invalidate
       description: Invalidate a site's rendered provider output after source data changes.
     # Forms (core/form block)
@@ -234,7 +236,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content/v2.14.0
+    ref: content/v2.14.1
     entry: mcp/content
   port: 8080
   health_check: /health

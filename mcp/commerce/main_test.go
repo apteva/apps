@@ -896,16 +896,27 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 		t.Fatalf("storefront templates missing: %#v", manifest["templates"])
 	}
 	funcs := template.FuncMap{
-		"asset":    func(string) string { return "/" },
-		"action":   func(string) string { return "/" },
-		"href":     func(string) string { return "/" },
-		"get":      func(any, string) any { return nil },
-		"first":    func(any) any { return nil },
-		"text":     func(any) string { return "" },
-		"default":  func(fallback string, _ any) string { return fallback },
-		"money":    func(any, any) string { return "" },
-		"json":     func(any) template.JS { return "{}" },
-		"safeHTML": func(string) template.HTML { return "" },
+		"asset":      func(string) string { return "/" },
+		"themeAsset": func(string) string { return "/" },
+		"action":     func(string) string { return "/" },
+		"href":       func(string) string { return "/" },
+		"get":        func(any, string) any { return nil },
+		"first":      func(any) any { return nil },
+		"text":       func(any) string { return "" },
+		"default":    func(fallback string, _ any) string { return fallback },
+		"money":      func(any, any) string { return "" },
+		"json":       func(any) template.JS { return "{}" },
+		"safeHTML":   func(string) template.HTML { return "" },
+	}
+	layout, ok := manifest["layout"].(map[string]any)
+	if !ok || layout["template"] != "site_layout" {
+		t.Fatalf("storefront layout contract missing: %#v", manifest["layout"])
+	}
+	siteLayout := templates["site_layout"].(string)
+	for _, expected := range []string{"{{.Content}}", `{{themeAsset "style.css"}}`, "site-header", "site-footer"} {
+		if !strings.Contains(siteLayout, expected) {
+			t.Fatalf("storefront site layout missing %q", expected)
+		}
 	}
 	for name, source := range templates {
 		if _, err := template.New(name).Funcs(funcs).Parse(source.(string)); err != nil {

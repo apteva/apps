@@ -82,6 +82,45 @@ func TestActiveThemeIsResolvedPerSite(t *testing.T) {
 	}
 }
 
+func TestSiteCreationInitializesTitleFromName(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "site-title-project", "docs", "Product Documentation", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := dbGetSetting(db, "site-title-project", site.ID, "site_title"); err != nil || got != "Product Documentation" {
+		t.Fatalf("site title = %q, err=%v", got, err)
+	}
+	fallback, err := dbCreateSite(db, "site-title-project", "support-center", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := dbGetSetting(db, "site-title-project", fallback.ID, "site_title"); err != nil || got != "support-center" {
+		t.Fatalf("fallback site title = %q, err=%v", got, err)
+	}
+}
+
+func TestMarkdownBlockRendersBlockLevelMarkup(t *testing.T) {
+	if err := initializeThemes(); err != nil {
+		t.Fatal(err)
+	}
+	source := "# Heading\n\nFirst paragraph.\n\nSecond paragraph.\n\n- Alpha\n- Beta"
+	body := string(renderBlockWithTheme(getTheme("default"), Block{
+		Type: "core/markdown", Attrs: map[string]any{"source": source},
+	}))
+	for _, expected := range []string{
+		"<h1>Heading</h1>", "<p>First paragraph.</p>", "<p>Second paragraph.</p>",
+		"<ul>", "<li>Alpha</li>", "<li>Beta</li>",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("markdown output missing %q: %s", expected, body)
+		}
+	}
+	if unsafe := string(renderMarkdown("<script>alert(1)</script>")); strings.Contains(unsafe, "<script") {
+		t.Fatalf("markdown renderer retained unsafe script: %s", unsafe)
+	}
+}
+
 func TestRenderedThemeAssetsKeepProxyProjectAndSite(t *testing.T) {
 	if err := initializeThemes(); err != nil {
 		t.Fatal(err)
@@ -190,7 +229,7 @@ func TestPrivateIPsRejectedForURLImport(t *testing.T) {
 func TestPageCacheIsBoundedAndDropsExpiredEntries(t *testing.T) {
 	invalidatePageCache()
 	t.Cleanup(invalidatePageCache)
-	cacheSet("expired", "x", "text/plain", "e")
+	cacheSet("expired", "x", "text/plain", "e", "", false)
 	pageCacheMu.Lock()
 	e := pageCache["expired"]
 	e.storedAt = time.Now().Add(-2 * time.Hour)
@@ -203,7 +242,7 @@ func TestPageCacheIsBoundedAndDropsExpiredEntries(t *testing.T) {
 		t.Fatal("expired entry retained")
 	}
 	for i := 0; i < 2050; i++ {
-		cacheSet(string(rune(i))+"-key", "x", "text/plain", "e")
+		cacheSet(string(rune(i))+"-key", "x", "text/plain", "e", "", false)
 	}
 	if len(pageCache) != 2048 {
 		t.Fatalf("cache size = %d, want 2048", len(pageCache))

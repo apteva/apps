@@ -54,6 +54,11 @@ type ExtensionManifest struct {
 	Settings       map[string]any             `json:"settings,omitempty"`
 	SettingsSchema []ExtensionSetting         `json:"settings_schema,omitempty"`
 	BrowserPolicy  ExtensionBrowserPolicy     `json:"browser_policy,omitempty"`
+	Layout         *ExtensionLayout           `json:"layout,omitempty"`
+}
+
+type ExtensionLayout struct {
+	Template string `json:"template"`
 }
 
 type ExtensionBrowserPolicy struct {
@@ -100,6 +105,10 @@ type extensionPageData struct {
 	Query         map[string]any
 	Data          map[string]any
 	Settings      map[string]any
+	PageTitle     string
+	PrimaryMenu   []RenderedMenuItem
+	Content       template.HTML
+	Theme         *Theme
 }
 
 var extensionKeyRE = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,62}$`)
@@ -134,6 +143,18 @@ func validateExtensionManifest(key, provider string, manifest ExtensionManifest)
 			if _, ok := manifest.DataSources[source]; !ok {
 				return fmt.Errorf("route %q references missing data source %q", route.Name, source)
 			}
+		}
+	}
+	if manifest.Layout != nil {
+		layoutTemplate := strings.TrimSpace(manifest.Layout.Template)
+		if layoutTemplate == "" {
+			return errors.New("extension layout requires a template")
+		}
+		if _, ok := manifest.Templates[layoutTemplate]; !ok {
+			return fmt.Errorf("extension layout references missing template %q", layoutTemplate)
+		}
+		if !seenPatterns["/"] {
+			return errors.New("extension layout requires ownership of the root route")
 		}
 	}
 	for name, source := range manifest.DataSources {
@@ -449,6 +470,40 @@ func (a *App) toolExtensionsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, e
 	return map[string]any{"extension": ext}, err
 }
 
+func (a *App) toolExtensionsUpdateSettings(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	key := asString(args["key"])
+	if key == "" {
+		return nil, errors.New("key required")
+	}
+	settings, ok := args["settings"].(map[string]any)
+	if !ok {
+		return nil, errors.New("settings must be an object")
+	}
+	ext, err := dbExtensionUpdateSettings(ctx.AppDB(), pid, siteID, key, settings)
+	if err != nil {
+		return nil, err
+	}
+	if publish, _ := args["publish"].(bool); publish {
+		ext, err = dbExtensionPublish(ctx.AppDB(), pid, siteID, key)
+		if err != nil {
+			return nil, err
+		}
+	}
+	invalidatePageCacheForSite(siteID)
+	ctx.Emit("content.extension.updated", map[string]any{
+		"site_id": siteID, "key": key, "provider_app": ext.ProviderApp, "settings": true,
+	})
+	return map[string]any{"extension": ext}, nil
+}
+
 func (a *App) toolExtensionsRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -659,12 +714,7 @@ func (a *App) tryHandleExtensionRoute(w http.ResponseWriter, r *http.Request, ct
 			}
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "private, no-cache")
-			if len(manifest.BrowserPolicy.ScriptOrigins)+len(manifest.BrowserPolicy.FrameOrigins)+
-				len(manifest.BrowserPolicy.ConnectOrigins)+len(manifest.BrowserPolicy.ImageOrigins) > 0 {
-				w.Header().Set("Content-Security-Policy", extensionContentSecurityPolicy(manifest.BrowserPolicy))
-			}
-			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-			w.Header().Set("X-Content-Type-Options", "nosniff")
+			applyExtensionBrowserPolicy(w, &manifest.BrowserPolicy)
 			if r.Method != http.MethodHead {
 				_, _ = w.Write([]byte(body))
 			}
@@ -688,7 +738,11 @@ func resourceQuery(r *http.Request) string {
 }
 
 func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extensionPageData) (string, error) {
-	source := ext.PublishedManifest.Templates[route.Template]
+	return renderExtensionSource(ext, route.Template, data)
+}
+
+func renderExtensionSource(ext Extension, templateName string, data extensionPageData) (string, error) {
+	source := ext.PublishedManifest.Templates[templateName]
 	funcs := template.FuncMap{
 		"asset": func(name string) string {
 			return data.URLPrefix + "_extensions/" + url.PathEscape(ext.Key) + "/assets/" + strings.TrimPrefix(name, "/") + data.ResourceQuery
@@ -698,6 +752,13 @@ func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extension
 		},
 		"href": func(target string) string {
 			return data.URLPrefix + strings.TrimPrefix(target, "/") + data.ResourceQuery
+		},
+		"themeAsset": func(name string) string {
+			if data.Theme == nil {
+				return ""
+			}
+			return data.URLPrefix + "_theme/" + data.Theme.Name + "/" + data.Theme.Version + "/" +
+				strings.TrimPrefix(name, "/") + data.ResourceQuery
 		},
 		"get": func(value any, key string) any {
 			switch typed := value.(type) {
@@ -738,7 +799,7 @@ func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extension
 		},
 		"safeHTML": sanitizeHTML,
 	}
-	tpl, err := template.New(ext.Key + ":" + route.Template).Funcs(funcs).Parse(source)
+	tpl, err := template.New(ext.Key + ":" + templateName).Funcs(funcs).Parse(source)
 	if err != nil {
 		return "", err
 	}
@@ -747,6 +808,77 @@ func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extension
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func publishedExtensionLayout(db *sql.DB, pid string, siteID int64) (*Extension, error) {
+	extensions, err := dbExtensionsList(db, pid, siteID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range extensions {
+		ext := &extensions[index]
+		if ext.Status == "published" && ext.PublishedManifest.Layout != nil {
+			return ext, nil
+		}
+	}
+	return nil, nil
+}
+
+func renderSingleForSite(ctx *sdk.AppCtx, pid string, siteID int64, data PageData) (string, *ExtensionBrowserPolicy, error) {
+	ext, err := publishedExtensionLayout(ctx.AppDB(), pid, siteID)
+	if err != nil {
+		return "", nil, err
+	}
+	if ext == nil {
+		body, renderErr := renderSingle(data)
+		return body, nil, renderErr
+	}
+	content, err := renderSingleMain(data)
+	if err != nil {
+		return "", nil, err
+	}
+	return renderPageWithExtensionLayout(ext, data, content)
+}
+
+func renderListForSite(ctx *sdk.AppCtx, pid string, siteID int64, data PageData) (string, *ExtensionBrowserPolicy, error) {
+	ext, err := publishedExtensionLayout(ctx.AppDB(), pid, siteID)
+	if err != nil {
+		return "", nil, err
+	}
+	if ext == nil {
+		body, renderErr := renderList(data)
+		return body, nil, renderErr
+	}
+	content, err := renderListMain(data)
+	if err != nil {
+		return "", nil, err
+	}
+	return renderPageWithExtensionLayout(ext, data, content)
+}
+
+func renderPageWithExtensionLayout(ext *Extension, data PageData, content template.HTML) (string, *ExtensionBrowserPolicy, error) {
+	body, err := renderExtensionSource(*ext, ext.PublishedManifest.Layout.Template, extensionPageData{
+		SiteTitle: data.SiteTitle, SiteTagline: data.SiteTagline, Locale: data.Locale,
+		URLPrefix: data.URLPrefix, ResourceQuery: data.ResourceQuery,
+		ExtensionKey: ext.Key, Settings: ext.PublishedManifest.Settings,
+		PageTitle: data.PageTitle, PrimaryMenu: data.PrimaryMenu, Content: content, Theme: data.Theme,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	policy := ext.PublishedManifest.BrowserPolicy
+	return body, &policy, nil
+}
+
+func applyExtensionBrowserPolicy(w http.ResponseWriter, policy *ExtensionBrowserPolicy) {
+	if policy == nil {
+		return
+	}
+	if len(policy.ScriptOrigins)+len(policy.FrameOrigins)+len(policy.ConnectOrigins)+len(policy.ImageOrigins) > 0 {
+		w.Header().Set("Content-Security-Policy", extensionContentSecurityPolicy(*policy))
+	}
+	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
 func (a *App) handleExtensionAsset(w http.ResponseWriter, r *http.Request) {

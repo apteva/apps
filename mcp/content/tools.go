@@ -534,6 +534,16 @@ func (a *App) mcpTools() []sdk.Tool {
 			Handler: a.toolExtensionsRemove,
 		},
 		{
+			Name:        "extensions_update_settings",
+			Description: "Update validated settings for an installed Content extension. Changes are saved as a draft unless publish is true. Args: key, settings, publish?.",
+			InputSchema: schemaObject(map[string]any{
+				"key":      map[string]any{"type": "string"},
+				"settings": map[string]any{"type": "object"},
+				"publish":  map[string]any{"type": "boolean"},
+			}, []string{"key", "settings"}),
+			Handler: a.toolExtensionsUpdateSettings,
+		},
+		{
 			Name:        "extensions_invalidate",
 			Description: "Invalidate rendered output for a Content site after provider data changes. Args: site selector plus optional cache tags reserved for future selective invalidation.",
 			InputSchema: schemaObject(map[string]any{
