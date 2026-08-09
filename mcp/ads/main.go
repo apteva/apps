@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.38
+version: 0.1.39
 scopes: [project, global]
 requires:
   permissions:
@@ -52,7 +52,12 @@ requires:
   apps:
     - name: storage
       version: ">=0.1.0"
+      optional: true
       reason: "Resolve stored image and video files for creative uploads."
+    - name: crm
+      version: ">=0.5.0"
+      optional: true
+      reason: "Resolve saved CRM segments for privacy-safe audience member sync."
 provides:
   http_routes:
     - prefix: /

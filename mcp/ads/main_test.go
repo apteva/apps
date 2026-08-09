@@ -180,6 +180,23 @@ func newAdsCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	return ctx
 }
 
+func TestManifestAppDependenciesAreOptional(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	dependencies := map[string]sdk.RequiredAppRef{}
+	for _, dependency := range manifest.Requires.Apps {
+		dependencies[dependency.Name] = dependency
+	}
+	for _, name := range []string{"storage", "crm"} {
+		dependency, exists := dependencies[name]
+		if !exists {
+			t.Fatalf("manifest is missing %s dependency", name)
+		}
+		if !dependency.Optional {
+			t.Fatalf("%s dependency must be optional: %#v", name, dependency)
+		}
+	}
+}
+
 // --- account_add ---------------------------------------------------
 
 func TestAccountAdd_StartsOAuth(t *testing.T) {
