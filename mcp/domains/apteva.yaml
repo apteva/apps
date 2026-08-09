@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.5.1
+version: 0.5.2
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -38,6 +38,7 @@ requires:
   integrations:
     - role: dns_provider
       kind: integration
+      mode: multiple
       compatible_slugs: [porkbun, namecheap, ionos, spaceship]
       capabilities:
         - dns.list_records
@@ -50,10 +51,11 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS provider (Porkbun, Namecheap, IONOS, Spaceship)"
-      hint: "Connect a Porkbun, Namecheap, IONOS, or Spaceship account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
+      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship)"
+      hint: "Connect every DNS account used by this project and choose a default. Each domain is pinned to its selected connection."
     - role: registrar_provider
       kind: integration
+      mode: multiple
       compatible_slugs: [porkbun]
       capabilities:
         - domains.check_availability
@@ -64,8 +66,8 @@ requires:
         domains.register:            register_domain
         domains.pricing:             get_pricing
       required: false
-      label: "Registrar provider (Porkbun)"
-      hint: "Connect a Porkbun account to check availability and register new domains. If unset, registrar tools fall back to the DNS provider when it is Porkbun, or to Spaceship for availability checks only."
+      label: "Registrar providers (Porkbun)"
+      hint: "Connect every Porkbun registrar account used by this project and choose a default. If unset, registrar tools fall back to the default DNS provider when it is Porkbun, or to Spaceship for availability checks only."
 
 provides:
   http_routes:

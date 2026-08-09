@@ -45,6 +45,10 @@ interface Connection {
   app_slug: string;
   name: string;
   status: string;
+  dns_bound: boolean;
+  dns_default: boolean;
+  registrar_bound: boolean;
+  registrar_default: boolean;
 }
 
 interface DomainAvailability {
@@ -103,7 +107,9 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
   const [view, setView] = useState<"inventory" | "register">("inventory");
 
   const activeConnections = useMemo(
-    () => connections.filter((connection) => (connection.status || "").toLowerCase() === "active"),
+    () => connections
+      .filter((connection) => (connection.status || "").toLowerCase() === "active")
+      .sort((a, b) => Number(b.dns_bound) - Number(a.dns_bound) || a.app_slug.localeCompare(b.app_slug)),
     [connections],
   );
 
@@ -270,6 +276,9 @@ function AddDomainForm({
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const boundConnections = connections.filter((connection) => connection.dns_bound);
+  const otherConnections = connections.filter((connection) => !connection.dns_bound);
+  const defaultConnection = connections.find((connection) => connection.dns_default);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -315,12 +324,29 @@ function AddDomainForm({
           value={pick}
           onChange={(e) => setPick(e.target.value as ConnectionChoice)}
         >
-          <option value="default">Default (install binding)</option>
-          {connections.map((c) => (
-            <option key={c.id} value={String(c.id)}>
-              {providerLabel(c.app_slug)} — {c.name || `connection ${c.id}`}
-            </option>
-          ))}
+          <option value="default">
+            {defaultConnection
+              ? `Default - ${providerLabel(defaultConnection.app_slug)} / ${defaultConnection.name || `connection ${defaultConnection.id}`}`
+              : "Default DNS connection"}
+          </option>
+          {boundConnections.length > 0 && (
+            <optgroup label="Connected DNS providers">
+              {boundConnections.map((c) => (
+                <option key={c.id} value={String(c.id)}>
+                  {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}{c.dns_default ? " (default)" : ""}
+                </option>
+              ))}
+            </optgroup>
+          )}
+          {otherConnections.length > 0 && (
+            <optgroup label="Other available connections">
+              {otherConnections.map((c) => (
+                <option key={c.id} value={String(c.id)}>
+                  {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}
+                </option>
+              ))}
+            </optgroup>
+          )}
           <option value="other">Other / unknown</option>
         </select>
       </Field>
@@ -364,6 +390,10 @@ function RegisterDomainPane({
   const [intent, setIntent] = useState<RegistrationIntent | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const boundConnections = connections.filter((connection) => connection.registrar_bound);
+  const otherConnections = connections.filter((connection) => !connection.registrar_bound);
+  const defaultConnection = connections.find((connection) => connection.registrar_default)
+    || connections.find((connection) => connection.dns_default);
 
   const selectedConnection = useMemo(() => {
     if (pick === "default" || pick === "other") return null;
@@ -456,12 +486,29 @@ function RegisterDomainPane({
             value={pick}
             onChange={(e) => { setPick(e.target.value as ConnectionChoice); setAvailability(null); }}
           >
-            <option value="default">Default registrar binding</option>
-            {connections.map((c) => (
-              <option key={c.id} value={String(c.id)}>
-                {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}
-              </option>
-            ))}
+            <option value="default">
+              {defaultConnection
+                ? `Default - ${providerLabel(defaultConnection.app_slug)} / ${defaultConnection.name || `connection ${defaultConnection.id}`}`
+                : "Default registrar connection"}
+            </option>
+            {boundConnections.length > 0 && (
+              <optgroup label="Connected registrar providers">
+                {boundConnections.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}{c.registrar_default ? " (default)" : ""}
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {otherConnections.length > 0 && (
+              <optgroup label="Other available connections">
+                {otherConnections.map((c) => (
+                  <option key={c.id} value={String(c.id)}>
+                    {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}
+                  </option>
+                ))}
+              </optgroup>
+            )}
           </select>
         </Field>
         <button

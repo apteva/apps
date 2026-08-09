@@ -2588,10 +2588,10 @@ func (a *App) handleDomainItem(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"domain": d})
 }
 
-// handleConnectionsList — feeds the panel's connection picker. Returns
-// every Porkbun + Namecheap + IONOS + Spaceship connection in this project so the
-// operator can pin one specifically when adding a domain. Not an MCP tool
-// because agents shouldn't be picking connections for users; operator UI.
+// handleConnectionsList feeds the panel's connection picker. It returns every
+// compatible project connection for backwards compatibility with domains that
+// were pinned before multi-bindings existed, and marks the connections selected
+// in each multi-binding role so the UI can prioritize them.
 func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
@@ -2603,11 +2603,17 @@ func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type conn struct {
-		ID      int64  `json:"id"`
-		AppSlug string `json:"app_slug"`
-		Name    string `json:"name"`
-		Status  string `json:"status"`
+		ID               int64  `json:"id"`
+		AppSlug          string `json:"app_slug"`
+		Name             string `json:"name"`
+		Status           string `json:"status"`
+		DNSBound         bool   `json:"dns_bound"`
+		DNSDefault       bool   `json:"dns_default"`
+		RegistrarBound   bool   `json:"registrar_bound"`
+		RegistrarDefault bool   `json:"registrar_default"`
 	}
+	dnsBound, dnsDefault := integrationBindingSet(globalCtx, "dns_provider")
+	registrarBound, registrarDefault := integrationBindingSet(globalCtx, "registrar_provider")
 	out := []conn{}
 	for _, slug := range []string{"porkbun", "namecheap", "ionos", "spaceship"} {
 		rows, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
@@ -2616,10 +2622,34 @@ func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, c := range rows {
-			out = append(out, conn{ID: c.ID, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status})
+			out = append(out, conn{
+				ID:               c.ID,
+				AppSlug:          c.AppSlug,
+				Name:             c.Name,
+				Status:           c.Status,
+				DNSBound:         dnsBound[c.ID],
+				DNSDefault:       c.ID == dnsDefault,
+				RegistrarBound:   registrarBound[c.ID],
+				RegistrarDefault: c.ID == registrarDefault,
+			})
 		}
 	}
 	httpJSON(w, map[string]any{"connections": out})
+}
+
+func integrationBindingSet(ctx *sdk.AppCtx, role string) (map[int64]bool, int64) {
+	selected := map[int64]bool{}
+	defaultID := int64(0)
+	for _, bound := range ctx.IntegrationsFor(role) {
+		if bound == nil || bound.ConnectionID <= 0 {
+			continue
+		}
+		selected[bound.ConnectionID] = true
+		if bound.IsDefault {
+			defaultID = bound.ConnectionID
+		}
+	}
+	return selected, defaultID
 }
 
 // handleToolsCall — same generic dispatcher messaging uses, so the

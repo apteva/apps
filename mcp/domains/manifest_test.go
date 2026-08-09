@@ -8,8 +8,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "domains" {
 		t.Errorf("name=%q", m.Name)
 	}
-	if m.Version != "0.5.1" {
-		t.Errorf("version=%q, want 0.5.0", m.Version)
+	if m.Version != "0.5.2" {
+		t.Errorf("version=%q, want 0.5.2", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
@@ -38,18 +38,26 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 	}
 }
 
-func TestEmbeddedManifest_DNSProviderAllowsSpaceship(t *testing.T) {
+func TestEmbeddedManifest_ProviderRolesAllowMultipleConnections(t *testing.T) {
 	app := &App{}
+	wantRoles := map[string]bool{"dns_provider": false, "registrar_provider": false}
 	for _, dep := range app.Manifest().Requires.Integrations {
-		if dep.Role != "dns_provider" {
+		if _, ok := wantRoles[dep.Role]; !ok {
 			continue
 		}
-		if !containsString(dep.CompatibleSlugs, "spaceship") {
+		if dep.Mode != "multiple" {
+			t.Errorf("%s mode=%q, want multiple", dep.Role, dep.Mode)
+		}
+		if dep.Role == "dns_provider" && !containsString(dep.CompatibleSlugs, "spaceship") {
 			t.Fatalf("dns_provider compatible_slugs=%v, want spaceship", dep.CompatibleSlugs)
 		}
-		return
+		wantRoles[dep.Role] = true
 	}
-	t.Fatal("dns_provider integration role missing")
+	for role, found := range wantRoles {
+		if !found {
+			t.Errorf("%s integration role missing", role)
+		}
+	}
 }
 
 func containsString(values []string, want string) bool {
