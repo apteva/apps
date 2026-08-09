@@ -45,6 +45,50 @@ func TestMobileStoreConfigRoundTripUsesEnvironmentIdentity(t *testing.T) {
 	}
 }
 
+func TestMobileStorePartialStatusAndUnchangedSavePreserveFailureHistory(t *testing.T) {
+	db := openSchemaDBThrough(t, len(testMigrationFiles)-1)
+	defer db.Close()
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "ios-state", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	doc := completeIOSStoreDocument()
+	cfg, err := dbUpsertMobileStoreConfig(db, d, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := `{"last_apply":{"status":"partial"}}`
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "failed", observed, "{}", "", "pricing failed"); err != nil {
+		t.Fatal(err)
+	}
+	applyTestMigration(t, db, testMigrationFiles[len(testMigrationFiles)-1])
+	if err := dbUpdateMobileStoreState(db, cfg.ID, "partial", observed, "{}", "", "pricing failed"); err != nil {
+		t.Fatalf("partial status rejected after migration: %v", err)
+	}
+	cfg, err = dbUpsertMobileStoreConfig(db, d, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "partial" || cfg.LastError != "pricing failed" || cfg.ObservedJSON != observed {
+		t.Fatalf("unchanged save lost reconciliation state: %+v", cfg)
+	}
+	doc.Copyright = "Changed"
+	cfg, err = dbUpsertMobileStoreConfig(db, d, doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Status != "draft" || cfg.LastError != "" {
+		t.Fatalf("changed desired document did not reset active state: %+v", cfg)
+	}
+}
+
 func TestStoreDocumentNeverPersistsReviewPassword(t *testing.T) {
 	doc := completeIOSStoreDocument()
 	doc.Review.DemoAccountRequired = true

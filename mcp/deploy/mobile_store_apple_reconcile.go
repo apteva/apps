@@ -14,28 +14,45 @@ import (
 )
 
 func (a *App) applyAppleDistribution(bound *sdk.BoundIntegration, appID string, doc StoreDocument) error {
-	if body := providerExtensionBody(doc, "app_store_connect", "price_schedule_body"); body != nil && !strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
-		if _, err := executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body}); err != nil {
+	price := func() error {
+		if body := providerExtensionBody(doc, "app_store_connect", "price_schedule_body"); body != nil && !strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
+			_, err := executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body})
 			return err
 		}
-	} else if strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
-		if err := reconcileAppleFreePrice(bound, appID, doc); err != nil {
+		if strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
+			return reconcileAppleFreePrice(bound, appID, doc)
+		}
+		return nil
+	}
+	availability := func() error {
+		if body := providerExtensionBody(doc, "app_store_connect", "availability_body"); body != nil {
+			availabilityID := jsonStringFromValue(body, "data", "id")
+			if availabilityID == "" {
+				_, err := executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
+				return err
+			}
+			_, err := executeIntegration(bound, "update_app_availability", map[string]any{"availability_id": availabilityID, "body": body})
 			return err
 		}
-	}
-	if body := providerExtensionBody(doc, "app_store_connect", "availability_body"); body != nil {
-		availabilityID := jsonStringFromValue(body, "data", "id")
-		if availabilityID == "" {
-			_, err := executeIntegration(bound, "create_app_availability", map[string]any{"body": body})
-			return err
+		if storeAvailabilityConfigured(doc.Distribution) {
+			return reconcileAppleAvailability(bound, appID, doc.Distribution)
 		}
-		_, err := executeIntegration(bound, "update_app_availability", map[string]any{"availability_id": availabilityID, "body": body})
-		return err
+		return nil
 	}
-	if storeAvailabilityConfigured(doc.Distribution) {
-		return reconcileAppleAvailability(bound, appID, doc.Distribution)
+	return applyIndependentStoreOperations(price, availability)
+}
+
+func applyIndependentStoreOperations(operations ...func() error) error {
+	var operationErrors []error
+	for _, operation := range operations {
+		if operation == nil {
+			continue
+		}
+		if err := operation(); err != nil {
+			operationErrors = append(operationErrors, err)
+		}
 	}
-	return nil
+	return errors.Join(operationErrors...)
 }
 
 func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc StoreDocument) error {
@@ -60,8 +77,14 @@ func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc Stor
 	if zeroID == "" {
 		return fmt.Errorf("App Store Connect returned no zero price point for base territory %s", baseTerritory)
 	}
-	manualPriceID := "deploy-free-" + strings.ToLower(baseTerritory)
-	body := map[string]any{
+	body := appleFreePriceScheduleBody(appID, baseTerritory, zeroID)
+	_, err = executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body})
+	return err
+}
+
+func appleFreePriceScheduleBody(appID, baseTerritory, pricePointID string) map[string]any {
+	manualPriceID := "${deploy-free-" + strings.ToLower(baseTerritory) + "}"
+	return map[string]any{
 		"data": map[string]any{
 			"type": "appPriceSchedules",
 			"relationships": map[string]any{
@@ -73,12 +96,10 @@ func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc Stor
 		"included": []any{map[string]any{
 			"type": "appPrices", "id": manualPriceID,
 			"relationships": map[string]any{
-				"appPricePoint": map[string]any{"data": map[string]any{"type": "appPricePoints", "id": zeroID}},
+				"appPricePoint": map[string]any{"data": map[string]any{"type": "appPricePoints", "id": pricePointID}},
 			},
 		}},
 	}
-	_, err = executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body})
-	return err
 }
 
 func firstZeroApplePricePoint(raw json.RawMessage) string {

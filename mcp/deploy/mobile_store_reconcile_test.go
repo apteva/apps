@@ -56,6 +56,33 @@ func TestFirstZeroApplePricePoint(t *testing.T) {
 	}
 }
 
+func TestAppleFreePriceUsesJSONAPIInlineEntityID(t *testing.T) {
+	body := appleFreePriceScheduleBody("app-1", "USA", "point-1")
+	data := body["data"].(map[string]any)
+	relationships := data["relationships"].(map[string]any)
+	manualPrices := relationships["manualPrices"].(map[string]any)["data"].([]any)
+	linkageID := manualPrices[0].(map[string]any)["id"]
+	includedID := body["included"].([]any)[0].(map[string]any)["id"]
+	if linkageID != "${deploy-free-usa}" || includedID != linkageID {
+		t.Fatalf("inline IDs linkage=%q included=%q", linkageID, includedID)
+	}
+}
+
+func TestIndependentStoreOperationsContinueAfterFailure(t *testing.T) {
+	pricingErr := errors.New("pricing failed")
+	availabilityCalled := false
+	err := applyIndependentStoreOperations(
+		func() error { return pricingErr },
+		func() error { availabilityCalled = true; return nil },
+	)
+	if !errors.Is(err, pricingErr) {
+		t.Fatalf("combined error=%v", err)
+	}
+	if !availabilityCalled {
+		t.Fatal("availability did not run after pricing failed")
+	}
+}
+
 func TestAppleAvailabilityCreateBodyUsesGenericTerritorySelection(t *testing.T) {
 	body := appleAvailabilityCreateBody("app-1", map[string]bool{"USA": true, "CHN": false}, true)
 	data := body["data"].(map[string]any)

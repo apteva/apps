@@ -372,9 +372,13 @@ func dbUpsertMobileStoreConfig(db *sql.DB, d *Deployment, doc StoreDocument) (*M
 			desired_hash = excluded.desired_hash,
 			status = CASE
 				WHEN mobile_store_configs.applied_hash = excluded.desired_hash THEN 'applied'
+				WHEN mobile_store_configs.desired_hash = excluded.desired_hash THEN mobile_store_configs.status
 				ELSE 'draft'
 			END,
-			last_error = '',
+			last_error = CASE
+				WHEN mobile_store_configs.desired_hash = excluded.desired_hash THEN mobile_store_configs.last_error
+				ELSE ''
+			END,
 			updated_at = excluded.updated_at
 	`, d.ID, d.EnvironmentID, d.TargetKind, mobileStoreProvider(d.TargetKind), desiredJSON, desiredHash, now, now)
 	if err != nil {

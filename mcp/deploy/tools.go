@@ -884,11 +884,7 @@ func (a *App) toolStoreUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	a.pruneUnreferencedStoreAssets(d, doc)
 	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
-	status := "ready"
-	if !preflight.Ready {
-		status = "blocked"
-	}
-	_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+	_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 	cfg, _ = dbGetMobileStoreConfig(ctx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 	emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
 	return map[string]any{"config": cfg, "desired": doc, "preflight": preflight}, nil

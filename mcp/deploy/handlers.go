@@ -141,11 +141,7 @@ func (a *App) httpDeploymentStoreConfig(w http.ResponseWriter, r *http.Request, 
 		}
 		a.pruneUnreferencedStoreAssets(d, doc)
 		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
-		status := "ready"
-		if !preflight.Ready {
-			status = "blocked"
-		}
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 		cfg, _ = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 		emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
 		httpJSON(w, map[string]any{"config": cfg, "desired": doc, "preflight": preflight})
