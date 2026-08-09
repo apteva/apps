@@ -89,6 +89,25 @@ on the platform — authenticated with the sidecar's own
 `APTEVA_APP_TOKEN`. Each incoming event is dispatched to every
 matching workflow on the lane (exact topic match, or `prefix.*`).
 
+From v0.4.8, event triggers can add a `when` predicate. It is evaluated
+against the normal event input before a run is persisted, so a non-match
+creates no run, steps, or downstream calls:
+
+```yaml
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'ventes'"
+```
+
+Predicates use the same small condition language as branch steps: path
+truthiness checks and comparisons using `==`, `!=`, `>`, `<`, `>=`, or
+`<=`, joined when needed with short-circuit `and` / `or` (`and` binds more
+tightly). String literals must be quoted. Invalid predicates are rejected
+when the workflow is created or updated; invalid legacy definitions fail
+closed at dispatch time.
+
 Reconnect-with-`since` handles transient drops; the bus's 256-event
 ring buffer covers brief outages. A sidecar restart re-subscribes
 fresh; events that age out of the ring during a longer downtime are

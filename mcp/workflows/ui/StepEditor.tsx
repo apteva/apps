@@ -743,7 +743,7 @@ function BranchFields({ step, patch }: { step: StepDef; patch: (mutator: (s: Ste
     goto?.fail ? "fail" : goto?.end ? "end" : "goto";
   return (
     <>
-      <Field label="When" hint={`Examples: "input.x > 0", "steps.lookup.found == true", "input.kind != 'invoice'".`}>
+      <Field label="When" hint={`Examples: "input.x > 0", "steps.lookup.found == true", "input.a or input.b". Use and/or to combine checks.`}>
         <input
           type="text"
           value={step.when || ""}

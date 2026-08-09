@@ -45,7 +45,7 @@ export interface GotoSpec {
 
 export interface WorkflowDef {
   name: string;
-  trigger?: { kind: string; topic?: string; source?: string; cron?: string };
+  trigger?: { kind: string; topic?: string; source?: string; when?: string; cron?: string };
   steps: StepDef[];
 }
 

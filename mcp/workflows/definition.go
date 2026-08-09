@@ -35,6 +35,7 @@ type TriggerDef struct {
 	Kind   string `yaml:"kind" json:"kind"`
 	Topic  string `yaml:"topic,omitempty" json:"topic,omitempty"`
 	Source string `yaml:"source,omitempty" json:"source,omitempty"` // for kind=event: source app
+	When   string `yaml:"when,omitempty" json:"when,omitempty"`     // for kind=event: predicate evaluated before a run is created
 	Cron   string `yaml:"cron,omitempty" json:"cron,omitempty"`     // for kind=schedule
 }
 
@@ -157,6 +158,13 @@ func (d *WorkflowDef) Validate() error {
 		if strings.TrimSpace(d.Trigger.Topic) == "" {
 			return errors.New("event trigger.topic required")
 		}
+		if strings.TrimSpace(d.Trigger.When) != "" {
+			if err := ValidateTriggerCondition(d.Trigger.When); err != nil {
+				return fmt.Errorf("event trigger.when: %w", err)
+			}
+		}
+	} else if strings.TrimSpace(d.Trigger.When) != "" {
+		return errors.New("trigger.when is only valid for event triggers")
 	}
 	if d.Trigger.Kind == "schedule" && strings.TrimSpace(d.Trigger.Cron) == "" {
 		return errors.New("schedule trigger.cron required")

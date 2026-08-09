@@ -612,13 +612,14 @@ function NewWorkflowModal({
   const [kind, setKind] = useState<TriggerKind>("manual");
   const [source, setSource] = useState("");
   const [topic, setTopic] = useState("");
+  const [when, setWhen] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const slug = slugify(name);
   const yaml = useMemo(
-    () => starterYAML(slug || "new-workflow", kind, source, topic),
-    [slug, kind, source, topic],
+    () => starterYAML(slug || "new-workflow", kind, source, topic, when),
+    [slug, kind, source, topic, when],
   );
 
   const submit = async () => {
@@ -730,6 +731,21 @@ function NewWorkflowModal({
                 className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
               />
             </div>
+            <div className="col-span-2">
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Filter before run <span className="normal-case">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={when}
+                onChange={(e) => setWhen(e.target.value)}
+                placeholder="input.data.table == 'ventes'"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+              />
+              <p className="text-text-dim text-xs mt-1">
+                Non-matching events are ignored before a run or step is created.
+              </p>
+            </div>
           </div>
         )}
 
@@ -790,6 +806,7 @@ function starterYAML(
   kind: TriggerKind,
   source: string,
   topic: string,
+  when: string,
 ): string {
   const trigger =
     kind === "manual"
@@ -797,7 +814,8 @@ function starterYAML(
       : kind === "http"
       ? "  kind: http\n"
       : kind === "event"
-      ? `  kind: event\n  source: ${source || "tables"}\n  topic: ${topic || "row.inserted"}\n`
+      ? `  kind: event\n  source: ${source || "tables"}\n  topic: ${topic || "row.inserted"}\n` +
+        (when.trim() ? `  when: ${JSON.stringify(when.trim())}\n` : "")
       : "  kind: manual\n";
   return (
     `name: ${name}\n\n` +

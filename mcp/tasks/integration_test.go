@@ -2,114 +2,132 @@
 
 package main
 
-// Tier 2 — boot the real sidecar binary, talk MCP + REST. Validates
-// SDK wiring (manifest parsing at boot, migrations on disk, JSON-RPC
-// dispatch, route mounting, /health, auth header) end-to-end.
+// Tier 2 boots the real sidecar binary and exercises the v3 MCP + HTTP
+// contract. Durable scheduling and thread delivery use a recording platform in
+// the default unit suite; this test owns process boot, migrations, trusted
+// caller propagation, persistence, and route shapes.
 //
-// Run with:  go test -tags integration ./...
-//
-// Same pattern as apps/mcp/crm and apps/mcp/storage.
+// Run with: go test -tags integration ./...
 
 import (
-	"encoding/json"
-	"strconv"
+	"net/url"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
+const (
+	testProject = "test-proj"
+	testThread  = "opaque-thread-a7"
+)
+
 func TestSidecar_BootsAndHealthOK(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
 	var got map[string]any
 	resp := sc.GET("/health", &got)
-	if resp.Status != 200 {
-		t.Fatalf("status=%d body=%s", resp.Status, resp.Body)
-	}
-	if got["ok"] != true {
-		t.Errorf("/health body=%v", got)
+	if resp.Status != 200 || got["ok"] != true {
+		t.Fatalf("health status=%d body=%s", resp.Status, resp.Body)
 	}
 }
 
-func TestSidecar_FullToolFlow(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+func TestSidecar_DurableLifecycleAcrossMCPAndHTTP(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
 
-	// 1. Create a task via MCP.
-	r := sc.MCP("tasks_create", map[string]any{
-		"agent_id": 7,
-		"title":    "Ship social v0.2",
-		"notes":    "remember to push panel",
-	})
-	id := int64(r["id"].(float64))
-	if id == 0 {
-		t.Fatalf("tasks_create returned no id: %#v", r)
+	created := sc.MCPAs("create", map[string]any{
+		"title": "Ship social v3", "description": "Verify the durable app boundary",
+	}, 7, testThread, testProject)
+	task, ok := created["task"].(map[string]any)
+	if !ok {
+		t.Fatalf("create response missing task: %#v", created)
 	}
-	if r["status"] != "open" {
-		t.Errorf("default status = %v, want open", r["status"])
-	}
-	if r["title"] != "Ship social v0.2" {
-		t.Errorf("title round-trip wrong: %#v", r)
+	id, _ := task["id"].(string)
+	if id == "" || task["created_by_thread_id"] != testThread || task["assigned_thread_id"] != testThread {
+		t.Fatalf("trusted caller provenance missing: %#v", task)
 	}
 
-	// 2. Read back via MCP — list filtered by status=open. The MCP
-	// wrapper returns a list inside content[0].text; the testkit's
-	// MCPRaw unwrap falls back to {text: "<json>"} for non-object
-	// results, so we re-decode the text manually.
-	raw := sc.MCP("tasks_list", map[string]any{"agent_id": 7})
-	var listed []map[string]any
-	if text, ok := raw["text"].(string); ok {
-		if err := json.Unmarshal([]byte(text), &listed); err != nil {
-			t.Fatalf("decode list text: %v (text=%q)", err, text)
-		}
-	}
-	if len(listed) != 1 || listed[0]["title"] != "Ship social v0.2" {
-		t.Errorf("MCP list mismatch: %#v", listed)
+	updated := sc.MCPAs("update", map[string]any{
+		"task_id": id, "state": "running", "progress": 40, "current_step": "Checking persistence",
+	}, 7, testThread, testProject)
+	if updated["state"] != "running" || updated["current_step"] != "Checking persistence" {
+		t.Fatalf("update response=%#v", updated)
 	}
 
-	// 3. Read back via REST — same data, panel-shape.
-	var rest []map[string]any
-	resp := sc.GET("/agents/7", &rest)
-	if resp.Status != 200 {
-		t.Fatalf("REST GET: status=%d body=%s", resp.Status, resp.Body)
+	var detail struct {
+		Task   Task        `json:"task"`
+		Events []TaskEvent `json:"events"`
 	}
-	if len(rest) != 1 || rest[0]["title"] != "Ship social v0.2" {
-		t.Errorf("REST list mismatch: %#v", rest)
-	}
-
-	// 4. Complete the task via MCP.
-	done := sc.MCP("tasks_complete", map[string]any{"task_id": id})
-	if done["status"] != "done" {
-		t.Errorf("tasks_complete returned %#v", done)
+	path := "/tasks/" + url.PathEscape(id) + "?project_id=" + url.QueryEscape(testProject)
+	resp := sc.GET(path, &detail)
+	if resp.Status != 200 || detail.Task.ID != id || len(detail.Events) != 2 {
+		t.Fatalf("detail status=%d task=%+v events=%+v body=%s", resp.Status, detail.Task, detail.Events, resp.Body)
 	}
 
-	// 5. Confirm via REST that status is now done.
-	var doneList []map[string]any
-	sc.GET("/agents/7?status=done", &doneList)
-	if len(doneList) != 1 || doneList[0]["status"] != "done" {
-		t.Errorf("expected one done task, got %#v", doneList)
+	done := sc.MCPAs("complete", map[string]any{
+		"task_id": id, "result": "Durable app boundary verified",
+	}, 7, testThread, testProject)
+	if done["state"] != "completed" || done["result"] != "Durable app boundary verified" {
+		t.Fatalf("complete response=%#v", done)
 	}
 
-	// 6. Delete the task via REST.
-	delResp := sc.DELETE("/tasks/" + strconv.FormatInt(id, 10))
-	if delResp.Status != 204 {
-		t.Errorf("DELETE returned %d", delResp.Status)
+	var listed struct {
+		Tasks  []Task     `json:"tasks"`
+		Counts TaskCounts `json:"counts"`
 	}
-
-	// 7. Listing all (status=all) should now be empty.
-	var all []map[string]any
-	sc.GET("/agents/7?status=all", &all)
-	if len(all) != 0 {
-		t.Errorf("expected empty list after delete, got %#v", all)
+	listPath := "/tasks?project_id=" + url.QueryEscape(testProject)
+	resp = sc.GET(listPath, &listed)
+	if resp.Status != 200 || len(listed.Tasks) != 1 || listed.Counts.Completed != 1 {
+		t.Fatalf("list status=%d payload=%+v body=%s", resp.Status, listed, resp.Body)
 	}
 }
 
-func TestSidecar_RejectsUnknownTool(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
-	// MCPRaw returns the JSON-RPC error envelope without panicking.
+func TestSidecar_RejectsMissingTrustedCallerAndUnknownTool(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
+	if _, err := sc.MCPRaw("tools/call", map[string]any{
+		"name": "create", "arguments": map[string]any{"title": "untrusted"},
+	}); err == nil {
+		t.Fatal("expected create without trusted caller to fail")
+	}
 	got, err := sc.MCPRaw("tools/call", map[string]any{
-		"name":      "tasks_does_not_exist",
-		"arguments": map[string]any{},
+		"name": "does_not_exist", "arguments": map[string]any{},
 	})
 	if err == nil && got["error"] == nil {
-		t.Errorf("expected tools/call to reject unknown tool, got %#v", got)
+		t.Errorf("expected unknown tool rejection, got %#v", got)
+	}
+}
+
+func TestSidecar_ListIsAgentWideAcrossThreads(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
+	for _, item := range []struct {
+		thread string
+		title  string
+	}{
+		{thread: "opaque-default", title: "Default-thread work"},
+		{thread: "conversation-a", title: "Conversation-created work"},
+	} {
+		sc.MCPAs("create", map[string]any{"title": item.title}, 7, item.thread, testProject)
+	}
+	sc.MCPAs("create", map[string]any{"title": "Other-agent work"}, 8, "other-default", testProject)
+
+	listed := sc.MCPAs("list", map[string]any{}, 7, "conversation-reader", testProject)
+	tasks, ok := listed["tasks"].([]any)
+	if !ok || len(tasks) != 2 {
+		t.Fatalf("agent-wide list from unrelated thread=%#v", listed)
+	}
+	for _, value := range tasks {
+		task, _ := value.(map[string]any)
+		if task["agent_id"] != float64(7) {
+			t.Fatalf("cross-agent task leaked into inventory: %#v", task)
+		}
+	}
+}
+
+func TestSidecar_CrossProjectHTTPIsolation(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
+	created := sc.MCPAs("create", map[string]any{"title": "Scoped"}, 7, testThread, testProject)
+	task := created["task"].(map[string]any)
+	id := task["id"].(string)
+	resp := sc.GET("/tasks/"+url.PathEscape(id)+"?project_id=other", nil)
+	if resp.Status != 403 {
+		t.Fatalf("cross-project status=%d body=%s", resp.Status, resp.Body)
 	}
 }

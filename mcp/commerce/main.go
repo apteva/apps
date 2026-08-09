@@ -818,6 +818,9 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 			}
 			return a.rebuildCheckoutCart(ctx, pid, reopened)
 		}
+		if existing.Status == "converted" {
+			return a.replaceConvertedCart(ctx, pid, store, existing, token)
+		}
 		if existing.Status != "open" && existing.Status != "checkout" && existing.Status != "awaiting_payment" {
 			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
 		}
@@ -843,6 +846,54 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		return nil, err
 	}
 	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
+}
+
+func (a *App) replaceConvertedCart(ctx *sdk.AppCtx, pid string, store *Store, converted *Cart, sessionToken string) (*Cart, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	var created map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
+		"_project_id":   pid,
+		"session_token": newToken(),
+		"metadata": map[string]any{
+			"source":                    "commerce",
+			"store_id":                  store.ID,
+			"previous_commerce_cart_id": converted.ID,
+		},
+	}, &created); err != nil {
+		return nil, fmt.Errorf("create post-purchase Checkout cart: %w", err)
+	}
+	checkoutCartID := intArg(unwrap(created, "cart"), "id")
+	if checkoutCartID == 0 {
+		return nil, errors.New("post-purchase Checkout cart response missing id")
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	archivedToken := fmt.Sprintf("%s:converted:%d:%s", sessionToken, converted.ID, newToken())
+	if _, err := tx.Exec(
+		`UPDATE commerce_carts SET session_token=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND status='converted'`,
+		archivedToken, pid, converted.ID,
+	); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(
+		`INSERT INTO commerce_carts (project_id, store_id, checkout_cart_id, session_token, currency, metadata_json)
+		 VALUES (?, ?, ?, ?, ?, '{}')`,
+		pid, store.ID, checkoutCartID, sessionToken, store.DefaultCurrency,
+	)
+	if err != nil {
+		return nil, err
+	}
+	newCartID, _ := result.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbCartGet(ctx.AppDB(), pid, newCartID, true)
 }
 
 func (a *App) rebuildCheckoutCart(ctx *sdk.AppCtx, pid string, cart *Cart) (*Cart, error) {
@@ -1483,7 +1534,17 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		return nil, errors.New("paid checkout cannot be cancelled")
 	}
 	if ch.Status == "cancelled" {
-		return ch, nil
+		if err := a.voidCheckoutInvoice(ctx, pid, ch); err != nil {
+			return nil, err
+		}
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE commerce_sales SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+			  WHERE project_id=? AND checkout_id=? AND payment_status!='paid'`,
+			pid, ch.ID,
+		); err != nil {
+			return nil, err
+		}
+		return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
 	}
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
@@ -1521,6 +1582,9 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 			return nil, err
 		}
 	}
+	if err := a.voidCheckoutInvoice(ctx, pid, ch); err != nil {
+		return nil, err
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -1532,10 +1596,36 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 	if _, err := tx.Exec(`UPDATE commerce_carts SET status='open', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND status='checkout'`, pid, ch.CartID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(
+		`UPDATE commerce_sales SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND checkout_id=? AND payment_status!='paid'`,
+		pid, ch.ID,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+}
+
+func (a *App) voidCheckoutInvoice(ctx *sdk.AppCtx, pid string, checkout *CheckoutSession) error {
+	if checkout == nil || checkout.InvoiceID == nil || *checkout.InvoiceID == 0 {
+		return nil
+	}
+	if ctx.PlatformAPI() == nil {
+		return errors.New("platform API unavailable")
+	}
+	var response map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_void", map[string]any{
+		"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled",
+	}, &response); err != nil {
+		message := strings.ToLower(err.Error())
+		if !strings.Contains(message, "already void") && !strings.Contains(message, "already cancelled") {
+			return fmt.Errorf("void Billing invoice: %w", err)
+		}
+	}
+	return nil
 }
 
 func (a *App) markSalePaid(ctx *sdk.AppCtx, args map[string]any) (*Sale, error) {

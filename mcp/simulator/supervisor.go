@@ -22,10 +22,10 @@ import (
 // simProcess holds the live runtime state for one booted sim. Fields
 // are platform-specific:
 //
-//   android: Cmd + Cancel point at the emulator child; Streamers points
-//            at the scrcpy bridge once a stream WS is attached.
-//   ios:     Cmd is nil (simctl boot is host-managed); Streamers points
-//            at idb_companion + idb video-stream once attached.
+//	android: Cmd + Cancel point at the emulator child; Streamers points
+//	         at the scrcpy bridge once a stream WS is attached.
+//	ios:     Cmd is nil (simctl boot is host-managed); Streamers points
+//	         at idb_companion + idb video-stream once attached.
 type simProcess struct {
 	SimID    string
 	Platform string
@@ -109,6 +109,11 @@ func (s *simSupervisor) reconcileOrphans(ctx *sdk.AppCtx) error {
 	}
 	for i := range rows {
 		row := rows[i]
+		// Remote devices are owned by simulator-worker and reconciled through
+		// its authenticated API. Never demote them with local PID/simctl probes.
+		if row.IsRemote() {
+			continue
+		}
 		alive := s.probeAlive(row)
 		if alive {
 			continue

@@ -25,5 +25,21 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 
 | File | What it exercises |
 |---|---|
-| `01-create-and-complete.yaml` | Flagship `tasks_create` + `tasks_complete` loop. Three creates, one completion. |
-| `02-list-and-update.yaml` | Seeded data → `tasks_list` → `tasks_update`. Validates the "agent reads then acts" pattern. |
+| `01-create-and-complete.yaml` | One opaque-thread-owned task moves through create → progress → complete without duplication. |
+| `02-list-and-update.yaml` | One recurring task is created, listed directly from Tasks, and paused without a setup-task duplicate. |
+| `03-brief-chat-no-task.yaml` | A simple saved-conversation reply stays task-free and is delivered exactly once. |
+| `04-chat-one-time-schedule.yaml` | Chat creates one future task owned by the default durable thread and does not execute it early. |
+| `05-chat-recurring-schedule.yaml` | Chat creates one recurring schedule without setup work, delegation messages, or early execution. |
+| `06-scheduled-execution-and-receipt.yaml` | Due work executes on the default thread and its terminal receipt returns one requested result to the creator conversation. |
+| `07-chat-lists-agent-inventory.yaml` | Chat lists the agent-wide Tasks inventory directly without a thread-to-thread status query. |
+| `08-chat-natural-multisource-task.yaml` | A natural multi-area review creates and completes one conversation-owned task without task-oriented wording. |
+| `09-chat-bounded-lookup-no-task.yaml` | A single bounded lookup remains task-free, preserving the other side of the classification boundary. |
+
+Conversation scenarios use `setup.interaction: conversation`: `directive` is
+the agent's durable role and `prompt` is sent as a real dashboard-channel user
+message after the agent starts. Runtime placeholders expose the opaque IDs:
+
+- `${APTEVA_TEST_CONVERSATION_ID}`
+- `${APTEVA_TEST_CONVERSATION_THREAD_ID}`
+- `${APTEVA_TEST_DEFAULT_THREAD_ID}`
+- `${APTEVA_TEST_AGENT_ID}`

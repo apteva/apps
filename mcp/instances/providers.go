@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -71,6 +72,9 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	if inst.IsLocal() {
 		return InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true}
 	}
+	if !isCompatibleProvider(normalizeProvider(inst.Provider)) {
+		return InstanceCapabilities{}
+	}
 	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
 	switch normalizeProvider(inst.Provider) {
 	case "hetzner":
@@ -82,6 +86,9 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 		// Contabo only schedules contract cancellation; it does not expose
 		// immediate instance deletion. Do not present that as Destroy.
 		cap.Destroy = isAPIProvider(provider) && provider != "contabo"
+	}
+	if cap.Destroy && isScalewayAppleInstance(inst) && !scalewayAppleCanDelete(inst, time.Now()) {
+		cap.Destroy = false
 	}
 	return cap
 }

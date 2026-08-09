@@ -400,7 +400,33 @@ func executeProviderTool(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool stri
 	if err := json.Unmarshal(result.Data, &data); err != nil {
 		return nil, fmt.Errorf("%s.%s returned invalid JSON: %w", bound.AppSlug, tool, err)
 	}
+	if err := providerResponseError(bound.AppSlug, data); err != nil {
+		return nil, fmt.Errorf("%s.%s: %w", bound.AppSlug, tool, err)
+	}
 	return data, nil
+}
+
+func providerResponseError(provider string, data any) error {
+	if provider != "cjdropshipping" {
+		return nil
+	}
+	root := anyMap(data)
+	code, hasCode := numberValue(root["code"])
+	failed := hasCode && int64(code) != http.StatusOK
+	if success, ok := root["success"].(bool); ok && !success {
+		failed = true
+	}
+	if result, ok := root["result"].(bool); ok && !result {
+		failed = true
+	}
+	if !failed {
+		return nil
+	}
+	message := firstNonEmpty(firstString(root, "message"), "CJ returned an unsuccessful response")
+	if hasCode {
+		return fmt.Errorf("CJ code %d: %s", int64(code), message)
+	}
+	return errors.New(message)
 }
 
 func fetchProviderProduct(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, policy *ProviderPolicy, productID string, input map[string]any) (*ProviderProduct, error) {
@@ -695,11 +721,15 @@ func normalizeCJProducts(raw any, detail bool) []ProviderProduct {
 		root := anyMap(raw)
 		productMap := firstObject(root["product"])
 		product := providerProductBase(productMap)
-		product.Variants = normalizeVariants("cjdropshipping", providerRows(root["variants"]))
+		variantRows := providerRows(root["variants"])
+		if len(variantRows) == 0 {
+			variantRows = providerRows(productMap["variants"])
+		}
+		product.Variants = normalizeVariants("cjdropshipping", variantRows)
 		product.Raw = raw
 		return []ProviderProduct{product}
 	}
-	rows := providerRows(raw)
+	rows := cjProductRows(raw)
 	out := make([]ProviderProduct, 0, len(rows))
 	for _, row := range rows {
 		product := providerProductBase(anyMap(row))
@@ -707,6 +737,19 @@ func normalizeCJProducts(raw any, detail bool) []ProviderProduct {
 		out = append(out, product)
 	}
 	return out
+}
+
+func cjProductRows(raw any) []any {
+	root := firstObject(raw)
+	content := anySlice(root["content"])
+	var rows []any
+	for _, entry := range content {
+		rows = append(rows, anySlice(anyMap(entry)["productList"])...)
+	}
+	if len(rows) > 0 {
+		return rows
+	}
+	return providerRows(raw)
 }
 
 func providerProductBase(m map[string]any) ProviderProduct {
@@ -763,6 +806,7 @@ func normalizeVariants(provider string, rows []any) []ProviderVariant {
 			}
 		case "cjdropshipping":
 			variant.CostCents = firstMoneyCents(m, "variantSellPrice", "sellPrice", "variantPrice", "price")
+			variant.SuggestedPrice = firstMoneyCents(m, "variantSugSellPrice", "suggestSellPrice")
 			qty := firstNumber(m, "inventory", "variantInventory", "stock")
 			if qty >= 0 {
 				variant.AvailableQuantity = &qty

@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/workflows
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.43.0
+	github.com/apteva/app-sdk v0.51.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.0
 )

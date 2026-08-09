@@ -1,8 +1,8 @@
-name: create-and-complete
+name: durable-lifecycle
 description: |
-  Agent receives a directive with a small to-do list, creates one
-  task per item, then completes the second one. Verifies the flagship
-  create + complete loop works against a real LLM.
+  A real agent creates exactly one durable task for one outcome, records a
+  meaningful milestone, and completes it. The task app—not the server—owns the
+  lifecycle and event history.
 
 timeout: 90s
 max_iterations: 10
@@ -13,25 +13,23 @@ setup:
     path: ./
 
 directive: |
-  You are managing the mission board for agent 1. Add three tasks
-  to it:
-
-    1. "Buy oat milk"
-    2. "Reply to Anna about the meeting"
-    3. "Review the design doc"
-
-  Then mark task #2 (the reply to Anna) as complete. Use tasks_create
-  for each one and tasks_complete for the one you finish. After that,
-  stop.
+  Track one durable task named "Prepare the weekly client briefing". Record
+  that work has started at 25% with the current step "Collecting source
+  material", then complete that same task with the result "Briefing ready".
+  Do not create a second task. List the task inventory to verify the outcome,
+  then stop.
 
 assert:
   - tool_called: tasks_create
+  - tool_called: tasks_update
   - tool_called: tasks_complete
-  - http: GET /api/apps/tasks/agents/1?status=all
+  - tool_called: tasks_list
+  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
-    expect_count: 3
+    expect_count_at: tasks
+    expect_count: 1
   - iterations_at_most: 10
 
 budget:
-  total_tokens: 12000
-  cost_usd: 0.20
+  total_tokens: 150000
+  cost_usd: 1.50

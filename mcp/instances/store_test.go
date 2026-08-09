@@ -81,6 +81,13 @@ func TestLifecycleMigration_PreservesExistingRows(t *testing.T) {
 	if _, err := db.Exec(string(body)); err != nil {
 		t.Fatal(err)
 	}
+	body, err = os.ReadFile(filepath.Join("migrations", "004_platform_metadata.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
 	inst, err := dbGetInstance(db, 7)
 	if err != nil {
 		t.Fatal(err)

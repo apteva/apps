@@ -67,6 +67,9 @@ func TestSimUpsertAndGet(t *testing.T) {
 	if got.Platform != "android" || got.Serial != "emulator-5554" {
 		t.Errorf("unexpected row: %+v", got)
 	}
+	if got.RunnerKind != "local" || got.InstanceID != 0 || got.BackendID != "avd-1" {
+		t.Errorf("local runner defaults not applied: %+v", got)
+	}
 
 	// Upsert flips status; created_at must survive.
 	if err := dbUpdateSim(db, "avd-1", map[string]any{"status": "booted"}); err != nil {
@@ -75,6 +78,42 @@ func TestSimUpsertAndGet(t *testing.T) {
 	got, _ = dbGetSim(db, "avd-1")
 	if got.Status != "booted" {
 		t.Errorf("status=%q, want booted", got.Status)
+	}
+}
+
+func TestRemoteSimAndHostRoundTrip(t *testing.T) {
+	db := openTestDB(t)
+	host := SimulatorHost{
+		InstanceID: 9, InstanceName: "mac-studio", WorkerPort: 48190,
+		WorkerToken: "worker-secret", WorkerVersion: simulatorVersion, Status: "ready",
+	}
+	if err := dbUpsertSimulatorHost(db, host); err != nil {
+		t.Fatal(err)
+	}
+	gotHost, err := dbGetSimulatorHost(db, 9)
+	if err != nil || gotHost == nil {
+		t.Fatalf("get host: %+v / %v", gotHost, err)
+	}
+	if gotHost.WorkerToken != "worker-secret" || gotHost.InstanceName != "mac-studio" {
+		t.Fatalf("unexpected host: %+v", gotHost)
+	}
+	sim := Sim{
+		ID: "sim_public", ProjectID: "p1", Platform: "ios", Status: "booted",
+		RunnerKind: "instances", InstanceID: 9, BackendID: "native-udid",
+	}
+	if err := dbUpsertSim(db, sim); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbGetSim(db, sim.ID)
+	if err != nil || got == nil {
+		t.Fatalf("get sim: %+v / %v", got, err)
+	}
+	if !got.IsRemote() || got.NativeID() != "native-udid" {
+		t.Fatalf("remote routing fields lost: %+v", got)
+	}
+	found, err := dbFindSimByBackend(db, "p1", "ios", "instances", 9, "native-udid")
+	if err != nil || found == nil || found.ID != sim.ID {
+		t.Fatalf("find backend: %+v / %v", found, err)
 	}
 }
 

@@ -81,6 +81,13 @@ func TestManifestParse(t *testing.T) {
 	if len(fromFile.Provides.MCPTools) == 0 {
 		t.Fatal("commerce manifest should expose MCP tools")
 	}
+	permissions := map[sdk.Permission]bool{}
+	for _, permission := range fromFile.Requires.Permissions {
+		permissions[permission] = true
+	}
+	if !permissions[sdk.Permission("platform.connections.execute")] {
+		t.Fatal("commerce manifest must allow execution of bound supplier provider tools")
+	}
 	declared := map[string]bool{}
 	for _, tool := range fromFile.Provides.MCPTools {
 		declared[tool.Name] = true
@@ -761,8 +768,56 @@ func TestCartCreateIsIdempotentForStorefrontSession(t *testing.T) {
 	if _, err := ctx.AppDB().Exec(`UPDATE commerce_carts SET status='converted' WHERE id=?`, first.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (&App{}).createCart(ctx, args); err == nil {
-		t.Fatal("converted storefront session was reused")
+	fresh, err := (&App{}).createCart(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ID == first.ID || fresh.Status != "open" || fresh.CheckoutCartID == nil || *fresh.CheckoutCartID != 453 {
+		t.Fatalf("converted storefront session did not receive a fresh cart: %#v", fresh)
+	}
+	archived, err := dbCartGet(ctx.AppDB(), "cart-session", first.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Status != "converted" || archived.SessionToken == args["session_token"] {
+		t.Fatalf("converted cart history was not archived: %#v", archived)
+	}
+}
+
+func TestCheckoutCancelVoidsInvoiceAndCancelsSale(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["checkout:checkout_cancel"] = map[string]any{"session": map[string]any{"status": "cancelled"}}
+	platform.responses["billing:invoices_void"] = map[string]any{"invoice": map[string]any{"status": "void"}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("cancel-sale"), tk.WithPlatform(platform))
+	_, _, variant, cart := seedCommerceCart(t, ctx.AppDB(), "cancel-sale", "main", 0)
+	if err := dbCartAddItem(ctx.AppDB(), "cancel-sale", cart.ID, variant, 1, 501); err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := dbCheckoutCreate(ctx.AppDB(), "cancel-sale", cart, 752, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbCheckoutInvoice(ctx.AppDB(), "cancel-sale", checkout.ID, 88, "INV-88"); err != nil {
+		t.Fatal(err)
+	}
+	checkout, _ = dbCheckoutGet(ctx.AppDB(), "cancel-sale", checkout.ID)
+	sale, err := dbSaleCreateFromCheckout(ctx.AppDB(), "cancel-sale", checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&App{}).checkoutCancel(ctx, map[string]any{"checkout_id": checkout.ID}); err != nil {
+		t.Fatal(err)
+	}
+	cancelledSale, err := dbSaleGet(ctx.AppDB(), "cancel-sale", sale.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelledSale.Status != "cancelled" || cancelledSale.PaymentStatus != "unpaid" {
+		t.Fatalf("cancelled sale has wrong state: %#v", cancelledSale)
+	}
+	if calls := countPlatformCalls(platform.calls, "billing", "invoices_void"); calls != 1 {
+		t.Fatalf("Billing invoices_void calls=%d, want 1", calls)
 	}
 }
 
@@ -793,6 +848,9 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	js := assets["store.js"].(string)
 	if strings.Contains(js, "{{") {
 		t.Fatal("static storefront JavaScript contains an unrendered template expression")
+	}
+	if !strings.Contains(js, "event.key==='Enter'") || !strings.Contains(js, "input.disabled=true") {
+		t.Fatal("cart quantity control does not persist Enter-key edits safely")
 	}
 	if !strings.Contains(js, "cartTitle(item)") {
 		t.Fatal("storefront cart does not normalize repeated snapshot titles")
@@ -1073,8 +1131,15 @@ func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
 			}
 		}},
 		{"cjdropshipping", map[string]any{}, func(t *testing.T, request map[string]any) {
-			if strArg(anyMap(anySlice(request["products"])[0]), "vid") != "123" {
+			if strArg(anyMap(anySlice(request["products"])[0]), "vid") != "123" ||
+				strArg(request, "shippingAddress") != "1 Main St" ||
+				strArg(request, "logisticName") != "CJPacket Ordinary" ||
+				strArg(request, "fromCountryCode") != "CN" ||
+				intArg(request, "payType") != 3 {
 				t.Fatalf("unexpected CJ request: %#v", request)
+			}
+			if _, ok := request["shippingAddress"].(map[string]any); ok {
+				t.Fatalf("CJ shippingAddress must be a string, not a nested object: %#v", request)
 			}
 		}},
 		{"prodigi", map[string]any{"shipping_method": "Standard"}, func(t *testing.T, request map[string]any) {
@@ -1087,18 +1152,121 @@ func TestProviderOrderRequestsRemainProviderSpecific(t *testing.T) {
 				len(anySlice(item["assets"])) != 1 {
 				t.Fatalf("unexpected Prodigi request: %#v", request)
 			}
+			if _, ok := address["line2"]; ok {
+				t.Fatalf("empty optional Prodigi address fields must be omitted: %#v", address)
+			}
+			if _, ok := recipient["phoneNumber"]; ok {
+				t.Fatalf("empty optional Prodigi recipient fields must be omitted: %#v", recipient)
+			}
 		}},
 	}
 	for _, test := range tests {
 		t.Run(test.provider, func(t *testing.T) {
+			var shipping map[string]any
+			if test.provider == "cjdropshipping" {
+				shipping = map[string]any{"logisticName": "CJPacket Ordinary"}
+			}
 			request, err := providerOrderRequest(test.provider, &ProviderPolicy{
 				ConnectionID: 9, ProviderSlug: test.provider, Settings: test.settings,
-			}, sale, []dispatchLine{line})
+			}, sale, []dispatchLine{line}, shipping)
 			if err != nil {
 				t.Fatal(err)
 			}
 			test.assert(t, request)
 		})
+	}
+}
+
+func TestNormalizeCJProductListV2AndDetailFallback(t *testing.T) {
+	listRaw := map[string]any{
+		"code": 200,
+		"data": map[string]any{
+			"content": []any{
+				map[string]any{"productList": []any{
+					map[string]any{"id": "cat-1", "nameEn": "Cat Toy", "bigImage": "https://example.com/cat.jpg"},
+					map[string]any{"id": "cat-2", "nameEn": "Cat Bed"},
+				}},
+			},
+		},
+	}
+	products := normalizeCJProducts(listRaw, false)
+	if len(products) != 2 || products[0].ID != "cat-1" || products[0].Title != "Cat Toy" {
+		t.Fatalf("unexpected CJ V2 products: %#v", products)
+	}
+
+	detailRaw := map[string]any{
+		"product": map[string]any{"code": 200, "data": map[string]any{
+			"pid": "cat-1", "productNameEn": "Cat Toy", "variants": []any{
+				map[string]any{
+					"vid": "variant-1", "variantSku": "CAT-1", "variantNameEn": "Blue",
+					"variantSellPrice": 3.64, "variantSugSellPrice": 26.32,
+				},
+			},
+		}},
+		"variants": map[string]any{},
+	}
+	products = normalizeCJProducts(detailRaw, true)
+	if len(products) != 1 || len(products[0].Variants) != 1 {
+		t.Fatalf("unexpected CJ detail products: %#v", products)
+	}
+	variant := products[0].Variants[0]
+	if variant.ID != "variant-1" || variant.CostCents != 364 || variant.SuggestedPrice != 2632 {
+		t.Fatalf("unexpected CJ variant economics: %#v", variant)
+	}
+}
+
+func TestNormalizeCJShippingOptions(t *testing.T) {
+	bound := &sdk.BoundIntegration{AppSlug: "cjdropshipping", ConnectionID: 112}
+	raw := map[string]any{"code": 200, "data": []any{
+		map[string]any{"logisticName": "CJPacket Ordinary", "logisticPrice": 4.71, "logisticAging": "2-5"},
+		map[string]any{"logisticName": "USPS+", "totalPostageFee": 7.25, "logisticAging": "4-8 days"},
+	}}
+	options := normalizeCJShippingOptions(bound, raw)
+	if len(options) != 2 || options[0].AmountCents != 471 || options[0].Currency != "USD" {
+		t.Fatalf("unexpected CJ shipping options: %#v", options)
+	}
+	if intArg(options[0].Raw, "estimated_days_min") != 2 || intArg(options[0].Raw, "estimated_days_max") != 5 {
+		t.Fatalf("unexpected CJ shipping estimate: %#v", options[0].Raw)
+	}
+}
+
+func TestCJBusinessErrorsAreNotTreatedAsSuccess(t *testing.T) {
+	err := providerResponseError("cjdropshipping", map[string]any{
+		"code": 1600101, "result": false, "message": "Interface not found",
+	})
+	if err == nil || !strings.Contains(err.Error(), "1600101") {
+		t.Fatalf("expected CJ business error, got %v", err)
+	}
+	if err := providerResponseError("cjdropshipping", map[string]any{"code": 200, "result": true}); err != nil {
+		t.Fatalf("unexpected CJ success error: %v", err)
+	}
+}
+
+func TestSanitizeProdigiOrderRequestRemovesLegacyEmptyOptionalFields(t *testing.T) {
+	request := map[string]any{
+		"recipient": map[string]any{
+			"email": "buyer@example.com", "phoneNumber": " ",
+			"address": map[string]any{
+				"line1": "1 Main St", "line2": "", "townOrCity": "Madrid",
+				"stateOrCounty": " ", "postalOrZipCode": "28001", "countryCode": "ES",
+			},
+		},
+	}
+
+	got := sanitizeProdigiOrderRequest(request)
+	recipient := mapArg(got, "recipient")
+	address := mapArg(recipient, "address")
+	if _, ok := address["line2"]; ok {
+		t.Fatalf("empty line2 was not removed: %#v", address)
+	}
+	if _, ok := address["stateOrCounty"]; ok {
+		t.Fatalf("empty stateOrCounty was not removed: %#v", address)
+	}
+	if _, ok := recipient["phoneNumber"]; ok {
+		t.Fatalf("empty phoneNumber was not removed: %#v", recipient)
+	}
+	if strArg(address, "line1") != "1 Main St" || strArg(recipient, "email") != "buyer@example.com" {
+		t.Fatalf("required/non-empty fields changed: %#v", got)
 	}
 }
 
