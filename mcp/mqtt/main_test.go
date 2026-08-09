@@ -401,6 +401,9 @@ func TestPanelContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	tsx := string(body)
+	if !strings.Contains(tsx, "/_install/${encodeURIComponent(String(installId))}") {
+		t.Error("panel API must select its exact install; unscoped project installs are rejected by the app proxy")
+	}
 	// Every fetch(`${API}/foo…`) — extract the literal path segment
 	// and assert the route exists. Simple-grep, not a parser; good
 	// enough until someone aliases API.
