@@ -320,6 +320,30 @@ func TestCheckoutMarketAllowlist(t *testing.T) {
 	}
 }
 
+func TestCheckoutBootstrapReturnsBrowserSafeMarketSettingsWithoutCart(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("bootstrap-markets"))
+	store, err := dbStoreCreate(ctx.AppDB(), "bootstrap-markets", map[string]any{
+		"slug": "main", "name": "Main", "metadata": map[string]any{
+			"markets": map[string]any{"enabled": []any{"US"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&App{}).toolCheckoutBootstrap(ctx, map[string]any{
+		"store_id": store.ID, "session_token": "missing-session",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := result.(map[string]any)
+	markets := mapArg(mapArg(out, "settings"), "markets")
+	enabled := providerRows(markets["enabled"])
+	if len(enabled) != 1 || enabled[0] != "US" {
+		t.Fatalf("bootstrap market settings=%#v", out["settings"])
+	}
+}
+
 func TestCartUsesCanonicalPriceAndKeepsCheckoutInSync(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["catalog:catalog_prices_get"] = map[string]any{"price": map[string]any{
@@ -639,9 +663,16 @@ func TestCommerceExposesNoPublicStorefrontRoute(t *testing.T) {
 func TestConfigureStorefrontRegistersGenericContentExtension(t *testing.T) {
 	platform := newCommercePlatformStub()
 	platform.responses["content:sites_get"] = map[string]any{"site": map[string]any{"id": 81, "slug": "main"}}
+	platform.responses["content:settings_get"] = map[string]any{"settings": map[string]any{
+		"site_title": "My Site", "default_locale": "en", "timezone": "UTC", "public_base_url": "",
+	}}
+	platform.responses["content:settings_set"] = map[string]any{"ok": true}
 	platform.responses["content:extensions_upsert"] = map[string]any{"extension": map[string]any{"key": "commerce-store-1"}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("storefront-project"), tk.WithPlatform(platform))
-	store, err := dbStoreCreate(ctx.AppDB(), "storefront-project", map[string]any{"slug": "main", "name": "Main Store"})
+	store, err := dbStoreCreate(ctx.AppDB(), "storefront-project", map[string]any{
+		"slug": "main", "name": "Main Store", "default_locale": "en-US",
+		"timezone": "Europe/Madrid", "public_base_url": "https://shop.example/",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,6 +691,20 @@ func TestConfigureStorefrontRegistersGenericContentExtension(t *testing.T) {
 	if call.Tool == "" {
 		t.Fatalf("Content extension was not registered: %#v", platform.calls)
 	}
+	settings := map[string]any{}
+	for _, platformCall := range platform.calls {
+		if platformCall.App == "content" && platformCall.Tool == "settings_set" {
+			settings[strArg(platformCall.Input, "key")] = platformCall.Input["value"]
+		}
+	}
+	for key, want := range map[string]any{
+		"site_title": "Main Store", "default_locale": "en-US",
+		"timezone": "Europe/Madrid", "public_base_url": "https://shop.example",
+	} {
+		if settings[key] != want {
+			t.Fatalf("Content setting %s=%#v, want %#v; calls=%#v", key, settings[key], want, platform.calls)
+		}
+	}
 	manifest, ok := call.Input["manifest"].(map[string]any)
 	if !ok {
 		t.Fatalf("extension manifest missing: %#v", call.Input)
@@ -674,6 +719,26 @@ func TestConfigureStorefrontRegistersGenericContentExtension(t *testing.T) {
 		if route.NoAuth {
 			t.Fatalf("storefront configuration introduced a public Commerce route: %#v", route)
 		}
+	}
+}
+
+func TestConfigureContentSiteSettingsPreservesCustomValues(t *testing.T) {
+	platform := newCommercePlatformStub()
+	platform.responses["content:settings_get"] = map[string]any{"settings": map[string]any{
+		"site_title": "Custom Store", "default_locale": "fr", "timezone": "Europe/Paris",
+		"public_base_url": "https://custom.example", "site_tagline": "Custom tagline",
+	}}
+	platform.responses["content:settings_set"] = map[string]any{"ok": true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("content-settings"), tk.WithPlatform(platform))
+	store := &Store{
+		Name: "Commerce Name", DefaultLocale: "en-US", Timezone: "Europe/Madrid",
+		PublicBaseURL: "https://commerce.example", Metadata: map[string]any{"site_tagline": "Commerce tagline"},
+	}
+	if err := (&App{}).configureContentSiteSettings(ctx, "content-settings", 42, store); err != nil {
+		t.Fatal(err)
+	}
+	if calls := countPlatformCalls(platform.calls, "content", "settings_set"); calls != 0 {
+		t.Fatalf("custom Content settings were overwritten: %#v", platform.calls)
 	}
 }
 
@@ -822,7 +887,10 @@ func TestCheckoutCancelVoidsInvoiceAndCancelsSale(t *testing.T) {
 }
 
 func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
-	manifest := commerceStorefrontManifest(&Store{ID: 7, Name: "Reference Store"})
+	manifest := commerceStorefrontManifest(&Store{
+		ID: 7, Name: "Reference Store",
+		Metadata: map[string]any{"markets": map[string]any{"enabled": []any{"US"}}},
+	})
 	templates, ok := manifest["templates"].(map[string]any)
 	if !ok || len(templates) < 7 {
 		t.Fatalf("storefront templates missing: %#v", manifest["templates"])
@@ -855,7 +923,31 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	if !strings.Contains(js, "cartTitle(item)") {
 		t.Fatal("storefront cart does not normalize repeated snapshot titles")
 	}
+	product := templates["product"].(string)
+	for _, expected := range []string{"data-variant-select", "data-product-price", "data-price-cents", "data-currency"} {
+		if !strings.Contains(product, expected) {
+			t.Fatalf("product template missing %q", expected)
+		}
+	}
+	if strings.Contains(product, `type="hidden" name="variant_id"`) {
+		t.Fatal("product template still fixes checkout to the first variant")
+	}
+	for _, expected := range []string{"[data-variant-select]", "marketCountryCodes", "state?.settings?.markets?.enabled", "populateCountries"} {
+		if !strings.Contains(js, expected) {
+			t.Fatalf("storefront JavaScript missing %q", expected)
+		}
+	}
+	settings := manifest["settings"].(map[string]any)
+	if strings.Contains(strings.ToLower(strArg(settings, "announcement")), "free shipping") {
+		t.Fatalf("default announcement makes an unsupported free-shipping claim: %#v", settings)
+	}
+	if strings.Contains(strings.ToLower(templates["home"].(string)), "free shipping") {
+		t.Fatal("storefront template fallback makes an unsupported free-shipping claim")
+	}
 	css := assets["store.css"].(string)
+	if !strings.Contains(css, ".product-option") {
+		t.Fatal("variant selector is not styled")
+	}
 	if !strings.Contains(css, ".line-total{text-align:right") {
 		t.Fatal("storefront line totals are not right-aligned")
 	}
