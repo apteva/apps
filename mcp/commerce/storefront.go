@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "7"
+const commerceStorefrontExtensionVersion = "8"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -65,12 +66,12 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 		"name":    store.Name,
 		"version": commerceStorefrontExtensionVersion,
 		"settings": map[string]any{
-			"announcement": "Free shipping options shown at checkout",
+			"announcement": "Made to order. Shipping calculated at checkout.",
 			"accent":       "#176b45",
 			"logo_text":    store.Name,
 		},
 		"settings_schema": []any{
-			map[string]any{"key": "announcement", "label": "Announcement", "type": "text", "default": "Free shipping options shown at checkout"},
+			map[string]any{"key": "announcement", "label": "Announcement", "type": "text", "default": "Made to order. Shipping calculated at checkout."},
 			map[string]any{"key": "accent", "label": "Accent color", "type": "color", "default": "#176b45"},
 			map[string]any{"key": "logo_text", "label": "Store name", "type": "text", "default": store.Name},
 		},
@@ -226,7 +227,7 @@ func storefrontDocument(body string) string {
   <script defer src="{{asset "store.js"}}"></script>
 </head>
 <body style="--accent:{{default "#176b45" (get .Settings "accent")}}">
-  <div class="announcement">{{default "Free shipping options shown at checkout" (get .Settings "announcement")}}</div>
+  <div class="announcement">{{default "Made to order. Shipping calculated at checkout." (get .Settings "announcement")}}</div>
   <header class="site-header">
     <a class="brand" href="{{href "/"}}">{{default .SiteTitle (get .Settings "logo_text")}}</a>
     <nav aria-label="Main navigation">
@@ -304,11 +305,15 @@ const productStorefrontBody = `
     <div class="detail-copy">
       <p class="eyebrow">{{get $product "vendor"}}</p>
       <h1>{{get $product "title"}}</h1>
-      {{with $variant}}<p class="detail-price">{{money (get . "price_cents") (get . "currency")}}</p>{{end}}
+      {{with $variant}}<p class="detail-price" data-product-price>{{money (get . "price_cents") (get . "currency")}}</p>{{end}}
       <div class="description">{{safeHTML (text (get $product "description_html"))}}</div>
       {{if $variant}}
       <form data-storefront-action="{{action "add_to_cart"}}" data-success="Added to cart">
-        <input type="hidden" name="variant_id" value="{{get $variant "id"}}">
+        <label class="product-option">Option
+          <select name="variant_id" data-variant-select required>
+            {{range $variants}}<option value="{{get . "id"}}" data-price-cents="{{get . "price_cents"}}" data-currency="{{get . "currency"}}">{{get . "title"}}</option>{{end}}
+          </select>
+        </label>
         <label class="quantity">Quantity <input type="number" name="quantity" value="1" min="1" step="1"></label>
         <button class="button wide" type="submit">Add to cart</button>
       </form>
@@ -468,6 +473,7 @@ const checkoutReturnStorefrontBody = `
   </section>`
 
 const storefrontCSS = `
+.product-option{display:grid;gap:8px;font-size:12px;margin-bottom:12px}.product-option select{height:44px;border:1px solid #cfd4cf;background:#fff;padding:0 12px;width:100%;font:inherit}
 *{box-sizing:border-box}html{color:#171a17;background:#fff;font-family:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif;letter-spacing:0}body{margin:0}a{color:inherit;text-decoration:none}img{display:block;max-width:100%;height:auto}.announcement{background:#171a17;color:#fff;padding:9px 20px;text-align:center;font-size:12px}.site-header{height:72px;padding:0 clamp(20px,5vw,72px);display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #e7e9e6;position:sticky;top:0;background:rgba(255,255,255,.96);z-index:20}.brand{font-family:Georgia,serif;font-size:23px;font-weight:700}.site-header nav{display:flex;gap:24px;align-items:center;font-size:14px}.site-header nav a:hover{color:var(--accent)}main{min-height:70vh}.hero{min-height:min(70vh,680px);padding:clamp(64px,9vw,128px) clamp(20px,8vw,120px);display:flex;align-items:center;position:relative;overflow:hidden;background:#edf2ec;border-bottom:1px solid #dce3dc}.hero-image{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.hero-with-image:after{content:"";position:absolute;inset:0;background:rgba(17,20,17,.58)}.hero-copy{position:relative;z-index:1;max-width:900px}.hero h1{font-family:Georgia,serif;font-size:clamp(48px,7vw,96px);line-height:.98;margin:12px 0 24px}.hero-copy>p:not(.eyebrow){font-size:18px;line-height:1.6;max-width:560px;margin:0 0 30px;color:#4d554e}.hero-with-image .hero-copy,.hero-with-image .hero-copy>p,.hero-with-image .eyebrow{color:#fff}.eyebrow{text-transform:uppercase;font-size:11px;letter-spacing:1.6px;font-weight:700;color:var(--accent);margin:0 0 8px}.button{display:inline-flex;min-height:44px;padding:0 20px;border:0;background:var(--accent);color:#fff;align-items:center;justify-content:center;font:600 14px inherit;cursor:pointer;width:max-content}.button:hover{filter:brightness(.92)}.button.wide{width:100%}.section{padding:72px clamp(20px,5vw,72px)}.section-heading{display:flex;justify-content:space-between;align-items:end;margin-bottom:30px}.section-heading h2,.page-header h1{font-family:Georgia,serif;font-size:clamp(36px,5vw,62px);margin:0}.section-heading>a{font-size:13px;border-bottom:1px solid}.product-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:28px 18px}.product-media{display:block;aspect-ratio:1;background:#f2f3f1;overflow:hidden}.product-media img,.detail-media img{width:100%;height:100%;object-fit:cover;transition:transform .35s}.product-card:hover img{transform:scale(1.02)}.media-placeholder{display:flex;width:100%;height:100%;align-items:center;justify-content:center;padding:30px;color:#778078;text-align:center}.product-copy{padding-top:14px}.product-copy h2{font-size:15px;margin:3px 0 8px;font-weight:600}.price{font-size:14px;margin:0;color:#505650}.page-header{padding:72px clamp(20px,8vw,120px) 42px;border-bottom:1px solid #e7e9e6}.lede{max-width:700px;color:#525a53;line-height:1.7}.collection-grid{padding:36px clamp(20px,5vw,72px) 80px;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.collection-card{min-height:180px;padding:28px;background:#edf2ec;display:flex;flex-direction:column;justify-content:end}.collection-card span{font:600 28px Georgia,serif}.collection-card small{margin-top:8px;color:#5c655e}.product-detail{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(340px,.75fr);min-height:calc(100vh - 105px)}.detail-media{background:#f2f3f1;min-height:620px}.detail-copy{padding:clamp(46px,7vw,100px);align-self:center}.detail-copy h1{font:500 clamp(42px,5vw,70px)/1 Georgia,serif;margin:10px 0 20px}.detail-price{font-size:20px;font-weight:650}.description{line-height:1.7;color:#505750;margin:28px 0}.quantity{display:grid;gap:8px;font-size:12px;margin-bottom:12px}.quantity input{height:44px;border:1px solid #cfd4cf;padding:0 12px;width:100%}.assurances{list-style:none;padding:22px 0 0;margin:22px 0 0;border-top:1px solid #e1e4e1;display:grid;gap:8px;font-size:12px;color:#606860}.search-form{display:flex;gap:10px;max-width:680px;margin-top:28px}.search-form input{height:48px;flex:1;border:1px solid #cbd0cb;padding:0 15px;font-size:16px}.cart-shell{padding:0 clamp(20px,8vw,120px) 90px;max-width:1100px}.cart-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 132px;gap:20px;padding:20px 0;border-bottom:1px solid #e3e6e3;align-items:center}.cart-row input{width:72px;height:40px;border:1px solid #ccd1cc;padding:8px;justify-self:end}.line-total{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.cart-total{display:flex;justify-content:space-between;font-size:20px;font-weight:700;padding:28px 0}.cart-total span:last-child{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.empty,.cart-loading{padding:40px 0;color:#667067}.site-footer{border-top:1px solid #e1e4e1;padding:34px clamp(20px,5vw,72px);display:flex;justify-content:space-between;color:#606760;font-size:12px}.toast{position:fixed;right:20px;bottom:20px;background:#171a17;color:#fff;padding:13px 18px;opacity:0;transform:translateY(12px);transition:.2s;pointer-events:none;z-index:50}.toast.visible{opacity:1;transform:none}
 .checkout-page{background:#fff;color:#202420}.checkout-page main{min-height:0}.checkout-header{height:76px;border-bottom:1px solid #dfe3df;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(24px,5vw,72px)}.checkout-brand{font:700 24px Georgia,serif}.secure-label{color:#5e665f;font-size:13px}.checkout-layout{display:grid;grid-template-columns:minmax(0,700px) minmax(380px,1fr);max-width:1320px;margin:0 auto;min-height:calc(100vh - 132px)}.checkout-form-column{padding:42px clamp(28px,5vw,72px) 72px}.checkout-back{display:inline-block;color:#59615a;font-size:13px;margin-bottom:34px;border-bottom:1px solid #aeb5af}.checkout-intro{margin-bottom:38px}.checkout-intro h1{font:600 42px/1.05 Georgia,serif;margin:8px 0 0}.checkout-error{border-left:3px solid #a83b2f;background:#fbf3f1;color:#792b23;padding:14px 16px;margin:0 0 24px;font-size:14px;line-height:1.5}.checkout-form{display:grid}.checkout-section{padding:0 0 34px;margin:0 0 34px;border-bottom:1px solid #dfe3df}.checkout-section-heading{display:grid;grid-template-columns:30px minmax(0,1fr);gap:12px;align-items:start;margin-bottom:22px}.step-number{width:28px;height:28px;border:1px solid #aeb5af;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700}.checkout-section-heading h2{font-size:19px;margin:2px 0 4px}.checkout-section-heading p{color:#677068;font-size:13px;line-height:1.5;margin:0}.checkout-fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.field{display:grid;gap:7px;color:#454c46;font-size:12px;font-weight:600}.field.full{grid-column:1/-1}.field small{color:#7a827b;font-weight:400}.field input,.field select{width:100%;height:50px;border:1px solid #bac1bb;border-radius:4px;background:#fff;color:#202420;padding:0 13px;font-family:inherit;font-size:15px;font-weight:400}.field select{appearance:auto}.field input:hover,.field select:hover{border-color:#8f9991}.field input:focus,.field select:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}.field input:user-invalid,.field select:user-invalid{border-color:#a83b2f}.shipping-methods{display:grid;gap:10px}.shipping-method{min-height:72px;border:1px solid #aeb5af;border-radius:6px;padding:14px 16px;display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:14px;cursor:pointer}.shipping-method:has(input:checked){border-color:var(--accent);background:#f7faf8;box-shadow:0 0 0 1px var(--accent)}.shipping-method input{width:17px;height:17px;margin:0;accent-color:var(--accent)}.shipping-method-copy{display:grid;gap:4px}.shipping-method small{color:#677068;font-size:12px;line-height:1.4;font-weight:400}.shipping-method-price{font-variant-numeric:tabular-nums;white-space:nowrap}.billing-toggle{display:flex;align-items:center;gap:10px;font-size:13px;margin:0 0 18px;cursor:pointer}.billing-toggle input{width:17px;height:17px;accent-color:var(--accent)}.billing-fields{padding:0 0 22px}.payment-security{margin-top:22px}.payment-element-shell{margin-top:22px;padding-top:22px;border-top:1px solid #dfe3df}.payment-element-shell .checkout-submit{margin-top:22px}.payment-element-error{color:#792b23;font-size:13px;line-height:1.5;margin-top:12px}.checkout-submit{width:100%;min-height:54px;justify-content:space-between;padding:0 20px;font-size:15px}.checkout-submit:disabled{cursor:wait;opacity:.7}.checkout-note{margin:14px 0 0;color:#69716a;font-size:12px;line-height:1.55;text-align:center}.checkout-result{padding:36px 0;border-top:1px solid #dfe3df}.checkout-result h2{font:600 36px/1.1 Georgia,serif;margin:8px 0 14px}.checkout-result p{color:#535c54;line-height:1.65}.checkout-result .confirmation-number{color:#202420;font-size:14px;font-weight:700}.status-pill{display:inline-flex;background:#edf2ec;color:#345443;padding:6px 9px;border-radius:4px;text-transform:uppercase;font-size:10px;font-weight:800;letter-spacing:1px}.checkout-return{max-width:620px;margin:0 auto;padding:clamp(72px,12vw,150px) 24px;min-height:calc(100vh - 132px);text-align:center}.checkout-return h1{font:600 42px/1.1 Georgia,serif;margin:18px 0 14px}.checkout-return p{color:#535c54;line-height:1.65;margin:0 auto 28px;max-width:520px}.checkout-return .button{margin:0 auto}.checkout-summary-column{background:#f5f6f4;border-left:1px solid #dfe3df;padding:62px clamp(28px,4vw,56px)}.order-summary{position:sticky;top:28px}.order-summary summary{list-style:none;display:flex;align-items:center;justify-content:space-between;font-size:15px;font-weight:700;padding-bottom:24px;cursor:default}.order-summary summary::-webkit-details-marker{display:none}.order-summary summary strong{font-size:18px;font-variant-numeric:tabular-nums}.summary-items{display:grid;gap:18px;padding:0 0 24px;border-bottom:1px solid #d7dbd7}.summary-item{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:14px;align-items:center}.summary-media{width:64px;height:64px;border:1px solid #d9ddd9;border-radius:6px;background:#fff;position:relative;display:grid;place-items:center;overflow:visible;color:#777f78;font:600 11px Georgia,serif;text-align:center;padding:5px}.summary-media img{width:100%;height:100%;object-fit:cover;border-radius:5px}.summary-quantity{position:absolute;right:-7px;top:-8px;min-width:22px;height:22px;border-radius:50%;background:#646c65;color:#fff;display:grid;place-items:center;padding:0 5px;font-size:11px}.summary-copy{min-width:0}.summary-copy strong{display:block;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.summary-copy small{display:block;color:#747c75;font-size:11px;margin-top:4px}.summary-price{justify-self:end;text-align:right;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-totals{display:grid;grid-template-columns:1fr auto;gap:10px 24px;padding:24px 0;font-size:13px}.summary-totals span:nth-child(even){justify-self:end;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.summary-total-label,.summary-total-value{border-top:1px solid #d7dbd7;padding-top:18px;margin-top:8px;font-size:17px;font-weight:750}.summary-total-value{font-size:21px}.summary-loading{color:#69716a;font-size:13px;padding:12px 0}.checkout-footer{min-height:56px;border-top:1px solid #dfe3df;display:flex;justify-content:space-between;align-items:center;gap:20px;padding:16px clamp(24px,5vw,72px);color:#69716a;font-size:11px}
 [hidden]{display:none!important}
@@ -517,6 +523,7 @@ function updateCount(cart){qsa('[data-cart-count]').forEach(el=>el.textContent=c
 function cartTitle(item){const title=String(item?.title_snapshot??'');const parts=title.split(' - ');return parts.length===2&&parts[0]===parts[1]?parts[0]:title}
 const money=(cents,currency)=>new Intl.NumberFormat(undefined,{style:'currency',currency:currency||'USD'}).format((cents||0)/100);
 function imageURL(value){try{const url=new URL(String(value||''),location.href);return ['http:','https:'].includes(url.protocol)?url.href:''}catch{return''}}
+qsa('[data-variant-select]').forEach(select=>{const price=qs('[data-product-price]');const sync=()=>{const option=select.selectedOptions[0];if(price&&option)price.textContent=money(Number(option.dataset.priceCents||0),option.dataset.currency||'USD')};select.addEventListener('change',sync);sync()});
 const searchForm=qs('[data-search-form]');if(searchForm)searchForm.addEventListener('submit',event=>{event.preventDefault();const target=new URL(searchForm.action);target.searchParams.set('q',qs('input[name=q]',searchForm).value);location.assign(target)});
 qsa('form[data-storefront-action]:not([data-checkout-form])').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const button=qs('button[type=submit]',form);if(button)button.disabled=true;try{const input=Object.fromEntries(new FormData(form));qsa('input[type=number]',form).forEach(field=>input[field.name]=Number(field.value));const body=await call(form.dataset.storefrontAction,input);updateCount(cartFrom(body));toast(form.dataset.success||'Updated')}catch(error){toast(error.message)}finally{if(button)button.disabled=false}}));
 const cartRoot=qs('[data-cart]');if(cartRoot){const render=cart=>{updateCount(cart);if(!cart?.items?.length){cartRoot.innerHTML='<p class="empty">Your cart is empty.</p>';return}cartRoot.innerHTML=cart.items.map(item=>'<div class="cart-row"><div><strong>'+esc(cartTitle(item))+'</strong><br><small>'+esc(item.sku)+'</small></div><input aria-label="Quantity" data-item="'+Number(item.id)+'" type="number" min="0" step="1" value="'+Number(item.quantity)+'"><span class="line-total">'+esc(money(item.unit_amount_cents*item.quantity,item.currency))+'</span></div>').join('')+'<div class="cart-total"><span>Total</span><span>'+esc(money(cart.total_cents,cart.currency))+'</span></div><a class="button wide" href="'+esc(cartRoot.dataset.checkoutUrl)+'">Continue to checkout</a>';qsa('[data-item]',cartRoot).forEach(input=>{let saving=false;const persist=async()=>{if(saving)return;saving=true;input.disabled=true;try{const body=await call(cartRoot.dataset.quantityAction,{item_id:Number(input.dataset.item),quantity:Number(input.value)});render(cartFrom(body))}catch(error){input.disabled=false;saving=false;toast(error.message)}};input.addEventListener('change',persist);input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();persist()}})})};call(cartRoot.dataset.cartAction).then(body=>render(cartFrom(body))).catch(error=>{cartRoot.textContent=error.message})}
@@ -525,8 +532,10 @@ const checkoutForm=qs('[data-checkout-form]');
 if(checkoutForm){
   const countryCodes='AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'.split(' ');
   const regionNames=typeof Intl.DisplayNames==='function'?new Intl.DisplayNames([navigator.language||'en'],{type:'region'}):null;
-  const countries=countryCodes.map(code=>({code,label:regionNames?.of(code)||code})).sort((a,b)=>a.label.localeCompare(b.label));
-  qsa('[data-country-select]',checkoutForm).forEach(select=>countries.forEach(country=>{const option=document.createElement('option');option.value=country.code;option.textContent=country.label;select.append(option)}));
+  const countrySet=new Set(countryCodes);
+  let restoredValues={};
+  function marketCountryCodes(state){const configured=state?.settings?.markets?.enabled;if(!Array.isArray(configured)||!configured.length)return countryCodes;return [...new Set(configured.map(code=>String(code||'').trim().toUpperCase()).filter(code=>countrySet.has(code)))]}
+  function populateCountries(codes){const countries=codes.map(code=>({code,label:regionNames?.of(code)||code})).sort((a,b)=>a.label.localeCompare(b.label));qsa('[data-country-select]',checkoutForm).forEach(select=>{const selected=select.value||restoredValues[select.name]||'';select.length=1;countries.forEach(country=>{const option=document.createElement('option');option.value=country.code;option.textContent=country.label;select.append(option)});if(codes.includes(selected))select.value=selected})}
 
   const billingSame=qs('[data-billing-same]',checkoutForm);
   const billingFields=qs('[data-billing-fields]',checkoutForm);
@@ -569,8 +578,8 @@ if(checkoutForm){
   }
   function restoreForm(){
     try{
-      const values=JSON.parse(sessionStorage.getItem(persistedKey)||'{}');
-      Object.entries(values).forEach(([name,value])=>{const field=checkoutForm.elements.namedItem(name);if(field&&typeof value==='string')field.value=value});
+      restoredValues=JSON.parse(sessionStorage.getItem(persistedKey)||'{}');
+      Object.entries(restoredValues).forEach(([name,value])=>{const field=checkoutForm.elements.namedItem(name);if(field&&typeof value==='string')field.value=value});
     }catch{}
   }
   function persistForm(){
@@ -700,7 +709,6 @@ if(checkoutForm){
     paymentStage.scrollIntoView({behavior:'smooth',block:'center'});
   }
 
-  restoreForm();
   setBillingMode();
   setStep(1,false);
   billingSame.addEventListener('change',()=>{setBillingMode();persistForm()});
@@ -766,6 +774,8 @@ if(checkoutForm){
   });
   call(checkoutForm.dataset.bootstrapAction).then(async body=>{
     const state=body?.result||{};
+    populateCountries(marketCountryCodes(state));
+    restoreForm();
     if(state.status==='not_found'||!state.cart){renderSummary(cartFrom(await call(checkoutForm.dataset.cartAction)),null);return}
     hydrateCheckout(state.checkout);
     const quote=state.quote&&Object.keys(state.quote).length?state.quote:null;
@@ -778,7 +788,7 @@ if(checkoutForm){
       if(state.payment?.presentation==='hosted'&&state.payment.url){location.assign(state.payment.url);return}
       if(state.payment?.presentation==='elements')await mountStripePayment(state.payment);
     }
-  }).catch(async error=>{try{renderSummary(cartFrom(await call(checkoutForm.dataset.cartAction)),null)}catch{showError(error.message)}});
+  }).catch(async error=>{populateCountries(countryCodes);restoreForm();try{renderSummary(cartFrom(await call(checkoutForm.dataset.cartAction)),null)}catch{showError(error.message)}});
   const orderSummary=qs('[data-order-summary]');
   const mobile=matchMedia('(max-width:900px)');
   const syncSummary=()=>{if(mobile.matches)orderSummary.removeAttribute('open');else orderSummary.setAttribute('open','')};
@@ -857,6 +867,9 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 	if siteID == 0 {
 		return nil, errors.New("Content site response missing id")
 	}
+	if err := a.configureContentSiteSettings(ctx, pid, siteID, store); err != nil {
+		return nil, err
+	}
 	extensionKey := storefrontExtensionKey(store.ID)
 	var extensionResult map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("content", "extensions_upsert", map[string]any{
@@ -876,6 +889,48 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 		return nil, err
 	}
 	return storefrontStatus(pid, updated, site, ""), nil
+}
+
+func (a *App) configureContentSiteSettings(ctx *sdk.AppCtx, pid string, siteID int64, store *Store) error {
+	desired := []struct {
+		key          string
+		value        string
+		defaultValue string
+	}{
+		{key: "site_title", value: store.Name, defaultValue: "My Site"},
+		{key: "default_locale", value: store.DefaultLocale, defaultValue: "en"},
+		{key: "timezone", value: store.Timezone, defaultValue: "UTC"},
+		{key: "public_base_url", value: strings.TrimRight(store.PublicBaseURL, "/")},
+		{key: "site_tagline", value: strArg(store.Metadata, "site_tagline")},
+	}
+	keys := make([]any, 0, len(desired))
+	for _, setting := range desired {
+		keys = append(keys, setting.key)
+	}
+	var result map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("content", "settings_get", map[string]any{
+		"_project_id": pid, "_site_id": siteID, "keys": keys,
+	}, &result); err != nil {
+		return fmt.Errorf("read Content site settings: %w", err)
+	}
+	current := unwrap(result, "settings")
+	for _, setting := range desired {
+		value := strings.TrimSpace(setting.value)
+		if value == "" {
+			continue
+		}
+		existing := strings.TrimSpace(strArg(current, setting.key))
+		if existing != "" && existing != setting.defaultValue {
+			continue
+		}
+		var updateResult map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("content", "settings_set", map[string]any{
+			"_project_id": pid, "_site_id": siteID, "key": setting.key, "value": value,
+		}, &updateResult); err != nil {
+			return fmt.Errorf("set Content site setting %s: %w", setting.key, err)
+		}
+	}
+	return nil
 }
 
 func storefrontStatus(pid string, store *Store, site map[string]any, errorMessage string) *StorefrontStatus {

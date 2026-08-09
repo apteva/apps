@@ -541,10 +541,13 @@ func (a *App) toolCheckoutBootstrap(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	if cart == nil {
-		return map[string]any{"store": store, "status": "not_found"}, nil
+		return map[string]any{
+			"store": store, "settings": commerceOwnedSettings(store), "status": "not_found",
+		}, nil
 	}
 	out := map[string]any{
-		"store": store, "cart": cart, "quote": mapArg(cart.Metadata, "checkout_quote"), "status": cart.Status,
+		"store": store, "settings": commerceOwnedSettings(store), "cart": cart,
+		"quote": mapArg(cart.Metadata, "checkout_quote"), "status": cart.Status,
 	}
 	checkout, err := dbCheckoutGetByCart(ctx.AppDB(), pid, cart.ID)
 	if err != nil || checkout == nil {
