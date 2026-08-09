@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: mqtt
 display_name: MQTT Broker
-version: 0.1.0
+version: 0.2.0
 description: |
   Embedded MQTT broker for Apteva. Acts as the LAN message bus for
   smart-home devices (ESP32, Zigbee2MQTT, Tasmota, anything that
@@ -13,10 +13,9 @@ description: |
   to named bus events (e.g. `mqtt.motion.frontdoor`).
 
   Runs mochi-mqtt under the hood — pure-Go broker, MIT licensed,
-  retained-message + persistent-session support, MQTT 5 properties.
+  retained-message persistence, MQTT session support, and MQTT 5 properties.
   Auth is username/password against this app's own DB; per-user
-  topic ACLs (publish + subscribe glob lists) gate every operation
-  and the panel surfaces the first 1000 ACL decisions for debugging.
+  topic ACLs (publish + subscribe filter lists) gate every operation.
 
   Auto-discovers Home Assistant-convention devices by parsing
   `homeassistant/+/+/config` so any sensor that already speaks the
@@ -25,7 +24,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/mqtt
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/mqtt/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [mqtt, iot, home-automation, broker, infrastructure]
 
 scopes: [project, global]
@@ -58,6 +58,9 @@ provides:
       label: MQTT
       icon: radio
       entry: /ui/MQTTPanel.mjs
+  publishes:
+    - name: mqtt.message
+      description: An MQTT message was published; includes topic, payload, qos, retain, and client_id.
 
 runtime:
   kind: source
@@ -66,6 +69,11 @@ runtime:
     ref: main
     entry: mcp/mqtt
   port: 8080
+  ports:
+    - name: mqtt
+      container_port: 1883
+      host_port: 1883
+      protocol: tcp
   health_check: /health
 
 db:
@@ -83,7 +91,7 @@ config_schema:
     type: text
     default: ""
     label: Bind interface (advanced)
-    description: Pin the listener to one interface (e.g. en0). Empty = all interfaces. Useful when the host has a VPN you don't want broker traffic to enter.
+    description: Pin the listener to an IP address (for example 192.168.1.20). Empty = all interfaces. Interface names such as en0 are not accepted.
   - name: allow_anonymous
     type: select
     options: ["true", "false"]
@@ -104,7 +112,7 @@ config_schema:
   - name: message_log_retention_hours
     type: text
     default: "168"
-    label: ACL log retention (hours)
-    description: How long to keep rows in mqtt_acl_log. 168 = 7 days.
+    label: Message and ACL log retention (hours)
+    description: How long to keep rows in mqtt_message_log and mqtt_acl_log. 168 = 7 days.
 
 upgrade_policy: auto-patch

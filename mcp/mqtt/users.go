@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 
 	mqtt "github.com/mochi-mqtt/server/v2"
 	"github.com/mochi-mqtt/server/v2/packets"
@@ -30,12 +29,12 @@ import (
 
 // MQTTUser represents one row of mqtt_users, in-memory.
 type MQTTUser struct {
-	ID                 int64    `json:"id"`
-	Username           string   `json:"username"`
-	AllowPublishTopics []string `json:"allow_publish"`
+	ID                   int64    `json:"id"`
+	Username             string   `json:"username"`
+	AllowPublishTopics   []string `json:"allow_publish"`
 	AllowSubscribeTopics []string `json:"allow_subscribe"`
-	Enabled            bool     `json:"enabled"`
-	CreatedAt          string   `json:"created_at"`
+	Enabled              bool     `json:"enabled"`
+	CreatedAt            string   `json:"created_at"`
 	// passwordHash is intentionally not serialised.
 	passwordHash string
 }
@@ -73,8 +72,8 @@ func (h *aclHook) OnConnectAuthenticate(cl *mqtt.Client, pk packets.Packet) bool
 		h.logACL("", "connect", "", false, "anonymous refused (allow_anonymous=false)")
 		return false
 	}
-	u, err := getUser(h.app.ctx.AppDB(), username)
-	if err != nil || u == nil {
+	u := h.app.cachedUser(username)
+	if u == nil {
 		h.logACL(username, "connect", "", false, "no such user")
 		return false
 	}
@@ -111,8 +110,8 @@ func (h *aclHook) OnACLCheck(cl *mqtt.Client, topic string, write bool) bool {
 		h.logACL("anonymous", action, topic, true, "anonymous")
 		return true
 	}
-	u, err := getUser(h.app.ctx.AppDB(), username)
-	if err != nil || u == nil || !u.Enabled {
+	u := h.app.cachedUser(username)
+	if u == nil || !u.Enabled {
 		h.logACL(username, action, topic, false, "user gone")
 		return false
 	}
@@ -181,8 +180,12 @@ func getUser(db *sql.DB, username string) (*MQTTUser, error) {
 		return nil, err
 	}
 	u.Enabled = en == 1
-	_ = json.Unmarshal([]byte(pubJSON), &u.AllowPublishTopics)
-	_ = json.Unmarshal([]byte(subJSON), &u.AllowSubscribeTopics)
+	if err := json.Unmarshal([]byte(pubJSON), &u.AllowPublishTopics); err != nil {
+		return nil, fmt.Errorf("decode publish ACL for %s: %w", username, err)
+	}
+	if err := json.Unmarshal([]byte(subJSON), &u.AllowSubscribeTopics); err != nil {
+		return nil, fmt.Errorf("decode subscribe ACL for %s: %w", username, err)
+	}
 	return &u, nil
 }
 
@@ -204,14 +207,19 @@ func listUsers(db *sql.DB) ([]MQTTUser, error) {
 			return nil, err
 		}
 		u.Enabled = en == 1
-		_ = json.Unmarshal([]byte(pubJSON), &u.AllowPublishTopics)
-		_ = json.Unmarshal([]byte(subJSON), &u.AllowSubscribeTopics)
+		if err := json.Unmarshal([]byte(pubJSON), &u.AllowPublishTopics); err != nil {
+			return nil, fmt.Errorf("decode publish ACL for %s: %w", u.Username, err)
+		}
+		if err := json.Unmarshal([]byte(subJSON), &u.AllowSubscribeTopics); err != nil {
+			return nil, fmt.Errorf("decode subscribe ACL for %s: %w", u.Username, err)
+		}
 		out = append(out, u)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func addUser(db *sql.DB, username, password string, allowPub, allowSub []string) error {
+	username = strings.TrimSpace(username)
 	if username == "" {
 		return fmt.Errorf("username required")
 	}
@@ -228,6 +236,14 @@ func addUser(db *sql.DB, username, password string, allowPub, allowSub []string)
 	if len(allowSub) == 0 {
 		allowSub = []string{"#"}
 	}
+	allowPub, err = normalizeTopicFilters(allowPub)
+	if err != nil {
+		return err
+	}
+	allowSub, err = normalizeTopicFilters(allowSub)
+	if err != nil {
+		return err
+	}
 	pubJSON, _ := json.Marshal(allowPub)
 	subJSON, _ := json.Marshal(allowSub)
 	_, err = db.Exec(
@@ -242,6 +258,48 @@ func addUser(db *sql.DB, username, password string, allowPub, allowSub []string)
 		   enabled = 1`,
 		username, string(hash), string(pubJSON), string(subJSON))
 	return err
+}
+
+func normalizeTopicFilters(filters []string) ([]string, error) {
+	out := make([]string, 0, len(filters))
+	for _, raw := range filters {
+		filter := strings.TrimSpace(raw)
+		if !mqtt.IsValidFilter(filter, false) {
+			return nil, fmt.Errorf("invalid MQTT topic filter %q", raw)
+		}
+		out = append(out, filter)
+	}
+	return out, nil
+}
+
+func (a *App) reloadUserCache() error {
+	users, err := listUsers(a.ctx.AppDB())
+	if err != nil {
+		return err
+	}
+	cache := make(map[string]*MQTTUser, len(users))
+	for i := range users {
+		u := users[i]
+		cache[u.Username] = &u
+	}
+	a.usersMu.Lock()
+	a.users = cache
+	a.usersMu.Unlock()
+	return nil
+}
+
+func (a *App) cachedUser(username string) *MQTTUser {
+	a.usersMu.RLock()
+	u := a.users[username]
+	if u == nil {
+		a.usersMu.RUnlock()
+		return nil
+	}
+	copy := *u
+	copy.AllowPublishTopics = append([]string(nil), u.AllowPublishTopics...)
+	copy.AllowSubscribeTopics = append([]string(nil), u.AllowSubscribeTopics...)
+	a.usersMu.RUnlock()
+	return &copy
 }
 
 func deleteUser(db *sql.DB, username string) error {
@@ -296,18 +354,11 @@ func randomPassword(n int) string {
 
 // ─── ACL log ────────────────────────────────────────────────────────
 
-var aclLogMu sync.Mutex
-
 func (h *aclHook) logACL(username, action, topic string, allowed bool, reason string) {
-	// Single mutex because mochi calls hooks from many goroutines and
-	// SQLite's writer is single-threaded anyway. Cheap and correct.
-	aclLogMu.Lock()
-	defer aclLogMu.Unlock()
-	v := 0
-	if allowed {
-		v = 1
+	record := aclRecord{username: username, action: action, topic: topic, allowed: allowed, reason: reason}
+	select {
+	case h.app.aclLogCh <- record:
+	default:
+		h.app.droppedLogs.Add(1)
 	}
-	_, _ = h.app.ctx.AppDB().Exec(
-		`INSERT INTO mqtt_acl_log(username, action, topic, allowed, reason) VALUES (?,?,?,?,?)`,
-		username, action, topic, v, reason)
 }
