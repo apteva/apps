@@ -4,9 +4,14 @@
 //   Devices   HA-discovered device cards
 //   Settings  users + bus subscriptions + test publish
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 
-const API = "/api/apps/mqtt";
+const API_ROOT = "/api/apps/mqtt";
+const APIContext = createContext(API_ROOT);
+
+function useAPI() {
+  return useContext(APIContext);
+}
 
 interface NativePanelProps {
   appName: string;
@@ -137,27 +142,33 @@ interface Device {
 
 type Tab = "live" | "devices" | "settings";
 
-export default function MQTTPanel({ projectId }: NativePanelProps) {
+export default function MQTTPanel({ installId, projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("live");
+  // Select this exact install in the proxy path. MQTT can be installed once
+  // per project, and an unscoped /api/apps/mqtt request intentionally cannot
+  // choose an arbitrary project's sidecar.
+  const api = `${API_ROOT}/_install/${encodeURIComponent(String(installId))}`;
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex border-b border-border">
-        {(["live", "devices", "settings"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent" : "text-text-dim"}`}
-          >
-            {t}
-          </button>
-        ))}
+    <APIContext.Provider value={api}>
+      <div className="flex flex-col h-full">
+        <div className="flex border-b border-border">
+          {(["live", "devices", "settings"] as Tab[]).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`px-4 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent" : "text-text-dim"}`}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <div className="flex-1 overflow-auto">
+          {tab === "live" && <LiveTab projectId={projectId} />}
+          {tab === "devices" && <DevicesTab />}
+          {tab === "settings" && <SettingsTab />}
+        </div>
       </div>
-      <div className="flex-1 overflow-auto">
-        {tab === "live" && <LiveTab projectId={projectId} />}
-        {tab === "devices" && <DevicesTab />}
-        {tab === "settings" && <SettingsTab />}
-      </div>
-    </div>
+    </APIContext.Provider>
   );
 }
 
@@ -176,6 +187,7 @@ interface LiveMessage {
 }
 
 function LiveTab({ projectId }: { projectId: string }) {
+  const API = useAPI();
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   const [messages, setMessages] = useState<LiveMessage[]>([]);
   const [clients, setClients] = useState<MQTTClient[]>([]);
@@ -208,7 +220,7 @@ function LiveTab({ projectId }: { projectId: string }) {
     } finally {
       refreshRunning.current = false;
     }
-  }, []);
+  }, [API]);
 
   useEffect(() => {
     refresh();
@@ -309,12 +321,13 @@ function LiveTab({ projectId }: { projectId: string }) {
 // ─── Devices ───────────────────────────────────────────────────────
 
 function DevicesTab() {
+  const API = useAPI();
   const [devices, setDevices] = useState<Device[]>([]);
   const [filter, setFilter] = useState("");
   const refresh = useCallback(async () => {
     const r = await fetch(`${API}/devices${filter ? `?filter=${encodeURIComponent(filter)}` : ""}`);
     if (r.ok) setDevices(await r.json());
-  }, [filter]);
+  }, [API, filter]);
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 10_000);
@@ -383,10 +396,11 @@ function SettingsTab() {
 }
 
 function ConnectionSection() {
+  const API = useAPI();
   const [status, setStatus] = useState<BrokerStatus | null>(null);
   useEffect(() => {
     fetch(`${API}/status`).then((r) => r.ok ? r.json() : null).then(setStatus).catch(() => {});
-  }, []);
+  }, [API]);
   return (
     <div>
       <h3 className="text-sm font-medium mb-2">Broker connection</h3>
@@ -401,12 +415,13 @@ function ConnectionSection() {
 }
 
 function UsersSection() {
+  const API = useAPI();
   const [users, setUsers] = useState<MQTTUser[]>([]);
   const [showAdd, setShowAdd] = useState(false);
   const refresh = useCallback(async () => {
     const r = await fetch(`${API}/users`);
     if (r.ok) setUsers(await r.json());
-  }, []);
+  }, [API]);
   useEffect(() => { refresh(); }, [refresh]);
   return (
     <div>
@@ -457,6 +472,7 @@ function UsersSection() {
 }
 
 function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const API = useAPI();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [pub, setPub] = useState("#");
@@ -500,6 +516,7 @@ function AddUserModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =
 }
 
 function SubscriptionsSection() {
+  const API = useAPI();
   const [subs, setSubs] = useState<BusSubscription[]>([]);
   const [topicPattern, setTopicPattern] = useState("");
   const [busTopic, setBusTopic] = useState("");
@@ -507,7 +524,7 @@ function SubscriptionsSection() {
   const refresh = useCallback(async () => {
     const r = await fetch(`${API}/subscriptions`);
     if (r.ok) setSubs(await r.json());
-  }, []);
+  }, [API]);
   useEffect(() => { refresh(); }, [refresh]);
   const add = async () => {
     setErr("");
@@ -561,6 +578,7 @@ function SubscriptionsSection() {
 }
 
 function TestPublishSection() {
+  const API = useAPI();
   const [topic, setTopic] = useState("");
   const [payload, setPayload] = useState("");
   const [retain, setRetain] = useState(false);
