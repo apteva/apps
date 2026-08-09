@@ -68,3 +68,39 @@ func TestEvalConditionTokensWithQuotedSpace(t *testing.T) {
 		t.Error("expected true")
 	}
 }
+
+func TestValidateTriggerCondition(t *testing.T) {
+	valid := []string{
+		"input.data.table == 'ventes'",
+		`input.data.status == "ready"`,
+		"input.data.count >= 2",
+		"input.data.enabled",
+		"true",
+	}
+	for _, expr := range valid {
+		if err := ValidateTriggerCondition(expr); err != nil {
+			t.Errorf("%q: unexpected validation error: %v", expr, err)
+		}
+	}
+
+	invalid := []string{
+		"ventes",
+		"'always truthy'",
+		"input.data.table = 'ventes'",
+		"input.data.table === 'ventes'",
+		"input.data.table == ventes",
+		"input.data.table == 'unterminated",
+		"input.data.table == 'ventes' && input.data.ready",
+	}
+	for _, expr := range invalid {
+		if err := ValidateTriggerCondition(expr); err == nil {
+			t.Errorf("%q: expected validation error", expr)
+		}
+		matched, err := EvalTriggerCondition(expr, TemplateContext{
+			Input: map[string]any{"data": map[string]any{"table": "ventes"}},
+		})
+		if err == nil || matched {
+			t.Errorf("%q: matched=%v err=%v, want fail closed", expr, matched, err)
+		}
+	}
+}

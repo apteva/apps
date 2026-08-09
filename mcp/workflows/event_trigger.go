@@ -368,7 +368,8 @@ func (m *eventTrigger) streamLane(ctx context.Context, ln *eventLane) error {
 }
 
 // dispatchFrame parses one event and dispatches RunWorkflow on each
-// matching workflow.
+// matching workflow. Event trigger predicates are evaluated here,
+// before RunWorkflow persists a run, so discarded events remain cheap.
 func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 	var ev struct {
 		Topic     string          `json:"topic"`
@@ -425,6 +426,21 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		}
 		if !topicMatches(trig.Topic, ev.Topic) {
 			continue
+		}
+		if strings.TrimSpace(trig.When) != "" {
+			matched, err := EvalTriggerCondition(trig.When, TemplateContext{
+				Input: input,
+				Steps: map[string]any{},
+				Env:   map[string]string{},
+				Now:   ev.Time,
+			})
+			if err != nil {
+				log.Printf("[WF-EVENT] trigger predicate workflow=%s err: %v", wf.Name, err)
+				continue
+			}
+			if !matched {
+				continue
+			}
 		}
 		m.runMatched(wf, input)
 	}

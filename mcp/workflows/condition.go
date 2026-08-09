@@ -8,9 +8,9 @@ import (
 
 // EvalCondition evaluates a branch.when expression. Three forms:
 //
-//   "input.x"                   — single token: truthiness check.
-//   "input.x == 5"              — three tokens: comparison.
-//   "steps.lookup.found != true" — same, with a literal RHS.
+//	"input.x"                   — single token: truthiness check.
+//	"input.x == 5"              — three tokens: comparison.
+//	"steps.lookup.found != true" — same, with a literal RHS.
 //
 // Operands are either dot-paths (resolved against ctx) or JSON
 // literals (strings in single OR double quotes, numbers, true,
@@ -38,6 +38,77 @@ func EvalCondition(when string, ctx TemplateContext) (bool, error) {
 	default:
 		return false, fmt.Errorf("expected 1 or 3 tokens, got %d (%q)", len(tokens), when)
 	}
+}
+
+// ValidateTriggerCondition applies a strict grammar to event trigger
+// predicates. Branch conditions intentionally accept forgiving bare-string
+// operands for backwards compatibility, but trigger predicates guard whether
+// a workflow runs at all and must fail closed on typos.
+func ValidateTriggerCondition(when string) error {
+	trimmed := strings.TrimSpace(when)
+	if trimmed == "" {
+		return fmt.Errorf("empty condition")
+	}
+	tokens := splitConditionTokens(trimmed)
+	switch len(tokens) {
+	case 1:
+		if isPathLike(tokens[0]) {
+			return nil
+		}
+		value, err := parseStrictConditionLiteral(tokens[0])
+		if err != nil {
+			return err
+		}
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("single-token trigger condition must be a path or boolean literal")
+		}
+		return nil
+	case 3:
+		switch tokens[1] {
+		case "==", "!=", ">", "<", ">=", "<=":
+		default:
+			return fmt.Errorf("unknown operator %q", tokens[1])
+		}
+		if err := validateStrictConditionOperand(tokens[0]); err != nil {
+			return fmt.Errorf("left operand: %w", err)
+		}
+		if err := validateStrictConditionOperand(tokens[2]); err != nil {
+			return fmt.Errorf("right operand: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("expected 1 or 3 tokens, got %d (%q)", len(tokens), when)
+	}
+}
+
+// EvalTriggerCondition validates before delegating to the shared evaluator.
+// Keeping validation here as well as at workflow create/update time protects
+// imported or legacy database rows from accidentally matching every event.
+func EvalTriggerCondition(when string, ctx TemplateContext) (bool, error) {
+	if err := ValidateTriggerCondition(when); err != nil {
+		return false, err
+	}
+	return EvalCondition(when, ctx)
+}
+
+func validateStrictConditionOperand(tok string) error {
+	if isPathLike(tok) {
+		return nil
+	}
+	_, err := parseStrictConditionLiteral(tok)
+	return err
+}
+
+func parseStrictConditionLiteral(tok string) (any, error) {
+	tok = strings.TrimSpace(tok)
+	if len(tok) >= 2 && tok[0] == '\'' && tok[len(tok)-1] == '\'' {
+		tok = `"` + tok[1:len(tok)-1] + `"`
+	}
+	var value any
+	if err := json.Unmarshal([]byte(tok), &value); err != nil {
+		return nil, fmt.Errorf("%q must be a path or quoted/JSON literal", tok)
+	}
+	return value, nil
 }
 
 // splitConditionTokens splits the expression on whitespace, but

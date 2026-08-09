@@ -195,6 +195,212 @@ steps:
 	}
 }
 
+// TestEventTrigger_PredicateFiltersBeforeRunPersistence proves that a
+// trigger-level predicate drops irrelevant high-volume events without
+// creating the short-lived run rows a first-step branch would create.
+func TestEventTrigger_PredicateFiltersBeforeRunPersistence(t *testing.T) {
+	streamReady := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w,
+			"id: 1\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"table\":\"prospects\",\"id\":41}}\n\n",
+			testProj)
+		fmt.Fprintf(w,
+			"id: 2\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":2,\"data\":{\"table\":\"ventes\",\"id\":42}}\n\n",
+			testProj)
+		flusher.Flush()
+		close(streamReady)
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+
+	src := `name: only-ventes-updated
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'ventes'"
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`
+	wf := mustCreateEventWorkflow(t, ctx, src)
+	mgr := newEventTrigger(ctx)
+	mgr.Start()
+	defer mgr.Stop()
+
+	select {
+	case <-streamReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE stream never opened")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var runs []*Run
+	for time.Now().Before(deadline) {
+		out, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(out) == 1 {
+			runs = out
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want exactly one matching ventes run", len(runs))
+	}
+	// Run dispatch is asynchronous. Give any incorrectly dispatched second run
+	// time to persist before asserting the final count.
+	time.Sleep(250 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("settled runs = %d, want exactly one matching ventes run", len(runs))
+	}
+	if strings.Contains(runs[0].InputJSON, "prospects") || !strings.Contains(runs[0].InputJSON, "ventes") {
+		t.Fatalf("unexpected persisted run input: %s", runs[0].InputJSON)
+	}
+	var stepCount int
+	if err := ctx.AppDB().QueryRow(`
+		SELECT COUNT(*) FROM workflow_step_executions
+		WHERE run_id IN (SELECT id FROM workflow_runs WHERE workflow_id = ?)
+	`, wf.ID).Scan(&stepCount); err != nil {
+		t.Fatal(err)
+	}
+	if stepCount != 1 {
+		t.Fatalf("step executions = %d, want one step from only the matching event", stepCount)
+	}
+}
+
+func TestEventTrigger_InvalidPredicateFailsClosed(t *testing.T) {
+	streamReady := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w,
+			"id: 1\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"table\":\"ventes\"}}\n\n",
+			testProj)
+		w.(http.Flusher).Flush()
+		close(streamReady)
+		select {
+		case <-time.After(400 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	wf := mustCreateEventWorkflow(t, ctx, `name: legacy-filter
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+steps:
+  - { id: ack, kind: emit, topic: ack }
+`)
+	// Simulate an invalid predicate imported from an older runtime or written
+	// directly into the database. New create/update requests reject this.
+	invalidTrigger := `{"kind":"event","source":"tables","topic":"row.updated","when":"ventes"}`
+	if _, err := ctx.AppDB().Exec(`UPDATE workflows SET trigger_json = ? WHERE id = ?`, invalidTrigger, wf.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newEventTrigger(ctx)
+	mgr.Start()
+	defer mgr.Stop()
+	select {
+	case <-streamReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE stream never opened")
+	}
+	time.Sleep(300 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("invalid predicate created %d runs, want zero", len(runs))
+	}
+	var stepCount int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM workflow_step_executions`).Scan(&stepCount); err != nil {
+		t.Fatal(err)
+	}
+	if stepCount != 0 {
+		t.Fatalf("invalid predicate created %d steps, want zero", stepCount)
+	}
+}
+
+func TestEventTrigger_UpdatedPredicateTakesEffectWithoutRestart(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "http://example.invalid")
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	initialSource := `name: mutable-filter
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'prospects'"
+steps:
+  - { id: ack, kind: emit, topic: ack }
+`
+	wf := mustCreateEventWorkflow(t, ctx, initialSource)
+	mgr := newEventTrigger(ctx)
+	ln := &eventLane{
+		key:       laneKey{source: "tables", projectID: testProj},
+		workflows: []*Workflow{wf},
+	}
+	ventesEvent := fmt.Sprintf(
+		`{"topic":"row.updated","app":"tables","project_id":"%s","seq":1,"data":{"table":"ventes"}}`,
+		testProj,
+	)
+	mgr.dispatchFrame(ln, "1", ventesEvent)
+	time.Sleep(150 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("old predicate unexpectedly matched ventes: %d runs", len(runs))
+	}
+
+	updatedSource := strings.Replace(initialSource, "'prospects'", "'ventes'", 1)
+	updated, err := updateAndRehashWorkflow(ctx, testProj, wf.ID, map[string]any{"source": updatedSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.mu.Lock()
+	ln.workflows = []*Workflow{updated}
+	ln.mu.Unlock()
+	ventesEvent = strings.Replace(ventesEvent, `"seq":1`, `"seq":2`, 1)
+	mgr.dispatchFrame(ln, "2", ventesEvent)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err = dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(runs) == 1 && runs[0].Status != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(runs) != 1 || !strings.Contains(runs[0].InputJSON, "ventes") {
+		t.Fatalf("updated predicate did not take effect: %+v", runs)
+	}
+}
+
 func TestEventTrigger_MissingConfigurationIsDegraded(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", "")
 	t.Setenv("APTEVA_APP_TOKEN", "")
