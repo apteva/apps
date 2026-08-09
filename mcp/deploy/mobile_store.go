@@ -849,7 +849,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		observed["pricing_error"] = storeObservationError(err, recoverable, "create_price_schedule")
 		readiness["pricing"] = readinessCheck(false, "provider", "Pricing could not be read from Apple.")
 	}
-	if availability, err := executeIntegration(bound, "get_app_availability", map[string]any{"app_id": appID, "include": "territoryAvailabilities", "limit[territoryAvailabilities]": 50}); err == nil {
+	if availability, err := executeIntegration(bound, "get_app_availability", map[string]any{"app_id": appID}); err == nil {
 		value := decodeJSONValue(availability)
 		observed["availability"] = value
 		verified, territoryState, verifyErr := appleAvailabilityMatches(bound, doc.Distribution, availability)
@@ -1198,24 +1198,35 @@ func applePriceScheduleIsFree(bound *sdk.BoundIntegration, schedule json.RawMess
 	if scheduleID == "" {
 		return false
 	}
-	prices, err := executeIntegration(bound, "list_app_schedule_manual_prices", map[string]any{
+	pricePages, err := executeAppleCollectionPages(bound, "list_app_schedule_manual_prices", map[string]any{
 		"schedule_id": scheduleID, "include": "appPricePoint,territory", "limit": 200,
+		"fields_app_price_points": "customerPrice", "fields_app_prices": "appPricePoint,territory,startDate,endDate",
 	})
 	if err != nil {
 		return false
 	}
-	pointIDs := appleManualPricePointIDs(prices)
+	pointIDs := appleManualPricePointIDsFromPages(pricePages)
 	if len(pointIDs) == 0 {
 		return false
 	}
-	if appleReferencedPricePointIsFree(prices, pointIDs) {
-		return true
+	for _, prices := range pricePages {
+		if appleReferencedPricePointIsFree(prices, pointIDs) {
+			return true
+		}
 	}
-	points, err := executeIntegration(bound, "list_app_price_points", map[string]any{
+	pointPages, err := executeAppleCollectionPages(bound, "list_app_price_points", map[string]any{
 		"app_id": appID, "territory": baseTerritory,
 		"fields": "customerPrice,proceeds", "include": "territory", "limit": 200,
 	})
-	return err == nil && appleReferencedPricePointIsFree(points, pointIDs)
+	if err != nil {
+		return false
+	}
+	for _, points := range pointPages {
+		if appleReferencedPricePointIsFree(points, pointIDs) {
+			return true
+		}
+	}
+	return false
 }
 
 func appleManualPricePointIDs(raw json.RawMessage) map[string]bool {
@@ -1236,6 +1247,16 @@ func appleManualPricePointIDs(raw json.RawMessage) map[string]bool {
 	ids := map[string]bool{}
 	for _, price := range payload.Data {
 		if id := strings.TrimSpace(price.Relationships.AppPricePoint.Data.ID); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func appleManualPricePointIDsFromPages(pages []json.RawMessage) map[string]bool {
+	ids := map[string]bool{}
+	for _, page := range pages {
+		for id := range appleManualPricePointIDs(page) {
 			ids[id] = true
 		}
 	}

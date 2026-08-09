@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -153,13 +154,13 @@ func reconcileAppleAvailability(bound *sdk.BoundIntegration, appID string, distr
 	if err != nil {
 		return err
 	}
-	territories, err := executeIntegration(bound, "list_app_availability_territories", map[string]any{
+	territoryPages, err := executeAppleCollectionPages(bound, "list_app_availability_territories", map[string]any{
 		"availability_id": availabilityID, "include": "territory", "limit": 200,
 	})
 	if err != nil {
 		return err
 	}
-	for resourceID, territoryID := range appleTerritoryAvailabilityIDs(territories) {
+	for resourceID, territoryID := range appleTerritoryAvailabilityIDsFromPages(territoryPages) {
 		available, ok := desired[territoryID]
 		if !ok {
 			continue
@@ -179,11 +180,11 @@ func reconcileAppleAvailability(bound *sdk.BoundIntegration, appID string, distr
 }
 
 func desiredAppleTerritories(bound *sdk.BoundIntegration, distribution StoreDistribution) (map[string]bool, bool, error) {
-	raw, err := executeIntegration(bound, "list_territories", map[string]any{"fields": "currency", "limit": 200})
+	pages, err := executeAppleCollectionPages(bound, "list_territories", map[string]any{"fields": "currency", "limit": 200})
 	if err != nil {
 		return nil, false, err
 	}
-	all := jsonAPIResourceIDs(raw)
+	all := jsonAPIResourceIDsFromPages(pages)
 	if len(all) == 0 {
 		return nil, false, errors.New("App Store Connect returned no territories")
 	}
@@ -264,6 +265,16 @@ func appleTerritoryAvailabilityIDs(raw json.RawMessage) map[string]string {
 	return out
 }
 
+func appleTerritoryAvailabilityIDsFromPages(pages []json.RawMessage) map[string]string {
+	out := map[string]string{}
+	for _, page := range pages {
+		for resourceID, territoryID := range appleTerritoryAvailabilityIDs(page) {
+			out[resourceID] = territoryID
+		}
+	}
+	return out
+}
+
 func appleAvailabilityMatches(bound *sdk.BoundIntegration, distribution StoreDistribution, availability json.RawMessage) (bool, map[string]bool, error) {
 	if !storeAvailabilityConfigured(distribution) {
 		return jsonValueHasData(decodeJSONValue(availability)), nil, nil
@@ -272,13 +283,13 @@ func appleAvailabilityMatches(bound *sdk.BoundIntegration, distribution StoreDis
 	if availabilityID == "" {
 		return false, nil, errors.New("App Store availability response missing id")
 	}
-	raw, err := executeIntegration(bound, "list_app_availability_territories", map[string]any{
+	pages, err := executeAppleCollectionPages(bound, "list_app_availability_territories", map[string]any{
 		"availability_id": availabilityID, "include": "territory", "limit": 200,
 	})
 	if err != nil {
 		return false, nil, err
 	}
-	actual := appleTerritoryAvailabilityState(raw)
+	actual := appleTerritoryAvailabilityStateFromPages(pages)
 	desired, _, err := desiredAppleTerritories(bound, distribution)
 	if err != nil {
 		return false, actual, err
@@ -319,6 +330,16 @@ func appleTerritoryAvailabilityState(raw json.RawMessage) map[string]bool {
 	return out
 }
 
+func appleTerritoryAvailabilityStateFromPages(pages []json.RawMessage) map[string]bool {
+	out := map[string]bool{}
+	for _, page := range pages {
+		for territoryID, available := range appleTerritoryAvailabilityState(page) {
+			out[territoryID] = available
+		}
+	}
+	return out
+}
+
 func jsonAPIResourceIDs(raw json.RawMessage) []string {
 	var payload struct {
 		Data []struct {
@@ -333,6 +354,83 @@ func jsonAPIResourceIDs(raw json.RawMessage) []string {
 		}
 	}
 	return out
+}
+
+func jsonAPIResourceIDsFromPages(pages []json.RawMessage) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, page := range pages {
+		for _, id := range jsonAPIResourceIDs(page) {
+			if !seen[id] {
+				seen[id] = true
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+func executeAppleCollectionPages(bound *sdk.BoundIntegration, tool string, input map[string]any) ([]json.RawMessage, error) {
+	params := make(map[string]any, len(input)+1)
+	for key, value := range input {
+		params[key] = value
+	}
+	seen := map[string]bool{}
+	pages := make([]json.RawMessage, 0, 1)
+	for len(pages) < 100 {
+		callInput := make(map[string]any, len(params))
+		for key, value := range params {
+			callInput[key] = value
+		}
+		raw, err := executeIntegration(bound, tool, callInput)
+		if err != nil {
+			return nil, err
+		}
+		pages = append(pages, raw)
+		cursor, err := appleJSONAPINextCursor(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s pagination: %w", tool, err)
+		}
+		if cursor == "" {
+			return pages, nil
+		}
+		if seen[cursor] {
+			return nil, fmt.Errorf("%s pagination repeated cursor %q", tool, cursor)
+		}
+		seen[cursor] = true
+		params["cursor"] = cursor
+	}
+	return nil, fmt.Errorf("%s pagination exceeded 100 pages", tool)
+}
+
+func appleJSONAPINextCursor(raw json.RawMessage) (string, error) {
+	var payload struct {
+		Links struct {
+			Next json.RawMessage `json:"next"`
+		} `json:"links"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	if len(payload.Links.Next) == 0 || string(payload.Links.Next) == "null" {
+		return "", nil
+	}
+	var next string
+	if err := json.Unmarshal(payload.Links.Next, &next); err != nil {
+		return "", errors.New("links.next is not a URL string")
+	}
+	if strings.TrimSpace(next) == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(next)
+	if err != nil {
+		return "", fmt.Errorf("parse links.next: %w", err)
+	}
+	cursor := strings.TrimSpace(parsed.Query().Get("cursor"))
+	if cursor == "" {
+		return "", errors.New("links.next is missing cursor")
+	}
+	return cursor, nil
 }
 
 func upperStringSet(values []string) map[string]bool {

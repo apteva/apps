@@ -12,6 +12,18 @@ var storeScopeOrder = []string{
 
 type storeScopeSet map[string]bool
 
+type storePreflightError struct {
+	Preflight StorePreflight
+}
+
+func (e *storePreflightError) Error() string {
+	return fmt.Sprintf("store preflight failed with %d error(s)", e.Preflight.Errors)
+}
+
+func newStorePreflightError(preflight StorePreflight) error {
+	return &storePreflightError{Preflight: preflight}
+}
+
 func allStoreScopeSet() storeScopeSet {
 	out := storeScopeSet{}
 	for _, scope := range storeScopeOrder {
@@ -122,7 +134,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 	}
 	if len(blocked) > 0 && !request.AllowPartial {
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "blocked", "", mustJSON(preflight), "", "store preflight failed")
-		return nil, fmt.Errorf("store preflight failed with %d error(s)", preflight.Errors)
+		return nil, newStorePreflightError(preflight)
 	}
 
 	_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "applying", "", mustJSON(preflight), "", "")

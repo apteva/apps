@@ -3,9 +3,41 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type pagedApplePlatform struct {
+	tk.BasePlatformClient
+	calls []integrationCall
+}
+
+func (p *pagedApplePlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	var data json.RawMessage
+	switch tool {
+	case "list_app_availability_territories":
+		if input["cursor"] == "page-2" {
+			data = json.RawMessage(`{"data":[{"attributes":{"available":false},"relationships":{"territory":{"data":{"id":"CHN"}}}}],"links":{"next":null}}`)
+		} else {
+			data = json.RawMessage(`{"data":[{"attributes":{"available":true},"relationships":{"territory":{"data":{"id":"USA"}}}}],"links":{"next":"https://api.appstoreconnect.apple.com/v2/appAvailabilities/availability-1/territoryAvailabilities?cursor=page-2&limit=50"}}`)
+		}
+	case "list_app_schedule_manual_prices":
+		if input["cursor"] == "price-2" {
+			data = json.RawMessage(`{"data":[{"type":"appPrices","relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"free-point"}}}}],"included":[{"type":"appPricePoints","id":"free-point","attributes":{"customerPrice":"0.0"}}],"links":{"next":null}}`)
+		} else {
+			data = json.RawMessage(`{"data":[{"type":"appPrices","relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"paid-point"}}}}],"included":[{"type":"appPricePoints","id":"paid-point","attributes":{"customerPrice":"1.99"}}],"links":{"next":"https://api.appstoreconnect.apple.com/v1/appPriceSchedules/schedule-1/manualPrices?cursor=price-2"}}`)
+		}
+	default:
+		data = json.RawMessage(`{"data":[],"links":{"next":null}}`)
+	}
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
+}
 
 func TestStorePreflightReportsObservedAppleVersionMismatch(t *testing.T) {
 	doc := completeIOSStoreDocument()
@@ -123,6 +155,87 @@ func TestApplePricingVerificationFollowsManualPricePointRelationship(t *testing.
 		if !applePriceValueIsZero(value) {
 			t.Fatalf("zero price %s was not accepted", value)
 		}
+	}
+}
+
+func TestAppleAvailabilityPaginationReadsEveryTerritory(t *testing.T) {
+	platform := &pagedApplePlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	pages, err := executeAppleCollectionPages(
+		&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"},
+		"list_app_availability_territories",
+		map[string]any{"availability_id": "availability-1", "include": "territory", "limit": 200},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := appleTerritoryAvailabilityStateFromPages(pages)
+	if len(pages) != 2 || len(state) != 2 || !state["USA"] || state["CHN"] {
+		t.Fatalf("pages=%d state=%#v", len(pages), state)
+	}
+	if got := platform.calls[1].Input["cursor"]; got != "page-2" {
+		t.Fatalf("second-page cursor=%v", got)
+	}
+}
+
+func TestAppleFreePricingUsesIncludedPricePointAcrossPages(t *testing.T) {
+	platform := &pagedApplePlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if !applePriceScheduleIsFree(bound, json.RawMessage(`{"data":{"id":"schedule-1"}}`), "app-1", "USA") {
+		t.Fatal("zero manual price on the second page was not verified")
+	}
+	if len(platform.calls) != 2 {
+		t.Fatalf("calls=%#v", platform.calls)
+	}
+	first := platform.calls[0].Input
+	if first["include"] != "appPricePoint,territory" || first["fields_app_price_points"] != "customerPrice" {
+		t.Fatalf("manual price request=%#v", first)
+	}
+	if platform.calls[1].Input["cursor"] != "price-2" {
+		t.Fatalf("second-page request=%#v", platform.calls[1].Input)
+	}
+}
+
+func TestFirstJSONAPIIDAcceptsResourceAndCollectionDocuments(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		json.RawMessage(`{"data":{"type":"appPriceSchedules","id":"schedule-1"}}`),
+		json.RawMessage(`{"data":[{"type":"appPriceSchedules","id":"schedule-1"}]}`),
+	} {
+		if got := firstJSONAPIID(raw); got != "schedule-1" {
+			t.Fatalf("id=%q for %s", got, raw)
+		}
+	}
+}
+
+func TestStorePreflightReleaseErrorReturnsStructured422(t *testing.T) {
+	preflight := StorePreflight{
+		Ready: false, Errors: 1,
+		Findings: []StoreFinding{{Code: "privacy.apple_manual", Severity: "error", Scope: "compliance", Message: "Complete App Privacy in App Store Connect."}},
+	}
+	recorder := httptest.NewRecorder()
+	httpStoreErr(recorder, newStorePreflightError(preflight), http.StatusInternalServerError)
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var body struct {
+		Error     string         `json:"error"`
+		Code      string         `json:"code"`
+		Preflight StorePreflight `json:"preflight"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "store_preflight_failed" || body.Preflight.Ready || len(body.Preflight.Findings) != 1 {
+		t.Fatalf("response=%#v", body)
 	}
 }
 

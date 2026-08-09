@@ -207,7 +207,7 @@ func (a *App) httpDeploymentStoreApply(w http.ResponseWriter, r *http.Request, d
 	}
 	result, err := a.applyStoreConfigScoped(d, build, true, body)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpStoreErr(w, err, http.StatusBadRequest)
 		return
 	}
 	emit("deploy.store.applied", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": result.Config.Provider, "status": result.Status})
@@ -862,7 +862,7 @@ func (a *App) httpDeploymentRelease(w http.ResponseWriter, r *http.Request, d *D
 	}
 	rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(body))
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpStoreErr(w, err, http.StatusInternalServerError)
 		return
 	}
 	httpJSON(w, map[string]any{"release": rel, "url": a.deploymentURL(d, rel)})
@@ -1041,4 +1041,17 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
+}
+
+func httpStoreErr(w http.ResponseWriter, err error, fallbackStatus int) {
+	var preflightErr *storePreflightError
+	if errors.As(err, &preflightErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": err.Error(), "code": "store_preflight_failed", "preflight": preflightErr.Preflight,
+		})
+		return
+	}
+	httpErr(w, fallbackStatus, err.Error())
 }

@@ -128,7 +128,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 				var preflight StorePreflight
 				preflight, err = a.storePreflight(d, b, true)
 				if err == nil && !preflight.Ready {
-					err = fmt.Errorf("store preflight failed with %d error(s)", preflight.Errors)
+					err = newStorePreflightError(preflight)
 				}
 			}
 		} else if platform == "ios" && meta.SubmitForReview {
@@ -1058,13 +1058,21 @@ func jsonScalarStringAt(raw json.RawMessage, path ...string) string {
 }
 
 func firstJSONAPIID(raw json.RawMessage) string {
-	var payload struct {
+	var collection struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(raw, &payload) == nil && len(payload.Data) > 0 {
-		return payload.Data[0].ID
+	if json.Unmarshal(raw, &collection) == nil && len(collection.Data) > 0 {
+		return collection.Data[0].ID
+	}
+	var resource struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &resource) == nil {
+		return resource.Data.ID
 	}
 	return ""
 }
