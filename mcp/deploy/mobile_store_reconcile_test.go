@@ -95,8 +95,34 @@ func TestAppleAvailabilityCreateBodyUsesGenericTerritorySelection(t *testing.T) 
 	}
 	first := included[0].(map[string]any)
 	second := included[1].(map[string]any)
-	if first["id"] != "deploy-territory-chn" || second["id"] != "deploy-territory-usa" {
+	if first["id"] != "${deploy-territory-chn}" || second["id"] != "${deploy-territory-usa}" {
 		t.Fatalf("territories are not stable/sorted: %#v", included)
+	}
+	linkages := data["relationships"].(map[string]any)["territoryAvailabilities"].(map[string]any)["data"].([]any)
+	if linkages[0].(map[string]any)["id"] != first["id"] || linkages[1].(map[string]any)["id"] != second["id"] {
+		t.Fatalf("territory linkage IDs do not match included IDs: %#v", linkages)
+	}
+}
+
+func TestApplePricingVerificationFollowsManualPricePointRelationship(t *testing.T) {
+	manualPrices := json.RawMessage(`{"data":[
+		{"type":"appPrices","id":"manual-1","relationships":{"appPricePoint":{"data":{"type":"appPricePoints","id":"selected"}}}}
+	],"included":[
+		{"type":"appPricePoints","id":"unrelated","attributes":{"customerPrice":"0.0"}},
+		{"type":"appPricePoints","id":"selected","attributes":{"customerPrice":"1.99"}}
+	]}`)
+	ids := appleManualPricePointIDs(manualPrices)
+	if !ids["selected"] || appleReferencedPricePointIsFree(manualPrices, ids) {
+		t.Fatalf("manual price relationship was not followed: ids=%#v", ids)
+	}
+	points := json.RawMessage(`{"data":[{"type":"appPricePoints","id":"selected","attributes":{"customerPrice":0.0}}]}`)
+	if !appleReferencedPricePointIsFree(points, ids) {
+		t.Fatal("referenced numeric zero price was not verified")
+	}
+	for _, value := range []json.RawMessage{json.RawMessage(`"0.0"`), json.RawMessage(`0.0`)} {
+		if !applePriceValueIsZero(value) {
+			t.Fatalf("zero price %s was not accepted", value)
+		}
 	}
 }
 

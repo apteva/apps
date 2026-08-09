@@ -56,16 +56,13 @@ func applyIndependentStoreOperations(operations ...func() error) error {
 }
 
 func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc StoreDocument) error {
+	baseTerritory := appleBasePriceTerritory(doc.Distribution)
 	current, err := executeIntegration(bound, "get_app_price_schedule", map[string]any{"app_id": appID, "include": "baseTerritory,manualPrices"})
-	if err == nil && applePriceScheduleIsFree(bound, current) {
+	if err == nil && applePriceScheduleIsFree(bound, current, appID, baseTerritory) {
 		return nil
 	}
 	if err != nil && integrationErrorStatus(err) != http.StatusNotFound {
 		return err
-	}
-	baseTerritory := "USA"
-	if value := strings.TrimSpace(jsonStringFromValue(doc.Distribution.Provider, "base_territory")); value != "" {
-		baseTerritory = strings.ToUpper(value)
 	}
 	points, err := executeIntegration(bound, "list_app_price_points", map[string]any{
 		"app_id": appID, "territory": baseTerritory, "fields": "customerPrice,proceeds", "include": "territory", "limit": 200,
@@ -80,6 +77,13 @@ func reconcileAppleFreePrice(bound *sdk.BoundIntegration, appID string, doc Stor
 	body := appleFreePriceScheduleBody(appID, baseTerritory, zeroID)
 	_, err = executeIntegration(bound, "create_app_price_schedule", map[string]any{"body": body})
 	return err
+}
+
+func appleBasePriceTerritory(distribution StoreDistribution) string {
+	if value := strings.TrimSpace(jsonStringFromValue(distribution.Provider, "base_territory")); value != "" {
+		return strings.ToUpper(value)
+	}
+	return "USA"
 }
 
 func appleFreePriceScheduleBody(appID, baseTerritory, pricePointID string) map[string]any {
@@ -219,7 +223,7 @@ func appleAvailabilityCreateBody(appID string, desired map[string]bool, availabl
 	linkages := make([]any, 0, len(ids))
 	included := make([]any, 0, len(ids))
 	for _, territory := range ids {
-		id := "deploy-territory-" + strings.ToLower(territory)
+		id := "${deploy-territory-" + strings.ToLower(territory) + "}"
 		linkages = append(linkages, map[string]any{"type": "territoryAvailabilities", "id": id})
 		included = append(included, map[string]any{
 			"type": "territoryAvailabilities", "id": id,

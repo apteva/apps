@@ -841,7 +841,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		observed["pricing"] = value
 		verified := jsonValueHasData(value)
 		if strings.EqualFold(doc.Distribution.PriceTier, "FREE") {
-			verified = applePriceScheduleIsFree(bound, pricing)
+			verified = applePriceScheduleIsFree(bound, pricing, appID, appleBasePriceTerritory(doc.Distribution))
 		}
 		readiness["pricing"] = readinessCheck(verified, "provider", "Pricing was read and compared with the desired Apple price.")
 	} else {
@@ -1193,7 +1193,7 @@ func storeObservationError(err error, recoverable bool, action string) map[strin
 	return out
 }
 
-func applePriceScheduleIsFree(bound *sdk.BoundIntegration, schedule json.RawMessage) bool {
+func applePriceScheduleIsFree(bound *sdk.BoundIntegration, schedule json.RawMessage, appID, baseTerritory string) bool {
 	scheduleID := firstJSONAPIID(schedule)
 	if scheduleID == "" {
 		return false
@@ -1204,26 +1204,77 @@ func applePriceScheduleIsFree(bound *sdk.BoundIntegration, schedule json.RawMess
 	if err != nil {
 		return false
 	}
-	var payload struct {
-		Included []struct {
-			Type       string `json:"type"`
-			Attributes struct {
-				CustomerPrice string `json:"customerPrice"`
-			} `json:"attributes"`
-		} `json:"included"`
-	}
-	if json.Unmarshal(prices, &payload) != nil {
+	pointIDs := appleManualPricePointIDs(prices)
+	if len(pointIDs) == 0 {
 		return false
 	}
-	for _, resource := range payload.Included {
-		if resource.Type == "appPricePoints" {
-			price, parseErr := strconv.ParseFloat(resource.Attributes.CustomerPrice, 64)
-			if parseErr == nil && price == 0 {
+	if appleReferencedPricePointIsFree(prices, pointIDs) {
+		return true
+	}
+	points, err := executeIntegration(bound, "list_app_price_points", map[string]any{
+		"app_id": appID, "territory": baseTerritory,
+		"fields": "customerPrice,proceeds", "include": "territory", "limit": 200,
+	})
+	return err == nil && appleReferencedPricePointIsFree(points, pointIDs)
+}
+
+func appleManualPricePointIDs(raw json.RawMessage) map[string]bool {
+	var payload struct {
+		Data []struct {
+			Relationships struct {
+				AppPricePoint struct {
+					Data struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				} `json:"appPricePoint"`
+			} `json:"relationships"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	ids := map[string]bool{}
+	for _, price := range payload.Data {
+		if id := strings.TrimSpace(price.Relationships.AppPricePoint.Data.ID); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+func appleReferencedPricePointIsFree(raw json.RawMessage, pointIDs map[string]bool) bool {
+	var payload struct {
+		Data     []applePricePointResource `json:"data"`
+		Included []applePricePointResource `json:"included"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return false
+	}
+	for _, resources := range [][]applePricePointResource{payload.Data, payload.Included} {
+		for _, resource := range resources {
+			if resource.Type == "appPricePoints" && pointIDs[resource.ID] && applePriceValueIsZero(resource.Attributes.CustomerPrice) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+type applePricePointResource struct {
+	Type       string `json:"type"`
+	ID         string `json:"id"`
+	Attributes struct {
+		CustomerPrice json.RawMessage `json:"customerPrice"`
+	} `json:"attributes"`
+}
+
+func applePriceValueIsZero(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	value := strings.Trim(string(raw), `"`)
+	price, err := strconv.ParseFloat(value, 64)
+	return err == nil && price == 0
 }
 
 func providerExtensionBody(doc StoreDocument, provider, key string) map[string]any {
