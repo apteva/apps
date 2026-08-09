@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.39
+version: 0.1.40
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -47,6 +47,8 @@ description: |
   usage validation fails, preserving targeting safety.
   v0.1.39 makes Storage and CRM optional dependencies. Core campaign,
   analytics, and provider-native audience workflows run without either app.
+  v0.1.40 adds project-managed campaign imports, descendant scope enforcement,
+  filtered analytics collection, and a provider-neutral campaign picker.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -108,6 +110,8 @@ provides:
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
     - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (for Meta act_12345; for Google the customer id without hyphens)." }
     - { name: account_list,                description: "List connected ad accounts in this project." }
+    - { name: account_management_mode_get, description: "Get all or selected campaign management mode." }
+    - { name: account_management_mode_update, description: "Change campaign management mode without modifying provider data." }
     - { name: account_context_get,         description: "Discover normalized identities, tracking sources, conversion actions, lead forms, audiences, and defaults for an ad account." }
     - { name: resource_refresh,            description: "Refresh normalized provider resources for an ad account." }
     - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
@@ -120,6 +124,9 @@ provides:
     - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
+    - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
+    - { name: campaign_import,             description: "Import selected campaigns into this project." }
+    - { name: campaign_remove_from_project, description: "Remove a campaign from project management without deleting it upstream." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
     - { name: campaign_performance_get,     description: "Get normalized daily campaign spend and performance for a bounded date range." }
     - { name: performance_get,              description: "Get cached or fresh normalized account, campaign, ad-group, or ad performance with derived advertising KPIs." }

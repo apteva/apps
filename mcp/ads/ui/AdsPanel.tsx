@@ -28,6 +28,7 @@ interface AdAccount {
   currency: string;
   timezone: string;
   status: string;
+  management_mode: "all" | "selected";
   created_at: string;
 }
 
@@ -51,6 +52,12 @@ interface Campaign {
   status?: string;
   effective_status?: string;
   daily_budget?: string;
+}
+
+interface CampaignCandidate extends Campaign {
+  managed: boolean;
+  managed_elsewhere: boolean;
+  unavailable?: boolean;
 }
 
 interface AdSet {
@@ -1299,6 +1306,13 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [connectionPickerMode, setConnectionPickerMode] = useState<"account" | "link">("account");
   const [pendingPicker, setPendingPicker] = useState<PendingPicker | null>(null);
   const [accountFilter, setAccountFilter] = useState("");
+  const [campaignPickerAccount, setCampaignPickerAccount] = useState<AdAccount | null>(null);
+  const [campaignCandidates, setCampaignCandidates] = useState<CampaignCandidate[]>([]);
+  const [campaignSelection, setCampaignSelection] = useState<Set<string>>(new Set());
+  const [campaignFilter, setCampaignFilter] = useState("");
+  const [loadingCampaignPicker, setLoadingCampaignPicker] = useState(false);
+  const [savingCampaignPicker, setSavingCampaignPicker] = useState(false);
+  const [campaignPickerError, setCampaignPickerError] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<AdAccount | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [setupAccount, setSetupAccount] = useState<AdAccount | null>(null);
@@ -1334,6 +1348,13 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       `${page.name} ${page.id} ${page.currency} ${page.timezone}`.toLowerCase().includes(query),
     );
   }, [accountFilter, pendingPicker]);
+  const filteredCampaignCandidates = useMemo(() => {
+    const query = campaignFilter.trim().toLowerCase();
+    if (!query) return campaignCandidates;
+    return campaignCandidates.filter((campaign) =>
+      `${campaign.name || ""} ${campaign.id} ${campaign.objective || ""}`.toLowerCase().includes(query),
+    );
+  }, [campaignCandidates, campaignFilter]);
   const groupedResources = useMemo(() => {
     if (!accountContext) return [];
     return accountContext.resource_kinds.map((kind) => ({
@@ -1812,10 +1833,75 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     }
   };
 
+  const openCampaignManager = async (account: AdAccount) => {
+    setCampaignPickerAccount(account);
+    setCampaignCandidates([]);
+    setCampaignSelection(new Set());
+    setCampaignFilter("");
+    setCampaignPickerError(null);
+    setLoadingCampaignPicker(true);
+    try {
+      const result = await callTool("campaign_import_candidates_list", { ad_account_id: account.id });
+      const candidates = (result.data || []) as CampaignCandidate[];
+      setCampaignCandidates(candidates);
+      setCampaignSelection(new Set(candidates.filter((campaign) => campaign.managed).map((campaign) => campaign.id)));
+    } catch (err) {
+      setCampaignPickerError((err as Error).message);
+    } finally {
+      setLoadingCampaignPicker(false);
+    }
+  };
+
+  const saveCampaignSelection = async () => {
+    if (!campaignPickerAccount) return;
+    setSavingCampaignPicker(true);
+    setCampaignPickerError(null);
+    try {
+      const selectedIDs = [...campaignSelection];
+      const currentIDs = campaignCandidates.filter((campaign) => campaign.managed).map((campaign) => campaign.id);
+      const importIDs = selectedIDs.filter((id) => !currentIDs.includes(id));
+      const removeIDs = currentIDs.filter((id) => !campaignSelection.has(id));
+      if (importIDs.length > 0) {
+        await callTool("campaign_import", { ad_account_id: campaignPickerAccount.id, campaign_ids: importIDs });
+      }
+      await callTool("account_management_mode_update", { ad_account_id: campaignPickerAccount.id, mode: "selected" });
+      for (const campaignID of removeIDs) {
+        await callTool("campaign_remove_from_project", { ad_account_id: campaignPickerAccount.id, campaign_id: campaignID });
+      }
+      const account = { ...campaignPickerAccount, management_mode: "selected" as const };
+      setAccounts((current) => current.map((item) => item.id === account.id ? account : item));
+      setCampaignPickerAccount(null);
+      setSelectedId(account.id);
+      await Promise.all([refreshAccounts(), refreshCampaigns(account), refreshPerformance(account, true)]);
+    } catch (err) {
+      setCampaignPickerError((err as Error).message);
+    } finally {
+      setSavingCampaignPicker(false);
+    }
+  };
+
+  const manageEntireAccount = async () => {
+    if (!campaignPickerAccount) return;
+    setSavingCampaignPicker(true);
+    setCampaignPickerError(null);
+    try {
+      await callTool("account_management_mode_update", { ad_account_id: campaignPickerAccount.id, mode: "all" });
+      const account = { ...campaignPickerAccount, management_mode: "all" as const };
+      setAccounts((current) => current.map((item) => item.id === account.id ? account : item));
+      setCampaignPickerAccount(null);
+      setSelectedId(account.id);
+      await Promise.all([refreshAccounts(), refreshCampaigns(account), refreshPerformance(account, true)]);
+    } catch (err) {
+      setCampaignPickerError((err as Error).message);
+    } finally {
+      setSavingCampaignPicker(false);
+    }
+  };
+
   const finalizeAccount = async (page: PendingAccountPage) => {
     if (!pendingPicker) return;
     try {
-      await apiJSON("/accounts/finalize", {
+		const result = await apiJSON("/accounts/finalize", {
         method: "POST",
         body: JSON.stringify({
           pending_account_id: pendingPicker.pendingId,
@@ -1828,6 +1914,14 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
       cleanURL.searchParams.delete("pending");
       window.history.replaceState({}, "", cleanURL.pathname + cleanURL.search);
       await Promise.all([refreshAccounts(), refreshPlatforms()]);
+		const account: AdAccount = {
+		  id: Number(result.ad_account_id), platform: result.platform, connection_id: 0,
+		  native_account_id: result.native_account_id, display_name: result.display_name,
+		  currency: result.currency || "", timezone: result.timezone || "", status: "active",
+		  management_mode: "selected", created_at: "",
+		};
+		setSelectedId(account.id);
+		await openCampaignManager(account);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -1894,6 +1988,97 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
             ×
           </button>
         </div>
+      )}
+
+      {campaignPickerAccount && (
+        <Modal
+          title="Manage campaigns"
+          description={`${campaignPickerAccount.display_name} · Choose the campaigns available in this project.`}
+          size="workspace"
+          onClose={() => !savingCampaignPicker && setCampaignPickerAccount(null)}
+          labelledBy="ads-campaign-picker-title"
+        >
+          <div className="flex min-h-[32rem] max-h-[72vh] flex-col">
+            <div className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3">
+              <input
+                type="search"
+                value={campaignFilter}
+                onChange={(event) => setCampaignFilter(event.target.value)}
+                placeholder="Search campaigns"
+                aria-label="Search campaigns"
+                className="h-9 min-w-56 flex-1 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"
+              />
+              <button
+                type="button"
+                disabled={loadingCampaignPicker || savingCampaignPicker}
+                onClick={() => setCampaignSelection(new Set(campaignCandidates.filter((campaign) => !campaign.managed_elsewhere || campaign.managed).map((campaign) => campaign.id)))}
+                className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+              >
+                Select available
+              </button>
+              <button
+                type="button"
+                disabled={loadingCampaignPicker || savingCampaignPicker}
+                onClick={() => setCampaignSelection(new Set())}
+                className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+              >
+                Clear
+              </button>
+            </div>
+            {campaignPickerError && <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-2 text-sm text-red">{campaignPickerError}</div>}
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              {loadingCampaignPicker ? (
+                <p className="px-4 py-12 text-center text-sm text-text-muted">Loading campaigns from {providerName(campaignPickerAccount.platform)}...</p>
+              ) : filteredCampaignCandidates.length === 0 ? (
+                <p className="px-4 py-12 text-center text-sm text-text-muted">{campaignCandidates.length === 0 ? "No campaigns are available in this account." : "No campaigns match that search."}</p>
+              ) : (
+                <div className="divide-y divide-border">
+                  {filteredCampaignCandidates.map((campaign) => {
+                    const unavailable = campaign.managed_elsewhere && !campaign.managed;
+                    return (
+                      <label key={campaign.id} className={`flex items-center gap-3 px-4 py-3 ${unavailable ? "cursor-not-allowed opacity-55" : "cursor-pointer hover:bg-bg-input/50"}`}>
+                        <input
+                          type="checkbox"
+                          checked={campaignSelection.has(campaign.id)}
+                          disabled={unavailable || savingCampaignPicker}
+                          onChange={(event) => setCampaignSelection((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked) next.add(campaign.id); else next.delete(campaign.id);
+                            return next;
+                          })}
+                          className="h-4 w-4 shrink-0 accent-accent"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-sm font-medium text-text">{campaign.name || campaign.id}</div>
+                          <div className="mt-0.5 truncate text-xs text-text-muted">{campaign.id}{campaign.objective ? ` · ${campaign.objective}` : ""}</div>
+                        </div>
+                        {campaign.managed && <span className="rounded bg-green/15 px-2 py-1 text-xs font-medium text-green">In this project</span>}
+                        {unavailable && <span className="rounded bg-border px-2 py-1 text-xs font-medium text-text-muted">Managed elsewhere</span>}
+                        {campaign.unavailable && <span className="rounded bg-yellow/15 px-2 py-1 text-xs font-medium text-yellow">Unavailable upstream</span>}
+                        <span className={`rounded px-2 py-1 text-xs font-medium ${statusStyle(displayStatus(campaign))}`}>{displayStatus(campaign)}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3">
+              <button
+                type="button"
+                disabled={savingCampaignPicker || loadingCampaignPicker}
+                onClick={manageEntireAccount}
+                className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-50"
+              >
+                Manage entire account
+              </button>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-text-muted">{campaignSelection.size} selected</span>
+                <button type="button" disabled={savingCampaignPicker} onClick={() => setCampaignPickerAccount(null)} className="h-9 rounded border border-border px-3 text-sm hover:bg-bg-input disabled:opacity-50">Cancel</button>
+                <button type="button" disabled={savingCampaignPicker || loadingCampaignPicker} onClick={saveCampaignSelection} className="h-9 rounded bg-accent px-4 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50">{savingCampaignPicker ? "Saving..." : "Save selection"}</button>
+              </div>
+            </footer>
+          </div>
+        </Modal>
       )}
 
       {pendingPicker && (
@@ -2022,6 +2207,13 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openCampaignManager(selected)}
+                    className="h-9 rounded border border-border px-3 text-xs font-medium text-text-muted hover:bg-bg-input hover:text-text"
+                  >
+                    Manage campaigns
+                  </button>
                   <button
                     type="button"
                     onClick={() => openAccountResources(selected)}
@@ -2159,7 +2351,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                   <p className="p-4 text-sm text-text-muted">Loading campaigns...</p>
                 ) : campaigns.length === 0 ? (
                   <div className="grid min-h-64 place-items-center p-6 text-center">
-                    <div><h3 className="text-sm font-medium">No campaigns found</h3><p className="mt-1 text-sm text-text-muted">This account has no campaigns to display.</p></div>
+                    <div><h3 className="text-sm font-medium">{selected.management_mode === "selected" ? "No managed campaigns" : "No campaigns found"}</h3><p className="mt-1 text-sm text-text-muted">{selected.management_mode === "selected" ? "Choose campaigns from this account to manage in the project." : "This account has no campaigns to display."}</p>{selected.management_mode === "selected" && <button type="button" onClick={() => openCampaignManager(selected)} className="mt-4 h-9 rounded bg-accent px-3 text-sm font-medium text-black hover:opacity-90">Choose campaigns</button>}</div>
                   </div>
                 ) : (
 				  <table className="w-full table-fixed text-sm" style={{ minWidth: "69rem" }}>

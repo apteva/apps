@@ -42,6 +42,9 @@ func (a *App) toolDeliveryActivate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if campaignID == "" || adSetID == "" || adID == "" {
 		return mcpError("campaign_id, adset_id, and ad_id required"), nil
 	}
+	if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
+		return scopeErr, nil
+	}
 
 	states, preflightErr := a.loadDeliveryHierarchy(ctx, acct, def, campaignID, adSetID, adID)
 	if preflightErr != nil {

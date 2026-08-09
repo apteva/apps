@@ -109,13 +109,23 @@ func validateGenericPerformanceRequest(args map[string]any) (*genericPerformance
 }
 
 func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, _, errOut := a.resolveAdAccount(ctx, args)
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
 	}
 	request, err := validateGenericPerformanceRequest(args)
 	if err != nil {
 		return mcpError(err.Error()), nil
+	}
+	empty, scopeErr, internalErr := a.scopePerformanceRequest(ctx, acct, def, request)
+	if internalErr != nil {
+		return nil, internalErr
+	}
+	if scopeErr != nil {
+		return scopeErr, nil
+	}
+	if empty {
+		return analyticsResponse([]analyticsPoint{}, "cache"), nil
 	}
 	pid, err := requireProject(ctx, args)
 	if err != nil {
@@ -142,6 +152,47 @@ func (a *App) toolPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 		source = "live"
 	}
 	return analyticsResponse(points, source), nil
+}
+
+func (a *App) scopePerformanceRequest(
+	ctx *sdk.AppCtx,
+	acct *adAccount,
+	def *platformDef,
+	request *genericPerformanceRequest,
+) (bool, map[string]any, error) {
+	if acct.ManagementMode != managementModeSelected {
+		return false, nil, nil
+	}
+	if request.Level == "account" {
+		return false, mcpError("account-level performance includes unmanaged campaigns; use campaign, ad_group, or ad level in selected mode"), nil
+	}
+	var allowedIDs []string
+	var err error
+	if request.Level == "campaign" {
+		allowedIDs, err = a.managedCampaignIDs(ctx, acct)
+	} else {
+		if errOut := a.refreshManagedHierarchy(ctx, acct, def); errOut != nil {
+			return false, errOut, nil
+		}
+		allowedIDs, err = a.managedEntityIDs(ctx, acct, request.Level)
+	}
+	if err != nil {
+		return false, nil, err
+	}
+	allowed := make(map[string]bool, len(allowedIDs))
+	for _, id := range allowedIDs {
+		allowed[id] = true
+	}
+	if len(request.EntityIDs) > 0 {
+		for _, id := range request.EntityIDs {
+			if !allowed[id] {
+				return false, mcpError(request.Level + " is not managed by this project"), nil
+			}
+		}
+	} else {
+		request.EntityIDs = allowedIDs
+	}
+	return len(request.EntityIDs) == 0, nil, nil
 }
 
 func (a *App) syncAnalytics(ctx *sdk.AppCtx, pid string, acct *adAccount, request *genericPerformanceRequest, source string) ([]analyticsPoint, map[string]any, error, bool) {
@@ -835,12 +886,24 @@ func (a *App) runPerformanceSyncJob(app *sdk.AppCtx, pid string, accountID int64
 	if reconcile {
 		dateFrom = today.AddDate(0, 0, -6).Format("2006-01-02")
 	}
-	acct, _, errOut := a.resolveAdAccount(app, map[string]any{"_project_id": pid, "ad_account_id": accountID})
+	acct, def, errOut := a.resolveAdAccount(app, map[string]any{"_project_id": pid, "ad_account_id": accountID})
 	if errOut != nil {
 		app.Logger().Warn("performance_collector: account resolution failed", "project", pid, "account", accountID)
 		return
 	}
 	request := &genericPerformanceRequest{Level: level, DateFrom: dateFrom, DateTo: today.Format("2006-01-02"), Refresh: true}
+	empty, scopeErr, internalErr := a.scopePerformanceRequest(app, acct, def, request)
+	if internalErr != nil {
+		app.Logger().Warn("performance_collector: scope resolution failed", "project", pid, "account", accountID, "level", level, "err", internalErr)
+		return
+	}
+	if scopeErr != nil {
+		app.Logger().Warn("performance_collector: scope rejected", "project", pid, "account", accountID, "level", level, "err", mcpErrorTextValue(scopeErr))
+		return
+	}
+	if empty {
+		return
+	}
 	_, providerErr, err, _ := a.syncAnalytics(app, pid, acct, request, "worker")
 	if err != nil {
 		app.Logger().Warn("performance_collector: sync failed", "project", pid, "account", accountID, "level", level, "err", err)

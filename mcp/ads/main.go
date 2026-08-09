@@ -28,6 +28,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.39
+version: 0.1.40
 scopes: [project, global]
 requires:
   permissions:
@@ -519,6 +520,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAccountList,
 		},
 		{
+			Name:        "account_management_mode_get",
+			Description: "Get whether an ad account manages every campaign or an explicit project selection.",
+			InputSchema: schemaObject(map[string]any{"ad_account_id": map[string]any{"type": "integer"}}, []string{"ad_account_id"}),
+			Handler:     a.toolAccountManagementModeGet,
+		},
+		{
+			Name:        "account_management_mode_update",
+			Description: "Set campaign management mode to selected or all. Selected mode purges unrelated local entity and metric caches without changing provider data.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"mode":          map[string]any{"type": "string", "enum": []string{"selected", "all"}},
+			}, []string{"ad_account_id", "mode"}),
+			Handler: a.toolAccountManagementModeUpdate,
+		},
+		{
 			Name:        "account_context_get",
 			Description: "Discover normalized resources and configured defaults for one ad account. Refreshes provider data by default. Args: ad_account_id, refresh? (default true).",
 			InputSchema: schemaObject(map[string]any{
@@ -614,6 +630,35 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 
 		// ── Campaigns ──
+		{
+			Name:        "campaign_import_candidates_list",
+			Description: "List provider campaign summaries transiently for the project campaign picker. Candidates are not persisted until imported.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"q":             map[string]any{"type": "string"},
+				"status":        map[string]any{"type": "string"},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolCampaignImportCandidatesList,
+		},
+		{
+			Name:        "campaign_import",
+			Description: "Import accessible provider campaigns into this project's managed scope. Descendant ad sets and ads are discovered only for selected campaigns.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_ids":  map[string]any{"type": "array", "maxItems": 200, "items": map[string]any{"type": "string"}},
+				"allow_shared":  map[string]any{"type": "boolean", "description": "Explicitly allow a campaign already managed by another project."},
+			}, []string{"ad_account_id", "campaign_ids"}),
+			Handler: a.toolCampaignImport,
+		},
+		{
+			Name:        "campaign_remove_from_project",
+			Description: "Stop managing a campaign in this project and remove only its local hierarchy and metrics. Provider data is unchanged.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolCampaignRemoveFromProject,
+		},
 		{
 			Name: "campaign_create",
 			Description: "Create a campaign on the bound ad account. " +
@@ -1381,8 +1426,8 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return mcpError("pending account was already finalized or expired"), nil
 	}
 	_, err = tx.Exec(
-		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, login_account_id, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name, currency, timezone_name, login_account_id, status, management_mode)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'selected')
 		 ON CONFLICT(project_id, platform, native_account_id) DO UPDATE SET
 		   connection_id=excluded.connection_id,
 		   display_name=excluded.display_name,
@@ -1435,7 +1480,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	statusFilter, _ := args["status"].(string)
 
 	q := `SELECT id, platform, connection_id, native_account_id, display_name,
-	             COALESCE(currency,''), COALESCE(timezone_name,''), status, created_at
+	             COALESCE(currency,''), COALESCE(timezone_name,''), status, created_at,
+	             COALESCE(management_mode,'all')
 	      FROM ad_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -1455,10 +1501,10 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
-			id, connID                                                  int64
-			platform, native, name, currency, timezone, status, created string
+			id, connID                                                                  int64
+			platform, native, name, currency, timezone, status, created, managementMode string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &native, &name, &currency, &timezone, &status, &created); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &native, &name, &currency, &timezone, &status, &created, &managementMode); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
@@ -1471,6 +1517,7 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"timezone":          timezone,
 			"status":            status,
 			"created_at":        created,
+			"management_mode":   managementMode,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
@@ -1761,6 +1808,7 @@ type adAccount struct {
 	Currency        string
 	Timezone        string
 	LoginAccountID  string
+	ManagementMode  string
 }
 
 func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount, *platformDef, map[string]any) {
@@ -1775,7 +1823,8 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 	var acct adAccount
 	if err := ctx.AppDB().QueryRow(
 		`SELECT id, platform, connection_id, native_account_id,
-		        COALESCE(currency,''), COALESCE(timezone_name,''), COALESCE(login_account_id,'')
+		        COALESCE(currency,''), COALESCE(timezone_name,''), COALESCE(login_account_id,''),
+		        COALESCE(management_mode,'all')
 		 FROM ad_accounts WHERE id=? AND project_id=? AND status='active'`,
 		id, pid,
 	).Scan(
@@ -1786,6 +1835,7 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 		&acct.Currency,
 		&acct.Timezone,
 		&acct.LoginAccountID,
+		&acct.ManagementMode,
 	); err != nil {
 		return nil, nil, mcpError("ad_account not found or not active")
 	}
@@ -2077,6 +2127,15 @@ func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return errOut, nil
 	}
 	out, err := platformAdapters[acct.Platform].CampaignCreate(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		if id := createdProviderID(out, "campaign"); id != "" {
+			campaign := cloneMap(args)
+			campaign["id"] = id
+			if persistErr := a.upsertManagedCampaign(ctx, acct, campaign, "created"); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+	}
 	a.emitEntityChanged(ctx, acct, "campaign", "created", args, out, err)
 	return out, err
 }
@@ -2086,7 +2145,24 @@ func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CampaignList(a, ctx, acct, def, args)
+	if acct.ManagementMode != managementModeSelected {
+		return platformAdapters[acct.Platform].CampaignList(a, ctx, acct, def, args)
+	}
+	rows, providerErr := a.listAllProviderCampaigns(ctx, acct, def, args)
+	if providerErr != nil {
+		return providerErr, nil
+	}
+	managed, err := a.managedCampaignSet(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	rows = filterCampaignRows(rows, managed)
+	for _, row := range rows {
+		if err := a.upsertManagedCampaign(ctx, acct, row, ""); err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"data": rows, "next_cursor": nil, "management_mode": managementModeSelected}, nil
 }
 
 func (a *App) toolCampaignPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2094,8 +2170,33 @@ func (a *App) toolCampaignPerformanceGet(ctx *sdk.AppCtx, args map[string]any) (
 	if errOut != nil {
 		return errOut, nil
 	}
-	if _, err := validatePerformanceRequest(args); err != nil {
+	request, err := validatePerformanceRequest(args)
+	if err != nil {
 		return mcpError(err.Error()), nil
+	}
+	if acct.ManagementMode == managementModeSelected {
+		managed, err := a.managedCampaignSet(ctx, acct)
+		if err != nil {
+			return nil, err
+		}
+		if len(request.CampaignIDs) == 0 {
+			request.CampaignIDs = make([]string, 0, len(managed))
+			for id := range managed {
+				request.CampaignIDs = append(request.CampaignIDs, id)
+			}
+			sort.Strings(request.CampaignIDs)
+		} else {
+			for _, id := range request.CampaignIDs {
+				if !managed[id] {
+					return mcpError("campaign is not managed by this project; import it first"), nil
+				}
+			}
+		}
+		if len(request.CampaignIDs) == 0 {
+			return performanceResponse([]map[string]any{}), nil
+		}
+		args = cloneMap(args)
+		args["campaign_ids"] = request.CampaignIDs
 	}
 	return platformAdapters[acct.Platform].CampaignPerformance(a, ctx, acct, def, args)
 }
@@ -2104,6 +2205,9 @@ func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if scopeErr := a.requireManagedCampaign(ctx, acct, stringArgAny(args, "campaign_id")); scopeErr != nil {
+		return scopeErr, nil
 	}
 	out, err := platformAdapters[acct.Platform].CampaignUpdate(a, ctx, acct, def, args)
 	a.emitEntityChanged(ctx, acct, "campaign", "updated", args, out, err)
@@ -2125,7 +2229,16 @@ func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
+	campaignID := stringArgAny(args, "campaign_id")
+	if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
+		return scopeErr, nil
+	}
 	out, err := platformAdapters[acct.Platform].CampaignDelete(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		if cleanupErr := a.removeCampaignLocal(ctx, acct, campaignID); cleanupErr != nil {
+			return nil, cleanupErr
+		}
+	}
 	a.emitEntityChanged(ctx, acct, "campaign", "deleted", args, out, err)
 	return out, err
 }
@@ -2992,7 +3105,7 @@ func (googleAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	if errOut != nil {
 		return errOut, nil
 	}
-	return map[string]any{"data": normalizeGoogleCampaigns(parsed)}, nil
+	return map[string]any{"data": normalizeGoogleCampaigns(parsed), "next_cursor": googleNextPageToken(parsed)}, nil
 }
 
 func (googleAdapter) CampaignPerformance(a *App, ctx *sdk.AppCtx, acct *adAccount, _ *platformDef, args map[string]any) (any, error) {
@@ -3264,11 +3377,15 @@ func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if limit := intArg(args, "limit", 0); limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdSetListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
+	if pageToken := stringArgAny(args, "after"); pageToken != "" {
+		input["page_token"] = pageToken
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdSetListTool, input)
 	if errOut != nil {
 		return errOut, nil
 	}
-	return map[string]any{"data": normalizeGoogleAdGroups(parsed)}, nil
+	return map[string]any{"data": normalizeGoogleAdGroups(parsed), "next_cursor": googleNextPageToken(parsed)}, nil
 }
 
 func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -3363,11 +3480,15 @@ func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 	if limit := intArg(args, "limit", 0); limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
-	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
+	if pageToken := stringArgAny(args, "after"); pageToken != "" {
+		input["page_token"] = pageToken
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdListTool, input)
 	if errOut != nil {
 		return errOut, nil
 	}
-	return map[string]any{"data": normalizeGoogleAds(parsed)}, nil
+	return map[string]any{"data": normalizeGoogleAds(parsed), "next_cursor": googleNextPageToken(parsed)}, nil
 }
 
 func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -3608,6 +3729,10 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
+	campaignID := stringArgAny(args, "campaign_id")
+	if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
+		return scopeErr, nil
+	}
 	if acct.Platform == "meta" && len(asMap(args["promoted_object"])) == 0 {
 		if strings.EqualFold(stringArgAny(args, "conversion_location"), "instant_form") {
 			page, selectionErr := a.resolveResourceChoice(ctx, acct, "publishing_identity", resourceIdentity, "facebook_page", 0)
@@ -3633,6 +3758,15 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		if id := createdProviderID(out, "ad_group"); id != "" {
+			row := cloneMap(args)
+			row["id"] = id
+			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", []map[string]any{row}, campaignID); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+	}
 	a.emitEntityChanged(ctx, acct, "ad_group", "created", args, out, err)
 	return out, err
 }
@@ -3642,13 +3776,39 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
+	if acct.ManagementMode != managementModeSelected {
+		return platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
+	}
+	campaignID := stringArgAny(args, "campaign_id")
+	if campaignID != "" {
+		if scopeErr := a.requireManagedCampaign(ctx, acct, campaignID); scopeErr != nil {
+			return scopeErr, nil
+		}
+		out, err := platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
+		if err == nil && successfulProviderResult(out) {
+			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", resultRows(out), campaignID); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+		return out, err
+	}
+	if scopeErr := a.refreshManagedHierarchy(ctx, acct, def); scopeErr != nil {
+		return scopeErr, nil
+	}
+	rows, err := a.scopedEntityRows(ctx, acct, "ad_group", "", "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"data": rows, "next_cursor": nil}, nil
 }
 
 func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", stringArgAny(args, "adset_id")); scopeErr != nil {
+		return scopeErr, nil
 	}
 	out, err := platformAdapters[acct.Platform].AdSetUpdate(a, ctx, acct, def, args)
 	a.emitEntityChanged(ctx, acct, "ad_group", "updated", args, out, err)
@@ -3660,7 +3820,14 @@ func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
+	adSetID := stringArgAny(args, "adset_id")
+	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
+		return scopeErr, nil
+	}
 	out, err := platformAdapters[acct.Platform].AdSetDelete(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM ad_entities WHERE project_id=? AND ad_account_id=? AND (native_entity_id=? OR ad_group_id=?)`, acct.ProjectID, acct.ID, adSetID, adSetID)
+	}
 	a.emitEntityChanged(ctx, acct, "ad_group", "deleted", args, out, err)
 	return out, err
 }
@@ -3672,7 +3839,25 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
+	adSetID := stringArgAny(args, "adset_id")
+	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
+		return scopeErr, nil
+	}
+	if scopeErr := a.requireManagedCreative(ctx, acct, stringArgAny(args, "creative_id")); scopeErr != nil {
+		return scopeErr, nil
+	}
+	campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
 	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		if id := createdProviderID(out, "ad"); id != "" {
+			row := cloneMap(args)
+			row["id"] = id
+			row["adset_id"] = adSetID
+			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad", []map[string]any{row}, campaignID); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+	}
 	a.emitEntityChanged(ctx, acct, "ad", "created", args, out, err)
 	return out, err
 }
@@ -3682,13 +3867,40 @@ func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
+	if acct.ManagementMode != managementModeSelected {
+		return platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
+	}
+	adSetID := stringArgAny(args, "adset_id")
+	if adSetID != "" {
+		if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad_group", adSetID); scopeErr != nil {
+			return scopeErr, nil
+		}
+		campaignID, _ := a.campaignIDForEntity(ctx, acct, "ad_group", adSetID)
+		out, err := platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
+		if err == nil && successfulProviderResult(out) {
+			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad", resultRows(out), campaignID); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+		return out, err
+	}
+	if scopeErr := a.refreshManagedHierarchy(ctx, acct, def); scopeErr != nil {
+		return scopeErr, nil
+	}
+	rows, err := a.scopedEntityRows(ctx, acct, "ad", "", "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"data": rows, "next_cursor": nil}, nil
 }
 
 func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, def, errOut := a.resolveAdAccount(ctx, args)
 	if errOut != nil {
 		return errOut, nil
+	}
+	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad", stringArgAny(args, "ad_id")); scopeErr != nil {
+		return scopeErr, nil
 	}
 	out, err := platformAdapters[acct.Platform].AdUpdate(a, ctx, acct, def, args)
 	a.emitEntityChanged(ctx, acct, "ad", "updated", args, out, err)
@@ -3700,7 +3912,14 @@ func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if errOut != nil {
 		return errOut, nil
 	}
+	adID := stringArgAny(args, "ad_id")
+	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad", adID); scopeErr != nil {
+		return scopeErr, nil
+	}
 	out, err := platformAdapters[acct.Platform].AdDelete(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM ad_entities WHERE project_id=? AND ad_account_id=? AND level='ad' AND native_entity_id=?`, acct.ProjectID, acct.ID, adID)
+	}
 	a.emitEntityChanged(ctx, acct, "ad", "deleted", args, out, err)
 	return out, err
 }
@@ -3764,7 +3983,22 @@ func (a *App) toolCreativeCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 			args["lead_form_id"] = form.NativeID
 		}
 	}
-	return platformAdapters[acct.Platform].CreativeCreate(a, ctx, acct, def, args)
+	out, err := platformAdapters[acct.Platform].CreativeCreate(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		result := asMap(out)
+		creativeID := firstString(result, "post_id", "creative_id")
+		if creativeID == "" && firstString(result, "job_id", "post_creation_job_id") == "" {
+			creativeID = createdProviderID(out, "creative")
+		}
+		if creativeID != "" {
+			creative := cloneMap(args)
+			creative["id"] = creativeID
+			if persistErr := a.upsertManagedCreative(ctx, acct, creative, "", "created"); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+	}
+	return out, err
 }
 
 func (a *App) toolCreativeGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3772,7 +4006,29 @@ func (a *App) toolCreativeGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CreativeGet(a, ctx, acct, def, args)
+	creativeID := stringArgAny(args, "creative_id")
+	if scopeErr := a.requireManagedCreative(ctx, acct, creativeID); scopeErr != nil {
+		return scopeErr, nil
+	}
+	out, err := platformAdapters[acct.Platform].CreativeGet(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) && acct.ManagementMode == managementModeSelected {
+		creative := asMap(out)
+		if len(creative) == 0 {
+			rows := resultRows(out)
+			if len(rows) > 0 {
+				creative = rows[0]
+			}
+		}
+		if len(creative) > 0 {
+			creative["id"] = creativeID
+			var campaignID string
+			_ = ctx.AppDB().QueryRow(`SELECT campaign_id FROM ad_entities WHERE project_id=? AND ad_account_id=? AND level='creative' AND native_entity_id=?`, acct.ProjectID, acct.ID, creativeID).Scan(&campaignID)
+			if persistErr := a.upsertManagedCreative(ctx, acct, creative, campaignID, "referenced"); persistErr != nil {
+				return nil, persistErr
+			}
+		}
+	}
+	return out, err
 }
 
 func (a *App) toolCreativeDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3780,7 +4036,15 @@ func (a *App) toolCreativeDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CreativeDelete(a, ctx, acct, def, args)
+	creativeID := stringArgAny(args, "creative_id")
+	if scopeErr := a.requireManagedCreative(ctx, acct, creativeID); scopeErr != nil {
+		return scopeErr, nil
+	}
+	out, err := platformAdapters[acct.Platform].CreativeDelete(a, ctx, acct, def, args)
+	if err == nil && successfulProviderResult(out) {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM ad_entities WHERE project_id=? AND ad_account_id=? AND level='creative' AND native_entity_id=?`, acct.ProjectID, acct.ID, creativeID)
+	}
+	return out, err
 }
 
 func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3812,7 +4076,17 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if errOut != nil {
 		return errOut, nil
 	}
-	return platformAdapters[acct.Platform].CreativeList(a, ctx, acct, def, args)
+	if acct.ManagementMode != managementModeSelected {
+		return platformAdapters[acct.Platform].CreativeList(a, ctx, acct, def, args)
+	}
+	if scopeErr := a.refreshManagedHierarchy(ctx, acct, def); scopeErr != nil {
+		return scopeErr, nil
+	}
+	rows, err := a.scopedEntityRows(ctx, acct, "creative", "", "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"data": rows, "next_cursor": nil}, nil
 }
 
 // ─── Audience tools ────────────────────────────────────────────────

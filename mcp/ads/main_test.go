@@ -562,6 +562,11 @@ func TestAccountFinalize_WritesAdAccount(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("ad_accounts row not inserted")
 	}
+	var managementMode string
+	_ = ctx.AppDB().QueryRow(`SELECT management_mode FROM ad_accounts WHERE native_account_id='act_999'`).Scan(&managementMode)
+	if managementMode != managementModeSelected {
+		t.Fatalf("new account management_mode = %q, want selected", managementMode)
+	}
 	if len(pf.executeCalls) != 1 {
 		t.Fatalf("expected one account discovery call, got %#v", pf.executeCalls)
 	}
@@ -691,11 +696,15 @@ func TestAccountFinalize_ReactivationUpdatesConnection(t *testing.T) {
 		t.Fatalf("reactivation failed: out=%#v err=%v", out, err)
 	}
 	var connectionID int64
+	var managementMode string
 	_ = ctx.AppDB().QueryRow(
-		`SELECT connection_id FROM ad_accounts WHERE project_id='test-proj' AND native_account_id='act_111'`,
-	).Scan(&connectionID)
+		`SELECT connection_id, management_mode FROM ad_accounts WHERE project_id='test-proj' AND native_account_id='act_111'`,
+	).Scan(&connectionID, &managementMode)
 	if connectionID != 8 {
 		t.Fatalf("connection_id = %d, want 8", connectionID)
+	}
+	if managementMode != managementModeAll {
+		t.Fatalf("reactivation changed legacy management mode to %q", managementMode)
 	}
 }
 
