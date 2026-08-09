@@ -221,6 +221,7 @@ interface StoreFinding {
   code: string;
   severity: "error" | "warning" | "info";
   scope: string;
+  verification?: "provider_read" | "provider_apply" | "provider_commit" | "manual_attestation";
   locale?: string;
   field?: string;
   message: string;
@@ -2776,7 +2777,7 @@ function StoreListingDialog({
                         },
                       })}
                     />
-                    App Privacy questionnaire reviewed and published
+                    App Privacy already reviewed and published (optional confirmation)
                   </label>
                 </>
               ) : (

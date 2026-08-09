@@ -32,21 +32,96 @@ type releaseOptions struct {
 }
 
 type mobileReleaseMeta struct {
-	Platform           string            `json:"platform"`
-	PackageName        string            `json:"package_name,omitempty"`
-	AppID              string            `json:"app_id,omitempty"`
-	BundleID           string            `json:"bundle_id,omitempty"`
-	VersionName        string            `json:"version_name,omitempty"`
-	BuildNumber        string            `json:"build_number,omitempty"`
-	VersionCode        string            `json:"version_code,omitempty"`
-	BetaGroupID        string            `json:"beta_group_id,omitempty"`
-	AppStoreVersionID  string            `json:"app_store_version_id,omitempty"`
-	ReviewSubmissionID string            `json:"review_submission_id,omitempty"`
-	ReleaseType        string            `json:"release_type,omitempty"`
-	RolloutFraction    float64           `json:"rollout_fraction,omitempty"`
-	ReleaseNotes       map[string]string `json:"release_notes,omitempty"`
-	SubmitForReview    bool              `json:"submit_for_review,omitempty"`
-	Prepared           bool              `json:"prepared,omitempty"`
+	Platform            string                                `json:"platform"`
+	PackageName         string                                `json:"package_name,omitempty"`
+	AppID               string                                `json:"app_id,omitempty"`
+	BundleID            string                                `json:"bundle_id,omitempty"`
+	VersionName         string                                `json:"version_name,omitempty"`
+	BuildNumber         string                                `json:"build_number,omitempty"`
+	VersionCode         string                                `json:"version_code,omitempty"`
+	BetaGroupID         string                                `json:"beta_group_id,omitempty"`
+	AppStoreVersionID   string                                `json:"app_store_version_id,omitempty"`
+	ReviewSubmissionID  string                                `json:"review_submission_id,omitempty"`
+	ReleaseType         string                                `json:"release_type,omitempty"`
+	RolloutFraction     float64                               `json:"rollout_fraction,omitempty"`
+	ReleaseNotes        map[string]string                     `json:"release_notes,omitempty"`
+	SubmitForReview     bool                                  `json:"submit_for_review,omitempty"`
+	Prepared            bool                                  `json:"prepared,omitempty"`
+	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
+}
+
+type providerValidationEvidence struct {
+	Provider    string `json:"provider"`
+	Requirement string `json:"requirement"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	ExternalID  string `json:"external_id,omitempty"`
+	VersionName string `json:"version_name,omitempty"`
+	ValidatedAt string `json:"validated_at"`
+}
+
+type providerValidationError struct {
+	Provider    string          `json:"provider"`
+	Requirement string          `json:"requirement"`
+	Action      string          `json:"action"`
+	Status      int             `json:"provider_status"`
+	Details     json.RawMessage `json:"details,omitempty"`
+	Err         error           `json:"-"`
+}
+
+func (e *providerValidationError) Error() string {
+	return fmt.Sprintf("%s rejected %s validation during %s: %v", e.Provider, e.Requirement, e.Action, e.Err)
+}
+
+func (e *providerValidationError) Unwrap() error { return e.Err }
+
+func wrapProviderCommitValidationError(provider, requirement, action string, err error) error {
+	status := integrationErrorStatus(err)
+	if status != http.StatusConflict && status != http.StatusUnprocessableEntity {
+		return err
+	}
+	var toolErr *integrationToolError
+	var details json.RawMessage
+	if errors.As(err, &toolErr) {
+		details = append(json.RawMessage(nil), toolErr.Data...)
+	}
+	return &providerValidationError{
+		Provider: provider, Requirement: requirement, Action: action,
+		Status: status, Details: details, Err: err,
+	}
+}
+
+func providerValidationErrorPayload(err *providerValidationError) map[string]any {
+	payload := map[string]any{
+		"error": err.Error(), "code": "provider_validation_failed",
+		"provider": err.Provider, "requirement": err.Requirement,
+		"action": err.Action, "provider_status": err.Status,
+	}
+	if len(err.Details) > 0 {
+		payload["details"] = err.Details
+	}
+	return payload
+}
+
+func recordStoreProviderValidation(rel *Release, platform string, evidence providerValidationEvidence) error {
+	if rel == nil || globalCtx == nil || globalCtx.AppDB() == nil {
+		return nil
+	}
+	cfg, err := dbGetMobileStoreConfig(globalCtx.AppDB(), rel.DeploymentID, rel.EnvironmentID, platform)
+	if err != nil || cfg == nil {
+		return err
+	}
+	observed := map[string]any{}
+	if strings.TrimSpace(cfg.ObservedJSON) != "" {
+		_ = json.Unmarshal([]byte(cfg.ObservedJSON), &observed)
+	}
+	validations, _ := observed["provider_validations"].(map[string]any)
+	if validations == nil {
+		validations = map[string]any{}
+	}
+	validations[evidence.Requirement] = evidence
+	observed["provider_validations"] = validations
+	return dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), "", "", cfg.LastError)
 }
 
 func isMobileDeployment(d *Deployment, b *Build) bool {
@@ -448,7 +523,15 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 			continue
 		}
 		if err := a.syncIOSRelease(&releases[i]); err != nil {
-			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, map[string]any{"error": err.Error(), "external_status": "sync_error"})
+			fields := map[string]any{"error": err.Error(), "external_status": "sync_error"}
+			var validationErr *providerValidationError
+			if errors.As(err, &validationErr) {
+				fields["status"] = "failed"
+				fields["external_status"] = "provider_validation_failed"
+				fields["stopped_at"] = nowUTC()
+				_ = dbAppendReleaseEvent(globalCtx.AppDB(), releases[i].ID, "provider_validation_failed", mustJSON(providerValidationErrorPayload(validationErr)))
+			}
+			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, fields)
 		}
 	}
 	return nil
@@ -608,6 +691,9 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	}
 	meta.AppStoreVersionID = versionID
 	meta.Prepared = true
+	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		"external_id": buildID, "external_status": "ready_for_review", "release_meta_json": mustJSON(meta),
+	})
 	status := "ready_for_review"
 	if meta.SubmitForReview {
 		created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": meta.AppID, "platform": "IOS"})
@@ -618,13 +704,28 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 		if submissionID == "" {
 			return errors.New("review submission response missing id")
 		}
+		meta.ReviewSubmissionID = submissionID
+		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+			"external_status": "validating_submission", "release_meta_json": mustJSON(meta),
+		})
 		if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
-			return err
+			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "create_review_submission_item", err)
 		}
 		if _, err := executeIntegration(bound, "submit_review_submission", map[string]any{"submission_id": submissionID, "submitted": true}); err != nil {
-			return err
+			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", err)
 		}
-		meta.ReviewSubmissionID = submissionID
+		if meta.ProviderValidations == nil {
+			meta.ProviderValidations = map[string]providerValidationEvidence{}
+		}
+		evidence := providerValidationEvidence{
+			Provider: "app_store_connect", Requirement: "app_privacy", Action: "submit_review_submission",
+			Status: "accepted", ExternalID: submissionID, VersionName: meta.VersionName, ValidatedAt: nowUTC(),
+		}
+		meta.ProviderValidations["app_privacy"] = evidence
+		if err := recordStoreProviderValidation(rel, "ios", evidence); err != nil {
+			return fmt.Errorf("record provider validation: %w", err)
+		}
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "provider_validation_accepted", mustJSON(evidence))
 		status = "waiting_for_review"
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{

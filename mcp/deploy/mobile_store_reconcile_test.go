@@ -78,6 +78,29 @@ func TestManualPrivacyDoesNotBlockIndependentStoreScopes(t *testing.T) {
 	}
 }
 
+func TestApplePrivacyIsDeferredToProviderCommit(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "ios"}
+	doc := completeIOSStoreDocument()
+	doc.Privacy.ManualAttestations = map[string]bool{}
+	doc.Assets[0].Path = writeTestStorePNG(t, root, d, "shot", 1290, 2796, true)
+
+	preflight := validateStoreDocument(root, d, nil, &MobileStoreConfig{}, doc, true)
+	if !preflight.Ready || preflight.Errors != 0 {
+		t.Fatalf("provider-commit privacy validation blocked preflight: %#v", preflight)
+	}
+	var privacy *StoreFinding
+	for i := range preflight.Findings {
+		if preflight.Findings[i].Code == "privacy.apple_provider_validation" {
+			privacy = &preflight.Findings[i]
+			break
+		}
+	}
+	if privacy == nil || privacy.Severity != "warning" || privacy.Verification != "provider_commit" || !privacy.Automatable {
+		t.Fatalf("privacy finding=%#v", privacy)
+	}
+}
+
 func TestFirstZeroApplePricePoint(t *testing.T) {
 	raw := json.RawMessage(`{"data":[
 		{"id":"paid","attributes":{"customerPrice":"0.99"}},
@@ -239,6 +262,96 @@ func TestStorePreflightReleaseErrorReturnsStructured422(t *testing.T) {
 	}
 }
 
+func TestProviderCommitValidationErrorReturnsStructured422(t *testing.T) {
+	providerErr := &integrationToolError{
+		Slug: "app-store-connect", Tool: "submit_review_submission", Status: http.StatusUnprocessableEntity,
+		Data: json.RawMessage(`{"errors":[{"code":"ENTITY_ERROR.ATTRIBUTE.REQUIRED","detail":"App Privacy is incomplete"}]}`),
+	}
+	err := wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", providerErr)
+	var validationErr *providerValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("error type=%T", err)
+	}
+	recorder := httptest.NewRecorder()
+	httpStoreErr(recorder, err, http.StatusInternalServerError)
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != "provider_validation_failed" || body["provider"] != "app_store_connect" || body["requirement"] != "store_submission" {
+		t.Fatalf("response=%#v", body)
+	}
+
+	operationalErr := &integrationToolError{Slug: "app-store-connect", Tool: "submit_review_submission", Status: http.StatusInternalServerError}
+	if got := wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", operationalErr); got != operationalErr {
+		t.Fatalf("operational error was misclassified: %T %v", got, got)
+	}
+}
+
+func TestAppleReviewSubmissionStoresProviderValidationEvidence(t *testing.T) {
+	platform := &iosPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-provider-validation", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.EnvironmentID = env.ID
+	d.EnvironmentName = env.Name
+	doc := completeIOSStoreDocument()
+	doc.Privacy.ManualAttestations = map[string]bool{}
+	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
+		t.Fatal(err)
+	}
+	build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := mobileReleaseMeta{AppID: "app-1", VersionName: "1.0", SubmitForReview: true}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).prepareIOSProductionRelease(bound, release, "build-42", &meta); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := dbGetRelease(ctx.AppDB(), release.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored mobileReleaseMeta
+	if err := json.Unmarshal([]byte(fresh.ReleaseMetaJSON), &stored); err != nil {
+		t.Fatal(err)
+	}
+	evidence, ok := stored.ProviderValidations["app_privacy"]
+	if !ok || evidence.Status != "accepted" || evidence.ExternalID != "review-1" || evidence.ValidatedAt == "" {
+		t.Fatalf("provider evidence=%#v", stored.ProviderValidations)
+	}
+	if fresh.ExternalStatus != "waiting_for_review" {
+		t.Fatalf("release status=%q", fresh.ExternalStatus)
+	}
+	storeCfg, err := dbGetMobileStoreConfig(ctx.AppDB(), d.ID, env.ID, "ios")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !providerCommitValidated(storeCfg, "app_privacy", "1.0") {
+		t.Fatalf("store provider evidence was not persisted: %#v", storeCfg)
+	}
+}
+
 func TestScreenshotOrderDiffDetectsReorderAndRemoval(t *testing.T) {
 	existing := []appleScreenshotResource{{ID: "1", Filename: "a.png"}, {ID: "2", Filename: "b.png"}}
 	if !sameAppleScreenshotOrder(existing, []string{"a.png", "b.png"}) {
@@ -277,12 +390,15 @@ func TestAppleScreenshotSetSelectionRequiresExactDisplayType(t *testing.T) {
 
 func TestSyncPreservesLastApplyObservation(t *testing.T) {
 	observed := map[string]any{"readiness": map[string]any{"media": readinessCheck(true, "provider", "ok")}}
-	preserveStoreObservationState(observed, `{"last_apply":{"status":"partial"},"applied_at":"then","desired_hash":"abc","stale":"drop"}`)
+	preserveStoreObservationState(observed, `{"last_apply":{"status":"partial"},"applied_at":"then","desired_hash":"abc","provider_validations":{"app_privacy":{"status":"accepted"}},"stale":"drop"}`)
 	if _, ok := observed["last_apply"]; !ok {
 		t.Fatal("last_apply was not preserved")
 	}
 	if observed["applied_at"] != "then" || observed["desired_hash"] != "abc" {
 		t.Fatalf("preserved state=%#v", observed)
+	}
+	if _, ok := observed["provider_validations"]; !ok {
+		t.Fatalf("provider validation evidence was dropped: %#v", observed)
 	}
 	if _, ok := observed["stale"]; ok {
 		t.Fatalf("stale provider state was retained: %#v", observed)

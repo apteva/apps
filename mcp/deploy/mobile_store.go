@@ -160,14 +160,15 @@ type StoreManualRequirement struct {
 }
 
 type StoreFinding struct {
-	Code        string `json:"code"`
-	Severity    string `json:"severity"`
-	Scope       string `json:"scope"`
-	Locale      string `json:"locale,omitempty"`
-	Field       string `json:"field,omitempty"`
-	Message     string `json:"message"`
-	Automatable bool   `json:"automatable"`
-	Action      string `json:"action,omitempty"`
+	Code         string `json:"code"`
+	Severity     string `json:"severity"`
+	Scope        string `json:"scope"`
+	Verification string `json:"verification,omitempty"`
+	Locale       string `json:"locale,omitempty"`
+	Field        string `json:"field,omitempty"`
+	Message      string `json:"message"`
+	Automatable  bool   `json:"automatable"`
+	Action       string `json:"action,omitempty"`
 }
 
 type StorePreflight struct {
@@ -541,8 +542,13 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 			if !storeContentRatingComplete(doc.Classification.ContentRating) && len(doc.Classification.AgeDeclaration) == 0 {
 				add("age_rating.required", "error", "classification", "", "content_rating", "Apple age-rating declarations are required.", "Complete the age-rating questionnaire.", true)
 			}
-			if !doc.Privacy.ManualAttestations["apple_privacy_published"] {
-				add("privacy.apple_manual", "error", "compliance", "", "apple_privacy_published", "Apple privacy answers must be reviewed and published in App Store Connect.", "Complete and attest the App Privacy questionnaire.", false)
+			if !doc.Privacy.ManualAttestations["apple_privacy_published"] && !providerCommitValidated(cfg, "app_privacy", doc.VersionName) {
+				findings = append(findings, StoreFinding{
+					Code: "privacy.apple_provider_validation", Severity: "warning", Scope: "compliance",
+					Verification: "provider_commit", Field: "app_privacy", Automatable: true,
+					Message: "Apple does not expose App Privacy publication state through its API; Deploy will validate it when review is submitted.",
+					Action:  "Complete App Privacy in App Store Connect before submitting for review.",
+				})
 			}
 		} else {
 			if doc.ReleaseMode == "staged" && (doc.Distribution.RolloutFraction <= 0 || doc.Distribution.RolloutFraction >= 1) {
@@ -703,7 +709,7 @@ func preserveStoreObservationState(observed map[string]any, previousJSON string)
 	if json.Unmarshal([]byte(previousJSON), &previous) != nil {
 		return
 	}
-	for _, key := range []string{"last_apply", "applied_at", "desired_hash"} {
+	for _, key := range []string{"last_apply", "applied_at", "desired_hash", "provider_validations"} {
 		if value, ok := previous[key]; ok {
 			observed[key] = value
 		}
@@ -1040,6 +1046,20 @@ func providerReadinessVerified(cfg *MobileStoreConfig, key string) bool {
 		return false
 	}
 	return strings.EqualFold(observed.Readiness[key].Status, "verified")
+}
+
+func providerCommitValidated(cfg *MobileStoreConfig, requirement, versionName string) bool {
+	if cfg == nil || strings.TrimSpace(cfg.ObservedJSON) == "" {
+		return false
+	}
+	var observed struct {
+		ProviderValidations map[string]providerValidationEvidence `json:"provider_validations"`
+	}
+	if json.Unmarshal([]byte(cfg.ObservedJSON), &observed) != nil {
+		return false
+	}
+	evidence, ok := observed.ProviderValidations[requirement]
+	return ok && strings.EqualFold(evidence.Status, "accepted") && evidence.VersionName == versionName
 }
 
 func readinessCheck(verified bool, source, message string) map[string]any {

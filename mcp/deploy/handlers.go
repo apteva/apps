@@ -1053,5 +1053,12 @@ func httpStoreErr(w http.ResponseWriter, err error, fallbackStatus int) {
 		})
 		return
 	}
+	var validationErr *providerValidationError
+	if errors.As(err, &validationErr) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_ = json.NewEncoder(w).Encode(providerValidationErrorPayload(validationErr))
+		return
+	}
 	httpErr(w, fallbackStatus, err.Error())
 }
