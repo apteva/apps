@@ -416,14 +416,53 @@ func (a *App) storePreflight(d *Deployment, build *Build, strict bool) (StorePre
 		return StorePreflight{}, err
 	}
 	out := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
+	appendProviderReadinessFindings(&out, d, cfg)
 	if cfg != nil {
-		status := "ready"
-		if !out.Ready {
-			status = "blocked"
-		}
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, "", mustJSON(out), "", "")
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(out), "", cfg.LastError)
 	}
 	return out, nil
+}
+
+func appendProviderReadinessFindings(out *StorePreflight, d *Deployment, cfg *MobileStoreConfig) {
+	if out == nil || d == nil || cfg == nil || d.TargetKind != "ios" {
+		return
+	}
+	checks := []struct {
+		key, scope, message, action string
+	}{
+		{"listing", "localizations", "The App Store listing has not been verified at Apple.", "Apply or sync the listing metadata."},
+		{"media", "media", "The required App Store screenshots have not been verified at Apple.", "Apply media and wait for Apple to finish processing every screenshot."},
+		{"review", "review", "App Review contact details have not been verified at Apple.", "Apply or sync App Review details."},
+		{"classification", "classification", "The App Store category and age rating have not been verified at Apple.", "Apply classification after updating the App Store integration."},
+		{"pricing", "distribution", "App Store pricing has not been verified at Apple.", "Apply and verify the desired App Store price."},
+		{"availability", "distribution", "App Store country availability has not been verified at Apple.", "Apply and verify the desired territory availability."},
+	}
+	for _, check := range checks {
+		if providerReadinessVerified(cfg, check.key) {
+			continue
+		}
+		out.Findings = append(out.Findings, StoreFinding{
+			Code: "provider." + check.key + "_unverified", Severity: "error", Scope: check.scope,
+			Message: check.message, Action: check.action, Automatable: true,
+		})
+		out.Errors++
+		out.Ready = false
+	}
+	if !providerReadinessVerified(cfg, "build") {
+		out.Findings = append(out.Findings, StoreFinding{
+			Code: "provider.build_unverified", Severity: "warning", Scope: "version",
+			Message: "Apple does not yet report a non-expired build attached to this App Store version.",
+			Action:  "Publish a matching binary, then attach it before review submission.", Automatable: true,
+		})
+		out.Warnings++
+	}
+	sort.SliceStable(out.Findings, func(i, j int) bool {
+		order := map[string]int{"error": 0, "warning": 1, "info": 2}
+		if order[out.Findings[i].Severity] != order[out.Findings[j].Severity] {
+			return order[out.Findings[i].Severity] < order[out.Findings[j].Severity]
+		}
+		return out.Findings[i].Code < out.Findings[j].Code
+	})
 }
 
 func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *MobileStoreConfig, doc StoreDocument, strict bool) StorePreflight {
@@ -580,6 +619,7 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 		return StorePlan{}, err
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	plan := StorePlan{
 		Provider: mobileStoreProvider(d.TargetKind), Platform: d.TargetKind,
 		Preflight: preflight,
@@ -642,16 +682,28 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", err.Error())
 		return nil, nil, err
 	}
+	preserveStoreObservationState(observed, cfg.ObservedJSON)
 	observed["observed_at"] = nowUTC()
-	status := cfg.Status
-	if status == "failed" {
-		status = "draft"
-	}
-	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, mustJSON(observed), "", "", ""); err != nil {
+	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), "", "", cfg.LastError); err != nil {
 		return nil, nil, err
 	}
 	cfg, err = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 	return cfg, observed, err
+}
+
+func preserveStoreObservationState(observed map[string]any, previousJSON string) {
+	if observed == nil || strings.TrimSpace(previousJSON) == "" {
+		return
+	}
+	var previous map[string]any
+	if json.Unmarshal([]byte(previousJSON), &previous) != nil {
+		return
+	}
+	for _, key := range []string{"last_apply", "applied_at", "desired_hash"} {
+		if value, ok := previous[key]; ok {
+			observed[key] = value
+		}
+	}
 }
 
 func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[string]any, error) {
@@ -702,6 +754,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	} else {
 		localizations := observed["localizations"].(map[string]any)
 		localizationsReady := len(doc.Localizations) > 0
+		mediaReady := true
 		for locale := range doc.Localizations {
 			raw, err := executeIntegration(bound, "list_version_localizations", map[string]any{"version_id": versionID, "locale": locale})
 			if err != nil {
@@ -710,9 +763,29 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 			value := decodeJSONValue(raw)
 			localizations[locale] = value
 			localizationsReady = localizationsReady && jsonValueHasData(value)
+			if localizationID := firstJSONAPIID(raw); localizationID != "" {
+				ready, state, mediaErr := a.observeAppleScreenshots(bound, d, localizationID, locale, doc)
+				observed["screenshots_"+locale] = state
+				mediaReady = mediaReady && ready
+				if mediaErr != nil {
+					observed["screenshots_error_"+locale] = storeObservationError(mediaErr, false, "retry_sync")
+					mediaReady = false
+				}
+			} else {
+				mediaReady = false
+			}
 		}
 		readiness := observed["readiness"].(map[string]any)
 		readiness["listing"] = readinessCheck(localizationsReady, "provider", "App Store version and requested localizations were read from Apple.")
+		readiness["media"] = readinessCheck(mediaReady, "provider", "Configured screenshots were matched by locale, display type, filename, and delivery state.")
+		versionRaw, versionErr := executeIntegration(bound, "get_app_version", map[string]any{"version_id": versionID, "include": "build"})
+		if versionErr == nil {
+			observed["version"] = decodeJSONValue(versionRaw)
+			readiness["build"] = readinessCheck(jsonStringAt(versionRaw, "data", "relationships", "build", "data", "id") != "", "provider", "The App Store version's selected build was read from Apple.")
+		} else {
+			observed["build_error"] = storeObservationError(versionErr, false, "retry_sync")
+			readiness["build"] = readinessCheck(false, "provider", "The selected App Store build could not be verified.")
+		}
 		if review, err := executeIntegration(bound, "get_version_review_detail", map[string]any{"version_id": versionID}); err == nil {
 			value := decodeJSONValue(review)
 			observed["review"] = value
@@ -721,11 +794,30 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	}
 	readiness := observed["readiness"].(map[string]any)
 	appInfoID := ""
-	if infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "limit": 10}); err == nil {
-		appInfoID = firstJSONAPIID(infos)
+	classificationInfoReady := false
+	if infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "fields": "state,appStoreState,primaryCategory,secondaryCategory", "include": "primaryCategory,secondaryCategory", "limit": 10}); err == nil {
+		appInfoID = editableAppleAppInfoID(infos)
+		classificationInfoReady = appleAppInfoCategoriesMatch(infos, appInfoID, doc.Classification)
 		value := decodeJSONValue(infos)
 		observed["app_infos"] = value
-		readiness["classification"] = readinessCheck(jsonValueHasData(value), "provider", "App information was read from Apple.")
+		readiness["classification"] = readinessCheck(false, "provider", "Age-rating declarations have not been verified.")
+		appInfoLocalizationsReady := appInfoID != ""
+		appInfoLocalizations := map[string]any{}
+		if appInfoID != "" {
+			for locale, localization := range doc.Localizations {
+				raw, localizationErr := executeIntegration(bound, "list_app_info_localizations", map[string]any{"app_info_id": appInfoID, "locale": locale})
+				if localizationErr != nil {
+					appInfoLocalizationsReady = false
+					appInfoLocalizations[locale] = storeObservationError(localizationErr, false, "retry_sync")
+					continue
+				}
+				appInfoLocalizations[locale] = decodeJSONValue(raw)
+				appInfoLocalizationsReady = appInfoLocalizationsReady && appleAppInfoLocalizationMatches(raw, localization, doc.Privacy)
+			}
+		}
+		observed["app_info_localizations"] = appInfoLocalizations
+		listingReady := readinessValueVerified(readiness["listing"]) && appInfoLocalizationsReady
+		readiness["listing"] = readinessCheck(listingReady, "provider", "Version and app-level localizations were compared with Apple.")
 	} else {
 		observed["app_infos_error"] = storeObservationError(err, false, "retry_sync")
 	}
@@ -734,9 +826,10 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		if err == nil {
 			value := decodeJSONValue(age)
 			observed["age_rating"] = value
-			readiness["classification"] = readinessCheck(jsonValueHasData(value), "provider", "Age-rating declarations were read from Apple.")
+			readiness["classification"] = readinessCheck(classificationInfoReady && jsonValueHasData(value), "provider", "Category and age-rating declarations were compared with Apple.")
 		} else {
 			observed["age_rating_error"] = storeObservationError(err, false, "retry_sync")
+			readiness["classification"] = readinessCheck(false, "provider", "Age-rating declarations could not be read from Apple.")
 		}
 	}
 	if pricing, err := executeIntegration(bound, "get_app_price_schedule", map[string]any{"app_id": appID, "include": "baseTerritory,manualPrices"}); err == nil {
@@ -951,6 +1044,81 @@ func readinessCheck(verified bool, source, message string) map[string]any {
 		status = "verified"
 	}
 	return map[string]any{"status": status, "source": source, "message": message}
+}
+
+func readinessValueVerified(value any) bool {
+	check, ok := value.(map[string]any)
+	return ok && strings.EqualFold(fmt.Sprint(check["status"]), "verified")
+}
+
+func editableAppleAppInfoID(raw json.RawMessage) string {
+	var payload struct {
+		Data []struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				State         string `json:"state"`
+				AppStoreState string `json:"appStoreState"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(raw, &payload)
+	for _, item := range payload.Data {
+		state := strings.ToUpper(defaultStr(item.Attributes.State, item.Attributes.AppStoreState))
+		if state == "PREPARE_FOR_SUBMISSION" || state == "READY_FOR_REVIEW" || state == "DEVELOPER_REJECTED" || state == "METADATA_REJECTED" || state == "REJECTED" {
+			return item.ID
+		}
+	}
+	if len(payload.Data) > 0 {
+		return payload.Data[0].ID
+	}
+	return ""
+}
+
+func appleAppInfoCategoriesMatch(raw json.RawMessage, appInfoID string, desired StoreClassification) bool {
+	var payload struct {
+		Data []struct {
+			ID            string `json:"id"`
+			Relationships map[string]struct {
+				Data *struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			} `json:"relationships"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return false
+	}
+	for _, item := range payload.Data {
+		if item.ID != appInfoID {
+			continue
+		}
+		primary := item.Relationships["primaryCategory"].Data
+		secondary := item.Relationships["secondaryCategory"].Data
+		if primary == nil || primary.ID != desired.PrimaryCategory {
+			return false
+		}
+		return desired.SecondaryCategory == "" || (secondary != nil && secondary.ID == desired.SecondaryCategory)
+	}
+	return false
+}
+
+func appleAppInfoLocalizationMatches(raw json.RawMessage, desired StoreLocalization, privacy StorePrivacy) bool {
+	var payload struct {
+		Data []struct {
+			Attributes struct {
+				Name              string `json:"name"`
+				Subtitle          string `json:"subtitle"`
+				PrivacyPolicyURL  string `json:"privacyPolicyUrl"`
+				PrivacyChoicesURL string `json:"privacyChoicesUrl"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &payload) != nil || len(payload.Data) == 0 {
+		return false
+	}
+	actual := payload.Data[0].Attributes
+	return actual.Name == desired.Title && actual.Subtitle == desired.Subtitle &&
+		actual.PrivacyPolicyURL == privacy.PolicyURL && actual.PrivacyChoicesURL == privacy.ChoicesURL
 }
 
 func jsonValueHasData(value any) bool {
@@ -1264,15 +1432,15 @@ func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, loca
 		return "", err
 	}
 	id := firstJSONAPIID(listed)
-	input := map[string]any{
-		"description": loc.Description, "keywords": strings.Join(loc.Keywords, ","),
-		"marketingUrl": loc.MarketingURL, "promotionalText": loc.PromotionalText,
-		"supportUrl": loc.SupportURL, "whatsNew": loc.WhatsNew,
-	}
+	input := appleVersionLocalizationInput(loc, true)
 	if id == "" {
 		input["version_id"] = versionID
 		input["locale"] = locale
 		created, err := executeIntegration(bound, "create_version_localization", input)
+		if appleRejectsFirstVersionWhatsNew(err) {
+			delete(input, "whatsNew")
+			created, err = executeIntegration(bound, "create_version_localization", input)
+		}
 		if err != nil {
 			return "", err
 		}
@@ -1280,8 +1448,32 @@ func upsertAppleVersionLocalization(bound *sdk.BoundIntegration, versionID, loca
 	} else {
 		input["localization_id"] = id
 		_, err = executeIntegration(bound, "update_version_localization", input)
+		if appleRejectsFirstVersionWhatsNew(err) {
+			delete(input, "whatsNew")
+			_, err = executeIntegration(bound, "update_version_localization", input)
+		}
 	}
 	return id, err
+}
+
+func appleVersionLocalizationInput(loc StoreLocalization, includeWhatsNew bool) map[string]any {
+	input := map[string]any{
+		"description": loc.Description, "keywords": strings.Join(loc.Keywords, ","),
+		"marketingUrl": loc.MarketingURL, "promotionalText": loc.PromotionalText,
+		"supportUrl": loc.SupportURL,
+	}
+	if includeWhatsNew && strings.TrimSpace(loc.WhatsNew) != "" {
+		input["whatsNew"] = loc.WhatsNew
+	}
+	return input
+}
+
+func appleRejectsFirstVersionWhatsNew(err error) bool {
+	if err == nil || (integrationErrorStatus(err) != http.StatusConflict && integrationErrorStatus(err) != http.StatusUnprocessableEntity) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "whatsnew") || strings.Contains(message, "what's new") || strings.Contains(message, "what\u2019s new")
 }
 
 func (a *App) applyAppleReviewDetail(bound *sdk.BoundIntegration, versionID string, review StoreReview) (string, error) {
@@ -1323,11 +1515,11 @@ func (a *App) applyAppleMetadata(bound *sdk.BoundIntegration, appID string, doc 
 	if !scopes.any("localizations", "classification", "privacy") {
 		return nil
 	}
-	infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "limit": 10})
+	infos, err := executeIntegration(bound, "list_app_infos", map[string]any{"app_id": appID, "fields": "state,appStoreState", "limit": 10})
 	if err != nil {
 		return err
 	}
-	infoID := firstJSONAPIID(infos)
+	infoID := editableAppleAppInfoID(infos)
 	if scopes.has("classification") && infoID != "" && doc.Classification.PrimaryCategory != "" {
 		input := map[string]any{
 			"app_info_id": infoID, "primary_category_id": doc.Classification.PrimaryCategory,
@@ -1402,13 +1594,11 @@ func (a *App) uploadAppleScreenshot(bound *sdk.BoundIntegration, d *Deployment, 
 	}
 	name := storeUploadFilename(path, asset.SHA256)
 	target := appleScreenshotDisplayTarget(asset)
-	sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{
-		"localization_id": localizationID, "display_type": target, "limit": 20,
-	})
+	sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID})
 	if err != nil {
 		return err
 	}
-	setID := firstJSONAPIID(sets)
+	setID := appleScreenshotSetID(sets, target)
 	if setID == "" {
 		created, err := executeIntegration(bound, "create_screenshot_set", map[string]any{
 			"localization_id": localizationID, "screenshotDisplayType": target,
@@ -1418,7 +1608,7 @@ func (a *App) uploadAppleScreenshot(bound *sdk.BoundIntegration, d *Deployment, 
 		}
 		setID = jsonStringAt(created, "data", "id")
 	}
-	existing, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID, "limit": 200})
+	existing, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID})
 	if err != nil {
 		return err
 	}

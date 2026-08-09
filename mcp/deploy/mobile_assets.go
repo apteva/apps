@@ -90,7 +90,7 @@ func validateStoreAssets(dataDir string, d *Deployment, build *Build, doc StoreD
 				add("asset.apple_alpha", locale, "path", "App Store screenshots cannot contain transparency.", "Export the image without an alpha channel.")
 			}
 			if asset.Kind == "phone_screenshot" || asset.Kind == "tablet_screenshot" {
-				target := appleScreenshotDisplayTarget(asset)
+				target := appleScreenshotDisplayTargetForSize(asset, metadata.Width, metadata.Height)
 				if !appleScreenshotSizeAllowed(target, metadata.Width, metadata.Height) {
 					add("asset.apple_dimensions", locale, "display_target",
 						fmt.Sprintf("%s screenshot dimensions %d x %d do not match %s.", asset.Kind, metadata.Width, metadata.Height, target),
@@ -156,7 +156,28 @@ func appleScreenshotDisplayTarget(asset StoreAsset) string {
 	if asset.Kind == "tablet_screenshot" {
 		return "APP_IPAD_PRO_3GEN_129"
 	}
-	return "APP_IPHONE_67"
+	return appleScreenshotDisplayTargetForSize(asset, asset.Width, asset.Height)
+}
+
+func appleScreenshotDisplayTargetForSize(asset StoreAsset, width, height int) string {
+	if strings.TrimSpace(asset.DisplayTarget) != "" {
+		target := strings.ToUpper(strings.TrimSpace(asset.DisplayTarget))
+		if width <= 0 || height <= 0 || appleScreenshotSizeAllowed(target, width, height) {
+			return target
+		}
+	}
+	if asset.Kind == "tablet_screenshot" {
+		return "APP_IPAD_PRO_3GEN_129"
+	}
+	if width > height {
+		width, height = height, width
+	}
+	for _, target := range []string{"APP_IPHONE_69", "APP_IPHONE_67", "APP_IPHONE_65", "APP_IPHONE_63", "APP_IPHONE_61", "APP_IPHONE_55", "APP_IPHONE_47"} {
+		if appleScreenshotSizeAllowed(target, width, height) {
+			return target
+		}
+	}
+	return "APP_IPHONE_69"
 }
 
 func appleScreenshotSizeAllowed(target string, width, height int) bool {

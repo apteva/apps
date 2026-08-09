@@ -324,6 +324,58 @@ type appleScreenshotResource struct {
 	State    string
 }
 
+func (a *App) observeAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment, localizationID, locale string, doc StoreDocument) (bool, map[string]any, error) {
+	grouped := map[string][]StoreAsset{}
+	for _, asset := range doc.Assets {
+		if !strings.Contains(asset.Kind, "screenshot") || defaultStr(asset.Locale, doc.DefaultLocale) != locale {
+			continue
+		}
+		target := appleScreenshotDisplayTarget(asset)
+		grouped[target] = append(grouped[target], asset)
+	}
+	desired := map[string][]string{}
+	for target, assets := range grouped {
+		sort.SliceStable(assets, func(i, j int) bool { return assets[i].Order < assets[j].Order })
+		for _, asset := range assets {
+			path, err := resolveStoreAssetPath(a.dataDir, d, asset.Path)
+			if err != nil {
+				return false, nil, err
+			}
+			desired[target] = append(desired[target], storeUploadFilename(path, asset.SHA256))
+		}
+	}
+	setsRaw, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID})
+	if err != nil {
+		return false, nil, err
+	}
+	sets := parseAppleScreenshotSets(setsRaw)
+	state := map[string]any{}
+	ready := len(desired) > 0
+	for target, names := range desired {
+		setID := ""
+		for _, set := range sets {
+			if strings.EqualFold(set.DisplayType, target) {
+				setID = set.ID
+				break
+			}
+		}
+		if setID == "" {
+			state[target] = map[string]any{"status": "missing"}
+			ready = false
+			continue
+		}
+		raw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID})
+		if err != nil {
+			return false, state, err
+		}
+		resources := parseAppleScreenshots(raw)
+		complete := appleScreenshotsCompleteInOrder(resources, names)
+		state[target] = map[string]any{"set_id": setID, "screenshots": decodeJSONValue(raw), "verified": complete}
+		ready = ready && complete
+	}
+	return ready, state, nil
+}
+
 func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment, localizationIDs map[string]string, doc StoreDocument) error {
 	grouped := map[string][]StoreAsset{}
 	for _, asset := range doc.Assets {
@@ -335,7 +387,7 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 		grouped[key] = append(grouped[key], asset)
 	}
 	for locale, localizationID := range localizationIDs {
-		setsRaw, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID, "limit": 200})
+		setsRaw, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID})
 		if err != nil {
 			return err
 		}
@@ -343,7 +395,7 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 			if _, desired := grouped[locale+"\x00"+set.DisplayType]; desired {
 				continue
 			}
-			existingRaw, listErr := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": set.ID, "limit": 200})
+			existingRaw, listErr := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": set.ID})
 			if listErr != nil {
 				return listErr
 			}
@@ -361,11 +413,11 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 			return fmt.Errorf("asset group references unknown locale %s", parts[0])
 		}
 		sort.SliceStable(assets, func(i, j int) bool { return assets[i].Order < assets[j].Order })
-		sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID, "display_type": parts[1], "limit": 20})
+		sets, err := executeIntegration(bound, "list_screenshot_sets", map[string]any{"localization_id": localizationID})
 		if err != nil {
 			return err
 		}
-		setID := firstJSONAPIID(sets)
+		setID := appleScreenshotSetID(sets, parts[1])
 		if setID == "" {
 			created, createErr := executeIntegration(bound, "create_screenshot_set", map[string]any{"localization_id": localizationID, "screenshotDisplayType": parts[1]})
 			if createErr != nil {
@@ -373,7 +425,7 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 			}
 			setID = firstJSONAPIID(created)
 		}
-		existingRaw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID, "limit": 200})
+		existingRaw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID})
 		if err != nil {
 			return err
 		}
@@ -386,7 +438,7 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 			}
 			desiredNames = append(desiredNames, storeUploadFilename(path, asset.SHA256))
 		}
-		if !sameAppleScreenshotOrder(existing, desiredNames) {
+		if !appleScreenshotsCompleteInOrder(existing, desiredNames) {
 			for _, screenshot := range existing {
 				if _, err := executeIntegration(bound, "delete_screenshot", map[string]any{"screenshot_id": screenshot.ID}); err != nil {
 					return err
@@ -427,6 +479,16 @@ func parseAppleScreenshotSets(raw json.RawMessage) []appleScreenshotSet {
 	return out
 }
 
+func appleScreenshotSetID(raw json.RawMessage, displayType string) string {
+	displayType = strings.ToUpper(strings.TrimSpace(displayType))
+	for _, set := range parseAppleScreenshotSets(raw) {
+		if strings.ToUpper(strings.TrimSpace(set.DisplayType)) == displayType {
+			return set.ID
+		}
+	}
+	return ""
+}
+
 func parseAppleScreenshots(raw json.RawMessage) []appleScreenshotResource {
 	var payload struct {
 		Data []struct {
@@ -459,9 +521,21 @@ func sameAppleScreenshotOrder(existing []appleScreenshotResource, desired []stri
 	return true
 }
 
+func appleScreenshotsCompleteInOrder(existing []appleScreenshotResource, desired []string) bool {
+	if !sameAppleScreenshotOrder(existing, desired) {
+		return false
+	}
+	for _, resource := range existing {
+		if !strings.EqualFold(resource.State, "COMPLETE") {
+			return false
+		}
+	}
+	return true
+}
+
 func waitForAppleScreenshots(bound *sdk.BoundIntegration, setID string, desired []string) error {
 	for attempt := 0; attempt < 20; attempt++ {
-		raw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID, "limit": 200})
+		raw, err := executeIntegration(bound, "list_screenshots", map[string]any{"set_id": setID})
 		if err != nil {
 			return err
 		}

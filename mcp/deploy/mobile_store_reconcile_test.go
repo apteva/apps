@@ -86,6 +86,106 @@ func TestScreenshotOrderDiffDetectsReorderAndRemoval(t *testing.T) {
 	}
 }
 
+func TestIncompleteAppleScreenshotReservationIsReplaced(t *testing.T) {
+	desired := []string{"a.png"}
+	if appleScreenshotsCompleteInOrder([]appleScreenshotResource{{Filename: "a.png", State: "AWAITING_UPLOAD"}}, desired) {
+		t.Fatal("incomplete reservation was treated as uploaded")
+	}
+	if !appleScreenshotsCompleteInOrder([]appleScreenshotResource{{Filename: "a.png", State: "COMPLETE"}}, desired) {
+		t.Fatal("complete screenshot was rejected")
+	}
+}
+
+func TestAppleScreenshotSetSelectionRequiresExactDisplayType(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"ipad","attributes":{"screenshotDisplayType":"APP_IPAD_PRO_13"}},
+		{"id":"iphone","attributes":{"screenshotDisplayType":"APP_IPHONE_69"}}
+	]}`)
+	if got := appleScreenshotSetID(raw, "APP_IPHONE_69"); got != "iphone" {
+		t.Fatalf("selected set=%q", got)
+	}
+	if got := appleScreenshotSetID(raw, "APP_IPHONE_67"); got != "" {
+		t.Fatalf("unexpected fallback set=%q", got)
+	}
+}
+
+func TestSyncPreservesLastApplyObservation(t *testing.T) {
+	observed := map[string]any{"readiness": map[string]any{"media": readinessCheck(true, "provider", "ok")}}
+	preserveStoreObservationState(observed, `{"last_apply":{"status":"partial"},"applied_at":"then","desired_hash":"abc","stale":"drop"}`)
+	if _, ok := observed["last_apply"]; !ok {
+		t.Fatal("last_apply was not preserved")
+	}
+	if observed["applied_at"] != "then" || observed["desired_hash"] != "abc" {
+		t.Fatalf("preserved state=%#v", observed)
+	}
+	if _, ok := observed["stale"]; ok {
+		t.Fatalf("stale provider state was retained: %#v", observed)
+	}
+}
+
+func TestEditableAppleAppInfoPreferredForMetadata(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"live","attributes":{"state":"READY_FOR_SALE"}},
+		{"id":"editable","attributes":{"appStoreState":"PREPARE_FOR_SUBMISSION"}}
+	]}`)
+	if got := editableAppleAppInfoID(raw); got != "editable" {
+		t.Fatalf("app info=%q", got)
+	}
+}
+
+func TestAppleAppInfoCategoriesMustMatchEditableResource(t *testing.T) {
+	raw := json.RawMessage(`{"data":[
+		{"id":"live","relationships":{"primaryCategory":{"data":{"id":"GAMES"}}}},
+		{"id":"editable","relationships":{"primaryCategory":{"data":{"id":"PRODUCTIVITY"}},"secondaryCategory":{"data":{"id":"UTILITIES"}}}}
+	]}`)
+	desired := StoreClassification{PrimaryCategory: "PRODUCTIVITY", SecondaryCategory: "UTILITIES"}
+	if !appleAppInfoCategoriesMatch(raw, "editable", desired) {
+		t.Fatal("matching editable categories were rejected")
+	}
+	desired.PrimaryCategory = "BUSINESS"
+	if appleAppInfoCategoriesMatch(raw, "editable", desired) {
+		t.Fatal("category mismatch was accepted")
+	}
+}
+
+func TestAppleAppInfoLocalizationIncludesSubtitleAndPrivacy(t *testing.T) {
+	raw := json.RawMessage(`{"data":[{"attributes":{"name":"Apteva","subtitle":"Autonomous agents, anywhere","privacyPolicyUrl":"https://example.com/privacy","privacyChoicesUrl":"https://example.com/choices"}}]}`)
+	loc := StoreLocalization{Title: "Apteva", Subtitle: "Autonomous agents, anywhere"}
+	privacy := StorePrivacy{PolicyURL: "https://example.com/privacy", ChoicesURL: "https://example.com/choices"}
+	if !appleAppInfoLocalizationMatches(raw, loc, privacy) {
+		t.Fatal("matching app info localization was rejected")
+	}
+	loc.Subtitle = "wrong"
+	if appleAppInfoLocalizationMatches(raw, loc, privacy) {
+		t.Fatal("subtitle mismatch was accepted")
+	}
+}
+
+func TestProviderReadinessAddsReleaseCriticalFindings(t *testing.T) {
+	preflight := StorePreflight{Ready: true}
+	cfg := &MobileStoreConfig{ObservedJSON: `{"readiness":{"listing":{"status":"verified"},"review":{"status":"verified"}}}`}
+	appendProviderReadinessFindings(&preflight, &Deployment{TargetKind: "ios"}, cfg)
+	for _, code := range []string{"provider.media_unverified", "provider.classification_unverified", "provider.pricing_unverified", "provider.availability_unverified"} {
+		if !hasStoreFinding(preflight, code) {
+			t.Fatalf("missing %s: %#v", code, preflight.Findings)
+		}
+	}
+	if preflight.Ready {
+		t.Fatal("unverified provider state was considered ready")
+	}
+}
+
+func TestAppleVersionLocalizationOmitsEmptyWhatsNew(t *testing.T) {
+	input := appleVersionLocalizationInput(StoreLocalization{Description: "Description"}, true)
+	if _, ok := input["whatsNew"]; ok {
+		t.Fatalf("empty first-release whatsNew was sent: %#v", input)
+	}
+	input = appleVersionLocalizationInput(StoreLocalization{WhatsNew: "Changes"}, true)
+	if input["whatsNew"] != "Changes" {
+		t.Fatalf("subsequent whatsNew missing: %#v", input)
+	}
+}
+
 func TestStoreObservationErrorPreservesProviderStatus(t *testing.T) {
 	err := &integrationToolError{Slug: "app-store-connect", Tool: "get", Status: 404, Data: json.RawMessage(`{"errors":[{"code":"RESOURCE_NOT_FOUND"}]}`)}
 	got := storeObservationError(err, true, "create")

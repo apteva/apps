@@ -2188,7 +2188,7 @@ function StoreListingDialog({
   const [locale, setLocale] = useState(initial.desired.default_locale || "en-US");
   const [newLocale, setNewLocale] = useState("");
   const [assetKind, setAssetKind] = useState("phone_screenshot");
-  const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "ios" ? "APP_IPHONE_67" : "");
+  const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "ios" ? "APP_IPHONE_69" : "");
   const [reviewPassword, setReviewPassword] = useState("");
   const [hasConfig, setHasConfig] = useState(Boolean(initial.config));
   const [readiness, setReadiness] = useState(() => storeReadiness(initial.config?.observed_json));
@@ -2514,7 +2514,7 @@ function StoreListingDialog({
                       const kind = e.target.value;
                       setAssetKind(kind);
                       if (deployment.target_kind === "ios") {
-                        setDisplayTarget(kind === "tablet_screenshot" ? "APP_IPAD_PRO_13" : kind === "app_preview" ? "IPHONE_67" : "APP_IPHONE_67");
+                        setDisplayTarget(kind === "tablet_screenshot" ? "APP_IPAD_PRO_13" : kind === "app_preview" ? "IPHONE_67" : "APP_IPHONE_69");
                       } else {
                         setDisplayTarget(kind === "tablet_screenshot" ? "tablet_7" : "");
                       }

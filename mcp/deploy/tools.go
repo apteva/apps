@@ -932,12 +932,9 @@ func (a *App) toolStorePreflight(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, boolArg(args, "strict"))
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	if cfg != nil {
-		status := "ready"
-		if !preflight.Ready {
-			status = "blocked"
-		}
-		_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+		_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 	}
 	return preflight, nil
 }

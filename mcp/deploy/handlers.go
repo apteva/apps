@@ -188,12 +188,9 @@ func (a *App) httpDeploymentStorePreflight(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, true)
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	if cfg != nil {
-		status := "ready"
-		if !preflight.Ready {
-			status = "blocked"
-		}
-		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, "", mustJSON(preflight), "", "")
+		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 	}
 	httpJSON(w, preflight)
 }

@@ -31,6 +31,23 @@ func TestAppleStoreAssetsValidateDimensionsAndRequiredDeviceFamilies(t *testing.
 	}
 }
 
+func TestAppleScreenshotTargetInfersCurrentIPhoneSizes(t *testing.T) {
+	asset := StoreAsset{Kind: "phone_screenshot"}
+	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_69" {
+		t.Fatalf("1320 x 2868 target=%q", got)
+	}
+	if got := appleScreenshotDisplayTargetForSize(asset, 1290, 2796); got != "APP_IPHONE_69" {
+		t.Fatalf("1290 x 2796 target=%q", got)
+	}
+	asset.DisplayTarget = "APP_IPHONE_67"
+	if got := appleScreenshotDisplayTargetForSize(asset, 1290, 2796); got != "APP_IPHONE_67" {
+		t.Fatalf("explicit target=%q", got)
+	}
+	if got := appleScreenshotDisplayTargetForSize(asset, 1320, 2868); got != "APP_IPHONE_69" {
+		t.Fatalf("incompatible legacy target was not corrected: %q", got)
+	}
+}
+
 func TestGoogleStoreAssetsValidateRequiredShapes(t *testing.T) {
 	root := t.TempDir()
 	d := &Deployment{ID: 3, EnvironmentID: 4, TargetKind: "android"}

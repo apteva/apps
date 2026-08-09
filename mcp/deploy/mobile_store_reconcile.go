@@ -183,6 +183,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 	verifiedCfg := *cfg
 	verifiedCfg.ObservedJSON = mustJSON(observed)
 	verified := validateStoreDocument(a.dataDir, d, build, &verifiedCfg, doc, strict)
+	appendProviderReadinessFindings(&verified, d, &verifiedCfg)
 	allSelected := len(scopes) == len(storeScopeOrder)
 	status, appliedHash, lastError := "partial", "", ""
 	if len(result.Failed) > 0 {

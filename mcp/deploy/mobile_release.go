@@ -124,6 +124,13 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 			err = storeErr
 		} else if storeCfg != nil {
 			_, err = a.applyStoreConfig(d, b, true)
+			if err == nil {
+				var preflight StorePreflight
+				preflight, err = a.storePreflight(d, b, true)
+				if err == nil && !preflight.Ready {
+					err = fmt.Errorf("store preflight failed with %d error(s)", preflight.Errors)
+				}
+			}
 		} else if platform == "ios" && meta.SubmitForReview {
 			err = errors.New("configure and validate the App Store listing before submitting for review")
 		}
