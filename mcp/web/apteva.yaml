@@ -2,11 +2,15 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.2
+version: 0.2.3
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.3 adds Computer browser-environment profiles to extractors and
+  deterministic scheduled rotation across coherent preset pools, with resolved
+  profile metadata in run output and UI auditing.
 
   v0.2.2 integrates Jobs v0.1.13 deterministic random daily schedules and
   stable occurrence metadata for scheduled extractor runs.
@@ -74,8 +78,8 @@ requires:
     - platform.apps.call
   apps:
     - name: computer
-      version: ">=0.7.63"
-      reason: "Browser session lifecycle, rendered navigation, and screenshots."
+      version: ">=0.7.66"
+      reason: "Browser session lifecycle, rendered navigation, screenshots, and browser environments."
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
     - name: jobs
@@ -133,7 +137,7 @@ provides:
     - name: web_extractor_delete
       description: Delete a definition while preserving historical run snapshots.
     - name: web_extractor_run
-      description: Queue an extractor run and return immediately.
+      description: Queue an extractor run and return immediately, with deterministic scheduled preset-pool selection.
     - name: web_run_get
       description: Get a run with bounded output, immutable definition snapshot, and artifacts.
     - name: web_run_cancel
@@ -141,7 +145,7 @@ provides:
     - name: web_run_retry
       description: Retry an extractor run from its immutable snapshot.
     - name: web_extractor_schedule
-      description: Create or replace a Jobs-owned extractor schedule, including deterministic random daily schedules.
+      description: Create or replace a Jobs-owned extractor schedule, including deterministic random daily schedules and preset-pool rotation.
     - name: web_extractor_schedules
       description: List Web extractor schedules or one schedule's delivery runs.
     - name: web_extractor_unschedule
@@ -190,7 +194,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.2
+    ref: web/v0.2.3
     entry: mcp/web
   port: 8080
   health_check: /health

@@ -129,6 +129,100 @@ func TestExtractorRunExecutesAndStoresBoundedArtifacts(t *testing.T) {
 	}
 }
 
+func TestExtractorForwardsTemplatedComputerEnvironmentAndAuditsPreset(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	definition := map[string]any{
+		"schema_version": 1,
+		"defaults": map[string]any{
+			"start_url": "https://example.com", "country": "FR",
+			"width": 390, "height": 844, "locale": "fr-FR",
+			"languages": []any{"fr-FR", "fr"}, "timezone": "Europe/Paris",
+			"latitude": 48.8566, "longitude": 2.3522, "scale": 3,
+			"mobile": true, "touch": true, "touch_points": 5,
+			"user_agent": "QA Mobile Browser",
+		},
+		"presets": map[string]any{
+			"fr_mobile": map[string]any{"country": "FR"},
+		},
+		"browser": map[string]any{
+			"backend": "browserbase", "proxy_mode": "managed", "proxy_country": "{{country}}",
+			"viewport": map[string]any{"width": "{{width}}", "height": "{{height}}"},
+			"environment": map[string]any{
+				"user_agent": "{{user_agent}}", "locale": "{{locale}}", "languages": "{{languages}}",
+				"timezone": "{{timezone}}", "device_scale_factor": "{{scale}}",
+				"mobile": "{{mobile}}", "touch": "{{touch}}", "max_touch_points": "{{touch_points}}",
+				"geolocation": map[string]any{
+					"latitude": "{{latitude}}", "longitude": "{{longitude}}", "accuracy": 50, "permission": "grant",
+				},
+			},
+		},
+		"allowed_hosts": []any{"example.com"},
+		"limits":        map[string]any{"max_duration_seconds": 60, "step_retries": 0},
+		"steps":         []any{map[string]any{"action": "goto", "url": "{{start_url}}"}},
+		"output_schema": map[string]any{},
+	}
+	createdAny, err := app.toolExtractorSave(ctx, map[string]any{"name": "Environment QA", "definition": definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	runAny, err := app.toolExtractorRun(ctx, map[string]any{"extractor_id": id, "preset": "fr_mobile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := claimExtractorRun(ctx)
+	if err := app.executeExtractorRun(context.Background(), ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+
+	open := plat.lastCall("computer", "browser_open")
+	environment, ok := open["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("environment was not forwarded: %#v", open)
+	}
+	if environment["locale"] != "fr-FR" || environment["timezone"] != "Europe/Paris" || environment["mobile"] != true || environment["touch"] != true {
+		t.Fatalf("environment=%#v", environment)
+	}
+	languages := stringSliceFromAny(environment["languages"])
+	if len(languages) != 2 || languages[0] != "fr-FR" || languages[1] != "fr" {
+		t.Fatalf("languages=%#v", environment["languages"])
+	}
+	location := environment["geolocation"].(map[string]any)
+	if latitude, _ := numericValue(location["latitude"]); latitude != 48.8566 {
+		t.Fatalf("geolocation=%#v", location)
+	}
+
+	run, _ := getWebRun(ctx, runAny.(map[string]any)["run_id"].(int64))
+	out := run["output"].(map[string]any)
+	if out["preset"] != "fr_mobile" {
+		t.Fatalf("preset audit=%#v", out)
+	}
+	browser := out["browser_config"].(map[string]any)
+	if _, ok := browser["environment"].(map[string]any); !ok {
+		t.Fatalf("browser audit=%#v", browser)
+	}
+}
+
+func TestExtractorRejectsInvalidBrowserEnvironment(t *testing.T) {
+	for name, environment := range map[string]map[string]any{
+		"unknown field":                {"canvas_noise": true},
+		"invalid timezone":             {"timezone": "Paris/Definitely-Not-Real"},
+		"touch points without touch":   {"touch": false, "max_touch_points": 5},
+		"touch points with no setting": {"max_touch_points": 5},
+		"invalid latitude":             {"geolocation": map[string]any{"latitude": 91, "longitude": 2.3}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx, app := newTestCtx(t, newFakePlatform())
+			definition := testExtractorDefinition()
+			definition["browser"].(map[string]any)["environment"] = environment
+			if _, err := app.toolExtractorSave(ctx, map[string]any{"name": "Invalid environment", "definition": definition}); err == nil || !strings.Contains(err.Error(), "browser.environment") {
+				t.Fatalf("want environment validation error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestExtractorSelectorClickUsesComputerAndAssertsRedirect(t *testing.T) {
 	plat := newFakePlatform()
 	plat.selectorRedirectURL = "https://digilo.co/register?aff=qa"
@@ -426,6 +520,70 @@ func TestExtractorScheduleForwardsRandomScheduleUnchanged(t *testing.T) {
 	}
 	if call["timezone"] != "Europe/Paris" {
 		t.Fatalf("timezone=%v, want Europe/Paris", call["timezone"])
+	}
+}
+
+func TestExtractorScheduleRotatesPresetPoolDeterministically(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	definition := testExtractorDefinition()
+	definition["presets"].(map[string]any)["fr"] = map[string]any{"country": "FR"}
+	createdAny, _ := app.toolExtractorSave(ctx, map[string]any{"name": "Rotating profiles", "definition": definition})
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	pool := []any{"fr", "de", "fr"}
+	if _, err := app.toolExtractorSchedule(ctx, map[string]any{
+		"extractor_id": id,
+		"preset_pool":  pool,
+		"schedule":     map[string]any{"kind": "random", "period": "day", "runs_per_period": 5, "window_start": "08:00", "window_end": "22:00"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := plat.lastCall("jobs", "jobs_schedule")
+	target := call["target"].(map[string]any)
+	targetInput := target["input"].(map[string]any)
+	forwarded := stringSliceFromAny(targetInput["preset_pool"])
+	if len(forwarded) != 2 || forwarded[0] != "fr" || forwarded[1] != "de" {
+		t.Fatalf("preset_pool=%#v", targetInput["preset_pool"])
+	}
+	scheduleKey := stringFromAny(targetInput["schedule_key"])
+	bucket := "2026-08-10T12:00:00Z"
+	delivery := copyArgs(targetInput)
+	delivery["trigger_bucket"] = bucket
+	firstAny, err := app.toolExtractorRun(ctx, delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAny, err := app.toolExtractorRun(ctx, delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstAny.(map[string]any)["run_id"] != secondAny.(map[string]any)["run_id"] || secondAny.(map[string]any)["duplicate"] != true {
+		t.Fatalf("deliveries were not idempotent: first=%#v second=%#v", firstAny, secondAny)
+	}
+	var inputJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT input_json FROM web_runs WHERE id=?`, firstAny.(map[string]any)["run_id"]).Scan(&inputJSON); err != nil {
+		t.Fatal(err)
+	}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+		t.Fatal(err)
+	}
+	want := selectScheduledPreset([]string{"fr", "de"}, scheduleKey, bucket)
+	if input["preset"] != want {
+		t.Fatalf("selected preset=%v, want %s; input=%#v", input["preset"], want, input)
+	}
+}
+
+func TestExtractorScheduleRejectsInvalidPresetPool(t *testing.T) {
+	ctx, app := newTestCtx(t, newFakePlatform())
+	createdAny, _ := app.toolExtractorSave(ctx, map[string]any{"name": "Products", "definition": testExtractorDefinition()})
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	schedule := map[string]any{"kind": "every", "every_seconds": 3600}
+	if _, err := app.toolExtractorSchedule(ctx, map[string]any{"extractor_id": id, "preset_pool": []any{"missing"}, "schedule": schedule}); err == nil || !strings.Contains(err.Error(), "unknown preset") {
+		t.Fatalf("unknown pool error=%v", err)
+	}
+	if _, err := app.toolExtractorSchedule(ctx, map[string]any{"extractor_id": id, "preset": "de", "preset_pool": []any{"de"}, "schedule": schedule}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("preset/pool error=%v", err)
 	}
 }
 

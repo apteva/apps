@@ -53,16 +53,32 @@ accepts an optional two-letter `proxy_country`; profile routing also accepts
 `proxy_profile` and `proxy_sticky`. Web verifies Computer's resolved mode,
 country, profile, and stickiness before continuing the run.
 
+Use `browser.environment` for an opt-in browser-visible profile. It accepts
+Computer's environment fields: `user_agent`, `locale`, `languages`, `timezone`,
+`geolocation`, `device_scale_factor`, `mobile`, `touch`, and
+`max_touch_points`. Environment values participate in normal extractor
+templating and are passed only when opening the new browser session. Keep
+fingerprint variables together in coherent presets instead of independently
+mixing country, locale, timezone, user agent, viewport, and device properties.
+
 For five randomized runs per Paris day, use a schedule such as
 `{"kind":"random","period":"day","runs_per_period":5,"window_start":"08:00","window_end":"22:00","min_spacing_minutes":60}`
 with `timezone: "Europe/Paris"`. Jobs supplies stable occurrence metadata so
 Web can deduplicate retries without merging separate daily runs.
 
+To rotate coherent profiles, pass `preset_pool` to
+`web_extractor_schedule`, for example `["fr_desktop", "fr_mobile"]`. Web
+selects one preset deterministically from the schedule key and occurrence
+bucket, so a delivery retry keeps the same profile. `preset` and `preset_pool`
+are mutually exclusive. Use separate schedules when exact per-country quotas
+matter, such as one five-run FR pool and one five-run DE pool.
+
 Values resolve in this order: extractor defaults, named preset, schedule
 overrides, explicit run input. A run snapshots the complete definition, so a
 retry remains reproducible after later edits. Complete datasets are stored as
 JSONL and CSV artifacts; `web_run_get` returns bounded preview items and signed
-artifact links.
+artifact links. Extractor run output also records the selected preset and the
+resolved viewport/environment for auditing.
 
 ## Defaults
 

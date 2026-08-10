@@ -54,6 +54,7 @@ type extractorBrowser struct {
 	ProxySticky  string         `json:"proxy_sticky,omitempty"`
 	Persist      bool           `json:"persist,omitempty"`
 	Viewport     map[string]any `json:"viewport,omitempty"`
+	Environment  map[string]any `json:"environment,omitempty"`
 }
 
 type extractorLimits struct {
@@ -135,9 +136,10 @@ func (a *App) extractorTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolExtractorDelete,
 		},
 		{
-			Name: "web_extractor_run", Description: "Queue an extractor run and return immediately. Precedence: defaults, preset, schedule_overrides, explicit input.",
+			Name: "web_extractor_run", Description: "Queue an extractor run and return immediately. Precedence: defaults, selected preset, schedule_overrides, explicit input. Scheduled callers may pass preset_pool for deterministic per-occurrence profile rotation.",
 			InputSchema: schemaObject(map[string]any{
 				"extractor_id": map[string]any{"type": "integer"}, "preset": map[string]any{"type": "string"},
+				"preset_pool":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 				"schedule_overrides": map[string]any{"type": "object"}, "input": map[string]any{"type": "object"},
 				"schedule_key": map[string]any{"type": "string"}, "trigger_bucket": map[string]any{"type": "string"},
 				"_schedule_every_seconds": map[string]any{"type": "integer"},
@@ -156,11 +158,12 @@ func (a *App) extractorTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolWebRunRetry,
 		},
 		{
-			Name: "web_extractor_schedule", Description: "Create a Jobs-owned schedule that queues this extractor. Supports once, every, cron, and deterministic random daily schedules.",
+			Name: "web_extractor_schedule", Description: "Create a Jobs-owned schedule that queues this extractor. Supports once, every, cron, deterministic random daily schedules, and deterministic rotation across a preset_pool.",
 			InputSchema: schemaObject(map[string]any{
 				"extractor_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
 				"preset": map[string]any{"type": "string"}, "schedule": map[string]any{"type": "object"},
-				"timezone": map[string]any{"type": "string"}, "input": map[string]any{"type": "object"},
+				"preset_pool": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"timezone":    map[string]any{"type": "string"}, "input": map[string]any{"type": "object"},
 				"schedule_overrides": map[string]any{"type": "object"}, "max_retries": map[string]any{"type": "integer"},
 				"backoff_seconds": map[string]any{"type": "integer"}, "replace_job_id": map[string]any{"type": "integer"},
 			}, []string{"extractor_id", "schedule"}), Handler: a.toolExtractorSchedule,
@@ -259,6 +262,9 @@ func validateExtractorDefinition(def extractorDefinition) error {
 			}
 		}
 	}
+	if err := validateExtractorEnvironment(def.Browser.Environment); err != nil {
+		return fmt.Errorf("definition.browser.environment: %w", err)
+	}
 	for i, step := range def.Steps {
 		switch step.Action {
 		case "goto":
@@ -320,6 +326,121 @@ func normalizeAllowedHost(raw string) string {
 		return ""
 	}
 	return raw
+}
+
+func validateExtractorEnvironment(environment map[string]any) error {
+	if len(environment) == 0 {
+		return nil
+	}
+	allowed := map[string]bool{
+		"user_agent": true, "locale": true, "languages": true, "timezone": true,
+		"geolocation": true, "device_scale_factor": true, "mobile": true,
+		"touch": true, "max_touch_points": true,
+	}
+	for key := range environment {
+		if !allowed[key] {
+			return fmt.Errorf("unsupported field %q", key)
+		}
+	}
+	for _, key := range []string{"user_agent", "locale", "timezone"} {
+		if value, ok := environment[key]; ok && !extractorTemplateValue(value) {
+			text, ok := value.(string)
+			if !ok || strings.TrimSpace(text) == "" {
+				return fmt.Errorf("%s must be a non-empty string", key)
+			}
+			if key == "timezone" {
+				if _, err := time.LoadLocation(text); err != nil {
+					return fmt.Errorf("timezone must be a valid IANA timezone: %w", err)
+				}
+			}
+		}
+	}
+	if value, ok := environment["languages"]; ok && !extractorTemplateValue(value) {
+		languages := stringSliceFromAny(value)
+		if len(languages) == 0 || len(languages) > 10 {
+			return errors.New("languages must contain between 1 and 10 strings")
+		}
+		for _, language := range languages {
+			if strings.TrimSpace(language) == "" {
+				return errors.New("languages cannot contain an empty value")
+			}
+		}
+	}
+	if value, ok := environment["device_scale_factor"]; ok && !extractorTemplateValue(value) {
+		number, ok := numericValue(value)
+		if !ok || number < 0.1 || number > 10 {
+			return errors.New("device_scale_factor must be between 0.1 and 10")
+		}
+	}
+	for _, key := range []string{"mobile", "touch"} {
+		if value, ok := environment[key]; ok && !extractorTemplateValue(value) {
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("%s must be boolean", key)
+			}
+		}
+	}
+	if value, ok := environment["max_touch_points"]; ok && !extractorTemplateValue(value) {
+		points, ok := numericValue(value)
+		if !ok || points != float64(int(points)) || points < 1 || points > 20 {
+			return errors.New("max_touch_points must be an integer between 1 and 20")
+		}
+		touchValue, exists := environment["touch"]
+		if !exists {
+			return errors.New("max_touch_points requires touch=true")
+		}
+		if !extractorTemplateValue(touchValue) {
+			if touch, concrete := touchValue.(bool); !concrete || !touch {
+				return errors.New("max_touch_points requires touch=true")
+			}
+		}
+	}
+	if value, ok := environment["geolocation"]; ok {
+		location, ok := value.(map[string]any)
+		if !ok {
+			return errors.New("geolocation must be an object")
+		}
+		allowedLocation := map[string]bool{"latitude": true, "longitude": true, "accuracy": true, "permission": true}
+		for key := range location {
+			if !allowedLocation[key] {
+				return fmt.Errorf("geolocation has unsupported field %q", key)
+			}
+		}
+		for _, key := range []string{"latitude", "longitude"} {
+			value, exists := location[key]
+			if !exists {
+				return fmt.Errorf("geolocation.%s is required", key)
+			}
+			if extractorTemplateValue(value) {
+				continue
+			}
+			number, ok := numericValue(value)
+			limit := 90.0
+			if key == "longitude" {
+				limit = 180
+			}
+			if !ok || number < -limit || number > limit {
+				return fmt.Errorf("geolocation.%s must be between %g and %g", key, -limit, limit)
+			}
+		}
+		if value, exists := location["accuracy"]; exists && !extractorTemplateValue(value) {
+			number, ok := numericValue(value)
+			if !ok || number < 0 || number > 100000 {
+				return errors.New("geolocation.accuracy must be between 0 and 100000")
+			}
+		}
+		if value, exists := location["permission"]; exists && !extractorTemplateValue(value) {
+			permission, ok := value.(string)
+			if !ok || (permission != "grant" && permission != "prompt" && permission != "deny") {
+				return errors.New("geolocation.permission must be grant, prompt, or deny")
+			}
+		}
+	}
+	return nil
+}
+
+func extractorTemplateValue(value any) bool {
+	text, ok := value.(string)
+	return ok && strings.Contains(text, "{{")
 }
 
 func (a *App) toolExtractorSave(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -720,10 +841,18 @@ func (a *App) toolExtractorSchedule(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if !rec.Enabled {
 		return nil, errors.New("extractor is disabled")
 	}
-	if preset := stringArg(args, "preset"); preset != "" {
+	preset := strings.TrimSpace(stringArg(args, "preset"))
+	if preset != "" {
 		if _, ok := rec.Definition.Presets[preset]; !ok {
 			return nil, fmt.Errorf("preset %q not found", preset)
 		}
+	}
+	presetPool, err := extractorPresetPool(args["preset_pool"], rec.Definition.Presets)
+	if err != nil {
+		return nil, err
+	}
+	if preset != "" && len(presetPool) > 0 {
+		return nil, errors.New("preset and preset_pool are mutually exclusive")
 	}
 	schedule, ok := args["schedule"].(map[string]any)
 	if !ok {
@@ -735,6 +864,9 @@ func (a *App) toolExtractorSchedule(ctx *sdk.AppCtx, args map[string]any) (any, 
 		if v, exists := args[key]; exists {
 			targetInput[key] = v
 		}
+	}
+	if len(presetPool) > 0 {
+		targetInput["preset_pool"] = presetPool
 	}
 	if strings.EqualFold(stringFromAny(schedule["kind"]), "every") {
 		targetInput["_schedule_every_seconds"] = intFromAny(schedule["every_seconds"])
@@ -762,6 +894,22 @@ func (a *App) toolExtractorSchedule(ctx *sdk.AppCtx, args map[string]any) (any, 
 	out["schedule_key"] = scheduleKey
 	out["extractor"] = map[string]any{"id": rec.ID, "name": rec.Name, "revision": rec.Revision}
 	return out, nil
+}
+
+func extractorPresetPool(raw any, presets map[string]map[string]any) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	pool := dedupeStrings(stringSliceFromAny(raw), 100)
+	if len(pool) == 0 {
+		return nil, errors.New("preset_pool must contain at least one preset name")
+	}
+	for _, preset := range pool {
+		if _, ok := presets[preset]; !ok {
+			return nil, fmt.Errorf("preset_pool contains unknown preset %q", preset)
+		}
+	}
+	return pool, nil
 }
 
 func (a *App) toolExtractorSchedules(ctx *sdk.AppCtx, args map[string]any) (any, error) {
