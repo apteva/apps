@@ -39,6 +39,12 @@ const (
 	// chunk at a time so memory stays flat regardless of file size —
 	// a 5 MB buffer is enough headroom for the storage HTTP client.
 	chunkSize = 5 * 1024 * 1024
+
+	// storageBoundProxyPath is the platform's streaming proxy for the
+	// storage app declared in requires.apps. The proxy authenticates this
+	// Torrent install, validates the binding and project, then replaces the
+	// caller credential with the target Storage install's credential.
+	storageBoundProxyPath = "/api/apps/callback/apps/storage/proxy"
 )
 
 // completionInFlight dedupes overlapping handleCompletion runs for
@@ -290,15 +296,15 @@ func (a *App) markCompletionError(projectID, infohash, msg string) {
 // The relative path inside the torrent is preserved under `root` —
 // a torrent like Movie.X/subs/en.srt becomes {target}/Movie.X/subs/en.srt.
 //
-// Wire (cross-app HTTP, sidecar→sidecar via the platform gateway):
+// Wire (cross-app HTTP via the platform's bound-app streaming proxy):
 //
-//	POST   {gateway}/api/apps/storage/uploads
-//	PUT    {gateway}/api/apps/storage/uploads/{id}/parts/{N}     (×many)
-//	POST   {gateway}/api/apps/storage/uploads/{id}/complete
+//	POST   {gateway}/api/apps/callback/apps/storage/proxy/uploads
+//	PUT    {gateway}/api/apps/callback/apps/storage/proxy/uploads/{id}/parts/{N}     (×many)
+//	POST   {gateway}/api/apps/callback/apps/storage/proxy/uploads/{id}/complete
 //
-// Auth: APTEVA_APP_TOKEN. Project: APTEVA_PROJECT_ID query param so
-// storage's resolveProjectFromRequest is unambiguous even on
-// global-scoped storage installs.
+// Auth: APTEVA_OUTBOUND_TOKEN (falling back to APTEVA_APP_TOKEN for
+// older runtimes). Project: APTEVA_PROJECT_ID query param so the
+// platform selects the correctly bound project-scoped Storage install.
 func (a *App) uploadOneFile(requestCtx context.Context, ctx *sdk.AppCtx, root string, f FileSnapshot) (int64, error) {
 	working := resolveWorkingDir(a.ctx)
 	abs, err := safeChildPath(working, f.Path)
@@ -325,12 +331,15 @@ func (a *App) uploadOneFile(requestCtx context.Context, ctx *sdk.AppCtx, root st
 	contentType := guessContentType(f.Path)
 
 	gateway := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
-	token := os.Getenv("APTEVA_APP_TOKEN")
+	token := strings.TrimSpace(os.Getenv("APTEVA_OUTBOUND_TOKEN"))
+	if token == "" {
+		token = strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN"))
+	}
 	if gateway == "" || token == "" {
-		return 0, errors.New("APTEVA_GATEWAY_URL / APTEVA_APP_TOKEN not set in env")
+		return 0, errors.New("APTEVA_GATEWAY_URL / outbound app token not set in env")
 	}
 	pid := projectScope(ctx)
-	base := gateway + "/api/apps/storage"
+	base := gateway + storageBoundProxyPath
 	q := "?project_id=" + url.QueryEscape(pid)
 
 	httpc := &http.Client{Timeout: 15 * time.Minute}

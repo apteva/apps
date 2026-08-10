@@ -369,10 +369,11 @@ func TestPanelStateContract(t *testing.T) {
 }
 
 // TestChunkedUpload_EndToEnd — exercises uploadOneFile against a
-// stand-in storage HTTP server that mimics the real /uploads
-// protocol. Verifies bytes round-trip exactly, sha256 matches, and
-// the file_id is returned. Rules out a regression to the v0.1.x
-// inline-base64 path that capped at 256 MiB.
+// stand-in platform bound-app proxy that forwards storage's /uploads
+// protocol. Verifies the proxy route, outbound credential, project,
+// exact byte round-trip, sha256, and returned file_id. Rules out both
+// the v0.1.x inline-base64 path and direct cross-app requests using
+// Torrent's credential against Storage's ordinary app route.
 func TestChunkedUpload_EndToEnd(t *testing.T) {
 	// 12 MB synthetic file — forces 3 chunks at the default 5 MB part size.
 	tmp := t.TempDir()
@@ -399,7 +400,23 @@ func TestChunkedUpload_EndToEnd(t *testing.T) {
 	var completeSHA string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/api/apps/storage")
+		const wantProxyPrefix = "/api/apps/callback/apps/storage/proxy"
+		if !strings.HasPrefix(r.URL.Path, wantProxyPrefix+"/") {
+			t.Errorf("request bypassed bound Storage proxy: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "wrong proxy route", http.StatusForbidden)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer torrent-outbound-token" {
+			t.Errorf("Authorization = %q, want outbound token", got)
+			http.Error(w, "wrong credential", http.StatusForbidden)
+			return
+		}
+		if got := r.URL.Query().Get("project_id"); got != "proj-test" {
+			t.Errorf("project_id = %q, want proj-test", got)
+			http.Error(w, "wrong project", http.StatusBadRequest)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, wantProxyPrefix)
 		switch {
 		case path == "/uploads" && r.Method == http.MethodPost:
 			body, _ := io.ReadAll(r.Body)
@@ -428,7 +445,8 @@ func TestChunkedUpload_EndToEnd(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
-	t.Setenv("APTEVA_APP_TOKEN", "dev-1")
+	t.Setenv("APTEVA_APP_TOKEN", "torrent-install-token")
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "torrent-outbound-token")
 	t.Setenv("APTEVA_PROJECT_ID", "proj-test")
 	t.Setenv("APTEVA_DATA_DIR", tmp)
 
