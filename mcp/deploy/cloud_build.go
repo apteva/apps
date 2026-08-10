@@ -27,7 +27,21 @@ const (
 	buildBackendGitHubActions = "github_actions"
 	defaultCloudArtifactName  = "apteva-build"
 	maxCloudArtifactBytes     = int64(2 << 30)
+	cloudBuildPollLease       = 2 * time.Minute
+	cloudBuildPropagationWait = 90 * time.Second
+	cloudBuildMaxPollDelay    = time.Minute
 )
+
+type externalJobUnavailableError struct {
+	Provider string
+	JobID    string
+	Reason   string
+	NotFound bool
+}
+
+func (e *externalJobUnavailableError) Error() string {
+	return fmt.Sprintf("%s job %s is unavailable: %s", e.Provider, e.JobID, e.Reason)
+}
 
 type cloudBuildConfig struct {
 	Owner               string            `json:"owner,omitempty"`
@@ -341,9 +355,14 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 		return a.failBuild(build, "submit "+backendName+": "+err.Error()), nil
 	}
 	fields := map[string]any{
-		"external_job_id":    job.ID,
-		"external_status":    defaultStr(job.Status, "queued"),
-		"external_meta_json": defaultStr(job.MetaJSON, "{}"),
+		"external_job_id":           job.ID,
+		"external_status":           defaultStr(job.Status, "queued"),
+		"external_meta_json":        defaultStr(job.MetaJSON, "{}"),
+		"external_submitted_at":     nowUTC(),
+		"external_poll_attempts":    0,
+		"external_next_poll_at":     startedAt,
+		"external_poll_lease_until": "",
+		"external_last_poll_error":  "",
 	}
 	if job.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = job.SourceSHA
@@ -370,6 +389,19 @@ func (a *App) syncPendingCloudBuilds(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		now := time.Now().UTC()
+		acquired, acquireErr := dbTryAcquireCloudBuildPoll(
+			globalCtx.AppDB(), builds[i].ID, now.Format(time.RFC3339), now.Add(cloudBuildPollLease).Format(time.RFC3339),
+		)
+		if acquireErr != nil {
+			if firstErr == nil {
+				firstErr = acquireErr
+			}
+			continue
+		}
+		if !acquired {
+			continue
+		}
 		if err := a.syncCloudBuild(ctx, &builds[i]); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -390,17 +422,33 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 	}
 	bound, err := cloudIntegrationFor(build.BuildBackend)
 	if err != nil {
-		return err
+		a.scheduleCloudBuildPoll(build, err)
+		return nil
 	}
 	status, err := backend.Inspect(ctx, bound, cfg, build)
 	if err != nil {
 		_ = appendCloudBuildLog(build.LogPath, "status check failed: "+err.Error())
-		return err
+		var unavailable *externalJobUnavailableError
+		if errors.As(err, &unavailable) {
+			return a.handleUnavailableCloudJob(build, unavailable)
+		}
+		a.scheduleCloudBuildPoll(build, err)
+		return nil
 	}
 	if status == nil {
-		return errors.New("cloud backend returned no status")
+		a.scheduleCloudBuildPoll(build, errors.New("cloud backend returned no status"))
+		return nil
 	}
-	fields := map[string]any{"external_status": status.Status}
+	now := nowUTC()
+	fields := map[string]any{
+		"external_status":           status.Status,
+		"external_poll_attempts":    build.ExternalPollAttempts + 1,
+		"external_poll_lease_until": "",
+		"external_last_poll_error":  "",
+	}
+	if build.ExternalVerifiedAt == "" {
+		fields["external_verified_at"] = now
+	}
 	if len(status.ProviderRaw) > 0 {
 		fields["external_meta_json"] = string(status.ProviderRaw)
 	}
@@ -411,13 +459,15 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		_ = appendCloudBuildLog(build.LogPath, "status="+status.Status)
 	}
 	switch status.Status {
-	case "queued", "pending", "requested", "waiting", "in_progress", "building", "running":
+	case "queued", "pending", "requested", "waiting", "initializing", "preparing", "fetching", "testing", "in_progress", "building", "publishing", "finishing", "running":
+		fields["external_next_poll_at"] = nextCloudBuildPoll(build.ExternalPollAttempts + 1)
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
 		return nil
 	case "cancelled", "canceled":
 		fields["status"] = "cancelled"
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build cancelled")
+		fields["external_next_poll_at"] = ""
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
 		dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 		a.removeSourceCapsule(build.ID)
@@ -430,6 +480,7 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 		fields["status"] = "failed"
 		fields["finished_at"] = nowUTC()
 		fields["error"] = defaultStr(status.Error, "cloud build "+status.Status)
+		fields["external_next_poll_at"] = ""
 		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
 		dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 		a.removeSourceCapsule(build.ID)
@@ -441,8 +492,100 @@ func (a *App) syncCloudBuild(ctx context.Context, build *Build) error {
 	case "succeeded", "success", "finished", "completed":
 		return a.finalizeCloudBuild(ctx, backend, bound, cfg, build, status)
 	default:
-		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+		return a.handleUnavailableCloudJob(build, &externalJobUnavailableError{
+			Provider: build.BuildBackend, JobID: build.ExternalJobID,
+			Reason: fmt.Sprintf("provider returned unknown status %q", status.Status),
+		})
+	}
+}
+
+func (a *App) scheduleCloudBuildPoll(build *Build, pollErr error) {
+	attempt := build.ExternalPollAttempts + 1
+	fields := map[string]any{
+		"external_poll_attempts":    attempt,
+		"external_next_poll_at":     nextCloudBuildPoll(attempt),
+		"external_poll_lease_until": "",
+	}
+	if pollErr != nil {
+		fields["external_last_poll_error"] = pollErr.Error()
+	}
+	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, fields)
+}
+
+func nextCloudBuildPoll(attempt int) string {
+	return nextCloudBuildPollTime(attempt).Format(time.RFC3339)
+}
+
+func nextCloudBuildPollTime(attempt int) time.Time {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := 5 * time.Second
+	for i := 1; i < attempt && delay < cloudBuildMaxPollDelay; i++ {
+		delay *= 2
+	}
+	if delay > cloudBuildMaxPollDelay {
+		delay = cloudBuildMaxPollDelay
+	}
+	return time.Now().UTC().Add(delay)
+}
+
+func (a *App) handleUnavailableCloudJob(build *Build, unavailable *externalJobUnavailableError) error {
+	submittedAt, ok := cloudBuildSubmissionTime(build)
+	if ok && time.Since(submittedAt) < cloudBuildPropagationWait {
+		attempt := build.ExternalPollAttempts + 1
+		nextPoll := nextCloudBuildPollTime(attempt)
+		deadline := submittedAt.Add(cloudBuildPropagationWait)
+		if nextPoll.After(deadline) {
+			nextPoll = deadline
+		}
+		_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
+			"external_status":           "propagating",
+			"external_poll_attempts":    attempt,
+			"external_next_poll_at":     nextPoll.UTC().Format(time.RFC3339),
+			"external_poll_lease_until": "",
+			"external_last_poll_error":  unavailable.Error(),
+		})
 		return nil
+	}
+	reason := fmt.Sprintf("%s returned build ID %s, but the job could not be retrieved: %s",
+		providerDisplayName(unavailable.Provider), unavailable.JobID, unavailable.Reason)
+	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
+		"status": "failed", "finished_at": nowUTC(), "error": reason,
+		"external_status":        "provider_job_unavailable",
+		"external_poll_attempts": build.ExternalPollAttempts + 1,
+		"external_next_poll_at":  "", "external_poll_lease_until": "",
+		"external_last_poll_error": unavailable.Error(),
+	})
+	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
+	a.removeSourceCapsule(build.ID)
+	emit("deploy.build.failed", map[string]any{
+		"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
+		"build_id": build.ID, "backend": build.BuildBackend, "error": reason,
+	})
+	return nil
+}
+
+func cloudBuildSubmissionTime(build *Build) (time.Time, bool) {
+	for _, value := range []string{build.ExternalSubmittedAt, build.StartedAt, build.CreatedAt} {
+		value = strings.TrimSpace(value)
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+			if parsed, err := time.Parse(layout, value); err == nil {
+				return parsed.UTC(), true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func providerDisplayName(provider string) string {
+	switch normalizeBuildBackend(provider) {
+	case buildBackendCodemagic:
+		return "Codemagic"
+	case buildBackendGitHubActions:
+		return "GitHub Actions"
+	default:
+		return provider
 	}
 }
 
@@ -496,7 +639,12 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	fields := map[string]any{
 		"status": "succeeded", "finished_at": finished, "duration_ms": duration,
 		"artifact_path": distDir, "artifact_size": size,
-		"external_status": "succeeded",
+		"external_status":        "succeeded",
+		"external_poll_attempts": build.ExternalPollAttempts + 1,
+		"external_next_poll_at":  "", "external_poll_lease_until": "", "external_last_poll_error": "",
+	}
+	if build.ExternalVerifiedAt == "" {
+		fields["external_verified_at"] = finished
 	}
 	if manifestJSON != "" {
 		fields["artifact_manifest_json"] = manifestJSON
@@ -568,6 +716,8 @@ func (a *App) cancelCloudBuild(ctx context.Context, build *Build) (*Build, error
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
 		"status": "cancelled", "external_status": "cancelled",
 		"finished_at": nowUTC(), "error": "cancelled by operator",
+		"external_next_poll_at": "", "external_poll_lease_until": "",
+		"external_last_poll_error": "",
 	})
 	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "failed")
 	a.removeSourceCapsule(build.ID)
@@ -638,16 +788,32 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 func (codemagicBuildBackend) Inspect(_ context.Context, bound *sdk.BoundIntegration, _ cloudBuildConfig, build *Build) (*externalBuildStatus, error) {
 	data, err := executeIntegration(bound, "get_build", map[string]any{"build_id": build.ExternalJobID})
 	if err != nil {
+		var toolErr *integrationToolError
+		if errors.As(err, &toolErr) && toolErr.Status == http.StatusNotFound {
+			return nil, &externalJobUnavailableError{
+				Provider: buildBackendCodemagic, JobID: build.ExternalJobID,
+				Reason: "provider returned HTTP 404 not_found", NotFound: true,
+			}
+		}
 		return nil, err
 	}
-	status := strings.ToLower(firstRecursiveString(data, "status"))
+	payload, err := codemagicBuildPayload(data)
+	if err != nil {
+		return nil, &externalJobUnavailableError{
+			Provider: buildBackendCodemagic, JobID: build.ExternalJobID, Reason: err.Error(),
+		}
+	}
+	status := strings.ToLower(firstRecursiveString(payload, "status"))
 	if status == "" {
-		return nil, errors.New("Codemagic get_build returned no status")
+		return nil, &externalJobUnavailableError{
+			Provider: buildBackendCodemagic, JobID: build.ExternalJobID,
+			Reason: "get_build returned a JSON object with no status",
+		}
 	}
 	if status == "finished" {
 		status = "succeeded"
 	}
-	errorText := topLevelProviderError(data)
+	errorText := topLevelProviderError(payload)
 	if isFailedCloudStatus(status) {
 		if actions, actionErr := executeIntegration(bound, "list_build_actions", map[string]any{
 			"build_id": build.ExternalJobID, "page_size": 100,
@@ -657,10 +823,33 @@ func (codemagicBuildBackend) Inspect(_ context.Context, bound *sdk.BoundIntegrat
 		errorText = defaultStr(errorText, "Codemagic build failed")
 	}
 	return &externalBuildStatus{
-		Status: status, ProviderRaw: append(json.RawMessage(nil), data...),
-		SourceSHA: firstRecursiveString(data, "commitHash", "commit_hash", "head_sha"),
+		Status: status, ProviderRaw: append(json.RawMessage(nil), payload...),
+		SourceSHA: firstRecursiveString(payload, "commitHash", "commit_hash", "head_sha"),
 		Error:     errorText,
 	}, nil
+}
+
+func codemagicBuildPayload(raw json.RawMessage) (json.RawMessage, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, fmt.Errorf("get_build returned malformed JSON: %w", err)
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, errors.New("get_build returned a non-object response")
+	}
+	if nested, exists := object["data"]; exists {
+		nestedObject, ok := nested.(map[string]any)
+		if !ok {
+			return nil, errors.New("get_build returned a non-object data payload")
+		}
+		object = nestedObject
+	}
+	payload, err := json.Marshal(object)
+	if err != nil {
+		return nil, fmt.Errorf("encode get_build payload: %w", err)
+	}
+	return payload, nil
 }
 
 func topLevelProviderError(raw json.RawMessage) string {
@@ -755,6 +944,10 @@ func uniqueCloudStrings(values []string) []string {
 
 func (codemagicBuildBackend) Cancel(_ context.Context, bound *sdk.BoundIntegration, _ cloudBuildConfig, build *Build) error {
 	_, err := executeIntegration(bound, "cancel_build", map[string]any{"build_id": build.ExternalJobID})
+	var toolErr *integrationToolError
+	if errors.As(err, &toolErr) && toolErr.Status == http.StatusNotFound {
+		return nil
+	}
 	return err
 }
 

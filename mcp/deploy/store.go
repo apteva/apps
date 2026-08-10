@@ -85,6 +85,12 @@ type Build struct {
 	ExternalJobID        string `json:"external_job_id,omitempty"`
 	ExternalStatus       string `json:"external_status,omitempty"`
 	ExternalMetaJSON     string `json:"external_meta_json,omitempty"`
+	ExternalSubmittedAt  string `json:"external_submitted_at,omitempty"`
+	ExternalVerifiedAt   string `json:"external_verified_at,omitempty"`
+	ExternalPollAttempts int    `json:"external_poll_attempts,omitempty"`
+	ExternalNextPollAt   string `json:"external_next_poll_at,omitempty"`
+	ExternalPollLease    string `json:"-"`
+	ExternalLastPollErr  string `json:"external_last_poll_error,omitempty"`
 	ReleaseRequested     bool   `json:"release_requested,omitempty"`
 	ReleaseOptionsJSON   string `json:"release_options_json,omitempty"`
 	LogPath              string `json:"log_path"`
@@ -647,7 +653,9 @@ func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 		"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code",
 		"artifact_path", "artifact_size", "artifact_manifest_json", "log_path", "error", "framework",
 		"build_backend", "build_backend_config_json", "target_config_json", "external_job_id", "external_status",
-		"external_meta_json", "release_requested", "release_options_json",
+		"external_meta_json", "external_submitted_at", "external_verified_at", "external_poll_attempts",
+		"external_next_poll_at", "external_poll_lease_until", "external_last_poll_error",
+		"release_requested", "release_options_json",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -718,7 +726,8 @@ func dbListPendingCloudBuilds(db *sql.DB, limit int) ([]Build, error) {
 	rows, err := db.Query(`SELECT `+buildColumns+`
 		FROM builds
 		WHERE build_backend != 'local' AND status IN ('pending','running')
-		ORDER BY id LIMIT ?`, limit)
+		  AND (external_next_poll_at = '' OR external_next_poll_at <= ?)
+		ORDER BY id LIMIT ?`, nowUTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -734,11 +743,29 @@ func dbListPendingCloudBuilds(db *sql.DB, limit int) ([]Build, error) {
 	return out, rows.Err()
 }
 
+func dbTryAcquireCloudBuildPoll(db *sql.DB, id int64, now, leaseUntil string) (bool, error) {
+	res, err := db.Exec(`UPDATE builds
+		SET external_poll_lease_until = ?
+		WHERE id = ?
+		  AND build_backend != 'local'
+		  AND status IN ('pending','running')
+		  AND (external_next_poll_at = '' OR external_next_poll_at <= ?)
+		  AND (external_poll_lease_until = '' OR external_poll_lease_until <= ?)`,
+		leaseUntil, id, now, now)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
 const buildColumns = `id, deployment_id, COALESCE(environment_id,0), source_sha, framework, build_cmd,
 		build_backend, build_backend_config_json, target_config_json, status,
 		COALESCE(started_at,''), COALESCE(finished_at,''), duration_ms, exit_code,
 		artifact_path, artifact_size, artifact_manifest_json,
 		external_job_id, external_status, external_meta_json,
+		external_submitted_at, external_verified_at, external_poll_attempts,
+		external_next_poll_at, external_poll_lease_until, external_last_poll_error,
 		release_requested, release_options_json, log_path, error, created_at`
 
 func scanBuild(r rowScanner) (*Build, error) {
@@ -749,6 +776,8 @@ func scanBuild(r rowScanner) (*Build, error) {
 		&b.StartedAt, &b.FinishedAt, &b.DurationMs, &b.ExitCode,
 		&b.ArtifactPath, &b.ArtifactSize, &b.ArtifactManifestJSON,
 		&b.ExternalJobID, &b.ExternalStatus, &b.ExternalMetaJSON,
+		&b.ExternalSubmittedAt, &b.ExternalVerifiedAt, &b.ExternalPollAttempts,
+		&b.ExternalNextPollAt, &b.ExternalPollLease, &b.ExternalLastPollErr,
 		&b.ReleaseRequested, &b.ReleaseOptionsJSON, &b.LogPath, &b.Error, &b.CreatedAt,
 	); err != nil {
 		return nil, err
