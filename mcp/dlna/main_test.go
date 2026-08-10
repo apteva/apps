@@ -13,10 +13,11 @@ import (
 
 type dlnaPlatformStub struct {
 	tk.BasePlatformClient
-	mu       sync.Mutex
-	files    map[int64]storageFile
-	calls    []string
-	lastArgs map[string]any
+	mu           sync.Mutex
+	files        map[int64]storageFile
+	wrappedFiles bool
+	calls        []string
+	lastArgs     map[string]any
 }
 
 func (p *dlnaPlatformStub) CallAppResult(app, tool string, args map[string]any, out any) error {
@@ -31,7 +32,12 @@ func (p *dlnaPlatformStub) CallAppResult(app, tool string, args map[string]any, 
 	var payload any
 	switch app + ":" + tool {
 	case "storage:files_get":
-		payload = p.files[toInt64(args["id"])]
+		file, found := p.files[toInt64(args["id"])]
+		if p.wrappedFiles {
+			payload = map[string]any{"found": found, "file": file}
+		} else {
+			payload = file
+		}
 	case "storage:files_get_url":
 		payload = map[string]any{"url": "https://storage.example/media.mp4?sig=test&exp=999"}
 	case "storage:files_list_folders":
@@ -67,7 +73,7 @@ func newDLNATestApp(t *testing.T, platform *dlnaPlatformStub) *App {
 func TestManifestAndToolSurfaceMatch(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "dlna" || manifest.Version != "0.2.1" {
+	if manifest.Name != "dlna" || manifest.Version != "0.2.2" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {
@@ -184,6 +190,33 @@ func TestOpenMediaEndpointOnlyServesPublishedFiles(t *testing.T) {
 	platform.mu.Unlock()
 	if project != "project-a" {
 		t.Fatalf("dependency call project=%v, want project-a", project)
+	}
+}
+
+func TestOpenMediaEndpointAcceptsWrappedStorageFileResponse(t *testing.T) {
+	platform := &dlnaPlatformStub{
+		wrappedFiles: true,
+		files: map[int64]storageFile{
+			8416: {
+				ID:          8416,
+				Name:        "episode.mkv",
+				Folder:      "/downloads/",
+				ContentType: "video/x-matroska",
+			},
+		},
+	}
+	app := newDLNATestApp(t, platform)
+	if _, err := addPublishedFolder(app.ctx.AppDB(), app.projectID, "/downloads", "Downloads"); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	app.handleMediaRedirect(recorder, httptest.NewRequest(http.MethodGet, "/media?id=8416", nil))
+	if recorder.Code != http.StatusFound {
+		t.Fatalf("wrapped files_get response status=%d, want 302", recorder.Code)
+	}
+	if location := recorder.Header().Get("Location"); !strings.Contains(location, "sig=test") {
+		t.Fatalf("missing signed redirect: %q", location)
 	}
 }
 

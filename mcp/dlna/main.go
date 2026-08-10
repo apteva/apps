@@ -349,8 +349,14 @@ func (a *App) handleMediaRedirect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	file, err := a.storageGetFile(r.Context(), fileID)
-	if err != nil || file == nil || !a.isFilePublished(*file) {
+	if err != nil {
+		a.ctx.Logger().Warn("dlna media lookup failed", "file_id", fileID, "client_ip", clientIP(r), "err", err.Error())
+		http.NotFound(w, r)
+		return
+	}
+	if file == nil || !a.isFilePublished(*file) {
 		// Do not reveal whether an unpublished storage ID exists.
+		a.ctx.Logger().Warn("dlna media file unavailable", "file_id", fileID, "client_ip", clientIP(r))
 		http.NotFound(w, r)
 		return
 	}
@@ -1196,7 +1202,8 @@ type storageSubfolder struct {
 //
 //   files_list_folders → {folders: ["a","b"], count, parent}   (names only)
 //   files_list         → {files: [{id, name, …}, …], count, …}
-//   files_get          → {id, name, …}                         (bare object — historical)
+//   files_get          → {found: bool, file: {id, name, …}}    (current)
+//                      or {id, name, …}                         (legacy)
 //
 // All cross-app calls below go through PlatformAPI.CallAppResult
 // (added in app-sdk v0.1.8) which strips the JSON-RPC envelope and
@@ -1238,11 +1245,38 @@ func (a *App) storageListFiles(ctx context.Context, folder string, recursive boo
 }
 
 func (a *App) storageGetFile(ctx context.Context, id int64) (*storageFile, error) {
-	var f storageFile
-	if err := a.callApp("storage", "files_get", map[string]any{"id": id}, &f); err != nil {
+	var payload json.RawMessage
+	if err := a.callApp("storage", "files_get", map[string]any{"id": id}, &payload); err != nil {
 		return nil, err
 	}
-	return &f, nil
+	var wrapped struct {
+		Found *bool        `json:"found"`
+		File  *storageFile `json:"file"`
+	}
+	if err := json.Unmarshal(payload, &wrapped); err != nil {
+		return nil, fmt.Errorf("decode storage files_get response: %w", err)
+	}
+	if wrapped.Found != nil || wrapped.File != nil {
+		if wrapped.Found != nil && !*wrapped.Found {
+			return nil, nil
+		}
+		if wrapped.File == nil || wrapped.File.ID <= 0 {
+			return nil, errors.New("storage files_get returned found without a valid file")
+		}
+		return wrapped.File, nil
+	}
+
+	// Storage versions before v0.10 returned the file as a bare object.
+	// Keep accepting that shape so a DLNA update does not force a lockstep
+	// storage upgrade on existing installations.
+	var legacy storageFile
+	if err := json.Unmarshal(payload, &legacy); err != nil {
+		return nil, fmt.Errorf("decode legacy storage files_get response: %w", err)
+	}
+	if legacy.ID <= 0 {
+		return nil, errors.New("storage files_get returned an unrecognized response")
+	}
+	return &legacy, nil
 }
 
 // storageGetURL mints the short-lived signed path used by the DLNA
