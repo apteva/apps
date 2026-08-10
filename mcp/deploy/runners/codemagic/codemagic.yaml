@@ -109,7 +109,8 @@ workflows:
           elif [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
             test -n "${APTEVA_PACKAGE_NAME:-}"
             chmod +x ./gradlew
-            task=":${APTEVA_MODULE}:bundle${APTEVA_VARIANT^}"
+            variant_task="$(printf '%s' "$APTEVA_VARIANT" | awk '{ print toupper(substr($0, 1, 1)) substr($0, 2) }')"
+            task=":${APTEVA_MODULE}:bundle${variant_task}"
             args=("$task" --console=plain --no-daemon)
             if [[ -n "${APTEVA_VERSION_CODE:-}" || -n "${APTEVA_VERSION_NAME:-}" ]]; then
               cat > "$CM_BUILD_DIR/apteva-mobile-version.gradle" <<'GRADLE'

@@ -38,4 +38,15 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 	if strings.Contains(text, "shlex.quote") {
 		t.Fatal("Codemagic CM_ENV values must not contain shell quote literals")
 	}
+	if strings.Contains(text, "${APTEVA_VARIANT^}") {
+		t.Fatal("Codemagic runner must remain compatible with macOS Bash 3")
+	}
+	for _, required := range []string{
+		`variant_task="$(printf '%s' "$APTEVA_VARIANT" | awk`,
+		`task=":${APTEVA_MODULE}:bundle${variant_task}"`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("Codemagic Android task construction is missing %q", required)
+		}
+	}
 }
