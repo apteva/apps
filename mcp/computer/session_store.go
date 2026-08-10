@@ -2,36 +2,40 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 )
 
 type ComputerSession struct {
-	ID                  string  `json:"session_id"`
-	Backend             string  `json:"backend"`
-	BackendSessionID    string  `json:"backend_session_id,omitempty"`
-	AppContextID        string  `json:"app_context_id,omitempty"`
-	ContextName         string  `json:"context_name,omitempty"`
-	InitialURL          string  `json:"initial_url,omitempty"`
-	CurrentURL          string  `json:"current_url,omitempty"`
-	Width               int     `json:"width,omitempty"`
-	Height              int     `json:"height,omitempty"`
-	Status              string  `json:"status"`
-	CloseReason         string  `json:"close_reason,omitempty"`
-	RecordingStatus     string  `json:"recording_status"`
-	OpenedAt            string  `json:"opened_at"`
-	ClosedAt            *string `json:"closed_at,omitempty"`
-	UpdatedAt           string  `json:"updated_at"`
-	FinalScreenshot     []byte  `json:"-"`
-	FinalScreenshotMIME string  `json:"final_screenshot_mime,omitempty"`
-	ProxyMode           string  `json:"proxy_mode,omitempty"`
-	ProxyProvider       string  `json:"proxy_provider,omitempty"`
-	ProxyProfileID      string  `json:"proxy_profile_id,omitempty"`
-	ProxyProfileName    string  `json:"proxy_profile_name,omitempty"`
-	ProxyCountry        string  `json:"proxy_country,omitempty"`
-	ProxyStickyScope    string  `json:"proxy_sticky_scope,omitempty"`
+	ID                  string                      `json:"session_id"`
+	Backend             string                      `json:"backend"`
+	BackendSessionID    string                      `json:"backend_session_id,omitempty"`
+	AppContextID        string                      `json:"app_context_id,omitempty"`
+	ContextName         string                      `json:"context_name,omitempty"`
+	InitialURL          string                      `json:"initial_url,omitempty"`
+	CurrentURL          string                      `json:"current_url,omitempty"`
+	Width               int                         `json:"width,omitempty"`
+	Height              int                         `json:"height,omitempty"`
+	Status              string                      `json:"status"`
+	CloseReason         string                      `json:"close_reason,omitempty"`
+	RecordingStatus     string                      `json:"recording_status"`
+	OpenedAt            string                      `json:"opened_at"`
+	ClosedAt            *string                     `json:"closed_at,omitempty"`
+	UpdatedAt           string                      `json:"updated_at"`
+	FinalScreenshot     []byte                      `json:"-"`
+	FinalScreenshotMIME string                      `json:"final_screenshot_mime,omitempty"`
+	ProxyMode           string                      `json:"proxy_mode,omitempty"`
+	ProxyProvider       string                      `json:"proxy_provider,omitempty"`
+	ProxyProfileID      string                      `json:"proxy_profile_id,omitempty"`
+	ProxyProfileName    string                      `json:"proxy_profile_name,omitempty"`
+	ProxyCountry        string                      `json:"proxy_country,omitempty"`
+	ProxyStickyScope    string                      `json:"proxy_sticky_scope,omitempty"`
+	Environment         backends.EnvironmentOptions `json:"environment,omitempty"`
 }
 
 type NavigationStep struct {
@@ -50,8 +54,9 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			initial_url, current_url, width, height, status, close_reason,
 			recording_status, opened_at, closed_at, updated_at,
 			final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
-			proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
+			environment_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			backend=excluded.backend,
 			backend_session_id=excluded.backend_session_id,
@@ -73,6 +78,7 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			proxy_profile_name=excluded.proxy_profile_name,
 			proxy_country=excluded.proxy_country,
 			proxy_sticky_scope=excluded.proxy_sticky_scope,
+			environment_json=excluded.environment_json,
 			final_screenshot=COALESCE(excluded.final_screenshot, computer_sessions.final_screenshot),
 			final_screenshot_mime=CASE
 				WHEN excluded.final_screenshot IS NOT NULL THEN excluded.final_screenshot_mime
@@ -83,6 +89,7 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 		nullableText(row.CloseReason), row.RecordingStatus, row.OpenedAt, row.ClosedAt, row.UpdatedAt,
 		nullableBytes(row.FinalScreenshot), row.FinalScreenshotMIME, row.ProxyMode, row.ProxyProvider,
 		row.ProxyProfileID, row.ProxyProfileName, row.ProxyCountry, row.ProxyStickyScope,
+		encodeEnvironment(row.Environment),
 	)
 	if err != nil {
 		return fmt.Errorf("persist computer session %s: %w", row.ID, err)
@@ -99,7 +106,8 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at,
 		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
-		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
+		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
+		       environment_json
 		FROM computer_sessions WHERE id=?`, id))
 }
 
@@ -115,7 +123,8 @@ func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at,
 		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
-		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope
+		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
+		       environment_json
 		FROM computer_sessions
 		ORDER BY opened_at DESC
 		LIMIT ?`, limit)
@@ -141,7 +150,7 @@ type computerSessionScanner interface {
 
 func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, error) {
 	row := &ComputerSession{}
-	var appContextID, contextName, initialURL, currentURL, closeReason sql.NullString
+	var appContextID, contextName, initialURL, currentURL, closeReason, environmentJSON sql.NullString
 	var closedAt sql.NullString
 	err := scanner.Scan(
 		&row.ID, &row.Backend, &row.BackendSessionID, &appContextID, &contextName,
@@ -149,7 +158,7 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		&row.RecordingStatus, &row.OpenedAt, &closedAt, &row.UpdatedAt,
 		&row.FinalScreenshot, &row.FinalScreenshotMIME,
 		&row.ProxyMode, &row.ProxyProvider, &row.ProxyProfileID, &row.ProxyProfileName,
-		&row.ProxyCountry, &row.ProxyStickyScope,
+		&row.ProxyCountry, &row.ProxyStickyScope, &environmentJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -163,7 +172,23 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		value := closedAt.String
 		row.ClosedAt = &value
 	}
+	if environmentJSON.Valid && environmentJSON.String != "" {
+		if err := json.Unmarshal([]byte(environmentJSON.String), &row.Environment); err != nil {
+			return nil, fmt.Errorf("decode computer session environment: %w", err)
+		}
+	}
 	return row, nil
+}
+
+func encodeEnvironment(value backends.EnvironmentOptions) string {
+	if value.IsEmpty() {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func dbAppendNavigation(db *sql.DB, sessionID, rawURL, title string, visitedAt time.Time) error {

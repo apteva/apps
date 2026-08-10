@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.65
+version: 0.7.66
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.65 stabilizes
-  selector-targeted real mouse clicks on pages with smooth scrolling while
-  preserving agent label behavior.
+  Watch, steer, and replay hosted browser sessions. v0.7.66 adds opt-in browser
+  identity and device environments for newly-created sessions while preserving
+  existing agent defaults when omitted.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -53,7 +53,10 @@ provides:
         its tabs. Args: action, session_id?, tab_id?, backend?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
         proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?,
-        proxy_sticky?, viewport?, presentation_mode?. Use
+        proxy_sticky?, viewport?, environment?, presentation_mode?. environment
+        is opt-in for newly-created sessions and can set user agent,
+        locale/languages, timezone, geolocation, device scale, mobile, and
+        touch. Omit it to preserve normal agent defaults. Use
         presentation_mode=demo for a visible cursor, click feedback, human-paced
         typing, non-interactive cues for structured control changes, and longer
         holds in user-facing walkthroughs; fast is the default and preserves
@@ -168,9 +171,11 @@ provides:
         credentials.
     - name: browser_open
       description: |
-        Compatibility alias for browser_session(action=open). Browserbase
-        honors timeout as max session lifetime. Pass presentation_mode=demo
-        for visible, human-paced actions in live views and recordings.
+        Compatibility alias for browser_session(action=open). Supports the
+        same optional environment object for newly-created sessions; omit it
+        to preserve agent defaults. Browserbase honors timeout as max session
+        lifetime. Pass presentation_mode=demo for visible, human-paced actions
+        in live views and recordings.
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,

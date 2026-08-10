@@ -20,6 +20,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
@@ -91,6 +92,7 @@ type Computer struct {
 	cancel      context.CancelFunc
 	allocCancel context.CancelFunc
 	http        *http.Client
+	environment computer.EnvironmentOptions
 
 	// SoM wiring — same as local/browserbase/steel.
 	labelMu    sync.RWMutex
@@ -170,7 +172,7 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	// session create — the API rejects requests missing initial_url /
 	// timeout / metadata even though they're nominally optional.
 	initialURL := c.opts.InitialURL
-	if o.URL != "" {
+	if o.URL != "" && o.Environment.IsEmpty() {
 		// If the agent gave us a target URL, seed it server-side so the
 		// session lands ready instead of about:blank.
 		initialURL = o.URL
@@ -349,11 +351,18 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	if o.SessionID != "" && o.ContextID != "" {
 		return fmt.Errorf("browserengine: SessionID and ContextID are mutually exclusive")
 	}
+	if o.SessionID != "" && !o.Environment.IsEmpty() {
+		return fmt.Errorf("browserengine: environment settings cannot be applied while attaching to an existing session")
+	}
 	// Fast path: requested binding is what we already have.
 	if c.sessionID != "" {
 		sameSession := o.SessionID != "" && o.SessionID == c.sessionID
 		sameContext := o.SessionID == "" && o.ContextID != "" && o.ContextID == c.contextID
 		if sameSession || sameContext {
+			c.environment = o.Environment
+			if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+				return fmt.Errorf("browserengine environment: %w", err)
+			}
 			if o.URL != "" {
 				return c.navigate(o.URL)
 			}
@@ -387,6 +396,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	}
 	if err := c.establishCDP(connectURL, o.SessionID != ""); err != nil {
 		return fmt.Errorf("browserengine: connect: %w", err)
+	}
+	c.environment = o.Environment
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("browserengine environment: %w", err)
 	}
 	proxyDesc := "off"
 	if c.activeProxy != nil && c.activeProxy.Enabled {
@@ -574,6 +587,9 @@ func (c *Computer) SwitchTab(tabID string) error {
 	}
 	c.ctx = ctx
 	c.cancel = cancel
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("reapply browser environment: %w", err)
+	}
 	return nil
 }
 

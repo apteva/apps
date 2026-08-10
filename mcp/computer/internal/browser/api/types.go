@@ -316,6 +316,43 @@ type OpenOptions struct {
 	// Browserbase, Steel, and local Chrome honor it; Browser Engine and
 	// service backends reject it until their APIs gain an upstream hook.
 	ExternalProxy *ExternalProxy
+
+	// Environment contains optional browser-visible identity and emulation
+	// settings for a newly-created session. The zero value is intentionally a
+	// no-op so existing agent calls preserve the backend's current defaults.
+	// Backends must reject applying it while attaching to an existing provider
+	// session because that would mutate an already-established browser identity.
+	Environment EnvironmentOptions
+}
+
+// EnvironmentOptions is a provider-neutral, opt-in browser environment.
+// Pointer scalar fields distinguish an explicitly requested false/zero value
+// from an omitted setting. Backends apply these settings before the first
+// requested URL is loaded and reapply them when switching targets.
+type EnvironmentOptions struct {
+	UserAgent         string              `json:"user_agent,omitempty"`
+	Locale            string              `json:"locale,omitempty"`
+	Languages         []string            `json:"languages,omitempty"`
+	Timezone          string              `json:"timezone,omitempty"`
+	Geolocation       *GeolocationOptions `json:"geolocation,omitempty"`
+	DeviceScaleFactor *float64            `json:"device_scale_factor,omitempty"`
+	Mobile            *bool               `json:"mobile,omitempty"`
+	Touch             *bool               `json:"touch,omitempty"`
+	MaxTouchPoints    *int                `json:"max_touch_points,omitempty"`
+}
+
+// IsEmpty reports whether applying the environment would be a no-op.
+func (o EnvironmentOptions) IsEmpty() bool {
+	return o.UserAgent == "" && o.Locale == "" && len(o.Languages) == 0 &&
+		o.Timezone == "" && o.Geolocation == nil && o.DeviceScaleFactor == nil &&
+		o.Mobile == nil && o.Touch == nil && o.MaxTouchPoints == nil
+}
+
+type GeolocationOptions struct {
+	Latitude   *float64 `json:"latitude"`
+	Longitude  *float64 `json:"longitude"`
+	Accuracy   *float64 `json:"accuracy,omitempty"`
+	Permission string   `json:"permission,omitempty"`
 }
 
 // ExternalProxy contains the minimum provider-neutral connection material

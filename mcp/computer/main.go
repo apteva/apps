@@ -37,6 +37,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -53,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.65
+version: 0.7.66
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.65 stabilizes
-  selector-targeted real mouse clicks on pages with smooth scrolling while
-  preserving agent label behavior.
+  Watch, steer, and replay hosted browser sessions. v0.7.66 adds opt-in browser
+  identity and device environments for newly-created sessions while preserving
+  existing agent defaults when omitted.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -90,7 +91,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, presentation_mode?. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode?. environment is opt-in for a newly-created session and can set user agent, locale/languages, timezone, geolocation, device scale, mobile, and touch; omit it to preserve normal agent defaults. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
     - name: computer_context_create
@@ -106,7 +107,7 @@ provides:
     - name: computer_proxy_profile_list
       description: "List safe proxy profiles available for agent-selected browser sessions. Returns profile ids, names, providers, countries, protocols, and sticky policies; never credentials or proxy URLs."
     - name: browser_open
-      description: "Compatibility alias for browser_session(action=open). Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
+      description: "Compatibility alias for browser_session(action=open). Supports the same optional environment object for newly-created sessions; omit it to preserve agent defaults. Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
     - name: browser_extract
@@ -305,6 +306,7 @@ type session struct {
 	persist          bool
 	timeout          int
 	proxy            SessionProxyState
+	environment      backends.EnvironmentOptions
 	openedAt         time.Time
 	lastUsed         time.Time
 }
@@ -530,7 +532,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_session",
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
 				"Open args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, timeout?, proxy?, proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, presentation_mode? (fast|demo, default fast). " +
+				"context_name?, auto_create_context?, timeout?, proxy?, proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode? (fast|demo, default fast). " +
+				"environment is opt-in for new sessions and sets browser-visible identity/emulation; omit it to preserve normal agent defaults. " +
 				"Use presentation_mode=demo for visible cursor/click feedback, human-paced typing, non-interactive structured-control cues, and longer holds in user-facing walkthroughs. " +
 				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"session_id is the app-owned live br_* handle for status/close/computer_use and cannot reopen a closed session. " +
@@ -564,6 +567,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"proxy_profile":       map[string]any{"type": "string", "description": "Configured proxy profile id or unique name. Use computer_proxy_profile_list to discover safe choices."},
 				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
 				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "External profile identity lifetime. context requires an app-managed browser context."},
+				"environment":         sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -681,6 +685,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
 				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?, presentation_mode? (fast|demo, default fast). Use demo for visible, human-paced actions and non-interactive structured-control cues in live views and recordings. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
+				"Pass environment? only when a new session needs a specific user agent, locale/languages, timezone, geolocation, device scale, mobile, or touch profile; omit it to preserve agent defaults. " +
 				"Browserbase honors timeout as max session lifetime. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
@@ -702,6 +707,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"proxy_profile":       map[string]any{"type": "string"},
 				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
 				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}},
+				"environment":         sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -1278,6 +1284,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if err != nil {
 		return nil, err
 	}
+	environmentOptions, err := browserenvironment.Parse(args["environment"], stringArg(args, "user_agent"))
+	if err != nil {
+		return nil, err
+	}
 
 	width, height := 0, 0
 	if vp, ok := args["viewport"].(map[string]any); ok {
@@ -1304,8 +1314,14 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if resume && requestedBackendSessionID == "" {
 		return nil, fmt.Errorf("backend_session_id required for provider attach; to continue saved browser state, call browser_session(action=\"open\", context_id=...) or context_name=...")
 	}
+	if requestedBackendSessionID != "" && !environmentOptions.IsEmpty() {
+		return nil, fmt.Errorf("environment settings are only supported when creating a new browser session")
+	}
+	if backend == "service" && !environmentOptions.IsEmpty() {
+		return nil, fmt.Errorf("backend %q does not support session environment settings", backend)
+	}
 
-	cfg := backendConfig(ctx, args, backend, width, height)
+	cfg := backendConfig(ctx, args, backend, width, height, environmentOptions)
 	if usingProductionBackendFactory() {
 		if err := validateBackendConfigured(cfg); err != nil {
 			return nil, err
@@ -1329,6 +1345,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		Proxy:         proxyPolicy.Managed,
 		ProxyCountry:  proxyPolicy.ManagedCountry,
 		ExternalProxy: proxyPolicy.External,
+		Environment:   environmentOptions,
 	}
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
@@ -1344,7 +1361,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 			return nil, fmt.Errorf("OpenSession: %w", err)
 		}
 	} else {
-		if openOpts.ContextID != "" || openOpts.SessionID != "" || openOpts.Proxy != nil {
+		if openOpts.ContextID != "" || openOpts.SessionID != "" || openOpts.Proxy != nil || !openOpts.Environment.IsEmpty() {
 			_ = comp.Close()
 			return nil, fmt.Errorf("backend %q does not support context_id/session_id/proxy", backend)
 		}
@@ -1369,6 +1386,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		persist:          rc.Persist,
 		timeout:          intArg(args, "timeout"),
 		proxy:            proxyPolicy.State,
+		environment:      environmentOptions,
 		openedAt:         now,
 		lastUsed:         now,
 	}
@@ -1442,32 +1460,33 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID          string             `json:"session_id"`
-	BackendSessionID   string             `json:"backend_session_id,omitempty"`
-	Backend            string             `json:"backend"`
-	PresentationMode   string             `json:"presentation_mode,omitempty"`
-	Status             string             `json:"status"`
-	RecordingSupported bool               `json:"recording_supported"`
-	RecordingStatus    string             `json:"recording_status"`
-	ContextID          string             `json:"context_id,omitempty"`
-	AppContextID       string             `json:"app_context_id,omitempty"`
-	ContextName        string             `json:"context_name,omitempty"`
-	Persist            bool               `json:"persist"`
-	TimeoutSeconds     int                `json:"timeout_seconds,omitempty"`
-	ProviderExpiresAt  string             `json:"provider_expires_at,omitempty"`
-	CurrentURL         string             `json:"current_url"`
-	DebugURL           string             `json:"debug_url,omitempty"`
-	StreamURL          string             `json:"stream_url,omitempty"`
-	ActiveTabID        string             `json:"active_tab_id,omitempty"`
-	Tabs               []backends.TabInfo `json:"tabs,omitempty"`
-	TabCount           int                `json:"tab_count,omitempty"`
-	Width              int                `json:"width"`
-	Height             int                `json:"height"`
-	OpenedAt           string             `json:"opened_at"`
-	LastUsedAt         string             `json:"last_used_at"`
-	ClosedAt           string             `json:"closed_at,omitempty"`
-	CloseReason        string             `json:"close_reason,omitempty"`
-	Proxy              SessionProxyState  `json:"proxy"`
+	SessionID          string                       `json:"session_id"`
+	BackendSessionID   string                       `json:"backend_session_id,omitempty"`
+	Backend            string                       `json:"backend"`
+	PresentationMode   string                       `json:"presentation_mode,omitempty"`
+	Status             string                       `json:"status"`
+	RecordingSupported bool                         `json:"recording_supported"`
+	RecordingStatus    string                       `json:"recording_status"`
+	ContextID          string                       `json:"context_id,omitempty"`
+	AppContextID       string                       `json:"app_context_id,omitempty"`
+	ContextName        string                       `json:"context_name,omitempty"`
+	Persist            bool                         `json:"persist"`
+	TimeoutSeconds     int                          `json:"timeout_seconds,omitempty"`
+	ProviderExpiresAt  string                       `json:"provider_expires_at,omitempty"`
+	CurrentURL         string                       `json:"current_url"`
+	DebugURL           string                       `json:"debug_url,omitempty"`
+	StreamURL          string                       `json:"stream_url,omitempty"`
+	ActiveTabID        string                       `json:"active_tab_id,omitempty"`
+	Tabs               []backends.TabInfo           `json:"tabs,omitempty"`
+	TabCount           int                          `json:"tab_count,omitempty"`
+	Width              int                          `json:"width"`
+	Height             int                          `json:"height"`
+	OpenedAt           string                       `json:"opened_at"`
+	LastUsedAt         string                       `json:"last_used_at"`
+	ClosedAt           string                       `json:"closed_at,omitempty"`
+	CloseReason        string                       `json:"close_reason,omitempty"`
+	Proxy              SessionProxyState            `json:"proxy"`
+	Environment        *backends.EnvironmentOptions `json:"environment,omitempty"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1565,6 +1584,7 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 			Country:     row.ProxyCountry,
 			StickyScope: row.ProxyStickyScope,
 		},
+		Environment: environmentPointer(row.Environment),
 	}
 }
 
@@ -1600,12 +1620,21 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		OpenedAt:           s.openedAt.UTC().Format(time.RFC3339),
 		LastUsedAt:         s.lastUsed.UTC().Format(time.RFC3339),
 		Proxy:              s.proxy,
+		Environment:        environmentPointer(s.environment),
 	}
+}
+
+func environmentPointer(value backends.EnvironmentOptions) *backends.EnvironmentOptions {
+	if value.IsEmpty() {
+		return nil
+	}
+	copy := value
+	return &copy
 }
 
 func (a *App) sessionOutput(id string, s *session) map[string]any {
 	info := a.sessionInfo(id, s)
-	return map[string]any{
+	out := map[string]any{
 		"session_id":                    info.SessionID,
 		"backend_session_id":            info.BackendSessionID,
 		"backend":                       info.Backend,
@@ -1633,6 +1662,10 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"proxy":                         info.Proxy,
 		"view":                          browserViewReference(id),
 	}
+	if info.Environment != nil {
+		out["environment"] = info.Environment
+	}
+	return out
 }
 
 func browserViewReference(sessionID string) map[string]any {
@@ -2617,6 +2650,7 @@ func sessionRecord(id string, s *session, status, closeReason string, closedAt *
 		ProxyProfileName: s.proxy.ProfileName,
 		ProxyCountry:     s.proxy.Country,
 		ProxyStickyScope: s.proxy.StickyScope,
+		Environment:      s.environment,
 	}
 	if s.comp != nil {
 		display := s.comp.DisplaySize()
@@ -3064,7 +3098,7 @@ func deleteBrowserbaseContext(ctx *sdk.AppCtx, providerID string) error {
 	return nil
 }
 
-func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, height int) backends.Config {
+func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, height int, environmentOptions backends.EnvironmentOptions) backends.Config {
 	cfg := backends.Config{Type: backend, Width: width, Height: height}
 	switch backend {
 	case "browserbase":
@@ -3086,13 +3120,13 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		cfg.SolveCaptcha = boolArgDefault(args, "solve_captcha", false)
 		cfg.Region = stringArg(args, "region")
 		cfg.Timeout = intArg(args, "timeout")
-		cfg.UserAgent = stringArg(args, "user_agent")
+		cfg.UserAgent = environmentOptions.UserAgent
 	case "browser-engine":
 		fields := integrationFields(ctx, "browser-engine")
 		cfg.APIKey = firstNonEmpty(fields["BROWSER_API_KEY"], fields["api_key"], fields["token"], os.Getenv("BROWSER_API_KEY"), os.Getenv("NEXT_PUBLIC_BROWSER_API_KEY"))
 		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), fields["BROWSER_API_URL"], fields["base_url"], os.Getenv("BROWSER_API_URL"))
 		cfg.InitialURL = stringArg(args, "initial_url")
-		cfg.UserAgent = stringArg(args, "user_agent")
+		cfg.UserAgent = environmentOptions.UserAgent
 		cfg.Timeout = intArg(args, "timeout")
 		cfg.ProxyEnabled = boolArgDefault(args, "proxy_enabled", false)
 		cfg.ProxyCountry = stringArg(args, "proxy_country")
@@ -3905,6 +3939,34 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		out["required"] = required
 	}
 	return out
+}
+
+func sessionEnvironmentSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"description":          "Optional browser-visible environment for this newly-created session. Omit it to preserve the backend's normal agent defaults. Proxy country controls network egress separately and does not infer these values.",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"user_agent": map[string]any{"type": "string"},
+			"locale":     map[string]any{"type": "string", "description": "BCP-47 locale, for example fr-FR."},
+			"languages":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 10},
+			"timezone":   map[string]any{"type": "string", "description": "IANA timezone, for example Europe/Paris."},
+			"geolocation": map[string]any{
+				"type": "object", "additionalProperties": false,
+				"properties": map[string]any{
+					"latitude":   map[string]any{"type": "number", "minimum": -90, "maximum": 90},
+					"longitude":  map[string]any{"type": "number", "minimum": -180, "maximum": 180},
+					"accuracy":   map[string]any{"type": "number", "minimum": 0, "maximum": 100000, "description": "Accuracy radius in meters; default 100."},
+					"permission": map[string]any{"type": "string", "enum": []string{"grant", "prompt", "deny"}, "description": "Geolocation permission state; default grant."},
+				},
+				"required": []string{"latitude", "longitude"},
+			},
+			"device_scale_factor": map[string]any{"type": "number", "minimum": 0.1, "maximum": 10},
+			"mobile":              map[string]any{"type": "boolean"},
+			"touch":               map[string]any{"type": "boolean", "description": "Advertise touch capability; Computer agent actions continue using real mouse events."},
+			"max_touch_points":    map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "description": "Requires touch=true."},
+		},
+	}
 }
 
 // ─── HTTP handlers ─────────────────────────────────────────────────

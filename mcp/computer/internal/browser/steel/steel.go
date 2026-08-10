@@ -18,6 +18,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
@@ -84,6 +85,7 @@ type Computer struct {
 	cancel      context.CancelFunc
 	allocCancel context.CancelFunc
 	http        *http.Client
+	environment computer.EnvironmentOptions
 
 	// SoM: same wiring as local.Computer / browserbase.Computer.
 	labelMu    sync.RWMutex
@@ -283,6 +285,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	}
 	// Fast path: same context already attached, just navigate.
 	if c.sessionID != "" && o.ContextID != "" && o.ContextID == c.contextID {
+		c.environment = o.Environment
+		if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+			return fmt.Errorf("steel environment: %w", err)
+		}
 		if o.URL != "" {
 			return c.navigate(o.URL)
 		}
@@ -303,6 +309,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	}
 	if err := c.establishCDP(connectURL); err != nil {
 		return fmt.Errorf("steel: connect: %w", err)
+	}
+	c.environment = o.Environment
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("steel environment: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "[STEEL] session ready id=%s context=%s viewer=%s display=%dx%d\n",
 		c.sessionID, c.contextID, c.viewerURL, c.display.Width, c.display.Height)
@@ -325,6 +335,9 @@ func (c *Computer) establishCDP(connectURL string) error {
 	c.allocCtx = allocCtx
 	c.ctx = ctx
 	c.cancel = cancel
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("reapply browser environment: %w", err)
+	}
 	return nil
 }
 

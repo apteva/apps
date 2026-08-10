@@ -27,6 +27,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
@@ -101,7 +102,8 @@ type Computer struct {
 	// can type-assert against `interface{ DebugURL() string }`
 	// without caring which backend they hold. Empty if the post-launch
 	// fetch failed; see WARN log line for cause.
-	debugURL string
+	debugURL    string
+	environment computer.EnvironmentOptions
 }
 
 // pickFreePort asks the OS for an unused TCP port on loopback by
@@ -676,6 +678,10 @@ func (c *Computer) OpenSession(opts computer.OpenOptions) error {
 	}
 	if err := c.relaunchIfProxyChanged(opts.Proxy); err != nil {
 		return err
+	}
+	c.environment = opts.Environment
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("local chrome environment: %w", err)
 	}
 	if opts.URL != "" {
 		_, err := c.Execute(computer.Action{Type: "navigate", URL: opts.URL})
@@ -1761,6 +1767,9 @@ func (c *Computer) SwitchTab(tabID string) error {
 	}
 	c.ctx = ctx
 	c.cancel = cancel
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("reapply browser environment: %w", err)
+	}
 	return nil
 }
 

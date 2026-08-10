@@ -11,6 +11,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 	"github.com/apteva/apps/mcp/computer/internal/browser/browserbase"
 	"github.com/apteva/apps/mcp/computer/internal/browser/replay"
 	"github.com/apteva/apps/mcp/computer/internal/browser/steel"
@@ -24,7 +25,7 @@ var (
 type replayResolverFactory func(*sdk.AppCtx, string) (replay.Resolver, error)
 
 func defaultReplayResolver(ctx *sdk.AppCtx, backend string) (replay.Resolver, error) {
-	cfg := backendConfig(ctx, map[string]any{}, backend, 0, 0)
+	cfg := backendConfig(ctx, map[string]any{}, backend, 0, 0, backends.EnvironmentOptions{})
 	switch backend {
 	case "browserbase":
 		if strings.TrimSpace(cfg.APIKey) == "" {

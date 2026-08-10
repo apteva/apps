@@ -471,6 +471,97 @@ func TestBrowserSessionPresentationDefaultsToFastAndRejectsUnknown(t *testing.T)
 	}
 }
 
+func TestBrowserSessionEnvironmentIsOptInAndPropagates(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 390, Height: 844}}
+	var created backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		created = cfg
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":   "open",
+		"backend":  "steel",
+		"viewport": map[string]any{"width": 390, "height": 844},
+		"environment": map[string]any{
+			"user_agent":          "Computer-Test/1.0",
+			"locale":              "fr-FR",
+			"timezone":            "Europe/Paris",
+			"geolocation":         map[string]any{"latitude": 48.8566, "longitude": 2.3522},
+			"device_scale_factor": 3.0,
+			"mobile":              true,
+			"touch":               true,
+			"max_touch_points":    5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("open with environment: %v", err)
+	}
+	if created.UserAgent != "Computer-Test/1.0" {
+		t.Fatalf("native provider user agent = %q", created.UserAgent)
+	}
+	got := fake.openEnvironment
+	if got.UserAgent != "Computer-Test/1.0" || got.Locale != "fr-FR" || got.Timezone != "Europe/Paris" {
+		t.Fatalf("environment did not propagate: %+v", got)
+	}
+	if !reflect.DeepEqual(got.Languages, []string{"fr-FR"}) {
+		t.Fatalf("effective languages = %#v", got.Languages)
+	}
+	if got.Geolocation == nil || got.Geolocation.Accuracy == nil || *got.Geolocation.Accuracy != 100 || got.Geolocation.Permission != "grant" {
+		t.Fatalf("effective geolocation defaults = %+v", got.Geolocation)
+	}
+	openMap := out.(map[string]any)
+	if openMap["environment"] == nil {
+		t.Fatalf("effective environment missing from output: %#v", openMap)
+	}
+	firstSessionID := openMap["session_id"].(string)
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": firstSessionID})
+	stored, err := dbGetSession(ctx.AppDB(), firstSessionID)
+	if err != nil {
+		t.Fatalf("read stored environment: %v", err)
+	}
+	if stored.Environment.UserAgent != "Computer-Test/1.0" || stored.Environment.Timezone != "Europe/Paris" {
+		t.Fatalf("stored environment mismatch: %+v", stored.Environment)
+	}
+
+	// Omission is the compatibility contract: the zero environment reaches
+	// the backend and is absent from tool output.
+	fake = &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}}
+	out, err = app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open without environment: %v", err)
+	}
+	if !fake.openEnvironment.IsEmpty() {
+		t.Fatalf("omitted environment changed defaults: %+v", fake.openEnvironment)
+	}
+	openMap = out.(map[string]any)
+	if _, exists := openMap["environment"]; exists {
+		t.Fatalf("omitted environment unexpectedly returned: %#v", openMap["environment"])
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": openMap["session_id"]})
+}
+
+func TestBrowserSessionEnvironmentRejectsUnsupportedAndInvalidSettings(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	for name, args := range map[string]map[string]any{
+		"invalid timezone": {"action": "open", "backend": "local", "environment": map[string]any{"timezone": "Paris"}},
+		"service":          {"action": "open", "backend": "service", "environment": map[string]any{"locale": "de-DE"}},
+		"attach":           {"action": "open", "backend": "browserbase", "backend_session_id": "provider-1", "environment": map[string]any{"locale": "de-DE"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := app.toolBrowserSession(ctx, args); err == nil {
+				t.Fatal("expected environment validation error")
+			}
+		})
+	}
+}
+
 func TestComputerUseReliableNavigationActions(t *testing.T) {
 	fake := &fakeComp{
 		display: backends.DisplaySize{Width: 1024, Height: 768},
@@ -879,6 +970,19 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	}
 	if _, ok := props["backend_session_id"]; ok {
 		t.Fatal("browser_session must not advertise provider-session attachment")
+	}
+	environmentSchema, ok := props["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session environment schema missing: %#v", props["environment"])
+	}
+	environmentProps, ok := environmentSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session environment properties missing: %#v", environmentSchema)
+	}
+	for _, field := range []string{"user_agent", "locale", "languages", "timezone", "geolocation", "device_scale_factor", "mobile", "touch", "max_touch_points"} {
+		if _, ok := environmentProps[field]; !ok {
+			t.Fatalf("browser_session environment missing %q", field)
+		}
 	}
 	presentationMode, ok := props["presentation_mode"].(map[string]any)
 	if !ok {
@@ -2605,6 +2709,7 @@ type fakeComp struct {
 	openTimeout       int
 	openProxy         *bool
 	openExternalProxy *backends.ExternalProxy
+	openEnvironment   backends.EnvironmentOptions
 	openErr           error
 	lastAction        backends.Action
 	screenshotCalls   int
@@ -2772,6 +2877,7 @@ func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openTimeout = opts.Timeout
 	f.openProxy = opts.Proxy
 	f.openExternalProxy = opts.ExternalProxy
+	f.openEnvironment = opts.Environment
 	return f.openErr
 }
 

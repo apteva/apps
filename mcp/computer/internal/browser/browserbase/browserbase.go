@@ -22,6 +22,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
@@ -104,6 +105,7 @@ type Computer struct {
 	cancel         context.CancelFunc
 	allocCancel    context.CancelFunc
 	http           *http.Client
+	environment    computer.EnvironmentOptions
 
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu    sync.RWMutex
@@ -1246,6 +1248,9 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	if o.SessionID != "" && o.ContextID != "" {
 		return fmt.Errorf("browserbase: SessionID and ContextID are mutually exclusive")
 	}
+	if o.SessionID != "" && !o.Environment.IsEmpty() {
+		return fmt.Errorf("browserbase: environment settings cannot be applied while attaching to an existing session")
+	}
 	// Fast path: caller wants the same session/context we already have.
 	if c.sessionID != "" {
 		sameSession := o.SessionID != "" && o.SessionID == c.sessionID
@@ -1253,6 +1258,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		if sameSession || sameContext {
 			if sameContext {
 				c.contextPersist = o.Persist
+			}
+			c.environment = o.Environment
+			if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+				return fmt.Errorf("browserbase environment: %w", err)
 			}
 			if o.URL != "" {
 				return c.navigate(o.URL)
@@ -1291,6 +1300,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 	}
 	if err := c.establishCDP(connectURL); err != nil {
 		return fmt.Errorf("browserbase: connect: %w", err)
+	}
+	c.environment = o.Environment
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("browserbase environment: %w", err)
 	}
 	if dbg, derr := c.fetchDebugURL(); derr == nil {
 		c.debugURL = dbg
@@ -1353,6 +1366,9 @@ func (c *Computer) establishCDP(connectURL string) error {
 	c.allocCtx = browserCtx
 	c.ctx = ctx
 	c.cancel = cancel
+	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
+		return fmt.Errorf("reapply browser environment: %w", err)
+	}
 	return nil
 }
 
