@@ -1,4 +1,4 @@
-// Web v0.2.1 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.2 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page

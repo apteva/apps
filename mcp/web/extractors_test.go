@@ -405,6 +405,30 @@ func TestExtractorScheduleDelegatesToJobs(t *testing.T) {
 	}
 }
 
+func TestExtractorScheduleForwardsRandomScheduleUnchanged(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	createdAny, _ := app.toolExtractorSave(ctx, map[string]any{"name": "Random products", "definition": testExtractorDefinition()})
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	schedule := map[string]any{
+		"kind": "random", "period": "day", "runs_per_period": float64(5),
+		"window_start": "08:00", "window_end": "22:00", "min_spacing_minutes": float64(60),
+	}
+	if _, err := app.toolExtractorSchedule(ctx, map[string]any{"extractor_id": id, "schedule": schedule, "timezone": "Europe/Paris"}); err != nil {
+		t.Fatal(err)
+	}
+	call := plat.lastCall("jobs", "jobs_schedule")
+	forwarded := call["schedule"].(map[string]any)
+	for key, want := range schedule {
+		if forwarded[key] != want {
+			t.Fatalf("schedule.%s=%v, want %v; full schedule=%#v", key, forwarded[key], want, forwarded)
+		}
+	}
+	if call["timezone"] != "Europe/Paris" {
+		t.Fatalf("timezone=%v, want Europe/Paris", call["timezone"])
+	}
+}
+
 func TestMoneyParsingHandlesCommaAndDotLocales(t *testing.T) {
 	for input, want := range map[string]float64{"€1.234,56": 1234.56, "$1,234.56": 1234.56, "29.95 EUR": 29.95} {
 		got, err := parseExtractorNumber(input)

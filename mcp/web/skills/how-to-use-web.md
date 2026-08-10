@@ -33,7 +33,9 @@ extraction workflow.
 - `web_extractor_run`: queue a run and return immediately. Poll with
   `web_run_get`; use `web_run_cancel` or `web_run_retry` for lifecycle control.
 - `web_extractor_schedule/schedules/unschedule`: manage Jobs-owned extractor
-  schedules without constructing Jobs targets manually.
+  schedules without constructing Jobs targets manually. In addition to once,
+  interval, and cron schedules, use `kind: random` for deterministic runs in a
+  daily local-time window.
 
 ## Extractors
 
@@ -50,6 +52,11 @@ Extractor browser proxy settings use Computer's provider-neutral contract:
 accepts an optional two-letter `proxy_country`; profile routing also accepts
 `proxy_profile` and `proxy_sticky`. Web verifies Computer's resolved mode,
 country, profile, and stickiness before continuing the run.
+
+For five randomized runs per Paris day, use a schedule such as
+`{"kind":"random","period":"day","runs_per_period":5,"window_start":"08:00","window_end":"22:00","min_spacing_minutes":60}`
+with `timezone: "Europe/Paris"`. Jobs supplies stable occurrence metadata so
+Web can deduplicate retries without merging separate daily runs.
 
 Values resolve in this order: extractor defaults, named preset, schedule
 overrides, explicit run input. A run snapshots the complete definition, so a
