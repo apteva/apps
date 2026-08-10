@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.41
+version: 0.1.42
 scopes: [project, global]
 requires:
   permissions:
@@ -597,6 +597,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel; this does not install browser or server-side tracking on a website.",
 			InputSchema: trackingSourceCreateSchema(),
 			Handler:     a.toolTrackingSourceCreate,
+		},
+		{
+			Name:        "tracking_source_installation_get",
+			Description: "Return browser-public installation configuration for a normalized tracking source. Resolves the account default when tracking_source_resource_id is omitted.",
+			InputSchema: trackingSourceInstallationSchema(),
+			Handler:     a.toolTrackingSourceInstallationGet,
 		},
 		{
 			Name:        "lead_form_create",

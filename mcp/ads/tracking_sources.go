@@ -9,6 +9,13 @@ import (
 
 const trackingSourceDefaultPurpose = "conversion_source"
 
+func trackingSourceInstallationSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"ad_account_id":               map[string]any{"type": "integer"},
+		"tracking_source_resource_id": map[string]any{"type": "integer"},
+	}, []string{"ad_account_id"})
+}
+
 func trackingSourceCreateSchema() map[string]any {
 	return schemaObject(map[string]any{
 		"ad_account_id": map[string]any{"type": "integer"},
@@ -108,6 +115,43 @@ func (a *App) toolTrackingSourceCreate(ctx *sdk.AppCtx, args map[string]any) (an
 		a.emitTrackingSourceCreated(ctx, acct, resource, setDefault)
 	}
 	return result, err
+}
+
+func (a *App) toolTrackingSourceInstallationGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, _, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	if acct.Platform != "meta" {
+		out := mcpError("tracking source browser installation is not supported for " + acct.Platform)
+		out["code"] = "unsupported_operation"
+		out["operation"] = "tracking_source_installation_get"
+		out["platform"] = acct.Platform
+		return out, nil
+	}
+	resource, resourceErr := a.resolveResourceChoice(
+		ctx,
+		acct,
+		trackingSourceDefaultPurpose,
+		resourceTrackingSource,
+		"meta_pixel",
+		int64(intArg(args, "tracking_source_resource_id", 0)),
+	)
+	if resourceErr != nil {
+		return resourceErr, nil
+	}
+	return map[string]any{
+		"resource": resource.response(),
+		"installation": map[string]any{
+			"provider":        "meta",
+			"public_id":       resource.NativeID,
+			"script_url":      "https://connect.facebook.net/en_US/fbevents.js",
+			"script_origins":  []string{"https://connect.facebook.net"},
+			"connect_origins": []string{"https://connect.facebook.net", "https://www.facebook.com"},
+			"image_origins":   []string{"https://www.facebook.com"},
+			"event_names":     []string{"PageView", "ViewContent", "Search", "AddToCart", "InitiateCheckout", "AddPaymentInfo", "Purchase"},
+		},
+	}, nil
 }
 
 func (a *App) markTrackingSourceManaged(ctx *sdk.AppCtx, acct *adAccount, resource *adResource) (*adResource, error) {

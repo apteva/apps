@@ -890,7 +890,7 @@ func TestStorefrontTemplatesAndAssetsAreSelfContained(t *testing.T) {
 	manifest := commerceStorefrontManifest(&Store{
 		ID: 7, Name: "Reference Store",
 		Metadata: map[string]any{"markets": map[string]any{"enabled": []any{"US"}}},
-	})
+	}, nil)
 	templates, ok := manifest["templates"].(map[string]any)
 	if !ok || len(templates) < 7 {
 		t.Fatalf("storefront templates missing: %#v", manifest["templates"])

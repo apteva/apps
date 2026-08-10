@@ -198,7 +198,43 @@ interface StoreSettings {
   payments: { payment_method_types?: string[]; save_payment_method?: boolean; set_default_payment_method?: boolean };
 }
 
-type View = "products" | "collections" | "providers" | "storefront" | "stores" | "settings" | "carts" | "sales";
+interface MarketingResource {
+  id: number;
+  display_name: string;
+  status: string;
+}
+
+interface MetaAccountOption {
+  id: number;
+  display_name: string;
+  currency?: string;
+  resources?: MarketingResource[];
+  resource_error?: string;
+}
+
+interface MarketingChannel {
+  id: number;
+  status: string;
+  ad_account_id: number;
+  tracking_source_resource_id: number;
+  tracking_source_name: string;
+  data_sharing_mode: string;
+  site_tracking_status: string;
+  site_tracking_error?: string;
+}
+
+interface MarketingChannelOptions {
+  ads_available: boolean;
+  accounts: MetaAccountOption[];
+  error?: string;
+}
+
+interface MarketingChannelResponse {
+  channel: MarketingChannel | null;
+  options: MarketingChannelOptions;
+}
+
+type View = "products" | "collections" | "providers" | "channels" | "storefront" | "stores" | "settings" | "carts" | "sales";
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
@@ -218,6 +254,9 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
   const [storefront, setStorefront] = useState<StorefrontStatus | null>(null);
   const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null);
+  const [marketingChannel, setMarketingChannel] = useState<MarketingChannel | null>(null);
+  const [marketingOptions, setMarketingOptions] = useState<MarketingChannelOptions>({ ads_available: false, accounts: [] });
+  const [marketingDraft, setMarketingDraft] = useState({ adAccountId: "", resourceId: "", pixelName: "" });
   const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
   const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
   const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
@@ -308,13 +347,40 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     void load();
   }, [load]);
 
+  const loadMarketing = useCallback(async () => {
+    if (!selectedStore) {
+      setMarketingChannel(null);
+      setMarketingOptions({ ads_available: false, accounts: [] });
+      return;
+    }
+    try {
+      const result = await api<MarketingChannelResponse>(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`);
+      setMarketingChannel(result.channel || null);
+      setMarketingOptions(result.options || { ads_available: false, accounts: [] });
+    } catch (error) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  }, [api, selectedStore]);
+
+  useEffect(() => {
+    if (view === "channels") void loadMarketing();
+  }, [view, loadMarketing]);
+
   useEffect(() => {
     if (!productForm.store_id && stores.length === 1) setProductForm((current) => ({ ...current, store_id: String(stores[0].id), currency: stores[0].default_currency }));
     if (!collectionForm.store_id && stores.length === 1) setCollectionForm((current) => ({ ...current, store_id: String(stores[0].id) }));
   }, [stores, productForm.store_id, collectionForm.store_id]);
 
+  useEffect(() => {
+    const accountId = marketingChannel?.ad_account_id || marketingOptions.accounts[0]?.id;
+    const account = marketingOptions.accounts.find((row) => row.id === accountId);
+    const resourceId = marketingChannel?.tracking_source_resource_id || account?.resources?.[0]?.id;
+    setMarketingDraft({ adAccountId: accountId ? String(accountId) : "", resourceId: resourceId ? String(resourceId) : "", pixelName: "" });
+  }, [selectedStore, marketingChannel?.id, marketingOptions]);
+
   const totals = summary || { stores: stores.length, products: products.length, open_carts: 0, sales: sales.length };
   const currentStore = useMemo(() => stores.find((store) => String(store.id) === selectedStore), [stores, selectedStore]);
+  const selectedMetaAccount = useMemo(() => marketingOptions.accounts.find((account) => String(account.id) === marketingDraft.adAccountId), [marketingOptions.accounts, marketingDraft.adAccountId]);
 
   async function run(action: () => Promise<void>, success: string) {
     setBusy(true);
@@ -519,6 +585,29 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setStorefront(status);
   }
 
+  async function configureMarketingChannel() {
+    if (!selectedStore) throw new Error("Select a store before configuring Meta");
+    if (!marketingDraft.adAccountId) throw new Error("Select a Meta ad account");
+    if (!marketingDraft.resourceId && !marketingDraft.pixelName.trim()) throw new Error("Select a Pixel or enter a name for a new one");
+    await api("/admin/marketing-channel", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore),
+        ad_account_id: Number(marketingDraft.adAccountId),
+        tracking_source_resource_id: marketingDraft.resourceId ? Number(marketingDraft.resourceId) : undefined,
+        pixel_name: marketingDraft.resourceId ? undefined : marketingDraft.pixelName.trim(),
+        set_default: true,
+      }),
+    });
+    await loadMarketing();
+  }
+
+  async function disconnectMarketingChannel() {
+    if (!selectedStore) throw new Error("Select a store before disconnecting Meta");
+    await api(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`, { method: "DELETE" });
+    await loadMarketing();
+  }
+
   function updateShippingMethod(zoneIndex: number, methodIndex: number, patch: Partial<ShippingMethod>) {
     setStoreSettings((current) => {
       if (!current) return current;
@@ -564,7 +653,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
 
   const tabs: Array<{ id: View; label: string }> = [
     { id: "products", label: "Products" }, { id: "collections", label: "Collections" },
-    { id: "providers", label: "Providers" }, { id: "storefront", label: "Storefront" },
+    { id: "providers", label: "Providers" }, { id: "channels", label: "Sales channels" }, { id: "storefront", label: "Storefront" },
     { id: "stores", label: "Stores" }, { id: "settings", label: "Settings" },
     { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
   ];
@@ -820,6 +909,58 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                   </section>
                 </div>
               </>
+            )}
+          </section>
+        )}
+
+        {view === "channels" && (
+          <section className="max-w-4xl space-y-5">
+            <div>
+              <h2 className="text-sm font-semibold">Sales channels</h2>
+              <p className="mt-1 text-sm text-text-muted">Connect Commerce to Ads for storefront measurement. Campaign creation and bid management remain in Ads.</p>
+            </div>
+            {!selectedStore ? (
+              <div className="rounded-md border border-border px-4 py-10 text-center text-sm text-text-muted">Select a store to configure its channels.</div>
+            ) : !marketingOptions.ads_available ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+                <h3 className="font-semibold">Facebook &amp; Instagram</h3>
+                <p className="mt-2 text-text-muted">Install or upgrade Ads, then connect a Meta account there first.</p>
+                {marketingOptions.error && <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">{marketingOptions.error}</p>}
+              </div>
+            ) : (
+              <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_260px]">
+                <div className="rounded-md border border-border p-4 space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div><h3 className="font-semibold">Facebook &amp; Instagram</h3><p className="mt-1 text-xs leading-5 text-text-muted">Meta Pixel browser events with an explicit visitor consent prompt.</p></div>
+                    <Status value={marketingChannel?.status === "active" ? "active" : "not configured"} />
+                  </div>
+                  <Field label="Meta ad account">
+                    <select value={marketingDraft.adAccountId} onChange={(event) => { const account = marketingOptions.accounts.find((row) => String(row.id) === event.target.value); setMarketingDraft({ adAccountId: event.target.value, resourceId: account?.resources?.[0] ? String(account.resources[0].id) : "", pixelName: "" }); }} className={inputClass}>
+                      <option value="">Select account</option>
+                      {marketingOptions.accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || `Account #${account.id}`}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Meta Pixel">
+                    <select value={marketingDraft.resourceId} onChange={(event) => setMarketingDraft({ ...marketingDraft, resourceId: event.target.value })} disabled={!marketingDraft.adAccountId} className={inputClass}>
+                      <option value="">Create a new Pixel</option>
+                      {(selectedMetaAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.display_name || `Pixel #${resource.id}`}</option>)}
+                    </select>
+                  </Field>
+                  {!marketingDraft.resourceId && <Field label="New Pixel name"><input value={marketingDraft.pixelName} onChange={(event) => setMarketingDraft({ ...marketingDraft, pixelName: event.target.value })} placeholder={`${currentStore?.name || "Store"} Pixel`} className={inputClass} /></Field>}
+                  {selectedMetaAccount?.resource_error && <p className="text-xs text-amber-700 dark:text-amber-300">Could not refresh Pixels: {selectedMetaAccount.resource_error}</p>}
+                  <button type="button" disabled={busy || !marketingDraft.adAccountId || (!marketingDraft.resourceId && !marketingDraft.pixelName.trim())} onClick={() => void run(configureMarketingChannel, marketingChannel?.status === "active" ? "Meta Pixel updated" : "Meta Pixel connected")} className="h-9 rounded-md bg-accent px-4 text-sm font-medium text-bg disabled:opacity-50">{marketingChannel?.status === "active" ? "Update Meta Pixel" : "Connect Meta Pixel"}</button>
+                </div>
+                <aside className="space-y-3">
+                  <div className="rounded-md border border-border divide-y divide-border">
+                    <StorefrontRow label="Pixel" value={marketingChannel?.tracking_source_name || "Not selected"} />
+                    <StorefrontRow label="Data sharing" value="Browser only" />
+                    <StorefrontRow label="Storefront" value={marketingChannel?.site_tracking_status === "installed" ? "Installed" : storefront?.configured ? "Pending refresh" : "Configure Content first"} />
+                  </div>
+                  {marketingChannel?.site_tracking_error && <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{marketingChannel.site_tracking_error}</p>}
+                  {marketingChannel?.status === "active" && <button type="button" disabled={busy} onClick={() => void run(disconnectMarketingChannel, "Meta Pixel disconnected")} className="w-full h-9 rounded-md border border-red-500/40 text-sm text-red-600 disabled:opacity-50">Disconnect</button>}
+                  <p className="text-xs leading-5 text-text-muted">Tracks PageView, product views, search, add-to-cart, and checkout after consent. Catalog sync and server-side Conversions API are not included yet.</p>
+                </aside>
+              </div>
             )}
           </section>
         )}

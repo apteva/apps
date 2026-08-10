@@ -84,6 +84,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/dispatches", Handler: a.handleDispatches},
 		{Pattern: "/admin/dispatches/", Handler: a.handleDispatch},
 		{Pattern: "/admin/storefront", Handler: a.handleStorefrontConfiguration},
+		{Pattern: "/admin/marketing-channel", Handler: a.handleMarketingChannel},
 	}
 }
 
@@ -135,6 +136,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_dispatches_list", Description: "List provider dispatch jobs. Args: store_id?, sale_id?, status?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "sale_id": typ("integer"), "status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolDispatchesList},
 		{Name: "commerce_dispatch_submit", Description: "Approve or retry one provider dispatch job. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolDispatchSubmit},
 		{Name: "commerce_sources_sync", Description: "Synchronize imported provider variant cost and availability. Args: store_id?, listing_id?, provider?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "listing_id": typ("integer"), "provider": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolSourcesSync},
+		{Name: "commerce_marketing_channel_options", Description: "List Meta ad accounts and Pixels available through the optional Ads app. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelOptions},
+		{Name: "commerce_marketing_channel_get", Description: "Return the configured marketing channel for a store. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelGet},
+		{Name: "commerce_marketing_channel_configure", Description: "Select or create a Meta Pixel and install consent-gated browser tracking on the Content storefront.", InputSchema: schemaObject(marketingChannelProps(), []string{"store_id", "ad_account_id"}), Handler: a.toolMarketingChannelConfigure},
+		{Name: "commerce_marketing_channel_disconnect", Description: "Disable a store marketing channel and remove it from the published storefront. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelDisconnect},
+		{Name: "commerce_marketing_channel_public_get", Description: "Return browser-public tracking configuration for a store. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelPublicGet},
 	}
 }
 
@@ -692,11 +698,25 @@ func (a *App) toolCheckoutStatus(ctx *sdk.AppCtx, args map[string]any) (any, err
 			"status": checkout.Status, "payment_status": "unpaid",
 		}, nil
 	}
+	contents := make([]map[string]any, 0, len(sale.Items))
+	for _, item := range sale.Items {
+		contentID := ""
+		if item.VariantID != nil {
+			contentID = fmt.Sprintf("commerce-variant-%d", *item.VariantID)
+		}
+		if contentID != "" {
+			contents = append(contents, map[string]any{"id": contentID, "quantity": item.Quantity, "item_price": float64(item.UnitAmountCents) / 100})
+		}
+	}
 	return map[string]any{
 		"status":             sale.Status,
 		"payment_status":     sale.PaymentStatus,
 		"fulfillment_status": sale.FulfillmentStatus,
 		"invoice_number":     sale.InvoiceNumber,
+		"sale_id":            sale.ID,
+		"total_cents":        sale.TotalCents,
+		"currency":           sale.Currency,
+		"contents":           contents,
 	}, nil
 }
 

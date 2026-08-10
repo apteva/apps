@@ -10,7 +10,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const commerceStorefrontExtensionVersion = "9"
+const commerceStorefrontExtensionVersion = "10"
 
 type StorefrontStatus struct {
 	StoreID      int64  `json:"store_id"`
@@ -29,9 +29,17 @@ func storefrontExtensionKey(storeID int64) string {
 	return fmt.Sprintf("commerce-store-%d", storeID)
 }
 
-func commerceStorefrontManifest(store *Store) map[string]any {
+func commerceStorefrontManifest(store *Store, channel *MarketingChannel) map[string]any {
 	fixedStore := map[string]any{"store_id": store.ID}
 	activeStore := map[string]any{"store_id": store.ID, "status": "active"}
+	scriptOrigins := []any{"https://js.stripe.com", "https://checkout.stripe.com"}
+	connectOrigins := []any{"https://api.stripe.com", "https://checkout.stripe.com"}
+	imageOrigins := []any{"https://*.stripe.com"}
+	if channel != nil && channel.Status == "active" {
+		scriptOrigins = appendStringValues(scriptOrigins, channel.PublicConfig["script_origins"])
+		connectOrigins = appendStringValues(connectOrigins, channel.PublicConfig["connect_origins"])
+		imageOrigins = appendStringValues(imageOrigins, channel.PublicConfig["image_origins"])
+	}
 	shippingAddress := map[string]any{
 		"name":         "{{ input.customer_name }}",
 		"company":      "{{ input.company }}",
@@ -76,10 +84,10 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			map[string]any{"key": "logo_text", "label": "Store name", "type": "text", "default": store.Name},
 		},
 		"browser_policy": map[string]any{
-			"script_origins":  []any{"https://js.stripe.com", "https://checkout.stripe.com"},
+			"script_origins":  scriptOrigins,
 			"frame_origins":   []any{"https://js.stripe.com", "https://hooks.stripe.com", "https://checkout.stripe.com"},
-			"connect_origins": []any{"https://api.stripe.com", "https://checkout.stripe.com"},
-			"image_origins":   []any{"https://*.stripe.com"},
+			"connect_origins": connectOrigins,
+			"image_origins":   imageOrigins,
 		},
 		"layout": map[string]any{"template": "site_layout"},
 		"routes": []any{
@@ -100,6 +108,9 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 			"search":      map[string]any{"tool": "commerce_products_list", "args": mergeMaps(activeStore, map[string]any{"q": "{{ query.q }}", "limit": 48})},
 		},
 		"actions": map[string]any{
+			"marketing_config": map[string]any{
+				"steps": []any{map[string]any{"tool": "commerce_marketing_channel_public_get", "args": fixedStore}},
+			},
 			"cart": map[string]any{
 				"steps": []any{map[string]any{"tool": "commerce_cart_create", "args": mergeMaps(fixedStore, map[string]any{"session_token": "{{ session.token }}"})}},
 			},
@@ -206,6 +217,31 @@ func commerceStorefrontManifest(store *Store) map[string]any {
 	}
 }
 
+func appendStringValues(base []any, values any) []any {
+	seen := map[string]bool{}
+	for _, value := range base {
+		seen[fmt.Sprint(value)] = true
+	}
+	appendValue := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			base = append(base, value)
+			seen[value] = true
+		}
+	}
+	switch rows := values.(type) {
+	case []any:
+		for _, value := range rows {
+			appendValue(fmt.Sprint(value))
+		}
+	case []string:
+		for _, value := range rows {
+			appendValue(value)
+		}
+	}
+	return base
+}
+
 func storefrontSiteLayoutDocument() string {
 	return `<!doctype html>
 <html lang="{{.Locale}}">
@@ -218,7 +254,7 @@ func storefrontSiteLayoutDocument() string {
   <link rel="stylesheet" href="{{asset "store.css"}}">
   <script defer src="{{asset "store.js"}}"></script>
 </head>
-<body style="--accent:{{default "#176b45" (get .Settings "accent")}}">
+<body style="--accent:{{default "#176b45" (get .Settings "accent")}}" data-marketing-config-action="{{action "marketing_config"}}">
   <div class="announcement">{{default "Made to order. Shipping calculated at checkout." (get .Settings "announcement")}}</div>
   <header class="site-header">
     <a class="brand" href="{{href "/"}}">{{default .SiteTitle (get .Settings "logo_text")}}</a>
@@ -229,7 +265,8 @@ func storefrontSiteLayoutDocument() string {
     </nav>
   </header>
   <main class="storefront-content">{{.Content}}</main>
-  <footer class="site-footer"><span>{{default .SiteTitle (get .Settings "logo_text")}}</span><span>Secure commerce by Apteva</span></footer>
+  <footer class="site-footer"><span>{{default .SiteTitle (get .Settings "logo_text")}}</span><span>Secure commerce by Apteva · <button type="button" data-consent-settings>Privacy choices</button></span></footer>
+  <aside class="marketing-consent" data-marketing-consent hidden aria-label="Privacy choices"><p><strong>Your privacy choices</strong><span>Allow optional analytics to help us understand store visits and improve relevant advertising.</span></p><div><button type="button" data-marketing-decline>Decline</button><button class="button" type="button" data-marketing-accept>Allow</button></div></aside>
   <div class="toast" data-toast role="status" aria-live="polite"></div>
 </body>
 </html>`
@@ -257,7 +294,7 @@ func storefrontDocument(body string) string {
   <link rel="stylesheet" href="{{asset "store.css"}}">
   <script defer src="{{asset "store.js"}}"></script>
 </head>
-<body style="--accent:{{default "#176b45" (get .Settings "accent")}}">
+<body style="--accent:{{default "#176b45" (get .Settings "accent")}}" data-marketing-config-action="{{action "marketing_config"}}">
   <div class="announcement">{{default "Made to order. Shipping calculated at checkout." (get .Settings "announcement")}}</div>
   <header class="site-header">
     <a class="brand" href="{{href "/"}}">{{default .SiteTitle (get .Settings "logo_text")}}</a>
@@ -268,7 +305,8 @@ func storefrontDocument(body string) string {
     </nav>
   </header>
   <main>` + body + `</main>
-  <footer class="site-footer"><span>{{default .SiteTitle (get .Settings "logo_text")}}</span><span>Secure commerce by Apteva</span></footer>
+  <footer class="site-footer"><span>{{default .SiteTitle (get .Settings "logo_text")}}</span><span>Secure commerce by Apteva · <button type="button" data-consent-settings>Privacy choices</button></span></footer>
+  <aside class="marketing-consent" data-marketing-consent hidden aria-label="Privacy choices"><p><strong>Your privacy choices</strong><span>Allow optional analytics to help us understand store visits and improve relevant advertising.</span></p><div><button type="button" data-marketing-decline>Decline</button><button class="button" type="button" data-marketing-accept>Allow</button></div></aside>
   <div class="toast" data-toast role="status" aria-live="polite"></div>
 </body>
 </html>`
@@ -286,13 +324,14 @@ func checkoutStorefrontDocument(body string) string {
   <script src="https://js.stripe.com/clover/stripe.js"></script>
   <script defer src="{{asset "store.js"}}"></script>
 </head>
-<body class="checkout-page" style="--accent:{{default "#176b45" (get .Settings "accent")}}">
+<body class="checkout-page" style="--accent:{{default "#176b45" (get .Settings "accent")}}" data-marketing-config-action="{{action "marketing_config"}}">
   <header class="checkout-header">
     <a class="checkout-brand" href="{{href "/"}}">{{default .SiteTitle (get .Settings "logo_text")}}</a>
     <span class="secure-label">Secure checkout</span>
   </header>
   <main>` + body + `</main>
   <footer class="checkout-footer"><span>Secure checkout</span><span>Encrypted session and protected order processing</span></footer>
+  <aside class="marketing-consent" data-marketing-consent hidden aria-label="Privacy choices"><p><strong>Your privacy choices</strong><span>Allow optional analytics to help us understand store visits and improve relevant advertising.</span></p><div><button type="button" data-marketing-decline>Decline</button><button class="button" type="button" data-marketing-accept>Allow</button></div></aside>
   <div class="toast" data-toast role="status" aria-live="polite"></div>
 </body>
 </html>`
@@ -331,7 +370,7 @@ const homeStorefrontBody = productCardTemplate + `
 
 const productStorefrontBody = `
   {{$result := index .Data "product"}}{{$product := get $result "product"}}{{$meta := get $product "metadata"}}{{$variants := get $product "variants"}}{{$variant := first $variants}}
-  <section class="product-detail">
+  <section class="product-detail" data-meta-product data-product-id="commerce-product-{{get $product "id"}}" data-product-title="{{get $product "title"}}">
     <div class="detail-media">{{with get $meta "image_url"}}<img src="{{.}}" alt="{{get $product "title"}}" width="1200" height="1200">{{else}}<span class="media-placeholder">{{get $product "title"}}</span>{{end}}</div>
     <div class="detail-copy">
       <p class="eyebrow">{{get $product "vendor"}}</p>
@@ -339,7 +378,7 @@ const productStorefrontBody = `
       {{with $variant}}<p class="detail-price" data-product-price>{{money (get . "price_cents") (get . "currency")}}</p>{{end}}
       <div class="description">{{safeHTML (text (get $product "description_html"))}}</div>
       {{if $variant}}
-      <form data-storefront-action="{{action "add_to_cart"}}" data-success="Added to cart">
+      <form data-storefront-action="{{action "add_to_cart"}}" data-meta-add-to-cart data-success="Added to cart">
         <label class="product-option">Option
           <select name="variant_id" data-variant-select required>
             {{range $variants}}<option value="{{get . "id"}}" data-price-cents="{{get . "price_cents"}}" data-currency="{{get . "currency"}}">{{get . "title"}}</option>{{end}}
@@ -538,9 +577,10 @@ const storefrontCSS = `
 .checkout-actions{display:grid;grid-template-columns:auto minmax(230px,1fr);gap:20px;align-items:center}
 .checkout-secondary{appearance:none;border:0;background:transparent;color:#59615a;cursor:pointer;font:600 13px/1.4 inherit;padding:8px 0;border-bottom:1px solid #aeb5af}
 .checkout-submit{justify-content:center;font-weight:700;border-radius:5px}
+.site-footer button{border:0;background:none;color:inherit;padding:0;text-decoration:underline;cursor:pointer;font:inherit}.marketing-consent{position:fixed;z-index:100;left:20px;right:20px;bottom:20px;max-width:760px;margin:auto;padding:18px 20px;background:#fff;border:1px solid #d5dad5;box-shadow:0 12px 40px rgba(0,0,0,.18);display:flex;gap:24px;align-items:center;justify-content:space-between}.marketing-consent[hidden]{display:none}.marketing-consent p{display:grid;gap:5px;margin:0;font-size:13px;line-height:1.45}.marketing-consent p span{color:#596159}.marketing-consent>div{display:flex;gap:9px;flex:none}.marketing-consent button:not(.button){min-height:44px;padding:0 16px;border:1px solid #bdc4bd;background:#fff;cursor:pointer}
 .checkout-note{margin-top:16px}
 @media(max-width:900px){.product-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.product-detail{grid-template-columns:1fr}.detail-media{min-height:auto;aspect-ratio:1}.collection-grid{grid-template-columns:1fr 1fr}.site-header nav a:not(.cart-link){display:none}.checkout-layout{grid-template-columns:1fr}.checkout-summary-column{grid-row:1;border-left:0;border-bottom:1px solid #dfe3df;padding:20px clamp(24px,6vw,56px)}.checkout-form-column{grid-row:2;padding-top:36px}.order-summary{position:static}.order-summary summary{cursor:pointer;padding:4px 0}.order-summary[open] summary{padding-bottom:22px}.order-summary summary:after{content:"+";margin-left:12px;color:#687069}.order-summary[open] summary:after{content:"-"}.order-summary summary strong{margin-left:auto}.checkout-header{height:68px}}
-@media(max-width:560px){.hero{min-height:590px}.hero h1{font-size:52px}.product-grid{gap:24px 10px}.section{padding:52px 16px}.site-header{padding:0 16px}.collection-grid{grid-template-columns:1fr;padding:24px 16px 60px}.detail-copy{padding:40px 20px}.page-header{padding:52px 20px 30px}.cart-shell{padding:0 20px 60px}.cart-row{grid-template-columns:1fr 72px}.cart-row .line-total{grid-column:1/-1}.site-footer{padding:28px 20px;gap:20px;flex-direction:column}.checkout-header{padding:0 20px}.checkout-brand{font-size:21px}.secure-label{font-size:11px}.checkout-summary-column{padding:16px 20px}.checkout-form-column{padding:30px 20px 56px}.checkout-back{margin-bottom:26px}.checkout-intro{margin-bottom:32px}.checkout-intro h1{font-size:36px}.checkout-fields{grid-template-columns:1fr}.field.full{grid-column:auto}.checkout-section{padding-bottom:28px;margin-bottom:28px}.checkout-footer{align-items:flex-start;flex-direction:column;padding:20px}.summary-item{grid-template-columns:56px minmax(0,1fr) auto}.summary-media{width:56px;height:56px}}
+@media(max-width:560px){.hero{min-height:590px}.hero h1{font-size:52px}.product-grid{gap:24px 10px}.section{padding:52px 16px}.site-header{padding:0 16px}.collection-grid{grid-template-columns:1fr;padding:24px 16px 60px}.detail-copy{padding:40px 20px}.page-header{padding:52px 20px 30px}.cart-shell{padding:0 20px 60px}.cart-row{grid-template-columns:1fr 72px}.cart-row .line-total{grid-column:1/-1}.site-footer{padding:28px 20px;gap:20px;flex-direction:column}.checkout-header{padding:0 20px}.checkout-brand{font-size:21px}.secure-label{font-size:11px}.checkout-summary-column{padding:16px 20px}.checkout-form-column{padding:30px 20px 56px}.checkout-back{margin-bottom:26px}.checkout-intro{margin-bottom:32px}.checkout-intro h1{font-size:36px}.checkout-fields{grid-template-columns:1fr}.field.full{grid-column:auto}.checkout-section{padding-bottom:28px;margin-bottom:28px}.checkout-footer{align-items:flex-start;flex-direction:column;padding:20px}.summary-item{grid-template-columns:56px minmax(0,1fr) auto}.summary-media{width:56px;height:56px}.marketing-consent{left:12px;right:12px;bottom:12px;align-items:stretch;flex-direction:column;gap:14px}.marketing-consent>div{justify-content:flex-end}}
 @media(max-width:560px){.checkout-intro{margin-bottom:24px}.checkout-progress{margin-bottom:30px}.checkout-progress ol{gap:6px}.checkout-progress button{gap:5px;font-size:11px}.checkout-progress button span{width:20px;height:20px}.checkout-review{padding:0 14px}.checkout-review-row{grid-template-columns:62px minmax(0,1fr) auto;gap:9px}.checkout-actions{grid-template-columns:1fr}.checkout-secondary{justify-self:start;grid-row:2}.checkout-submit{min-height:56px}.shipping-method{align-items:flex-start}.payment-security{align-items:flex-start}}
 `
 
@@ -549,6 +589,35 @@ const qs=(s,r=document)=>r.querySelector(s),qsa=(s,r=document)=>[...r.querySelec
 const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
 const toast=(message)=>{const el=qs('[data-toast]');if(!el)return;el.textContent=message;el.classList.add('visible');setTimeout(()=>el.classList.remove('visible'),2200)};
 async function call(url,input={}){const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Requested-With':'storefront'},body:JSON.stringify(input)});const body=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(body.error||'Request failed');error.code=body.code||'';error.retryable=Boolean(body.retryable);throw error}return body}
+const marketingConsentKey='apteva-marketing-consent-v1';
+let metaConfig=null,metaEnabled=false,pendingPurchase=null;
+const marketingConsent=()=>{try{return localStorage.getItem(marketingConsentKey)||''}catch{return''}};
+const setMarketingConsent=value=>{try{localStorage.setItem(marketingConsentKey,value)}catch{}}
+const eventID=()=>globalThis.crypto?.randomUUID?.()||String(Date.now())+'-'+Math.random().toString(36).slice(2);
+function metaTrack(name,params={}){if(!metaEnabled||typeof window.fbq!=='function'){if(name==='Purchase')pendingPurchase=params;return}window.fbq('track',name,params,{eventID:eventID()})}
+function initialMetaEvents(){
+  metaTrack('PageView');
+  const product=qs('[data-meta-product]');
+  if(product){const option=qs('[data-variant-select] option:checked',product);metaTrack('ViewContent',{content_ids:[option?'commerce-variant-'+option.value:product.dataset.productId],content_type:'product',content_name:product.dataset.productTitle,value:Number(option?.dataset.priceCents||0)/100,currency:option?.dataset.currency||'USD'})}
+  const query=new URLSearchParams(location.search).get('q');if(query)metaTrack('Search',{search_string:query});
+  if(qs('[data-checkout-form]'))metaTrack('InitiateCheckout');
+	if(pendingPurchase){const purchase=pendingPurchase;pendingPurchase=null;metaTrack('Purchase',purchase)}
+}
+function loadMeta(){
+  if(metaEnabled||!metaConfig?.public_id||marketingConsent()!=='granted')return;
+  metaEnabled=true;
+  if(!window.fbq){const fbq=window.fbq=function(){fbq.callMethod?fbq.callMethod.apply(fbq,arguments):fbq.queue.push(arguments)};fbq.push=fbq;fbq.loaded=true;fbq.version='2.0';fbq.queue=[];const script=document.createElement('script');script.async=true;script.src=metaConfig.script_url||'https://connect.facebook.net/en_US/fbevents.js';document.head.append(script)}
+  window.fbq('init',String(metaConfig.public_id));initialMetaEvents();
+}
+function showConsent(){const panel=qs('[data-marketing-consent]');if(panel&&metaConfig?.enabled)panel.hidden=false}
+async function initializeMarketing(){
+  const action=document.body.dataset.marketingConfigAction;if(!action)return;
+  try{const body=await call(action);metaConfig=body?.result||body?.steps?.at(-1)||body;if(!metaConfig?.enabled)return;const choice=marketingConsent();if(choice==='granted')loadMeta();else if(choice!=='denied')showConsent()}catch{}
+}
+qsa('[data-marketing-accept]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('granted');qs('[data-marketing-consent]').hidden=true;loadMeta()}));
+qsa('[data-marketing-decline]').forEach(button=>button.addEventListener('click',()=>{setMarketingConsent('denied');metaEnabled=false;qs('[data-marketing-consent]').hidden=true}));
+qsa('[data-consent-settings]').forEach(button=>button.addEventListener('click',showConsent));
+initializeMarketing();
 function cartFrom(body){return body?.result?.cart||body?.result||body?.steps?.at(-1)?.cart||null}
 function updateCount(cart){qsa('[data-cart-count]').forEach(el=>el.textContent=cart?.items?.length?'('+cart.items.length+')':'')}
 function cartTitle(item){const title=String(item?.title_snapshot??'');const parts=title.split(' - ');return parts.length===2&&parts[0]===parts[1]?parts[0]:title}
@@ -556,7 +625,7 @@ const money=(cents,currency)=>new Intl.NumberFormat(undefined,{style:'currency',
 function imageURL(value){try{const url=new URL(String(value||''),location.href);return ['http:','https:'].includes(url.protocol)?url.href:''}catch{return''}}
 qsa('[data-variant-select]').forEach(select=>{const price=qs('[data-product-price]');const sync=()=>{const option=select.selectedOptions[0];if(price&&option)price.textContent=money(Number(option.dataset.priceCents||0),option.dataset.currency||'USD')};select.addEventListener('change',sync);sync()});
 const searchForm=qs('[data-search-form]');if(searchForm)searchForm.addEventListener('submit',event=>{event.preventDefault();const target=new URL(searchForm.action);target.searchParams.set('q',qs('input[name=q]',searchForm).value);location.assign(target)});
-qsa('form[data-storefront-action]:not([data-checkout-form])').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const button=qs('button[type=submit]',form);if(button)button.disabled=true;try{const input=Object.fromEntries(new FormData(form));qsa('input[type=number]',form).forEach(field=>input[field.name]=Number(field.value));const body=await call(form.dataset.storefrontAction,input);updateCount(cartFrom(body));toast(form.dataset.success||'Updated')}catch(error){toast(error.message)}finally{if(button)button.disabled=false}}));
+qsa('form[data-storefront-action]:not([data-checkout-form])').forEach(form=>form.addEventListener('submit',async event=>{event.preventDefault();const button=qs('button[type=submit]',form);if(button)button.disabled=true;try{const input=Object.fromEntries(new FormData(form));qsa('input[type=number]',form).forEach(field=>input[field.name]=Number(field.value));const body=await call(form.dataset.storefrontAction,input);updateCount(cartFrom(body));if(form.matches('[data-meta-add-to-cart]')){const option=qs('[data-variant-select] option:checked',form);metaTrack('AddToCart',{content_ids:['commerce-variant-'+input.variant_id],content_type:'product',value:Number(option?.dataset.priceCents||0)*Number(input.quantity||1)/100,currency:option?.dataset.currency||'USD',num_items:Number(input.quantity||1)})}toast(form.dataset.success||'Updated')}catch(error){toast(error.message)}finally{if(button)button.disabled=false}}));
 const cartRoot=qs('[data-cart]');if(cartRoot){const render=cart=>{updateCount(cart);if(!cart?.items?.length){cartRoot.innerHTML='<p class="empty">Your cart is empty.</p>';return}cartRoot.innerHTML=cart.items.map(item=>'<div class="cart-row"><div><strong>'+esc(cartTitle(item))+'</strong><br><small>'+esc(item.sku)+'</small></div><input aria-label="Quantity" data-item="'+Number(item.id)+'" type="number" min="0" step="1" value="'+Number(item.quantity)+'"><span class="line-total">'+esc(money(item.unit_amount_cents*item.quantity,item.currency))+'</span></div>').join('')+'<div class="cart-total"><span>Total</span><span>'+esc(money(cart.total_cents,cart.currency))+'</span></div><a class="button wide" href="'+esc(cartRoot.dataset.checkoutUrl)+'">Continue to checkout</a>';qsa('[data-item]',cartRoot).forEach(input=>{let saving=false;const persist=async()=>{if(saving)return;saving=true;input.disabled=true;try{const body=await call(cartRoot.dataset.quantityAction,{item_id:Number(input.dataset.item),quantity:Number(input.value)});render(cartFrom(body))}catch(error){input.disabled=false;saving=false;toast(error.message)}};input.addEventListener('change',persist);input.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();persist()}})})};call(cartRoot.dataset.cartAction).then(body=>render(cartFrom(body))).catch(error=>{cartRoot.textContent=error.message})}
 
 const checkoutForm=qs('[data-checkout-form]');
@@ -840,6 +909,8 @@ if(paymentReturn){
       const body=await call(paymentReturn.dataset.statusAction);
       const status=body?.result||{};
       if(status.payment_status==='paid'){
+		const purchaseKey='apteva-meta-purchase-'+String(status.sale_id||status.invoice_number||'');
+		try{if(!sessionStorage.getItem(purchaseKey)){metaTrack('Purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD',contents:Array.isArray(status.contents)?status.contents:[],content_type:'product'});sessionStorage.setItem(purchaseKey,'1')}}catch{metaTrack('Purchase',{value:Number(status.total_cents||0)/100,currency:status.currency||'USD'})}
         pill.textContent='Paid';
         title.textContent='Order confirmed';
         message.textContent=status.invoice_number?'Payment is confirmed for invoice '+status.invoice_number+'. Your order is being prepared.':'Payment is confirmed and your order is being prepared.';
@@ -902,12 +973,19 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 		return nil, err
 	}
 	extensionKey := storefrontExtensionKey(store.ID)
+	channel, err := dbMarketingChannelGet(ctx.AppDB(), pid, store.ID, metaMarketingProvider)
+	if err != nil {
+		return nil, fmt.Errorf("read marketing channel: %w", err)
+	}
 	var extensionResult map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("content", "extensions_upsert", map[string]any{
 		"_project_id": pid, "_site_id": siteID,
 		"key": extensionKey, "provider_app": "commerce",
-		"manifest": commerceStorefrontManifest(store), "publish": true,
+		"manifest": commerceStorefrontManifest(store, channel), "publish": true,
 	}, &extensionResult); err != nil {
+		if channel != nil && channel.Status == "active" {
+			_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, "error", err.Error())
+		}
 		return nil, fmt.Errorf("install Content storefront: %w", err)
 	}
 	metadata := copyMap(store.Metadata)
@@ -918,6 +996,9 @@ func (a *App) configureContentStorefront(ctx *sdk.AppCtx, pid string, store *Sto
 	updated, err := dbStoreUpdate(ctx.AppDB(), pid, store.ID, map[string]any{"metadata": metadata})
 	if err != nil {
 		return nil, err
+	}
+	if channel != nil && channel.Status == "active" {
+		_ = dbMarketingChannelSiteStatus(ctx.AppDB(), pid, store.ID, "installed", "")
 	}
 	return storefrontStatus(pid, updated, site, ""), nil
 }

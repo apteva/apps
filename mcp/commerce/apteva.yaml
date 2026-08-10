@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.8.5
+version: 0.8.6
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -12,6 +12,8 @@ description: |
   Prodigi, BigBuy, and CJ Dropshipping catalogs, quotes, orders, and tracking.
   Each store can select manual, Stripe-hosted, or native Stripe Elements
   checkout while Content remains the sole owner of public storefront UI.
+  Commerce can optionally bind Ads to install a selected Meta Pixel on its
+  Content storefront with consent-gated browser events.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
@@ -40,6 +42,10 @@ requires:
       optional: false
     - name: content
       optional: true
+    - name: ads
+      version: ">=0.1.42"
+      optional: true
+      reason: "Resolve Meta tracking sources and browser-public installation configuration."
   integrations:
     - role: supplier_provider
       kind: integration
@@ -99,6 +105,11 @@ provides:
     - { name: commerce_dispatches_list, description: "List provider fulfillment dispatch jobs." }
     - { name: commerce_dispatch_submit, description: "Approve or retry one provider dispatch job." }
     - { name: commerce_sources_sync, description: "Synchronize imported provider variant cost and availability." }
+    - { name: commerce_marketing_channel_options, description: "List Meta ad accounts and Pixels available through the optional Ads app. Args: store_id." }
+    - { name: commerce_marketing_channel_get, description: "Return the configured marketing channel for a store. Args: store_id." }
+    - { name: commerce_marketing_channel_configure, description: "Select or create a Meta Pixel and install consent-gated browser tracking on the Content storefront. Args: store_id, ad_account_id, tracking_source_resource_id? or pixel_name?." }
+    - { name: commerce_marketing_channel_disconnect, description: "Disable a store marketing channel and remove it from the published storefront. Args: store_id." }
+    - { name: commerce_marketing_channel_public_get, description: "Return browser-public tracking configuration for a store. Args: store_id." }
   ui_panels:
     - slot: project.page
       label: Commerce
@@ -129,6 +140,8 @@ provides:
       description: A provider product was imported into Catalog and Commerce.
     - name: commerce.fulfillment.submitted
       description: A provider fulfillment order was submitted.
+    - name: commerce.marketing_channel.updated
+      description: A store marketing channel was configured or disabled.
   workers:
     - name: provider-dispatch-reconcile
       schedule: "@every 30s"
@@ -139,7 +152,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.8.5
+    ref: commerce/v0.8.6
     entry: mcp/commerce
   port: 8080
   health_check: /health

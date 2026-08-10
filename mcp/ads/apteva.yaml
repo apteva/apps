@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.41
+version: 0.1.42
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -51,6 +51,9 @@ description: |
   filtered analytics collection, and a provider-neutral campaign picker.
   v0.1.41 adds capability-driven conversion tracking source creation, safe Meta
   Pixel reuse and reconciliation, project defaults, and account-resource UI.
+  v0.1.42 adds a constrained browser installation contract for normalized Meta
+  Pixels so optional storefront apps can install tracking without receiving
+  provider credentials or using native IDs for resource selection.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -122,6 +125,7 @@ provides:
     - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
     - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source without installing website tracking code." }
+    - { name: tracking_source_installation_get, description: "Return browser-public installation configuration for a normalized tracking source." }
     - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
     - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
     - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }

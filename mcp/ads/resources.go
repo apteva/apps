@@ -128,10 +128,15 @@ func accountResourceCapabilities(platform string) map[string]any {
 	if create {
 		operations = append(operations, "create")
 	}
+	install := platform == "meta"
+	if install {
+		operations = append(operations, "install_config")
+	}
 	return map[string]any{
 		"tracking_source": map[string]any{
 			"supported":                  supported,
 			"create":                     create,
+			"install":                    install,
 			"resource_kind":              resourceKind,
 			"provider_types":             providerTypes,
 			"operations":                 operations,
