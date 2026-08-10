@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.40
+version: 0.1.41
 scopes: [project, global]
 requires:
   permissions:
@@ -74,6 +74,8 @@ provides:
       description: "Normalized performance cache was refreshed for an account and level."
     - name: performance.sync_failed
       description: "A performance refresh failed and was scheduled for retry."
+    - name: tracking_source.created
+      description: "A provider tracking source was created and normalized."
 db:
   driver: sqlite
   path: /data/ads.db
@@ -589,6 +591,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"resource_id": map[string]any{"type": "integer"},
 			}, []string{"ad_account_id", "purpose", "resource_id"}),
 			Handler: a.toolResourceSetDefault,
+		},
+		{
+			Name:        "tracking_source_create",
+			Description: "Create or safely reuse a normalized conversion tracking source. Meta creates a Pixel; this does not install browser or server-side tracking on a website.",
+			InputSchema: trackingSourceCreateSchema(),
+			Handler:     a.toolTrackingSourceCreate,
 		},
 		{
 			Name:        "lead_form_create",

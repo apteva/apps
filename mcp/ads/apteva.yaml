@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.40
+version: 0.1.41
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -49,6 +49,8 @@ description: |
   analytics, and provider-native audience workflows run without either app.
   v0.1.40 adds project-managed campaign imports, descendant scope enforcement,
   filtered analytics collection, and a provider-neutral campaign picker.
+  v0.1.41 adds capability-driven conversion tracking source creation, safe Meta
+  Pixel reuse and reconciliation, project defaults, and account-resource UI.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -105,6 +107,8 @@ provides:
       description: "An audience member sync completed."
     - name: audience.sync.failed
       description: "An audience member sync failed or was scheduled for retry."
+    - name: tracking_source.created
+      description: "A provider tracking source was created and normalized into the account resource registry."
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
@@ -117,6 +121,7 @@ provides:
     - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
     - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
+    - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source without installing website tracking code." }
     - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
     - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
     - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }

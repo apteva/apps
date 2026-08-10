@@ -98,11 +98,46 @@ func (a *App) toolAccountContextGet(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return map[string]any{
 		"ad_account_id":  acct.ID,
 		"platform":       acct.Platform,
+		"capabilities":   accountResourceCapabilities(acct.Platform),
 		"resource_kinds": platformResourceKinds[acct.Platform],
 		"resources":      items,
 		"defaults":       defaults,
 		"refresh_errors": errorsByKind,
 	}, nil
+}
+
+func accountResourceCapabilities(platform string) map[string]any {
+	resourceKind := resourceTrackingSource
+	providerTypes := []string{}
+	create := false
+	supported := false
+	switch platform {
+	case "meta":
+		supported = true
+		create = true
+		providerTypes = []string{"meta_pixel"}
+	case "google":
+		supported = true
+		resourceKind = resourceConversionAction
+		providerTypes = []string{"google_conversion_action"}
+	case "reddit":
+		supported = true
+		providerTypes = []string{"reddit_pixel"}
+	}
+	operations := []string{"list", "get", "set_default"}
+	if create {
+		operations = append(operations, "create")
+	}
+	return map[string]any{
+		"tracking_source": map[string]any{
+			"supported":                  supported,
+			"create":                     create,
+			"resource_kind":              resourceKind,
+			"provider_types":             providerTypes,
+			"operations":                 operations,
+			"requires_site_installation": true,
+		},
+	}
 }
 
 func (a *App) toolResourceRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -192,14 +227,7 @@ func (a *App) toolResourceSetDefault(ctx *sdk.AppCtx, args map[string]any) (any,
 	if !resourceMatchesPurpose(resource, purpose) {
 		return mcpError(fmt.Sprintf("%s resource cannot be used as %s", resource.Kind, purpose)), nil
 	}
-	_, err = ctx.AppDB().Exec(
-		`INSERT INTO ad_resource_defaults (project_id, ad_account_id, purpose, resource_id)
-		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT(project_id, ad_account_id, purpose) DO UPDATE SET
-		   resource_id=excluded.resource_id, updated_at=CURRENT_TIMESTAMP`,
-		pid, acct.ID, purpose, resource.ID,
-	)
-	if err != nil {
+	if err := a.setResourceDefault(ctx, acct, purpose, resource.ID); err != nil {
 		return nil, err
 	}
 	return map[string]any{"purpose": purpose, "resource": resource.response()}, nil
@@ -496,7 +524,7 @@ func (a *App) discoverMetaResources(ctx *sdk.AppCtx, acct *adAccount, kind strin
 			out = append(out, discoveredResource{
 				Kind: resourceTrackingSource, ProviderType: "meta_pixel", NativeID: id,
 				DisplayName: firstString(row, "name"), Status: status,
-				Capabilities: []string{"conversion_tracking"},
+				Capabilities: []string{"conversion_tracking", "server_events"},
 				Metadata:     map[string]any{"last_fired_time": row["last_fired_time"]},
 			})
 		}

@@ -257,10 +257,33 @@ interface AdResource {
 interface AccountContext {
   ad_account_id: number;
   platform: string;
+  capabilities: {
+    tracking_source?: {
+      supported: boolean;
+      create: boolean;
+      resource_kind: string;
+      provider_types: string[];
+      operations: string[];
+      requires_site_installation: boolean;
+    };
+  };
   resource_kinds: string[];
   resources: AdResource[];
   defaults: Record<string, AdResource>;
   refresh_errors: Record<string, string>;
+}
+
+export function canCreateTrackingSource(context: AccountContext | null | undefined): boolean {
+  return context?.capabilities?.tracking_source?.create === true;
+}
+
+export function trackingSourceCreateInput(accountId: number, name: string, setDefault: boolean) {
+  return {
+    ad_account_id: accountId,
+    name: name.trim(),
+    set_default: setDefault,
+    reuse_existing: true,
+  };
 }
 
 interface PendingPicker {
@@ -1320,6 +1343,11 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const [loadingResources, setLoadingResources] = useState(false);
   const [savingResourceId, setSavingResourceId] = useState<number | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  const [resourceNotice, setResourceNotice] = useState<string | null>(null);
+  const [trackingSourceOpen, setTrackingSourceOpen] = useState(false);
+  const [creatingTrackingSource, setCreatingTrackingSource] = useState(false);
+  const [trackingSourceName, setTrackingSourceName] = useState("");
+  const [trackingSourceSetDefault, setTrackingSourceSetDefault] = useState(true);
   const [leadFormOpen, setLeadFormOpen] = useState(false);
   const [creatingLeadForm, setCreatingLeadForm] = useState(false);
   const [leadFormName, setLeadFormName] = useState("");
@@ -1537,6 +1565,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
   const openAccountResources = useCallback((account: AdAccount) => {
     setSetupAccount(account);
     setAccountContext(null);
+    setResourceNotice(null);
     loadAccountContext(account, true);
   }, [loadAccountContext]);
 
@@ -1545,9 +1574,41 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     setSetupAccount(null);
     setAccountContext(null);
     setResourceError(null);
+    setResourceNotice(null);
     setLoadingResources(false);
+    setTrackingSourceOpen(false);
     setLeadFormOpen(false);
   }, []);
+
+  const openTrackingSourceCreate = () => {
+    setTrackingSourceName("");
+    setTrackingSourceSetDefault(true);
+    setResourceError(null);
+    setResourceNotice(null);
+    setTrackingSourceOpen(true);
+  };
+
+  const createTrackingSource = async () => {
+    if (!setupAccount || !trackingSourceName.trim()) return;
+    setCreatingTrackingSource(true);
+    setResourceError(null);
+    try {
+      const result = await callTool(
+        "tracking_source_create",
+        trackingSourceCreateInput(setupAccount.id, trackingSourceName, trackingSourceSetDefault),
+      );
+      setTrackingSourceOpen(false);
+      const sourceType = result.resource?.provider_type === "meta_pixel" ? "Meta Pixel" : "Tracking source";
+      setResourceNotice(result.reused
+        ? `${result.resource?.name || sourceType} already existed${result.default_selected ? " and is now the default" : ""}. Website tracking was not installed.`
+        : `${sourceType} ${result.resource?.name || ""} was created${result.default_selected ? " and selected as the default" : ""}. Website tracking was not installed.`);
+      await loadAccountContext(setupAccount, false);
+    } catch (err) {
+      setResourceError((err as Error).message);
+    } finally {
+      setCreatingTrackingSource(false);
+    }
+  };
 
   const openLeadFormCreate = () => {
     setLeadFormName("");
@@ -1647,6 +1708,10 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
     if (event.topic === "account.changed" || event.topic === "account.added" || event.topic === "account.removed") {
       refreshAccounts();
       refreshPlatforms();
+      return;
+    }
+    if (event.topic === "tracking_source.created" && setupAccount && event.data?.ad_account_id === setupAccount.id) {
+      loadAccountContext(setupAccount, false);
       return;
     }
     if (!selected || event.data?.ad_account_id !== selected.id) return;
@@ -2529,7 +2594,7 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
         </Modal>
       )}
 
-      {setupAccount && !leadFormOpen && (
+      {setupAccount && !leadFormOpen && !trackingSourceOpen && (
         <Modal
           title="Account resources"
 		  description={`${setupAccount.display_name} · ${providerName(setupAccount.platform)}`}
@@ -2555,6 +2620,11 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                 {resourceError}
               </div>
             )}
+            {resourceNotice && (
+              <div role="status" className="border-b border-green/30 bg-green/10 px-4 py-3 text-sm text-green">
+                {resourceNotice}
+              </div>
+            )}
             {loadingResources && !accountContext ? (
               <p className="px-4 py-10 text-center text-sm text-text-muted">Discovering account resources...</p>
             ) : groupedResources.length === 0 ? (
@@ -2569,6 +2639,15 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                       </h3>
                       <div className="flex items-center gap-3">
                         <span className="text-xs tabular-nums text-text-dim">{group.resources.length}</span>
+						{group.kind === "tracking_source" && canCreateTrackingSource(accountContext) && (
+                          <button
+                            type="button"
+                            onClick={openTrackingSourceCreate}
+                            className="h-7 rounded border border-border px-2.5 text-xs font-medium text-text hover:bg-bg-card"
+                          >
+                            Create
+                          </button>
+                        )}
 						{group.kind === "lead_form" && (setupAccount.platform === "meta" || setupAccount.platform === "google") && (
                           <button
                             type="button"
@@ -2583,7 +2662,11 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
                     {group.error ? (
                       <p className="px-4 py-3 text-xs text-red">{group.error}</p>
                     ) : group.resources.length === 0 ? (
-                      <p className="px-4 py-3 text-xs text-text-muted">None available from this provider connection.</p>
+                      <p className="px-4 py-3 text-xs text-text-muted">
+                        {group.kind === "tracking_source" && canCreateTrackingSource(accountContext)
+                          ? "No conversion tracking sources yet."
+                          : "None available from this provider connection."}
+                      </p>
                     ) : (
                       <div className="divide-y divide-border">
                         {group.resources.map((resource) => {
@@ -2619,6 +2702,49 @@ export default function AdsPanel({ projectId, installId }: NativePanelProps) {
               </div>
             )}
           </div>
+        </Modal>
+      )}
+
+      {setupAccount && trackingSourceOpen && (
+        <Modal
+          title="Create tracking source"
+		  description={`${setupAccount.display_name} · ${providerName(setupAccount.platform)}`}
+          size="large"
+          onClose={() => !creatingTrackingSource && setTrackingSourceOpen(false)}
+          labelledBy="ads-tracking-source-title"
+        >
+          <form onSubmit={(event) => { event.preventDefault(); createTrackingSource(); }}>
+            {resourceError && (
+              <div role="alert" className="border-b border-red/30 bg-red/10 px-4 py-3 text-sm text-red">{resourceError}</div>
+            )}
+            <div className="grid gap-4 px-4 py-4">
+              <label className="grid gap-1.5 text-xs font-medium text-text-muted">
+                Name
+                <input
+                  required
+                  maxLength={255}
+                  autoFocus
+                  value={trackingSourceName}
+                  onChange={(event) => setTrackingSourceName(event.target.value)}
+                  placeholder="Website conversions"
+                  className="h-9 rounded border border-border bg-bg-input px-3 text-sm text-text outline-none focus:border-accent"
+                />
+              </label>
+              <label className="flex h-9 items-center gap-2 text-sm text-text">
+                <input type="checkbox" checked={trackingSourceSetDefault} onChange={(event) => setTrackingSourceSetDefault(event.target.checked)} className="h-4 w-4 accent-accent" />
+                Use as the default conversion source
+              </label>
+              <p className="rounded border border-border bg-bg-input px-3 py-2.5 text-xs leading-5 text-text-muted">
+                This creates a provider tracking source for campaign attribution. It does not install browser tracking or server events on your website.
+              </p>
+            </div>
+            <footer className="flex justify-end gap-2 border-t border-border px-4 py-3">
+              <button type="button" disabled={creatingTrackingSource} onClick={() => setTrackingSourceOpen(false)} className="h-9 rounded border border-border px-3 text-sm text-text hover:bg-bg-input disabled:opacity-50">Cancel</button>
+              <button type="submit" disabled={creatingTrackingSource || !trackingSourceName.trim()} className="h-9 rounded bg-accent px-3 text-sm font-medium text-black hover:opacity-90 disabled:opacity-50">
+                {creatingTrackingSource ? "Creating..." : "Create source"}
+              </button>
+            </footer>
+          </form>
         </Modal>
       )}
 
