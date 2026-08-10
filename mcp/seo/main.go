@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.10
+version: 0.4.11
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 icon: /ui/icon.svg
@@ -120,6 +120,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("seo requires a db block")
 	}
 	globalCtx = ctx
+	// A process restart interrupts in-flight goroutines. Preserve their item
+	// checkpoints and make the jobs explicitly resumable from the panel.
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE keyword_metric_jobs
+		    SET status = 'partial', phase = 'interrupted',
+		        last_error = 'refresh interrupted by app restart; resume to continue missing fields',
+		        updated_at = ?
+		  WHERE status = 'running'`, time.Now().Unix())
 	ctx.Logger().Info("seo mounted")
 	return nil
 }
@@ -139,6 +147,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/domains/", Handler: a.handleDomainsItem},
 		{Pattern: "/keywords/", Handler: a.handleKeywordsItem},
+		{Pattern: "/keyword-metric-jobs", Handler: a.handleKeywordMetricJobs},
+		{Pattern: "/keyword-metric-jobs/", Handler: a.handleKeywordMetricJobItem},
 		{Pattern: "/locations", Handler: a.handleLocationsList},
 		{Pattern: "/locations/sync", Handler: a.handleLocationsSync},
 		{Pattern: "/tools/call", Handler: a.handleToolsCall},
@@ -2625,6 +2635,11 @@ func writeJSONOrErr(w http.ResponseWriter, payload any, err error) {
 		code := http.StatusInternalServerError
 		if errors.Is(err, errProviderUnbound) {
 			code = http.StatusServiceUnavailable
+		} else {
+			var providerErr *providerRequestError
+			if errors.As(err, &providerErr) && providerErr.HTTPStatus != 0 {
+				code = providerErr.HTTPStatus
+			}
 		}
 		http.Error(w, err.Error(), code)
 		return

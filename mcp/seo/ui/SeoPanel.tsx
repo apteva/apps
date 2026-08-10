@@ -63,6 +63,24 @@ interface KeywordMetrics {
   cpc_usd?: number;
 }
 
+interface KeywordMetricJob {
+  id: number;
+  project_id: string;
+  provider: string;
+  search_engine: string;
+  location_id: number;
+  status: "pending" | "running" | "partial" | "failed" | "completed";
+  phase: string;
+  total_keywords: number;
+  completed_keywords: number;
+  incomplete_keywords: number;
+  volume_completed: number;
+  difficulty_completed: number;
+  last_error?: string;
+  created_at: number;
+  updated_at: number;
+}
+
 interface Ranking {
   id: number;
   domain_id: number;
@@ -244,6 +262,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [serpResults, setSerpResults] = useState<SearchRanking[]>([]);
   const [keywordIdeas, setKeywordIdeas] = useState<KeywordIdea[]>([]);
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
+  const [metricJobs, setMetricJobs] = useState<KeywordMetricJob[]>([]);
   const [activity, setActivity] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -307,18 +326,31 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setOpportunities(resp.items || []);
   }, [callTool, searchEngine]);
 
+  const mergeMetricJobs = useCallback((rows: KeywordMetricJob[]) => {
+    setMetricJobs((current) => {
+      const byId = new Map(current.map((job) => [job.id, job]));
+      for (const job of rows) byId.set(job.id, job);
+      return Array.from(byId.values()).sort((a, b) => b.id - a.id).slice(0, 20);
+    });
+  }, []);
+
+  const reloadMetricJobs = useCallback(async () => {
+    const response = await api<{ jobs: KeywordMetricJob[] }>("GET", "/keyword-metric-jobs");
+    setMetricJobs(response.jobs || []);
+  }, [api]);
+
   const reloadAll = useCallback(async () => {
     setBusy(true);
     setErr("");
     try {
-      await Promise.all([reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities()]);
+      await Promise.all([reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities(), reloadMetricJobs()]);
       setStatus("Updated");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadOpportunities]);
+  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities]);
 
   useEffect(() => {
     if (!engineViews(searchEngine).includes(view)) {
@@ -438,7 +470,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const loc = domain.default_location_id || defaultLocation?.id;
-      const params = loc ? { location_id: String(loc) } : {};
+      const params: Record<string, string> = loc ? { location_id: String(loc) } : {};
       await api<Record<string, unknown>>(
         "POST",
         backlinks ? `/domains/${domain.id}/backlinks/refresh` : `/domains/${domain.id}/refresh`,
@@ -476,6 +508,70 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setKeywordMetrics(detail.metrics || null);
       setStatus("Keyword refreshed");
       pushActivity(`Keyword refreshed: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function waitForMetricJobs(initialJobs: KeywordMetricJob[]): Promise<KeywordMetricJob[]> {
+    let jobs = initialJobs;
+    mergeMetricJobs(jobs);
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      if (jobs.every((job) => job.status !== "pending" && job.status !== "running")) break;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      jobs = await Promise.all(
+        jobs.map((job) =>
+          job.status === "pending" || job.status === "running"
+            ? api<KeywordMetricJob>("GET", `/keyword-metric-jobs/${job.id}`)
+            : Promise.resolve(job),
+        ),
+      );
+      mergeMetricJobs(jobs);
+    }
+    await Promise.all([reloadKeywords(), reloadMetricJobs()]);
+    const incomplete = jobs.filter((job) => job.status !== "completed");
+    if (incomplete.length > 0) {
+      throw new Error(incomplete.map((job) => job.last_error || `Metric job ${job.id} is ${job.status}`).join("\n"));
+    }
+    return jobs;
+  }
+
+  async function refreshKeywordMetricsBulk(rows: Keyword[]): Promise<KeywordMetricJob[]> {
+    if (rows.length === 0) return [];
+    const response = await api<{ jobs: KeywordMetricJob[] }>(
+      "POST",
+      "/keyword-metric-jobs",
+      {},
+      { keyword_ids: rows.map((keyword) => keyword.id) },
+    );
+    const jobs = await waitForMetricJobs(response.jobs || []);
+    setStatus(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
+    pushActivity(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
+    return jobs;
+  }
+
+  async function refreshAllKeywordMetrics() {
+    setBusy(true);
+    setErr("");
+    try {
+      await refreshKeywordMetricsBulk(keywords);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resumeMetricJob(job: KeywordMetricJob) {
+    setBusy(true);
+    setErr("");
+    try {
+      await api<Record<string, unknown>>("POST", `/keyword-metric-jobs/${job.id}/resume`);
+      await waitForMetricJobs([{ ...job, status: "pending", phase: "queued", last_error: "" }]);
+      setStatus(`Metric job ${job.id} completed`);
+      pushActivity(`Resumed metric job ${job.id}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -596,8 +692,10 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
         <SeedView
           locations={filteredLocations}
           activity={activity}
+          metricJobs={metricJobs}
           busy={busy}
           onSync={syncLocations}
+          onResume={resumeMetricJob}
           onSeed={async (payload) => {
             setBusy(true);
             setErr("");
@@ -623,10 +721,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               if (domain) setSelectedDomain(domain);
               if (keywordRows[0]) setSelectedKeyword(keywordRows[0]);
               if (payload.refresh && domain) await refreshDomain(domain);
-              if (payload.refresh) {
-                for (const keyword of keywordRows) await refreshKeyword(keyword);
-              }
-              setStatus(`Seeded ${domain ? 1 : 0} domain, ${keywordRows.length} keywords`);
+              if (payload.refresh) await refreshKeywordMetricsBulk(keywordRows);
+              if (!payload.refresh) setStatus(`Seeded ${domain ? 1 : 0} domain, ${keywordRows.length} keywords`);
               pushActivity(`Seeded ${domain ? 1 : 0} domain and ${keywordRows.length} keywords`);
             } catch (e) {
               setErr((e as Error).message);
@@ -729,6 +825,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
             await reloadKeywords();
           }}
           onRefresh={refreshKeyword}
+          onRefreshAll={refreshAllKeywordMetrics}
           onRefreshSERP={refreshKeywordSERP}
           locationById={locationById}
           busy={busy}
@@ -1266,8 +1363,10 @@ function RankingExplorer(props: {
 function SeedView(props: {
   locations: SEOLocation[];
   activity: string[];
+  metricJobs: KeywordMetricJob[];
   busy: boolean;
   onSync(): Promise<void>;
+  onResume(job: KeywordMetricJob): Promise<void>;
   onSeed(payload: {
     host: string;
     label: string;
@@ -1340,6 +1439,40 @@ function SeedView(props: {
               </button>
             </div>
           </form>
+          {props.metricJobs.length > 0 && (
+            <div className="border-t border-border pt-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-sm font-medium">Keyword metric refreshes</h3>
+                <span className="text-xs text-text-dim">Volume and difficulty</span>
+              </div>
+              {props.metricJobs.slice(0, 5).map((job) => {
+                const fieldsDone = job.volume_completed + job.difficulty_completed;
+                const totalFields = Math.max(1, job.total_keywords * 2);
+                const progress = Math.min(100, Math.round((fieldsDone / totalFields) * 100));
+                const resumable = job.status === "partial" || job.status === "failed";
+                return (
+                  <div key={job.id} className="border border-border rounded p-3 space-y-2">
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <span>Job {job.id} - {job.status}</span>
+                      <span className="text-xs text-text-dim">{progress}%</span>
+                    </div>
+                    <div className="h-1.5 bg-surface-2 overflow-hidden">
+                      <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
+                    </div>
+                    <div className="flex items-center justify-between gap-3 text-xs text-text-dim">
+                      <span>Volume {job.volume_completed}/{job.total_keywords} - Difficulty {job.difficulty_completed}/{job.total_keywords}</span>
+                      {resumable && (
+                        <button type="button" className={buttonCls} disabled={props.busy} onClick={() => props.onResume(job)}>
+                          Resume missing
+                        </button>
+                      )}
+                    </div>
+                    {job.last_error && <div className="text-xs text-red-300 whitespace-pre-wrap">{job.last_error}</div>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
       <div className="border-l border-border min-h-0 overflow-auto">
@@ -1360,6 +1493,7 @@ function KeywordsView(props: {
   onAdd(text: string, locationId: number): Promise<void>;
   onRemove(id: number): Promise<void>;
   onRefresh(k: Keyword): Promise<void>;
+  onRefreshAll(): Promise<void>;
   onRefreshSERP(k: Keyword): Promise<void>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
@@ -1399,6 +1533,11 @@ function KeywordsView(props: {
             {props.locations.map((l) => <option key={l.id} value={l.id}>{localeLabel(l)}</option>)}
           </select>
           <button type="submit" className={primaryBtn} disabled={props.busy || !text.trim() || locationId === ""}>Add Keyword</button>
+          {props.searchEngine === "google" && props.keywords.length > 0 && (
+            <button type="button" className={`${buttonCls} w-full`} disabled={props.busy} onClick={props.onRefreshAll}>
+              Refresh All Metrics
+            </button>
+          )}
         </form>
         <div className="flex-1 overflow-auto">
           {props.keywords.map((k) => (

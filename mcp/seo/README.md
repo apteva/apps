@@ -5,7 +5,7 @@ and backlinks; pull metrics from any provider behind one pluggable role.
 
 ## Schema (v0.4)
 
-Fourteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
+Sixteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
 - `seo_locations` — provider/search-engine/language/location catalog used to
   make every paid refresh locale-explicit
@@ -17,6 +17,10 @@ Fourteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / M
 - `keyword_metrics` — `(keyword, provider, ts)` snapshot
 - `keyword_volume_history` — monthly volume series, all three providers expose
   ~24 months of this inline so it gets its own table
+- `keyword_metric_jobs` — resumable bulk refresh progress grouped by provider,
+  search engine, and locale
+- `keyword_metric_job_items` — per-keyword volume/difficulty checkpoints and
+  retry state for each bulk job
 - `rankings` — `(domain, keyword, ts) → rank, rank_url, device, serp_features`
 - `ranking_observations` — successful domain ranking refreshes, including
   empty observations, used to distinguish current rows from retained history
@@ -43,3 +47,10 @@ YouTube locales from active DataForSEO Google locations so YouTube SERP refresh
 still has explicit country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
 explicit paid MCP actions.
+
+Google keyword metric refreshes are HTTP/UI-only bulk jobs. DataForSEO requests
+are grouped by locale and sent in batches of up to 1,000 keywords, with separate
+volume and difficulty phases. The app checks account credit before starting,
+retries rate limits with backoff, and resumes only missing fields after a
+partial or interrupted run. SERP/ranking refreshes stay separate because they
+have different provider costs.

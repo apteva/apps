@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.11
+
+- Added bulk Google keyword metric jobs grouped by provider locale, with up to
+  1,000 keywords per DataForSEO request for volume and difficulty.
+- Persisted per-keyword progress so interrupted, partial, and failed jobs can
+  resume only missing volume or difficulty fields.
+- Added account balance preflight, rate-limit retry with backoff, and explicit
+  HTTP 402 and 429 responses for provider payment and throttling failures.
+- Updated seed-and-refresh and keyword-list UI workflows to use bulk jobs and
+  show progress, errors, and resume controls.
+
+## 0.4.10
+
+- Added the adaptive SEO app icon used by the registry.
+
 ## 0.4.9
 
 - Fixed duplicate `keywords_add` and `domains_add` calls returning stale SQLite

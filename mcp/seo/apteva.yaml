@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.10
+version: 0.4.11
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -55,6 +55,10 @@ description: |
         adds bounded SERP retention.
   v0.4.9: fixes duplicate keyword and domain additions so conflict-tolerant
         inserts always return the canonical tracked record.
+  v0.4.10: adds the adaptive app icon used by the app registry.
+  v0.4.11: batches Google keyword volume and difficulty refreshes, checks
+        DataForSEO credit before paid work, persists resumable progress, and
+        returns provider payment and rate-limit errors as HTTP 402/429.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo

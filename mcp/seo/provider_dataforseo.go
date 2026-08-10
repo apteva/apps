@@ -31,7 +31,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -55,41 +57,102 @@ type dfsTask struct {
 	Result     []json.RawMessage `json:"result"`
 }
 
+type providerRequestError struct {
+	HTTPStatus   int
+	ProviderCode int
+	Message      string
+}
+
+func (e *providerRequestError) Error() string {
+	if e.ProviderCode != 0 {
+		return fmt.Sprintf("dataforseo: task status %d: %s", e.ProviderCode, e.Message)
+	}
+	return "dataforseo: " + e.Message
+}
+
+func classifyProviderError(code int, message string) error {
+	lower := strings.ToLower(message)
+	switch {
+	case code == 40202, code == 50301,
+		strings.Contains(lower, "rate limit"), strings.Contains(lower, "rates limit"),
+		strings.Contains(lower, "too many requests"):
+		return &providerRequestError{HTTPStatus: http.StatusTooManyRequests, ProviderCode: code, Message: message}
+	case code == 40200, strings.Contains(lower, "payment required"),
+		strings.Contains(lower, "insufficient") && (strings.Contains(lower, "credit") || strings.Contains(lower, "fund")),
+		strings.Contains(lower, "balance") && strings.Contains(lower, "low"):
+		return &providerRequestError{HTTPStatus: http.StatusPaymentRequired, ProviderCode: code, Message: message}
+	default:
+		return fmt.Errorf("dataforseo: task status %d: %s", code, message)
+	}
+}
+
 // callDfs wraps ExecuteIntegrationTool + envelope sanity-check. It
 // returns the first task's first result row as raw JSON, plus the
 // whole task[0] payload for raw_json archival.
 func callDfs(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (resultRow []byte, taskRaw []byte, err error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, map[string]any{
+	rows, taskRaw, err := callDfsRows(ctx, connID, tool, input)
+	if err != nil || len(rows) == 0 {
+		return nil, taskRaw, err
+	}
+	return rows[0], taskRaw, nil
+}
+
+// callDfsRows preserves every task result row. Single-keyword and overview
+// callers use callDfs; bulk keyword metrics need the complete result array.
+func callDfsRows(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (resultRows []json.RawMessage, taskRaw []byte, err error) {
+	return callDfsRowsWithIntegrationInput(ctx, connID, tool, map[string]any{
 		"tasks": []map[string]any{input},
 	})
+}
+
+func callDfsRowsWithIntegrationInput(ctx *sdk.AppCtx, connID int64, tool string, integrationInput map[string]any) (resultRows []json.RawMessage, taskRaw []byte, err error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, integrationInput)
 	if err != nil {
 		return nil, nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
 	}
-	if !res.Success || res.Status >= 400 {
-		return nil, nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, res.Status)
-	}
 	var env dfsEnvelope
-	if err := json.Unmarshal(res.Data, &env); err != nil {
-		return nil, nil, fmt.Errorf("dataforseo: parse envelope: %w", err)
+	parseErr := json.Unmarshal(res.Data, &env)
+	if parseErr == nil && env.StatusCode != 0 && env.StatusCode != 20000 {
+		return nil, nil, classifyProviderError(env.StatusCode, env.StatusMsg)
 	}
-	if env.StatusCode != 20000 {
-		return nil, nil, fmt.Errorf("dataforseo: status %d: %s", env.StatusCode, env.StatusMsg)
+	if parseErr == nil && len(env.Tasks) > 0 && env.Tasks[0].StatusCode != 20000 {
+		t := env.Tasks[0]
+		return nil, nil, classifyProviderError(t.StatusCode, t.StatusMsg)
+	}
+	if !res.Success || res.Status >= 400 {
+		status := res.Status
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
+			return nil, nil, &providerRequestError{HTTPStatus: status, Message: fmt.Sprintf("%s returned HTTP %d", tool, status)}
+		}
+		return nil, nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, status)
+	}
+	if parseErr != nil {
+		return nil, nil, fmt.Errorf("dataforseo: parse envelope: %w", parseErr)
 	}
 	if len(env.Tasks) == 0 {
 		return nil, nil, fmt.Errorf("dataforseo: %s returned zero tasks", tool)
 	}
 	t := env.Tasks[0]
-	if t.StatusCode != 20000 {
-		return nil, nil, fmt.Errorf("dataforseo: task status %d: %s", t.StatusCode, t.StatusMsg)
-	}
 	taskRaw, _ = json.Marshal(t)
-	if len(t.Result) == 0 {
-		// Some endpoints legitimately return zero result rows
-		// (e.g. backlinks_list when nothing matches the filter).
-		// Surface as nil resultRow + nil err so callers can decide.
-		return nil, taskRaw, nil
+	return t.Result, taskRaw, nil
+}
+
+func retryProviderCall(call func() ([]json.RawMessage, []byte, error)) ([]json.RawMessage, []byte, error) {
+	delays := []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second}
+	for attempt := 0; ; attempt++ {
+		rows, raw, err := call()
+		if err == nil {
+			return rows, raw, nil
+		}
+		var providerErr *providerRequestError
+		if !errors.As(err, &providerErr) || providerErr.HTTPStatus != http.StatusTooManyRequests || attempt >= len(delays) {
+			return nil, nil, err
+		}
+		time.Sleep(delays[attempt])
 	}
-	return t.Result[0], taskRaw, nil
 }
 
 // ─── Domain rank overview ────────────────────────────────────────
@@ -411,14 +474,15 @@ func firstInt64Ptr(xs ...*int64) *int64 {
 // keyword per call; the monthly_searches array is the inline history
 // we unfold into keyword_volume_history.
 type dfsKeywordVolumeItem struct {
-	Keyword          string   `json:"keyword"`
-	LocationCode     int      `json:"location_code"`
-	LanguageCode     string   `json:"language_code"`
-	SearchVolume     *int64   `json:"search_volume"`
-	CompetitionIdx   *int64   `json:"competition_index"`
-	CPC              *float64 `json:"cpc"`
-	LowTopOfPageBid  *float64 `json:"low_top_of_page_bid"`
-	HighTopOfPageBid *float64 `json:"high_top_of_page_bid"`
+	Keyword          string          `json:"keyword"`
+	LocationCode     int             `json:"location_code"`
+	LanguageCode     string          `json:"language_code"`
+	SearchVolume     *int64          `json:"search_volume"`
+	CompetitionIdx   *int64          `json:"competition_index"`
+	CPC              *float64        `json:"cpc"`
+	LowTopOfPageBid  *float64        `json:"low_top_of_page_bid"`
+	HighTopOfPageBid *float64        `json:"high_top_of_page_bid"`
+	Raw              json.RawMessage `json:"-"`
 	MonthlySearches  []struct {
 		Year   int   `json:"year"`
 		Month  int   `json:"month"`
@@ -446,80 +510,53 @@ func decodeKeywordVolumeItem(rowRaw []byte, keyword string) (dfsKeywordVolumeIte
 }
 
 func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
-	rowRaw, taskRaw, err := callDfs(ctx, connID, "keyword_search_volume", map[string]any{
-		"keywords":      []string{k.Text},
-		"location_code": *loc.LocationCode,
-		"language_code": strings.ToLower(loc.LanguageCode),
-	})
+	if loc.ID != k.LocationID {
+		return nil, fmt.Errorf("keyword %d belongs to location %d, not %d", k.ID, k.LocationID, loc.ID)
+	}
+	balance, err := preflightDataForSEO(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if rowRaw == nil {
-		return nil, fmt.Errorf("dataforseo: zero rows for keyword %q", k.Text)
-	}
-	// Google Ads search_volume returns task.result as keyword rows directly:
-	// { result: [{ keyword, search_volume, monthly_searches, ... }] }.
-	// Older fixtures and some DataForSEO endpoints use { items: [...] }, so
-	// accept both shapes.
-	item, err := decodeKeywordVolumeItem(rowRaw, k.Text)
+	jobs, err := createKeywordMetricJobs(ctx.AppDB(), k.ProjectID, []int64{k.ID})
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().Unix()
-	tx, err := ctx.AppDB().Begin()
+	job := jobs[0]
+	if err := runKeywordMetricJob(ctx, job.ID); err != nil {
+		return nil, err
+	}
+	completed, err := getKeywordMetricJob(ctx.AppDB(), k.ProjectID, job.ID)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-
-	res, err := tx.Exec(
-		`INSERT INTO keyword_metrics
-		   (keyword_id, location_id, provider, ts, volume, cpc_usd, raw_json)
-		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?)`,
-		k.ID, loc.ID, now, item.SearchVolume, item.CPC, string(taskRaw),
-	)
+	if completed.Status != "completed" {
+		return nil, fmt.Errorf("keyword metrics refresh incomplete: %s", completed.LastError)
+	}
+	metrics, err := latestKeywordMetrics(ctx.AppDB(), k.ID)
 	if err != nil {
-		return nil, fmt.Errorf("insert keyword_metrics: %w", err)
+		return nil, err
 	}
-	snapID, _ := res.LastInsertId()
-
-	// Unfold monthly_searches → keyword_volume_history. Upsert on the
-	// (keyword_id, location_id, provider, year, month) UNIQUE so re-refreshing
-	// doesn't duplicate. ON CONFLICT updates volume to the freshest
-	// figure DataForSEO reports for that month.
-	for _, mo := range item.MonthlySearches {
-		if mo.Year == 0 || mo.Month == 0 {
-			continue
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO keyword_volume_history
-			   (keyword_id, location_id, provider, year, month, volume)
-			 VALUES (?, ?, 'dataforseo', ?, ?, ?)
-			 ON CONFLICT(keyword_id, location_id, provider, year, month)
-			 DO UPDATE SET volume = excluded.volume`,
-			k.ID, loc.ID, mo.Year, mo.Month, mo.Volume,
-		); err != nil {
-			return nil, fmt.Errorf("upsert volume history (%d-%02d): %w", mo.Year, mo.Month, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
+	var historyRows int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM keyword_volume_history
+		  WHERE keyword_id = ? AND location_id = ? AND provider = 'dataforseo'`,
+		k.ID, loc.ID).Scan(&historyRows); err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"keyword_id":   k.ID,
-		"location_id":  loc.ID,
-		"snapshot_id":  snapID,
-		"provider":     "dataforseo",
-		"fetched_at":   now,
-		"volume":       valOr(item.SearchVolume, 0),
-		"history_rows": len(item.MonthlySearches),
+		"keyword_id":      k.ID,
+		"location_id":     loc.ID,
+		"snapshot_id":     metrics.ID,
+		"provider":        "dataforseo",
+		"fetched_at":      metrics.TS,
+		"volume":          valOr(metrics.Volume, 0),
+		"difficulty":      valOr(metrics.Difficulty, 0),
+		"history_rows":    historyRows,
+		"metric_job_id":   job.ID,
+		"account_balance": balance,
 	}, nil
 }
 
