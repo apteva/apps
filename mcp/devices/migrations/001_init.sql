@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS devices (
     project_id         TEXT NOT NULL,
     name               TEXT NOT NULL,
     description        TEXT NOT NULL DEFAULT '',
-    protocol           TEXT NOT NULL DEFAULT 'arest-mqtt/v1',
+    protocol           TEXT NOT NULL DEFAULT 'apteva.devices/v1',
     model              TEXT NOT NULL DEFAULT '',
     manufacturer       TEXT NOT NULL DEFAULT '',
     firmware           TEXT NOT NULL DEFAULT '',

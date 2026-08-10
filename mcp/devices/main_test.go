@@ -79,7 +79,7 @@ func TestManifestAndRuntimeSurfaceMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m.Name != "devices" || m.Version != "0.1.0" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
+	if m.Name != "devices" || m.Version != "0.1.1" || len(m.Scopes) != 1 || m.Scopes[0] != sdk.ScopeProject {
 		t.Fatalf("unexpected manifest identity/scope: %#v", m)
 	}
 	if len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "mqtt" || m.Requires.Apps[0].Version != ">=0.3.0" {
@@ -105,6 +105,24 @@ func TestManifestAndRuntimeSurfaceMatch(t *testing.T) {
 		if route.NoAuth {
 			t.Errorf("management route %s must be authenticated", route.Pattern)
 		}
+	}
+}
+
+func TestProvisionUsesNativeProtocol(t *testing.T) {
+	app, _, _ := newTestApp(t)
+	response, err := app.provision(map[string]any{"name": "Native board", "device_id": "native-board"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, ok := response["device"].(Device)
+	if !ok || device.Protocol != "apteva.devices/v1" {
+		t.Fatalf("provisioned device = %#v", response["device"])
+	}
+	if len(response) != 4 {
+		t.Fatalf("unexpected enrollment fields: %#v", response)
+	}
+	if _, err := app.provision(map[string]any{"name": "Unsupported board", "device_id": "unsupported-board", "protocol": "legacy/v1"}); err == nil {
+		t.Fatal("unsupported protocol was accepted")
 	}
 }
 
@@ -176,7 +194,7 @@ func TestIdentityEnforcementAndStateIngestion(t *testing.T) {
 	}
 }
 
-func TestARESTCommandEnvelopeAndResponseCorrelation(t *testing.T) {
+func TestCommandEnvelopeAndResponseCorrelation(t *testing.T) {
 	app, platform, recorder := newTestApp(t)
 	if _, err := app.provision(map[string]any{"name": "Controller", "device_id": "controller-1"}); err != nil {
 		t.Fatal(err)

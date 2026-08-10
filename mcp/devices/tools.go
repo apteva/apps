@@ -33,7 +33,7 @@ func (a *App) mcpTools() []sdk.Tool {
 		tool("devices_delete", "Delete a device and MQTT credential.", schema(map[string]any{"device_id": stringProp(), "confirm": boolProp()}, []string{"device_id", "confirm"}), a.toolDelete),
 		tool("devices_state_get", "Get current device state.", schema(map[string]any{"device_id": stringProp(), "key": stringProp()}, []string{"device_id"}), a.toolStateGet),
 		tool("devices_capabilities_set", "Set the allowlisted variables, functions, and pins for a device.", schema(map[string]any{"device_id": stringProp(), "manifest": objectProp()}, []string{"device_id", "manifest"}), a.toolCapabilitiesSet),
-		tool("devices_capabilities_refresh", "Ask a device to report identity and capabilities (aREST get_info compatible).", commandHelperSchema(map[string]any{}, nil), a.toolCapabilitiesRefresh),
+		tool("devices_capabilities_refresh", "Ask a device to report identity and capabilities.", commandHelperSchema(map[string]any{}, nil), a.toolCapabilitiesRefresh),
 		tool("devices_variable_get", "Read an exposed firmware variable.", commandHelperSchema(map[string]any{"name": stringProp()}, []string{"name"}), a.toolVariableGet),
 		tool("devices_function_call", "Call an exposed firmware function.", commandHelperSchema(map[string]any{"name": stringProp(), "arguments": objectProp()}, []string{"name"}), a.toolFunctionCall),
 		tool("devices_pin_read", "Read an allowlisted digital or analog pin.", commandHelperSchema(map[string]any{"pin": map[string]any{}, "kind": stringProp()}, []string{"pin"}), a.toolPinRead),
@@ -107,11 +107,11 @@ func (a *App) provision(args map[string]any) (map[string]any, error) {
 		return nil, fmt.Errorf("device %q already exists", id)
 	}
 	protocol := strings.TrimSpace(str(args, "protocol"))
-	if protocol == "" || protocol == "arest" {
-		protocol = "arest-mqtt/v1"
+	if protocol == "" {
+		protocol = "apteva.devices/v1"
 	}
-	if protocol != "arest-mqtt/v1" && protocol != "apteva.devices/v1" {
-		return nil, errors.New("protocol must be arest-mqtt/v1 or apteva.devices/v1")
+	if protocol != "apteva.devices/v1" {
+		return nil, errors.New("protocol must be apteva.devices/v1")
 	}
 	secret, err := generateSecret()
 	if err != nil {
@@ -160,7 +160,6 @@ func (a *App) enrollmentResponse(d Device, secret string) map[string]any {
 			"commands": base + "/commands", "response": base + "/response", "telemetry": base + "/telemetry",
 			"state": base + "/state", "manifest": base + "/manifest", "availability": base + "/availability",
 		},
-		"arest": map[string]any{"device_id": d.ID, "api_key": secret, "server": broker.AdvertisedHost, "port": broker.AdvertisedPort},
 	}
 }
 

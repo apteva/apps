@@ -21,7 +21,7 @@ interface Device {
 interface StateValue { key: string; value: any; value_type: string; unit?: string; source: string; updated_at: string }
 interface Command { id: string; operation: string; target?: string; status: string; result?: any; error?: string; created_at: string }
 interface Summary { devices: number; online: number; offline: number; disabled: number; commands_24h: number; failed_commands_24h: number }
-interface Enrollment { device: Device; mqtt: { endpoint: string; host: string; port: number; username: string; password: string }; topics: Record<string, string>; arest: Record<string, any> }
+interface Enrollment { device: Device; mqtt: { endpoint: string; host: string; port: number; username: string; password: string }; topics: Record<string, string> }
 type Tab = "overview" | "controls" | "commands" | "setup";
 
 export default function DevicesPanel() {
@@ -35,7 +35,7 @@ export default function DevicesPanel() {
   const [notice, setNotice] = useState("");
   const [showProvision, setShowProvision] = useState(false);
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
-  const [form, setForm] = useState({ name: "", device_id: "", model: "", protocol: "arest-mqtt/v1" });
+  const [form, setForm] = useState({ name: "", device_id: "", model: "" });
 
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
     const response = await fetch(`${API}${path}`, {
@@ -77,7 +77,7 @@ export default function DevicesPanel() {
     if (!form.name.trim()) return;
     const result = await api<Enrollment>("/devices", { method: "POST", body: JSON.stringify(form) });
     setEnrollment(result); setSelectedId(result.device.id); setShowProvision(false);
-    setForm({ name: "", device_id: "", model: "", protocol: "arest-mqtt/v1" });
+    setForm({ name: "", device_id: "", model: "" });
     await loadList(); await loadDevice();
   }
 
@@ -133,14 +133,13 @@ export default function DevicesPanel() {
 
     {showProvision && <Modal title="Provision a device" onClose={() => setShowProvision(false)}>
       <div className="space-y-3"><Field label="Name" value={form.name} onChange={name => setForm({...form, name})}/><Field label="Device ID (optional)" value={form.device_id} onChange={device_id => setForm({...form, device_id})} placeholder="greenhouse-1"/><Field label="Model (optional)" value={form.model} onChange={model => setForm({...form, model})}/>
-        <label className="block text-xs text-text-muted">Protocol<select className="mt-1 w-full bg-bg-input border border-border rounded-md px-3 py-2 text-sm text-text" value={form.protocol} onChange={e => setForm({...form, protocol: e.target.value})}><option value="arest-mqtt/v1">aREST MQTT</option><option value="apteva.devices/v1">Apteva Devices v1</option></select></label>
         <button className="w-full rounded-md bg-accent text-bg py-2 text-sm font-medium" onClick={() => provision().catch(err => setNotice(err.message))}>Create credentials</button>
       </div>
     </Modal>}
 
     {enrollment && <Modal title="Save these credentials now" onClose={() => setEnrollment(null)}>
       <p className="text-sm text-text-muted mb-3">The password is shown only once. Put these values in your firmware before closing.</p>
-      <Secret label="MQTT endpoint" value={enrollment.mqtt.endpoint}/><Secret label="Device ID / username" value={enrollment.mqtt.username}/><Secret label="Password / aREST API key" value={enrollment.mqtt.password}/>
+      <Secret label="MQTT endpoint" value={enrollment.mqtt.endpoint}/><Secret label="Device ID / username" value={enrollment.mqtt.username}/><Secret label="MQTT password" value={enrollment.mqtt.password}/>
       <pre className="mt-3 bg-bg-input border border-border rounded-md p-3 text-xs overflow-auto">{`client.deviceId = "${enrollment.mqtt.username}";\nclient.apiKey = "${enrollment.mqtt.password}";\nclient.setServer("${enrollment.mqtt.host}", ${enrollment.mqtt.port});`}</pre>
       <button className="mt-4 w-full rounded-md bg-accent text-bg py-2 text-sm" onClick={() => setEnrollment(null)}>I saved the credentials</button>
     </Modal>}
@@ -176,7 +175,7 @@ function Setup({device, api, action, onSaved}: {device: Device; api: <T>(path: s
   const [manifest, setManifest] = useState(JSON.stringify(device.manifest || {}, null, 2));
   useEffect(() => setManifest(JSON.stringify(device.manifest || {}, null, 2)), [device.id, device.manifest]);
   async function save() { const value = JSON.parse(manifest); await api(`/devices/${device.id}/capabilities`, {method: "PUT", body: JSON.stringify(value)}); await onSaved(); }
-  return <div className="space-y-5"><section><h3 className="text-sm font-medium">Capabilities and GPIO allowlist</h3><p className="text-xs text-text-muted my-2">aREST discovers variables and functions automatically. Add GPIO pins here because firmware cannot safely advertise every usable pin.</p><textarea className="w-full min-h-64 font-mono text-xs bg-bg-input border border-border rounded-md p-3" value={manifest} onChange={e => setManifest(e.target.value)}/><button className="mt-2 rounded-md bg-accent text-bg px-3 py-2 text-sm" onClick={() => save().catch(err => window.alert(err.message))}>Save capabilities</button></section>
+  return <div className="space-y-5"><section><h3 className="text-sm font-medium">Capabilities and GPIO allowlist</h3><p className="text-xs text-text-muted my-2">Devices can advertise variables and functions automatically. Add GPIO pins explicitly so only approved hardware can be controlled.</p><textarea className="w-full min-h-64 font-mono text-xs bg-bg-input border border-border rounded-md p-3" value={manifest} onChange={e => setManifest(e.target.value)}/><button className="mt-2 rounded-md bg-accent text-bg px-3 py-2 text-sm" onClick={() => save().catch(err => window.alert(err.message))}>Save capabilities</button></section>
     <section className="border-t border-border pt-4"><h3 className="text-sm font-medium">Credentials</h3><p className="text-xs text-text-muted my-2">Rotation immediately disconnects clients using the old password.</p><button className="border border-border rounded-md px-3 py-2 text-sm" onClick={async () => { const result = await action(`/devices/${device.id}/credentials/rotate`); window.alert(`New password (shown once):\n${result.password}`); }}>Rotate password</button></section>
   </div>;
 }

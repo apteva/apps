@@ -290,8 +290,8 @@ func (a *App) handleMQTTConnected(_ *sdk.AppCtx, event sdk.Event) error {
 		a.ctx.Emit("devices.device.status_changed", map[string]any{"device_id": d.ID, "status": "online"})
 	}
 	insertEvent(a.ctx.AppDB(), d.ID, "connected", event.Data)
-	// Existing aREST firmware exposes variables/functions through get_info rather
-	// than a retained manifest. Discover it automatically after authentication.
+	// Clients without a retained manifest can report their identity and
+	// capabilities after authentication.
 	if needsDeviceInfo(d.Manifest) {
 		_, _ = a.sendCommand(d, "device.info", "", map[string]any{}, false, 10000, "")
 	}
@@ -440,7 +440,7 @@ func validateManifest(manifest map[string]any) error {
 		return errors.New("device manifest exceeds 128 KiB")
 	}
 	protocol := firstString(manifest, "protocol")
-	if protocol != "" && protocol != "apteva.devices/v1" && protocol != "arest-mqtt/v1" {
+	if protocol != "" && protocol != "apteva.devices/v1" {
 		return fmt.Errorf("unsupported device protocol %q", protocol)
 	}
 	for _, key := range []string{"variables", "functions", "pins"} {

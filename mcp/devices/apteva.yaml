@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: devices
 display_name: Devices
-version: 0.1.0
+version: 0.1.1
 description: |
   Provision and control Arduino, ESP8266/ESP32, Raspberry Pi, and other
   MQTT-capable hardware. Devices owns identity, narrowly-scoped credentials,
@@ -13,7 +13,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/devices
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [devices, iot, mqtt, arduino, esp32, raspberry-pi, gpio, arest]
+tags: [devices, iot, mqtt, arduino, esp32, raspberry-pi, gpio]
 
 scopes: [project]
 min_apteva_version: "0.11.0"
@@ -45,7 +45,7 @@ provides:
     - { name: devices_delete, description: "Delete a managed device and its MQTT credential. Args: device_id, confirm=true." }
     - { name: devices_state_get, description: "Get current state values for a device. Args: device_id, key?." }
     - { name: devices_capabilities_set, description: "Set the allowlisted variables, functions, and pins for a device. Required for GPIO pins that firmware cannot self-advertise. Args: device_id, manifest." }
-    - { name: devices_capabilities_refresh, description: "Ask a device to report its variables, functions, pins, and identity. Compatible with aREST get_info. Args: device_id, wait?, timeout_ms?." }
+    - { name: devices_capabilities_refresh, description: "Ask a device to report its variables, functions, pins, and identity. Args: device_id, wait?, timeout_ms?." }
     - { name: devices_variable_get, description: "Read an exposed device variable. Args: device_id, name, wait?, timeout_ms?." }
     - { name: devices_function_call, description: "Call an exposed firmware function. Args: device_id, name, arguments?, wait?, timeout_ms?, idempotency_key?." }
     - { name: devices_pin_read, description: "Read an allowlisted digital or analog pin. Args: device_id, pin, kind?, wait?, timeout_ms?." }

@@ -29,30 +29,19 @@ devices/{device_id}/availability   publish, retained/LWT recommended
 The MQTT username is the device ID. Its ACL can only publish/subscribe the
 listed exact topics for that same ID.
 
-## aREST compatibility
+## Device protocol
 
-Current aREST MQTT firmware uses the same four core topics, the device ID as
-the username, and the API key as the password. Configure the provisioned broker
-with:
+Clients authenticate with the provisioned device ID and one-time MQTT
+password, subscribe to their command topic, and publish responses, state,
+telemetry, availability, and a retained capability manifest. The Arduino and
+Python examples implement the complete `apteva.devices/v1` contract.
 
-```cpp
-client.deviceId = "greenhouse-1";
-client.apiKey = "the-one-time-password";
-client.setServer("your-apteva-host", 1883);
-```
-
-Devices emits aREST-compatible command fields (`command_id`, `type`, and
-`params`) alongside the native versioned fields. Supported aREST operations
-include `get_info`, `get_variable`, `function`, `digital_read`,
-`digital_write`, `analog_read`, and `analog_write`.
-
-aREST's `get_info` discovers variables and functions but does not report a safe
-GPIO allowlist. Add exposed pins in Setup or pass `capabilities` while
-provisioning:
+Add exposed pins in Setup or pass `capabilities` while provisioning. GPIO is
+always deny-by-default and only explicitly declared pins can be controlled:
 
 ```json
 {
-  "protocol": "arest-mqtt/v1",
+  "protocol": "apteva.devices/v1",
   "pins": [
     {"name": "status_led", "number": 2, "type": "digital", "modes": ["input", "output"], "writable": true},
     {"name": "light", "number": 34, "type": "analog", "modes": ["input"], "writable": false}
@@ -62,7 +51,7 @@ provisioning:
 
 ## Native command envelope
 
-Commands contain both the native and compatibility representation:
+Commands use a versioned, correlated envelope:
 
 ```json
 {
