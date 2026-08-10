@@ -1,4 +1,4 @@
-// Web v0.2.0 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.1 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -262,13 +262,23 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 type browserSession struct {
-	SessionID  string `json:"session_id"`
-	Backend    string `json:"backend"`
-	CurrentURL string `json:"current_url"`
-	DebugURL   string `json:"debug_url,omitempty"`
-	StreamURL  string `json:"stream_url,omitempty"`
-	Width      int    `json:"width"`
-	Height     int    `json:"height"`
+	SessionID  string            `json:"session_id"`
+	Backend    string            `json:"backend"`
+	CurrentURL string            `json:"current_url"`
+	DebugURL   string            `json:"debug_url,omitempty"`
+	StreamURL  string            `json:"stream_url,omitempty"`
+	Width      int               `json:"width"`
+	Height     int               `json:"height"`
+	Proxy      browserProxyState `json:"proxy"`
+}
+
+type browserProxyState struct {
+	Mode        string `json:"mode"`
+	Provider    string `json:"provider,omitempty"`
+	ProfileID   string `json:"profile_id,omitempty"`
+	ProfileName string `json:"profile_name,omitempty"`
+	Country     string `json:"country,omitempty"`
+	StickyScope string `json:"sticky_scope,omitempty"`
 }
 
 type browserExtractResult struct {
@@ -1975,7 +1985,7 @@ func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (
 	if b := firstNonEmpty(stringArg(args, "backend"), configString(ctx, "default_backend")); b != "" {
 		openArgs["backend"] = b
 	}
-	for _, key := range []string{"viewport", "context_id", "persist", "timeout", "proxy", "proxy_country"} {
+	for _, key := range []string{"viewport", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
 		if v, ok := args[key]; ok {
 			openArgs[key] = v
 		}

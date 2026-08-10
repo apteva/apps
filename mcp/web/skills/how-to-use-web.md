@@ -40,7 +40,16 @@ extraction workflow.
 Use an extractor when the same structured browser workflow will run more than
 once, needs pagination or interaction, or should be scheduled. Definitions use
 `schema_version: 1`, an explicit `allowed_hosts` list, bounded `limits`, and
-steps such as `goto`, `click`, `extract`, `paginate`, `wait`, and `screenshot`.
+steps such as `goto`, `click`, `assert_url`, `extract`, `paginate`, `wait`, and
+`screenshot`. When a click locator has a CSS `selector`, Web passes it directly
+to Computer; use text or role locators when semantic visual fallback is useful.
+Use `assert_url` with `host` and optional `path_prefix` after redirect clicks.
+
+Extractor browser proxy settings use Computer's provider-neutral contract:
+`proxy_mode` may be `auto`, `direct`, `managed`, or `profile`. Managed routing
+accepts an optional two-letter `proxy_country`; profile routing also accepts
+`proxy_profile` and `proxy_sticky`. Web verifies Computer's resolved mode,
+country, profile, and stickiness before continuing the run.
 
 Values resolve in this order: extractor defaults, named preset, schedule
 overrides, explicit run input. A run snapshots the complete definition, so a

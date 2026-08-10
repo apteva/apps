@@ -2,11 +2,16 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.0
+version: 0.2.1
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.1 sends selector locators directly to Computer, adds redirect URL
+  assertions, adopts Computer's provider-neutral proxy modes and profiles with
+  fail-closed country validation, and fixes zero-retry and Browserbase timeout
+  handling.
 
   v0.2.0 adds revisioned extractor definitions, immutable run snapshots, a
   durable worker queue, cancellation and retry, JSONL/CSV datasets, bounded
@@ -66,6 +71,7 @@ requires:
     - platform.apps.call
   apps:
     - name: computer
+      version: ">=0.7.63"
       reason: "Browser session lifecycle, rendered navigation, and screenshots."
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
@@ -180,7 +186,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.0
+    ref: web/v0.2.1
     entry: mcp/web
   port: 8080
   health_check: /health

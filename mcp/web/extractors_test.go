@@ -14,7 +14,7 @@ func testExtractorDefinition() map[string]any {
 		"presets": map[string]any{
 			"de": map[string]any{"country": "DE", "viewport": map[string]any{"width": 1440, "height": 900}},
 		},
-		"browser":       map[string]any{"backend": "local", "proxy_mode": "managed", "proxy_country": "{{country}}", "persist": false},
+		"browser":       map[string]any{"backend": "browserbase", "proxy_mode": "managed", "proxy_country": "{{country}}", "persist": false},
 		"allowed_hosts": []any{"example.com"},
 		"limits":        map[string]any{"max_pages": "{{max_pages}}", "max_items": 100, "max_duration_seconds": 60, "step_retries": 1},
 		"steps": []any{
@@ -121,8 +121,130 @@ func TestExtractorRunExecutesAndStoresBoundedArtifacts(t *testing.T) {
 		t.Fatalf("browser close calls=%d, want 1", countCalls(plat, "computer", "browser_close"))
 	}
 	open := plat.lastCall("computer", "browser_open")
-	if open["backend"] != "local" || open["proxy_country"] != "DE" || open["proxy"] != true {
+	if open["backend"] != "browserbase" || open["proxy_country"] != "DE" || open["proxy_mode"] != "managed" {
 		t.Fatalf("rendered browser args=%#v", open)
+	}
+	if _, legacy := open["proxy"]; legacy {
+		t.Fatalf("extractor used legacy provider-coupled proxy flag: %#v", open)
+	}
+}
+
+func TestExtractorSelectorClickUsesComputerAndAssertsRedirect(t *testing.T) {
+	plat := newFakePlatform()
+	plat.selectorRedirectURL = "https://digilo.co/register?aff=qa"
+	ctx, app := newTestCtx(t, plat)
+	definition := map[string]any{
+		"schema_version": 1,
+		"browser":        map[string]any{"backend": "browserbase", "proxy_mode": "managed", "proxy_country": "FR"},
+		"allowed_hosts":  []any{"marcoschwartz.com", "go.marcoschwartz.com", "digilo.co"},
+		"limits":         map[string]any{"max_duration_seconds": 60, "step_retries": 0},
+		"steps": []any{
+			map[string]any{"action": "goto", "url": "https://marcoschwartz.com/digilo-review"},
+			map[string]any{"action": "click", "locator": map[string]any{"selector": `a[href="https://go.marcoschwartz.com/digilo"]`}},
+			map[string]any{"action": "assert_url", "host": "digilo.co", "path_prefix": "/register"},
+		},
+		"output_schema": map[string]any{},
+	}
+	createdAny, err := app.toolExtractorSave(ctx, map[string]any{"name": "Digilo redirect QA", "definition": definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	runAny, err := app.toolExtractorRun(ctx, map[string]any{"extractor_id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, _ := claimExtractorRun(ctx)
+	if err := app.executeExtractorRun(context.Background(), ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	run, _ := getWebRun(ctx, runAny.(map[string]any)["run_id"].(int64))
+	if run["status"] != "completed" {
+		t.Fatalf("run=%#v", run)
+	}
+	out := run["output"].(map[string]any)
+	if out["current_url"] != plat.selectorRedirectURL {
+		t.Fatalf("current_url=%v", out["current_url"])
+	}
+	open := plat.lastCall("computer", "browser_open")
+	if open["proxy_mode"] != "managed" || open["proxy_country"] != "FR" {
+		t.Fatalf("proxy args=%#v", open)
+	}
+	if intFromAny(open["timeout"]) < 60 {
+		t.Fatalf("browserbase timeout=%v, want at least 60 seconds", open["timeout"])
+	}
+	foundSelector := false
+	for _, call := range plat.callsSnapshot() {
+		if call.app == "computer" && call.tool == "computer_use" && call.args["action"] == "click" {
+			if call.args["selector"] == `a[href="https://go.marcoschwartz.com/digilo"]` {
+				foundSelector = true
+			}
+			if call.args["coordinate"] != nil || call.args["label"] != nil {
+				t.Fatalf("selector click unexpectedly used visual targeting: %#v", call.args)
+			}
+		}
+	}
+	if !foundSelector {
+		t.Fatal("selector was not passed directly to Computer")
+	}
+}
+
+func TestExtractorForwardsProviderNeutralComputerProxyProfile(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	definition := map[string]any{
+		"schema_version": 1,
+		"browser": map[string]any{
+			"backend": "local", "proxy_mode": "profile", "proxy_profile": "qa-fr",
+			"proxy_country": "FR", "proxy_sticky": "session",
+		},
+		"allowed_hosts": []any{"example.com"},
+		"limits":        map[string]any{"max_duration_seconds": 60, "step_retries": 0},
+		"steps": []any{
+			map[string]any{"action": "goto", "url": "https://example.com/qa"},
+			map[string]any{"action": "assert_url", "host": "example.com", "path_prefix": "/qa"},
+		},
+		"output_schema": map[string]any{},
+	}
+	createdAny, err := app.toolExtractorSave(ctx, map[string]any{"name": "Profile proxy QA", "definition": definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	runAny, _ := app.toolExtractorRun(ctx, map[string]any{"extractor_id": id})
+	queued, _ := claimExtractorRun(ctx)
+	_ = app.executeExtractorRun(context.Background(), ctx, queued)
+	run, _ := getWebRun(ctx, runAny.(map[string]any)["run_id"].(int64))
+	if run["status"] != "completed" {
+		t.Fatalf("run=%#v", run)
+	}
+	open := plat.lastCall("computer", "browser_open")
+	if open["backend"] != "local" || open["proxy_mode"] != "profile" || open["proxy_profile"] != "qa-fr" || open["proxy_country"] != "FR" || open["proxy_sticky"] != "session" {
+		t.Fatalf("computer proxy contract not forwarded: %#v", open)
+	}
+}
+
+func TestExtractorFailsClosedWhenComputerResolvesWrongProxyCountry(t *testing.T) {
+	plat := newFakePlatform()
+	plat.proxyCountryOverride = "DE"
+	ctx, app := newTestCtx(t, plat)
+	definition := testExtractorDefinition()
+	definition["defaults"].(map[string]any)["country"] = "FR"
+	definition["limits"].(map[string]any)["step_retries"] = 0
+	createdAny, err := app.toolExtractorSave(ctx, map[string]any{"name": "Proxy validation", "definition": definition})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := createdAny.(map[string]any)["extractor"].(*extractorRecord).ID
+	runAny, _ := app.toolExtractorRun(ctx, map[string]any{"extractor_id": id})
+	queued, _ := claimExtractorRun(ctx)
+	_ = app.executeExtractorRun(context.Background(), ctx, queued)
+	run, _ := getWebRun(ctx, runAny.(map[string]any)["run_id"].(int64))
+	if run["status"] != "failed" || !strings.Contains(stringFromAny(run["error"]), `proxy country "DE", expected "FR"`) {
+		t.Fatalf("run=%#v", run)
+	}
+	if countCalls(plat, "computer", "browser_open") != 1 || countCalls(plat, "computer", "browser_close") != 1 {
+		t.Fatalf("opens=%d closes=%d", countCalls(plat, "computer", "browser_open"), countCalls(plat, "computer", "browser_close"))
 	}
 }
 
@@ -238,7 +360,8 @@ func TestExtractorRejectsDisallowedHostBeforeBrowserOpen(t *testing.T) {
 }
 
 func TestExtractorNeverFallsBackFromRequestedBackend(t *testing.T) {
-	plat := newFakePlatform() // The fake deliberately reports local for every open.
+	plat := newFakePlatform()
+	plat.openBackendOverride = "local"
 	ctx, app := newTestCtx(t, plat)
 	definition := testExtractorDefinition()
 	definition["browser"].(map[string]any)["backend"] = "browserbase"

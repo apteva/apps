@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"regexp"
 	"sort"
@@ -313,6 +314,9 @@ func (a *App) executeExtractorRun(workerCtx context.Context, ctx *sdk.AppCtx, qu
 	out["items"] = previewExtractorItems(exec.items)
 	out["trace_preview"] = previewExtractorTrace(exec.trace)
 	out["current_url"] = exec.currentURL
+	if exec.session != nil {
+		out["proxy"] = exec.session.Proxy
+	}
 	if exec.datasetFull {
 		out["dataset_truncated"] = true
 	}
@@ -379,7 +383,10 @@ func newExtractorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx,
 	maxPages := boundedInt(templateInt(rendered.Limits.MaxPages), defaultExtractorMaxPages, 1, maxExtractorPages)
 	maxItems := boundedInt(templateInt(rendered.Limits.MaxItems), defaultExtractorMaxItems, 1, maxExtractorItems)
 	maxSeconds := boundedInt(templateInt(rendered.Limits.MaxDurationSeconds), defaultExtractorMaxSeconds, 1, maxExtractorSeconds)
-	retries := boundedInt(templateInt(rendered.Limits.StepRetries), defaultExtractorRetries, 0, 10)
+	retries := defaultExtractorRetries
+	if rendered.Limits.StepRetries != nil {
+		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
+	}
 	now := time.Now().UTC()
 	return &extractorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}}, nil
 }
@@ -441,7 +448,7 @@ func retryableExtractorError(err error) bool {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	for _, marker := range []string{"allowed_hosts", "unsupported action", "invalid items selector", "required field", "output item", "requires an open browser", "locator not found", "computer returned backend"} {
+	for _, marker := range []string{"allowed_hosts", "unsupported action", "invalid items selector", "required field", "output item", "requires an open browser", "locator not found", "computer returned backend", "computer returned proxy", "url assertion failed"} {
 		if strings.Contains(message, marker) {
 			return false
 		}
@@ -455,6 +462,8 @@ func (e *extractorExecution) runStep(step extractorStep) error {
 		return e.gotoURL(step.URL)
 	case "click":
 		return e.click(step.Locator)
+	case "assert_url":
+		return e.assertURL(step)
 	case "wait":
 		d := boundedInt(templateInt(step.Duration), 1000, 0, 30000)
 		if e.session == nil {
@@ -483,7 +492,10 @@ func (e *extractorExecution) gotoURL(target string) error {
 		return err
 	}
 	if e.session == nil {
-		remainingSeconds := maxInt64(1, int64(time.Until(e.deadline).Seconds()))
+		remainingSeconds := maxInt64(1, int64(math.Ceil(time.Until(e.deadline).Seconds())))
+		if e.definition.Browser.Backend == "browserbase" {
+			remainingSeconds = maxInt64(60, remainingSeconds)
+		}
 		args := map[string]any{"persist": e.definition.Browser.Persist, "timeout": remainingSeconds}
 		if e.definition.Browser.Backend != "" {
 			args["backend"] = e.definition.Browser.Backend
@@ -491,11 +503,17 @@ func (e *extractorExecution) gotoURL(target string) error {
 		if len(e.definition.Browser.Viewport) > 0 {
 			args["viewport"] = e.definition.Browser.Viewport
 		}
-		if e.definition.Browser.ProxyMode == "managed" {
-			args["proxy"] = true
+		if mode := normalizedExtractorProxyMode(e.definition.Browser.ProxyMode); mode != "" {
+			args["proxy_mode"] = mode
+		}
+		if e.definition.Browser.ProxyProfile != "" {
+			args["proxy_profile"] = e.definition.Browser.ProxyProfile
 		}
 		if e.definition.Browser.ProxyCountry != "" {
 			args["proxy_country"] = e.definition.Browser.ProxyCountry
+		}
+		if e.definition.Browser.ProxySticky != "" {
+			args["proxy_sticky"] = e.definition.Browser.ProxySticky
 		}
 		session, err := e.app.openBrowser(e.ctx, target, args)
 		if err != nil {
@@ -507,6 +525,11 @@ func (e *extractorExecution) gotoURL(target string) error {
 			e.app.closeBrowser(e.ctx, session.SessionID)
 			e.session = nil
 			return fmt.Errorf("computer returned backend %q, expected %q", session.Backend, e.definition.Browser.Backend)
+		}
+		if err := e.validateResolvedProxy(session.Proxy); err != nil {
+			e.app.closeBrowser(e.ctx, session.SessionID)
+			e.session = nil
+			return err
 		}
 		e.persistProgress("browser opened")
 		return nil
@@ -524,6 +547,13 @@ func (e *extractorExecution) click(locator extractorLocator) error {
 	if e.session == nil {
 		return errors.New("click requires an open browser")
 	}
+	if selector := strings.TrimSpace(locator.Selector); selector != "" {
+		var out map[string]any
+		if err := e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "selector": selector}), &out); err != nil {
+			return err
+		}
+		return e.finishInteraction(out)
+	}
 	var shot computerSOMScreenshot
 	err := e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "screenshot", "annotate": true, "include_som": true}), &shot)
 	if err == nil {
@@ -533,9 +563,7 @@ func (e *extractorExecution) click(locator extractorLocator) error {
 				if err := e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "label": target.Label}), &out); err != nil {
 					return err
 				}
-				e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
-				_ = e.waitAfterInteraction()
-				return nil
+				return e.finishInteraction(out)
 			}
 		}
 	}
@@ -568,14 +596,62 @@ func (e *extractorExecution) click(locator extractorLocator) error {
 	if err := e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "click", "coordinate": coordinate}), &out); err != nil {
 		return err
 	}
-	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
-	_ = e.waitAfterInteraction()
-	return nil
+	return e.finishInteraction(out)
 }
 
 func (e *extractorExecution) waitAfterInteraction() error {
-	var ignored map[string]any
-	return e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "wait", "duration": 500}), &ignored)
+	var out map[string]any
+	if err := e.ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(e.ctx, map[string]any{"session_id": e.session.SessionID, "action": "wait", "duration": 500}), &out); err != nil {
+		return err
+	}
+	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
+	return nil
+}
+
+func (e *extractorExecution) finishInteraction(out map[string]any) error {
+	e.currentURL = firstNonEmpty(stringFromAny(out["current_url"]), e.currentURL)
+	if err := e.waitAfterInteraction(); err != nil {
+		return err
+	}
+	if !hostAllowed(e.currentURL, e.definition.AllowedHosts) {
+		return fmt.Errorf("browser navigated outside allowed_hosts: %s", e.currentURL)
+	}
+	return nil
+}
+
+func (e *extractorExecution) assertURL(step extractorStep) error {
+	if e.session == nil {
+		return errors.New("assert_url requires an open browser")
+	}
+	if !hostAllowed(e.currentURL, []string{step.Host}) {
+		return fmt.Errorf("URL assertion failed: host %q does not match %q", e.currentURL, step.Host)
+	}
+	parsed, err := url.Parse(e.currentURL)
+	if err != nil {
+		return fmt.Errorf("URL assertion failed: %w", err)
+	}
+	if step.PathPrefix != "" && !strings.HasPrefix(parsed.EscapedPath(), step.PathPrefix) {
+		return fmt.Errorf("URL assertion failed: path %q does not start with %q", parsed.EscapedPath(), step.PathPrefix)
+	}
+	return nil
+}
+
+func (e *extractorExecution) validateResolvedProxy(proxy browserProxyState) error {
+	browser := e.definition.Browser
+	expectedMode := normalizedExtractorProxyMode(browser.ProxyMode)
+	if expectedMode != "" && proxy.Mode != expectedMode {
+		return fmt.Errorf("computer returned proxy mode %q, expected %q", proxy.Mode, expectedMode)
+	}
+	if browser.ProxyCountry != "" && !strings.EqualFold(proxy.Country, browser.ProxyCountry) {
+		return fmt.Errorf("computer returned proxy country %q, expected %q", proxy.Country, browser.ProxyCountry)
+	}
+	if browser.ProxyProfile != "" && proxy.ProfileID != browser.ProxyProfile && proxy.ProfileName != browser.ProxyProfile {
+		return fmt.Errorf("computer returned proxy profile %q, expected %q", firstNonEmpty(proxy.ProfileName, proxy.ProfileID), browser.ProxyProfile)
+	}
+	if browser.ProxySticky != "" && proxy.StickyScope != browser.ProxySticky {
+		return fmt.Errorf("computer returned proxy sticky policy %q, expected %q", proxy.StickyScope, browser.ProxySticky)
+	}
+	return nil
 }
 
 func locatorMatches(locator extractorLocator, text, role, selector string) bool {

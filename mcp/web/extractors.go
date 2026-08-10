@@ -49,7 +49,9 @@ type extractorDefinition struct {
 type extractorBrowser struct {
 	Backend      string         `json:"backend,omitempty"`
 	ProxyMode    string         `json:"proxy_mode,omitempty"`
+	ProxyProfile string         `json:"proxy_profile,omitempty"`
 	ProxyCountry string         `json:"proxy_country,omitempty"`
+	ProxySticky  string         `json:"proxy_sticky,omitempty"`
 	Persist      bool           `json:"persist,omitempty"`
 	Viewport     map[string]any `json:"viewport,omitempty"`
 }
@@ -62,15 +64,17 @@ type extractorLimits struct {
 }
 
 type extractorStep struct {
-	Action   string                    `json:"action"`
-	URL      string                    `json:"url,omitempty"`
-	Locator  extractorLocator          `json:"locator,omitempty"`
-	Optional bool                      `json:"optional,omitempty"`
-	Items    string                    `json:"items,omitempty"`
-	Fields   map[string]extractorField `json:"fields,omitempty"`
-	MaxPages any                       `json:"max_pages,omitempty"`
-	Duration any                       `json:"duration_ms,omitempty"`
-	Label    string                    `json:"label,omitempty"`
+	Action     string                    `json:"action"`
+	URL        string                    `json:"url,omitempty"`
+	Locator    extractorLocator          `json:"locator,omitempty"`
+	Optional   bool                      `json:"optional,omitempty"`
+	Items      string                    `json:"items,omitempty"`
+	Fields     map[string]extractorField `json:"fields,omitempty"`
+	MaxPages   any                       `json:"max_pages,omitempty"`
+	Duration   any                       `json:"duration_ms,omitempty"`
+	Label      string                    `json:"label,omitempty"`
+	Host       string                    `json:"host,omitempty"`
+	PathPrefix string                    `json:"path_prefix,omitempty"`
 }
 
 type extractorLocator struct {
@@ -209,8 +213,8 @@ func validateExtractorDefinition(def extractorDefinition) error {
 			return fmt.Errorf("invalid allowed host %q", host)
 		}
 	}
-	if def.Browser.ProxyMode != "" && def.Browser.ProxyMode != "none" && def.Browser.ProxyMode != "managed" {
-		return errors.New("definition.browser.proxy_mode must be none or managed")
+	if mode := def.Browser.ProxyMode; mode != "" && mode != "none" && mode != "auto" && mode != "direct" && mode != "managed" && mode != "profile" {
+		return errors.New("definition.browser.proxy_mode must be auto, direct, managed, or profile")
 	}
 	if backend := def.Browser.Backend; backend != "" && !strings.Contains(backend, "{{") {
 		switch backend {
@@ -219,8 +223,21 @@ func validateExtractorDefinition(def extractorDefinition) error {
 			return fmt.Errorf("definition.browser.backend %q is unsupported", backend)
 		}
 	}
-	if def.Browser.ProxyCountry != "" && def.Browser.ProxyMode != "managed" {
-		return errors.New("definition.browser.proxy_country requires proxy_mode=managed")
+	mode := normalizedExtractorProxyMode(def.Browser.ProxyMode)
+	if def.Browser.ProxyCountry != "" && mode != "managed" && mode != "profile" {
+		return errors.New("definition.browser.proxy_country requires proxy_mode=managed or profile")
+	}
+	if def.Browser.ProxyProfile != "" && mode != "profile" {
+		return errors.New("definition.browser.proxy_profile requires proxy_mode=profile")
+	}
+	if mode == "profile" && strings.TrimSpace(def.Browser.ProxyProfile) == "" {
+		return errors.New("definition.browser.proxy_profile is required when proxy_mode=profile")
+	}
+	if def.Browser.ProxySticky != "" && mode != "profile" {
+		return errors.New("definition.browser.proxy_sticky requires proxy_mode=profile")
+	}
+	if sticky := def.Browser.ProxySticky; sticky != "" && !strings.Contains(sticky, "{{") && sticky != "rotating" && sticky != "session" && sticky != "context" {
+		return errors.New("definition.browser.proxy_sticky must be rotating, session, or context")
 	}
 	if country := def.Browser.ProxyCountry; country != "" && !strings.Contains(country, "{{") {
 		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
@@ -259,6 +276,13 @@ func validateExtractorDefinition(def extractorDefinition) error {
 			if len(step.Fields) > maxExtractorFields {
 				return fmt.Errorf("steps[%d].fields exceeds the %d field limit", i, maxExtractorFields)
 			}
+		case "assert_url":
+			if normalizeAllowedHost(step.Host) == "" {
+				return fmt.Errorf("steps[%d].host is required and must be a valid host", i)
+			}
+			if step.PathPrefix != "" && !strings.HasPrefix(step.PathPrefix, "/") {
+				return fmt.Errorf("steps[%d].path_prefix must start with /", i)
+			}
 		case "wait", "screenshot":
 		default:
 			return fmt.Errorf("steps[%d].action %q is unsupported", i, step.Action)
@@ -275,6 +299,13 @@ func validateExtractorDefinition(def extractorDefinition) error {
 		}
 	}
 	return nil
+}
+
+func normalizedExtractorProxyMode(mode string) string {
+	if mode == "none" {
+		return "direct"
+	}
+	return mode
 }
 
 func normalizeAllowedHost(raw string) string {

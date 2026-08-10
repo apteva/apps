@@ -945,21 +945,25 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu                  sync.Mutex
-	calls               []fakeCall
-	storageID           int64
-	storageURL          string
-	openURL             string
-	searchBlocked       bool
-	cookieBanner        bool
-	cookieBannerSOM     bool
-	cookieTextBanner    bool
-	cookiePolicyText    bool
-	cookieDismissed     bool
-	duplicateCrawlLinks bool
-	extractorPagination bool
-	extractorPage       int
-	scrollY             int
+	mu                   sync.Mutex
+	calls                []fakeCall
+	storageID            int64
+	storageURL           string
+	openURL              string
+	searchBlocked        bool
+	cookieBanner         bool
+	cookieBannerSOM      bool
+	cookieTextBanner     bool
+	cookiePolicyText     bool
+	cookieDismissed      bool
+	duplicateCrawlLinks  bool
+	extractorPagination  bool
+	extractorPage        int
+	scrollY              int
+	selectorRedirectURL  string
+	openBackendOverride  string
+	proxyModeOverride    string
+	proxyCountryOverride string
 }
 
 func newFakePlatform() *fakePlatform {
@@ -987,12 +991,27 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		if p.extractorPagination {
 			p.extractorPage = 1
 		}
+		backend := firstNonEmpty(p.openBackendOverride, stringFromAny(in["backend"]), "local")
+		proxyMode := firstNonEmpty(p.proxyModeOverride, stringFromAny(in["proxy_mode"]), "auto")
+		if proxyMode == "none" {
+			proxyMode = "direct"
+		}
+		proxyCountry := firstNonEmpty(p.proxyCountryOverride, stringFromAny(in["proxy_country"]))
+		proxy := map[string]any{"mode": proxyMode, "country": proxyCountry}
+		if profile := stringFromAny(in["proxy_profile"]); profile != "" {
+			proxy["profile_id"] = profile
+			proxy["profile_name"] = profile
+		}
+		if sticky := stringFromAny(in["proxy_sticky"]); sticky != "" {
+			proxy["sticky_scope"] = sticky
+		}
 		return map[string]any{
 			"session_id":  "sess_1",
-			"backend":     "local",
+			"backend":     backend,
 			"current_url": in["url"],
 			"width":       1280,
 			"height":      720,
+			"proxy":       proxy,
 		}
 	case "computer.browser_extract":
 		if strings.Contains(p.openURL, "google.com/search") {
@@ -1168,6 +1187,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 		if in["action"] == "click" && intFromAny(in["label"]) == 7 && p.cookieBanner {
 			p.cookieDismissed = true
+		}
+		if in["action"] == "click" && stringFromAny(in["selector"]) != "" && p.selectorRedirectURL != "" {
+			p.openURL = p.selectorRedirectURL
 		}
 		out := map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
 		if in["action"] == "screenshot" && in["include_som"] == true && !p.cookieDismissed {
