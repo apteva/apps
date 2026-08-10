@@ -1,4 +1,4 @@
-// Web v0.2.2 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.3 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -1985,7 +1985,7 @@ func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (
 	if b := firstNonEmpty(stringArg(args, "backend"), configString(ctx, "default_backend")); b != "" {
 		openArgs["backend"] = b
 	}
-	for _, key := range []string{"viewport", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
+	for _, key := range []string{"viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
 		if v, ok := args[key]; ok {
 			openArgs[key] = v
 		}

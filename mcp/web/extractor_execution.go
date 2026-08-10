@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -25,29 +27,30 @@ import (
 var extractorNumberPattern = regexp.MustCompile(`[-+]?\d[\d\s.,]*`)
 
 type extractorExecution struct {
-	app           *App
-	ctx           *sdk.AppCtx
-	run           *extractorQueuedRun
-	definition    extractorDefinition
-	variables     map[string]any
-	deadline      time.Time
-	maxPages      int
-	maxItems      int
-	retries       int
-	session       *browserSession
-	items         []map[string]any
-	pageCount     int
-	trace         []map[string]any
-	lastExtract   *extractorStep
-	currentURL    string
-	startedAt     time.Time
-	workerCtx     context.Context
-	screenshot    *artifactSummary
-	datasetJSONL  *artifactSummary
-	datasetCSV    *artifactSummary
-	traceArtifact *artifactSummary
-	datasetBytes  int
-	datasetFull   bool
+	app            *App
+	ctx            *sdk.AppCtx
+	run            *extractorQueuedRun
+	definition     extractorDefinition
+	variables      map[string]any
+	deadline       time.Time
+	maxPages       int
+	maxItems       int
+	retries        int
+	session        *browserSession
+	items          []map[string]any
+	pageCount      int
+	trace          []map[string]any
+	lastExtract    *extractorStep
+	currentURL     string
+	startedAt      time.Time
+	workerCtx      context.Context
+	screenshot     *artifactSummary
+	datasetJSONL   *artifactSummary
+	datasetCSV     *artifactSummary
+	traceArtifact  *artifactSummary
+	datasetBytes   int
+	datasetFull    bool
+	selectedPreset string
 }
 
 func (a *App) toolExtractorRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -62,19 +65,33 @@ func (a *App) toolExtractorRun(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if !rec.Enabled {
 		return nil, errors.New("extractor is disabled")
 	}
-	if preset := stringArg(args, "preset"); preset != "" {
+	trigger := extractorTrigger(args)
+	preset := strings.TrimSpace(stringArg(args, "preset"))
+	presetPool, err := extractorPresetPool(args["preset_pool"], rec.Definition.Presets)
+	if err != nil {
+		return nil, err
+	}
+	if preset != "" && len(presetPool) > 0 {
+		return nil, errors.New("preset and preset_pool are mutually exclusive")
+	}
+	if len(presetPool) > 0 {
+		if stringFromAny(trigger["kind"]) != "schedule" {
+			return nil, errors.New("preset_pool requires a scheduled trigger")
+		}
+		preset = selectScheduledPreset(presetPool, stringFromAny(trigger["schedule_key"]), stringFromAny(trigger["bucket"]))
+	}
+	if preset != "" {
 		if _, ok := rec.Definition.Presets[preset]; !ok {
 			return nil, fmt.Errorf("preset %q not found", preset)
 		}
 	}
 	inputJSON, _ := json.Marshal(map[string]any{
-		"preset": stringArg(args, "preset"), "schedule_overrides": mapFromAny(args["schedule_overrides"]), "input": mapFromAny(args["input"]),
+		"preset": preset, "preset_pool": presetPool, "schedule_overrides": mapFromAny(args["schedule_overrides"]), "input": mapFromAny(args["input"]),
 	})
 	if len(inputJSON) > maxExtractorInputBytes {
 		return nil, fmt.Errorf("run input exceeds %d bytes", maxExtractorInputBytes)
 	}
 	defJSON, _ := json.Marshal(rec.Definition)
-	trigger := extractorTrigger(args)
 	runID, status, duplicate, err := enqueueExtractorSnapshot(ctx, rec.ID, rec.Revision, string(inputJSON), string(defJSON), trigger)
 	if err != nil {
 		return nil, err
@@ -83,6 +100,15 @@ func (a *App) toolExtractorRun(ctx *sdk.AppCtx, args map[string]any) (any, error
 		ctx.Emit("extractor.run.queued", map[string]any{"run_id": runID, "extractor_id": rec.ID, "revision": rec.Revision})
 	}
 	return map[string]any{"run_id": runID, "status": status, "duplicate": duplicate}, nil
+}
+
+func selectScheduledPreset(pool []string, scheduleKey, bucket string) string {
+	if len(pool) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(scheduleKey + ":" + bucket))
+	index := binary.BigEndian.Uint64(sum[:8]) % uint64(len(pool))
+	return pool[index]
 }
 
 func extractorTrigger(args map[string]any) map[string]any {
@@ -317,6 +343,12 @@ func (a *App) executeExtractorRun(workerCtx context.Context, ctx *sdk.AppCtx, qu
 	if exec.session != nil {
 		out["proxy"] = exec.session.Proxy
 	}
+	if exec.selectedPreset != "" {
+		out["preset"] = exec.selectedPreset
+	}
+	if browser := extractorBrowserAudit(exec.definition.Browser); len(browser) > 0 {
+		out["browser_config"] = browser
+	}
 	if exec.datasetFull {
 		out["dataset_truncated"] = true
 	}
@@ -360,6 +392,7 @@ func newExtractorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx,
 	}
 	var runInput struct {
 		Preset            string         `json:"preset"`
+		PresetPool        []string       `json:"preset_pool"`
 		ScheduleOverrides map[string]any `json:"schedule_overrides"`
 		Input             map[string]any `json:"input"`
 	}
@@ -388,7 +421,21 @@ func newExtractorExecution(workerCtx context.Context, app *App, ctx *sdk.AppCtx,
 		retries = clampInt(templateInt(rendered.Limits.StepRetries), 0, 10)
 	}
 	now := time.Now().UTC()
-	return &extractorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}}, nil
+	return &extractorExecution{app: app, ctx: ctx, run: run, definition: rendered, variables: vars, deadline: now.Add(time.Duration(maxSeconds) * time.Second), maxPages: maxPages, maxItems: maxItems, retries: retries, startedAt: now, workerCtx: workerCtx, items: []map[string]any{}, trace: []map[string]any{}, selectedPreset: runInput.Preset}, nil
+}
+
+func extractorBrowserAudit(browser extractorBrowser) map[string]any {
+	out := map[string]any{}
+	if browser.Backend != "" {
+		out["backend"] = browser.Backend
+	}
+	if len(browser.Viewport) > 0 {
+		out["viewport"] = browser.Viewport
+	}
+	if len(browser.Environment) > 0 {
+		out["environment"] = browser.Environment
+	}
+	return out
 }
 
 func (e *extractorExecution) runSteps() (map[string]any, error) {
@@ -502,6 +549,9 @@ func (e *extractorExecution) gotoURL(target string) error {
 		}
 		if len(e.definition.Browser.Viewport) > 0 {
 			args["viewport"] = e.definition.Browser.Viewport
+		}
+		if len(e.definition.Browser.Environment) > 0 {
+			args["environment"] = e.definition.Browser.Environment
 		}
 		if mode := normalizedExtractorProxyMode(e.definition.Browser.ProxyMode); mode != "" {
 			args["proxy_mode"] = mode
