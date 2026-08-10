@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	mqtt "github.com/mochi-mqtt/server/v2"
 )
 
 type BusSubscription struct {
@@ -22,13 +24,27 @@ type BusSubscription struct {
 	CreatedAt    string `json:"created_at"`
 }
 
-func listBusSubscriptions(db *sql.DB) ([]BusSubscription, error) {
+func listBusSubscriptions(db *sql.DB, projectID string) ([]BusSubscription, error) {
+	rows, err := db.Query(
+		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions WHERE project_id = ? ORDER BY id`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return scanBusSubscriptions(rows)
+}
+
+func listAllBusSubscriptions(db *sql.DB) ([]BusSubscription, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
 		   FROM mqtt_subscriptions ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
+	return scanBusSubscriptions(rows)
+}
+
+func scanBusSubscriptions(rows *sql.Rows) ([]BusSubscription, error) {
 	defer rows.Close()
 	out := []BusSubscription{}
 	for rows.Next() {
@@ -38,7 +54,7 @@ func listBusSubscriptions(db *sql.DB) ([]BusSubscription, error) {
 		}
 		out = append(out, s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func addBusSubscription(db *sql.DB, projectID, topicPattern, busTopic, createdBy string) (*BusSubscription, error) {
@@ -47,30 +63,46 @@ func addBusSubscription(db *sql.DB, projectID, topicPattern, busTopic, createdBy
 	if topicPattern == "" {
 		return nil, errors.New("topic_pattern required")
 	}
+	if !mqtt.IsValidFilter(topicPattern, false) {
+		return nil, fmt.Errorf("topic_pattern %q is not a valid MQTT filter", topicPattern)
+	}
 	if busTopic == "" {
 		return nil, errors.New("bus_topic required")
 	}
 	if !validBusTopic(busTopic) {
 		return nil, fmt.Errorf("bus_topic %q invalid (a-z0-9 plus . _ -)", busTopic)
 	}
-	res, err := db.Exec(
+	_, err := db.Exec(
 		`INSERT INTO mqtt_subscriptions(project_id, topic_pattern, bus_topic, created_by)
 		 VALUES (?,?,?,?)
-		 ON CONFLICT(project_id, topic_pattern, bus_topic) DO UPDATE SET created_at = CURRENT_TIMESTAMP`,
+		 ON CONFLICT(project_id, topic_pattern, bus_topic) DO NOTHING`,
 		projectID, topicPattern, busTopic, createdBy)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return &BusSubscription{
-		ID: id, ProjectID: projectID, TopicPattern: topicPattern,
-		BusTopic: busTopic, CreatedBy: createdBy,
-	}, nil
+	var out BusSubscription
+	err = db.QueryRow(
+		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions
+		  WHERE project_id = ? AND topic_pattern = ? AND bus_topic = ?`,
+		projectID, topicPattern, busTopic,
+	).Scan(&out.ID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
+	return &out, err
 }
 
-func deleteBusSubscription(db *sql.DB, id int64) error {
-	_, err := db.Exec(`DELETE FROM mqtt_subscriptions WHERE id = ?`, id)
-	return err
+func deleteBusSubscription(db *sql.DB, projectID string, id int64) (*BusSubscription, error) {
+	var out BusSubscription
+	err := db.QueryRow(
+		`SELECT id, project_id, topic_pattern, bus_topic, created_by, created_at
+		   FROM mqtt_subscriptions WHERE id = ? AND project_id = ?`, id, projectID,
+	).Scan(&out.ID, &out.ProjectID, &out.TopicPattern, &out.BusTopic, &out.CreatedBy, &out.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`DELETE FROM mqtt_subscriptions WHERE id = ? AND project_id = ?`, id, projectID); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // validBusTopic — bus topics namespace under "mqtt.<name>", so we

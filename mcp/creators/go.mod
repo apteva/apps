@@ -1,9 +1,9 @@
 module github.com/apteva/apps/mcp/creators
 
-go 1.26.5
+go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.36.3
+	github.com/apteva/app-sdk v0.43.0
 	modernc.org/sqlite v1.50.0
 )
 

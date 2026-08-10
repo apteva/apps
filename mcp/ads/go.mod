@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/ads
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.34.0
+	github.com/apteva/app-sdk v0.47.2
 	modernc.org/sqlite v1.50.0
 )
 

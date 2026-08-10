@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.18
+version: 0.1.21
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -11,7 +11,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/gigs
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/gigs/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [gigs, workers, delegation, productivity]
 
 scopes: [project, global]
@@ -22,6 +23,7 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: contacts
       kind: app
@@ -37,9 +39,18 @@ requires:
       required: true
       label: "Storage"
       hint: "Instruction media (audio/video) and worker submissions are stored here under /.gigs/."
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.list_records, dns.create_record, dns.delete_records]
+      required: false
+      label: "Domains (public gig links)"
+      hint: "Optional. Publish branded worker-link hostnames through Domains-managed DNS and server-native ingress."
 
 provides:
   http_routes:
+    - prefix: /worker/
+      no_auth: true
     - prefix: /
   mcp_tools:
     # ─── Workers ─────────────────────────────────────────────────────
@@ -101,13 +112,13 @@ provides:
       description: Render title + each instruction with sample variables. No gig created.
     # ─── Gigs ────────────────────────────────────────────────────────
     - name: gigs_create_from_template
-      description: Primary dispatch path. Template slug/id + vars + optional worker_id and notify_worker=false. Returns the gig + assignment.
+      description: Primary dispatch path. Template slug/id + vars + optional worker_id, notify_worker=false, and public_domain_id. Returns the gig + assignment.
     - name: gigs_create_from_instructions
-      description: Ad-hoc dispatch — list of instruction refs + vars, no template required. Optional worker_id and notify_worker=false.
+      description: Ad-hoc dispatch — list of instruction refs + vars, no template required. Optional worker_id, notify_worker=false, and public_domain_id.
     - name: gigs_create
-      description: Fully inline composition (raw instruction bodies, no library refs). Optional worker_id and notify_worker=false.
+      description: Fully inline composition (raw instruction bodies, no library refs). Optional worker_id, notify_worker=false, and public_domain_id.
     - name: gigs_assign
-      description: Assign or re-assign an open gig (mode= direct|broadcast|first-come, notify_worker=false).
+      description: Assign or re-assign an open gig (mode= direct|broadcast|first-come, notify_worker=false, public_domain_id optional).
     - name: gigs_status
       description: Pre-flight read — gig + composition + assignments + submission.
     - name: gigs_list_open

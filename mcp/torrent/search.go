@@ -8,15 +8,15 @@
 //
 // Wire shape per kind:
 //
-//   * jackett  — GET {base_url}/api/v2.0/indexers/all/results?apikey=K&Query=Q&Category=C
-//                 Returns JSON: { Results: [ { Title, MagnetUri, InfoHash, Size,
-//                                              Seeders, Peers, PublishDate, CategoryDesc,
-//                                              Tracker, ... }, ... ] }
-//   * prowlarr — GET {base_url}/api/v1/search?query=Q&type=search&apikey=K
-//                 Returns JSON: array of { title, magnetUrl, infoHash, size,
-//                                          seeders, leechers, publishDate, ... }
-//   * rss      — GET {base_url} returning Torznab/RSS XML; we parse the minimum
-//                 needed for {title, magnet, infohash, size, seeders, leechers}.
+//   - jackett  — GET {base_url}/api/v2.0/indexers/all/results?apikey=K&Query=Q&Category=C
+//     Returns JSON: { Results: [ { Title, MagnetUri, InfoHash, Size,
+//     Seeders, Peers, PublishDate, CategoryDesc,
+//     Tracker, ... }, ... ] }
+//   - prowlarr — GET {base_url}/api/v1/search?query=Q&type=search&apikey=K
+//     Returns JSON: array of { title, magnetUrl, infoHash, size,
+//     seeders, leechers, publishDate, ... }
+//   - rss      — GET {base_url} returning Torznab/RSS XML; we parse the minimum
+//     needed for {title, magnet, infohash, size, seeders, leechers}.
 //
 // Categories are normalised to a small enum: movie | tv | music | book | software.
 // Each kind has its own mapping back to its native category id space.
@@ -25,8 +25,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base32"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,6 +38,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // SearchResult is the agent-facing normalised shape.
@@ -55,8 +60,25 @@ type SearchResult struct {
 // Search is the top-level aggregator. minSeeders=0 disables the
 // filter; "" category disables the category filter; sort=""
 // defaults to seeders-desc.
-func (a *App) searchIndexers(ctx context.Context, query, category string, minSeeders int, sortBy string) ([]SearchResult, error) {
-	indexers, err := listIndexers(a.ctx.AppDB(), projectScope(), true)
+func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, category string, minSeeders int, sortBy string) ([]SearchResult, error) {
+	query = strings.TrimSpace(query)
+	category = strings.ToLower(strings.TrimSpace(category))
+	if query == "" {
+		return nil, errors.New("search query required")
+	}
+	switch category {
+	case "", "movie", "tv", "music", "book", "software":
+	default:
+		return nil, fmt.Errorf("unsupported category %q", category)
+	}
+	if minSeeders < 0 {
+		minSeeders = 0
+	}
+	pid := projectScope(appCtx)
+	if pid == "" {
+		return nil, errors.New("torrent: missing project context")
+	}
+	indexers, err := listIndexers(a.ctx.AppDB(), pid, true)
 	if err != nil {
 		return nil, err
 	}
@@ -89,13 +111,20 @@ func (a *App) searchIndexers(ctx context.Context, query, category string, minSee
 	}
 
 	merged := []SearchResult{}
+	succeeded := 0
+	failures := make([]string, 0, len(indexers))
 	for i := 0; i < len(indexers); i++ {
 		out := <-resCh
 		if out.err != nil {
 			a.ctx.Logger().Warn("indexer", "name", out.name, "err", out.err.Error())
+			failures = append(failures, out.name+": "+out.err.Error())
 			continue
 		}
+		succeeded++
 		merged = append(merged, out.results...)
+	}
+	if succeeded == 0 {
+		return nil, fmt.Errorf("all indexers failed: %s", strings.Join(failures, "; "))
 	}
 
 	merged = dedupe(merged)
@@ -134,7 +163,7 @@ func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category stri
 	case "rss":
 		return queryTorznabRSS(ctx, httpc, ix.BaseURL, apiKey, query, category, ix.Name)
 	case "apibay":
-		return queryApibay(ctx, httpc, ix.BaseURL, query, ix.Name)
+		return queryApibay(ctx, httpc, ix.BaseURL, query, category, ix.Name)
 	default:
 		return nil, fmt.Errorf("unknown indexer kind: %s", ix.Kind)
 	}
@@ -143,10 +172,8 @@ func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category stri
 // ─── Apibay (TPB public JSON) ───────────────────────────────────────
 //
 // apibay.org/q.php is The Pirate Bay's public JSON search frontend.
-// No API key, no self-hosting — used as the zero-config default so a
-// fresh torrent install can search out of the box. The tradeoff is a
-// single point of failure: if apibay is down or blocked on the user's
-// network, search returns nothing until they add a Jackett/Prowlarr.
+// No API key or self-hosting is required, but it is never configured
+// automatically. Users can add it explicitly like any other source.
 
 type apibayItem struct {
 	Name     string `json:"name"`
@@ -172,7 +199,7 @@ var publicTrackers = []string{
 	"udp://open.demonii.com:1337/announce",
 }
 
-func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, indexer string) ([]SearchResult, error) {
+func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, category, indexer string) ([]SearchResult, error) {
 	if baseURL == "" {
 		baseURL = "https://apibay.org"
 	}
@@ -186,8 +213,15 @@ func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, indexe
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("apibay status %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 10<<20 {
+		return nil, errors.New("apibay response exceeds 10 MiB")
+	}
 	var items []apibayItem
-	if err := json.NewDecoder(resp.Body).Decode(&items); err != nil {
+	if err := json.Unmarshal(body, &items); err != nil {
 		return nil, err
 	}
 	out := make([]SearchResult, 0, len(items))
@@ -203,15 +237,23 @@ func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, indexe
 		if ts, err := strconv.ParseInt(it.Added, 10, 64); err == nil && ts > 0 {
 			published = time.Unix(ts, 0).UTC().Format(time.RFC3339)
 		}
+		normalizedCategory := apibayCategory(it.Category)
+		if category != "" && normalizedCategory != strings.ToLower(category) {
+			continue
+		}
+		infohash := normalizeInfohash(it.InfoHash)
+		if infohash == "" {
+			continue
+		}
 		out = append(out, SearchResult{
 			Name:        it.Name,
-			Infohash:    it.InfoHash,
-			Magnet:      buildApibayMagnet(it.InfoHash, it.Name),
+			Infohash:    infohash,
+			Magnet:      buildApibayMagnet(infohash, it.Name),
 			SizeBytes:   size,
 			Seeders:     seeders,
 			Leechers:    leechers,
 			PublishedAt: published,
-			Category:    apibayCategory(it.Category),
+			Category:    normalizedCategory,
 			Indexer:     indexer,
 		})
 	}
@@ -233,11 +275,14 @@ func apibayCategory(cat string) string {
 	if cat == "" {
 		return ""
 	}
+	if cat == "205" || cat == "208" {
+		return "tv"
+	}
 	switch cat[0] {
 	case '1':
 		return "music"
 	case '2':
-		return "video"
+		return "movie"
 	case '3', '4':
 		return "software"
 	default:
@@ -288,7 +333,7 @@ func queryJackett(ctx context.Context, httpc *http.Client, baseURL, apiKey, quer
 	}
 	out := make([]SearchResult, 0, len(jr.Results))
 	for _, r := range jr.Results {
-		ih := strings.ToLower(strings.TrimSpace(r.InfoHash))
+		ih := normalizeInfohash(r.InfoHash)
 		if ih == "" && r.MagnetUri != "" {
 			ih = infohashFromMagnet(r.MagnetUri)
 		}
@@ -372,7 +417,7 @@ func queryProwlarr(ctx context.Context, httpc *http.Client, baseURL, apiKey, que
 	}
 	out := make([]SearchResult, 0, len(rs))
 	for _, r := range rs {
-		ih := strings.ToLower(strings.TrimSpace(r.InfoHash))
+		ih := normalizeInfohash(r.InfoHash)
 		if ih == "" && r.MagnetURL != "" {
 			ih = infohashFromMagnet(r.MagnetURL)
 		}
@@ -422,11 +467,11 @@ type torznabFeed struct {
 }
 
 type torznabItem struct {
-	Title    string  `xml:"title"`
-	Link     string  `xml:"link"`
-	GUID     string  `xml:"guid"`
-	PubDate  string  `xml:"pubDate"`
-	Size     int64   `xml:"size"`
+	Title     string `xml:"title"`
+	Link      string `xml:"link"`
+	GUID      string `xml:"guid"`
+	PubDate   string `xml:"pubDate"`
+	Size      int64  `xml:"size"`
 	Enclosure struct {
 		URL  string `xml:"url,attr"`
 		Type string `xml:"type,attr"`
@@ -474,7 +519,7 @@ func queryTorznabRSS(ctx context.Context, httpc *http.Client, baseURL, apiKey, q
 			case "leechers", "peers":
 				leechers, _ = strconv.Atoi(a.Value)
 			case "infohash":
-				ih = strings.ToLower(a.Value)
+				ih = normalizeInfohash(a.Value)
 			}
 		}
 		size := it.Size
@@ -544,7 +589,14 @@ func getRaw(ctx context.Context, httpc *http.Client, u string) ([]byte, error) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
-	return io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 10<<20 {
+		return nil, errors.New("indexer response exceeds 10 MiB")
+	}
+	return body, nil
 }
 
 // dedupe collapses results sharing an infohash to the highest-seeded
@@ -555,6 +607,7 @@ func dedupe(in []SearchResult) []SearchResult {
 	best := map[string]int{}
 	out := []SearchResult{}
 	for _, r := range in {
+		r.Infohash = normalizeInfohash(r.Infohash)
 		if r.Infohash == "" {
 			out = append(out, r)
 			continue
@@ -565,31 +618,54 @@ func dedupe(in []SearchResult) []SearchResult {
 			out = append(out, r)
 			continue
 		}
-		if r.Seeders > out[idx].Seeders {
-			out[idx] = r
+		current := &out[idx]
+		if r.Seeders > current.Seeders {
+			if r.Magnet == "" {
+				r.Magnet = current.Magnet
+			}
+			if r.TorrentURL == "" {
+				r.TorrentURL = current.TorrentURL
+			}
+			*current = r
+		} else {
+			if current.Magnet == "" {
+				current.Magnet = r.Magnet
+			}
+			if current.TorrentURL == "" {
+				current.TorrentURL = r.TorrentURL
+			}
 		}
 	}
 	return out
 }
 
 func infohashFromMagnet(magnet string) string {
-	const prefix = "urn:btih:"
-	i := strings.Index(magnet, prefix)
-	if i < 0 {
+	u, err := url.Parse(magnet)
+	if err != nil || !strings.EqualFold(u.Scheme, "magnet") {
 		return ""
 	}
-	rest := magnet[i+len(prefix):]
-	end := strings.IndexAny(rest, "&?")
-	if end >= 0 {
-		rest = rest[:end]
+	for _, xt := range u.Query()["xt"] {
+		const prefix = "urn:btih:"
+		if len(xt) >= len(prefix) && strings.EqualFold(xt[:len(prefix)], prefix) {
+			return normalizeInfohash(xt[len(prefix):])
+		}
 	}
-	rest = strings.ToLower(rest)
-	// urn:btih: can be 40-char hex (v1) or 32-char base32 (v1) or
-	// hex-encoded sha256 (v2). For dedupe we just need a stable key.
-	if len(rest) > 50 {
-		rest = rest[:50]
+	return ""
+}
+
+func normalizeInfohash(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == 32 {
+		if decoded, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(value)); err == nil && len(decoded) == 20 {
+			return hex.EncodeToString(decoded)
+		}
 	}
-	return rest
+	if len(value) == 40 {
+		if decoded, err := hex.DecodeString(value); err == nil && len(decoded) == 20 {
+			return strings.ToLower(value)
+		}
+	}
+	return ""
 }
 
 func normaliseCategory(s string) string {
@@ -627,17 +703,17 @@ func max0(n int) int {
 // ─── indexer DB layer ───────────────────────────────────────────────
 
 type Indexer struct {
-	ID            int64    `json:"id"`
-	ProjectID     string   `json:"project_id"`
-	Name          string   `json:"name"`
-	Kind          string   `json:"kind"`
-	BaseURL       string   `json:"base_url"`
-	APIKeyEnc     string   `json:"-"`
-	Categories    []string `json:"categories"`
-	Priority      int      `json:"priority"`
-	Enabled       bool     `json:"enabled"`
-	LastOKAt      string   `json:"last_ok_at,omitempty"`
-	LastError     string   `json:"last_error,omitempty"`
+	ID         int64    `json:"id"`
+	ProjectID  string   `json:"project_id"`
+	Name       string   `json:"name"`
+	Kind       string   `json:"kind"`
+	BaseURL    string   `json:"base_url"`
+	APIKeyEnc  string   `json:"-"`
+	Categories []string `json:"categories"`
+	Priority   int      `json:"priority"`
+	Enabled    bool     `json:"enabled"`
+	LastOKAt   string   `json:"last_ok_at,omitempty"`
+	LastError  string   `json:"last_error,omitempty"`
 }
 
 func listIndexers(db *sql.DB, pid string, onlyEnabled bool) ([]Indexer, error) {
@@ -668,7 +744,7 @@ func listIndexers(db *sql.DB, pid string, onlyEnabled bool) ([]Indexer, error) {
 		_ = json.Unmarshal([]byte(catsJSON), &ix.Categories)
 		out = append(out, ix)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func (a *App) markIndexerError(id int64, msg string) {
@@ -681,4 +757,3 @@ func (a *App) markIndexerOK(id int64) {
 		`UPDATE indexers SET last_ok_at = ?, last_error = '' WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339), id)
 }
-

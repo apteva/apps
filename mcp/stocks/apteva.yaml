@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: stocks
 display_name: Stocks
-version: 0.7.2
+version: 0.7.4
 description: |
   Explore and screen stocks, backed by Yahoo Finance. Filter the S&P 1500
   universe (every Dividend Aristocrat and King included) by dividend
@@ -18,7 +18,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/stocks
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/stocks/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [finance, stocks, equities, dividends, research]
 
 scopes: [project, global]

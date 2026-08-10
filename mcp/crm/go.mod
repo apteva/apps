@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/crm
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.38.5
+	github.com/apteva/app-sdk v0.42.0
 	modernc.org/sqlite v1.50.0
 )
 

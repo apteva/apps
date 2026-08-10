@@ -229,6 +229,78 @@ func extractSourceZipFiles(files []*zip.File, destDir string) (int, error) {
 	return count, nil
 }
 
+// sourceDirToTarGzB64 normalizes the standalone panel's zip/tar upload into
+// the source format used by the remote worker. The input directory has already
+// passed the hardened extraction path, so this only emits regular files and
+// directories and re-applies the same total-size and entry ceilings.
+func sourceDirToTarGzB64(root string) (string, error) {
+	var compressed bytes.Buffer
+	b64 := base64.NewEncoder(base64.StdEncoding, &compressed)
+	gz := gzip.NewWriter(b64)
+	tw := tar.NewWriter(gz)
+	entries := 0
+	var total int64
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
+			return nil
+		}
+		entries++
+		if entries > maxSourceEntries {
+			return fmt.Errorf("source tree exceeds %d entries", maxSourceEntries)
+		}
+		if info.Mode().IsRegular() {
+			total += info.Size()
+			if info.Size() > maxArtifactBytes || total > maxSourceExpandedBytes {
+				return fmt.Errorf("source tree exceeds remote transfer limits")
+			}
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(rel)
+		if info.IsDir() {
+			header.Name += "/"
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(tw, file)
+		closeErr := file.Close()
+		return errors.Join(copyErr, closeErr)
+	})
+	if closeErr := tw.Close(); err == nil {
+		err = closeErr
+	}
+	if closeErr := gz.Close(); err == nil {
+		err = closeErr
+	}
+	if closeErr := b64.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return "", err
+	}
+	return compressed.String(), nil
+}
+
 func sourceBuildRoot(destDir string) (string, error) {
 	entries, err := os.ReadDir(destDir)
 	if err != nil {

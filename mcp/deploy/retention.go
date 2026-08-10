@@ -25,17 +25,25 @@ type retentionSummary struct {
 }
 
 func (a *App) pruneBuildArtifactsAsync(reason string) {
-	if globalCtx == nil || globalCtx.AppDB() == nil {
+	ctx := globalCtx
+	if ctx == nil || ctx.AppDB() == nil {
 		return
 	}
+	db := ctx.AppDB()
 	go func() {
-		if _, err := a.pruneBuildArtifacts(globalCtx.AppDB(), reason); err != nil && globalCtx != nil {
-			globalCtx.Logger().Warn("build retention prune failed", "reason", reason, "err", err)
+		if _, err := a.pruneBuildArtifactsWithContext(db, reason, ctx); err != nil {
+			ctx.Logger().Warn("build retention prune failed", "reason", reason, "err", err)
 		}
 	}()
 }
 
 func (a *App) pruneBuildArtifacts(db *sql.DB, reason string) (retentionSummary, error) {
+	return a.pruneBuildArtifactsWithContext(db, reason, globalCtx)
+}
+
+func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx interface {
+	Emit(string, any)
+}) (retentionSummary, error) {
 	retentionMu.Lock()
 	defer retentionMu.Unlock()
 
@@ -70,9 +78,11 @@ func (a *App) pruneBuildArtifacts(db *sql.DB, reason string) (retentionSummary, 
 					"artifact_size": int64(0),
 				})
 			}
-			emit("deploy.build.pruned", map[string]any{
-				"build_id": b.ID, "deployment_id": b.DeploymentID, "reason": reason,
-			})
+			if eventCtx != nil {
+				eventCtx.Emit("deploy.build.pruned", map[string]any{
+					"build_id": b.ID, "deployment_id": b.DeploymentID, "reason": reason,
+				})
+			}
 		}
 	}
 
@@ -226,6 +236,9 @@ func (a *App) prunableArtifactPaths(b Build) []string {
 	add(b.ArtifactPath)
 	add(filepath.Join(a.buildDir(b.ID), "dist"))
 	add(filepath.Join(a.buildDir(b.ID), "src"))
+	add(filepath.Join(a.buildDir(b.ID), "source-capsule-src"))
+	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleFilename))
+	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleMetadata))
 	return out
 }
 

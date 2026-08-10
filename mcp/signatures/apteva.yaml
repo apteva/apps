@@ -1,0 +1,132 @@
+schema: apteva-app/v1
+
+name: signatures
+display_name: Signatures
+version: 0.1.0
+description: |
+  Send PDFs for simple electronic signature. Create an envelope from a
+  Storage file, add ordered recipients and fields, share secure signing
+  links, and save the completed PDF and audit summary back to Storage.
+  Messaging is optional and is used only for invitations and reminders.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/signatures
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [signatures, documents, contracts, pdf, approvals]
+
+scopes: [project]
+min_apteva_version: "0.18.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.10.0"
+      optional: false
+      reason: Reads source PDFs and stores completed PDFs and audit summaries.
+    - name: messaging
+      optional: true
+      reason: Sends signing invitations, reminders, and completion notices.
+
+provides:
+  http_routes:
+    - prefix: /
+    - prefix: /sign/
+      no_auth: true
+
+  resources:
+    - name: envelope
+      label: Signing envelope
+      list_endpoint: /envelopes
+      matcher: id_set
+      picker: list
+
+  permissions:
+    - name: signatures.read
+      resource: envelope
+      description: View envelopes, recipients, fields, and audit records.
+    - name: signatures.send
+      resource: envelope
+      description: Create, prepare, send, remind, and generate manual signing links.
+    - name: signatures.manage
+      resource: envelope
+      description: Void envelopes and manage signing settings.
+
+  mcp_tools:
+    - { name: signatures_envelopes_create, description: "Create a draft envelope from a PDF in Storage. Args: source_file_id, title, sender_name?, message?, expires_at?.", requires: signatures.send }
+    - { name: signatures_envelopes_update, description: "Update a draft envelope. Args: envelope_id and any of title, sender_name, message, expires_at.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_get, description: "Get one envelope with recipients and fields. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_list, description: "List envelopes. Args: status?, limit?.", requires: signatures.read }
+    - { name: signatures_recipients_set, description: "Replace a draft envelope's ordered recipients. Args: envelope_id, recipients[].", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_fields_set, description: "Replace a draft envelope's PDF fields. Args: envelope_id, fields[].", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_validate, description: "Validate that a draft is ready to send. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_send, description: "Freeze and activate an envelope. Args: envelope_id, delivery_mode (manual|messaging), idempotency_key?.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_recipient_link_create, description: "Generate or rotate a secure link for the current recipient. Args: envelope_id, recipient_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_remind, description: "Send a reminder through optional Messaging. Args: envelope_id, recipient_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_void, description: "Void an active envelope. Args: envelope_id, reason?.", requires: signatures.manage, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_envelopes_finalize, description: "Retry completed-PDF generation after every recipient has finished. Args: envelope_id.", requires: signatures.send, resource_from: "envelope/{arg.envelope_id?}" }
+    - { name: signatures_audit_get, description: "Return the append-only audit timeline for an envelope. Args: envelope_id.", requires: signatures.read, resource_from: "envelope/{arg.envelope_id?}" }
+
+  publishes:
+    - { name: envelope.sent, description: "An envelope was activated for signing." }
+    - { name: envelope.completed, description: "Every recipient finished and the completed PDF was stored." }
+    - { name: envelope.declined, description: "A recipient declined the envelope." }
+    - { name: envelope.voided, description: "The sender voided the envelope." }
+    - { name: envelope.expired, description: "The envelope expired." }
+    - { name: recipient.viewed, description: "The active recipient opened the signing page." }
+    - { name: recipient.signed, description: "A signer completed assigned fields." }
+    - { name: recipient.approved, description: "An approver approved the envelope." }
+
+  ui_panels:
+    - slot: project.page
+      label: Signatures
+      icon: pen-tool
+      entry: /ui/SignaturesPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/signatures
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.1
+    memory: 96
+    cpu_limit: 1
+    memory_limit: 384
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN: { from: platform }
+    APTEVA_INSTALL_ID: { from: platform }
+    APTEVA_PROJECT_ID: { from: platform }
+    APTEVA_APP_CONFIG: { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/signatures.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_expiry_days
+    type: text
+    default: "14"
+    label: Default expiry (days)
+  - name: output_folder
+    type: text
+    default: "/signatures/"
+    label: Completed document folder
+  - name: public_base_url
+    type: text
+    default: ""
+    label: Public URL override
+    description: Optional base URL used for signing links. Normally discovered from the platform.
+
+upgrade_policy: auto-patch

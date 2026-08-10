@@ -266,15 +266,15 @@ func TestSuppression_DomainBlocksOutboundAndRequiresForceForCommonDomains(t *tes
 	if row["kind"] != "domain" || row["address"] != "spammer.test" {
 		t.Fatalf("unexpected suppression row: %v", row)
 	}
-	allowed, suppressed := filterSuppressed(ctx.AppDB(), "test-proj", channelEmail, []string{
+	suppressed, err := findSuppressedRecipients(ctx.AppDB(), "test-proj", channelEmail, []string{
 		"lead@spammer.test",
 		"friend@example.com",
-	})
-	if len(allowed) != 1 || allowed[0] != "friend@example.com" {
-		t.Fatalf("allowed=%v", allowed)
+	}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(suppressed) != 1 || suppressed[0] != "lead@spammer.test" {
-		t.Fatalf("suppressed=%v", suppressed)
+	if len(suppressed) != 1 || suppressed[0].Address != "lead@spammer.test" || suppressed[0].Matched != "spammer.test" {
+		t.Fatalf("suppressed=%+v", suppressed)
 	}
 
 	check, err := app.toolSuppressionCheck(ctx, map[string]any{"address": "other@spammer.test"})
@@ -450,6 +450,81 @@ func TestMessagesList_AddressFilterUsesExactJSONValues(t *testing.T) {
 	}
 	if total != 1 || len(rows) != 1 || rows[0].To[0] != "percent%tag@example.com" {
 		t.Fatalf("total=%d rows=%+v", total, rows)
+	}
+}
+
+func TestMessagesList_FreeTextSearchesMessageFieldsLiterally(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, cc_addrs, bcc_addrs,
+			 subject, body_text, body_html, status, created_at)
+		 VALUES ('test-proj', 'email', 'in', 'sender-search@example.com',
+			 '["to-search@example.com"]', '["cc-search@example.com"]', '["bcc-search@example.com"]',
+			 'Unique subject needle', 'Plain body needle', '<p>HTML body needle and 100% literal</p>',
+			 'received', '2026-06-02T08:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, subject, body_text, status, created_at)
+		 VALUES ('test-proj', 'sms', 'out', '+15551234567', '["+15557654321"]',
+			 'unrelated', '1000 unrelated', 'sent', '2026-06-02T09:00:00Z')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, q := range []string{
+		"SENDER-SEARCH",
+		"to-search",
+		"cc-search",
+		"bcc-search",
+		"subject needle",
+		"plain body",
+		"html body",
+		"100%",
+	} {
+		rows, total, err := dbMessageListPage(ctx.AppDB(), "test-proj", messageListOpts{Q: q, Limit: 10})
+		if err != nil {
+			t.Fatalf("q=%q: %v", q, err)
+		}
+		if total != 1 || len(rows) != 1 || rows[0].From != "sender-search@example.com" {
+			t.Fatalf("q=%q total=%d rows=%+v", q, total, rows)
+		}
+	}
+
+	rows, total, err := dbMessageListPage(ctx.AppDB(), "test-proj", messageListOpts{
+		Q:         "needle",
+		Direction: "in",
+		Channel:   "email",
+		Status:    "received",
+		Since:     "2026-06-02T07:00:00Z",
+		Address:   "bcc-search@example.com",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(rows) != 1 {
+		t.Fatalf("combined filters total=%d rows=%+v", total, rows)
+	}
+
+	app := &App{}
+	r := httptest.NewRequest("GET", "/messages?project_id=test-proj&q=plain+body&direction=in", nil)
+	w := httptest.NewRecorder()
+	app.handleMessagesList(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("search status=%d body=%s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Total int `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Total != 1 {
+		t.Fatalf("HTTP q filter total=%d", response.Total)
 	}
 }
 
@@ -985,11 +1060,110 @@ func TestSendMessage_RespectsSuppression(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected suppression error")
 	}
-	if !strings.Contains(err.Error(), "suppressed") {
-		t.Errorf("error %v should mention suppression", err)
+	var suppressedErr *recipientSuppressedError
+	if !errors.As(err, &suppressedErr) {
+		t.Fatalf("error type=%T, want *recipientSuppressedError: %v", err, err)
+	}
+	if suppressedErr.Code != "recipient_suppressed" ||
+		suppressedErr.Address != "bad@example.com" ||
+		suppressedErr.Matched != "bad@example.com" ||
+		suppressedErr.Kind != "address" ||
+		suppressedErr.Reason != "hard-bounce" ||
+		suppressedErr.Source != "auto" {
+		t.Fatalf("unexpected structured suppression error: %+v", suppressedErr)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal([]byte(suppressedErr.Error()), &wire); err != nil {
+		t.Fatalf("suppression error is not JSON: %v", err)
+	}
+	if wire["code"] != "recipient_suppressed" {
+		t.Fatalf("wire error=%v", wire)
 	}
 	if len(plat.executeCalls) != 0 {
 		t.Errorf("provider should not have been called")
+	}
+}
+
+func TestToolsCall_ReturnsStructuredSuppressionHTTPError(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	app := &App{}
+	if err := dbSuppressionUpsert(ctx.AppDB(), "test-proj", channelEmail, "blocked@example.com", "complaint", "ses"); err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"tool": "send_message",
+		"args": map[string]any{
+			"channel": channelEmail,
+			"from":    fromAcme,
+			"to":      "blocked@example.com",
+			"body":    "blocked",
+		},
+	})
+	r := httptest.NewRequest(http.MethodPost, "/tools/call?project_id=test-proj", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	app.handleToolsCall(w, r)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Error recipientSuppressedError `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Error.Code != "recipient_suppressed" || out.Error.Address != "blocked@example.com" ||
+		out.Error.Matched != "blocked@example.com" || out.Error.Source != "ses" {
+		t.Fatalf("response=%+v", out)
+	}
+}
+
+func TestSendMessage_AnySuppressedRecipientBlocksEntireSend(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if err := dbSuppressionUpsertKind(ctx.AppDB(), "test-proj", channelEmail, "domain", "blocked.test", "complaint", "ses"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
+		"from":    fromAcme,
+		"to":      []any{"allowed@example.com", "blocked@blocked.test"},
+		"cc":      "copy@example.com",
+		"body":    "atomic send",
+	})
+	var suppressedErr *recipientSuppressedError
+	if !errors.As(err, &suppressedErr) {
+		t.Fatalf("error=%v, want structured suppression error", err)
+	}
+	if suppressedErr.Kind != "domain" || suppressedErr.Matched != "blocked.test" ||
+		suppressedErr.Address != "blocked@blocked.test" || suppressedErr.Source != "ses" {
+		t.Fatalf("unexpected suppression match: %+v", suppressedErr)
+	}
+	if len(suppressedErr.Recipients) != 1 || suppressedErr.Recipients[0].RecipientType != "to" {
+		t.Fatalf("recipients=%+v", suppressedErr.Recipients)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called %d times for an atomic blocked send", len(plat.executeCalls))
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM messages WHERE project_id = 'test-proj'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("persisted %d messages for a blocked send", count)
+	}
+}
+
+func TestFindSuppressedRecipients_FailsClosedOnDatabaseError(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	if err := ctx.AppDB().Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := findSuppressedRecipients(
+		ctx.AppDB(), "test-proj", channelEmail, []string{"allowed@example.com"}, nil, nil,
+	); err == nil {
+		t.Fatal("expected suppression lookup error")
 	}
 }
 

@@ -96,6 +96,8 @@ interface Deployment {
   source_ref: string;
   framework: string;
   build_cmd: string;
+  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  build_backend_config_json: string;
   start_cmd: string;
   port_hint: number;
   env_json: string;
@@ -127,12 +129,16 @@ interface Build {
   deployment_id: number;
   source_sha: string;
   framework: string;
+  build_backend: "local" | "runner" | "codemagic" | "github_actions";
+  external_job_id: string;
+  external_status: string;
   status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
   duration_ms: number;
   exit_code: number;
   artifact_path: string;
   artifact_size: number;
   artifact_manifest_json: string;
+  target_config_json?: string;
   log_path: string;
   error: string;
   created_at: string;
@@ -168,6 +174,240 @@ interface DeploymentDetail {
   url: string;
 }
 
+interface MobileSigningSetup {
+  id: number;
+  deployment_id: number;
+  environment_id?: number;
+  platform: string;
+  provider: string;
+  bundle_id: string;
+  status: "pending" | "provisioning" | "action_required" | "ready" | "failed";
+  app_store_app_id?: string;
+  apple_bundle_resource_id?: string;
+  apple_certificate_id?: string;
+  apple_profile_id?: string;
+  provider_secret_ref?: string;
+  provider_config_json: string;
+  key_fingerprint?: string;
+  required_features_json: string;
+  provisioned_features_json: string;
+  managed_features_json: string;
+  requirements_hash?: string;
+  platform_state_json: string;
+  last_error?: string;
+  updated_at: string;
+}
+
+interface DistributionAudienceMember {
+  kind: "individual" | "group";
+  email: string;
+  first_name?: string;
+  last_name?: string;
+  state?: string;
+}
+
+interface MobileDistributionState {
+  platform: "android" | "ios";
+  provider: string;
+  channel: string;
+  group_id?: string;
+  group_name?: string;
+  configured: boolean;
+  audience: DistributionAudienceMember[];
+  count: number;
+}
+
+interface StoreFinding {
+  code: string;
+  severity: "error" | "warning" | "info";
+  scope: string;
+  verification?: "provider_read" | "provider_apply" | "provider_commit" | "manual_attestation";
+  locale?: string;
+  field?: string;
+  message: string;
+  automatable: boolean;
+  action?: string;
+}
+
+interface StorePreflight {
+  ready: boolean;
+  errors: number;
+  warnings: number;
+  findings: StoreFinding[];
+}
+
+interface StoreLocalization {
+  title?: string;
+  subtitle?: string;
+  short_description?: string;
+  description?: string;
+  keywords?: string[];
+  support_url?: string;
+  marketing_url?: string;
+  promotional_text?: string;
+  whats_new?: string;
+  video_url?: string;
+}
+
+interface StoreAsset {
+  id: string;
+  locale: string;
+  kind: string;
+  display_target?: string;
+  path: string;
+  sha256: string;
+  order?: number;
+  mime?: string;
+  width?: number;
+  height?: number;
+}
+
+type StoreRatingLevel = "NONE" | "INFREQUENT" | "FREQUENT";
+
+interface StoreContentRating {
+  violence?: StoreRatingLevel;
+  sexual_content?: StoreRatingLevel;
+  profanity?: StoreRatingLevel;
+  drugs?: StoreRatingLevel;
+  gambling_simulation?: StoreRatingLevel;
+  contests?: StoreRatingLevel;
+  weapons?: StoreRatingLevel;
+  horror_fear?: StoreRatingLevel;
+  medical_information?: StoreRatingLevel;
+  health_wellness?: StoreRatingLevel;
+  mature_themes?: StoreRatingLevel;
+  unrestricted_web_access?: boolean;
+  real_money_gambling?: boolean;
+  loot_boxes?: boolean;
+  advertising?: boolean;
+  messaging_chat?: boolean;
+  user_generated_content?: boolean;
+  parental_controls?: boolean;
+  age_assurance?: boolean;
+  social_media?: boolean;
+  social_media_age_gate?: boolean;
+}
+
+interface StoreDocument {
+  schema_version: number;
+  version_name: string;
+  default_locale: string;
+  release_mode: string;
+  earliest_release_at?: string;
+  copyright?: string;
+  uses_idfa?: boolean;
+  content_rights?: {
+    uses_third_party_content?: boolean;
+    rights_confirmed?: boolean;
+  };
+  localizations: Record<string, StoreLocalization>;
+  assets: StoreAsset[];
+  review: {
+    first_name?: string;
+    last_name?: string;
+    email?: string;
+    phone?: string;
+    notes?: string;
+    demo_account_required?: boolean;
+    demo_username?: string;
+    demo_password_set?: boolean;
+  };
+  classification: {
+    primary_category?: string;
+    secondary_category?: string;
+    content_rating?: StoreContentRating;
+    age_declaration?: Record<string, unknown>;
+  };
+  distribution: {
+    territories?: string[];
+    availability?: {
+      mode?: "all" | "all_except" | "only";
+      included_territories?: string[];
+      excluded_territories?: string[];
+      available_in_new_territories?: boolean;
+    };
+    price_tier?: string;
+    phased_release?: boolean;
+    rollout_fraction?: number;
+    provider?: Record<string, unknown>;
+  };
+  privacy: {
+    policy_url?: string;
+    choices_url?: string;
+    data_safety_csv?: string;
+    declarations?: Record<string, unknown>;
+    manual_attestations?: Record<string, boolean>;
+  };
+  manual_requirements?: { code: string; label: string; completed: boolean; url?: string }[];
+  provider_extensions?: Record<string, unknown>;
+}
+
+interface StoreConfigState {
+  config: {
+    id: number;
+    provider: string;
+    status: string;
+    desired_hash: string;
+    applied_hash: string;
+    observed_json?: string;
+    last_error?: string;
+  } | null;
+  desired: StoreDocument;
+  preflight: StorePreflight;
+}
+
+interface StoreApplyResult {
+  status: string;
+  applied: boolean;
+  applied_scopes: string[];
+  blocked: { scope: string; code?: string; message: string }[];
+  failed: { scope: string; code?: string; message: string }[];
+}
+
+const APPLE_CATEGORIES = [
+  "BOOKS", "BUSINESS", "DEVELOPER_TOOLS", "EDUCATION", "ENTERTAINMENT", "FINANCE",
+  "FOOD_AND_DRINK", "GAMES", "GRAPHICS_AND_DESIGN", "HEALTH_AND_FITNESS", "LIFESTYLE",
+  "MAGAZINES_AND_NEWSPAPERS", "MEDICAL", "MUSIC", "NAVIGATION", "NEWS", "PHOTO_AND_VIDEO",
+  "PRODUCTIVITY", "REFERENCE", "SHOPPING", "SOCIAL_NETWORKING", "SPORTS", "TRAVEL", "UTILITIES", "WEATHER",
+] as const;
+
+const GOOGLE_CATEGORIES = [
+  "ART_AND_DESIGN", "AUTO_AND_VEHICLES", "BEAUTY", "BOOKS_AND_REFERENCE", "BUSINESS", "COMICS",
+  "COMMUNICATION", "DATING", "EDUCATION", "ENTERTAINMENT", "EVENTS", "FINANCE", "FOOD_AND_DRINK",
+  "HEALTH_AND_FITNESS", "HOUSE_AND_HOME", "LIBRARIES_AND_DEMO", "LIFESTYLE", "MAPS_AND_NAVIGATION",
+  "MEDICAL", "MUSIC_AND_AUDIO", "NEWS_AND_MAGAZINES", "PARENTING", "PERSONALIZATION", "PHOTOGRAPHY",
+  "PRODUCTIVITY", "SHOPPING", "SOCIAL", "SPORTS", "TOOLS", "TRAVEL_AND_LOCAL", "VIDEO_PLAYERS", "WEATHER", "GAME",
+] as const;
+
+const RATING_FIELDS: { key: keyof StoreContentRating; label: string }[] = [
+  { key: "violence", label: "Violence" },
+  { key: "sexual_content", label: "Sexual content or nudity" },
+  { key: "profanity", label: "Profanity or crude humor" },
+  { key: "drugs", label: "Alcohol, tobacco, or drugs" },
+  { key: "gambling_simulation", label: "Simulated gambling" },
+  { key: "contests", label: "Contests" },
+  { key: "weapons", label: "Guns or other weapons" },
+  { key: "horror_fear", label: "Horror or fear" },
+  { key: "medical_information", label: "Medical information" },
+  { key: "health_wellness", label: "Health or wellness topics" },
+  { key: "mature_themes", label: "Mature or suggestive themes" },
+];
+
+function currentRatingLevel(value: unknown): string {
+  if (value === "INFREQUENT_OR_MILD") return "INFREQUENT";
+  if (value === "FREQUENT_OR_INTENSE") return "FREQUENT";
+  return String(value || "");
+}
+
+function storeReadiness(raw?: string): Record<string, { status?: string; source?: string; message?: string }> {
+  if (!raw) return {};
+  try {
+    return (JSON.parse(raw) as { readiness?: Record<string, { status?: string; source?: string; message?: string }> }).readiness || {};
+  } catch {
+    return {};
+  }
+}
+
 interface AutoRestartInfo {
   Attempts: number;
   LastAt: string;
@@ -190,6 +430,7 @@ const API = "/api/apps/deploy/api";
 const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
 const TARGET_KINDS = ["service", "android", "ios"] as const;
+const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -211,6 +452,57 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+function mobileFeatureLabels(raw: string): string {
+  try {
+    const features = JSON.parse(raw);
+    if (!Array.isArray(features) || features.length === 0) return "none";
+    return features.map((feature) => {
+      if (feature === "ios.push_notifications") return "Push Notifications";
+      return String(feature);
+    }).join(", ");
+  } catch {
+    return "unknown";
+  }
+}
+
+function cloudExecutionLabel(raw: string, backend: string): string {
+  try {
+    const config = JSON.parse(raw || "{}");
+    const versions = config.software_versions ?? {};
+    const xcode = versions.xcode ?? config.xcode_version;
+    const runner = config.instance_type ??
+      (config.machine_class
+        ? config.machine_class
+        : backend === "codemagic"
+          ? "mac_mini_m2"
+          : "");
+    return [xcode ? `Xcode ${xcode}` : "", runner].filter(Boolean).join(" · ");
+  } catch {
+    return "";
+  }
+}
+
+function releaseRolloutFraction(release: Release): number {
+  try {
+    const value = Number(JSON.parse(release.release_meta_json || "{}").rollout_fraction);
+    return value > 0 && value <= 1 ? value : 0.1;
+  } catch {
+    return 0.1;
+  }
+}
+
+function mobileBuildVersion(build: Build): string {
+  for (const raw of [build.artifact_manifest_json, build.target_config_json]) {
+    try {
+      const value = JSON.parse(raw || "{}");
+      const name = String(value.version_name || "");
+      const number = String(value.build_number || value.version_code || "");
+      if (name || number) return [name, number && `(${number})`].filter(Boolean).join(" ");
+    } catch {}
+  }
+  return "-";
+}
+
 export default function DeployPanel({ projectId, installId }: NativePanelProps) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
@@ -227,6 +519,15 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [health, setHealth] = useState<Record<number, UnhealthyEntry>>({});
   const [mobileChannel, setMobileChannel] = useState("internal");
   const [submitForReview, setSubmitForReview] = useState(false);
+  const [mobileSigning, setMobileSigning] = useState<MobileSigningSetup | null>(null);
+  const [signingBusy, setSigningBusy] = useState(false);
+  const [distribution, setDistribution] = useState<MobileDistributionState | null>(null);
+  const [distributionError, setDistributionError] = useState("");
+  const [audienceEmail, setAudienceEmail] = useState("");
+  const [audienceBusy, setAudienceBusy] = useState(false);
+  const [storeState, setStoreState] = useState<StoreConfigState | null>(null);
+  const [showStoreListing, setShowStoreListing] = useState(false);
+  const [rolloutFractions, setRolloutFractions] = useState<Record<number, number>>({});
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -276,6 +577,21 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       try {
         const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
         setDetail(d);
+        if (d.deployment.target_kind === "ios") {
+          const signing = await api<{ setups?: MobileSigningSetup[] }>("GET", `/deployments/${id}/mobile-signing`);
+          setMobileSigning(
+            (signing.setups || []).find((setup) => setup.provider === d.deployment.build_backend)
+              || signing.setups?.[0]
+              || null,
+          );
+          setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
+        } else if (d.deployment.target_kind === "android") {
+          setMobileSigning(null);
+          setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
+        } else {
+          setMobileSigning(null);
+          setStoreState(null);
+        }
         // Always re-anchor the log pane to THIS deployment, so
         // switching from a deployment with a live release to a
         // deployment without one doesn't leave the previous one's
@@ -301,6 +617,35 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   );
 
   useEffect(() => { loadDeployments(); }, [loadDeployments]);
+
+  useEffect(() => {
+    const deployment = detail?.deployment;
+    if (!deployment || deployment.target_kind === "service" || mobileChannel === "production") {
+      setDistribution(null);
+      setDistributionError("");
+      return;
+    }
+    let cancelled = false;
+    setDistribution(null);
+    setDistributionError("");
+    api<MobileDistributionState>(
+      "GET",
+      `/deployments/${deployment.id}/distribution`,
+      undefined,
+      { channel: mobileChannel },
+    ).then((state) => {
+      if (!cancelled) {
+        setDistribution(state);
+        setDistributionError("");
+      }
+    }).catch((e) => {
+      if (!cancelled) {
+        setDistribution(null);
+        setDistributionError((e as Error).message);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [api, detail?.deployment.id, detail?.deployment.target_kind, mobileChannel]);
 
   // Capabilities: whether the optional Domains app is installed +
   // the registered domains for the picker. Cheap one-shot per mount.
@@ -384,6 +729,11 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     setLogs("");
     setLogTargetId(null);
     setLogKind("release");
+    setMobileSigning(null);
+    setDistribution(null);
+    setDistributionError("");
+    setStoreState(null);
+    setAudienceEmail("");
     loadDetail(id);
   };
 
@@ -426,6 +776,16 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     }
   };
 
+  const handleCancelBuild = async (buildId: number) => {
+    if (!detail) return;
+    try {
+      await api("POST", `/builds/${buildId}/cancel`);
+      await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Cancel build failed: " + (e as Error).message);
+    }
+  };
+
   const handlePromoteMobile = async (releaseId: number) => {
     if (!detail) return;
     setBusy(true);
@@ -446,6 +806,108 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   };
 
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
+
+  const runMobileSigningSetup = async (rotate: boolean) => {
+    if (!detail) return;
+    setSigningBusy(true);
+    try {
+      const result = await api<{ setup: MobileSigningSetup; ready: boolean; manual_actions?: string[] }>(
+        "POST",
+        `/deployments/${detail.deployment.id}/mobile-signing/setup`,
+        { provider: detail.deployment.build_backend, rotate },
+      );
+      setMobileSigning(result.setup);
+      if (!result.ready && result.manual_actions?.length) {
+        setError(result.manual_actions.join(" "));
+      } else {
+        setError("");
+      }
+      await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Signing setup failed: " + (e as Error).message);
+    } finally {
+      setSigningBusy(false);
+    }
+  };
+
+  const handleMobileSigningSetup = () => {
+    void runMobileSigningSetup(false);
+  };
+
+  const handleMobileSigningRotation = () => {
+    setConfirmState({
+      title: "Rotate iOS signing",
+      body: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
+      confirmLabel: "Rotate",
+      tone: "warning",
+      onConfirm: () => runMobileSigningSetup(true),
+    });
+  };
+
+  const handleAddAudience = async () => {
+    if (!detail || !audienceEmail.trim() || mobileChannel === "production") return;
+    setAudienceBusy(true);
+    try {
+      const state = await api<MobileDistributionState>(
+        "POST",
+        `/deployments/${detail.deployment.id}/distribution`,
+        {
+          channel: mobileChannel,
+          audience: [{
+            kind: detail.deployment.target_kind === "android" ? "group" : "individual",
+            email: audienceEmail.trim(),
+          }],
+        },
+      );
+      setDistribution(state);
+      setDistributionError("");
+      setAudienceEmail("");
+    } catch (e) {
+      setDistributionError((e as Error).message);
+    } finally {
+      setAudienceBusy(false);
+    }
+  };
+
+  const handleReleaseApproved = async (releaseId: number) => {
+    setBusy(true);
+    try {
+      await api("POST", `/releases/${releaseId}/release-approved`);
+      if (detail) await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Release request failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRollout = async (release: Release) => {
+    const fraction = rolloutFractions[release.id] ?? releaseRolloutFraction(release);
+    setBusy(true);
+    try {
+      await api("POST", `/releases/${release.id}/rollout`, { fraction });
+      if (detail) await loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Rollout update failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleHaltMobileRelease = (release: Release) => {
+    setConfirmState({
+      title: detail?.deployment.target_kind === "android" ? "Halt rollout" : "Expire TestFlight build",
+      body: detail?.deployment.target_kind === "android"
+        ? "Halt this Google Play production rollout?"
+        : "Expire this TestFlight build? Testers will no longer be able to install it.",
+      confirmLabel: "Halt",
+      tone: "warning",
+      onConfirm: async () => {
+        await api("POST", `/releases/${release.id}/halt`);
+        if (detail) await loadDetail(detail.deployment.id);
+      },
+    });
+  };
 
   const handleStop = () => {
     if (!detail) return;
@@ -658,9 +1120,28 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   )}
                 </select>
               )}
+              {mobile && (
+                <button
+                  type="button"
+                  onClick={() => setShowStoreListing(true)}
+                  className={`px-2 py-1 text-xs border rounded hover:bg-bg-input ${
+                    storeState?.preflight.ready ? "border-green text-green" : "border-yellow text-yellow"
+                  }`}
+                  title={storeState?.preflight.ready
+                    ? "Store listing is ready"
+                    : `${storeState?.preflight.errors ?? 0} blocking listing issue(s)`}
+                >
+                  Store listing
+                </button>
+              )}
               {detail.deployment.target_kind === "ios" && mobileChannel === "production" && (
                 <label className="flex items-center gap-1 text-xs text-text-muted">
-                  <input type="checkbox" checked={submitForReview} onChange={(e) => setSubmitForReview(e.target.checked)} />
+                  <input
+                    type="checkbox"
+                    checked={submitForReview}
+                    disabled={!storeState?.preflight.ready}
+                    onChange={(e) => setSubmitForReview(e.target.checked)}
+                  />
                   Submit review
                 </label>
               )}
@@ -710,6 +1191,121 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 onRestart={handleRestart}
                 busy={busy}
               />
+            )}
+            {detail.deployment.target_kind === "ios" && (
+              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
+                <span className="text-text-dim uppercase">iOS signing</span>
+                <span className={
+                  mobileSigning?.status === "ready"
+                    ? "text-green"
+                    : mobileSigning?.status === "action_required"
+                      ? "text-yellow"
+                      : mobileSigning?.status === "failed"
+                        ? "text-red"
+                        : "text-text-muted"
+                }>
+                  {mobileSigning?.status || "not configured"}
+                </span>
+                <span className="text-text-dim truncate min-w-[12rem] flex-1">
+                  {detail.deployment.build_backend}
+                  {mobileSigning?.bundle_id ? ` · ${mobileSigning.bundle_id}` : ""}
+                  {mobileSigning?.required_features_json
+                    ? ` · requires ${mobileFeatureLabels(mobileSigning.required_features_json)}`
+                    : ""}
+                  {mobileSigning?.provisioned_features_json
+                    ? ` · Apple ${mobileFeatureLabels(mobileSigning.provisioned_features_json)}`
+                    : ""}
+                  {cloudExecutionLabel(detail.deployment.build_backend_config_json, detail.deployment.build_backend)
+                    ? ` · ${cloudExecutionLabel(detail.deployment.build_backend_config_json, detail.deployment.build_backend)}`
+                    : ""}
+                  {mobileSigning?.provider_secret_ref ? ` · secret group ${mobileSigning.provider_secret_ref}` : ""}
+                </span>
+                {mobileSigning?.last_error && (
+                  <span className="text-yellow truncate" title={mobileSigning.last_error}>
+                    {mobileSigning.last_error}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={handleMobileSigningSetup}
+                  disabled={signingBusy || detail.deployment.build_backend !== "codemagic"}
+                  className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
+                  title={
+                    detail.deployment.build_backend === "codemagic"
+                      ? "Provision Apple distribution signing and store credentials securely at the build provider."
+                      : "This build provider does not yet expose a signing-secret adapter."
+                  }
+                >
+                  {signingBusy
+                    ? "Reconciling..."
+                    : mobileSigning?.status === "ready"
+                      ? "Repair"
+                      : "Configure"}
+                </button>
+                {mobileSigning?.status === "ready" && (
+                  <button
+                    type="button"
+                    onClick={handleMobileSigningRotation}
+                    disabled={signingBusy}
+                    className="px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
+                    title="Replace the Apple distribution certificate, private key, and provisioning profile."
+                  >
+                    Rotate certificate
+                  </button>
+                )}
+              </section>
+            )}
+            {mobile && mobileChannel !== "production" && (
+              <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
+                <span className="text-text-dim uppercase">Test audience</span>
+                <span className="text-text-muted">
+                  {distribution
+                    ? `${distribution.count} ${detail.deployment.target_kind === "android" ? "Google group" : "tester"}${distribution.count === 1 ? "" : "s"}`
+                    : "loading"}
+                </span>
+                {distribution?.group_name && (
+                  <span className="text-text-dim truncate">{distribution.group_name}</span>
+                )}
+                <div className="flex items-center gap-2 ml-auto min-w-0">
+                  <input
+                    type="email"
+                    value={audienceEmail}
+                    onChange={(e) => setAudienceEmail(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        void handleAddAudience();
+                      }
+                    }}
+                    placeholder={detail.deployment.target_kind === "android"
+                      ? "Google Group email"
+                      : "Tester Apple ID email"}
+                    className="w-52 bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddAudience}
+                    disabled={audienceBusy || !audienceEmail.trim()}
+                    className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40"
+                  >
+                    {audienceBusy ? "Adding..." : "Add"}
+                  </button>
+                </div>
+                {distributionError && (
+                  <span className="basis-full text-red truncate" title={distributionError}>
+                    {distributionError}
+                  </span>
+                )}
+                {distribution && distribution.audience.length > 0 && (
+                  <div className="basis-full flex items-center gap-2 overflow-x-auto text-text-dim">
+                    {distribution.audience.map((member) => (
+                      <span key={`${member.kind}:${member.email}`} className="whitespace-nowrap">
+                        {member.email}{member.state ? ` (${member.state})` : ""}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </section>
             )}
 
             <section className="grid grid-cols-2 gap-4 p-4 border-b border-border text-xs">
@@ -772,6 +1368,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     </div>
                     <div className="text-text-dim truncate">
                       built as: {detail.builds[0].framework}
+                      {mobile && ` · version ${mobileBuildVersion(detail.builds[0])}`}
+                      {detail.builds[0].build_backend !== "local"
+                        && ` · ${detail.builds[0].build_backend}:${detail.builds[0].external_status || "queued"}`}
                       {detail.builds[0].framework !== detail.deployment.framework
                         && detail.deployment.framework !== ""
                         && (
@@ -845,6 +1444,37 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                           {rel.status !== "failed" && rel.channel !== mobileChannel && (
                             <button type="button" onClick={() => handlePromoteMobile(rel.id)} className="text-accent hover:underline">promote</button>
                           )}
+                          {(rel.external_status === "approved_pending_release" || rel.external_status === "pending_apple_release") && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => handleReleaseApproved(rel.id)}
+                              className="text-green hover:underline disabled:opacity-40"
+                            >release</button>
+                          )}
+                          {detail.deployment.target_kind === "android" && rel.channel === "production" && rel.status !== "failed" && (
+                            <span className="inline-flex items-center gap-1">
+                              <input
+                                type="range"
+                                min={1}
+                                max={100}
+                                value={Math.round((rolloutFractions[rel.id] ?? releaseRolloutFraction(rel)) * 100)}
+                                onChange={(e) => setRolloutFractions((current) => ({
+                                  ...current,
+                                  [rel.id]: Number(e.target.value) / 100,
+                                }))}
+                                className="w-20"
+                                title="Production rollout percentage"
+                              />
+                              <button type="button" disabled={busy} onClick={() => handleRollout(rel)} className="text-accent hover:underline disabled:opacity-40">
+                                {Math.round((rolloutFractions[rel.id] ?? releaseRolloutFraction(rel)) * 100)}%
+                              </button>
+                              <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">halt</button>
+                            </span>
+                          )}
+                          {detail.deployment.target_kind === "ios" && rel.channel !== "production" && rel.status === "live" && (
+                            <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">expire</button>
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -860,6 +1490,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   <tr>
                     <th className="text-left font-normal">#</th>
                     <th className="text-left font-normal">Status</th>
+                    {mobile && <th className="text-left font-normal">Version</th>}
                     <th className="text-left font-normal">Duration</th>
                     <th className="text-left font-normal">Size</th>
                     <th className="text-left font-normal">Created</th>
@@ -871,6 +1502,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     <tr key={b.id} className="border-t border-border/40">
                       <td className="py-1">{b.id}</td>
                       <td className={statusColor(b.status)}>{b.status}</td>
+                      {mobile && <td className="text-text-dim">{mobileBuildVersion(b)}</td>}
                       <td>{formatDuration(b.duration_ms)}</td>
                       <td>{formatSize(b.artifact_size)}</td>
                       <td className="text-text-dim truncate">{b.created_at}</td>
@@ -886,6 +1518,13 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                             onClick={() => handleReleaseBuild(b.id)}
                             className="text-accent hover:underline"
                           >{mobile ? "publish" : "release"}</button>
+                        )}
+                        {(b.status === "pending" || b.status === "running") && b.build_backend !== "local" && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancelBuild(b.id)}
+                            className="text-red hover:underline"
+                          >cancel</button>
                         )}
                       </td>
                     </tr>
@@ -920,6 +1559,21 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
             loadDetail(detail.deployment.id);
           }}
           api={api}
+        />
+      )}
+
+      {showStoreListing && detail && mobile && storeState && (
+        <StoreListingDialog
+          deployment={detail.deployment}
+          initial={storeState}
+          projectId={projectId}
+          installId={installId}
+          api={api}
+          onClose={() => setShowStoreListing(false)}
+          onSaved={(next) => {
+            setStoreState(next);
+            setSubmitForReview((current) => current && next.preflight.ready);
+          }}
         />
       )}
 
@@ -1040,6 +1694,8 @@ function CreateDeploymentDialog({
   const [sourceRef, setSourceRef] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>("");
   const [buildCmd, setBuildCmd] = useState("");
+  const [buildBackend, setBuildBackend] = useState<(typeof BUILD_BACKENDS)[number]>("local");
+  const [buildBackendConfig, setBuildBackendConfig] = useState("{}");
   const [startCmd, setStartCmd] = useState("");
   const [env, setEnv] = useState("");
   const [targetConfig, setTargetConfig] = useState("");
@@ -1081,6 +1737,29 @@ function CreateDeploymentDialog({
       setErr("name and source_ref required");
       return;
     }
+    const backendConfig = buildBackendConfig.trim() || "{}";
+    try {
+      const parsed = JSON.parse(backendConfig);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        setErr("Build backend config must be a JSON object");
+        return;
+      }
+    } catch (e) {
+      setErr("Build backend config: " + (e as Error).message);
+      return;
+    }
+    const targetJSON = targetConfig.trim() || "{}";
+    if (targetKind !== "service") {
+      try {
+        const parsed = JSON.parse(targetJSON) as Record<string, unknown>;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("must be an object");
+        if (targetKind === "android" && !String(parsed.package_name || "").trim()) throw new Error("package_name is required");
+        if (targetKind === "ios" && !String(parsed.bundle_id || "").trim()) throw new Error("bundle_id is required");
+      } catch (e) {
+        setErr("Mobile target config: " + (e as Error).message);
+        return;
+      }
+    }
     setBusy(true);
     try {
       let domain = "";
@@ -1096,9 +1775,11 @@ function CreateDeploymentDialog({
         source_ref: sourceRef.trim(),
         framework,
         build_cmd: buildCmd.trim(),
+        build_backend: buildBackend,
+        build_backend_config_json: backendConfig,
         start_cmd: startCmd.trim(),
         env_json: env.trim() || "{}",
-        target_config_json: targetConfig.trim() || "{}",
+        target_config_json: targetJSON,
         domain: targetKind === "service" ? domain : "",
       });
       if (r.domain_error) {
@@ -1120,7 +1801,7 @@ function CreateDeploymentDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(); }}
-        className="w-[480px] bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">New deployment</h2>
         <div className="grid grid-cols-2 gap-3">
@@ -1172,6 +1853,33 @@ function CreateDeploymentDialog({
               ))}
             </select>
           </div>
+          <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Build backend</label>
+            <select
+              value={buildBackend}
+              onChange={(e) => setBuildBackend(e.target.value as (typeof BUILD_BACKENDS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              <option value="local">Local</option>
+              <option value="runner">Capsule runner</option>
+              <option value="codemagic">Codemagic</option>
+              <option value="github_actions">GitHub Actions</option>
+            </select>
+          </div>
+          {buildBackend !== "local" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <textarea
+                value={buildBackendConfig}
+                onChange={(e) => setBuildBackendConfig(e.target.value)}
+                placeholder={buildBackend === "codemagic"
+                  ? '{"app_id":"...","workflow_id":"apteva-mobile-capsule","branch":"main","source_mode":"bundle","artifact_mode":"file"}'
+                  : '{"owner":"acme","repo":"app","workflow_id":"build.yml","ref":"main","artifact_mode":"file"}'}
+                rows={4}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">
               Source ref ({sourceKind === "code" ? "repository from Code app" : "absolute path on host"})
@@ -1249,16 +1957,16 @@ function CreateDeploymentDialog({
           </div>
           {targetKind !== "service" && (
             <div className="col-span-2">
-              <label className="text-xs text-text-muted block mb-1">Mobile target config (JSON)</label>
-              <textarea
-                value={targetConfig}
-                onChange={(e) => setTargetConfig(e.target.value)}
-                placeholder={targetKind === "android"
-                  ? '{"package_name":"com.example.app","module":"app","variant":"release"}'
-                  : '{"bundle_id":"com.example.app","scheme":"App","team_id":"TEAMID"}'}
-                rows={3}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
+              <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />
+              <details className="mt-3 text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <textarea
+                  value={targetConfig}
+                  onChange={(e) => setTargetConfig(e.target.value)}
+                  rows={5}
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </details>
             </div>
           )}
           {targetKind === "service" && <div className="col-span-2">
@@ -1461,6 +2169,927 @@ function AttachDomainDialog({
   );
 }
 
+function StoreListingDialog({
+  deployment,
+  initial,
+  projectId,
+  installId,
+  api,
+  onClose,
+  onSaved,
+}: {
+  deployment: Deployment;
+  initial: StoreConfigState;
+  projectId: string;
+  installId: number;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  onClose: () => void;
+  onSaved: (next: StoreConfigState) => void;
+}) {
+  const [doc, setDoc] = useState<StoreDocument>(() => structuredClone(initial.desired));
+  const [applyResult, setApplyResult] = useState<StoreApplyResult | null>(null);
+  const [preflight, setPreflight] = useState(initial.preflight);
+  const [tab, setTab] = useState<"listing" | "media" | "review" | "compliance" | "distribution">("listing");
+  const [locale, setLocale] = useState(initial.desired.default_locale || "en-US");
+  const [newLocale, setNewLocale] = useState("");
+  const [assetKind, setAssetKind] = useState("phone_screenshot");
+  const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "ios" ? "APP_IPHONE_69" : "");
+  const [reviewPassword, setReviewPassword] = useState("");
+  const [hasConfig, setHasConfig] = useState(Boolean(initial.config));
+  const [readiness, setReadiness] = useState(() => storeReadiness(initial.config?.observed_json));
+  const [ageJSON, setAgeJSON] = useState(
+    JSON.stringify(initial.desired.classification.age_declaration || {}, null, 2),
+  );
+  const [providerExtensionsJSON, setProviderExtensionsJSON] = useState(
+    JSON.stringify(initial.desired.provider_extensions || {}, null, 2),
+  );
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const localization = doc.localizations[locale] || {};
+  const updateLocalization = (patch: Partial<StoreLocalization>) => {
+    setDoc((current) => ({
+      ...current,
+      localizations: {
+        ...current.localizations,
+        [locale]: { ...(current.localizations[locale] || {}), ...patch },
+      },
+    }));
+  };
+
+  const normalize = (): StoreDocument => {
+    let age: Record<string, unknown>;
+    try {
+      age = JSON.parse(ageJSON || "{}") as Record<string, unknown>;
+      if (!age || typeof age !== "object" || Array.isArray(age)) throw new Error("must be an object");
+    } catch (e) {
+      throw new Error("Age declaration JSON: " + (e as Error).message);
+    }
+    let providerExtensions: Record<string, unknown>;
+    try {
+      providerExtensions = JSON.parse(providerExtensionsJSON || "{}") as Record<string, unknown>;
+      if (!providerExtensions || typeof providerExtensions !== "object" || Array.isArray(providerExtensions)) {
+        throw new Error("must be an object");
+      }
+    } catch (e) {
+      throw new Error("Provider extensions JSON: " + (e as Error).message);
+    }
+    return {
+      ...doc,
+      schema_version: 1,
+      version_name: doc.version_name.trim(),
+      default_locale: doc.default_locale || locale,
+      classification: { ...doc.classification, age_declaration: age },
+      provider_extensions: providerExtensions,
+    };
+  };
+
+  const save = async (): Promise<StoreConfigState> => {
+    const desired = normalize();
+    const next = await api<StoreConfigState>("PUT", `/deployments/${deployment.id}/store-config`, desired);
+    setDoc(structuredClone(next.desired));
+    setPreflight(next.preflight);
+    setReadiness(storeReadiness(next.config?.observed_json));
+    setHasConfig(true);
+    onSaved(next);
+    return next;
+  };
+
+  const handleSave = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await save();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleApply = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const saved = await save();
+      const result = await api<StoreApplyResult>("POST", `/deployments/${deployment.id}/store-apply`, {
+        scopes: ["version", "localizations", "media", "review", "classification", "privacy", "distribution", "compliance"],
+        allow_partial: true,
+        review_demo_password: reviewPassword || undefined,
+      });
+      setApplyResult(result);
+      setReviewPassword("");
+      const next = await api<StoreConfigState>("GET", `/deployments/${deployment.id}/store-config`);
+      setDoc(structuredClone(next.desired));
+      setPreflight(next.preflight);
+      setReadiness(storeReadiness(next.config?.observed_json));
+      onSaved(next);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSync = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      await api("POST", `/deployments/${deployment.id}/store-sync`);
+      const next = await api<StoreConfigState>("GET", `/deployments/${deployment.id}/store-config`);
+      setDoc(structuredClone(next.desired));
+      setPreflight(next.preflight);
+      setReadiness(storeReadiness(next.config?.observed_json));
+      onSaved(next);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const uploadAsset = async (file: File) => {
+    setBusy(true);
+    setErr("");
+    try {
+      const form = new FormData();
+      form.set("file", file);
+      form.set("locale", locale);
+      form.set("kind", assetKind);
+      form.set("display_target", displayTarget);
+      form.set("order", String(doc.assets.length + 1));
+      const query = new URLSearchParams({
+        project_id: projectId,
+        install_id: String(installId),
+      });
+      const response = await fetch(
+        `${API}/deployments/${deployment.id}/store-assets?${query.toString()}`,
+        { method: "POST", credentials: "same-origin", body: form },
+      );
+      if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
+      const result = await response.json() as { asset: StoreAsset };
+      setDoc((current) => ({ ...current, assets: [...current.assets, result.asset] }));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addLocale = () => {
+    const value = newLocale.trim();
+    if (!value) return;
+    setDoc((current) => ({
+      ...current,
+      localizations: { ...current.localizations, [value]: current.localizations[value] || {} },
+    }));
+    setLocale(value);
+    setNewLocale("");
+  };
+
+  const tabs = [
+    ["listing", "Listing"],
+    ["media", "Media"],
+    ["review", "Review"],
+    ["compliance", "Compliance"],
+    ["distribution", "Distribution"],
+  ] as const;
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-[820px] max-w-[94vw] h-[86vh] bg-bg border border-border rounded flex flex-col overflow-hidden"
+      >
+        <header className="px-5 py-3 border-b border-border flex flex-wrap items-center gap-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="text-text font-semibold">Store listing</h2>
+            <div className="text-xs text-text-dim">
+              {deployment.target_kind === "ios" ? "App Store Connect" : "Google Play"}
+              {initial.config?.status
+                ? ` · ${initial.config.desired_hash === initial.config.applied_hash && initial.config.applied_hash ? "applied and verified" : initial.config.status}`
+                : " · not configured"}
+            </div>
+          </div>
+          <span className={`text-xs ${preflight.ready ? "text-green" : "text-yellow"}`}>
+            {preflight.ready ? "Ready" : `${preflight.errors} blocking · ${preflight.warnings} warning`}
+          </span>
+          <button type="button" onClick={onClose} className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input">
+            Close
+          </button>
+        </header>
+
+        <nav className="px-5 border-b border-border flex items-center gap-1 overflow-x-auto shrink-0">
+          {tabs.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setTab(value)}
+              className={`px-3 py-2 text-xs border-b-2 ${
+                tab === value ? "border-accent text-accent" : "border-transparent text-text-dim hover:text-text"
+              }`}
+            >{label}</button>
+          ))}
+        </nav>
+
+        <div className="flex-1 overflow-auto p-5">
+          {preflight.findings.length > 0 && (
+            <section className="mb-5 border-b border-border pb-4 space-y-1">
+              {preflight.findings.map((finding) => (
+                <div key={`${finding.code}:${finding.locale || ""}`} className="flex gap-2 text-xs">
+                  <span className={finding.severity === "error" ? "text-red" : "text-yellow"}>
+                    {finding.severity}
+                  </span>
+                  <span className="text-text">{finding.message}</span>
+                  {finding.locale && <span className="text-text-dim">{finding.locale}</span>}
+                </div>
+              ))}
+            </section>
+          )}
+
+          {tab === "listing" && (
+            <div className="space-y-5">
+              <section className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <label className="text-xs text-text-muted">
+                  Store version
+                  <input
+                    value={doc.version_name}
+                    onChange={(e) => setDoc({ ...doc, version_name: e.target.value })}
+                    placeholder="1.0"
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  />
+                </label>
+                <label className="text-xs text-text-muted">
+                  Default locale
+                  <select
+                    value={doc.default_locale}
+                    onChange={(e) => setDoc({ ...doc, default_locale: e.target.value })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    {Object.keys(doc.localizations).map((value) => <option key={value}>{value}</option>)}
+                  </select>
+                </label>
+                <label className="text-xs text-text-muted">
+                  {deployment.target_kind === "ios" ? "Release mode" : "Production rollout"}
+                  <select
+                    value={doc.release_mode}
+                    onChange={(e) => setDoc({ ...doc, release_mode: e.target.value })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    {deployment.target_kind === "ios" ? (
+                      <>
+                        <option value="manual">Manual</option>
+                        <option value="after_approval">After approval</option>
+                        <option value="scheduled">Scheduled</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="immediate">Immediate</option>
+                        <option value="staged">Staged rollout</option>
+                      </>
+                    )}
+                  </select>
+                </label>
+              </section>
+
+              {deployment.target_kind === "ios" && (
+                <section className="grid grid-cols-1 sm:grid-cols-3 gap-3 border-t border-border pt-4">
+                  <TextField label="Copyright" value={doc.copyright} onChange={(copyright) => setDoc({ ...doc, copyright })} />
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.content_rights?.uses_third_party_content)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        content_rights: { ...doc.content_rights, uses_third_party_content: e.target.checked },
+                      })}
+                    />
+                    Uses third-party content
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.content_rights?.rights_confirmed)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        content_rights: { ...doc.content_rights, rights_confirmed: e.target.checked },
+                      })}
+                    />
+                    Content rights confirmed
+                  </label>
+                </section>
+              )}
+
+              <section className="border-t border-border pt-4">
+                <div className="flex items-center gap-2 mb-3">
+                  <select
+                    value={locale}
+                    onChange={(e) => setLocale(e.target.value)}
+                    className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  >
+                    {Object.keys(doc.localizations).map((value) => <option key={value}>{value}</option>)}
+                  </select>
+                  <input
+                    value={newLocale}
+                    onChange={(e) => setNewLocale(e.target.value)}
+                    placeholder="fr-FR"
+                    className="w-24 bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  />
+                  <button type="button" onClick={addLocale} className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input">
+                    Add locale
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <TextField label="Title" value={localization.title} onChange={(title) => updateLocalization({ title })} />
+                  <TextField
+                    label={deployment.target_kind === "ios" ? "Subtitle" : "Short description"}
+                    value={deployment.target_kind === "ios" ? localization.subtitle : localization.short_description}
+                    onChange={(value) => updateLocalization(deployment.target_kind === "ios"
+                      ? { subtitle: value }
+                      : { short_description: value })}
+                  />
+                  <label className="sm:col-span-2 text-xs text-text-muted">
+                    Description
+                    <textarea
+                      rows={6}
+                      value={localization.description || ""}
+                      onChange={(e) => updateLocalization({ description: e.target.value })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    />
+                  </label>
+                  {deployment.target_kind === "ios" && (
+                    <TextField
+                      label="Keywords"
+                      value={(localization.keywords || []).join(", ")}
+                      onChange={(value) => updateLocalization({ keywords: value.split(",").map((item) => item.trim()).filter(Boolean) })}
+                    />
+                  )}
+                  <TextField label="What's new" value={localization.whats_new} onChange={(whats_new) => updateLocalization({ whats_new })} />
+                  <TextField label="Support URL" value={localization.support_url} onChange={(support_url) => updateLocalization({ support_url })} />
+                  <TextField label="Marketing URL" value={localization.marketing_url} onChange={(marketing_url) => updateLocalization({ marketing_url })} />
+                  <TextField label="Promotional text" value={localization.promotional_text} onChange={(promotional_text) => updateLocalization({ promotional_text })} />
+                  {deployment.target_kind === "android" && (
+                    <TextField label="Promo video URL" value={localization.video_url} onChange={(video_url) => updateLocalization({ video_url })} />
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+
+          {tab === "media" && (
+            <div className="space-y-4">
+              <section className="flex flex-wrap items-end gap-3">
+                <label className="text-xs text-text-muted">
+                  Asset type
+                  <select
+                    value={assetKind}
+                    onChange={(e) => {
+                      const kind = e.target.value;
+                      setAssetKind(kind);
+                      if (deployment.target_kind === "ios") {
+                        setDisplayTarget(kind === "tablet_screenshot" ? "APP_IPAD_PRO_13" : kind === "app_preview" ? "IPHONE_67" : "APP_IPHONE_69");
+                      } else {
+                        setDisplayTarget(kind === "tablet_screenshot" ? "tablet_7" : "");
+                      }
+                    }}
+                    className="mt-1 block bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="phone_screenshot">Phone screenshot</option>
+                    <option value="tablet_screenshot">Tablet screenshot</option>
+                    {deployment.target_kind === "ios" && <option value="app_preview">App preview</option>}
+                    {deployment.target_kind === "ios" && <option value="review_attachment">Review attachment</option>}
+                    {deployment.target_kind === "android" && <option value="icon">App icon</option>}
+                    {deployment.target_kind === "android" && <option value="feature_graphic">Feature graphic</option>}
+                    {deployment.target_kind === "android" && <option value="tv_screenshot">TV screenshot</option>}
+                    {deployment.target_kind === "android" && <option value="wear_screenshot">Wear screenshot</option>}
+                  </select>
+                </label>
+                <label className="text-xs text-text-muted">
+                  Display target
+                  {deployment.target_kind === "ios" && assetKind !== "review_attachment" ? (
+                    <select
+                      value={displayTarget}
+                      onChange={(e) => setDisplayTarget(e.target.value)}
+                      className="mt-1 block w-52 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      {assetKind === "tablet_screenshot" ? (
+                        <>
+                          <option value="APP_IPAD_PRO_13">iPad 13-inch</option>
+                          <option value="APP_IPAD_PRO_3GEN_129">iPad Pro 12.9-inch</option>
+                        </>
+                      ) : assetKind === "app_preview" ? (
+                        <option value="IPHONE_67">iPhone 6.7-inch preview</option>
+                      ) : (
+                        <>
+                          <option value="APP_IPHONE_69">iPhone 6.9-inch</option>
+                          <option value="APP_IPHONE_67">iPhone 6.7-inch</option>
+                          <option value="APP_IPHONE_65">iPhone 6.5-inch</option>
+                          <option value="APP_IPHONE_63">iPhone 6.3-inch</option>
+                          <option value="APP_IPHONE_61">iPhone 6.1-inch</option>
+                        </>
+                      )}
+                    </select>
+                  ) : deployment.target_kind === "android" && assetKind === "tablet_screenshot" ? (
+                    <select
+                      value={displayTarget || "tablet_7"}
+                      onChange={(e) => setDisplayTarget(e.target.value)}
+                      className="mt-1 block w-44 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      <option value="tablet_7">7-inch tablet</option>
+                      <option value="tablet_10">10-inch tablet</option>
+                    </select>
+                  ) : (
+                    <span className="mt-1 block text-xs text-text-dim">Selected automatically</span>
+                  )}
+                </label>
+                <label className="px-3 py-1.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg cursor-pointer">
+                  Upload
+                  <input
+                    type="file"
+                    accept={assetKind === "app_preview"
+                      ? "video/mp4,video/quicktime"
+                      : assetKind === "review_attachment"
+                        ? "image/png,image/jpeg,application/pdf"
+                        : "image/png,image/jpeg"}
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      for (const file of Array.from(e.target.files || [])) void uploadAsset(file);
+                      e.currentTarget.value = "";
+                    }}
+                  />
+                </label>
+              </section>
+              <table className="w-full text-xs">
+                <thead className="text-text-dim">
+                  <tr>
+                    <th className="text-left font-normal">Locale</th>
+                    <th className="text-left font-normal">Type</th>
+                    <th className="text-left font-normal">Target</th>
+                    <th className="text-left font-normal">File</th>
+                    <th />
+                  </tr>
+                </thead>
+                <tbody>
+                  {doc.assets.map((asset) => (
+                    <tr key={asset.id} className="border-t border-border">
+                      <td className="py-2">{asset.locale}</td>
+                      <td>{asset.kind}</td>
+                      <td className="text-text-dim">{asset.display_target || "-"}</td>
+                      <td className="text-text-dim truncate max-w-64">
+                        {asset.path.split("/").at(-1)}
+                        {asset.width && asset.height ? ` · ${asset.width} × ${asset.height}` : ""}
+                      </td>
+                      <td className="text-right">
+                        <button
+                          type="button"
+                          onClick={() => setDoc({ ...doc, assets: doc.assets.filter((candidate) => candidate.id !== asset.id) })}
+                          className="text-red hover:underline"
+                        >remove</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {tab === "review" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <TextField label="First name" value={doc.review.first_name} onChange={(first_name) => setDoc({ ...doc, review: { ...doc.review, first_name } })} />
+              <TextField label="Last name" value={doc.review.last_name} onChange={(last_name) => setDoc({ ...doc, review: { ...doc.review, last_name } })} />
+              <TextField label="Email" value={doc.review.email} onChange={(email) => setDoc({ ...doc, review: { ...doc.review, email } })} />
+              <TextField label="Phone" value={doc.review.phone} onChange={(phone) => setDoc({ ...doc, review: { ...doc.review, phone } })} />
+              <label className="sm:col-span-2 text-xs text-text-muted">
+                Review notes
+                <textarea
+                  rows={5}
+                  value={doc.review.notes || ""}
+                  onChange={(e) => setDoc({ ...doc, review: { ...doc.review, notes: e.target.value } })}
+                  className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                />
+              </label>
+              {deployment.target_kind === "ios" && (
+                <>
+                  <label className="sm:col-span-2 flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.review.demo_account_required)}
+                      onChange={(e) => setDoc({ ...doc, review: { ...doc.review, demo_account_required: e.target.checked } })}
+                    />
+                    Review requires login
+                  </label>
+                  {doc.review.demo_account_required && (
+                    <>
+                      <TextField label="Demo username" value={doc.review.demo_username} onChange={(demo_username) => setDoc({ ...doc, review: { ...doc.review, demo_username } })} />
+                      <label className="text-xs text-text-muted">
+                        Demo password {doc.review.demo_password_set && <span className="text-green">configured</span>}
+                        <input
+                          type="password"
+                          value={reviewPassword}
+                          onChange={(e) => setReviewPassword(e.target.value)}
+                          placeholder={doc.review.demo_password_set ? "Leave blank to keep" : "Sent once during Apply"}
+                          className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                        />
+                      </label>
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === "compliance" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <TextField label="Privacy policy URL" value={doc.privacy.policy_url} onChange={(policy_url) => setDoc({ ...doc, privacy: { ...doc.privacy, policy_url } })} />
+                <TextField label="Privacy choices URL" value={doc.privacy.choices_url} onChange={(choices_url) => setDoc({ ...doc, privacy: { ...doc.privacy, choices_url } })} />
+                <label className="text-xs text-text-muted">
+                  Primary category
+                  <select
+                    value={doc.classification.primary_category || ""}
+                    onChange={(e) => setDoc({ ...doc, classification: { ...doc.classification, primary_category: e.target.value } })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="">Select category</option>
+                    {(deployment.target_kind === "ios" ? APPLE_CATEGORIES : GOOGLE_CATEGORIES).map((category) => (
+                      <option key={category} value={category}>{category.replaceAll("_", " ")}</option>
+                    ))}
+                  </select>
+                </label>
+                {deployment.target_kind === "ios" && (
+                  <label className="text-xs text-text-muted">
+                    Secondary category
+                    <select
+                      value={doc.classification.secondary_category || ""}
+                      onChange={(e) => setDoc({ ...doc, classification: { ...doc.classification, secondary_category: e.target.value } })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    >
+                      <option value="">None</option>
+                      {APPLE_CATEGORIES.map((category) => <option key={category} value={category}>{category.replaceAll("_", " ")}</option>)}
+                    </select>
+                  </label>
+                )}
+              </div>
+              <section className="border-t border-border pt-4 space-y-3">
+                <div className="text-xs uppercase text-text-dim">Content rating</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {RATING_FIELDS.map(({ key, label }) => (
+                    <label key={key} className="text-xs text-text-muted">
+                      {label}
+                      <select
+                        value={currentRatingLevel(doc.classification.content_rating?.[key])}
+                        onChange={(e) => setDoc({
+                          ...doc,
+                          classification: {
+                            ...doc.classification,
+                            content_rating: {
+                              ...doc.classification.content_rating,
+                              [key]: e.target.value as StoreRatingLevel,
+                            },
+                          },
+                        })}
+                        className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="">Select</option>
+                        <option value="NONE">None</option>
+                        <option value="INFREQUENT">Infrequent</option>
+                        <option value="FREQUENT">Frequent</option>
+                      </select>
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-4">
+                  {([
+                    ["unrestricted_web_access", "Unrestricted web access"],
+                    ["real_money_gambling", "Real-money gambling"],
+                    ["loot_boxes", "Loot boxes"],
+                    ["advertising", "Advertising"],
+                    ["messaging_chat", "Messaging and chat"],
+                    ["user_generated_content", "User-generated content"],
+                    ["parental_controls", "Parental controls"],
+                    ["age_assurance", "Age assurance"],
+                    ["social_media", "Social media"],
+                    ["social_media_age_gate", "Social media restricted under 13"],
+                  ] as const).map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-2 text-xs text-text-muted">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(doc.classification.content_rating?.[key])}
+                        onChange={(e) => setDoc({
+                          ...doc,
+                          classification: {
+                            ...doc.classification,
+                            content_rating: { ...doc.classification.content_rating, [key]: e.target.checked },
+                          },
+                        })}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                {deployment.target_kind === "ios" && (
+                  <details className="text-xs text-text-muted">
+                    <summary className="cursor-pointer">Advanced Apple declaration fields</summary>
+                    <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={6} className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
+                  </details>
+                )}
+              </section>
+              {deployment.target_kind === "ios" ? (
+                <>
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.privacy.manual_attestations?.apple_privacy_published)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        privacy: {
+                          ...doc.privacy,
+                          manual_attestations: { ...doc.privacy.manual_attestations, apple_privacy_published: e.target.checked },
+                        },
+                      })}
+                    />
+                    App Privacy already reviewed and published (optional confirmation)
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label className="text-xs text-text-muted block">
+                    Google Data Safety CSV
+                    <textarea
+                      value={doc.privacy.data_safety_csv || ""}
+                      onChange={(e) => setDoc({ ...doc, privacy: { ...doc.privacy, data_safety_csv: e.target.value } })}
+                      rows={8}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.privacy.manual_attestations?.google_data_safety_published)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        privacy: {
+                          ...doc.privacy,
+                          manual_attestations: { ...doc.privacy.manual_attestations, google_data_safety_published: e.target.checked },
+                        },
+                      })}
+                    />
+                    Existing Play Data Safety declaration verified
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.privacy.manual_attestations?.google_app_content_complete)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        privacy: {
+                          ...doc.privacy,
+                          manual_attestations: { ...doc.privacy.manual_attestations, google_app_content_complete: e.target.checked },
+                        },
+                      })}
+                    />
+                    Play category, content rating, and App Content complete
+                  </label>
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === "distribution" && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="text-xs text-text-muted">
+                  Availability
+                  <select
+                    value={doc.distribution.availability?.mode || (doc.distribution.territories?.length ? "only" : "")}
+                    onChange={(e) => setDoc({ ...doc, distribution: {
+                      ...doc.distribution,
+                      availability: { ...doc.distribution.availability, mode: e.target.value as "all" | "all_except" | "only" },
+                    } })}
+                    className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                  >
+                    <option value="">Select availability</option>
+                    <option value="all">All storefronts</option>
+                    <option value="all_except">All except selected</option>
+                    <option value="only">Only selected</option>
+                  </select>
+                </label>
+                {(doc.distribution.availability?.mode === "all_except" || doc.distribution.availability?.mode === "only" || (!doc.distribution.availability?.mode && doc.distribution.territories?.length)) && (
+                  <TextField
+                    label={doc.distribution.availability?.mode === "all_except" ? "Excluded territories" : "Included territories"}
+                    value={(doc.distribution.availability?.mode === "all_except"
+                      ? doc.distribution.availability?.excluded_territories
+                      : doc.distribution.availability?.included_territories || doc.distribution.territories || []).join(", ")}
+                    onChange={(value) => {
+                      const territories = value.split(",").map((item) => item.trim().toUpperCase()).filter(Boolean);
+                      const mode = doc.distribution.availability?.mode || "only";
+                      setDoc({ ...doc, distribution: { ...doc.distribution, territories: undefined, availability: {
+                        ...doc.distribution.availability,
+                        mode,
+                        ...(mode === "all_except" ? { excluded_territories: territories } : { included_territories: territories }),
+                      } } });
+                    }}
+                  />
+                )}
+                <TextField label="Price point / tier" value={doc.distribution.price_tier} onChange={(price_tier) => setDoc({ ...doc, distribution: { ...doc.distribution, price_tier } })} />
+                <label className="flex items-center gap-2 text-xs text-text-muted">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(doc.distribution.phased_release)}
+                    onChange={(e) => setDoc({ ...doc, distribution: { ...doc.distribution, phased_release: e.target.checked } })}
+                  />
+                  Phased release
+                </label>
+                {deployment.target_kind === "android" && doc.release_mode === "staged" && (
+                  <label className="text-xs text-text-muted">
+                    Initial rollout percent
+                    <input
+                      type="number"
+                      min={1}
+                      max={99}
+                      value={Math.round((doc.distribution.rollout_fraction || 0.1) * 100)}
+                      onChange={(e) => setDoc({
+                        ...doc,
+                        distribution: { ...doc.distribution, rollout_fraction: Number(e.target.value) / 100 },
+                      })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    />
+                  </label>
+                )}
+                {doc.release_mode === "scheduled" && (
+                  <label className="text-xs text-text-muted">
+                    Earliest release
+                    <input
+                      type="datetime-local"
+                      value={(doc.earliest_release_at || "").slice(0, 16)}
+                      onChange={(e) => setDoc({ ...doc, earliest_release_at: e.target.value ? new Date(e.target.value).toISOString() : "" })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    />
+                  </label>
+                )}
+                <label className="flex items-center gap-2 text-xs text-text-muted" title={readiness.availability?.message}>
+                  <input
+                    type="checkbox"
+                    disabled={readiness.availability?.status === "verified"}
+                    checked={readiness.availability?.status === "verified" || Boolean(doc.distribution.provider?.availability_configured)}
+                    onChange={(e) => setDoc({
+                      ...doc,
+                      distribution: {
+                        ...doc.distribution,
+                        provider: { ...doc.distribution.provider, availability_configured: e.target.checked },
+                      },
+                    })}
+                  />
+                  {readiness.availability?.status === "verified" ? "Availability verified by provider" : "Existing store availability verified manually"}
+                </label>
+                <label className="flex items-center gap-2 text-xs text-text-muted" title={readiness.pricing?.message}>
+                  <input
+                    type="checkbox"
+                    disabled={readiness.pricing?.status === "verified"}
+                    checked={readiness.pricing?.status === "verified" || Boolean(doc.distribution.provider?.pricing_configured)}
+                    onChange={(e) => setDoc({
+                      ...doc,
+                      distribution: {
+                        ...doc.distribution,
+                        provider: { ...doc.distribution.provider, pricing_configured: e.target.checked },
+                      },
+                    })}
+                  />
+                  {readiness.pricing?.status === "verified" ? "Pricing verified by provider" : "Existing store pricing verified manually"}
+                </label>
+              </div>
+              <details className="text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced provider extensions</summary>
+                <textarea
+                  value={providerExtensionsJSON}
+                  onChange={(e) => setProviderExtensionsJSON(e.target.value)}
+                  rows={9}
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+                />
+              </details>
+            </div>
+          )}
+        </div>
+
+        <footer className="px-5 py-3 border-t border-border flex flex-wrap items-center gap-2">
+          {err && <span className="text-xs text-red flex-1 truncate" title={err}>{err}</span>}
+          {!err && applyResult && <span className="flex-1 text-xs text-text-dim">
+            {applyResult.applied_scopes.length} applied · {applyResult.blocked.length} blocked · {applyResult.failed.length} failed
+          </span>}
+          {!err && !applyResult && <span className="flex-1 text-xs text-text-dim">Saving does not submit or release the app.</span>}
+          <button type="button" onClick={handleSync} disabled={busy || !hasConfig} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-40">
+            Sync
+          </button>
+          <button type="button" onClick={handleSave} disabled={busy} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-40">
+            Save draft
+          </button>
+          <button type="button" onClick={handleApply} disabled={busy} className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40">
+            {busy ? "Working..." : "Apply to store"}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function TextField({ label, value, onChange }: { label: string; value?: string; onChange: (value: string) => void }) {
+  return (
+    <label className="text-xs text-text-muted">
+      {label}
+      <input
+        value={value || ""}
+        onChange={(e) => onChange(e.target.value)}
+        className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+      />
+    </label>
+  );
+}
+
+function parseMobileTargetJSON(raw: string): Record<string, unknown> {
+  try {
+    const value = JSON.parse(raw.trim() || "{}");
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  } catch {
+    return {};
+  }
+}
+
+function patchMobileTargetJSON(raw: string, patch: Record<string, unknown>): string {
+  const value = parseMobileTargetJSON(raw);
+  if (!value.version_strategy) value.version_strategy = "auto";
+  for (const [key, next] of Object.entries(patch)) {
+    if (next === "" || next === undefined || next === null || (Array.isArray(next) && next.length === 0)) {
+      delete value[key];
+    } else {
+      value[key] = next;
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function MobileTargetFields({
+  targetKind,
+  value,
+  onChange,
+}: {
+  targetKind: "android" | "ios";
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const config = parseMobileTargetJSON(value);
+  const strategy = String(config.version_strategy || "auto");
+  const set = (patch: Record<string, unknown>) => onChange(patchMobileTargetJSON(value, patch));
+  const families = Array.isArray(config.device_families) ? config.device_families.map(String) : [];
+  const toggleFamily = (family: string, checked: boolean) => {
+    const next = checked ? [...new Set([...families, family])] : families.filter((value) => value !== family);
+    set({ device_families: next });
+  };
+
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      {targetKind === "android" ? (
+        <>
+          <TextField label="Package name" value={String(config.package_name || "")} onChange={(package_name) => set({ package_name })} />
+          <TextField label="Marketing version" value={String(config.version_name || "")} onChange={(version_name) => set({ version_name })} />
+          <TextField label="Gradle module" value={String(config.module || "app")} onChange={(module) => set({ module })} />
+          <TextField label="Build variant" value={String(config.variant || "release")} onChange={(variant) => set({ variant })} />
+        </>
+      ) : (
+        <>
+          <TextField label="Bundle ID" value={String(config.bundle_id || "")} onChange={(bundle_id) => set({ bundle_id })} />
+          <TextField label="Xcode scheme" value={String(config.scheme || "")} onChange={(scheme) => set({ scheme })} />
+          <TextField label="Marketing version" value={String(config.version_name || "")} onChange={(version_name) => set({ version_name })} />
+          <TextField label="Apple Team ID" value={String(config.team_id || "")} onChange={(team_id) => set({ team_id })} />
+          <TextField label="App Store app ID" value={String(config.app_store_app_id || "")} onChange={(app_store_app_id) => set({ app_store_app_id })} />
+          <div className="flex items-end gap-4 pb-1">
+            {(["iphone", "ipad"] as const).map((family) => (
+              <label key={family} className="flex items-center gap-2 text-xs text-text-muted">
+                <input type="checkbox" checked={families.includes(family)} onChange={(e) => toggleFamily(family, e.target.checked)} />
+                {family === "iphone" ? "iPhone" : "iPad"}
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+      <label className="text-xs text-text-muted">
+        Version allocation
+        <select value={strategy} onChange={(e) => set({ version_strategy: e.target.value })} className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm">
+          <option value="auto">Automatic</option>
+          <option value="manual">Manual</option>
+        </select>
+      </label>
+      {strategy === "manual" && (
+        <TextField
+          label={targetKind === "ios" ? "Build number" : "Version code"}
+          value={String(config[targetKind === "ios" ? "build_number" : "version_code"] || "")}
+          onChange={(next) => set({ [targetKind === "ios" ? "build_number" : "version_code"]: next })}
+        />
+      )}
+    </div>
+  );
+}
+
 // ─── CertBadge ────────────────────────────────────────────────────
 //
 // One-glance cert status next to an attached domain. The Certs app
@@ -1578,6 +3207,12 @@ function EditConfigDialog({
       : "",
   );
   const [buildCmd, setBuildCmd] = useState(deployment.build_cmd ?? "");
+  const [buildBackend, setBuildBackend] = useState<(typeof BUILD_BACKENDS)[number]>(
+    deployment.build_backend ?? "local",
+  );
+  const [buildBackendConfig, setBuildBackendConfig] = useState(
+    deployment.build_backend_config_json ?? "{}",
+  );
   const [startCmd, setStartCmd] = useState(deployment.start_cmd ?? "");
   const [portHint, setPortHint] = useState(
     deployment.port_hint ? String(deployment.port_hint) : "",
@@ -1614,6 +3249,17 @@ function EditConfigDialog({
         return;
       }
     }
+    const backendConfig = buildBackendConfig.trim() || "{}";
+    try {
+      const parsed = JSON.parse(backendConfig);
+      if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+        setErr("build_backend_config_json must be a JSON object");
+        return;
+      }
+    } catch (e) {
+      setErr("build_backend_config_json: " + (e as Error).message);
+      return;
+    }
     setBusy(true);
     try {
       // Diff against current values — sending only-changed keys keeps
@@ -1623,6 +3269,10 @@ function EditConfigDialog({
       if (description !== (deployment.description ?? "")) body.description = description;
       if (framework !== deployment.framework) body.framework = framework;
       if (buildCmd !== (deployment.build_cmd ?? "")) body.build_cmd = buildCmd;
+      if (buildBackend !== (deployment.build_backend ?? "local")) body.build_backend = buildBackend;
+      if (backendConfig !== (deployment.build_backend_config_json ?? "{}")) {
+        body.build_backend_config_json = backendConfig;
+      }
       if (startCmd !== (deployment.start_cmd ?? "")) body.start_cmd = startCmd;
       if (portN !== deployment.port_hint) body.port_hint = portN;
       if (env !== (deployment.env_json ?? "")) body.env_json = env;
@@ -1658,7 +3308,7 @@ function EditConfigDialog({
       <form
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => { e.preventDefault(); submit(false); }}
-        className="w-[520px] bg-bg border border-border rounded p-5 space-y-4"
+        className="w-[520px] max-w-[94vw] max-h-[90vh] overflow-y-auto bg-bg border border-border rounded p-5 space-y-4"
       >
         <h2 className="text-text font-semibold">Edit deployment config</h2>
         <p className="text-xs text-text-dim">
@@ -1711,6 +3361,30 @@ function EditConfigDialog({
             />
           </div>
           <div className="col-span-2">
+            <label className="text-xs text-text-muted block mb-1">Build backend</label>
+            <select
+              value={buildBackend}
+              onChange={(e) => setBuildBackend(e.target.value as (typeof BUILD_BACKENDS)[number])}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              <option value="local">Local</option>
+              <option value="runner">Capsule runner</option>
+              <option value="codemagic">Codemagic</option>
+              <option value="github_actions">GitHub Actions</option>
+            </select>
+          </div>
+          {buildBackend !== "local" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Build backend config (JSON)</label>
+              <textarea
+                value={buildBackendConfig}
+                onChange={(e) => setBuildBackendConfig(e.target.value)}
+                rows={4}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
+          <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Start cmd</label>
             <input
               type="text"
@@ -1733,13 +3407,16 @@ function EditConfigDialog({
           </div>
           {deployment.target_kind !== "service" && (
             <div className="col-span-2">
-              <label className="text-xs text-text-muted block mb-1">Mobile target config</label>
-              <textarea
-                value={targetConfigJSON}
-                onChange={(e) => setTargetConfigJSON(e.target.value)}
-                rows={5}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
-              />
+              <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />
+              <details className="mt-3 text-xs text-text-muted">
+                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <textarea
+                  value={targetConfigJSON}
+                  onChange={(e) => setTargetConfigJSON(e.target.value)}
+                  rows={6}
+                  className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              </details>
             </div>
           )}
         </div>

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -62,6 +63,7 @@ type gigAssignmentView struct {
 	SubmittedAt       string      `json:"submitted_at,omitempty"`
 	CRMConversationID int64       `json:"crm_conversation_id,omitempty"`
 	WorkerURL         string      `json:"worker_url,omitempty"`
+	PublicBaseURL     string      `json:"public_base_url,omitempty"`
 	Worker            *worker     `json:"worker,omitempty"`
 	Submission        *submission `json:"submission,omitempty"`
 	Mode              string      `json:"mode,omitempty"`
@@ -84,55 +86,59 @@ func (a *App) gigTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "gigs_create_from_template",
-			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and optionally assigns to a worker. Args: template_id OR template_slug, vars (object), worker_id?, notify_worker? (default false), deadline_at? (RFC3339), priority?, budget_cents?. Returns {gig, assignment?}.",
+			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and optionally assigns to a worker. Args: template_id OR template_slug, vars (object), worker_id?, notify_worker? (default false), public_domain_id?, deadline_at? (RFC3339), priority?, budget_cents?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"template_id":   map[string]any{"type": "integer"},
-				"template_slug": map[string]any{"type": "string"},
-				"vars":          map[string]any{"type": "object"},
-				"worker_id":     map[string]any{"type": "integer"},
-				"notify_worker": map[string]any{"type": "boolean"},
-				"deadline_at":   map[string]any{"type": "string"},
-				"priority":      map[string]any{"type": "string"},
-				"budget_cents":  map[string]any{"type": "integer"},
+				"template_id":      map[string]any{"type": "integer"},
+				"template_slug":    map[string]any{"type": "string"},
+				"vars":             map[string]any{"type": "object"},
+				"worker_id":        map[string]any{"type": "integer"},
+				"notify_worker":    map[string]any{"type": "boolean"},
+				"public_domain_id": map[string]any{"type": "integer"},
+				"deadline_at":      map[string]any{"type": "string"},
+				"priority":         map[string]any{"type": "string"},
+				"budget_cents":     map[string]any{"type": "integer"},
 			}, []string{}),
 			Handler: a.toolGigsCreateFromTemplate,
 		},
 		{
 			Name:        "gigs_create_from_instructions",
-			Description: "Ad-hoc dispatch — pass instruction refs directly (no template). Args: title, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), vars?, worker_id?, notify_worker? (default false), deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Ad-hoc dispatch — pass instruction refs directly (no template). Args: title, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), vars?, worker_id?, notify_worker? (default false), public_domain_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":         map[string]any{"type": "string"},
-				"instructions":  map[string]any{"type": "array"},
-				"vars":          map[string]any{"type": "object"},
-				"worker_id":     map[string]any{"type": "integer"},
-				"notify_worker": map[string]any{"type": "boolean"},
-				"deadline_at":   map[string]any{"type": "string"},
-				"priority":      map[string]any{"type": "string"},
+				"title":            map[string]any{"type": "string"},
+				"instructions":     map[string]any{"type": "array"},
+				"vars":             map[string]any{"type": "object"},
+				"worker_id":        map[string]any{"type": "integer"},
+				"notify_worker":    map[string]any{"type": "boolean"},
+				"public_domain_id": map[string]any{"type": "integer"},
+				"deadline_at":      map[string]any{"type": "string"},
+				"priority":         map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateFromInstructions,
 		},
 		{
 			Name:        "gigs_create",
-			Description: "Fully inline gig (raw instruction bodies, no library references). Escape hatch for agent-generated one-offs. Args: title, instructions ([{kind, body, result_key?}]), vars?, worker_id?, notify_worker? (default false), deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Fully inline gig (raw instruction bodies, no library references). Escape hatch for agent-generated one-offs. Args: title, instructions ([{kind, body, result_key?}]), vars?, worker_id?, notify_worker? (default false), public_domain_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":         map[string]any{"type": "string"},
-				"instructions":  map[string]any{"type": "array"},
-				"vars":          map[string]any{"type": "object"},
-				"worker_id":     map[string]any{"type": "integer"},
-				"notify_worker": map[string]any{"type": "boolean"},
-				"deadline_at":   map[string]any{"type": "string"},
-				"priority":      map[string]any{"type": "string"},
+				"title":            map[string]any{"type": "string"},
+				"instructions":     map[string]any{"type": "array"},
+				"vars":             map[string]any{"type": "object"},
+				"worker_id":        map[string]any{"type": "integer"},
+				"notify_worker":    map[string]any{"type": "boolean"},
+				"public_domain_id": map[string]any{"type": "integer"},
+				"deadline_at":      map[string]any{"type": "string"},
+				"priority":         map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateInline,
 		},
 		{
 			Name:        "gigs_assign",
-			Description: "Assign or re-assign an open gig. Args: gig_id, worker_id, mode? (direct|broadcast|first-come; default direct), notify_worker? (default false). Returns {assignment}.",
+			Description: "Assign or re-assign an open gig. Args: gig_id, worker_id, mode? (direct|broadcast|first-come; default direct), notify_worker? (default false), public_domain_id?. Returns {assignment}.",
 			InputSchema: schemaObject(map[string]any{
-				"gig_id":        map[string]any{"type": "integer"},
-				"worker_id":     map[string]any{"type": "integer"},
-				"mode":          map[string]any{"type": "string"},
-				"notify_worker": map[string]any{"type": "boolean"},
+				"gig_id":           map[string]any{"type": "integer"},
+				"worker_id":        map[string]any{"type": "integer"},
+				"mode":             map[string]any{"type": "string"},
+				"notify_worker":    map[string]any{"type": "boolean"},
+				"public_domain_id": map[string]any{"type": "integer"},
 			}, []string{"gig_id", "worker_id"}),
 			Handler: a.toolGigsAssign,
 		},
@@ -278,6 +284,7 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 		BudgetCents:        int64Arg(args, "budget_cents"),
 		WorkerID:           int64Arg(args, "worker_id"),
 		NotifyWorker:       boolArg(args, "notify_worker", false),
+		PublicDomainID:     int64Arg(args, "public_domain_id"),
 		DefaultDeadlineHrs: tplv.DefaultDeadlineHours,
 	})
 	if err != nil {
@@ -363,15 +370,16 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:        title,
-		Vars:         vars,
-		Rendered:     rendered,
-		Derived:      derived,
-		DeadlineAt:   strArg(args, "deadline_at"),
-		Priority:     strArg(args, "priority"),
-		BudgetCents:  int64Arg(args, "budget_cents"),
-		WorkerID:     int64Arg(args, "worker_id"),
-		NotifyWorker: boolArg(args, "notify_worker", false),
+		Title:          title,
+		Vars:           vars,
+		Rendered:       rendered,
+		Derived:        derived,
+		DeadlineAt:     strArg(args, "deadline_at"),
+		Priority:       strArg(args, "priority"),
+		BudgetCents:    int64Arg(args, "budget_cents"),
+		WorkerID:       int64Arg(args, "worker_id"),
+		NotifyWorker:   boolArg(args, "notify_worker", false),
+		PublicDomainID: int64Arg(args, "public_domain_id"),
 	})
 	if err != nil {
 		return nil, err
@@ -423,15 +431,16 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:        title,
-		Vars:         vars,
-		Rendered:     rendered,
-		Derived:      derived,
-		DeadlineAt:   strArg(args, "deadline_at"),
-		Priority:     strArg(args, "priority"),
-		BudgetCents:  int64Arg(args, "budget_cents"),
-		WorkerID:     int64Arg(args, "worker_id"),
-		NotifyWorker: boolArg(args, "notify_worker", false),
+		Title:          title,
+		Vars:           vars,
+		Rendered:       rendered,
+		Derived:        derived,
+		DeadlineAt:     strArg(args, "deadline_at"),
+		Priority:       strArg(args, "priority"),
+		BudgetCents:    int64Arg(args, "budget_cents"),
+		WorkerID:       int64Arg(args, "worker_id"),
+		NotifyWorker:   boolArg(args, "notify_worker", false),
+		PublicDomainID: int64Arg(args, "public_domain_id"),
 	})
 	if err != nil {
 		return nil, err
@@ -456,6 +465,7 @@ type createOpts struct {
 	BudgetCents        int64
 	WorkerID           int64
 	NotifyWorker       bool
+	PublicDomainID     int64
 	DefaultDeadlineHrs int
 }
 
@@ -473,6 +483,7 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	}
 	var wk *worker
 	var token string
+	var publicBaseURL string
 	if o.WorkerID > 0 {
 		var err error
 		wk, err = getWorker(ctx.AppDB(), pid, o.WorkerID)
@@ -487,6 +498,10 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 			return nil, nil, fmt.Errorf("worker has %d open assignments (cap=%d)", open, max)
 		}
 		token = randomToken()
+		publicBaseURL, err = resolveGigPublicBaseURL(ctx.AppDB(), pid, o.PublicDomainID)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -543,8 +558,8 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	var assignID int64
 	if o.WorkerID > 0 {
 		res, err := tx.Exec(`INSERT INTO gig_assignments
-			(gig_id,worker_id,status,magic_token,mode,notify_worker,token_expires_at)
-			VALUES (?,?,'offered',?,'direct',?,?)`, gigID, o.WorkerID, token, o.NotifyWorker, nullStr(deadlineAt))
+			(gig_id,worker_id,status,magic_token,mode,notify_worker,token_expires_at,public_base_url)
+			VALUES (?,?,'offered',?,'direct',?,?,?)`, gigID, o.WorkerID, token, o.NotifyWorker, nullStr(deadlineAt), nullStr(publicBaseURL))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -565,8 +580,11 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	})
 	var ass *gigAssignmentView
 	if assignID > 0 {
-		workerURL := buildWorkerURL(ctx, token)
-		if o.NotifyWorker {
+		workerURL, workerURLErr := buildWorkerURL(ctx, token, publicBaseURL)
+		if workerURLErr != nil {
+			ctx.Logger().Warn("build worker URL failed", "err", workerURLErr.Error(), "gig_id", gigID)
+		}
+		if o.NotifyWorker && workerURLErr == nil {
 			body := fmt.Sprintf("%s\n\nOpen: %s", o.Title, workerURL)
 			if conversationID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, o.Title); sendErr != nil {
 				ctx.Logger().Warn("crm send failed", "err", sendErr.Error(), "gig_id", gigID)
@@ -590,7 +608,7 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 
 // assignGig writes an assignment and optionally notifies via CRM. Returns the
 // hydrated view so the caller can surface the magic URL.
-func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, notifyWorker bool) (*gigAssignmentView, error) {
+func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, notifyWorker bool, publicDomainID int64) (*gigAssignmentView, error) {
 	if mode == "" {
 		mode = "direct"
 	}
@@ -625,6 +643,10 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 		}
 	}
 	token := randomToken()
+	publicBaseURL, err := resolveGigPublicBaseURL(ctx.AppDB(), pid, publicDomainID)
+	if err != nil {
+		return nil, err
+	}
 	expiresAt := g.DeadlineAt
 	if expiresAt == "" {
 		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour).Format(time.RFC3339)
@@ -644,9 +666,9 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	}
 	res, err := tx.Exec(
 		`INSERT INTO gig_assignments
-		   (gig_id, worker_id, status, magic_token, mode, notify_worker, token_expires_at)
-		 VALUES (?, ?, 'offered', ?, ?, ?, ?)`,
-		gigID, workerID, token, mode, notifyWorker, nullStr(expiresAt),
+		   (gig_id, worker_id, status, magic_token, mode, notify_worker, token_expires_at, public_base_url)
+		 VALUES (?, ?, 'offered', ?, ?, ?, ?, ?)`,
+		gigID, workerID, token, mode, notifyWorker, nullStr(expiresAt), nullStr(publicBaseURL),
 	)
 	if err != nil {
 		return nil, err
@@ -668,8 +690,11 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 		return nil, err
 	}
 
-	workerURL := buildWorkerURL(ctx, token)
-	if notifyWorker {
+	workerURL, workerURLErr := buildWorkerURL(ctx, token, publicBaseURL)
+	if workerURLErr != nil {
+		ctx.Logger().Warn("build worker URL failed", "err", workerURLErr.Error(), "gig_id", gigID)
+	}
+	if notifyWorker && workerURLErr == nil {
 		body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
 		subject := g.Title
 		convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
@@ -696,20 +721,29 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, 
 	return view, err
 }
 
-func buildWorkerURL(ctx *sdk.AppCtx, token string) string {
-	base := ""
-	if ctx != nil {
-		if info, err := ctx.PlatformInfo(); err == nil && info != nil {
-			base = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
-		}
+func buildWorkerURL(ctx *sdk.AppCtx, token, publicBaseURL string) (string, error) {
+	if base := strings.TrimRight(strings.TrimSpace(publicBaseURL), "/"); base != "" {
+		return base + "/worker/" + url.PathEscape(token), nil
 	}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return "", errors.New("resolve gigs installation identity: platform client unavailable")
+	}
+	identity, err := ctx.PlatformAPI().WhoAmI()
+	if err != nil {
+		return "", fmt.Errorf("resolve gigs installation identity: %w", err)
+	}
+	if identity == nil || identity.InstallID <= 0 {
+		return "", errors.New("resolve gigs installation identity: platform returned no install id")
+	}
+	base := strings.TrimRight(strings.TrimSpace(identity.PublicURL), "/")
 	if base == "" {
 		base = strings.TrimRight(os.Getenv("APTEVA_PUBLIC_URL"), "/")
 	}
 	if base == "" {
 		base = "http://localhost:5280"
 	}
-	return base + "/api/apps/gigs/worker/" + token
+	return base + "/api/apps/gigs/_install/" + strconv.FormatInt(identity.InstallID, 10) +
+		"/worker/" + url.PathEscape(token), nil
 }
 
 // ─── Lifecycle tools ────────────────────────────────────────────────
@@ -729,7 +763,7 @@ func (a *App) toolGigsAssign(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		mode = "direct"
 	}
 	notifyWorker := boolArg(args, "notify_worker", false)
-	view, err := assignGig(ctx, pid, gid, wid, mode, notifyWorker)
+	view, err := assignGig(ctx, pid, gid, wid, mode, notifyWorker, int64Arg(args, "public_domain_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -1249,7 +1283,7 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	aRows, err := db.Query(
 		`SELECT id, worker_id, status, offered_at, responded_at, submitted_at,
 		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
-		        COALESCE(notify_worker,0), COALESCE(token_expires_at,'')
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,'')
 		 FROM gig_assignments WHERE gig_id=? ORDER BY offered_at`,
 		id,
 	)
@@ -1259,13 +1293,13 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			var responded, submitted sql.NullString
 			var convID sql.NullInt64
 			var token string
-			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt); err != nil {
+			if err := aRows.Scan(&v.ID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt, &v.PublicBaseURL); err != nil {
 				return nil, err
 			}
 			v.RespondedAt = responded.String
 			v.SubmittedAt = submitted.String
 			v.CRMConversationID = convID.Int64
-			v.WorkerURL = buildWorkerURL(ctx, token)
+			v.WorkerURL, _ = buildWorkerURL(ctx, token, v.PublicBaseURL)
 			g.Assignments = append(g.Assignments, v)
 		}
 		if err := aRows.Err(); err != nil {
@@ -1353,16 +1387,16 @@ func loadAssignmentView(ctx *sdk.AppCtx, pid string, assignID int64) (*gigAssign
 	if err := ctx.AppDB().QueryRow(
 		`SELECT id, gig_id, worker_id, status, offered_at, responded_at, submitted_at,
 		        crm_conversation_id, magic_token, COALESCE(mode,'direct'),
-		        COALESCE(notify_worker,0), COALESCE(token_expires_at,'')
+		        COALESCE(notify_worker,0), COALESCE(token_expires_at,''), COALESCE(public_base_url,'')
 		 FROM gig_assignments WHERE id=?`,
 		assignID,
-	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt); err != nil {
+	).Scan(&v.ID, &v.GigID, &v.WorkerID, &v.Status, &v.OfferedAt, &responded, &submitted, &convID, &token, &v.Mode, &v.NotifyWorker, &v.TokenExpiresAt, &v.PublicBaseURL); err != nil {
 		return nil, err
 	}
 	v.RespondedAt = responded.String
 	v.SubmittedAt = submitted.String
 	v.CRMConversationID = convID.Int64
-	v.WorkerURL = buildWorkerURL(ctx, token)
+	v.WorkerURL, _ = buildWorkerURL(ctx, token, v.PublicBaseURL)
 	if wk, err := getWorker(ctx.AppDB(), pid, v.WorkerID); err == nil {
 		if c, _ := crmGetContact(ctx, pid, wk.ContactID); c != nil {
 			wk.Contact = c
@@ -1533,11 +1567,12 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			out, err := a.toolGigsAssign(ctx, map[string]any{
-				"_project_id":   pid,
-				"gig_id":        id,
-				"worker_id":     body["worker_id"],
-				"mode":          strOf(body["mode"]),
-				"notify_worker": body["notify_worker"],
+				"_project_id":      pid,
+				"gig_id":           id,
+				"worker_id":        body["worker_id"],
+				"mode":             strOf(body["mode"]),
+				"notify_worker":    body["notify_worker"],
+				"public_domain_id": body["public_domain_id"],
 			})
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())

@@ -16,12 +16,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 
@@ -32,27 +34,61 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.4.1
+version: 0.7.8
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
   in-app DMs, and full courses (metadata, sections, lessons, resources,
   quizzes, assignments, certificates, drip, enrollments, and progress). Ships both an
   operator dashboard panel and a client-facing React portal at
-  /api/apps/community/ui/portal/dist/index.html. Portal calls use
+  /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Community directly orchestrates one-time course purchases and recurring
+  course memberships using Catalog, Billing, and Subscriptions. It does not
+  depend on the SaaS app.
+  Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [community, courses, membership, forum, dms]
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.11.0"
 requires:
   permissions: [db.write.app, platform.apps.call]
   apps:
     - name: auth
-      optional: true
-      reason: Client-facing portal can call Auth public signup/login. A later server pass should map Auth users to Community members and enforce member identity on portal routes.
+      version: ">=0.8.0"
+      optional: false
+      reason: The member portal authenticates through Auth and maps verified users to Community members.
+    - name: catalog
+      version: ">=0.3.0"
+      optional: false
+      reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
+    - name: billing
+      version: ">=0.12.2"
+      optional: false
+      events:
+        - invoice.paid
+        - invoice.refunded
+        - invoice.voided
+        - invoice.payment_failed
+        - invoice.payment_action_required
+        - payment_method.attached
+      reason: Billing owns course customers, invoices, hosted payment sessions, saved payment methods, automatic collection, refunds, and authoritative payment events.
+    - name: subscriptions
+      version: ">=0.7.2"
+      optional: false
+      events:
+        - subscription.active
+        - subscription.trialing
+        - subscription.past_due
+        - subscription.paused
+        - subscription.cancelled
+        - subscription.resumed
+        - subscription.ended
+        - subscription.cycle_due
+      reason: Subscriptions owns recurring lifecycle, trials, renewal cycles, grace periods, scheduled cancellation, and resume.
   integrations:
     - role: storage
       kind: app
@@ -69,6 +105,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { prefix: /ui/, method: GET, no_auth: true }
   mcp_tools:
     - { name: communities_create,  description: "Create a community." }
     - { name: communities_list,    description: "List communities in this scope." }
@@ -78,6 +115,7 @@ provides:
     - { name: members_create,      description: "Create a member in a community." }
     - { name: members_list,        description: "List members of a community." }
     - { name: members_get,         description: "Fetch one member by id or handle." }
+    - { name: members_me,          description: "Return the member linked to the verified Auth user." }
     - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
     - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }
     - { name: spaces_list,         description: "List spaces in a community." }
@@ -117,6 +155,7 @@ provides:
     - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
+    - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
     - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
     - { name: quizzes_create,      description: "Create a lesson quiz." }
     - { name: quizzes_update,      description: "Update a lesson quiz." }
@@ -134,19 +173,44 @@ provides:
     - { name: enrollment_rules_set, description: "Set course enrollment rules." }
     - { name: course_enroll,       description: "Enroll a member in a course." }
     - { name: course_enrollments_list, description: "List course enrollments." }
+    - { name: course_enrollment_update, description: "Approve, reject, cancel, activate, or complete an enrollment." }
     - { name: lessons_mark_complete, description: "Mark a lesson complete (or in_progress) for a member." }
     - { name: lessons_progress,    description: "Get one member's progress across a course." }
     - { name: course_progress,     description: "Funnel across all members per lesson." }
     - { name: course_analytics,    description: "Course builder analytics summary." }
     - { name: lesson_comments_post, description: "Post a comment on a lesson." }
     - { name: lesson_comments_list, description: "List comments on a lesson, oldest first." }
+    - { name: course_offer_get, description: "Get the active Catalog-backed offer for a course." }
+    - { name: course_offer_upsert, description: "Bind a course to an active one-time Catalog price." }
+    - { name: course_offer_archive, description: "Stop new sales for a course." }
+    - { name: course_purchase_start, description: "Start or resume the verified member's Billing checkout." }
+    - { name: course_purchase_status, description: "Get and reconcile the verified member's course purchase." }
+    - { name: course_purchase_cancel, description: "Cancel an unpaid course purchase." }
+    - { name: course_purchases_list, description: "List course purchases for operators." }
+    - { name: course_purchase_get, description: "Get a course purchase and reconciliation history." }
+    - { name: course_purchase_reconcile, description: "Reconcile a course purchase with Billing." }
+    - { name: course_purchase_refund, description: "Request a Billing refund for a course purchase." }
+    - { name: membership_plans_list, description: "List recurring course membership plans." }
+    - { name: membership_plans_get, description: "Get a recurring course membership plan." }
+    - { name: membership_plans_upsert, description: "Create or update a recurring course membership plan." }
+    - { name: membership_plans_archive, description: "Archive a recurring course membership plan." }
+    - { name: membership_plan_courses_set, description: "Set the courses included in a selected-courses plan." }
+    - { name: membership_plan_tags_set, description: "Set the tags included in a course-tags plan." }
+    - { name: membership_checkout_start, description: "Start or resume recurring membership checkout." }
+    - { name: membership_status, description: "Get the verified member's recurring membership status." }
+    - { name: membership_cancel, description: "Cancel a recurring membership." }
+    - { name: membership_resume, description: "Resume a scheduled recurring membership cancellation." }
+    - { name: membership_subscriptions_list, description: "List recurring Community memberships." }
+    - { name: membership_subscription_get, description: "Get a recurring Community membership." }
+    - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
+    - { name: course_access_explain, description: "Explain a member's effective course access source." }
   ui_panels:
     - slot: project.page
       label: Community
       icon: users
       entry: /ui/CommunityPanel.mjs
   # Client-facing portal SPA:
-  # /api/apps/community/ui/portal/dist/index.html
+  # /api/apps/community/_install/{install_id}/ui/portal/dist/index.html
 runtime:
   kind: source
   source:
@@ -199,10 +263,39 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "membership-recovery",
+		Schedule: "@every 5m",
+		Run:      recoverMembershipOperations,
+	}}
+}
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "invoice.paid", Handler: a.handleBillingEvent},
+		{Event: "invoice.refunded", Handler: a.handleBillingEvent},
+		{Event: "invoice.voided", Handler: a.handleBillingEvent},
+		{Event: "invoice.payment_failed", Handler: a.handleBillingEvent},
+		{Event: "invoice.payment_action_required", Handler: a.handleBillingEvent},
+		{Event: "subscription.active", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.trialing", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.past_due", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.paused", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.cancelled", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.resumed", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.ended", Handler: a.handleMembershipSubscriptionEvent},
+		{Event: "subscription.cycle_due", Handler: a.handleMembershipSubscriptionEvent},
+	}
+}
+
+func (a *App) handleBillingEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	if err := a.handleCourseBillingEvent(ctx, event); err != nil {
+		return err
+	}
+	return a.handleMembershipBillingEvent(ctx, event)
+}
 
 // ─── HTTP routes ─────────────────────────────────────────────────
 // Mirror the MCP tools — the panel hits these for reads, the bus
@@ -211,15 +304,15 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/communities", Handler: a.httpCommunities},
-		{Pattern: "/members", Handler: a.httpMembers},
-		{Pattern: "/spaces", Handler: a.httpSpaces},
-		{Pattern: "/threads", Handler: a.httpThreads},
-		{Pattern: "/posts", Handler: a.httpPosts},
-		{Pattern: "/dms", Handler: a.httpDMs},
-		{Pattern: "/sections", Handler: a.httpSections},
-		{Pattern: "/lessons", Handler: a.httpLessons},
-		{Pattern: "/lesson", Handler: a.httpLesson},
+		{Pattern: "/communities", Handler: operatorHTTP(a.httpCommunities)},
+		{Pattern: "/members", Handler: operatorHTTP(a.httpMembers)},
+		{Pattern: "/spaces", Handler: operatorHTTP(a.httpSpaces)},
+		{Pattern: "/threads", Handler: operatorHTTP(a.httpThreads)},
+		{Pattern: "/posts", Handler: operatorHTTP(a.httpPosts)},
+		{Pattern: "/dms", Handler: operatorHTTP(a.httpDMs)},
+		{Pattern: "/sections", Handler: operatorHTTP(a.httpSections)},
+		{Pattern: "/lessons", Handler: operatorHTTP(a.httpLessons)},
+		{Pattern: "/lesson", Handler: operatorHTTP(a.httpLesson)},
 	}
 }
 
@@ -234,20 +327,47 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, postsTools()...)
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
-	return tools
+	tools = append(tools, courseSalesTools()...)
+	tools = append(tools, membershipTools()...)
+	return secureTools(tools)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, v any) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		writeErr(w, http.StatusInternalServerError, "response encoding failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func writeDomainErr(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "not found"):
+		writeErr(w, http.StatusNotFound, msg)
+	case strings.Contains(lower, "required"), strings.Contains(lower, "invalid"),
+		strings.Contains(lower, "must "), strings.Contains(lower, "cannot be"):
+		writeErr(w, http.StatusBadRequest, msg)
+	case strings.Contains(lower, "archived"), strings.Contains(lower, "forbidden"),
+		strings.Contains(lower, "only the"), strings.Contains(lower, "not a participant"),
+		strings.Contains(lower, "active course enrollment"):
+		writeErr(w, http.StatusForbidden, msg)
+	default:
+		writeErr(w, http.StatusInternalServerError, "internal error")
+	}
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {
@@ -274,6 +394,9 @@ func strArg(args map[string]any, key, def string) string {
 func intArg(args map[string]any, key string) (int64, bool) {
 	switch v := args[key].(type) {
 	case float64:
+		if math.Trunc(v) != v {
+			return 0, false
+		}
 		return int64(v), true
 	case int:
 		return int64(v), true
@@ -296,12 +419,19 @@ func mustStr(args map[string]any, key string) (string, error) {
 func newID(prefix string) string {
 	var b [10]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failure is fatal at process boot; if it happens
-		// mid-flight we surface zero-id and let the unique constraint
-		// reject the row.
-		return prefix + "_err"
+		panic("community: crypto/rand failed: " + err.Error())
 	}
 	return prefix + "_" + hex.EncodeToString(b[:])
+}
+
+func boundedLimit(args map[string]any, key string, def, max int64) int {
+	if v, ok := intArg(args, key); ok && v > 0 {
+		if v > max {
+			return int(max)
+		}
+		return int(v)
+	}
+	return int(def)
 }
 
 // scopeProject returns the project context for cross-cutting queries.

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.22
+version: 0.8.24
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -12,7 +12,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/crm
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/crm/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [crm, contacts, productivity]
 
 scopes: [project, global]
@@ -58,13 +59,13 @@ provides:
       description: Create or update an attribute definition.
     # Messaging-coupled tools — gate on the messaging dep being bound.
     - name: contacts_send_message
-      description: Send a message to a contact via the messaging app; auto-logs to the activity timeline and links to a conversation.
+      description: "REAL EXTERNAL SEND. Never use for sender/config testing; use messaging_senders_list. New standalone emails require a subject. Identical sends are automatically deduplicated for five minutes."
     - name: contacts_reply
-      description: Reply on the contact's most-recent inbound conversation; preserves email threading via In-Reply-To.
+      description: "REAL EXTERNAL SEND. Reply on the contact's most-recent inbound conversation, preserve email threading, and deduplicate identical replies for five minutes."
     - name: contacts_send_test
-      description: Send a test message; logged as *_test_sent and not linked to a conversation.
+      description: "REAL EXTERNAL SEND for an explicitly requested delivery test; not a configuration check. Logged as *_test_sent and deduplicated for five minutes."
     - name: messaging_senders_list
-      description: List verified senders from the bound Messaging app.
+      description: Read-only sender/configuration check. Use this instead of sending a placeholder message.
     - name: messaging_templates_list
       description: List templates from the bound Messaging app, especially approved WhatsApp templates.
     - name: messaging_whatsapp_session_check

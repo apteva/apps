@@ -985,6 +985,8 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	var result map[string]any
 	switch path {
+	case "/numbers/connected":
+		result, err = a.connectedNumbers(ctx)
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":

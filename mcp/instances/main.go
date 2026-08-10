@@ -40,15 +40,18 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.20
+version: 0.4.25
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
-  integrations: Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Foundation layer
+  integrations: Hetzner Cloud, DigitalOcean, Contabo, Vultr, AWS EC2,
+  Scaleway (virtual instances and Apple silicon Mac minis), Huawei Cloud,
+  Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [global]
 requires:
   permissions:
@@ -59,22 +62,23 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
+      compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS provider
       hint: |
         Optional — local instance always available. Bind a VPS integration
         to provision remote instances through the generic Instances interface.
-        Hetzner, DigitalOcean, and RunPod have provisioning and catalog adapters;
-        other compatible provider bindings fail clearly until their adapters
-        are implemented.
+        Every compatible provider has catalog, provisioning, readiness, and
+        recovery adapters. Immediate destroy is available except on Contabo,
+        whose API only schedules contract cancellation. Scaleway macOS hosts
+        have a mandatory 24-hour minimum allocation before Destroy is enabled.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod; Hetzner, DigitalOcean, and RunPod provisioning are implemented today. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Args: name, provider?, region?, size?, image?, tags?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
-    - { name: instance_destroy,      description: "Terminate the instance (refused for local id 0). Args: id." }
+    - { name: instance_destroy,      description: "Terminate the provider-managed instance and remove its row where supported (refused for local id 0 and Contabo). Args: id." }
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
@@ -82,10 +86,10 @@ provides:
     - { name: instance_open_tunnel,  description: "Open or reuse a loopback-only TCP tunnel through remote SSH. Args: id, target_port." }
     - { name: instance_close_tunnel, description: "Close a loopback TCP tunnel. Args: id, target_port." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
-    - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
-    - { name: instance_list_server_types, description: "Live list of active, non-deprecated VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, available_in. Use to discover valid sizes for instance_create. Args: provider? (default: bound provider)." }
+    - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime for local, remote Linux, and remote macOS hosts. Args: id." }
+    - { name: instance_list_server_types, description: "Live list of active, non-deprecated compute types from the bound provider — name, cores, memory_gb, disk_gb, platform, resource_class, price, available_in. Includes virtual and bare-metal types where supported. Args: provider? (default: bound provider)." }
     - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default: bound provider)." }
-    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default: bound provider)." }
+    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider, with platform, resource class, location, and server-type compatibility. Args: provider? (default: bound provider)." }
   publishes:
     - name: instance.created
       description: A new instance row was created in Instances.
@@ -155,7 +159,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.19
+    ref: instances/v0.4.25
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -205,6 +209,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	go reconcileHetznerProvisioning(ctx)
 	go reconcileDigitalOceanProvisioning(ctx)
 	go reconcileRunPodProvisioning(ctx)
+	go reconcileAPIProviderProvisioning(ctx)
 	go reconcileHetznerUpgrading(ctx)
 	go reconcileDestroying(ctx)
 

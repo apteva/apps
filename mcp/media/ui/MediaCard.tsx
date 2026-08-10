@@ -12,21 +12,7 @@
 // the LLM-generated description.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
-
-const mediaLogo = (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
-    <path d="M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5zm6 4v6l5-3-5-3z" />
-  </svg>
-);
-
-const mediaVendor: CardVendor = {
-  name: "Media",
-  logo: mediaLogo,
-  // Same neutral pop as storage's slate but tilted to teal — first-
-  // party Apteva app, not a third-party brand.
-  color: { light: "#0f766e", dark: "#5eead4" },
-};
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
 
 interface DerivationRow {
   kind: string; // "thumbnail" | "waveform"
@@ -199,14 +185,14 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <CardHeader title={`Media #${fid}`} status={{ label: "deleted", variant: "muted" }} />
+        <AppCardHeader title={`Media #${fid}`} status={{ label: "deleted", variant: "muted" }} />
       </Card>
     );
   }
   if (!meta) {
     return (
       <Card>
-        <CardHeader title={`Media #${fid}`} status={{ label: "loading", variant: "muted" }} />
+        <AppCardHeader title={`Media #${fid}`} status={{ label: "loading", variant: "muted" }} />
       </Card>
     );
   }
@@ -222,8 +208,7 @@ export default function MediaCard({ file_id, projectId, preview }: Props) {
 
   return (
     <Card>
-      <CardHeader
-        vendor={mediaVendor}
+      <AppCardHeader
         title={headerTitle}
         subtitle={subtitle}
         action={{ label: "Open", href: contentURL }}

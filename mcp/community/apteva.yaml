@@ -2,26 +2,34 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.4.1
+version: 0.7.8
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
   reactions, in-app DMs, and full courses (metadata, sections, lessons,
   resources, quizzes, assignments, certificates, drip, enrollments, and progress).
   Ships both an operator dashboard panel and a client-facing React portal
-  at /api/apps/community/ui/portal/dist/index.html. Portal calls use
+  at /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
   Panel and portal update live via the platform event bus.
-  Storage and ffmpeg are optional: bind storage to attach lesson videos,
-  bind ffmpeg to auto-probe video duration.
+  Community also drives one-time paid course sales: Catalog owns immutable
+  products/prices, Billing owns customers/invoices/payment sessions/refunds,
+  and Community grants or revokes enrollment from authoritative Billing events.
+  Community also owns recurring course memberships directly: Catalog supplies
+  monthly or annual prices, Subscriptions owns lifecycle and renewal cycles,
+  and Billing owns saved payment methods, invoices, hosted recovery links, and
+  off-session collection. Community does not depend on the SaaS app.
+  Storage and ffmpeg remain optional for course media.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [community, courses, membership, forum, dms]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.11.0"
 
 requires:
   permissions:
@@ -29,8 +37,37 @@ requires:
     - platform.apps.call
   apps:
     - name: auth
-      optional: true
-      reason: Client-facing portal can call Auth public signup/login. A later server pass should map Auth users to Community members and enforce member identity on portal routes.
+      version: ">=0.8.0"
+      optional: false
+      reason: The member portal authenticates through Auth and maps verified users to Community members.
+    - name: catalog
+      version: ">=0.3.0"
+      optional: false
+      reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
+    - name: billing
+      version: ">=0.12.2"
+      optional: false
+      events:
+        - invoice.paid
+        - invoice.refunded
+        - invoice.voided
+        - invoice.payment_failed
+        - invoice.payment_action_required
+        - payment_method.attached
+      reason: Billing owns course customers, invoices, hosted payment sessions, saved payment methods, automatic collection, refunds, and authoritative payment events.
+    - name: subscriptions
+      version: ">=0.7.2"
+      optional: false
+      events:
+        - subscription.active
+        - subscription.trialing
+        - subscription.past_due
+        - subscription.paused
+        - subscription.cancelled
+        - subscription.resumed
+        - subscription.ended
+        - subscription.cycle_due
+      reason: Subscriptions owns recurring lifecycle, trials, renewal cycles, grace periods, scheduled cancellation, and resume.
   integrations:
     - role: storage
       kind: app
@@ -48,6 +85,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { prefix: /ui/, method: GET, no_auth: true }
   mcp_tools:
     # ─── communities ───────────────────────────────────────────
     - { name: communities_create,  description: "Create a community." }
@@ -59,6 +97,7 @@ provides:
     - { name: members_create,      description: "Create a member in a community." }
     - { name: members_list,        description: "List members of a community." }
     - { name: members_get,         description: "Fetch one member by id or handle." }
+    - { name: members_me,          description: "Return the member linked to the verified Auth user." }
     - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
     # ─── spaces ────────────────────────────────────────────────
     - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }
@@ -102,6 +141,7 @@ provides:
     - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video. If ffmpeg is bound, duration_seconds is auto-filled from ffmpeg_probe." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
+    - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
     - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
     - { name: quizzes_create,      description: "Create a lesson quiz." }
     - { name: quizzes_update,      description: "Update a lesson quiz." }
@@ -119,12 +159,39 @@ provides:
     - { name: enrollment_rules_set, description: "Set course enrollment rules." }
     - { name: course_enroll,       description: "Enroll a member in a course." }
     - { name: course_enrollments_list, description: "List course enrollments." }
+    - { name: course_enrollment_update, description: "Approve, reject, cancel, activate, or complete an enrollment." }
     - { name: lessons_mark_complete, description: "Mark a lesson complete (or in_progress with last_position_seconds) for a member." }
     - { name: lessons_progress,    description: "Get one member's progress across a course." }
     - { name: course_progress,     description: "Funnel across all members: started / 50% / completed counts per lesson." }
     - { name: course_analytics,    description: "Course builder analytics summary." }
     - { name: lesson_comments_post, description: "Post a comment on a lesson." }
     - { name: lesson_comments_list, description: "List comments on a lesson, oldest first." }
+    # ─── course sales ─────────────────────────────────────────────
+    - { name: course_offer_get, description: "Get the active Catalog-backed offer for a course." }
+    - { name: course_offer_upsert, description: "Bind a course to an active one-time Catalog price." }
+    - { name: course_offer_archive, description: "Stop new sales for a course." }
+    - { name: course_purchase_start, description: "Start or resume the verified member's Billing checkout." }
+    - { name: course_purchase_status, description: "Get and reconcile the verified member's course purchase." }
+    - { name: course_purchase_cancel, description: "Cancel an unpaid course purchase." }
+    - { name: course_purchases_list, description: "List course purchases for operators." }
+    - { name: course_purchase_get, description: "Get a course purchase and reconciliation history." }
+    - { name: course_purchase_reconcile, description: "Reconcile a course purchase with Billing." }
+    - { name: course_purchase_refund, description: "Request a Billing refund for a course purchase." }
+    # ─── recurring memberships ───────────────────────────────────
+    - { name: membership_plans_list, description: "List recurring course membership plans." }
+    - { name: membership_plans_get, description: "Get a recurring course membership plan." }
+    - { name: membership_plans_upsert, description: "Create or update a recurring course membership plan." }
+    - { name: membership_plans_archive, description: "Archive a recurring course membership plan." }
+    - { name: membership_plan_courses_set, description: "Set the courses included in a selected-courses plan." }
+    - { name: membership_plan_tags_set, description: "Set the tags included in a course-tags plan." }
+    - { name: membership_checkout_start, description: "Start or resume recurring membership checkout." }
+    - { name: membership_status, description: "Get the verified member's recurring membership status." }
+    - { name: membership_cancel, description: "Cancel a recurring membership." }
+    - { name: membership_resume, description: "Resume a scheduled recurring membership cancellation." }
+    - { name: membership_subscriptions_list, description: "List recurring Community memberships." }
+    - { name: membership_subscription_get, description: "Get a recurring Community membership." }
+    - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
+    - { name: course_access_explain, description: "Explain a member's effective course access source." }
   ui_panels:
     # Dashboard operator/admin surface.
     - slot: project.page
@@ -132,7 +199,7 @@ provides:
       icon: users
       entry: /ui/CommunityPanel.mjs
   # Client-facing portal SPA:
-  # /api/apps/community/ui/portal/dist/index.html
+  # /api/apps/community/_install/{install_id}/ui/portal/dist/index.html
   # The SDK does not yet expose a first-class ui_pages slot for source apps,
   # so operators link to the portal URL directly for now.
 

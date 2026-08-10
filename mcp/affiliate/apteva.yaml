@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.11
+version: 0.1.14
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
   offers and stats, create monetized links, and optionally wrap them
@@ -14,8 +14,13 @@ description: |
     - Links: URLs the publisher places in content.
     - Stats: normalized performance by day, network, offer, or link.
 
+  v0.1.14 adds Affiliate's adaptive themed app icon and updates the
+  app to the current Apteva app SDK.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/affiliate
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [affiliate, publishers, offers, links, marketing]
 
 scopes: [project, global]
@@ -175,11 +180,11 @@ config_schema:
     default: "joined"
     label: Awin relationship
     description: Optional default Awin programme relationship filter.
-  - name: awin_date_type
+  - name: awin_region
     type: text
-    default: "transaction"
-    label: Awin date type
-    description: Optional default Awin transaction dateType.
+    default: ""
+    label: Awin advertiser region
+    description: Required for Awin performance refreshes. Use the advertiser region code, such as GB, DE, FR, or US.
   - name: cj_advertiser_ids
     type: text
     default: "joined"

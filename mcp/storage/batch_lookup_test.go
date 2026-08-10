@@ -109,3 +109,62 @@ func TestListByIDs_OverLimitRejected(t *testing.T) {
 		t.Fatalf("expected 400 over the cap, got %d", rec.Code)
 	}
 }
+
+func TestHTTPList_PaginatesCompleteStableInventory(t *testing.T) {
+	ctx := newTestCtx(t)
+	var uploaded []int64
+	for i := 0; i < 7; i++ {
+		f := mustUpload(t, ctx, "page-"+intToString(int64(i))+".txt", "/", string(rune('a'+i)))
+		uploaded = append(uploaded, f.ID)
+	}
+
+	app := &App{}
+	var got []int64
+	for offset := 0; ; offset += 3 {
+		req := httptest.NewRequest(http.MethodGet,
+			"/files?project_id=test-proj&limit=3&offset="+intToString(int64(offset)), nil)
+		rec := httptest.NewRecorder()
+		app.httpListOrSearch(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("offset %d: status=%d body=%s", offset, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Files      []*File `json:"files"`
+			Offset     int     `json:"offset"`
+			NextOffset int     `json:"next_offset"`
+			HasMore    bool    `json:"has_more"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("offset %d: decode: %v", offset, err)
+		}
+		if body.Offset != offset || body.NextOffset != offset+len(body.Files) {
+			t.Fatalf("offset metadata = (%d,%d), want (%d,%d)",
+				body.Offset, body.NextOffset, offset, offset+len(body.Files))
+		}
+		for _, f := range body.Files {
+			got = append(got, f.ID)
+		}
+		if len(body.Files) < 3 {
+			if body.HasMore {
+				t.Fatalf("short final page incorrectly reports has_more")
+			}
+			break
+		}
+	}
+
+	if len(got) != len(uploaded) {
+		t.Fatalf("paginated inventory returned %d ids, want %d: %v", len(got), len(uploaded), got)
+	}
+	seen := map[int64]bool{}
+	for _, id := range got {
+		if seen[id] {
+			t.Fatalf("duplicate id %d across pages: %v", id, got)
+		}
+		seen[id] = true
+	}
+	for _, id := range uploaded {
+		if !seen[id] {
+			t.Fatalf("uploaded id %d missing from paginated inventory: %v", id, got)
+		}
+	}
+}

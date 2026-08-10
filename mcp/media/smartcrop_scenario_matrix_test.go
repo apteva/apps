@@ -1,0 +1,379 @@
+package main
+
+import (
+	"image"
+	"image/color"
+	"testing"
+)
+
+// TestSmartCropProceduralScenarioMatrix is the always-on, deterministic gate
+// for the failure classes represented by the private real-media corpus. The
+// generated frames make the invariants explicit without publishing customer
+// media or relying on a particular filename.
+func TestSmartCropProceduralScenarioMatrix(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	face := func(center int) *smartCropFace {
+		return &smartCropFace{CenterX: center, MinX: center - 70, MaxX: center + 70, Scale: 140, Quality: 20}
+	}
+	frame := proceduralSmartCropFrame(320, 180, -1)
+
+	t.Run("stationary-subject-survives-saliency-outliers", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 1000}, img: frame, face: face(420)},
+			{point: cropPathPoint{AtMs: 1000, X: 1100}, img: frame},
+			{point: cropPathPoint{AtMs: 2000, X: 1050}, img: frame},
+			{point: cropPathPoint{AtMs: 3000, X: 1000}, img: frame, face: face(420)},
+		}
+		if corrected := correctSmartCropFaceTracks(samples, srcW, cropW); corrected < 2 {
+			t.Fatalf("corrected=%d, want both missed frames", corrected)
+		}
+		for i, sample := range samples {
+			if sample.point.X > 350 {
+				t.Fatalf("sample %d stayed on empty room: %+v", i, samples)
+			}
+		}
+	})
+
+	t.Run("crossing-subject-is-interpolated-not-frozen", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 0}, img: frame, face: face(250)},
+			{point: cropPathPoint{AtMs: 1000, X: 50}, img: frame},
+			{point: cropPathPoint{AtMs: 2000, X: 100}, img: frame},
+			{point: cropPathPoint{AtMs: 3000, X: 1200}, img: frame, face: face(1600)},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if !(samples[0].point.X < samples[1].point.X && samples[1].point.X < samples[2].point.X && samples[2].point.X < samples[3].point.X) {
+			t.Fatalf("crossing direction was lost: %+v", samples)
+		}
+	})
+
+	t.Run("scene-cut-blocks-anchor-leakage", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 0}, img: frame, face: face(250)},
+			{point: cropPathPoint{AtMs: 1000, X: 50}, img: frame},
+			{point: cropPathPoint{AtMs: 2000, X: 1200, Cut: true}, img: frame},
+			{point: cropPathPoint{AtMs: 3000, X: 1200}, img: frame, face: face(1600)},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[1].point.X > 350 || samples[2].point.X != 1200 {
+			t.Fatalf("face track crossed edit: %+v", samples)
+		}
+	})
+
+	t.Run("no-face-scene-is-unchanged", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 400}, img: frame},
+			{point: cropPathPoint{AtMs: 1000, X: 420}, img: frame},
+		}
+		if corrected := correctSmartCropFaceTracks(samples, srcW, cropW); corrected != 0 {
+			t.Fatalf("invented face track: corrected=%d samples=%+v", corrected, samples)
+		}
+	})
+
+	t.Run("settled-face-survives-long-profile-gap", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 480}, img: frame, face: face(900)},
+			{point: cropPathPoint{AtMs: 1000, X: 470}, img: frame, face: face(890)},
+			{point: cropPathPoint{AtMs: 4000, X: 0}, img: frame},
+			{point: cropPathPoint{AtMs: 9000, X: 0}, img: frame},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[2].point.X < 350 || samples[3].point.X < 350 {
+			t.Fatalf("profile gap snapped to room saliency: %+v", samples)
+		}
+	})
+
+	t.Run("strong-face-track-covers-bounded-leading-detector-gap", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 100}, img: frame},
+			{point: cropPathPoint{AtMs: 1000, X: 100}, img: frame},
+			{point: cropPathPoint{AtMs: 4000, X: 620}, img: frame, face: face(1000)},
+			{point: cropPathPoint{AtMs: 5000, X: 610}, img: frame, face: face(990)},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[0].point.X < 450 || samples[1].point.X < 450 {
+			t.Fatalf("leading detector gap stayed on room saliency: %+v", samples)
+		}
+	})
+
+	t.Run("strong-stable-tail-survives-fifteen-second-profile-gap", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 500}, img: frame, face: face(900)},
+			{point: cropPathPoint{AtMs: 1000, X: 490}, img: frame, face: face(890)},
+			{point: cropPathPoint{AtMs: 14_000, X: 0}, img: frame},
+			{point: cropPathPoint{AtMs: 17_000, X: 0}, img: frame},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[2].point.X < 400 {
+			t.Fatalf("strong profile tail expired too early: %+v", samples)
+		}
+		if samples[3].point.X != 0 {
+			t.Fatalf("strong profile tail was carried without a bound: %+v", samples)
+		}
+	})
+
+	t.Run("weak-directional-track-releases-to-new-pose", func(t *testing.T) {
+		weakFace := func(center int) *smartCropFace {
+			return &smartCropFace{CenterX: center, MinX: center - 60, MaxX: center + 60, Scale: 120, Quality: 10}
+		}
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 900}, img: frame, face: weakFace(1100)},
+			{point: cropPathPoint{AtMs: 1000, X: 880}, img: frame, face: weakFace(1080)},
+			{point: cropPathPoint{AtMs: 2000, X: 200}, img: frame},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[2].point.X != 200 {
+			t.Fatalf("weak profile anchors stranded crop on old pose: %+v", samples)
+		}
+	})
+
+	t.Run("isolated-weak-face-pair-cannot-pull-stable-track", func(t *testing.T) {
+		weakFace := func(center int) *smartCropFace {
+			return &smartCropFace{CenterX: center, MinX: center - 220, MaxX: center + 220, Scale: 440, Quality: 9}
+		}
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 670}, img: frame},
+			{point: cropPathPoint{AtMs: 1000, X: 672}, img: frame},
+			{point: cropPathPoint{AtMs: 2000, X: 672}, img: frame, face: weakFace(1248)},
+			{point: cropPathPoint{AtMs: 5000, X: 660}, img: frame, face: weakFace(1227)},
+			{point: cropPathPoint{AtMs: 6000, X: 672}, img: frame},
+			{point: cropPathPoint{AtMs: 7000, X: 670}, img: frame},
+		}
+		if corrected := correctSmartCropWeakFaceExcursions(samples, srcW, cropW); corrected != 2 {
+			t.Fatalf("corrected=%d want 2: %+v", corrected, samples)
+		}
+		for i := 2; i <= 3; i++ {
+			if samples[i].face != nil || absInt(samples[i].point.X-672) > 4 {
+				t.Fatalf("weak face island still moved sample %d: %+v", i, samples)
+			}
+		}
+	})
+
+	t.Run("motion-certified-weak-face-pair-is-preserved", func(t *testing.T) {
+		weak := &smartCropFace{CenterX: 1248, MinX: 1028, MaxX: 1468, Scale: 440, Quality: 9}
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 670}, img: frame},
+			{point: cropPathPoint{AtMs: 1000, X: 672}, img: frame},
+			{point: cropPathPoint{AtMs: 2000, X: 672}, img: frame, face: weak, motionTracked: true},
+			{point: cropPathPoint{AtMs: 5000, X: 660}, img: frame, face: weak},
+			{point: cropPathPoint{AtMs: 6000, X: 672}, img: frame},
+			{point: cropPathPoint{AtMs: 7000, X: 670}, img: frame},
+		}
+		if corrected := correctSmartCropWeakFaceExcursions(samples, srcW, cropW); corrected != 0 {
+			t.Fatalf("motion-certified excursion was suppressed: corrected=%d samples=%+v", corrected, samples)
+		}
+	})
+
+	t.Run("temporally-tracked-weak-face-pair-is-preserved", func(t *testing.T) {
+		weak := &smartCropFace{CenterX: 1248, MinX: 1028, MaxX: 1468, Scale: 440, Quality: 9}
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 670}, img: frame, temporalTrack: true},
+			{point: cropPathPoint{AtMs: 1000, X: 672}, img: frame, temporalTrack: true},
+			{point: cropPathPoint{AtMs: 2000, X: 672}, img: frame, face: weak, temporalTrack: true},
+			{point: cropPathPoint{AtMs: 5000, X: 660}, img: frame, face: weak, temporalTrack: true},
+			{point: cropPathPoint{AtMs: 6000, X: 672}, img: frame, temporalTrack: true},
+			{point: cropPathPoint{AtMs: 7000, X: 670}, img: frame, temporalTrack: true},
+		}
+		if corrected := correctSmartCropWeakFaceExcursions(samples, srcW, cropW); corrected != 0 {
+			t.Fatalf("temporally tracked excursion was suppressed: corrected=%d samples=%+v", corrected, samples)
+		}
+	})
+
+	t.Run("reclined-face-holds-until-new-motion", func(t *testing.T) {
+		samples := []smartCropV2Sample{
+			{point: cropPathPoint{AtMs: 0, X: 700}, img: frame, face: face(1050)},
+			{point: cropPathPoint{AtMs: 3000, X: 300}, img: frame, face: face(600)},
+			{point: cropPathPoint{AtMs: 8000, X: 1100}, img: frame},
+		}
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[2].point.X > 450 {
+			t.Fatalf("last reclined face snapped back to room saliency: %+v", samples)
+		}
+		samples[2].point.X = 1100
+		samples[2].motionTracked = true
+		correctSmartCropFaceTracks(samples, srcW, cropW)
+		if samples[2].point.X != 1100 {
+			t.Fatalf("motion-certified departure was frozen: %+v", samples)
+		}
+	})
+
+	t.Run("single-profile-anchor-defeats-alternating-room-fallback", func(t *testing.T) {
+		const localSrcW, localCropW = 1280, 404
+		xs := []int{408, 408, 700, 408, 696, 812, 408, 696, 408, 696, 408, 696}
+		samples := make([]smartCropV2Sample, len(xs))
+		for i, x := range xs {
+			samples[i] = smartCropV2Sample{
+				point: cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+				img:   frame,
+			}
+		}
+		samples[5].face = &smartCropFace{
+			CenterX: 1014, MinX: 970, MaxX: 1058, Scale: 88, Quality: 11.8,
+		}
+		correctSmartCropFaceTracks(samples, localSrcW, localCropW)
+		for i, sample := range samples {
+			if sample.point.X < 700 {
+				t.Fatalf("sample %d stayed on alternating empty-room fallback: %+v", i, samples)
+			}
+		}
+	})
+
+	t.Run("single-profile-anchor-does-not-freeze-one-way-traversal", func(t *testing.T) {
+		const localSrcW, localCropW = 1280, 404
+		xs := []int{392, 400, 408, 416, 430, 520, 610, 696, 760, 812}
+		samples := make([]smartCropV2Sample, len(xs))
+		for i, x := range xs {
+			samples[i] = smartCropV2Sample{
+				point: cropPathPoint{AtMs: int64(i) * 1_000, X: x},
+				img:   frame,
+			}
+		}
+		samples[len(samples)-1].face = &smartCropFace{
+			CenterX: 1014, MinX: 970, MaxX: 1058, Scale: 88, Quality: 11.8,
+		}
+		correctSmartCropFaceTracks(samples, localSrcW, localCropW)
+		if samples[0].point.X != xs[0] || samples[4].point.X != xs[4] {
+			t.Fatalf("one-way traversal was frozen by its only face anchor: %+v", samples)
+		}
+	})
+}
+
+func TestSmartCropProceduralBackgroundModel(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	references := make([]image.Image, 8)
+	for i := range references {
+		references[i] = proceduralSmartCropFrame(320, 180, -1)
+	}
+
+	t.Run("static-foreground-beats-empty-room", func(t *testing.T) {
+		current := proceduralSmartCropFrame(320, 180, 260)
+		x, result, ok := backgroundAwareNarrowSmartCropX(current, references, 200, srcW, cropW)
+		if !ok {
+			t.Fatalf("foreground was not recovered: %+v", result)
+		}
+		if x < 1000 {
+			t.Fatalf("crop x=%d did not move to right-side subject: %+v", x, result)
+		}
+	})
+
+	t.Run("empty-room-does-not-create-subject", func(t *testing.T) {
+		current := proceduralSmartCropFrame(320, 180, -1)
+		if x, result, ok := backgroundAwareNarrowSmartCropX(current, references, 500, srcW, cropW); ok || x != 500 {
+			t.Fatalf("empty room changed: x=%d ok=%v result=%+v", x, ok, result)
+		}
+	})
+
+	t.Run("camera-change-is-rejected", func(t *testing.T) {
+		current := proceduralSmartCropFrameWithBase(320, 180, -1, color.RGBA{R: 210, G: 205, B: 190, A: 255})
+		if x, result, ok := backgroundAwareNarrowSmartCropX(current, references, 500, srcW, cropW); ok || x != 500 {
+			t.Fatalf("camera/exposure change created subject: x=%d ok=%v result=%+v", x, ok, result)
+		}
+	})
+
+	t.Run("revealed-background-is-not-a-foreground-ghost", func(t *testing.T) {
+		mixed := make([]image.Image, 0, 8)
+		for i := 0; i < 4; i++ {
+			mixed = append(mixed, proceduralSmartCropFrame(320, 180, 70))
+		}
+		for i := 0; i < 4; i++ {
+			mixed = append(mixed, proceduralSmartCropFrame(320, 180, -1))
+		}
+		current := proceduralSmartCropFrame(320, 180, 250)
+		x, result, ok := backgroundAwareNarrowSmartCropX(current, mixed, 150, srcW, cropW)
+		if !ok || x < 1000 {
+			t.Fatalf("old subject ghost beat current foreground: x=%d ok=%v result=%+v", x, ok, result)
+		}
+	})
+}
+
+func TestSmartCropStaticTemporalCandidateMustTouchSaliency(t *testing.T) {
+	const cropW = 606
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		samples[i].point.X = 650
+	}
+	disconnected := smartCropTemporalResult{X: 0, StaticAnchored: true}
+	if smartCropStaticCandidateTouchesSceneSubject(disconnected, samples, cropW) {
+		t.Fatal("disconnected warm room feature was accepted as the subject")
+	}
+	edgeRecovery := smartCropTemporalResult{X: 400, StaticAnchored: true}
+	if !smartCropStaticCandidateTouchesSceneSubject(edgeRecovery, samples, cropW) {
+		t.Fatal("candidate already stranded at the crop edge was rejected")
+	}
+}
+
+func TestSmartCropBackgroundSubjectState(t *testing.T) {
+	samples := make([]smartCropV2Sample, 8)
+	for i := range samples {
+		samples[i].point.X = 900 + (i%2)*20
+		if i >= 3 {
+			samples[i].backgroundTracked = true
+		}
+	}
+	samples[0].face = &smartCropFace{CenterX: 500, MinX: 430, MaxX: 570, Scale: 140, Quality: 20}
+	if !smartCropSceneHasBackgroundSubjectState(samples, 606) {
+		t.Fatal("tight repeated background anchors were not preserved")
+	}
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1920, 606); corrected != 0 {
+		t.Fatalf("scene-wide temporal pass overwrote background subject state: corrected=%d", corrected)
+	}
+	samples[7].point.X = 1300
+	if smartCropSceneHasBackgroundSubjectState(samples, 606) {
+		t.Fatal("diffuse background candidates were treated as one subject state")
+	}
+	samples[7].point.X = 920
+	samples[0].face.CenterX = 1200
+	if smartCropSceneHasBackgroundSubjectState(samples, 606) {
+		t.Fatal("background cluster that did not establish a new subject state was over-protected")
+	}
+}
+
+func TestSmartCropFaceContainmentGeometry(t *testing.T) {
+	const srcW, cropW = 1920, 606
+	cases := []struct {
+		name    string
+		start   int
+		face    smartCropFace
+		minWant int
+		maxWant int
+	}{
+		{"left-reclining", 900, smartCropFace{CenterX: 250, MinX: 170, MaxX: 330, Scale: 160}, 0, 170},
+		{"right-reclining", 200, smartCropFace{CenterX: 1670, MinX: 1590, MaxX: 1750, Scale: 160}, 1140, 1314},
+		{"already-contained", 700, smartCropFace{CenterX: 1000, MinX: 920, MaxX: 1080, Scale: 160}, 700, 700},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			x := containSmartCropFaceX(tc.start, tc.face, srcW, cropW)
+			if x < tc.minWant || x > tc.maxWant {
+				t.Fatalf("x=%d want [%d,%d]", x, tc.minWant, tc.maxWant)
+			}
+		})
+	}
+}
+
+func proceduralSmartCropFrame(w, h, subjectX int) image.Image {
+	return proceduralSmartCropFrameWithBase(w, h, subjectX, color.RGBA{R: 78, G: 82, B: 80, A: 255})
+}
+
+func proceduralSmartCropFrameWithBase(w, h, subjectX int, base color.RGBA) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			shade := uint8((x/18+y/14)%2) * 8
+			img.SetRGBA(x, y, color.RGBA{R: base.R + shade, G: base.G + shade, B: base.B + shade, A: 255})
+		}
+	}
+	if subjectX >= 0 {
+		for y := h / 4; y < h*9/10; y++ {
+			for x := maxInt(0, subjectX-24); x < minInt(w, subjectX+24); x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 170, G: 42, B: 55, A: 255})
+			}
+		}
+		for y := h / 5; y < h*2/5; y++ {
+			for x := maxInt(0, subjectX-16); x < minInt(w, subjectX+16); x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 220, G: 155, B: 120, A: 255})
+			}
+		}
+	}
+	return img
+}

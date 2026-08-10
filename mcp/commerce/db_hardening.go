@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -122,16 +123,22 @@ func dbListingUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*L
 	return dbListingGet(db, pid, id, true)
 }
 
-func dbCollectionGetWithProducts(db *sql.DB, pid string, id int64) (*Collection, error) {
+func dbCollectionGetWithProducts(db *sql.DB, pid string, id int64, listingStatus string) (*Collection, error) {
 	collection, err := dbCollectionGet(db, pid, id)
 	if err != nil || collection == nil {
 		return nil, firstErr(err, errors.New("collection not found"))
 	}
-	rows, err := db.Query(`SELECT commerce_listings.id
+	query := `SELECT commerce_listings.id
 		FROM commerce_listings
 		JOIN commerce_collection_listings cl ON cl.listing_id=commerce_listings.id
-		WHERE commerce_listings.project_id=? AND cl.collection_id=?
-		ORDER BY cl.sort_order, commerce_listings.title`, pid, id)
+		WHERE commerce_listings.project_id=? AND cl.collection_id=?`
+	values := []any{pid, id}
+	if listingStatus != "" {
+		query += ` AND commerce_listings.status=?`
+		values = append(values, listingStatus)
+	}
+	query += ` ORDER BY cl.sort_order, commerce_listings.title`
+	rows, err := db.Query(query, values...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,14 +204,14 @@ func dbCollectionUpdate(db *sql.DB, pid string, id int64, patch map[string]any) 
 		vals = append(vals, jsonText(patch["metadata"], "{}"))
 	}
 	if len(sets) == 0 {
-		return dbCollectionGetWithProducts(db, pid, id)
+		return dbCollectionGetWithProducts(db, pid, id, "")
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
 	vals = append(vals, pid, id)
 	if _, err := db.Exec(`UPDATE commerce_collections SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, vals...); err != nil {
 		return nil, err
 	}
-	return dbCollectionGetWithProducts(db, pid, id)
+	return dbCollectionGetWithProducts(db, pid, id, "")
 }
 
 func dbCollectionRemoveListing(db *sql.DB, pid string, collectionID, listingID int64) error {
@@ -239,8 +246,75 @@ func dbCartsList(db *sql.DB, pid string, args map[string]any) ([]*Cart, error) {
 		where = append(where, "status=?")
 		vals = append(vals, status)
 	}
+
+	updatedBefore, err := cartFilterTimestamp(args, "updated_before")
+	if err != nil {
+		return nil, err
+	}
+	updatedAfter, err := cartFilterTimestamp(args, "updated_after")
+	if err != nil {
+		return nil, err
+	}
+	if updatedBefore != "" && updatedAfter != "" && updatedAfter >= updatedBefore {
+		return nil, errors.New("updated_after must be earlier than updated_before")
+	}
+
+	inactiveMinutes := intArg(args, "inactive_for_minutes")
+	if hasKey(args, "inactive_for_minutes") {
+		if inactiveMinutes <= 0 {
+			return nil, errors.New("inactive_for_minutes must be greater than zero")
+		}
+		if inactiveMinutes > 525600 {
+			return nil, errors.New("inactive_for_minutes must not exceed 525600")
+		}
+		if updatedBefore != "" {
+			return nil, errors.New("use either updated_before or inactive_for_minutes, not both")
+		}
+		updatedBefore = time.Now().UTC().Add(-time.Duration(inactiveMinutes) * time.Minute).Format("2006-01-02 15:04:05")
+	}
+
+	abandonedOnly := boolArg(args, "abandoned_only")
+	if abandonedOnly && hasKey(args, "has_items") && !boolArg(args, "has_items") {
+		return nil, errors.New("abandoned_only requires has_items to be true")
+	}
+	if abandonedOnly {
+		where = append(where, "status IN ('open','checkout')")
+		where = append(where, `EXISTS (
+			SELECT 1 FROM commerce_cart_items item
+			WHERE item.project_id=commerce_carts.project_id
+			  AND item.cart_id=commerce_carts.id
+			  AND item.quantity>0
+		)`)
+		if updatedBefore == "" {
+			updatedBefore = time.Now().UTC().Add(-24 * time.Hour).Format("2006-01-02 15:04:05")
+		}
+	} else if hasKey(args, "has_items") {
+		operator := "EXISTS"
+		if !boolArg(args, "has_items") {
+			operator = "NOT EXISTS"
+		}
+		where = append(where, operator+` (
+			SELECT 1 FROM commerce_cart_items item
+			WHERE item.project_id=commerce_carts.project_id
+			  AND item.cart_id=commerce_carts.id
+			  AND item.quantity>0
+		)`)
+	}
+	if updatedBefore != "" {
+		where = append(where, "updated_at<?")
+		vals = append(vals, updatedBefore)
+	}
+	if updatedAfter != "" {
+		where = append(where, "updated_at>?")
+		vals = append(vals, updatedAfter)
+	}
+
+	orderBy, err := cartFilterOrder(strArg(args, "sort"))
+	if err != nil {
+		return nil, err
+	}
 	vals = append(vals, clamp(intArg(args, "limit"), 1, 500, 100))
-	rows, err := db.Query(cartSelect()+` WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT ?`, vals...)
+	rows, err := db.Query(cartSelect()+` WHERE `+strings.Join(where, " AND ")+` ORDER BY `+orderBy+` LIMIT ?`, vals...)
 	if err != nil {
 		return nil, err
 	}
@@ -251,13 +325,45 @@ func dbCartsList(db *sql.DB, pid string, args map[string]any) ([]*Cart, error) {
 		if err != nil {
 			return nil, err
 		}
+		carts = append(carts, cart)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, cart := range carts {
+		var err error
 		cart.Items, err = dbCartItems(db, pid, cart.ID)
 		if err != nil {
 			return nil, err
 		}
-		carts = append(carts, cart)
 	}
-	return carts, rows.Err()
+	return carts, nil
+}
+
+func cartFilterTimestamp(args map[string]any, key string) (string, error) {
+	raw := strArg(args, key)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return "", fmt.Errorf("%s must be an RFC3339 timestamp", key)
+	}
+	return parsed.UTC().Format("2006-01-02 15:04:05"), nil
+}
+
+func cartFilterOrder(sort string) (string, error) {
+	switch sort {
+	case "", "updated_desc":
+		return "updated_at DESC, id DESC", nil
+	case "updated_asc":
+		return "updated_at ASC, id ASC", nil
+	default:
+		return "", errors.New("sort must be 'updated_desc' or 'updated_asc'")
+	}
 }
 
 func dbCartItemGet(db *sql.DB, pid string, cartID, itemID int64) (*CartItem, error) {

@@ -53,6 +53,34 @@ func Type(ctx context.Context, text, logPrefix string) error {
 	return nil
 }
 
+// TypeWithDelay inserts normal text one rune at a time so browser recordings
+// show the field changing. A non-positive delay preserves Type's atomic path.
+// Native temporal controls keep their specialized atomic behavior because
+// partial values are frequently rejected or normalized by the browser.
+func TypeWithDelay(ctx context.Context, text, logPrefix string, delay time.Duration) error {
+	if delay <= 0 {
+		return Type(ctx, text, logPrefix)
+	}
+	elem, _ := activeElement(ctx)
+	if temporalInput(elem.Type) {
+		return Type(ctx, text, logPrefix)
+	}
+	for _, char := range []rune(text) {
+		if err := chromedp.Run(ctx, input.InsertText(string(char))); err != nil {
+			fmt.Fprintf(os.Stderr, "%s delayed insertText failed (%v), falling back to KeyEvent\n", logPrefix, err)
+			return chromedp.Run(ctx, chromedp.KeyEvent(string(char)))
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 func activeElement(ctx context.Context) (focusedElement, error) {
 	var elem focusedElement
 	err := chromedp.Run(ctx, chromedp.Evaluate(`(function(){

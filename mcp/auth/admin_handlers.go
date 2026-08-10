@@ -538,10 +538,16 @@ func (a *App) handleAdminUsersGetContext(w http.ResponseWriter, r *http.Request)
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	authorization, err := dbAuthorizationContext(ctx.AppDB(), pid, org, user.ID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	httpJSON(w, map[string]any{
-		"user":      user,
-		"sessions":  sessions,
-		"audit_log": audits,
+		"user":          user,
+		"authorization": authorization,
+		"sessions":      sessions,
+		"audit_log":     audits,
 	})
 }
 

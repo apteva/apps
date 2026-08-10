@@ -156,6 +156,9 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		resp["apteva_access_token"] = res.AptevaAccessToken
 		resp["apteva_expires_in"] = res.AptevaExpiresIn
 	}
+	if res.Authorization != nil {
+		resp["authorization"] = res.Authorization
+	}
 	httpStatus(w, status, resp)
 }
 
@@ -182,13 +185,14 @@ type signupRequest struct {
 // when true, the access/refresh tokens are empty and the verify-email
 // has been (or attempted to be) sent.
 type signupResult struct {
-	User                 *User  `json:"user"`
-	AccessToken          string `json:"access_token,omitempty"`
-	RefreshToken         string `json:"refresh_token,omitempty"`
-	ExpiresIn            int    `json:"expires_in,omitempty"`
-	AptevaAccessToken    string `json:"apteva_access_token,omitempty"`
-	AptevaExpiresIn      int    `json:"apteva_expires_in,omitempty"`
-	VerificationRequired bool   `json:"verification_required,omitempty"`
+	User                 *User                 `json:"user"`
+	Authorization        *AuthorizationContext `json:"authorization,omitempty"`
+	AccessToken          string                `json:"access_token,omitempty"`
+	RefreshToken         string                `json:"refresh_token,omitempty"`
+	ExpiresIn            int                   `json:"expires_in,omitempty"`
+	AptevaAccessToken    string                `json:"apteva_access_token,omitempty"`
+	AptevaExpiresIn      int                   `json:"apteva_expires_in,omitempty"`
+	VerificationRequired bool                  `json:"verification_required,omitempty"`
 }
 
 // mintSessionFor returns a closure that calls mintSession with the
@@ -265,7 +269,8 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		ctx.Logger().Warn("delegated user token mint failed", "err", err)
+		aptevaToken = nil
 	}
 	aptevaAccessToken := ""
 	aptevaExpiresIn := 0
@@ -275,6 +280,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	}
 	return &signupResult{
 		User:              user,
+		Authorization:     &tokens.authorization,
 		AccessToken:       tokens.access,
 		RefreshToken:      tokens.refresh,
 		ExpiresIn:         tokens.expiresIn,
@@ -391,8 +397,8 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		ctx.Logger().Warn("delegated user token mint failed", "err", err)
+		aptevaToken = nil
 	}
 	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login", r.RemoteAddr, r.UserAgent(), nil)
 
@@ -400,6 +406,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]any{
 		"user":          user,
+		"authorization": tokens.authorization,
 		"access_token":  tokens.access,
 		"refresh_token": tokens.refresh,
 		"expires_in":    tokens.expiresIn,
@@ -512,12 +519,13 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		ctx.Logger().Warn("delegated user token mint failed", "err", err)
+		aptevaToken = nil
 	}
 	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "refresh", r.RemoteAddr, r.UserAgent(), nil)
 
 	resp := map[string]any{
+		"authorization": tokens.authorization,
 		"access_token":  tokens.access,
 		"refresh_token": tokens.refresh,
 		"expires_in":    tokens.expiresIn,
@@ -580,7 +588,12 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	httpJSON(w, map[string]any{"user": user, "org": org.Slug})
+	authorization, err := dbAuthorizationContext(ctx.AppDB(), pid, org, user.ID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"user": user, "org": org.Slug, "authorization": authorization})
 }
 
 // ─── /me/metadata ───────────────────────────────────────────────────
@@ -686,6 +699,15 @@ func (a *App) authenticatedBearerUser(w http.ResponseWriter, r *http.Request, ct
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "user_inactive"})
 		return nil, nil, false
 	}
+	tokenVersion, hasVersion := jwtInt64Claim(claims, "authorization_version")
+	if (hasVersion && tokenVersion != user.AuthorizationVersion) ||
+		(!hasVersion && user.AuthorizationVersion > 1) {
+		httpStatus(w, http.StatusUnauthorized, map[string]string{
+			"error":  "stale_authorization",
+			"detail": "refresh the session to receive current roles and permissions",
+		})
+		return nil, nil, false
+	}
 	return org, user, true
 }
 
@@ -696,9 +718,10 @@ func (a *App) handleOrgPublic(w http.ResponseWriter, r *http.Request) {
 // ─── helpers used only by handlers ────────────────────────────────────
 
 type tokenPair struct {
-	access    string
-	refresh   string
-	expiresIn int
+	access        string
+	refresh       string
+	expiresIn     int
+	authorization AuthorizationContext
 }
 
 // mintSession issues a fresh access + refresh token pair, persisting
@@ -725,6 +748,10 @@ func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *Use
 	if aud == "" {
 		aud = client.ClientID
 	}
+	authorization, err := dbAuthorizationContext(ctx.AppDB(), projectID, org, user.ID)
+	if err != nil {
+		return tokenPair{}, err
+	}
 	claims := jwtClaims{
 		Iss:   orgBaseURL(ctx, r, org),
 		Sub:   uintToStr(user.ID),
@@ -734,7 +761,15 @@ func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *Use
 		Exp:   now.Add(accessTTL).Unix(),
 		Email: user.Email,
 		EVer:  user.EmailVerifiedAt != "",
-		Extra: map[string]any{"org": org.Slug},
+		Extra: map[string]any{
+			"org":                   org.Slug, // legacy claim
+			"user_id":               authorization.UserID,
+			"organization_id":       authorization.OrganizationID,
+			"organization_slug":     authorization.OrganizationSlug,
+			"roles":                 authorization.Roles,
+			"permissions":           authorization.Permissions,
+			"authorization_version": authorization.AuthorizationVersion,
+		},
 	}
 	access, err := jwtSign(priv, kid, claims)
 	if err != nil {
@@ -749,7 +784,25 @@ func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *Use
 		hashToken(refresh), r.UserAgent(), r.RemoteAddr, expiresAt); err != nil {
 		return tokenPair{}, err
 	}
-	return tokenPair{access: access, refresh: refresh, expiresIn: int(accessTTL.Seconds())}, nil
+	return tokenPair{
+		access: access, refresh: refresh, expiresIn: int(accessTTL.Seconds()),
+		authorization: authorization,
+	}, nil
+}
+
+func jwtInt64Claim(claims map[string]any, key string) (int64, bool) {
+	switch v := claims[key].(type) {
+	case float64:
+		return int64(v), true
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	}
+	return 0, false
 }
 
 // requireClient looks up the client by id. Does NOT resolve the org —

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,6 +193,377 @@ steps:
 	if len(runs) != 0 {
 		t.Errorf("non-matching topic ran the workflow: %d runs", len(runs))
 	}
+}
+
+// TestEventTrigger_PredicateFiltersBeforeRunPersistence proves that a
+// trigger-level predicate drops irrelevant high-volume events without
+// creating the short-lived run rows a first-step branch would create.
+func TestEventTrigger_PredicateFiltersBeforeRunPersistence(t *testing.T) {
+	streamReady := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		fmt.Fprintf(w,
+			"id: 1\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"table\":\"prospects\",\"id\":41}}\n\n",
+			testProj)
+		fmt.Fprintf(w,
+			"id: 2\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":2,\"data\":{\"table\":\"ventes\",\"id\":42}}\n\n",
+			testProj)
+		flusher.Flush()
+		close(streamReady)
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+
+	src := `name: only-ventes-updated
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'ventes'"
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`
+	wf := mustCreateEventWorkflow(t, ctx, src)
+	mgr := newEventTrigger(ctx)
+	mgr.Start()
+	defer mgr.Stop()
+
+	select {
+	case <-streamReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE stream never opened")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	var runs []*Run
+	for time.Now().Before(deadline) {
+		out, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(out) == 1 {
+			runs = out
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want exactly one matching ventes run", len(runs))
+	}
+	// Run dispatch is asynchronous. Give any incorrectly dispatched second run
+	// time to persist before asserting the final count.
+	time.Sleep(250 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("settled runs = %d, want exactly one matching ventes run", len(runs))
+	}
+	if strings.Contains(runs[0].InputJSON, "prospects") || !strings.Contains(runs[0].InputJSON, "ventes") {
+		t.Fatalf("unexpected persisted run input: %s", runs[0].InputJSON)
+	}
+	var stepCount int
+	if err := ctx.AppDB().QueryRow(`
+		SELECT COUNT(*) FROM workflow_step_executions
+		WHERE run_id IN (SELECT id FROM workflow_runs WHERE workflow_id = ?)
+	`, wf.ID).Scan(&stepCount); err != nil {
+		t.Fatal(err)
+	}
+	if stepCount != 1 {
+		t.Fatalf("step executions = %d, want one step from only the matching event", stepCount)
+	}
+}
+
+func TestEventTrigger_InvalidPredicateFailsClosed(t *testing.T) {
+	streamReady := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w,
+			"id: 1\ndata: {\"topic\":\"row.updated\",\"app\":\"tables\","+
+				"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"table\":\"ventes\"}}\n\n",
+			testProj)
+		w.(http.Flusher).Flush()
+		close(streamReady)
+		select {
+		case <-time.After(400 * time.Millisecond):
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	wf := mustCreateEventWorkflow(t, ctx, `name: legacy-filter
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+steps:
+  - { id: ack, kind: emit, topic: ack }
+`)
+	// Simulate an invalid predicate imported from an older runtime or written
+	// directly into the database. New create/update requests reject this.
+	invalidTrigger := `{"kind":"event","source":"tables","topic":"row.updated","when":"ventes"}`
+	if _, err := ctx.AppDB().Exec(`UPDATE workflows SET trigger_json = ? WHERE id = ?`, invalidTrigger, wf.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := newEventTrigger(ctx)
+	mgr.Start()
+	defer mgr.Stop()
+	select {
+	case <-streamReady:
+	case <-time.After(3 * time.Second):
+		t.Fatal("SSE stream never opened")
+	}
+	time.Sleep(300 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("invalid predicate created %d runs, want zero", len(runs))
+	}
+	var stepCount int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM workflow_step_executions`).Scan(&stepCount); err != nil {
+		t.Fatal(err)
+	}
+	if stepCount != 0 {
+		t.Fatalf("invalid predicate created %d steps, want zero", stepCount)
+	}
+}
+
+func TestEventTrigger_UpdatedPredicateTakesEffectWithoutRestart(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "http://example.invalid")
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	initialSource := `name: mutable-filter
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'prospects'"
+steps:
+  - { id: ack, kind: emit, topic: ack }
+`
+	wf := mustCreateEventWorkflow(t, ctx, initialSource)
+	mgr := newEventTrigger(ctx)
+	ln := &eventLane{
+		key:       laneKey{source: "tables", projectID: testProj},
+		workflows: []*Workflow{wf},
+	}
+	ventesEvent := fmt.Sprintf(
+		`{"topic":"row.updated","app":"tables","project_id":"%s","seq":1,"data":{"table":"ventes"}}`,
+		testProj,
+	)
+	mgr.dispatchFrame(ln, "1", ventesEvent)
+	time.Sleep(150 * time.Millisecond)
+	runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("old predicate unexpectedly matched ventes: %d runs", len(runs))
+	}
+
+	updatedSource := strings.Replace(initialSource, "'prospects'", "'ventes'", 1)
+	updated, err := updateAndRehashWorkflow(ctx, testProj, wf.ID, map[string]any{"source": updatedSource})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.mu.Lock()
+	ln.workflows = []*Workflow{updated}
+	ln.mu.Unlock()
+	ventesEvent = strings.Replace(ventesEvent, `"seq":1`, `"seq":2`, 1)
+	mgr.dispatchFrame(ln, "2", ventesEvent)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err = dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(runs) == 1 && runs[0].Status != "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(runs) != 1 || !strings.Contains(runs[0].InputJSON, "ventes") {
+		t.Fatalf("updated predicate did not take effect: %+v", runs)
+	}
+}
+
+func TestEventTrigger_MissingConfigurationIsDegraded(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "")
+	t.Setenv("APTEVA_APP_TOKEN", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconcile()
+	status := mgr.Status()
+	if status.Healthy || status.State != "degraded" {
+		t.Fatalf("status = %+v, want degraded and unhealthy", status)
+	}
+	if status.Configured {
+		t.Fatal("subscriber unexpectedly configured")
+	}
+	if got := strings.Join(status.MissingConfig, ","); !strings.Contains(got, "APTEVA_GATEWAY_URL") ||
+		!strings.Contains(got, "APTEVA_APP_TOKEN") {
+		t.Fatalf("missing config = %q", got)
+	}
+
+	previous := globalEventTrigger
+	globalEventTrigger = mgr
+	defer func() { globalEventTrigger = previous }()
+	rec := httptest.NewRecorder()
+	(&App{}).handleSubscriberHealth(rec, httptest.NewRequest(http.MethodGet, "/subscriber/health", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("health status = %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestEventTrigger_ConfiguredIdleIsHealthy(t *testing.T) {
+	t.Setenv("APTEVA_GATEWAY_URL", "http://gateway.invalid")
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	mgr := newEventTrigger(ctx)
+	mgr.reconcile()
+	status := mgr.Status()
+	if !status.Healthy || status.State != "idle" {
+		t.Fatalf("status = %+v, want healthy idle", status)
+	}
+}
+
+func TestEventTrigger_AuthenticationFailureIsDiagnosable(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "invalid app token", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "bad-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	mustCreateEventWorkflow(t, ctx, `name: auth-failure
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`)
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconnectDelay = 10 * time.Millisecond
+	mgr.Start()
+	defer mgr.Stop()
+
+	waitForEventStatus(t, mgr, func(status eventSubscriberStatus) bool {
+		return len(status.Lanes) == 1 &&
+			strings.Contains(status.Lanes[0].LastError, "status 401") &&
+			status.Lanes[0].ReconnectCount > 0
+	})
+	status := mgr.Status()
+	if status.Healthy || status.State != "reconnecting" {
+		t.Fatalf("status = %+v, want reconnecting and unhealthy", status)
+	}
+	if requests.Load() == 0 {
+		t.Fatal("subscriber never attempted authentication")
+	}
+}
+
+func TestEventTrigger_ReconnectsWithCursorAndDelivers(t *testing.T) {
+	var connections atomic.Int32
+	secondDelivered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := connections.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		switch n {
+		case 1:
+			fmt.Fprintf(w,
+				"id: 1\ndata: {\"topic\":\"row.inserted\",\"app\":\"tables\","+
+					"\"project_id\":\"%s\",\"seq\":1,\"data\":{\"id\":1}}\n\n",
+				testProj)
+			flusher.Flush()
+		case 2:
+			if got := r.URL.Query().Get("since"); got != "1" {
+				http.Error(w, "missing reconnect cursor: "+got, http.StatusBadRequest)
+				return
+			}
+			fmt.Fprintf(w,
+				"id: 2\ndata: {\"topic\":\"row.inserted\",\"app\":\"tables\","+
+					"\"project_id\":\"%s\",\"seq\":2,\"data\":{\"id\":2}}\n\n",
+				testProj)
+			flusher.Flush()
+			close(secondDelivered)
+			<-r.Context().Done()
+		default:
+			<-r.Context().Done()
+		}
+	}))
+	defer srv.Close()
+
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	wf := mustCreateEventWorkflow(t, ctx, `name: reconnect
+trigger:
+  kind: event
+  source: tables
+  topic: row.inserted
+steps:
+  - id: ack
+    kind: emit
+    topic: ack
+`)
+
+	mgr := newEventTrigger(ctx)
+	mgr.reconnectDelay = 10 * time.Millisecond
+	mgr.Start()
+	defer mgr.Stop()
+
+	select {
+	case <-secondDelivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscriber did not reconnect and deliver the second event")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, err := dbListRuns(ctx.AppDB(), testProj, wf.ID, 10)
+		if err == nil && len(runs) == 2 {
+			status := mgr.Status()
+			if len(status.Lanes) != 1 || status.Lanes[0].LastEventSeq != 2 {
+				t.Fatalf("cursor diagnostics = %+v, want seq 2", status)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("both reconnected events were not delivered as workflow runs")
+}
+
+func waitForEventStatus(t *testing.T, mgr *eventTrigger, predicate func(eventSubscriberStatus) bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if predicate(mgr.Status()) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("subscriber status condition not reached: %+v", mgr.Status())
 }
 
 // TestTopicMatches: cheap unit coverage on the pattern matcher.

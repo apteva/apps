@@ -112,10 +112,14 @@ interface StatusResp {
   mode?: "quick" | "named";
   // v0.4+ — provider name reported by activeProvider(). Drives the
   // "Active provider" badge + which config form the panel shows.
-  provider?: "cloudflare-quick" | "cloudflare-named" | "ngrok" | string;
+  provider?: "cloudflare-quick" | "cloudflare-named" | "ngrok" | "zrok" | string;
   hostname?: string;
   cloudflare_bound?: boolean;
   ngrok_bound?: boolean;
+  zrok_bound?: boolean;
+  zrok_configured?: boolean;
+  zrok_name?: string;
+  zrok_url?: string;
   // ngrok reserved domain (paid plans), set via the app's ngrok_domain
   // config. Surfaced for display when active provider is ngrok.
   ngrok_domain?: string;
@@ -174,7 +178,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   });
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [error, setError] = useState("");
-  const [busy, setBusy] = useState<"start" | "stop" | "install" | "configure" | "provider" | "destroy" | null>(null);
+  const [busy, setBusy] = useState<"start" | "stop" | "install" | "configure" | "zrok-configure" | "provider" | "destroy" | null>(null);
   const [loading, setLoading] = useState(true);
   const [exposureAck, setExposureAck] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -186,6 +190,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   const [selectedZoneID, setSelectedZoneID] = useState("");
   const [subdomain, setSubdomain] = useState("");
   const [showConfigure, setShowConfigure] = useState(false);
+  const [zrokName, setZrokName] = useState("");
 
   const qs = useCallback(
     () => new URLSearchParams({ project_id: projectId, install_id: String(installId) }).toString(),
@@ -264,7 +269,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     finally { setBusy(null); }
   };
   const onReinstall = async () => {
-    const label = status.provider === "ngrok" ? "ngrok" : "cloudflared";
+    const label = status.provider === "ngrok" ? "ngrok" : status.provider === "zrok" ? "zrok2" : "cloudflared";
     if (!window.confirm(`Download and verify the pinned ${label} release? The managed binary will be replaced.`)) return;
     setBusy("install"); setError("");
     try { await api("POST", "/install", {}); }
@@ -322,7 +327,10 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     const hostname = `${subdomain.trim()}.${zone.name}`;
     setBusy("configure"); setError("");
     try {
-      await api("POST", "/named/configure", { zone_id: selectedZoneID, hostname });
+      await api("POST", "/provider/configure", {
+        provider: "cloudflare-named",
+        config: { zone_id: selectedZoneID, hostname },
+      });
       setShowConfigure(false);
       await refresh();
     } catch (e: unknown) {
@@ -330,7 +338,22 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
     } finally { setBusy(null); }
   };
 
-  const selectProvider = async (next: "cloudflare-quick" | "cloudflare-named" | "ngrok") => {
+  const configureZrok = async () => {
+    const name = zrokName.trim();
+    if (!/^[a-z0-9-]{3,63}$/.test(name) || name.startsWith("-") || name.endsWith("-")) {
+      setError("zrok names use 3–63 lowercase letters, digits, or hyphens and cannot start or end with a hyphen.");
+      return;
+    }
+    setBusy("zrok-configure"); setError("");
+    try {
+      await api("POST", "/provider/configure", { provider: "zrok", config: { name } });
+      await refresh();
+    } catch (e: unknown) {
+      setError("zrok configuration failed: " + (e instanceof Error ? e.message : String(e)));
+    } finally { setBusy(null); }
+  };
+
+  const selectProvider = async (next: "cloudflare-quick" | "cloudflare-named" | "ngrok" | "zrok") => {
     setBusy("provider"); setError("");
     try {
       await api("POST", "/provider", { provider: next });
@@ -343,7 +366,15 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   const destroyNamed = async () => {
     if (!window.confirm(`Delete the Cloudflare tunnel and DNS record for ${status.hostname}?`)) return;
     setBusy("destroy"); setError("");
-    try { await api("POST", "/destroy", {}); await refresh(); }
+    try { await api("POST", "/destroy", { provider: "cloudflare-named" }); await refresh(); }
+    catch (e: unknown) { setError("Delete failed: " + (e instanceof Error ? e.message : String(e))); }
+    finally { setBusy(null); }
+  };
+
+  const destroyZrok = async () => {
+    if (!window.confirm(`Release the zrok name ${status.zrok_name} and remove its local environment?`)) return;
+    setBusy("destroy"); setError("");
+    try { await api("POST", "/destroy", { provider: "zrok" }); await refresh(); }
     catch (e: unknown) { setError("Delete failed: " + (e instanceof Error ? e.message : String(e))); }
     finally { setBusy(null); }
   };
@@ -355,13 +386,17 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
   // also works against a v0.3 sidecar.
   const provider = status.provider || (status.mode === "named" ? "cloudflare-named" : "cloudflare-quick");
   const isNgrok = provider === "ngrok";
+  const isZrok = provider === "zrok";
   const isNamed = provider === "cloudflare-named" || status.mode === "named";
   const cfBound = !!status.cloudflare_bound;
   const ngrokBound = !!status.ngrok_bound;
+  const zrokBound = !!status.zrok_bound;
+  const zrokConfigured = !!status.zrok_configured && !!status.zrok_name;
   const hasNamedHostname = !!status.hostname && !!status.named_configured;
   // Human-friendly provider label for the header badge.
   const providerLabel =
     isNgrok ? "ngrok"
+    : isZrok ? "zrok"
     : isNamed ? "Cloudflare (named)"
     : "Cloudflare (quick)";
 
@@ -383,6 +418,8 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           <p className="text-text-muted text-xs mt-1">
             {isNgrok ? (
               <>Public HTTPS URL for this Apteva instance via ngrok.</>
+            ) : isZrok ? (
+              <>Stable public HTTPS URL for this Apteva instance via zrok.</>
             ) : (
               <>Public HTTPS URL for this Apteva instance via Cloudflare.</>
             )}
@@ -391,6 +428,9 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
             ) : null}
             {isNgrok && status.ngrok_domain ? (
               <> Reserved domain: <code className="font-mono text-text">{status.ngrok_domain}</code>.</>
+            ) : null}
+            {isZrok && status.zrok_url ? (
+              <> Reserved URL: <code className="font-mono text-text">{status.zrok_url}</code>.</>
             ) : null}
           </p>
         </div>
@@ -410,11 +450,12 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           <h3 id="provider-heading" className="text-text font-bold text-sm">Tunnel provider</h3>
           <p className="text-text-muted text-xs mt-1">Choose explicitly. Binding an integration never switches providers by itself.</p>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           {([
             ["cloudflare-quick", "Cloudflare Quick", "Temporary URL · no account", true],
             ["cloudflare-named", "Cloudflare Named", "Stable URL · your domain", cfBound && hasNamedHostname],
             ["ngrok", "ngrok", status.ngrok_domain ? `Reserved · ${status.ngrok_domain}` : "Temporary or reserved URL", ngrokBound],
+            ["zrok", "zrok", status.zrok_url ? `Stable · ${status.zrok_url}` : "Stable free public URL", zrokBound && zrokConfigured],
           ] as const).map(([value, label, hint, available]) => {
             const selected = provider === value;
             return (
@@ -427,7 +468,9 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
                 className={`text-left rounded border p-3 transition-colors disabled:opacity-50 ${selected ? "border-accent bg-accent/10" : "border-border hover:bg-bg-hover"}`}
               >
                 <span className="block text-text text-sm font-bold">{label}</span>
-                <span className="block text-text-muted text-xs mt-1">{available ? hint : value === "ngrok" ? "Bind ngrok first" : "Configure a hostname first"}</span>
+                <span className="block text-text-muted text-xs mt-1">
+                  {available ? hint : value === "ngrok" ? "Bind ngrok first" : value === "zrok" ? (zrokBound ? "Reserve a name below" : "Bind zrok first") : "Configure a hostname first"}
+                </span>
               </button>
             );
           })}
@@ -458,6 +501,61 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
               setting (Settings tab).
             </div>
           )}
+        </section>
+      )}
+
+      {zrokBound && (
+        <section className="border border-border rounded-lg p-4 bg-bg-card space-y-3">
+          <div>
+            <div className="text-text font-bold text-sm">zrok stable name</div>
+            <div className="text-text-muted text-xs mt-1">
+              Reserve a free public name. The URL stays the same when Live Link or the server restarts.
+            </div>
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <label className="flex-1 min-w-48">
+              <span className="text-text-muted text-xs">Name</span>
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  type="text"
+                  value={zrokName || status.zrok_name || ""}
+                  onChange={(e) => setZrokName(e.target.value.toLowerCase())}
+                  placeholder="my-apteva"
+                  disabled={isRunning || busy !== null}
+                  className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+                />
+                <span className="text-text-dim text-xs font-mono">
+                  {status.zrok_url
+                    ? new URL(status.zrok_url).hostname.slice((status.zrok_name || "").length)
+                    : " · zrok public namespace"}
+                </span>
+              </div>
+            </label>
+            <button
+              onClick={configureZrok}
+              disabled={isRunning || busy !== null || !(zrokName || status.zrok_name)}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
+            >
+              {busy === "zrok-configure" ? "Reserving…" : zrokConfigured ? "Change name" : "Reserve name"}
+            </button>
+          </div>
+          {zrokConfigured && (
+            <div className="flex items-center justify-between gap-3 text-xs flex-wrap">
+              <a href={status.zrok_url} target="_blank" rel="noreferrer" className="font-mono text-accent hover:underline">
+                {status.zrok_url}
+              </a>
+              <button
+                onClick={destroyZrok}
+                disabled={isRunning || busy !== null}
+                className="text-error underline disabled:opacity-50"
+              >
+                {busy === "destroy" ? "Releasing…" : "Release name"}
+              </button>
+            </div>
+          )}
+          <p className="text-text-dim text-xs">
+            zrok’s public frontend shows its own visitor interstitial; use Cloudflare Named when you need a fully branded URL.
+          </p>
         </section>
       )}
 
@@ -608,13 +706,15 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
           {!isRunning && (
             <button
               onClick={onStart}
-              disabled={loading || busy !== null || !exposureAck || (isNamed && !hasNamedHostname)}
+              disabled={loading || busy !== null || !exposureAck || (isNamed && !hasNamedHostname) || (isZrok && !zrokConfigured)}
               title={
                 isNamed && !hasNamedHostname
                   ? "Configure a hostname first (named mode)"
+                  : isZrok && !zrokConfigured
+                    ? "Reserve a zrok name first"
                   : !exposureAck
                     ? "Acknowledge public exposure first"
-                    : `First click may download the verified ${isNgrok ? "ngrok" : "cloudflared"} binary.`
+                    : `First click may download the verified ${isNgrok ? "ngrok" : isZrok ? "zrok2" : "cloudflared"} binary.`
               }
               className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
             >
@@ -675,7 +775,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
 
         {isStarting && (
           <div className="text-text-dim text-xs">
-            {isNgrok ? "ngrok" : "Cloudflared"} usually assigns a URL within a few seconds.
+            {isNgrok ? "ngrok" : isZrok ? "zrok" : "Cloudflared"} usually assigns a URL within a few seconds.
           </div>
         )}
 
@@ -696,7 +796,7 @@ export default function LiveLinkPanel({ projectId, installId }: NativePanelProps
               disabled={busy !== null}
               className="text-text-muted underline hover:text-text disabled:opacity-50"
             >
-              {busy === "install" ? "Downloading and verifying…" : `Reinstall ${isNgrok ? "ngrok" : "cloudflared"}`}
+              {busy === "install" ? "Downloading and verifying…" : `Reinstall ${isNgrok ? "ngrok" : isZrok ? "zrok2" : "cloudflared"}`}
             </button>
           )}
         </div>

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"math"
 	"sync"
 	"time"
 )
@@ -314,53 +313,4 @@ func (p *twilioAudioPacer) run() {
 
 func samplesToMS(samples int) int {
 	return (samples*1000 + twilioMediaSampleRate - 1) / twilioMediaSampleRate
-}
-
-// pcmSpeechStartDetector is a conservative local fallback for providers that
-// do not surface speech-start promptly. It only emits the transition into a
-// speech interval; silence rearms it for the next interval.
-type pcmSpeechStartDetector struct {
-	threshold       float64
-	requiredLoud    int
-	requiredSilence int
-	loudFrames      int
-	silentFrames    int
-	active          bool
-}
-
-func newPCMSpeechStartDetector() *pcmSpeechStartDetector {
-	return &pcmSpeechStartDetector{threshold: 0.035, requiredLoud: 2, requiredSilence: 12}
-}
-
-func (d *pcmSpeechStartDetector) observe(pcm []int16) bool {
-	if len(pcm) == 0 {
-		return false
-	}
-	var sum float64
-	for _, sample := range pcm {
-		normalized := float64(sample) / math.MaxInt16
-		sum += normalized * normalized
-	}
-	loud := math.Sqrt(sum/float64(len(pcm))) >= d.threshold
-	if loud {
-		d.silentFrames = 0
-		if d.active {
-			return false
-		}
-		d.loudFrames++
-		if d.loudFrames >= d.requiredLoud {
-			d.active = true
-			return true
-		}
-		return false
-	}
-	d.loudFrames = 0
-	if d.active {
-		d.silentFrames++
-		if d.silentFrames >= d.requiredSilence {
-			d.active = false
-			d.silentFrames = 0
-		}
-	}
-	return false
 }

@@ -16,6 +16,7 @@ const result = await Bun.build({
   minify: true,
   sourcemap: "linked",
   define: {
+    "process.env.NODE_ENV": '"production"',
     __API_BASE__: JSON.stringify(API_BASE),
     __COMMUNITY_APP__: JSON.stringify(COMMUNITY_APP),
     __AUTH_APP__: JSON.stringify(AUTH_APP),

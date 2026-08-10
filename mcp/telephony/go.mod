@@ -1,10 +1,12 @@
 module github.com/apteva/apps/mcp/telephony
 
-go 1.25.0
+go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.38.5
+	github.com/apteva/app-sdk v0.46.0
 	github.com/gobwas/ws v1.4.0
+	github.com/osgochina/webrtcvad-go v0.0.2
+	github.com/twilio/twilio-go v1.30.9
 	modernc.org/sqlite v1.50.0
 )
 
@@ -12,9 +14,11 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
+	github.com/golang/mock v1.6.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

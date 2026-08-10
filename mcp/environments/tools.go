@@ -1,15 +1,49 @@
 package main
 
 import (
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 var objectSchema = map[string]any{"type": "object", "additionalProperties": true}
+var voiceCallSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"run_id":           map[string]any{"type": "string"},
+		"caller_goal":      map[string]any{"type": "string"},
+		"caller_persona":   map[string]any{"type": "string"},
+		"caller_behavior":  map[string]any{"type": "string"},
+		"provider":         map[string]any{"type": "string"},
+		"voice":            map[string]any{"type": "string"},
+		"caller_provider":  map[string]any{"type": "string"},
+		"caller_voice":     map[string]any{"type": "string"},
+		"greeting":         map[string]any{"type": "string"},
+		"target_agent":     map[string]any{"type": "string"},
+		"target_directive": map[string]any{"type": "string"},
+		"timeout_seconds":  map[string]any{"type": "integer", "minimum": 15, "maximum": 300},
+		"transport":        map[string]any{"type": "string", "enum": []string{"direct", "carrier"}},
+		"protocol_fixture": map[string]any{"type": "string"},
+		"audio_conditions": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"preset":    map[string]any{"type": "string", "enum": []string{"clean", "office", "cafe", "street", "train_station", "poor_phone"}},
+				"intensity": map[string]any{"type": "string", "enum": []string{"light", "moderate", "heavy"}},
+				"codec":     map[string]any{"type": "string", "enum": []string{"none", "g711_mulaw"}},
+				"seed":      map[string]any{"type": "integer", "minimum": 0},
+			},
+			"additionalProperties": false,
+		},
+	},
+	"required":             []string{"run_id", "caller_goal"},
+	"additionalProperties": true,
+}
 
 func requiredSchema(fields ...string) map[string]any {
 	props := map[string]any{}
@@ -38,9 +72,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_run_create", Description: "Start an inline eval or one-off run from spec.", InputSchema: objectSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
-		{Name: "environment_catalog", Description: "List selectable apps, connections, integrations, web fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
+		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
 		{Name: "environment_call", Description: "Call a tool on a runtime app.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
+		{Name: "environment_mcp_call", Description: "Call a tool on a managed MCP cloned into a runtime.", InputSchema: requiredSchema("run_id", "mcp", "tool"), Handler: a.toolMCPCall},
 		{Name: "environment_inspect", Description: "Inspect runtime state, edge calls, and optional agent telemetry.", InputSchema: requiredSchema("run_id"), Handler: a.toolInspect},
 		{Name: "environment_assert", Description: "Run an app, edge, telemetry, web state, or web event assertion.", InputSchema: requiredSchema("run_id", "type"), Handler: a.toolAssert},
 		{Name: "environment_snapshot", Description: "Snapshot a running defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolSnapshot},
@@ -50,6 +85,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_agent_send", Description: "Send a message to a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "message"), Handler: a.toolAgentSend},
 		{Name: "environment_agent_control", Description: "Pause, resume, or stop a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "action"), Handler: a.toolAgentControl},
 		{Name: "environment_agent_wait", Description: "Wait for a runtime agent to finish and return its normalized trace and metrics.", InputSchema: requiredSchema("run_id", "agent"), Handler: a.toolAgentWait},
+		{Name: "environment_voice_call", Description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions.", InputSchema: voiceCallSchema, Handler: a.toolVoiceCall},
+		{Name: "environment_voice_call_get", Description: "Get a voice call transcript, metrics, and recording handles.", InputSchema: requiredSchema("id"), Handler: a.toolVoiceCallGet},
+		{Name: "environment_voice_recording_get", Description: "Get a base64-encoded WAV recording for receptionist, clean caller, or caller-delivered audio.", InputSchema: requiredSchema("id", "speaker"), Handler: a.toolVoiceRecordingGet},
 	}
 }
 
@@ -142,12 +180,17 @@ func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
+	if err != nil {
+		return nil, err
+	}
 	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
 	if err != nil {
 		return nil, err
 	}
 	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog()}, err
+	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
+	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -158,6 +201,18 @@ func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	var out any
 	err = a.svc.runtime().CallRuntimeAppResult(r.RuntimeID, str(args, "app"), str(args, "tool"), input, &out)
 	return out, err
+}
+func (a *App) toolMCPCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	input, _ := args["input"].(map[string]any)
+	var out any
+	if err := a.svc.runtime().CallRuntimeManagedMCPResult(r.RuntimeID, str(args, "mcp"), str(args, "tool"), input, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
@@ -172,7 +227,7 @@ func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures}
+	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures, "protocol_fixtures": r.ProtocolFixtures}
 	if agent := str(args, "agent"); agent != "" {
 		events, err := a.svc.runtime().ListRuntimeAgentTelemetry(r.RuntimeID, agent, time.Time{}, 500)
 		if err != nil {
@@ -261,4 +316,48 @@ func (a *App) toolAgentWait(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return a.svc.runtime().WaitRuntimeAgent(r.RuntimeID, str(args, "agent"), req)
+}
+
+func (a *App) toolVoiceCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	var spec VoiceFixtureSpec
+	if raw, ok := args["voice"].(map[string]any); ok {
+		err = decodeArgs(raw, &spec)
+	} else {
+		err = decodeArgs(args, &spec)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a.svc.runVoiceCall(context.Background(), r, spec)
+}
+
+func (a *App) toolVoiceCallGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	call, err := a.svc.db.getVoiceCall(str(args, "id"))
+	if err != nil {
+		return nil, err
+	}
+	if call == nil {
+		return nil, errors.New("voice call not found")
+	}
+	return call, nil
+}
+
+func (a *App) toolVoiceRecordingGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	path, err := a.svc.voiceRecordingPath(str(args, "id"), str(args, "speaker"))
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"content_type": "audio/wav",
+		"encoding":     "base64",
+		"data":         base64.StdEncoding.EncodeToString(raw),
+	}, nil
 }

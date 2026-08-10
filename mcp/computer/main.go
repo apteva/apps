@@ -37,6 +37,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -52,16 +53,19 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.53
+version: 0.7.62
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.53 adds compact action
-  deltas, aggregate extraction limits, and reliable navigation actions.
+  Watch, steer, and replay hosted browser sessions. v0.7.62 adds generic,
+  agent-selectable proxy profiles and country-aware managed proxy routing.
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - net.egress
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: browserbase
       kind: integration
@@ -75,12 +79,17 @@ requires:
       kind: integration
       required: false
       compatible_slugs: [browser-engine]
+    - role: proxy-provider
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [dataimpulse]
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, presentation_mode?. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
     - name: computer_context_create
@@ -93,22 +102,33 @@ provides:
       description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
     - name: computer_context_delete
       description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
+    - name: computer_proxy_profile_list
+      description: "List safe proxy profiles available for agent-selected browser sessions. Returns profile ids, names, providers, countries, protocols, and sticky policies; never credentials or proxy URLs."
     - name: browser_open
-      description: "Compatibility alias for browser_session(action=open)."
+      description: "Compatibility alias for browser_session(action=open). Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
     - name: browser_screenshot
-      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
+      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
     - name: browser_recording
       description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
-      description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
+      description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Returns view, a browser-view component reference containing only session_id. Compatibility alias for browser_session(action=close)."
   ui_panels:
     - slot: project.page
       label: Browsers
       icon: monitor
       entry: /ui/ComputerPanel.mjs
   ui_components:
-    - name: browser-card
+    - name: browser-session
       entry: /ui/BrowserCard.mjs
+      slots: [chat.message_attachment]
+    - name: browser-view
+      entry: /ui/BrowserViewCard.mjs
+      slots: [chat.message_attachment]
+    - name: browser-timeline
+      entry: /ui/TimelineCard.mjs
+      slots: [chat.message_attachment]
+    - name: browser-card
+      entry: /ui/BrowserViewCard.mjs
       slots: [chat.message_attachment]
     - name: screenshot-with-som
       entry: /ui/ScreenshotCard.mjs
@@ -211,6 +231,9 @@ provides:
       payload:
         default_backend: string
         lock_backend: boolean
+        default_proxy_mode: string
+        default_proxy_profile_id: string
+        lock_proxy_policy: boolean
 runtime:
   kind: source
   source:
@@ -270,12 +293,14 @@ type session struct {
 	actionMu         sync.Mutex
 	comp             backends.Computer
 	backend          string
+	presentation     backends.PresentationOptions
 	backendSessionID string
 	appContextID     string
 	contextName      string
 	initialURL       string
 	persist          bool
 	timeout          int
+	proxy            SessionProxyState
 	openedAt         time.Time
 	lastUsed         time.Time
 }
@@ -296,6 +321,7 @@ type reapedSession struct {
 	LastUsedAt       time.Time
 	Idle             time.Duration
 	ProviderExpired  bool
+	Proxy            SessionProxyState
 	sess             *session
 }
 
@@ -386,6 +412,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			LastUsedAt:       s.lastUsed,
 			Idle:             now.Sub(s.lastUsed),
 			ProviderExpired:  entry.providerExpired,
+			Proxy:            s.proxy,
 			sess:             s,
 		})
 	}
@@ -465,6 +492,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodDelete, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodGet, Pattern: "/settings", Handler: a.handleSettings},
 		{Method: http.MethodPatch, Pattern: "/settings", Handler: a.handleSettings},
+		{Method: http.MethodGet, Pattern: "/proxy-profiles", Handler: a.handleProxyProfilesCollection},
+		{Method: http.MethodPost, Pattern: "/proxy-profiles", Handler: a.handleProxyProfilesCollection},
+		{Method: http.MethodGet, Pattern: "/proxy-profiles/{id}", Handler: a.handleProxyProfileItem},
+		{Method: http.MethodPatch, Pattern: "/proxy-profiles/{id}", Handler: a.handleProxyProfileItem},
+		{Method: http.MethodDelete, Pattern: "/proxy-profiles/{id}", Handler: a.handleProxyProfileItem},
+		{Method: http.MethodGet, Pattern: "/proxy-connections", Handler: a.handleProxyConnections},
+		{Method: http.MethodGet, Pattern: "/proxy-resources", Handler: a.handleProxyResources},
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
@@ -473,6 +507,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}/tabs/{tab_id}", Handler: a.handleCloseTab},
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
 		{Method: http.MethodPost, Pattern: "/internal/sessions/{id}/extract", Handler: a.handleInternalSessionExtract},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/presentation", Handler: a.handleSessionPresentation},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/timeline", Handler: a.handleSessionTimeline},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/stream", Handler: a.handleSessionStream},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording", Handler: a.handleRecordingMetadata},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}", Handler: a.handleRecordingPlaylist},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}/asset", Handler: a.handleRecordingAsset},
@@ -489,7 +526,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_session",
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
 				"Open args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, timeout?, proxy?, proxy_country?, viewport?. " +
+				"context_name?, auto_create_context?, timeout?, proxy?, proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, presentation_mode? (fast|demo, default fast). " +
+				"Use presentation_mode=demo for visible cursor/click feedback, human-paced typing, non-interactive structured-control cues, and longer holds in user-facing walkthroughs. " +
 				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"session_id is the app-owned live br_* handle for status/close/computer_use and cannot reopen a closed session. " +
 				"Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. " +
@@ -500,15 +538,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
-				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height}.",
+				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height, view}. " +
+				"view is a copyable browser-view component reference containing only session_id; attach it when the browser result should be visible in chat.",
 			InputSchema: schemaObject(map[string]any{
-				"action":       map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
-				"session_id":   map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
-				"tab_id":       map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
-				"backend":      map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
-				"url":          map[string]any{"type": "string"},
-				"context_id":   map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
-				"context_name": map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
+				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
+				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
+				"tab_id":            map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo shows a non-interactive cursor/click pulse and structured-control cues on CDP backends, types short text character by character, and holds visible states. Presentation overlays never dispatch input events or replace agent actions."},
+				"url":               map[string]any{"type": "string"},
+				"context_id":        map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
+				"context_name":      map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
@@ -516,7 +556,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
 				"proxy":               map[string]any{"type": "boolean"},
-				"proxy_country":       map[string]any{"type": "string"},
+				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Provider-neutral routing mode. profile uses a configured proxy profile; managed uses the browser backend's own proxy."},
+				"proxy_profile":       map[string]any{"type": "string", "description": "Configured proxy profile id or unique name. Use computer_proxy_profile_list to discover safe choices."},
+				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
+				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "External profile identity lifetime. context requires an app-managed browser context."},
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -625,18 +668,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolContextDelete,
 		},
 		{
+			Name:        "computer_proxy_profile_list",
+			Description: "List enabled proxy profiles that agents may select when opening a browser session. Returns only safe routing metadata and never credentials or proxy URLs.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolProxyProfileList,
+		},
+		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
-				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
+				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?, presentation_mode? (fast|demo, default fast). Use demo for visible, human-paced actions and non-interactive structured-control cues in live views and recordings. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"Browserbase honors timeout as max session lifetime. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
-				"backend":      map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
-				"url":          map[string]any{"type": "string"},
-				"context_id":   map[string]any{"type": "string"},
-				"context_name": map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo adds non-interactive visual cues and pacing without replacing agent actions."},
+				"url":               map[string]any{"type": "string"},
+				"context_id":        map[string]any{"type": "string"},
+				"context_name":      map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
@@ -644,7 +694,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
 				"proxy":               map[string]any{"type": "boolean"},
-				"proxy_country":       map[string]any{"type": "string"},
+				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}},
+				"proxy_profile":       map[string]any{"type": "string"},
+				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
+				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}},
 				"viewport": map[string]any{
 					"type":        "object",
 					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
@@ -659,7 +712,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_screenshot",
 			Description: "Capture a clean PNG of the session's current viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). " +
-				"Returns {png_b64, current_url, width, height} and som only when include_som=true.",
+				"Returns {png_b64, screenshot_url, current_url, width, height} and som only when include_som=true. screenshot_url remains valid as the clean final frame after the session closes.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id":  map[string]any{"type": "string"},
 				"annotate":    map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
@@ -678,7 +731,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "browser_close",
-			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Idempotent — unknown ids return {closed:false}.",
+			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Returns view, a copyable browser-view component reference containing only session_id. Idempotent — unknown ids return {closed:false}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 			}, []string{"session_id"}),
@@ -856,7 +909,36 @@ func (a *App) toolSettingsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if db == nil {
 		return nil, fmt.Errorf("computer settings unavailable")
 	}
-	settings, err := dbUpdateSettings(db, args)
+	patch := make(map[string]any, len(args))
+	for key, value := range args {
+		patch[key] = value
+	}
+	current, err := dbGetSettings(db)
+	if err != nil {
+		return nil, err
+	}
+	mode := current.DefaultProxyMode
+	if raw, ok := patch["default_proxy_mode"].(string); ok {
+		mode = normalizeProxyMode(raw)
+	}
+	profileRef := current.DefaultProxyProfile
+	if raw, ok := patch["default_proxy_profile_id"].(string); ok {
+		profileRef = strings.TrimSpace(raw)
+	}
+	if mode == "profile" {
+		profile, err := getProxyProfileByReference(db, profileRef)
+		if err != nil {
+			return nil, err
+		}
+		if !profile.Enabled {
+			return nil, fmt.Errorf("proxy profile %q is disabled", profile.Name)
+		}
+		if _, err := boundProxyConnection(ctx, profile); err != nil {
+			return nil, err
+		}
+		patch["default_proxy_profile_id"] = profile.ID
+	}
+	settings, err := dbUpdateSettings(db, patch)
 	if err != nil {
 		return nil, err
 	}
@@ -1007,6 +1089,7 @@ func (a *App) toolBrowserSwitchTab(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err := tc.SwitchTab(tabID); err != nil {
 		return nil, fmt.Errorf("switch_tab: %w", err)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "switch_tab"
 	payload["tab_id"] = tabID
@@ -1026,6 +1109,7 @@ func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := tc.CloseTab(tabID); err != nil {
 		return nil, fmt.Errorf("close_tab: %w", err)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	payload := a.sessionEventPayload(id, sess)
 	payload["action"] = "close_tab"
 	payload["tab_id"] = tabID
@@ -1173,6 +1257,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if err != nil {
 		return nil, err
 	}
+	presentationOptions, err := presentation.ForMode(strings.TrimSpace(stringArg(args, "presentation_mode")))
+	if err != nil {
+		return nil, err
+	}
 
 	width, height := 0, 0
 	if vp, ok := args["viewport"].(map[string]any); ok {
@@ -1186,6 +1274,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	}
 	if rc.Backend != "" {
 		backend = rc.Backend
+	}
+	proxyPolicy, err := a.resolveSessionProxy(ctx, args, backend, rc.AppContextID)
+	if err != nil {
+		return nil, err
 	}
 
 	requestedBackendSessionID := firstNonEmpty(
@@ -1217,12 +1309,18 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		Persist:       rc.Persist,
 		SessionID:     requestedBackendSessionID,
 		Timeout:       intArg(args, "timeout"),
-		Proxy:         boolPtrArg(args, "proxy"),
-		ProxyCountry:  stringArg(args, "proxy_country"),
+		Proxy:         proxyPolicy.Managed,
+		ProxyCountry:  proxyPolicy.ManagedCountry,
+		ExternalProxy: proxyPolicy.External,
 	}
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
 			_ = comp.Close()
+			if proxyPolicy.External != nil {
+				// Cloud APIs may echo a rejected proxy URL in their error body.
+				// Keep credentials out of agent-visible tool errors.
+				return nil, fmt.Errorf("OpenSession: backend %q could not open with proxy profile %q", backend, proxyPolicy.State.ProfileName)
+			}
 			if resume && requestedBackendSessionID != "" {
 				return nil, providerAttachError(backend, requestedBackendSessionID, err)
 			}
@@ -1246,12 +1344,14 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	sess := &session{
 		comp:             comp,
 		backend:          backend,
+		presentation:     presentationOptions,
 		backendSessionID: backendSessionID(comp),
 		appContextID:     rc.AppContextID,
 		contextName:      rc.ContextName,
 		initialURL:       openOpts.URL,
 		persist:          rc.Persist,
 		timeout:          intArg(args, "timeout"),
+		proxy:            proxyPolicy.State,
 		openedAt:         now,
 		lastUsed:         now,
 	}
@@ -1264,6 +1364,10 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		return nil, errors.New("computer session history is unavailable")
 	}
 	if err := dbPutSession(ctx.AppDB(), sessionRecord(id, sess, "active", "", nil)); err != nil {
+		_ = comp.Close()
+		return nil, err
+	}
+	if err := dbAppendNavigation(ctx.AppDB(), id, currentURL(comp), activeTabTitle(comp), now); err != nil {
 		_ = comp.Close()
 		return nil, err
 	}
@@ -1324,6 +1428,7 @@ type sessionInfo struct {
 	SessionID          string             `json:"session_id"`
 	BackendSessionID   string             `json:"backend_session_id,omitempty"`
 	Backend            string             `json:"backend"`
+	PresentationMode   string             `json:"presentation_mode,omitempty"`
 	Status             string             `json:"status"`
 	RecordingSupported bool               `json:"recording_supported"`
 	RecordingStatus    string             `json:"recording_status"`
@@ -1345,6 +1450,7 @@ type sessionInfo struct {
 	LastUsedAt         string             `json:"last_used_at"`
 	ClosedAt           string             `json:"closed_at,omitempty"`
 	CloseReason        string             `json:"close_reason,omitempty"`
+	Proxy              SessionProxyState  `json:"proxy"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1361,23 +1467,25 @@ func (a *App) listSessions() []sessionInfo {
 		id           string
 		comp         backends.Computer
 		backend      string
+		presentation backends.PresentationOptions
 		appContextID string
 		contextName  string
 		persist      bool
 		timeout      int
+		proxy        SessionProxyState
 		opened       time.Time
 		used         time.Time
 	}
 	a.reg.mu.Lock()
 	rows := make([]frozen, 0, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, opened: s.openedAt, used: s.lastUsed})
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, presentation: s.presentation, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, proxy: s.proxy, opened: s.openedAt, used: s.lastUsed})
 	}
 	a.reg.mu.Unlock()
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, openedAt: r.opened, lastUsed: r.used}))
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, presentation: r.presentation, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, proxy: r.proxy, openedAt: r.opened, lastUsed: r.used}))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].OpenedAt > out[j].OpenedAt })
 	return out
@@ -1432,6 +1540,14 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 		LastUsedAt:         row.UpdatedAt,
 		ClosedAt:           closedAt,
 		CloseReason:        row.CloseReason,
+		Proxy: SessionProxyState{
+			Mode:        row.ProxyMode,
+			Provider:    row.ProxyProvider,
+			ProfileID:   row.ProxyProfileID,
+			ProfileName: row.ProxyProfileName,
+			Country:     row.ProxyCountry,
+			StickyScope: row.ProxyStickyScope,
+		},
 	}
 }
 
@@ -1446,6 +1562,7 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		SessionID:          id,
 		BackendSessionID:   sessionBackendID(s),
 		Backend:            s.backend,
+		PresentationMode:   firstNonEmpty(s.presentation.Mode, "fast"),
 		Status:             "active",
 		RecordingSupported: recordingSupported(s.backend),
 		RecordingStatus:    activeRecordingStatus(s.backend),
@@ -1465,34 +1582,49 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		Height:             disp.Height,
 		OpenedAt:           s.openedAt.UTC().Format(time.RFC3339),
 		LastUsedAt:         s.lastUsed.UTC().Format(time.RFC3339),
+		Proxy:              s.proxy,
 	}
 }
 
 func (a *App) sessionOutput(id string, s *session) map[string]any {
 	info := a.sessionInfo(id, s)
 	return map[string]any{
-		"session_id":          info.SessionID,
-		"backend_session_id":  info.BackendSessionID,
-		"backend":             info.Backend,
-		"status":              info.Status,
-		"recording_supported": info.RecordingSupported,
-		"recording_status":    info.RecordingStatus,
-		"context_id":          info.ContextID,
-		"app_context_id":      info.AppContextID,
-		"context_name":        info.ContextName,
-		"persist":             info.Persist,
-		"timeout_seconds":     info.TimeoutSeconds,
-		"provider_expires_at": info.ProviderExpiresAt,
-		"current_url":         info.CurrentURL,
-		"debug_url":           info.DebugURL,
-		"stream_url":          info.StreamURL,
-		"active_tab_id":       info.ActiveTabID,
-		"tabs":                info.Tabs,
-		"tab_count":           info.TabCount,
-		"width":               info.Width,
-		"height":              info.Height,
-		"opened_at":           info.OpenedAt,
-		"last_used_at":        info.LastUsedAt,
+		"session_id":                    info.SessionID,
+		"backend_session_id":            info.BackendSessionID,
+		"backend":                       info.Backend,
+		"presentation_mode":             info.PresentationMode,
+		"presentation_cursor_supported": info.Backend != "service",
+		"status":                        info.Status,
+		"recording_supported":           info.RecordingSupported,
+		"recording_status":              info.RecordingStatus,
+		"context_id":                    info.ContextID,
+		"app_context_id":                info.AppContextID,
+		"context_name":                  info.ContextName,
+		"persist":                       info.Persist,
+		"timeout_seconds":               info.TimeoutSeconds,
+		"provider_expires_at":           info.ProviderExpiresAt,
+		"current_url":                   info.CurrentURL,
+		"debug_url":                     info.DebugURL,
+		"stream_url":                    info.StreamURL,
+		"active_tab_id":                 info.ActiveTabID,
+		"tabs":                          info.Tabs,
+		"tab_count":                     info.TabCount,
+		"width":                         info.Width,
+		"height":                        info.Height,
+		"opened_at":                     info.OpenedAt,
+		"last_used_at":                  info.LastUsedAt,
+		"proxy":                         info.Proxy,
+		"view":                          browserViewReference(id),
+	}
+}
+
+func browserViewReference(sessionID string) map[string]any {
+	return map[string]any{
+		"app":  "computer",
+		"name": "browser-view",
+		"props": map[string]any{
+			"session_id": sessionID,
+		},
 	}
 }
 
@@ -1509,11 +1641,12 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	m := out.(map[string]any)
 	res := map[string]any{
-		"png_b64":     m["screenshot_b64"],
-		"screenshot":  m["screenshot"],
-		"current_url": m["current_url"],
-		"width":       m["width"],
-		"height":      m["height"],
+		"png_b64":        m["screenshot_b64"],
+		"screenshot":     m["screenshot"],
+		"screenshot_url": sessionResourceURL(ctx, stringArg(args, "session_id"), "screenshot"),
+		"current_url":    m["current_url"],
+		"width":          m["width"],
+		"height":         m["height"],
 	}
 	if som, ok := m["som"]; ok {
 		res["som"] = som
@@ -1795,20 +1928,21 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	act := backends.Action{
-		Type:        action,
-		Label:       intArg(args, "label"),
-		Selector:    stringArg(args, "selector"),
-		Text:        stringArg(args, "text"),
-		Value:       stringArg(args, "value"),
-		Texts:       stringSliceArg(args, "texts"),
-		Values:      stringSliceArg(args, "values"),
-		Mode:        stringArg(args, "mode"),
-		NewlineMode: stringArg(args, "newline_mode"),
-		Key:         stringArg(args, "key"),
-		Direction:   stringArg(args, "direction"),
-		Amount:      intArg(args, "amount"),
-		URL:         strings.TrimSpace(stringArg(args, "url")),
-		Duration:    intArg(args, "duration"),
+		Type:         action,
+		Label:        intArg(args, "label"),
+		Selector:     stringArg(args, "selector"),
+		Text:         stringArg(args, "text"),
+		Value:        stringArg(args, "value"),
+		Texts:        stringSliceArg(args, "texts"),
+		Values:       stringSliceArg(args, "values"),
+		Mode:         stringArg(args, "mode"),
+		NewlineMode:  stringArg(args, "newline_mode"),
+		Key:          stringArg(args, "key"),
+		Direction:    stringArg(args, "direction"),
+		Amount:       intArg(args, "amount"),
+		URL:          strings.TrimSpace(stringArg(args, "url")),
+		Duration:     intArg(args, "duration"),
+		Presentation: sess.presentation,
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
 		act.Checked = checked
@@ -1919,6 +2053,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			fmt.Sprintf("browser remained at %q", afterURL),
 			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
 	}
+	a.recordSessionNavigation(ctx, id, sess)
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
 	for k, v := range uploadMeta {
@@ -2030,7 +2165,11 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	sess, ok := a.reg.remove(id)
 	if !ok {
-		return map[string]any{"closed": false}, nil
+		return map[string]any{
+			"closed":     false,
+			"session_id": id,
+			"view":       browserViewReference(id),
+		}, nil
 	}
 	sess.actionMu.Lock()
 	defer sess.actionMu.Unlock()
@@ -2043,6 +2182,7 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"session_id":       id,
 		"status":           row.Status,
 		"recording_status": row.RecordingStatus,
+		"view":             browserViewReference(id),
 	}, nil
 }
 
@@ -2418,6 +2558,12 @@ func sessionRecord(id string, s *session, status, closeReason string, closedAt *
 		RecordingStatus:  activeRecordingStatus(s.backend),
 		OpenedAt:         s.openedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt:        now.Format(time.RFC3339Nano),
+		ProxyMode:        s.proxy.Mode,
+		ProxyProvider:    s.proxy.Provider,
+		ProxyProfileID:   s.proxy.ProfileID,
+		ProxyProfileName: s.proxy.ProfileName,
+		ProxyCountry:     s.proxy.Country,
+		ProxyStickyScope: s.proxy.StickyScope,
 	}
 	if s.comp != nil {
 		display := s.comp.DisplaySize()
@@ -2440,6 +2586,12 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	}
 	payload := a.sessionEventPayload(id, s)
 	active := sessionRecord(id, s, "active", "", nil)
+	if shot, err := screenshotWithOptions(s.comp, false); err == nil && len(shot) > 0 {
+		active.FinalScreenshot = shot
+		active.FinalScreenshotMIME = imageMIME(shot)
+	} else if err != nil && ctx != nil {
+		ctx.Logger().Warn("final browser screenshot failed", "session_id", id, "err", err.Error())
+	}
 	var persistErr error
 	if ctx == nil || ctx.AppDB() == nil {
 		persistErr = errors.New("computer session history is unavailable")
@@ -2486,6 +2638,7 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 		"session_id":          info.SessionID,
 		"backend_session_id":  info.BackendSessionID,
 		"backend":             info.Backend,
+		"presentation_mode":   info.PresentationMode,
 		"status":              info.Status,
 		"recording_supported": info.RecordingSupported,
 		"recording_status":    info.RecordingStatus,
@@ -2503,6 +2656,7 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 		"height":              info.Height,
 		"opened_at":           info.OpenedAt,
 		"last_used_at":        info.LastUsedAt,
+		"proxy":               info.Proxy,
 	}
 }
 
@@ -2639,6 +2793,7 @@ func reapedSessionEventPayload(row reapedSession) map[string]any {
 		"opened_at":           row.OpenedAt.UTC().Format(time.RFC3339),
 		"last_used_at":        row.LastUsedAt.UTC().Format(time.RFC3339),
 		"idle_seconds":        int(row.Idle.Seconds()),
+		"proxy":               row.Proxy,
 	}
 }
 
@@ -2668,8 +2823,11 @@ func providerExpiresAt(opened time.Time, timeoutSeconds int) string {
 
 func settingsEventPayload(settings ComputerSettings) map[string]any {
 	return map[string]any{
-		"default_backend": settings.DefaultBackend,
-		"lock_backend":    settings.LockBackend,
+		"default_backend":          settings.DefaultBackend,
+		"lock_backend":             settings.LockBackend,
+		"default_proxy_mode":       settings.DefaultProxyMode,
+		"default_proxy_profile_id": settings.DefaultProxyProfile,
+		"lock_proxy_policy":        settings.LockProxyPolicy,
 	}
 }
 
@@ -3022,6 +3180,25 @@ func streamURL(c backends.Computer) string {
 		return stream.StreamURL()
 	}
 	return ""
+}
+
+func activeTabTitle(c backends.Computer) string {
+	activeID := activeTabID(c)
+	for _, tab := range tabsFor(c) {
+		if tab.ID == activeID || tab.Active {
+			return tab.Title
+		}
+	}
+	return ""
+}
+
+func (a *App) recordSessionNavigation(ctx *sdk.AppCtx, id string, sess *session) {
+	if ctx == nil || ctx.AppDB() == nil || sess == nil || sess.comp == nil {
+		return
+	}
+	if err := dbAppendNavigation(ctx.AppDB(), id, currentURL(sess.comp), activeTabTitle(sess.comp), time.Now()); err != nil {
+		ctx.Logger().Warn("computer navigation history failed", "session_id", id, "err", err.Error())
+	}
 }
 
 func tabsFor(c backends.Computer) []backends.TabInfo {
@@ -3989,11 +4166,8 @@ func normalizeExtractOptions(body extractRequest) (extractOptions, error) {
 	return opts, nil
 }
 
-// handleSessionScreenshot streams the session's current screenshot inline.
-// Path is /sessions/{id}/screenshot — strip the prefix + suffix to
-// get id. Returns 404 if the session is unknown; the panel will then
-// stop polling that id on its own when the session disappears from
-// the list.
+// handleSessionScreenshot streams the current clean frame for an active
+// session and the durable final frame after the browser has closed.
 func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	rest := pathSessionID(r.URL.Path, "/screenshot")
 	if rest == "" {
@@ -4002,7 +4176,20 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := a.reg.get(rest)
 	if !ok {
-		httpErr(w, http.StatusNotFound, "session not found")
+		ctx := appCtxForRequest(r, nil)
+		if ctx == nil || ctx.AppDB() == nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		row, err := dbGetSession(ctx.AppDB(), rest)
+		if err != nil || len(row.FinalScreenshot) == 0 {
+			httpErr(w, http.StatusNotFound, "session screenshot not found")
+			return
+		}
+		contentType := firstNonEmpty(row.FinalScreenshotMIME, imageMIME(row.FinalScreenshot))
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(row.FinalScreenshot)
 		return
 	}
 	sess.actionMu.Lock()
@@ -4025,6 +4212,94 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 	// through.
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(shot)
+}
+
+func (a *App) handleSessionPresentation(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/presentation")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	ctx := appCtxForRequest(r, nil)
+	var info sessionInfo
+	if sess, ok := a.reg.get(id); ok {
+		sess.actionMu.Lock()
+		info = a.sessionInfo(id, sess)
+		sess.actionMu.Unlock()
+	} else {
+		if ctx == nil || ctx.AppDB() == nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		row, err := dbGetSession(ctx.AppDB(), id)
+		if err != nil {
+			httpErr(w, http.StatusNotFound, "session not found")
+			return
+		}
+		info = historicalSessionInfo(row)
+	}
+	writeJSON(w, map[string]any{
+		"session":        info,
+		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
+		"stream_url":     sessionResourceURL(ctx, id, "stream"),
+		"timeline_url":   sessionResourceURL(ctx, id, "timeline"),
+		"recording_url":  sessionResourceURL(ctx, id, "recording"),
+	})
+}
+
+func (a *App) handleSessionTimeline(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/timeline")
+	ctx := appCtxForRequest(r, nil)
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	if ctx == nil || ctx.AppDB() == nil {
+		httpErr(w, http.StatusServiceUnavailable, "session history unavailable")
+		return
+	}
+	steps, err := dbListNavigation(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"session_id": id, "steps": steps})
+}
+
+func (a *App) handleSessionStream(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/stream")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	ctx := appCtxForRequest(r, nil)
+	if sess, ok := a.reg.get(id); ok {
+		sess.actionMu.Lock()
+		liveURL := streamURL(sess.comp)
+		backend := sess.backend
+		sess.actionMu.Unlock()
+		if liveURL != "" {
+			writeJSON(w, map[string]any{"kind": "iframe", "url": liveURL, "backend": backend, "status": "active"})
+			return
+		}
+		writeJSON(w, map[string]any{"kind": "snapshot", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": backend, "status": "active"})
+		return
+	}
+	if ctx == nil || ctx.AppDB() == nil {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	row, err := dbGetSession(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "session not found")
+		return
+	}
+	writeJSON(w, map[string]any{"kind": "final", "url": sessionResourceURL(ctx, id, "screenshot"), "backend": row.Backend, "status": row.Status})
+}
+
+func sessionResourceURL(ctx *sdk.AppCtx, sessionID, resource string) string {
+	path := "/api/apps/computer/sessions/" + url.PathEscape(sessionID) + "/" + strings.Trim(resource, "/")
+	return withRecordingQuery(path, ctx, "", "")
 }
 
 func pathSessionID(path, suffix string) string {

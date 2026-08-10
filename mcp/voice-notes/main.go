@@ -19,10 +19,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: voice-notes
 display_name: Voice Notes
-version: 0.1.3
+version: 0.1.4
 description: Lightweight audio notes backed by Storage with optional Deepgram transcription.
 author: Apteva
-icon: icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

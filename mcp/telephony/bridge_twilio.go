@@ -167,6 +167,8 @@ type realtimeBridgeControl struct {
 	ResponseID string `json:"response_id,omitempty"`
 	ItemID     string `json:"item_id,omitempty"`
 	AudioEndMS int    `json:"audio_end_ms,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 func parseRealtimeBridgeControl(data []byte) (realtimeBridgeControl, bool) {
@@ -252,7 +254,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	inputResampler := newPCMResampler(8000, 24000)
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := newTwilioPlaybackTracker()
-	speechDetector := newPCMSpeechStartDetector()
+	audioFrontend := newCarrierAudioFrontend(8000)
 	var coreWriteMu sync.Mutex
 	defer func() {
 		select {
@@ -305,10 +307,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					continue
 				}
-				pcm8 := ulawToPCM16(mu)
-				speechStarted := speechDetector.observe(pcm8)
-				localSpeechStarted := speechStarted && playback.hasPending()
-				pcm24 := inputResampler.Process(pcm8)
+				processed := audioFrontend.process(ulawToPCM16(mu))
+				localSpeechStarted := processed.SpeechStarted && playback.hasPending()
+				if localSpeechStarted {
+					audioFrontend.markLocalSignal()
+				}
+				pcm24 := inputResampler.Process(processed.PCM)
 				if len(pcm24) == 0 {
 					continue
 				}
@@ -323,7 +327,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if localSpeechStarted {
-					globalCtx.Logger().Info("local barge-in detected", "provider", "twilio", "call", callID)
+					logLocalBargeIn(globalCtx.Logger(), "twilio", callID, processed)
 				}
 			case "mark":
 				if f.Mark == nil {
@@ -367,7 +371,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	})
 	defer func() {
-		globalCtx.Logger().Info("twilio media bridge metrics", "call", callID, "max_queued_ms", maxQueuedMS)
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "twilio", carrierCodecPCMU8, maxQueuedMS)
 	}()
 
 	var nextFrame realtimeBridgeControl
@@ -391,11 +395,12 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				nextFrame = control
 			case "interrupt":
 				nextFrame = realtimeBridgeControl{}
+				interruptSource := audioFrontend.markInterrupt(control.Source)
 				clearedMS, err := pacer.clear(ctx)
 				if err != nil {
 					return
 				}
-				globalCtx.Logger().Info("twilio playback cleared", "call", callID, "queued_ms", clearedMS)
+				globalCtx.Logger().Info("twilio playback cleared", "call", callID, "source", interruptSource, "queued_ms", clearedMS)
 			}
 			continue
 		}

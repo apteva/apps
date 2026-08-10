@@ -58,6 +58,7 @@ func runStep(ctx context.Context, app *sdk.AppCtx, step *StepDef, renderedInput 
 // ─── http ──────────────────────────────────────────────────────────
 
 func runHTTPStep(ctx context.Context, step *StepDef, input any) stepResult {
+	appRelative := step.URL == ""
 	url, err := resolveHTTPURL(step)
 	if err != nil {
 		return stepResult{Status: "error", Error: err.Error()}
@@ -87,10 +88,9 @@ func runHTTPStep(ctx context.Context, step *StepDef, input any) stepResult {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	// Forward the install token so app-relative dispatches reach
-	// the target sidecar with the platform's bearer. Same pattern
-	// as jobs.runHTTPTarget.
-	if t := os.Getenv("APTEVA_APP_TOKEN"); t != "" {
+	// Forward the install token only to app-relative gateway targets.
+	// Sending it to an explicit external URL leaks the sidecar bearer.
+	if t := os.Getenv("APTEVA_APP_TOKEN"); appRelative && t != "" {
 		req.Header.Set("Authorization", "Bearer "+t)
 	}
 

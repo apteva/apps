@@ -4,7 +4,9 @@ go 1.25.0
 
 require (
 	github.com/anacrolix/torrent v1.58.0
-	github.com/apteva/app-sdk v0.4.0
+	github.com/apteva/app-sdk v0.43.0
+	golang.org/x/sys v0.42.0
+	golang.org/x/time v0.0.0-20220609170525-579cf78fd858
 	modernc.org/sqlite v1.50.0
 )
 
@@ -81,8 +83,6 @@ require (
 	golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect
 	golang.org/x/net v0.29.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/time v0.0.0-20220609170525-579cf78fd858 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
 	modernc.org/libc v1.72.0 // indirect

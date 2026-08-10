@@ -38,6 +38,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("gigs requires a db block")
 	}
 	globalCtx = ctx
+	go reconcileGigPublicDomains(ctx)
 	ctx.Logger().Info("gigs mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
@@ -82,6 +83,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/workers", Handler: a.handleHTTPWorkersCollection},
 		{Pattern: "/workers/", Handler: a.handleHTTPWorkerItem},
 		{Pattern: "/skills", Handler: a.handleHTTPSkills},
+
+		// Public worker-link hostnames. These operator endpoints remain
+		// authenticated; only /worker/ is public.
+		{Pattern: "/public-domains", Handler: a.handleHTTPPublicDomainsCollection},
+		{Pattern: "/public-domains/", Handler: a.handleHTTPPublicDomainItem},
 
 		// Instructions.
 		{Pattern: "/instructions", Handler: a.handleHTTPInstructionsCollection},

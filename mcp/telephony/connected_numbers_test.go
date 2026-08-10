@@ -1,0 +1,205 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
+)
+
+func TestParseOwnedCarrierNumbers(t *testing.T) {
+	tests := []struct {
+		provider string
+		raw      string
+		id       string
+		phone    string
+		feature  string
+	}{
+		{
+			provider: "twilio",
+			raw:      `{"incoming_phone_numbers":[{"sid":"PN1","phone_number":"+13502231050","friendly_name":"Main","capabilities":{"voice":true,"sms":true}}]}`,
+			id:       "PN1", phone: "+13502231050", feature: "voice",
+		},
+		{
+			provider: "signalwire",
+			raw:      `{"incoming_phone_numbers":[{"sid":"PN2","phone_number":"+14155550101","capabilities":{"voice":true}}]}`,
+			id:       "PN2", phone: "+14155550101", feature: "voice",
+		},
+		{
+			provider: "telnyx",
+			raw:      `{"data":[{"id":"number-1","phone_number":"+3725550100","features":[{"name":"voice"},{"name":"sms"}],"connection_id":"app-1"}]}`,
+			id:       "number-1", phone: "+3725550100", feature: "sms",
+		},
+		{
+			provider: "plivo",
+			raw:      `{"objects":[{"number":"34648257793","voice_enabled":true,"application":"/v1/Account/test/Application/app-1/"}]}`,
+			id:       "34648257793", phone: "+34648257793", feature: "voice",
+		},
+		{
+			provider: "vonage",
+			raw:      `{"numbers":[{"msisdn":"33123456789","features":["VOICE"]}]}`,
+			id:       "33123456789", phone: "+33123456789", feature: "voice",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.provider, func(t *testing.T) {
+			numbers, err := parseOwnedCarrierNumbers(test.provider, json.RawMessage(test.raw))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(numbers) != 1 {
+				t.Fatalf("numbers=%#v", numbers)
+			}
+			got := numbers[0]
+			if got.ProviderNumberID != test.id || got.PhoneNumber != test.phone || !containsString(got.Capabilities, test.feature) {
+				t.Fatalf("unexpected normalized number: %#v", got)
+			}
+		})
+	}
+}
+
+func TestConnectedNumbersEndpointJoinsProjectRouteAndHidesSecrets(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": float64(10)},
+		connection: &sdk.PlatformConnection{
+			ID: 10, AppSlug: "twilio", Status: "connected", ProjectID: "project-a",
+		},
+		credentials: &sdk.ConnectionCredentials{
+			ConnectionID: 10, Slug: "twilio", Fields: map[string]string{"auth_token": "test-auth-token"},
+		},
+		agents: map[int64]*sdk.PlatformAgent{
+			7: {ID: 7, Name: "Standardiste Test", Status: "running", ProjectID: "project-a"},
+		},
+		integrationResponse: map[string]json.RawMessage{},
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previousCtx := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previousCtx })
+	app := &App{installID: 42}
+
+	route := routeRow{
+		ID: "route-staging", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 10,
+		PhoneNumber: "+13502231050", PhoneNumberSID: "PN1", AgentID: 7, Enabled: true,
+		AnswerMode: answerModeRealtimeImmediate, AutoVoice: "Kore", Secret: "route-secret",
+		CreatedAt: "2026-07-24T10:00:00Z", UpdatedAt: "2026-07-24T10:00:00Z",
+		RecordingMode: recordingModeInherit,
+	}
+	if err := app.db().insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	otherProject := route
+	otherProject.ID = "route-other-project"
+	otherProject.ProjectID = "project-b"
+	otherProject.PhoneNumber = "+14155550199"
+	otherProject.PhoneNumberSID = "PN-other"
+	if err := app.db().insertRoute(otherProject); err != nil {
+		t.Fatal(err)
+	}
+	platform.integrationResponse["list_phone_numbers"] = json.RawMessage(`{
+		"incoming_phone_numbers": [{
+			"sid": "PN1",
+			"phone_number": "+13502231050",
+			"friendly_name": "US reception",
+			"capabilities": {"voice": true, "sms": true},
+			"voice_url": ` + quoteJSON(app.inboundRouteURL(route)) + `,
+			"voice_method": "POST",
+			"status_callback": ` + quoteJSON(app.twilioRouteStatusURL(route)) + `,
+			"status_callback_method": "POST"
+		}]
+	}`)
+
+	request := httptest.NewRequest(http.MethodPost, "/numbers/connected?project_id=project-a", strings.NewReader(`{}`))
+	recorder := httptest.NewRecorder()
+	app.handleNumbers(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Provider string                `json:"provider"`
+		Numbers  []connectedNumberView `json:"numbers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Provider != "twilio" || len(response.Numbers) != 1 {
+		t.Fatalf("unexpected response: %#v", response)
+	}
+	number := response.Numbers[0]
+	if number.PhoneNumber != "+13502231050" || number.Route == nil {
+		t.Fatalf("number was not joined to its route: %#v", number)
+	}
+	if number.Route.AgentName != "Standardiste Test" || number.Route.AnswerMode != answerModeRealtimeImmediate || number.Route.Voice != "Kore" {
+		t.Fatalf("route details missing: %#v", number.Route)
+	}
+	if number.VoiceWebhookStatus != webhookConfigured || number.StatusCallbackState != webhookConfigured || number.RoutingHealth != "healthy" {
+		t.Fatalf("unexpected webhook health: %#v", number)
+	}
+	body := recorder.Body.String()
+	for _, secret := range []string{"route-secret", "/inbound/twilio/", "project-b", "+14155550199"} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("response leaked %q: %s", secret, body)
+		}
+	}
+}
+
+func TestConnectedNumbersKeepsRouteWhenCarrierNumberIsMissing(t *testing.T) {
+	route := routeRow{
+		ID: "route-missing", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 10,
+		PhoneNumber: "+13502231050", PhoneNumberSID: "PN-missing", AgentID: 7, Enabled: true,
+		AnswerMode: answerModeAgent, Secret: "secret",
+	}
+	app := &App{installID: 42}
+	view := app.connectedNumberView(nil, "twilio", ownedNumber{
+		PhoneNumber: route.PhoneNumber, ProviderNumberID: route.PhoneNumberSID, CarrierStatus: "not_found",
+	}, &route, func(int64) string { return "Reception" })
+	if view.Route == nil || view.CarrierStatus != "not_found" || view.RoutingHealth != "degraded" {
+		t.Fatalf("missing carrier number route was hidden: %#v", view)
+	}
+}
+
+func TestConnectedNumbersPanelContract(t *testing.T) {
+	source := readTestFile(t, "ui/CallsPanel.tsx")
+	for _, required := range []string{
+		`endpoint("/numbers/connected")`,
+		"Connected numbers",
+		"Find a number",
+		"Assigned agent",
+		"Routing health",
+		"setOffers([])",
+		"void loadConnected()",
+	} {
+		if !strings.Contains(source, required) {
+			t.Fatalf("panel missing %q", required)
+		}
+	}
+	manifest := (&App{}).Manifest()
+	foundPermission := false
+	for _, permission := range manifest.Requires.Permissions {
+		if permission == sdk.PermInstancesRead {
+			foundPermission = true
+		}
+	}
+	if !foundPermission {
+		t.Fatal("platform.instances.read is required to display assigned agent names")
+	}
+}
+
+func quoteJSON(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}
+
+func readTestFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}

@@ -107,3 +107,30 @@ func TestParseAcceptsJSON(t *testing.T) {
 		t.Errorf("Name = %q", d.Name)
 	}
 }
+
+func TestParseValidatesEventTriggerWhen(t *testing.T) {
+	valid := `
+name: filtered
+trigger:
+  kind: event
+  source: tables
+  topic: row.updated
+  when: "input.data.table == 'ventes'"
+steps:
+  - { id: ack, kind: emit, topic: ack }
+`
+	if _, err := ParseDefinition([]byte(valid)); err != nil {
+		t.Fatalf("valid trigger.when rejected: %v", err)
+	}
+
+	invalid := []string{
+		strings.Replace(valid, "input.data.table == 'ventes'", "ventes", 1),
+		strings.Replace(valid, "input.data.table == 'ventes'", "input.data.table = 'ventes'", 1),
+		strings.Replace(valid, "kind: event", "kind: manual", 1),
+	}
+	for _, src := range invalid {
+		if _, err := ParseDefinition([]byte(src)); err == nil {
+			t.Fatalf("invalid trigger.when accepted:\n%s", src)
+		}
+	}
+}

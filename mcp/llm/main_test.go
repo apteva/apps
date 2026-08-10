@@ -776,6 +776,165 @@ func TestProviderModelSyncCachesOpenAICompatibleModels(t *testing.T) {
 	}
 }
 
+func TestAdditionalOpenAICompatibleProviderProfiles(t *testing.T) {
+	tests := []struct {
+		provider string
+		role     string
+		slug     string
+		baseURL  string
+		keyRef   string
+	}{
+		{provider: "minimax", role: "minimax_provider", slug: "minimax-api", baseURL: "https://api.minimax.io/v1", keyRef: "minimax_api_key"},
+		{provider: "z-ai", role: "z_ai_provider", slug: "z-ai", baseURL: "https://api.z.ai/api/paas/v4", keyRef: "z_ai_api_key"},
+		{provider: "moonshot-ai", role: "moonshot_ai_provider", slug: "moonshot-ai", baseURL: "https://api.moonshot.ai/v1", keyRef: "moonshot_ai_api_key"},
+	}
+	roles := providerIntegrationRoles()
+	for _, test := range tests {
+		t.Run(test.provider, func(t *testing.T) {
+			if roles[test.provider] != test.role {
+				t.Fatalf("role=%q", roles[test.provider])
+			}
+			if got := defaultBaseURL(test.provider); got != test.baseURL {
+				t.Fatalf("base URL=%q", got)
+			}
+			if got := defaultProviderKeyRef(test.provider); got != test.keyRef {
+				t.Fatalf("key ref=%q", got)
+			}
+			if !providerConnectionCompatible(test.provider, test.slug) {
+				t.Fatalf("%s should accept %s", test.provider, test.slug)
+			}
+		})
+	}
+}
+
+func TestAdditionalBoundProvidersForwardNativeModelAndCredentials(t *testing.T) {
+	tests := []struct {
+		provider string
+		role     string
+		slug     string
+		model    string
+	}{
+		{provider: "minimax", role: "minimax_provider", slug: "minimax-api", model: "MiniMax-M3"},
+		{provider: "z-ai", role: "z_ai_provider", slug: "z-ai", model: "glm-5"},
+		{provider: "moonshot-ai", role: "moonshot_ai_provider", slug: "moonshot-ai", model: "kimi-k3"},
+	}
+	for _, test := range tests {
+		t.Run(test.provider, func(t *testing.T) {
+			var gotAuth, gotModel string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/chat/completions" {
+					t.Fatalf("path=%s", r.URL.Path)
+				}
+				gotAuth = r.Header.Get("Authorization")
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				gotModel = strArg(body, "model")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":"provider-response","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4}}`))
+			}))
+			defer upstream.Close()
+
+			platform := &llmPlatformStub{
+				identity:   &sdk.InstallIdentity{Bindings: map[string]any{test.role: float64(42)}},
+				connection: &sdk.PlatformConnection{ID: 42, AppSlug: test.slug, Status: "connected", ProjectID: "proj-test"},
+				credentials: map[int64]*sdk.ConnectionCredentials{
+					42: {ConnectionID: 42, Slug: test.slug, Fields: map[string]string{"api_key": "provider-secret"}},
+				},
+			}
+			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(platform))
+			app := &App{httpClient: upstream.Client()}
+			if err := app.OnMount(ctx); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := providerConfigFor(ctx, "proj-test", test.provider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Source != "bound_integration" || cfg.ConnectionID != 42 {
+				t.Fatalf("config=%+v", cfg)
+			}
+			cfg.BaseURL = upstream.URL
+			key, err := resolveProviderKey(ctx, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := app.callProvider(context.Background(), cfg, key, map[string]any{
+				"model":    gatewayModelID(test.provider, test.model),
+				"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotAuth != "Bearer provider-secret" || gotModel != test.model {
+				t.Fatalf("auth=%q model=%q", gotAuth, gotModel)
+			}
+			if result.RequestTokens != 9 || result.ResponseTokens != 4 {
+				t.Fatalf("result=%+v", result)
+			}
+		})
+	}
+}
+
+func TestZAIModelSyncUsesManualDiscoveryWithoutDeletingModels(t *testing.T) {
+	var requests atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer upstream.Close()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithConfig(map[string]string{"z_ai_api_key": "test"}))
+	app := &App{httpClient: upstream.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{
+		"provider": "z-ai", "base_url": upstream.URL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbProviderModelsReplace(ctx.AppDB(), "proj-test", "z-ai", []ProviderModel{
+		{Provider: "z-ai", ModelID: "glm-custom", DisplayName: "GLM Custom"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := app.syncProviderModels(ctx, "proj-test", "z-ai")
+	if len(results) != 1 || results[0].Status != "ok" || results[0].Discovery != "manual" || results[0].ModelCount != 1 {
+		t.Fatalf("results=%+v", results)
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("unexpected provider requests=%d", requests.Load())
+	}
+}
+
+func TestMoonshotModelMetadataIncludesMultimodalCapabilities(t *testing.T) {
+	models := parseProviderModels("moonshot-ai", []byte(`{"data":[{
+		"id":"kimi-k3",
+		"context_length":1000000,
+		"supports_image_in":true,
+		"supports_video_in":true,
+		"supports_reasoning":true
+	}]}`))
+	if len(models) != 1 || models[0].ContextWindow != 1000000 {
+		t.Fatalf("models=%+v", models)
+	}
+	var modalities []string
+	if err := json.Unmarshal(models[0].InputModalities, &modalities); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(modalities, ",") != "text,image,video" {
+		t.Fatalf("modalities=%v", modalities)
+	}
+	var capabilities map[string]any
+	if err := json.Unmarshal(models[0].Capabilities, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if capabilities["supports_reasoning"] != true {
+		t.Fatalf("capabilities=%v", capabilities)
+	}
+}
+
 func TestV1ModelsReturnsDiscoveredModels(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
 	app := &App{}
@@ -1254,6 +1413,7 @@ func TestEmbeddingsRouteForwardsAndRecordsRawUsage(t *testing.T) {
 }
 
 type llmPlatformStub struct {
+	tk.BasePlatformClient
 	identity           *sdk.InstallIdentity
 	credentials        map[int64]*sdk.ConnectionCredentials
 	connection         *sdk.PlatformConnection
@@ -1302,7 +1462,7 @@ func (p *llmPlatformStub) ListProjects() ([]sdk.PlatformProject, error) { return
 func (p *llmPlatformStub) SpawnRealtimeThread(sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
 	return nil, nil
 }
-func (p *llmPlatformStub) KillThread(string) error { return nil }
+func (p *llmPlatformStub) KillThread(int64, string) error { return nil }
 func (p *llmPlatformStub) PlatformInfo() (*sdk.PlatformInfo, error) {
 	return &sdk.PlatformInfo{}, nil
 }

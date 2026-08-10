@@ -262,6 +262,18 @@ func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, boun
 		}
 		return []modelEntry{}, nil
 	}
+	if bound.AppSlug == "cartesia" {
+		if kind == KindAudioTTS {
+			return cartesiaDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
+	}
+	if bound.AppSlug == "minimax-audio" {
+		if kind == KindAudioTTS {
+			return miniMaxDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
+	}
 	cacheKind := kind
 	if capability != "" {
 		cacheKind = kind + ":" + capability
@@ -662,6 +674,27 @@ func deepgramDefaultModels() []modelEntry {
 	return out
 }
 
+func cartesiaDefaultModels() []modelEntry {
+	return []modelEntry{
+		{ID: "sonic-3.5", Label: "Sonic 3.5"},
+		{ID: "sonic-3", Label: "Sonic 3"},
+		{ID: "sonic-latest", Label: "Sonic Latest"},
+	}
+}
+
+func miniMaxDefaultModels() []modelEntry {
+	return []modelEntry{
+		{ID: "speech-2.8-hd", Label: "Speech 2.8 HD", PromptCharLimit: 10000},
+		{ID: "speech-2.8-turbo", Label: "Speech 2.8 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-2.6-hd", Label: "Speech 2.6 HD", PromptCharLimit: 10000},
+		{ID: "speech-2.6-turbo", Label: "Speech 2.6 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-02-hd", Label: "Speech 02 HD", PromptCharLimit: 10000},
+		{ID: "speech-02-turbo", Label: "Speech 02 Turbo", PromptCharLimit: 10000},
+		{ID: "speech-01-hd", Label: "Speech 01 HD", PromptCharLimit: 10000},
+		{ID: "speech-01-turbo", Label: "Speech 01 Turbo", PromptCharLimit: 10000},
+	}
+}
+
 // buildModelEntryFromVeniceSpec parses a Venice model object into the
 // uniform modelEntry the panel renders. Venice mixes naming
 // conventions (image models use camelCase like aspectRatios /
@@ -683,6 +716,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 				DefaultAspect     string   `json:"defaultAspectRatio"`
 				DefaultResolution string   `json:"defaultResolution"`
 				PromptCharLimit   int      `json:"promptCharacterLimit"`
+				PromptLimitSnake  int      `json:"prompt_character_limit"`
 				Steps             struct {
 					Default int `json:"default"`
 					Max     int `json:"max"`
@@ -704,6 +738,9 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 	_ = json.Unmarshal(raw, &spec)
 
 	c := spec.ModelSpec.Constraints
+	if c.PromptCharLimit == 0 {
+		c.PromptCharLimit = c.PromptLimitSnake
+	}
 	aspects := c.AspectRatiosCamel
 	if len(aspects) == 0 {
 		aspects = c.AspectRatiosSnake
@@ -810,7 +847,7 @@ func veniceMaxSourceImages(id string) int {
 		return 3
 	}
 	if strings.Contains(lower, "reference-to-video") {
-		return 9
+		return veniceReferenceProfile(id).MaxImages
 	}
 	if strings.Contains(lower, "image-to-video") {
 		return 1

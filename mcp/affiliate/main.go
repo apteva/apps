@@ -28,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.11
+version: 0.1.14
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -154,10 +154,10 @@ config_schema:
     type: text
     default: "joined"
     label: Awin relationship
-  - name: awin_date_type
+  - name: awin_region
     type: text
-    default: "transaction"
-    label: Awin date type
+    default: ""
+    label: Awin advertiser region
   - name: cj_advertiser_ids
     type: text
     default: "joined"
@@ -1792,7 +1792,7 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		}
 		aggregated := map[string]StatInput{}
 		for _, call := range calls {
-			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results"})
+			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "result", "results"})
 			if err != nil {
 				return nil, err
 			}
@@ -2071,11 +2071,15 @@ func executeProviderPages(ctx *sdk.AppCtx, call providerCall, recordKeys []strin
 	pages := make([]providerPage, 0, min(maxPages, 8))
 	hasMore := false
 	for pageIndex := 0; pageIndex < maxPages; pageIndex++ {
-		out := map[string]any{}
+		var decoded any
 		pageCall := call
 		pageCall.Input = input
-		if err := executeProviderCall(ctx, pageCall, &out); err != nil {
+		if err := executeProviderCall(ctx, pageCall, &decoded); err != nil {
 			return nil, err
+		}
+		out, ok := decoded.(map[string]any)
+		if !ok {
+			out = map[string]any{"data": decoded}
 		}
 		records := collectMaps(out, recordKeys...)
 		pages = append(pages, providerPage{Output: out, Records: records})
@@ -2245,14 +2249,20 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		}), Pagination: &providerPagination{Mode: "page", Param: "Page", PageSize: boundedLimit(args, 100, 1000), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "awin":
 		publisherID := requiredArgOrConfig(args, "publisherId", "awin_publisher_id")
-		if publisherID == "" || from == "" || to == "" {
-			return nil, errors.New("awin stats require publisherId, from, and to")
+		region := requiredArgOrConfig(args, "region", "awin_region")
+		if publisherID == "" || region == "" || from == "" || to == "" {
+			return nil, errors.New("awin stats require publisherId, region, from, and to; set awin_publisher_id and awin_region or pass both")
 		}
-		return []providerCall{{Role: "awin", Tool: "transactions_list", Input: compactMap(map[string]any{
-			"publisherId": publisherID,
-			"startDate":   from,
-			"endDate":     to,
-			"dateType":    argOrConfig(args, "dateType", "awin_date_type", "transaction"),
+		return []providerCall{{Role: "awin", Tool: "campaign_performance_report", Input: compactMap(map[string]any{
+			"publisherId":                   publisherID,
+			"startDate":                     from,
+			"endDate":                       to,
+			"region":                        strings.ToUpper(region),
+			"advertiserIds":                 strArg(args, "advertiserIds"),
+			"campaign":                      strArg(args, "campaign"),
+			"includeNumbersWithoutCampaign": true,
+			"interval":                      "day",
+			"timezone":                      firstNonEmpty(strArg(args, "timezone"), "UTC"),
 		})}}, nil
 	case "cj-affiliate":
 		query := strArg(args, "query")
@@ -2455,6 +2465,18 @@ func pricingSummaryFromMap(m map[string]any) string {
 }
 
 func statInputFromMap(network string, m map[string]any) StatInput {
+	if canonicalNetworkKey(network) == "awin" && firstAny(m, "quantity") != nil {
+		return StatInput{
+			Date:            normalizeStatDate(firstString(m, "date")),
+			NetworkKey:      network,
+			Clicks:          toInt64(firstAny(m, "quantity.clicks", "clicks")),
+			Conversions:     toInt64(firstAny(m, "quantity.total", "totalNo", "transactions")),
+			RevenueCents:    moneyCentsFromAny(firstAny(m, "saleAmount.total", "totalValue")),
+			CommissionCents: moneyCentsFromAny(firstAny(m, "commissionAmount.total", "totalComm")),
+			Currency:        firstNonEmpty(firstString(m, "currency"), "USD"),
+			RawJSON:         mustJSON(redactSecrets(m)),
+		}
+	}
 	date := normalizeStatDate(firstString(m, "date", "day", "ActionDate", "eventDate", "postingDate", "transactionDate", "saved", "clickSaved", "updatedAt", "validationDate", "click.clickDate", "commission.commissionDate", "commission.updateDate", "created_at"))
 	transactionType := strings.ToLower(firstString(m, "transactionType", "transaction_type", "type"))
 	clicks := toInt64(firstAny(m, "clicks", "Clicks"))

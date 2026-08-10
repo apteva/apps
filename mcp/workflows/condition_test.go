@@ -68,3 +68,72 @@ func TestEvalConditionTokensWithQuotedSpace(t *testing.T) {
 		t.Error("expected true")
 	}
 }
+
+func TestEvalConditionLogicalOperators(t *testing.T) {
+	ctx := TemplateContext{Input: map[string]any{
+		"appel_id":        nil,
+		"appel_source_id": float64(42),
+		"status":          "ready",
+		"enabled":         true,
+	}}
+	cases := []struct {
+		expr string
+		want bool
+	}{
+		{"input.appel_id or input.appel_source_id", true},
+		{"input.appel_id and input.enabled", false},
+		{"input.status == 'ready' and input.enabled", true},
+		{"input.status == 'pending' or input.appel_source_id", true},
+		{"true or input.status > 2", true}, // short-circuit avoids the invalid numeric comparison
+		{"false and input.status > 2", false},
+		{"true or false and false", true}, // and binds more tightly than or
+	}
+	for _, tc := range cases {
+		got, err := EvalCondition(tc.expr, ctx)
+		if err != nil {
+			t.Errorf("%q: %v", tc.expr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("%q: got %v, want %v", tc.expr, got, tc.want)
+		}
+	}
+}
+
+func TestValidateTriggerCondition(t *testing.T) {
+	valid := []string{
+		"input.data.table == 'ventes'",
+		`input.data.status == "ready"`,
+		"input.data.count >= 2",
+		"input.data.enabled",
+		"input.data.table == 'ventes' and input.data.row.status == 'ready'",
+		"input.data.appel_id or input.data.appel_source_id",
+		"true",
+	}
+	for _, expr := range valid {
+		if err := ValidateTriggerCondition(expr); err != nil {
+			t.Errorf("%q: unexpected validation error: %v", expr, err)
+		}
+	}
+
+	invalid := []string{
+		"ventes",
+		"'always truthy'",
+		"input.data.table = 'ventes'",
+		"input.data.table === 'ventes'",
+		"input.data.table == ventes",
+		"input.data.table == 'unterminated",
+		"input.data.table == 'ventes' && input.data.ready",
+	}
+	for _, expr := range invalid {
+		if err := ValidateTriggerCondition(expr); err == nil {
+			t.Errorf("%q: expected validation error", expr)
+		}
+		matched, err := EvalTriggerCondition(expr, TemplateContext{
+			Input: map[string]any{"data": map[string]any{"table": "ventes"}},
+		})
+		if err == nil || matched {
+			t.Errorf("%q: matched=%v err=%v, want fail closed", expr, matched, err)
+		}
+	}
+}

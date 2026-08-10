@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: status
 display_name: Status
-version: 2.0.1
+version: 2.0.2
 description: Per-agent status line. Agent writes "what I'm on right now" via MCP; dashboard reads it live. Short-horizon counterpart to the long-lived directive.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/status
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/status/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [observability, agent, telemetry]
 
 scopes: [project, global]

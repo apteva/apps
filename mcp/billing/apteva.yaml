@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.18
+version: 0.12.2
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -10,15 +10,24 @@ description: |
   created only when explicitly requested. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
-  v0.8.16 includes reusable payment-method metadata in generic events
-  so orchestrator apps can correlate provider-hosted setup flows.
-  Billing remains product-agnostic.
-  v0.8.17 hardens tenant isolation, Checkout reconciliation, webhook
-  delivery, refunds, currency validation, and monetary rounding.
+  v0.9.0 routes every Stripe API call through the bound integration.
+  The platform registers and verifies Billing's webhook while keeping
+  Stripe API and signing secrets out of Billing. Checkout remains
+  strictly on demand, and verified payment events reconcile invoices
+  to paid automatically.
+  v0.10.0 adds durable, idempotent off-session invoice collection for
+  product apps while keeping recurring schedules out of Billing.
+  v0.11.0 adds durable hosted or custom Stripe Checkout Sessions for
+  product apps. Custom sessions return only a short-lived client secret
+  and the catalog-marked public publishable key.
+  v0.11.1 provider-encodes Stripe payment method arrays correctly.
+  v0.11.2 uses Stripe's current Elements Checkout Session UI mode.
+  v0.12.2 uses Stripe's current hosted-page Checkout Session UI mode.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/billing/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [billing, invoices, payments, finance]
 
 scopes: [project, global]
@@ -27,10 +36,9 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
-    - net.egress                              # direct Stripe API calls when stripe_secret_key is configured
     - platform.apps.call                       # billing calls catalog when line items reference price_id
-    - platform.connections.execute             # run Stripe integration tools when payment_processor is bound
-    - platform.connections.read_credentials    # for the Stripe webhook signature verification path
+    - platform.connections.execute             # run Stripe tools and reconcile its webhook via the bound connection
+    - platform.connections.read_public_config  # expose only Stripe's catalog-marked publishable key to Elements
   apps:
     - name: catalog
       optional: true                           # free-form line items keep working without catalog
@@ -38,16 +46,20 @@ requires:
     - role: payment_processor                  # Stripe (or any future processor) for card-payable invoices
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, refunds.create, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create:         create_customer
         customers.search:         search_customers
         checkout_sessions.create: create_checkout_session
+        checkout_sessions.get:    get_checkout_session
+        payment_intents.create:    create_payment_intent
+        payment_intents.get:       get_payment_intent
         refunds.create:           create_refund
-        webhooks.process:         process_webhook
+        payment_methods.get:      get_payment_method
+        payment_methods.detach:   detach_payment_method
       required: false                          # billing still works without it — manual payments only
       label: "Payment processor (Stripe)"
-      hint: "Legacy fallback for card payment links. Prefer setting stripe_secret_key directly in Billing config; without either, payments_record handles wire / cash / check / other only."
+      hint: "Required only for explicitly requested Stripe payment links and saved payment methods. Connecting Stripe does not create or email links automatically; without it, payments_record handles wire / cash / check / other."
 
 provides:
   http_routes:
@@ -96,10 +108,22 @@ provides:
         was created or finalized, or because the customer has an email address.
         This tool does not send email or deliver the URL; it only returns
         {url, stripe_session_id, expires_at}. Sharing it requires a separate,
-        explicitly requested channel or email action. Uses stripe_secret_key
-        from Billing config; legacy installs can use a bound payment_processor
-        integration. On payment success, the verified webhook records the
-        payment and transitions the invoice to paid.
+        explicitly requested channel or email action. Uses only the bound
+        payment_processor integration; Billing never receives Stripe keys.
+    - name: invoices_create_payment_session
+      description: |
+        Product-app payment primitive for an open invoice. presentation=elements
+        returns Stripe publishable_key + Checkout Session client_secret;
+        presentation=hosted returns a redirect URL. Requires a caller-stable
+        idempotency_key. Payment completion remains webhook-driven.
+        On payment success, the platform-verified webhook records the payment
+        and transitions the invoice to paid.
+    - name: invoices_collect
+      description: |
+        Collect an open invoice automatically using an active reusable saved
+        payment method. Product apps provide a stable idempotency key; Billing
+        owns the off-session processor call, durable attempt state, webhook
+        reconciliation, and invoice payment record.
     - name: payment_method_setup_create
       description: Create a provider-hosted setup session so a customer can save a reusable payment method. Supports card and bank-debit types such as sepa_debit where the processor supports them.
     - name: payment_methods_list
@@ -107,9 +131,11 @@ provides:
     - name: payment_method_default_set
       description: Mark one active payment method as the customer's default.
     - name: payment_method_detach
-      description: Detach a stored payment method locally and at Stripe when direct Stripe config is available.
+      description: Detach a stored payment method locally and at Stripe through the bound payment_processor integration.
     - name: payments_record
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
+    - name: invoices_refund
+      description: Request an idempotent partial or full Stripe refund and reconcile it through verified processor webhooks.
     - name: payments_list
       description: List payments for a customer or invoice, optionally filtered by method or date range.
     - name: issuer_get
@@ -225,6 +251,27 @@ provides:
         status: string
         total_cents: integer
         currency: string
+    - name: invoice.refund_requested
+      description: A merchant-initiated processor refund was submitted.
+      payload:
+        invoice_id: integer
+        refund_request_id: integer
+        amount_cents: integer
+        currency: string
+    - name: invoice.payment_failed
+      description: Automatic collection failed and the product app should apply its dunning or grace policy.
+      payload:
+        id: integer
+        customer_id: integer
+        status: string
+        collection_attempt: object
+    - name: invoice.payment_action_required
+      description: Automatic collection needs customer authentication or another provider action.
+      payload:
+        id: integer
+        customer_id: integer
+        status: string
+        collection_attempt: object
     - name: payment_method.attached
       description: A reusable customer payment method was attached after a successful setup flow.
       payload:
@@ -280,7 +327,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: billing/v0.12.2
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -291,23 +338,6 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: stripe_secret_key
-    type: password
-    default: ""
-    label: Stripe secret key
-    description: |
-      Optional. Set an sk_test_ or sk_live_ key to enable Stripe Checkout
-      payment links directly from Billing. Billing will create its own
-      Stripe webhook endpoint and store the returned signing secret, so
-      you do not need to paste a whsec_ value.
-  - name: stripe_webhook_url
-    type: text
-    default: ""
-    label: Stripe webhook URL override
-    description: |
-      Optional. Leave blank to use the platform public URL plus
-      /webhooks/stripe. For local testing, set this to a public tunnel URL
-      that forwards to the Billing webhook route.
   - name: stripe_success_url
     type: text
     default: ""

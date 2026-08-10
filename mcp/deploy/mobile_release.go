@@ -24,29 +24,186 @@ import (
 var googlePlayUploadBaseURL = "https://androidpublisher.googleapis.com/upload/androidpublisher/v3"
 
 type releaseOptions struct {
-	Channel         string
-	RolloutFraction float64
-	ReleaseNotes    map[string]string
-	SubmitForReview bool
-	BetaGroupID     string
+	Channel         string            `json:"channel,omitempty"`
+	RolloutFraction float64           `json:"rollout_fraction,omitempty"`
+	ReleaseNotes    map[string]string `json:"release_notes,omitempty"`
+	SubmitForReview bool              `json:"submit_for_review,omitempty"`
+	BetaGroupID     string            `json:"beta_group_id,omitempty"`
 }
 
 type mobileReleaseMeta struct {
-	Platform           string            `json:"platform"`
-	PackageName        string            `json:"package_name,omitempty"`
-	AppID              string            `json:"app_id,omitempty"`
-	BundleID           string            `json:"bundle_id,omitempty"`
-	VersionName        string            `json:"version_name,omitempty"`
-	BuildNumber        string            `json:"build_number,omitempty"`
-	VersionCode        string            `json:"version_code,omitempty"`
-	BetaGroupID        string            `json:"beta_group_id,omitempty"`
-	AppStoreVersionID  string            `json:"app_store_version_id,omitempty"`
-	ReviewSubmissionID string            `json:"review_submission_id,omitempty"`
-	ReleaseType        string            `json:"release_type,omitempty"`
-	RolloutFraction    float64           `json:"rollout_fraction,omitempty"`
-	ReleaseNotes       map[string]string `json:"release_notes,omitempty"`
-	SubmitForReview    bool              `json:"submit_for_review,omitempty"`
-	Prepared           bool              `json:"prepared,omitempty"`
+	Platform            string                                `json:"platform"`
+	PackageName         string                                `json:"package_name,omitempty"`
+	AppID               string                                `json:"app_id,omitempty"`
+	BundleID            string                                `json:"bundle_id,omitempty"`
+	VersionName         string                                `json:"version_name,omitempty"`
+	BuildNumber         string                                `json:"build_number,omitempty"`
+	VersionCode         string                                `json:"version_code,omitempty"`
+	BetaGroupID         string                                `json:"beta_group_id,omitempty"`
+	AppStoreVersionID   string                                `json:"app_store_version_id,omitempty"`
+	ReviewSubmissionID  string                                `json:"review_submission_id,omitempty"`
+	ReleaseType         string                                `json:"release_type,omitempty"`
+	RolloutFraction     float64                               `json:"rollout_fraction,omitempty"`
+	ReleaseNotes        map[string]string                     `json:"release_notes,omitempty"`
+	SubmitForReview     bool                                  `json:"submit_for_review,omitempty"`
+	Prepared            bool                                  `json:"prepared,omitempty"`
+	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
+}
+
+type providerValidationEvidence struct {
+	Provider    string `json:"provider"`
+	Requirement string `json:"requirement"`
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	ExternalID  string `json:"external_id,omitempty"`
+	VersionName string `json:"version_name,omitempty"`
+	ValidatedAt string `json:"validated_at"`
+}
+
+type providerValidationError struct {
+	Provider    string                 `json:"provider"`
+	Requirement string                 `json:"requirement"`
+	Action      string                 `json:"action"`
+	Status      int                    `json:"provider_status"`
+	Details     json.RawMessage        `json:"details,omitempty"`
+	Findings    []providerErrorFinding `json:"findings,omitempty"`
+	Err         error                  `json:"-"`
+}
+
+type providerErrorFinding struct {
+	Code    string `json:"code,omitempty"`
+	Title   string `json:"title,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Pointer string `json:"pointer,omitempty"`
+}
+
+func (e *providerValidationError) Error() string {
+	if len(e.Findings) > 0 {
+		details := make([]string, 0, len(e.Findings))
+		for _, finding := range e.Findings {
+			if finding.Detail != "" {
+				details = append(details, finding.Detail)
+			} else if finding.Title != "" {
+				details = append(details, finding.Title)
+			}
+		}
+		if len(details) > 0 {
+			return fmt.Sprintf("%s rejected %s validation during %s: %s", e.Provider, e.Requirement, e.Action, strings.Join(details, "; "))
+		}
+	}
+	return fmt.Sprintf("%s rejected %s validation during %s: %v", e.Provider, e.Requirement, e.Action, e.Err)
+}
+
+func (e *providerValidationError) Unwrap() error { return e.Err }
+
+func wrapProviderCommitValidationError(provider, requirement, action string, err error) error {
+	status := integrationErrorStatus(err)
+	if status != http.StatusConflict && status != http.StatusUnprocessableEntity {
+		return err
+	}
+	var toolErr *integrationToolError
+	var details json.RawMessage
+	if errors.As(err, &toolErr) {
+		details = append(json.RawMessage(nil), toolErr.Data...)
+	}
+	return &providerValidationError{
+		Provider: provider, Requirement: requirement, Action: action,
+		Status: status, Details: details, Findings: providerErrorFindings(details), Err: err,
+	}
+}
+
+func providerValidationErrorPayload(err *providerValidationError) map[string]any {
+	payload := map[string]any{
+		"error": err.Error(), "code": "provider_validation_failed",
+		"provider": err.Provider, "requirement": err.Requirement,
+		"action": err.Action, "provider_status": err.Status,
+	}
+	if len(err.Details) > 0 {
+		payload["details"] = err.Details
+	}
+	if len(err.Findings) > 0 {
+		payload["findings"] = err.Findings
+	}
+	return payload
+}
+
+func providerErrorFindings(raw json.RawMessage) []providerErrorFinding {
+	var payload map[string]any
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	errorsValue, ok := payload["errors"]
+	if !ok {
+		return nil
+	}
+	findings := []providerErrorFinding{}
+	seen := map[string]bool{}
+	var walk func(any, string)
+	walk = func(value any, fallbackPointer string) {
+		switch typed := value.(type) {
+		case []any:
+			for _, item := range typed {
+				walk(item, fallbackPointer)
+			}
+		case map[string]any:
+			code, _ := typed["code"].(string)
+			title, _ := typed["title"].(string)
+			detail, _ := typed["detail"].(string)
+			pointer := fallbackPointer
+			if source, ok := typed["source"].(map[string]any); ok {
+				if value, ok := source["pointer"].(string); ok && value != "" {
+					pointer = value
+				}
+			}
+			if code != "" || title != "" || detail != "" {
+				key := code + "\x00" + title + "\x00" + detail + "\x00" + pointer
+				if !seen[key] {
+					seen[key] = true
+					findings = append(findings, providerErrorFinding{Code: code, Title: title, Detail: detail, Pointer: pointer})
+				}
+			}
+			if meta, ok := typed["meta"].(map[string]any); ok {
+				if associated, ok := meta["associatedErrors"]; ok {
+					walk(associated, pointer)
+				}
+			}
+			if associated, ok := typed["associatedErrors"]; ok {
+				walk(associated, pointer)
+			}
+			if code == "" && title == "" && detail == "" {
+				for key, nested := range typed {
+					nextPointer := fallbackPointer
+					if strings.HasPrefix(key, "/") {
+						nextPointer = key
+					}
+					walk(nested, nextPointer)
+				}
+			}
+		}
+	}
+	walk(errorsValue, "")
+	return findings
+}
+
+func recordStoreProviderValidation(rel *Release, platform string, evidence providerValidationEvidence) error {
+	if rel == nil || globalCtx == nil || globalCtx.AppDB() == nil {
+		return nil
+	}
+	cfg, err := dbGetMobileStoreConfig(globalCtx.AppDB(), rel.DeploymentID, rel.EnvironmentID, platform)
+	if err != nil || cfg == nil {
+		return err
+	}
+	observed := map[string]any{}
+	if strings.TrimSpace(cfg.ObservedJSON) != "" {
+		_ = json.Unmarshal([]byte(cfg.ObservedJSON), &observed)
+	}
+	validations, _ := observed["provider_validations"].(map[string]any)
+	if validations == nil {
+		validations = map[string]any{}
+	}
+	validations[evidence.Requirement] = evidence
+	observed["provider_validations"] = validations
+	return dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), "", "", cfg.LastError)
 }
 
 func isMobileDeployment(d *Deployment, b *Build) bool {
@@ -63,6 +220,9 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if !buildArtifactAvailable(b) {
 		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
 	}
+	if cfg, cfgErr := parseMobileTargetConfig(d.TargetConfigJSON); cfgErr == nil && cfg.SmokeOnly {
+		return nil, errors.New("smoke_only mobile builds cannot be published; disable smoke_only and create a signed build")
+	}
 	manifest, err := readArtifactManifest(b)
 	if err != nil {
 		return nil, err
@@ -74,6 +234,14 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	channel, err := normalizeMobileChannel(platform, opts.Channel)
 	if err != nil {
 		return nil, err
+	}
+	if platform == "android" && channel == "production" && opts.RolloutFraction == 0 {
+		if _, storeDoc, storeErr := a.mobileStoreConfig(d); storeErr == nil && storeDoc.ReleaseMode == "staged" {
+			opts.RolloutFraction = storeDoc.Distribution.RolloutFraction
+		}
+	}
+	if platform == "android" && channel == "production" && (opts.RolloutFraction < 0 || opts.RolloutFraction > 1) {
+		return nil, errors.New("Android rollout_fraction must be between 0 and 1")
 	}
 	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
 	if err != nil {
@@ -88,7 +256,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	provider := map[string]string{"android": "google_play", "ios": "app_store_connect"}[platform]
 	meta := mobileReleaseMeta{
 		Platform: platform, PackageName: manifest.PackageName, BundleID: manifest.BundleID,
-		VersionName: manifest.VersionName, BuildNumber: manifest.BuildNumber,
+		VersionName: manifest.VersionName, BuildNumber: manifest.BuildNumber, VersionCode: manifest.VersionCode,
 		RolloutFraction: opts.RolloutFraction, ReleaseNotes: opts.ReleaseNotes,
 		SubmitForReview: opts.SubmitForReview, BetaGroupID: opts.BetaGroupID,
 	}
@@ -107,12 +275,86 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 		}
 		meta.ReleaseType = cfg.ReleaseType
 	}
+	if channel == "production" {
+		storeCfg, _, storeErr := a.mobileStoreConfig(d)
+		if storeErr != nil {
+			err = storeErr
+		} else if storeCfg != nil {
+			_, err = a.applyStoreConfig(d, b, true)
+			if err == nil {
+				var preflight StorePreflight
+				preflight, err = a.storePreflight(d, b, true)
+				if err == nil && !preflight.Ready {
+					err = newStorePreflightError(preflight)
+				}
+			}
+		} else if platform == "ios" && meta.SubmitForReview {
+			err = errors.New("configure and validate the App Store listing before submitting for review")
+		}
+		if err != nil {
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "stopped_at": nowUTC(), "error": err.Error(),
+				"external_status": "not_submitted",
+			})
+			_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "store_preflight_failed", mustJSON(map[string]any{"error": err.Error()}))
+			return nil, err
+		}
+	}
 	metaJSON := mustJSON(meta)
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 		"channel": channel, "provider": provider, "external_status": "publishing",
 		"release_meta_json": metaJSON, "started_at": nowUTC(), "log_path": logPath,
 	})
 	fmt.Fprintf(logFile, "=== publish build %d to %s/%s ===\n", b.ID, provider, channel)
+
+	if manifest.ExternalProvider != "" {
+		if manifest.ExternalProvider != provider {
+			err := fmt.Errorf("cloud artifact provider %q does not match release provider %q", manifest.ExternalProvider, provider)
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "error": err.Error(), "external_status": "failed",
+			})
+			return nil, err
+		}
+		if manifest.Channel != "" && manifest.Channel != channel {
+			err := fmt.Errorf("cloud backend uploaded to channel %q, not requested channel %q", manifest.Channel, channel)
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+				"status": "failed", "error": err.Error(), "external_status": "failed",
+			})
+			return nil, err
+		}
+		externalID := strings.TrimSpace(manifest.ExternalID)
+		externalStatus := manifest.ExternalStatus
+		releaseStatus := "starting"
+		if platform == "android" {
+			if meta.VersionCode == "" {
+				err := errors.New("Android store_upload result requires version_code")
+				_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+					"status": "failed", "error": err.Error(), "external_status": "failed",
+				})
+				return nil, err
+			}
+			externalID = meta.VersionCode
+			externalStatus = defaultStr(externalStatus, "completed")
+			releaseStatus = "live"
+		} else {
+			if externalID == "" {
+				externalID = strconv.FormatInt(b.ID, 10)
+			}
+			if !strings.HasPrefix(externalID, "uploaded-") {
+				externalID = "uploaded-" + externalID
+			}
+			externalStatus = defaultStr(externalStatus, "uploaded_processing")
+		}
+		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+			"status": releaseStatus, "external_id": externalID, "external_status": externalStatus,
+			"release_meta_json": mustJSON(meta),
+		})
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "upload_adopted", mustJSON(map[string]any{
+			"provider": provider, "build_backend": b.BuildBackend, "external_job_id": b.ExternalJobID,
+		}))
+		fmt.Fprintf(logFile, "cloud backend already uploaded artifact; waiting for store processing\n")
+		return dbGetRelease(globalCtx.AppDB(), rel.ID)
+	}
 
 	switch platform {
 	case "android":
@@ -197,6 +439,9 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 		"releases": []map[string]any{release},
 	}); err != nil {
 		return fmt.Errorf("update Play track: %w", err)
+	}
+	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
+		return fmt.Errorf("validate Play edit: %w", err)
 	}
 	if _, err := executeIntegration(bound, "commit_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
 		return fmt.Errorf("commit Play edit: %w", err)
@@ -360,7 +605,15 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 			continue
 		}
 		if err := a.syncIOSRelease(&releases[i]); err != nil {
-			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, map[string]any{"error": err.Error(), "external_status": "sync_error"})
+			fields := map[string]any{"error": err.Error(), "external_status": "sync_error"}
+			var validationErr *providerValidationError
+			if errors.As(err, &validationErr) {
+				fields["status"] = "failed"
+				fields["external_status"] = "provider_validation_failed"
+				fields["stopped_at"] = nowUTC()
+				_ = dbAppendReleaseEvent(globalCtx.AppDB(), releases[i].ID, "provider_validation_failed", mustJSON(providerValidationErrorPayload(validationErr)))
+			}
+			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, fields)
 		}
 	}
 	return nil
@@ -393,41 +646,99 @@ func (a *App) syncIOSRelease(rel *Release) error {
 	}
 	rel.ExternalID = buildID
 	if rel.Channel == "internal" || rel.Channel == "external" {
-		groupID := meta.BetaGroupID
-		if groupID == "" {
-			groups, err := executeIntegration(bound, "list_beta_groups", map[string]any{
-				"app_id": meta.AppID, "internal": rel.Channel == "internal", "limit": 20,
-			})
-			if err != nil {
-				return err
-			}
-			groupID = firstJSONAPIID(groups)
-			if groupID == "" {
-				created, err := executeIntegration(bound, "create_beta_group", map[string]any{
-					"app_id": meta.AppID, "name": "Deploy " + upperFirst(rel.Channel), "isInternalGroup": rel.Channel == "internal",
-				})
-				if err != nil {
-					return err
-				}
-				groupID = jsonStringAt(created, "data", "id")
-			}
-		}
-		if _, err := executeIntegration(bound, "add_builds_to_beta_group", map[string]any{
-			"group_id": groupID,
-			"body":     map[string]any{"data": []map[string]any{{"type": "builds", "id": buildID}}},
-		}); err != nil {
+		group, err := a.findIOSBetaGroup(bound, distributionTarget{
+			Channel: rel.Channel, AppID: meta.AppID, BetaGroupID: meta.BetaGroupID,
+		}, true)
+		if err != nil {
 			return err
 		}
-		meta.BetaGroupID = groupID
-		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-			"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
-		})
-		return nil
+		if group.ID == "" {
+			return errors.New("App Store Connect beta group response missing id")
+		}
+		if !group.HasAccessToAllBuilds {
+			if err := addIOSBuildToBetaGroup(bound, group.ID, buildID); err != nil {
+				if !isRedundantIOSBuildAssignment(err) {
+					return err
+				}
+				present, verifyErr := iosBuildHasBetaGroup(bound, buildID, group.ID)
+				if verifyErr != nil {
+					return fmt.Errorf("%w; verify beta group relationship: %v", err, verifyErr)
+				}
+				if !present {
+					return err
+				}
+			}
+		}
+		return markTestFlightAvailable(rel, buildID, group.ID, &meta)
 	}
 	if rel.Channel == "production" {
 		return a.prepareIOSProductionRelease(bound, rel, buildID, &meta)
 	}
 	return fmt.Errorf("unsupported iOS channel %q", rel.Channel)
+}
+
+func addIOSBuildToBetaGroup(bound *sdk.BoundIntegration, groupID, buildID string) error {
+	_, err := executeIntegration(bound, "add_builds_to_beta_group", map[string]any{
+		"group_id": groupID,
+		"body":     map[string]any{"data": []map[string]any{{"type": "builds", "id": buildID}}},
+	})
+	return err
+}
+
+func isRedundantIOSBuildAssignment(err error) bool {
+	var toolErr *integrationToolError
+	if !errors.As(err, &toolErr) || toolErr.Status != http.StatusUnprocessableEntity {
+		return false
+	}
+	body := strings.ToLower(string(toolErr.Data))
+	return strings.Contains(body, "cannot add internal group to a build") ||
+		strings.Contains(body, "builds cannot be assigned to this internal group")
+}
+
+func iosBuildHasBetaGroup(bound *sdk.BoundIntegration, buildID, groupID string) (bool, error) {
+	raw, err := executeIntegration(bound, "get_build", map[string]any{
+		"build_id": buildID,
+		"include":  "betaGroups",
+	})
+	if err != nil {
+		return false, err
+	}
+	var payload struct {
+		Data struct {
+			Relationships struct {
+				BetaGroups struct {
+					Data []struct {
+						ID string `json:"id"`
+					} `json:"data"`
+				} `json:"betaGroups"`
+			} `json:"relationships"`
+		} `json:"data"`
+		Included []struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+		} `json:"included"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false, fmt.Errorf("decode App Store build beta groups: %w", err)
+	}
+	for _, group := range payload.Data.Relationships.BetaGroups.Data {
+		if group.ID == groupID {
+			return true, nil
+		}
+	}
+	for _, resource := range payload.Included {
+		if resource.Type == "betaGroups" && resource.ID == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobileReleaseMeta) error {
+	meta.BetaGroupID = groupID
+	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		"status": "live", "external_id": buildID, "external_status": "testflight_available", "release_meta_json": mustJSON(meta),
+	})
 }
 
 func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Release, buildID string, meta *mobileReleaseMeta) error {
@@ -462,29 +773,123 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	}
 	meta.AppStoreVersionID = versionID
 	meta.Prepared = true
+	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+		"external_id": buildID, "external_status": "ready_for_review", "release_meta_json": mustJSON(meta),
+	})
 	status := "ready_for_review"
 	if meta.SubmitForReview {
-		created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": meta.AppID, "platform": "IOS"})
+		submissionID, itemAttached, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID)
 		if err != nil {
 			return err
 		}
-		submissionID := jsonStringAt(created, "data", "id")
-		if submissionID == "" {
-			return errors.New("review submission response missing id")
-		}
-		if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
-			return err
+		meta.ReviewSubmissionID = submissionID
+		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
+			"external_status": "validating_submission", "release_meta_json": mustJSON(meta),
+		})
+		if !itemAttached {
+			if _, err := executeIntegration(bound, "create_review_submission_item", map[string]any{"submission_id": submissionID, "version_id": versionID}); err != nil {
+				return wrapProviderCommitValidationError("app_store_connect", "store_submission", "create_review_submission_item", err)
+			}
 		}
 		if _, err := executeIntegration(bound, "submit_review_submission", map[string]any{"submission_id": submissionID, "submitted": true}); err != nil {
-			return err
+			return wrapProviderCommitValidationError("app_store_connect", "store_submission", "submit_review_submission", err)
 		}
-		meta.ReviewSubmissionID = submissionID
+		if meta.ProviderValidations == nil {
+			meta.ProviderValidations = map[string]providerValidationEvidence{}
+		}
+		evidence := providerValidationEvidence{
+			Provider: "app_store_connect", Requirement: "app_privacy", Action: "submit_review_submission",
+			Status: "accepted", ExternalID: submissionID, VersionName: meta.VersionName, ValidatedAt: nowUTC(),
+		}
+		meta.ProviderValidations["app_privacy"] = evidence
+		if err := recordStoreProviderValidation(rel, "ios", evidence); err != nil {
+			return fmt.Errorf("record provider validation: %w", err)
+		}
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "provider_validation_accepted", mustJSON(evidence))
 		status = "waiting_for_review"
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 		"external_id": buildID, "external_status": status, "release_meta_json": mustJSON(meta),
 	})
 	return nil
+}
+
+func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string) (string, bool, error) {
+	listed, err := executeIntegration(bound, "list_review_submissions", map[string]any{
+		"app_id": appID, "platform": "IOS", "state": "READY_FOR_REVIEW",
+		"include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if submissionID, itemAttached, conflictingID := reusableAppleReviewSubmission(listed, versionID); submissionID != "" {
+		return submissionID, itemAttached, nil
+	} else if conflictingID != "" {
+		return "", false, fmt.Errorf("App Store Connect draft review submission %s already contains another version", conflictingID)
+	}
+	created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": appID, "platform": "IOS"})
+	if err != nil {
+		return "", false, err
+	}
+	submissionID := jsonStringAt(created, "data", "id")
+	if submissionID == "" {
+		return "", false, errors.New("review submission response missing id")
+	}
+	return submissionID, false, nil
+}
+
+func reusableAppleReviewSubmission(raw json.RawMessage, versionID string) (string, bool, string) {
+	type relationshipData struct {
+		ID string `json:"id"`
+	}
+	type relationships struct {
+		AppStoreVersionForReview struct {
+			Data relationshipData `json:"data"`
+		} `json:"appStoreVersionForReview"`
+		AppStoreVersion struct {
+			Data relationshipData `json:"data"`
+		} `json:"appStoreVersion"`
+		Items struct {
+			Data []relationshipData `json:"data"`
+		} `json:"items"`
+	}
+	type resource struct {
+		ID            string        `json:"id"`
+		Type          string        `json:"type"`
+		Relationships relationships `json:"relationships"`
+	}
+	var payload struct {
+		Data     []resource `json:"data"`
+		Included []resource `json:"included"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return "", false, ""
+	}
+	itemVersions := map[string]string{}
+	for _, item := range payload.Included {
+		if item.Type == "reviewSubmissionItems" {
+			itemVersions[item.ID] = item.Relationships.AppStoreVersion.Data.ID
+		}
+	}
+	conflictingID := ""
+	for _, submission := range payload.Data {
+		if submission.Relationships.AppStoreVersionForReview.Data.ID == versionID {
+			return submission.ID, true, ""
+		}
+		items := submission.Relationships.Items.Data
+		for _, item := range items {
+			if itemVersions[item.ID] == versionID {
+				return submission.ID, true, ""
+			}
+		}
+		if len(items) == 0 {
+			return submission.ID, false, ""
+		}
+		if conflictingID == "" {
+			conflictingID = submission.ID
+		}
+	}
+	return "", false, conflictingID
 }
 
 func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release, meta *mobileReleaseMeta) error {
@@ -499,8 +904,11 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	normalized := strings.ToLower(state)
 	fields := map[string]any{"external_status": normalized}
 	switch state {
-	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE", "PENDING_APPLE_RELEASE":
+	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE":
 		fields["status"] = "live"
+	case "PENDING_APPLE_RELEASE":
+		fields["status"] = "starting"
+		fields["external_status"] = "approved_pending_release"
 	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY":
 		fields["status"] = "failed"
 		fields["error"] = "App Store state: " + state
@@ -782,9 +1190,22 @@ func executeIntegration(bound *sdk.BoundIntegration, tool string, input map[stri
 		if res != nil {
 			status, data = res.Status, res.Data
 		}
-		return nil, fmt.Errorf("%s.%s returned HTTP %d: %s", bound.AppSlug, tool, status, truncateString(string(data), 800))
+		return nil, &integrationToolError{
+			Slug: bound.AppSlug, Tool: tool, Status: status, Data: append(json.RawMessage(nil), data...),
+		}
 	}
 	return res.Data, nil
+}
+
+type integrationToolError struct {
+	Slug   string
+	Tool   string
+	Status int
+	Data   json.RawMessage
+}
+
+func (e *integrationToolError) Error() string {
+	return fmt.Sprintf("%s.%s returned HTTP %d: %s", e.Slug, e.Tool, e.Status, truncateString(string(e.Data), 800))
 }
 
 func (a *App) openMobileReleaseLog(releaseID int64) (string, *os.File, error) {
@@ -896,13 +1317,21 @@ func jsonScalarStringAt(raw json.RawMessage, path ...string) string {
 }
 
 func firstJSONAPIID(raw json.RawMessage) string {
-	var payload struct {
+	var collection struct {
 		Data []struct {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(raw, &payload) == nil && len(payload.Data) > 0 {
-		return payload.Data[0].ID
+	if json.Unmarshal(raw, &collection) == nil && len(collection.Data) > 0 {
+		return collection.Data[0].ID
+	}
+	var resource struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &resource) == nil {
+		return resource.Data.ID
 	}
 	return ""
 }

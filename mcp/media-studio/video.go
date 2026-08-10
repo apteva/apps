@@ -2,13 +2,13 @@ package main
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -30,19 +30,21 @@ func buildVideoArgs(args map[string]any, providerSlug, capability string) (map[s
 // buildVeniceVideoQueueArgs assembles Venice's POST /video/queue body.
 // Required: model, prompt, duration. Source-image refs arrive as resolved
 // args from the dispatcher; image-to-video uses image_url, while
-// reference-to-video uses Venice's reference_image_urls array.
+// reference-to-video is mapped to the selected model family's native
+// flat-reference or structured-element request shape.
 func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 	model := strArg(args, "model", "")
 	if model == "" {
 		return nil, errors.New("model required (call list_models?type=video for the live set)")
 	}
-	if videoModelRequiresSource(model) && len(resolvedSourceImages(args)) == 0 {
+	resolvedGroups, err := videoReferenceGroups(args, true)
+	if err != nil {
+		return nil, fmt.Errorf("reference_groups: %w", err)
+	}
+	if videoModelRequiresSource(model) && len(resolvedSourceImages(args)) == 0 && len(resolvedGroups) == 0 {
 		return nil, errors.New("selected video model requires at least one source image")
 	}
 	prompt := strArg(args, "prompt", "")
-	if count := utf8.RuneCountInString(prompt); count > veniceVideoPromptCharLimit {
-		return nil, fmt.Errorf("%d characters exceeds Venice's %d-character video prompt limit", count, veniceVideoPromptCharLimit)
-	}
 	duration := strArg(args, "duration", "")
 	if duration == "" {
 		// Default to a short clip if the agent didn't specify.
@@ -61,12 +63,8 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 		out["aspect_ratio"] = v
 	}
 	if isReferenceToVideoModel(model) {
-		if refs := resolvedSourceImages(args); len(refs) > 0 {
-			urls := make([]string, 0, len(refs))
-			for _, ref := range refs {
-				urls = append(urls, ensureDataURL(ref))
-			}
-			out["reference_image_urls"] = urls
+		if err := buildVeniceReferenceArgs(model, args, out); err != nil {
+			return nil, fmt.Errorf("video references: %w", err)
 		}
 	} else if v := strArg(args, "source_image", ""); v != "" {
 		// source_image at this point is either a URL or a base64 string
@@ -80,7 +78,7 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 			"negative_prompt", "resolution", "upscale_factor", "audio",
 			"end_image_url", "audio_url", "video_url",
 			"reference_image_urls", "reference_video_urls", "reference_audio_urls",
-			"consents",
+			"elements", "scene_image_urls", "consents",
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
@@ -109,9 +107,14 @@ func ensureDataURL(s string) string {
 	if len(s) >= 5 && s[:5] == "data:" {
 		return s
 	}
-	// Mime-sniffing the raw bytes is overkill — default to png; Venice
-	// re-decodes anyway.
-	return "data:image/png;base64," + s
+	mimeType := "image/png"
+	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil {
+		switch detected := http.DetectContentType(decoded); detected {
+		case "image/jpeg", "image/png", "image/gif", "image/webp":
+			mimeType = detected
+		}
+	}
+	return "data:" + mimeType + ";base64," + s
 }
 
 // normalizeVideoResponse parses the queue response into a generatedMedia

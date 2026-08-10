@@ -1237,11 +1237,12 @@ func (a *App) getZernioPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, ta
 	}
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
-		Views:    firstZernioMetric(metrics, "views", "impressions", "reach"),
-		Likes:    firstZernioMetric(metrics, "likes", "reactions", "reaction"),
-		Comments: firstZernioMetric(metrics, "comments", "replies"),
-		Shares:   firstZernioMetric(metrics, "shares", "reshares", "reposts"),
-		Raw:      sanitizeRawJSON(res.Data),
+		Views:     firstZernioMetric(metrics, "views", "impressions", "reach"),
+		Likes:     firstZernioMetric(metrics, "likes", "reactions", "reaction"),
+		Comments:  firstZernioMetric(metrics, "comments", "replies"),
+		Shares:    firstZernioMetric(metrics, "shares", "reshares", "reposts"),
+		Available: []string{"views", "likes", "comments", "shares"},
+		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
 }

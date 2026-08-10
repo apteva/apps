@@ -1,4 +1,4 @@
-/* Apteva Analytics — static-site tag (v0.8.6).
+/* Apteva Analytics — static-site tag (v0.8.7).
  *
  * Drop on any website:
  *   <script async src="https://YOUR-APTEVA/api/apps/analytics/ui/tag.js"

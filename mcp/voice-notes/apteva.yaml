@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: voice-notes
 display_name: Voice Notes
-version: 0.1.3
+version: 0.1.4
 description: |
   Lightweight audio notes for Apteva projects. Record voice memos from the
   browser, store the raw audio in Storage, and optionally transcribe through a
@@ -11,7 +11,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/voice-notes
-icon: icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [audio, notes, transcription, voice]
 
 scopes: [project, global]

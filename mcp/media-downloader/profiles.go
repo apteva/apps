@@ -22,8 +22,9 @@ const (
 )
 
 var sourceProfileProviders = map[string][]string{
-	"youtube": {"youtube.com", "google.com"},
-	"patreon": {"patreon.com"},
+	"youtube":   {"youtube.com", "google.com"},
+	"patreon":   {"patreon.com"},
+	"instagram": {"instagram.com"},
 }
 
 func profileSecret(ctx *sdk.AppCtx) string {
@@ -122,7 +123,7 @@ func validateCookieProfile(provider, authType string, payload profilePayload) er
 	}
 	domains, ok := sourceProfileProviders[provider]
 	if !ok {
-		return fmt.Errorf("provider %q is not supported; supported providers: youtube, patreon", provider)
+		return fmt.Errorf("provider %q is not supported; supported providers: youtube, patreon, instagram", provider)
 	}
 	if authType != "cookies_netscape" {
 		return fmt.Errorf("auth_type %q is not supported in v0.2", authType)

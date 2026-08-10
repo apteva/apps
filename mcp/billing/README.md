@@ -1,4 +1,4 @@
-# Billing (v0.8.17)
+# Billing (v0.10.0)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
@@ -10,9 +10,13 @@ Customers, invoices, and payments for Apteva agents and human teams.
   local; Stripe can process its outstanding balance through Checkout.
 - **Payments and refunds** for Stripe, wire, cash, check, and other methods,
   with provider-ID idempotency and paid-invoice reopening after refunds.
+- **Automatic invoice collection** through a reusable saved payment method,
+  with caller-stable idempotency, durable attempts, and webhook reconciliation.
 - **Append-only audit log** per invoice for status transitions.
 - **Stripe Checkout payment links** reconciled against persisted expected
-  amount/currency/session records before invoice state changes.
+  amount/currency/session records before invoice state changes. All Stripe
+  calls use the bound integration; the platform owns webhook registration,
+  encrypted signing-secret storage, and signature verification.
 - **Reusable payment methods** through provider-hosted setup sessions.
 - **PDF + print view** at `GET /invoices/{id}/pdf` (server-rendered
   via gofpdf — Helvetica, A4, no font embedding) and

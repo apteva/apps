@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.5.1
+version: 0.5.2
 description: |
   Public hostname control for Apteva. Routes exposes a stable app-level
   API for registering hostnames and delegates the actual routing and TLS
@@ -46,6 +46,8 @@ description: |
   Apps can keep calling routes_register/routes_unregister without
   learning the lower-level PlatformAPI ingress callbacks directly.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [global]
 requires:
   permissions:

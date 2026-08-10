@@ -24,6 +24,12 @@ type twitterSyncReport struct {
 	Warnings    []string `json:"warnings,omitempty"`
 }
 
+const (
+	twitterDMCursorKind       = "dm"
+	twitterDMPermissionPrefix = "permission_required:"
+	twitterDMPermissionHelp   = "X direct messages require dm.read and dm.write; reconnect this account to grant the new permissions"
+)
+
 type twitterUserNode struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
@@ -91,21 +97,24 @@ func syncTwitterAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*tw
 	}
 	report := &twitterSyncReport{}
 
-	if n, warns := syncTwitterMentions(ctx, projectID, creds); n >= 0 {
+	n, warns := syncTwitterMentions(ctx, projectID, creds)
+	if n >= 0 {
 		report.NewMentions = n
-		report.Warnings = append(report.Warnings, warns...)
 	}
-	if n, warns := syncTwitterDMs(ctx, projectID, creds); n >= 0 {
+	report.Warnings = append(report.Warnings, warns...)
+	n, warns = syncTwitterDMs(ctx, projectID, creds)
+	if n >= 0 {
 		report.NewDMs = n
-		report.Warnings = append(report.Warnings, warns...)
 	}
+	report.Warnings = append(report.Warnings, warns...)
 
+	lastError := strings.Join(report.Warnings, "; ")
 	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at)
-		 VALUES (?, ?, '', CURRENT_TIMESTAMP)
+		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at, last_error)
+		 VALUES (?, ?, '', CURRENT_TIMESTAMP, ?)
 		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
-		   last_sync_at=excluded.last_sync_at, last_error=NULL`,
-		accountID, "all",
+		   last_sync_at=excluded.last_sync_at, last_error=excluded.last_error`,
+		accountID, "all", nullable(lastError),
 	)
 	return report, nil
 }
@@ -174,6 +183,9 @@ func syncTwitterMentions(ctx *sdk.AppCtx, projectID string, creds *twitterAccoun
 }
 
 func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCreds) (int, []string) {
+	if twitterDMBackoffActive(ctx.AppDB(), creds.AccountID) {
+		return -1, []string{twitterDMPermissionHelp}
+	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_dm_events", map[string]any{
 		"max_results":     100,
 		"event_types":     "MessageCreate",
@@ -185,7 +197,12 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 		return -1, []string{"get_dm_events: " + err.Error()}
 	}
 	if res == nil || !res.Success {
-		return -1, []string{"get_dm_events: " + upstreamError(res).Error()}
+		upstream := upstreamError(res).Error()
+		if res != nil && res.Status == 403 {
+			recordTwitterDMPermissionFailure(ctx.AppDB(), creds.AccountID)
+			return -1, []string{twitterDMPermissionHelp}
+		}
+		return -1, []string{"get_dm_events: " + upstream}
 	}
 	var resp struct {
 		Data     []twitterDMEventNode `json:"data"`
@@ -196,6 +213,7 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 	if err := json.Unmarshal(res.Data, &resp); err != nil {
 		return -1, []string{"decode X DMs: " + err.Error()}
 	}
+	clearTwitterDMSyncError(ctx.AppDB(), creds.AccountID)
 	users := twitterUsersByID(resp.Includes.Users)
 	added := 0
 	for _, dm := range resp.Data {
@@ -227,6 +245,40 @@ func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCred
 		}
 	}
 	return added, nil
+}
+
+func twitterDMBackoffActive(db *sql.DB, accountID int64) bool {
+	var active int
+	_ = db.QueryRow(
+		`SELECT EXISTS(
+		   SELECT 1 FROM inbox_cursors
+		    WHERE social_account_id=? AND kind=?
+		      AND last_error LIKE ?
+		      AND last_sync_at >= datetime('now', '-24 hours')
+		 )`,
+		accountID, twitterDMCursorKind, twitterDMPermissionPrefix+"%",
+	).Scan(&active)
+	return active == 1
+}
+
+func recordTwitterDMPermissionFailure(db *sql.DB, accountID int64) {
+	_, _ = db.Exec(
+		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at, last_error)
+		 VALUES (?, ?, '', CURRENT_TIMESTAMP, ?)
+		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
+		   last_sync_at=excluded.last_sync_at, last_error=excluded.last_error`,
+		accountID, twitterDMCursorKind, twitterDMPermissionPrefix+" "+twitterDMPermissionHelp,
+	)
+}
+
+func clearTwitterDMSyncError(db *sql.DB, accountID int64) {
+	_, _ = db.Exec(
+		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at, last_error)
+		 VALUES (?, ?, '', CURRENT_TIMESTAMP, NULL)
+		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
+		   last_sync_at=excluded.last_sync_at, last_error=NULL`,
+		accountID, twitterDMCursorKind,
+	)
 }
 
 func twitterInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOutcome {

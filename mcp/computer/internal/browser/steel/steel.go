@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -148,8 +150,17 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	// take a country (custom routing requires the ProxyURL escape
 	// hatch in Options).
 	useProxy := c.opts.UseProxy
+	proxyURL := c.opts.ProxyURL
 	if o.Proxy != nil {
 		useProxy = *o.Proxy
+	}
+	if o.ExternalProxy != nil {
+		resolved, err := authenticatedProxyURL(o.ExternalProxy)
+		if err != nil {
+			return "", err
+		}
+		proxyURL = resolved
+		useProxy = false
 	}
 	req := sessionCreateRequest{
 		Dimensions: map[string]int{
@@ -157,7 +168,7 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 			"height": c.display.Height,
 		},
 		BlockAds:       c.opts.BlockAds,
-		ProxyURL:       c.opts.ProxyURL,
+		ProxyURL:       proxyURL,
 		UseProxy:       useProxy,
 		Region:         c.opts.Region,
 		Timeout:        timeout,
@@ -217,6 +228,20 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 		sep = "&"
 	}
 	return result.WebsocketURL + sep + "apiKey=" + c.apiKey, nil
+}
+
+func authenticatedProxyURL(proxy *computer.ExternalProxy) (string, error) {
+	if proxy == nil || strings.TrimSpace(proxy.Server) == "" {
+		return "", fmt.Errorf("steel: external proxy server is required")
+	}
+	u, err := url.Parse(strings.TrimSpace(proxy.Server))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("steel: invalid external proxy server")
+	}
+	if proxy.Username != "" {
+		u.User = url.UserPassword(proxy.Username, proxy.Password)
+	}
+	return u.String(), nil
 }
 
 // requestRelease ends the session via POST /v1/sessions/{id}/release.
@@ -376,7 +401,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
@@ -385,6 +410,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
 			}
+		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[STEEL] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		if err := c.dispatchClick(x, y, 1); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
@@ -401,7 +429,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[STEEL] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "double_click":
@@ -411,31 +439,35 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 				x, y = e.Center()
 			}
 		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[STEEL] presentation cursor unavailable, continuing double click: %v\n", err)
+		}
 		if err := c.dispatchClick(x, y, 2); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "type":
-		if err := textinput.Type(c.ctx, action.Text, "[STEEL]"); err != nil {
+		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
+		if err := textinput.TypeWithDelay(c.ctx, action.Text, "[STEEL]", delay); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
 		if err := keyinput.Dispatch(c.ctx, action.Key, "[STEEL]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "wait":
@@ -447,10 +479,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "select_option":
-		if _, err := c.selectOption(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.selectOption(action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		c.cueTarget(action, res.Selector, "Option selected")
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	default:
@@ -482,6 +517,55 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 		c.setLastSelectResult(&res)
 	}
 	return res, err
+}
+
+func (c *Computer) cueTarget(action computer.Action, selector, caption string) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		c.ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[STEEL] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		c.ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[STEEL] presentation move unavailable, continuing action: %v\n", err)
+	}
 }
 
 func (c *Computer) LastSelectResult() *selectinput.Result {

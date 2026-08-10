@@ -73,7 +73,39 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Upgrade already wrote the error
 	}
+	if sim.IsRemote() {
+		a.runRemoteStreamSession(sim, conn)
+		return
+	}
 	a.runStreamSession(sim, conn)
+}
+
+func (a *App) runRemoteStreamSession(sim *Sim, browser *websocket.Conn) {
+	defer browser.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	endSession := a.beginStream(sim.ID, cancel)
+	defer endSession()
+	client, err := a.ensureRemoteWorker(a.appCtx.WithProject(sim.ProjectID), sim.InstanceID)
+	if err != nil {
+		_ = browser.WriteJSON(map[string]any{"type": "error", "message": err.Error()})
+		return
+	}
+	worker, err := client.stream(ctx, sim.NativeID())
+	if err != nil {
+		_ = browser.WriteJSON(map[string]any{"type": "error", "message": "runner_unavailable: " + err.Error()})
+		return
+	}
+	defer worker.Close()
+	browser.SetReadLimit(64 << 10)
+	worker.SetReadLimit(64 << 20)
+	done := make(chan error, 2)
+	go copyWorkerStream(worker, browser, done)
+	go copyWorkerStream(browser, worker, done)
+	select {
+	case <-ctx.Done():
+	case <-done:
+	}
 }
 
 // runStreamSession owns one WebSocket's lifetime: spawn the stream

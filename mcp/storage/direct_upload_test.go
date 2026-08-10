@@ -28,9 +28,13 @@ import (
 // PresignGet/PresignPut return canned URLs the test asserts on.
 
 type fakeS3Backend struct {
-	objects   map[string][]byte
-	presigned int32 // count of PresignPut calls — assert clients hit it
-	putSize   int64
+	objects    map[string][]byte
+	presigned  int32 // count of PresignPut calls — assert clients hit it
+	putSize    int64
+	getCalls   int32
+	getOptions GetObjectOptions
+	getTTL     time.Duration
+	getURL     string
 }
 
 func newFakeS3() *fakeS3Backend { return &fakeS3Backend{objects: map[string][]byte{}} }
@@ -65,7 +69,13 @@ func (f *fakeS3Backend) Stat(_ context.Context, key string) (int64, error) {
 
 func (f *fakeS3Backend) LocalPath(string) (string, bool) { return "", false }
 
-func (f *fakeS3Backend) PresignGet(_ context.Context, key, _, _ string, _ time.Duration) (string, error) {
+func (f *fakeS3Backend) PresignGet(_ context.Context, key string, options GetObjectOptions, ttl time.Duration) (string, error) {
+	atomic.AddInt32(&f.getCalls, 1)
+	f.getOptions = options
+	f.getTTL = ttl
+	if f.getURL != "" {
+		return f.getURL, nil
+	}
 	return "https://fake-s3.example.com/" + key + "?presigned=get", nil
 }
 

@@ -3,6 +3,7 @@ package computer
 import "github.com/apteva/apps/mcp/computer/internal/browser/api"
 
 type Action = api.Action
+type PresentationOptions = api.PresentationOptions
 type DisplaySize = api.DisplaySize
 type ScreenshotOptions = api.ScreenshotOptions
 type ScreenshotRecoveryInfo = api.ScreenshotRecoveryInfo
@@ -22,6 +23,7 @@ type ScreenshotWithOptions = api.ScreenshotWithOptions
 type ScreenshotRecoveryReporter = api.ScreenshotRecoveryReporter
 type SetOfMarkReporter = api.SetOfMarkReporter
 type OpenOptions = api.OpenOptions
+type ExternalProxy = api.ExternalProxy
 type SessionOpener = api.SessionOpener
 type SessionInfo = api.SessionInfo
 type ContextInfo = api.ContextInfo

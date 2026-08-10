@@ -28,6 +28,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -50,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.1
+version: 0.3.3
 description: |
   Periodic database backups of the platform DB and app.db from running
   sidecars. Supports local disk, AWS S3, Cloudflare R2, and local Fleet tenants.
@@ -103,7 +104,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.1
+    ref: backup/v0.3.3
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -122,6 +123,11 @@ config_schema:
     default: ""
     label: Encryption passphrase (optional)
     description: Age-encrypt backups before upload and verify them before restore.
+  - name: failed_history_retention_days
+    type: text
+    default: "90"
+    label: Failed-run history retention (days)
+    description: Failed and interrupted run rows older than this are removed. Successful restore history is preserved with its stored object.
 upgrade_policy: auto-patch
 `
 
@@ -140,6 +146,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("backup requires a db block")
 	}
 	globalCtx = ctx
+	if err := reconcileInterruptedRuns(ctx); err != nil {
+		return fmt.Errorf("reconcile interrupted backup runs: %w", err)
+	}
+	if err := pruneFailedRunHistory(ctx); err != nil {
+		ctx.Logger().Warn("prune failed backup history", "err", err.Error())
+	}
 	ctx.Logger().Info("backup mounted",
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"))
 	return nil
@@ -179,6 +191,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"scope_kind":     map[string]any{"type": "string"},
 				"scope_id":       map[string]any{"type": "string"},
 				"source_app":     map[string]any{"type": "string"},
+				"async":          map[string]any{"type": "boolean", "description": "Return after queueing the run. Used by Jobs schedules."},
 			}, nil),
 			Handler: a.toolBackupNow,
 		},
@@ -231,6 +244,14 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if boolArg(args, "async") {
+			go func() {
+				if _, runErr := runBackup(ctx, dest, policy, policy.Scope); runErr != nil {
+					ctx.Logger().Error("scheduled backup failed", "policy_id", policy.ID, "err", runErr.Error())
+				}
+			}()
+			return map[string]any{"status": "accepted", "policy_id": policy.ID}, nil
+		}
 		run, err := runBackup(ctx, dest, policy, policy.Scope)
 		if err != nil {
 			return map[string]any{"run": run, "status": "failed", "error": err.Error()}, err
@@ -276,13 +297,22 @@ func (a *App) toolBackupSchedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	writer, err := openDestination(dest, ctx, defaultLocalBackupDir(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("open destination: %w", err)
+	}
+	checkCtx, cancelCheck := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelCheck()
+	if err := writer.Check(checkCtx); err != nil {
+		return nil, fmt.Errorf("destination check failed: %w", err)
+	}
 	scope := scopeFromArgs(args)
 	if err := validateScope(scope); err != nil {
 		return nil, err
 	}
 	keep := intArg(args, "retention_keep", defaultRetention(ctx))
 	if keep < 0 {
-		keep = 14
+		return nil, errors.New("retention_keep must be 0 or greater")
 	}
 	p, err := dbCreatePolicy(ctx.AppDB(), &Policy{
 		Name:          name,
@@ -312,6 +342,37 @@ func defaultRetention(ctx *sdk.AppCtx) int {
 		return 14
 	}
 	return n
+}
+
+func failedHistoryRetentionDays(ctx *sdk.AppCtx) int {
+	if ctx == nil {
+		return 90
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(ctx.Config().Get("failed_history_retention_days")))
+	if err != nil || n < 0 {
+		return 90
+	}
+	return n
+}
+
+func reconcileInterruptedRuns(ctx *sdk.AppCtx) error {
+	_, err := ctx.AppDB().Exec(
+		`UPDATE runs
+		 SET status = 'failed', stage = 'failed', finished_at = CURRENT_TIMESTAMP,
+		     error = CASE WHEN error = '' THEN 'backup process restarted before completion' ELSE error END
+		 WHERE status = 'running'`)
+	return err
+}
+
+func pruneFailedRunHistory(ctx *sdk.AppCtx) error {
+	days := failedHistoryRetentionDays(ctx)
+	if days == 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339Nano)
+	_, err := ctx.AppDB().Exec(
+		`DELETE FROM runs WHERE status = 'failed' AND datetime(started_at) < datetime(?)`, cutoff)
+	return err
 }
 
 func (a *App) handleScopes(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +433,11 @@ func (a *App) toolBackupRestore(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"report": report}, nil
+	status := "success"
+	if partial, _ := report["partial_failure"].(bool); partial {
+		status = "partial"
+	}
+	return map[string]any{"report": report, "status": status}, nil
 }
 
 // ─── Destinations REST ──────────────────────────────────────────────
@@ -398,14 +463,28 @@ func (a *App) handleDestinationsCollection(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if body.Kind == kindS3 {
-			if body.ConnectionID == 0 {
-				bound := ctx.IntegrationFor("cloud_storage")
-				if bound == nil {
-					httpErr(w, http.StatusBadRequest, "bind a cloud_storage connection before creating an S3 destination")
-					return
-				}
-				body.ConnectionID = bound.ConnectionID
+			bound := ctx.IntegrationFor("cloud_storage")
+			if bound == nil {
+				httpErr(w, http.StatusBadRequest, "bind a cloud_storage connection before creating an S3 destination")
+				return
 			}
+			if body.ConnectionID == 0 {
+				body.ConnectionID = bound.ConnectionID
+			} else if body.ConnectionID != bound.ConnectionID {
+				httpErr(w, http.StatusConflict, fmt.Sprintf("connection_id %d is not the currently bound cloud_storage connection %d", body.ConnectionID, bound.ConnectionID))
+				return
+			}
+		}
+		writer, err := openDestination(&body, ctx, defaultLocalBackupDir(ctx))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "open destination: "+err.Error())
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := writer.Check(checkCtx); err != nil {
+			httpErr(w, http.StatusBadRequest, "destination check failed: "+err.Error())
+			return
 		}
 		d, err := dbCreateDestination(ctx.AppDB(), &body)
 		if err != nil {
@@ -420,9 +499,38 @@ func (a *App) handleDestinationsCollection(w http.ResponseWriter, r *http.Reques
 
 func (a *App) handleDestinationItem(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
-	id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/destinations/"), 10, 64)
+	suffix := strings.Trim(strings.TrimPrefix(r.URL.Path, "/destinations/"), "/")
+	parts := strings.Split(suffix, "/")
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
+		return
+	}
+	if len(parts) == 2 && parts[1] == "test" {
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		d, err := dbGetDestination(ctx.AppDB(), id)
+		if err != nil || !d.Enabled {
+			httpErr(w, http.StatusNotFound, "enabled destination not found")
+			return
+		}
+		writer, err := openDestination(d, ctx, defaultLocalBackupDir(ctx))
+		if err == nil {
+			checkCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			defer cancel()
+			err = writer.Check(checkCtx)
+		}
+		if err != nil {
+			httpErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"ok": true})
+		return
+	}
+	if len(parts) != 1 {
+		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch r.Method {
@@ -468,8 +576,10 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		if body.Schedule == "" || body.DestinationID == 0 {
-			httpErr(w, http.StatusBadRequest, "schedule and destination_id required")
+		body.Name = strings.TrimSpace(body.Name)
+		body.Schedule = strings.TrimSpace(body.Schedule)
+		if body.Name == "" || body.Schedule == "" || body.DestinationID == 0 {
+			httpErr(w, http.StatusBadRequest, "name, schedule, and destination_id required")
 			return
 		}
 		if body.RetentionKeep < 0 {
@@ -486,6 +596,17 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 		destination, err := dbGetDestination(ctx.AppDB(), body.DestinationID)
 		if err != nil || !destination.Enabled {
 			httpErr(w, http.StatusBadRequest, "destination_id must reference an enabled destination")
+			return
+		}
+		writer, err := openDestination(destination, ctx, defaultLocalBackupDir(ctx))
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "open destination: "+err.Error())
+			return
+		}
+		checkCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := writer.Check(checkCtx); err != nil {
+			httpErr(w, http.StatusBadRequest, "destination check failed: "+err.Error())
 			return
 		}
 		p, err := dbCreatePolicy(ctx.AppDB(), &body)
@@ -564,12 +685,16 @@ func (a *App) handleRunsCollection(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	runs, err := dbListRuns(ctx.AppDB(), destID, limit)
+	runs, err := dbListRuns(ctx.AppDB(), destID, limit+1)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"runs": runs})
+	hasMore := len(runs) > limit
+	if hasMore {
+		runs = runs[:limit]
+	}
+	httpJSON(w, map[string]any{"runs": runs, "has_more": hasMore})
 }
 
 func (a *App) handleRunItem(w http.ResponseWriter, r *http.Request) {
@@ -709,6 +834,7 @@ type Run struct {
 	StartedAt       string `json:"started_at"`
 	FinishedAt      string `json:"finished_at,omitempty"`
 	Status          string `json:"status"`
+	Stage           string `json:"stage,omitempty"`
 	BytesCompressed int64  `json:"bytes_compressed"`
 	SHA256          string `json:"sha256,omitempty"`
 	RemoteKey       string `json:"remote_key,omitempty"`
@@ -890,16 +1016,21 @@ func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
 func dbFinishRun(db *sql.DB, id int64, status string, bytes int64, sha, remoteKey, manifestJSON, errMsg string, encrypted bool) error {
 	_, err := db.Exec(
 		`UPDATE runs SET status = ?, finished_at = CURRENT_TIMESTAMP,
-		   bytes_compressed = ?, sha256 = ?, remote_key = ?, manifest_json = ?, error = ?, encrypted = ?
+		   stage = ?, bytes_compressed = ?, sha256 = ?, remote_key = ?, manifest_json = ?, error = ?, encrypted = ?
 		 WHERE id = ?`,
-		status, bytes, sha, remoteKey, manifestJSON, errMsg, boolToInt(encrypted), id)
+		status, status, bytes, sha, remoteKey, manifestJSON, errMsg, boolToInt(encrypted), id)
+	return err
+}
+
+func dbUpdateRunStage(db *sql.DB, id int64, stage string) error {
+	_, err := db.Exec(`UPDATE runs SET stage = ? WHERE id = ? AND status = 'running'`, stage, id)
 	return err
 }
 
 func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 	q := `SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 	             started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		             sha256, remote_key, error, encrypted, scope_kind, scope_id, source_app
+		             sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app
 	      FROM runs`
 	args := []any{}
 	if destID > 0 {
@@ -918,7 +1049,7 @@ func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
 		r := &Run{}
 		if err := rows.Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -931,11 +1062,11 @@ func dbGetRun(db *sql.DB, id int64) (*Run, error) {
 	err := db.QueryRow(
 		`SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 		        started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		        sha256, remote_key, error, encrypted, scope_kind, scope_id, source_app
+		        sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app
 		 FROM runs WHERE id = ?`, id).
 		Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("run %d not found", id)
 	}
@@ -1035,11 +1166,23 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func intArg(args map[string]any, key string, def int) int {
-	if v, ok := args[key].(float64); ok {
+	switch v := args[key].(type) {
+	case float64:
 		return int(v)
-	}
-	if v, ok := args[key].(int); ok {
+	case int:
 		return v
+	case int64:
+		return int(v)
+	case json.Number:
+		n, err := strconv.Atoi(v.String())
+		if err == nil {
+			return n
+		}
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -1064,6 +1207,11 @@ func getStringArg(args map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+func boolArg(args map[string]any, key string) bool {
+	v, _ := args[key].(bool)
+	return v
 }
 
 func boolToInt(b bool) int {

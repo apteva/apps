@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: embed
 display_name: Embed
-version: 0.1.3
+version: 0.1.4
 description: |
   Create shareable viewer links and oEmbed-compatible responses for
   storage-backed files and media. Embed keeps publishing concerns out
@@ -11,6 +11,8 @@ description: |
   and oEmbed JSON.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/embed
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [embed, oembed, media, storage, sharing]
 scopes: [project, global]
 min_apteva_version: "0.10.0"

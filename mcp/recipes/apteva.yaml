@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: recipes
 display_name: Recipes
-version: 0.1.2
+version: 0.1.3
 description: |
   Recipe library, nutrition estimates, meal planning, and pantry-aware
   shopping lists. Agents can create structured recipes, scale servings,
@@ -11,7 +11,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/recipes
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/recipes/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [recipes, nutrition, meal-planning, food, cooking]
 
 scopes: [project, global]

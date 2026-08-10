@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: orders
 display_name: Orders
-version: 0.2.1
+version: 0.3.0
 description: |
   Generic commerce fulfillment ledger. Orders sits after checkout/billing
   and before fulfillment: it records durable order state, line items,
@@ -13,9 +13,13 @@ description: |
   owns invoices/payments, and Orders owns fulfillment workflow for
   physical, hosting, SaaS, digital, and service products.
 
+  v0.2.3 makes the generic fulfillment schema migration recover safely after
+  an interrupted upgrade.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/orders
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/orders/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [orders, fulfillment, ecommerce, commerce, hosting, saas, shipping, inventory]
 
 scopes: [project, global]
@@ -32,6 +36,8 @@ requires:
     - name: billing
       optional: true
     - name: checkout
+      optional: true
+    - name: inventory
       optional: true
   integrations:
     - role: fulfillment_provider
@@ -77,7 +83,7 @@ provides:
     - name: orders_cancel
       description: Cancel an order that has not reached a terminal fulfillment state.
     - name: fulfillments_create
-      description: Submit or record a fulfillment attempt for an order, including generic fulfillment_app/fulfillment_type requests.
+      description: Submit or record a fulfillment attempt for selected order items, including generic fulfillment_app/fulfillment_type requests.
     - name: fulfillments_update
       description: Update a fulfillment status, external_ref, response payload, or error after a product app fulfills it.
     - name: fulfillments_sync
@@ -86,12 +92,21 @@ provides:
       description: List shipments for an order.
     - name: shipments_sync_tracking
       description: Refresh shipment tracking from the fulfillment provider when possible.
+    - name: shipments_upsert
+      description: Idempotently record a provider shipment and tracking update.
     - name: returns_create
       description: Create a return record for an order.
     - name: returns_get
       description: Fetch one return record.
+    - name: returns_update
+      description: Move a return through approval, transit, receipt, rejection, or cancellation.
+    - name: returns_complete
+      description: Complete a received return, coordinate Billing refund, Inventory restock, and exchange linkage.
     - name: order_events_list
       description: List the append-only event log for an order.
+  publishes:
+    - name: order.payment_updated
+      description: Billing confirmed a partial or full refund and the order payment state was reconciled.
   ui_panels:
     - slot: project.page
       label: Orders
@@ -112,7 +127,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: orders/v0.3.0
     entry: mcp/orders
   port: 8080
   health_check: /health

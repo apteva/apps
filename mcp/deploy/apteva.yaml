@@ -2,9 +2,10 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.16.2
+version: 0.23.9
 description: |
-  Build and release services, Android apps, and iOS apps.
+  Build and release services, Android apps, and iOS apps across local
+  and external build backends using a provider-neutral build contract.
   Takes a code repo (from the Code app, a local path, or a git URL),
   builds it with the framework's toolchain, and runs the result as
   a supervised child process bound to a local port. The Apteva
@@ -16,7 +17,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/deploy/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [deploy, build, runtime, android, ios, app-store, google-play, agent]
 
 scopes: [project, global]
@@ -63,9 +65,20 @@ requires:
       capabilities: []
       label: App Store Connect
       hint: Required to sign, upload, publish, and monitor iOS releases.
+    - role: cloud_build
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [codemagic, github]
+      capabilities: [build.submit, build.status, build.cancel, build.artifacts]
+      label: Cloud build providers
+      hint: Optional Codemagic or GitHub connections. Git-independent capsule runners do not require an integration.
 
 provides:
   http_routes:
+    - prefix: /source-capsules/
+      method: GET
+      no_auth: true
     - prefix: /
   mcp_tools:
     - name: deploy_init
@@ -84,6 +97,32 @@ provides:
       description: Archive a non-production environment.
     - name: deploy_build
       description: Build a service artifact, Android AAB, or iOS IPA.
+    - name: deploy_build_cancel
+      description: Cancel a pending or running cloud build.
+    - name: deploy_cloud_backend_setup
+      description: Discover or create a provider's shared build adapter and configure a deployment environment.
+    - name: deploy_mobile_signing_setup
+      description: Configure, reconcile, repair, or explicitly rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
+    - name: deploy_mobile_signing_status
+      description: Return non-secret signing provisioning status for a mobile deployment environment.
+    - name: deploy_store_get
+      description: Get mobile store listing desired state, provider state, and readiness findings.
+    - name: deploy_store_update
+      description: Create or replace a provider-neutral App Store or Google Play listing document.
+    - name: deploy_store_plan
+      description: Preview the provider reconciliation without changing the store.
+    - name: deploy_store_preflight
+      description: Validate listing, media, compliance, and binary version compatibility.
+    - name: deploy_store_apply
+      description: Reconcile selected ready listing scopes with the bound store provider without submitting it.
+    - name: deploy_store_sync
+      description: Read and persist the current provider listing state.
+    - name: deploy_store_release_approved
+      description: Release an Apple-approved version waiting for manual developer release.
+    - name: deploy_distribution_status
+      description: Read the provider-backed TestFlight or Google Play test audience for a mobile channel.
+    - name: deploy_distribution_update
+      description: Idempotently add individual TestFlight testers or Google Groups to a mobile test channel.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote
@@ -122,6 +161,8 @@ provides:
   workers:
     - name: mobile_release_sync
       schedule: "@every 1m"
+    - name: cloud_build_sync
+      schedule: "@every 15s"
 
 runtime:
   kind: source
@@ -161,6 +202,11 @@ config_schema:
     default: "3"
     label: Retained rollback builds
     description: Number of most recent successful builds to keep per deployment in addition to any build referenced by the current/live release. Older unreferenced build artifacts are pruned automatically. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
+  - name: runner_token
+    type: secret
+    default: ""
+    label: Capsule runner token
+    description: Shared bearer token used to authenticate Git-independent capsule runner jobs. APTEVA_RUNNER_TOKEN overrides this value. Use at least 32 random characters.
   - name: public_host
     type: text
     default: ""

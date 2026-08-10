@@ -2,13 +2,15 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.53
+version: 0.7.62
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.53 adds compact action
-  deltas, aggregate extraction limits, and reliable navigation actions.
+  Watch, steer, and replay hosted browser sessions. v0.7.62 adds generic,
+  agent-selectable proxy profiles and country-aware managed proxy routing.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [browser, observability, ui]
 
 scopes: [project, global]
@@ -19,6 +21,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: browserbase
       kind: integration
@@ -32,6 +35,11 @@ requires:
       kind: integration
       required: false
       compatible_slugs: [browser-engine]
+    - role: proxy-provider
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [dataimpulse]
 
 provides:
   http_routes:
@@ -43,7 +51,13 @@ provides:
         Open a fresh app-owned browser session, inspect it, close it, or switch
         its tabs. Args: action, session_id?, tab_id?, backend?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for
+        proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?,
+        proxy_sticky?, viewport?, presentation_mode?. Use
+        presentation_mode=demo for a visible cursor, click feedback, human-paced
+        typing, non-interactive cues for structured control changes, and longer
+        holds in user-facing walkthroughs; fast is the default and preserves
+        normal automation behavior. Presentation overlays never receive pointer
+        events or replace the agent's underlying action. session_id is the app-owned live br_* handle for
         status/close/computer_use only. Usually omit viewport to use Computer's
         default desktop viewport, 1600x800. Pass viewport when a specific
         resolution is needed, for example mobile/tablet testing or a
@@ -64,7 +78,13 @@ provides:
         the browser open, close it with browser_session(action=close,
         session_id=...). Closing is especially important for Browserbase/Steel
         sessions and persisted contexts because it releases provider resources
-        and lets context state flush cleanly.
+        and lets context state flush cleanly. Open, status, and close results
+        include view, a copyable browser-view component reference containing
+        only session_id.
+        Proxy routing is provider-neutral: use proxy_mode=managed for the
+        selected browser backend's proxy, proxy_mode=profile with a profile
+        returned by computer_proxy_profile_list for an external provider, or
+        proxy_mode=direct to explicitly disable proxies.
     - name: computer_use
       description: |
         Drive an app-owned browser session. Default workflow: call
@@ -138,15 +158,23 @@ provides:
       description: |
         Delete or unlink an app-managed browser context. Args: id,
         delete_provider?.
+    - name: computer_proxy_profile_list
+      description: |
+        List enabled proxy profiles available for agent-selected browser
+        sessions. Returns only safe routing metadata and never proxy URLs or
+        credentials.
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open). Browserbase
-        honors timeout as max session lifetime.
+        honors timeout as max session lifetime. Pass presentation_mode=demo
+        for visible, human-paced actions in live views and recordings.
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,
         annotate? (default false; set true for Set-of-Mark labels),
-        include_som? (default false; returns structured SoM targets only when true).
+        include_som? (default false; returns structured SoM targets only when
+        true). Returns screenshot_url, a stable app-owned URL that continues
+        serving the clean final frame after the browser closes.
     - name: browser_recording
       description: |
         Retrieve provider-neutral playback metadata for an active or historical
@@ -158,7 +186,9 @@ provides:
       description: |
         Close a session opened by this app and release browser/provider
         resources. Use this when finished unless the user explicitly wants the
-        session left open. Compatibility alias for browser_session(action=close).
+        session left open. Returns view, a browser-view component reference
+        containing only session_id. Compatibility alias for
+        browser_session(action=close).
 
   ui_panels:
     - slot: project.page
@@ -167,27 +197,63 @@ provides:
       entry: /ui/ComputerPanel.mjs
 
   ui_components:
-    # Inline browser-session card — agent attaches after a successful
-    # browser_session(open). Carries enough context (backend, URL,
-    # status) to identify the session at a glance + a deep-link to
-    # the operator panel for live watching.
-    - name: browser-card
+    # Canonical components. The agent chooses whether and which card to attach;
+    # opening or driving a browser never creates chat attachments automatically.
+    - name: browser-session
       entry: /ui/BrowserCard.mjs
       slots: [chat.message_attachment]
       props_schema:
         type: object
-        required: [instance_id, backend, url]
+        required: [session_id]
+        properties:
+          session_id: { type: string }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+
+    - name: browser-view
+      entry: /ui/BrowserViewCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [session_id]
+        properties:
+          session_id: { type: string }
+          caption: { type: string }
+          height: { type: integer, default: 360 }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+        caption: "Example Domain"
+
+    - name: browser-timeline
+      entry: /ui/TimelineCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [session_id]
+        properties:
+          session_id: { type: string }
+      preview_props:
+        preview: true
+        session_id: "br_example"
+
+    # Compatibility aliases. They resolve onto canonical renderers so old
+    # messages and stale agent output remain visual without duplicate viewers.
+    - name: browser-card
+      entry: /ui/BrowserViewCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [instance_id]
         properties:
           instance_id: { type: string }
-          backend:     { type: string, enum: [local, browserbase, steel, browser-engine, service] }
-          url:         { type: string }
-          status:      { type: string }
+          caption:     { type: string }
+          height:      { type: integer, default: 360 }
       preview_props:
         preview: true
         instance_id: "demo-instance"
-        backend: "local"
-        url: "https://example.com"
-        status: "active"
+        caption: "Example Domain"
 
     # Annotated screenshot — agent attaches after computer_use(screenshot).
     # Renders the image with SoM badges as an SVG
@@ -350,17 +416,19 @@ provides:
       payload:
         default_backend: string
         lock_backend: boolean
+        default_proxy_mode: string
+        default_proxy_profile_id: string
+        lock_proxy_policy: boolean
 
   skills:
     - name: how-to-use-computer
       command: /computer
       body_file: skills/how-to-use-computer.md
       description: |
-        Teaches the agent which chat component to attach for which
-        browser action. Loads on browser_session and computer_use
-        tool calls. Render-only attachments — for human-in-the-loop
-        questions, use the existing pace() + console-injection
-        pattern instead.
+        Teaches the agent to attach the session-following browser-view for
+        direct webpage requests and when to choose session or timeline cards.
+        Loads on browser_session and computer_use tool calls. Browser actions
+        never attach cards automatically.
       metadata:
         category: browsing
         icon: 🖥️

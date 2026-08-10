@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"crypto/hmac"
-	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -17,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	twilioclient "github.com/twilio/twilio-go/client"
 )
 
 const maxCarrierFrameBytes = 1 << 20
@@ -232,11 +233,30 @@ func (a *App) verifyTwilioRequest(r *http.Request, connectionID int64) error {
 	if authToken == "" {
 		return errors.New("Twilio connection has no auth_token for request verification")
 	}
+	fullURL := a.publicRequestURL(r)
+	signature := strings.TrimSpace(r.Header.Get("X-Twilio-Signature"))
+	validator := twilioclient.NewRequestValidator(authToken)
+	if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+		body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+		if err != nil || len(body) > 1<<20 {
+			return errors.New("read Twilio request body")
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if !validator.ValidateBody(fullURL, body, signature) {
+			return errors.New("invalid Twilio request signature")
+		}
+		return nil
+	}
 	if err := r.ParseForm(); err != nil {
 		return fmt.Errorf("parse Twilio request: %w", err)
 	}
-	fullURL := a.publicRequestURL(r)
-	if !verifyTwilioSignature(fullURL, r.PostForm, authToken, r.Header.Get("X-Twilio-Signature")) {
+	params := make(map[string]string, len(r.PostForm))
+	for key, values := range r.PostForm {
+		if len(values) > 0 {
+			params[key] = values[0]
+		}
+	}
+	if !validator.Validate(fullURL, params, signature) {
 		return errors.New("invalid Twilio request signature")
 	}
 	return nil
@@ -256,23 +276,14 @@ func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected 
 	if fullURL == "" || authToken == "" || expected == "" {
 		return false
 	}
-	keys := make([]string, 0, len(form))
-	for key := range form {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var signed strings.Builder
-	signed.WriteString(fullURL)
-	for _, key := range keys {
-		if values := form[key]; len(values) > 0 {
-			signed.WriteString(key)
-			signed.WriteString(values[0])
+	params := make(map[string]string, len(form))
+	for key, values := range form {
+		if len(values) > 0 {
+			params[key] = values[0]
 		}
 	}
-	mac := hmac.New(sha1.New, []byte(authToken))
-	_, _ = mac.Write([]byte(signed.String()))
-	want := base64.StdEncoding.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(want), []byte(expected))
+	validator := twilioclient.NewRequestValidator(authToken)
+	return validator.Validate(fullURL, params, expected)
 }
 
 func redactURL(raw string) string {

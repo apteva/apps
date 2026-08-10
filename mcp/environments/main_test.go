@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -24,7 +25,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql"} {
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql", "005_protocol_fixtures.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -34,6 +35,128 @@ func testStore(t *testing.T) store {
 		}
 	}
 	return store{db: db}
+}
+
+func TestProtocolFixturePersistenceBindingsAndEvents(t *testing.T) {
+	s := testStore(t)
+	spec := EnvironmentSpec{ProtocolFixtures: []ProtocolFixtureSpec{{ID: "carrier", Pack: "telephony-carrier"}}}
+	if err := validateSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	normalizeProtocolFixtureSpecs(&spec)
+	bindings := protocolFixtureBindings(spec)
+	if len(bindings) != 1 || bindings[0].App != "telephony" || bindings[0].Role != "carrier" || bindings[0].Slug != "twilio" || bindings[0].Credentials["auth_token"] == "" {
+		t.Fatalf("bindings=%#v", bindings)
+	}
+	run := &Run{ID: "run-carrier", RuntimeID: "rt-carrier", Status: "starting", StartedAt: time.Now().UTC()}
+	if err := s.createRun(run); err != nil {
+		t.Fatal(err)
+	}
+	fixture := spec.ProtocolFixtures[0]
+	if bindings[0].Credentials["auth_token"] != stringConfig(fixture.Config, "auth_token", "") {
+		t.Fatal("persisted fixture and runtime binding use different auth tokens")
+	}
+	instance := &ProtocolFixtureInstance{RunID: run.ID, ID: fixture.ID, Pack: fixture.Pack, Version: fixture.Version, Protocol: "twilio", TargetApp: fixture.TargetApp, Status: "running", Config: fixture.Config}
+	if err := s.createProtocolFixture(instance); err != nil {
+		t.Fatal(err)
+	}
+	event := &ProtocolFixtureEvent{RunID: run.ID, FixtureID: fixture.ID, CallID: "call-one", Type: "webhook.inbound", Direction: "fixture_to_app", Data: map[string]any{"status": 200}}
+	if err := s.addProtocolEvent(event); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.getProtocolFixture(run.ID, fixture.ID)
+	if err != nil || got == nil || got.TargetApp != "telephony" {
+		t.Fatalf("fixture=%#v err=%v", got, err)
+	}
+	events, err := s.listProtocolEvents(run.ID, fixture.ID, "call-one")
+	if err != nil || len(events) != 1 || events[0].Type != "webhook.inbound" {
+		t.Fatalf("events=%#v err=%v", events, err)
+	}
+}
+
+func TestEnvironmentSpecPreservesRealConnectionBindings(t *testing.T) {
+	spec := EnvironmentSpec{
+		ConnectionIDs: []int64{6},
+		ConnectionBindings: []sdk.RuntimeConnectionBinding{{
+			App: "computer", Role: "browserbase", ConnectionID: 6,
+		}},
+	}
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte("api_key")) || bytes.Contains(raw, []byte("credentials")) {
+		t.Fatalf("environment spec leaked credentials: %s", raw)
+	}
+	var restored EnvironmentSpec
+	if err := json.Unmarshal(raw, &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.ConnectionBindings) != 1 || restored.ConnectionBindings[0].ConnectionID != 6 || restored.ConnectionBindings[0].App != "computer" || restored.ConnectionBindings[0].Role != "browserbase" {
+		t.Fatalf("connection bindings lost: %#v", restored.ConnectionBindings)
+	}
+}
+
+func TestTwilioFixtureSignatureAndCodec(t *testing.T) {
+	form := url.Values{"CallSid": {"CA1"}, "From": {"+15550100002"}}
+	if got := twilioFixtureSignature("https://example.test/inbound", form, "secret"); got != "IOSPEgp/OjWf5/tJEDTAUc/GDDo=" {
+		t.Fatalf("signature=%q", got)
+	}
+	pcm := []int16{-20000, -1000, 0, 1000, 20000}
+	roundTrip := carrierUlawToPCM(carrierPCMToUlaw(pcm))
+	for i := range pcm {
+		if delta := int(roundTrip[i]) - int(pcm[i]); delta < -2000 || delta > 2000 {
+			t.Fatalf("sample %d round trip=%d want near %d", i, roundTrip[i], pcm[i])
+		}
+	}
+	gateway, err := carrierGatewayURL("wss://runtime.apteva.invalid/rt-one/api/apps/telephony/_install/7/media/twilio/call/token", &sdk.RuntimeAppEndpoint{
+		PlatformURL: "https://runtime.apteva.invalid/rt-one",
+		GatewayURL:  "http://127.0.0.1:5280/api/environment-app-public/rt-one",
+	})
+	if err != nil || gateway != "ws://127.0.0.1:5280/api/environment-app-public/rt-one/api/apps/telephony/_install/7/media/twilio/call/token" {
+		t.Fatalf("gateway=%q err=%v", gateway, err)
+	}
+}
+
+func TestVoiceCallPersistenceAndValidation(t *testing.T) {
+	s := testStore(t)
+	started := time.Now().UTC()
+	call := &VoiceCall{
+		ID: "call-one", RunID: "run-one", Status: "completed",
+		Spec:       VoiceFixtureSpec{CallerGoal: "Book an appointment", TargetAgent: "main", TimeoutSeconds: 90},
+		Transcript: []VoiceTranscriptTurn{{Speaker: "caller", Text: "I need an appointment.", Time: started, AtMS: 250}},
+		Metrics:    VoiceCallMetrics{DurationMS: 3200, FirstResponseMS: 850, ToolCalls: 1, EndedBy: "caller"},
+		BridgeExits: []VoiceBridgeExitResult{{
+			Leg: "caller_to_target", Endpoint: "caller", Operation: "read",
+			CloseCode: 1000, Reason: "caller_done", ElapsedMS: 3100, NormalClosure: true,
+		}},
+		StartedAt: started,
+	}
+	if err := s.saveVoiceCall(call); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.getVoiceCall(call.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Spec.CallerGoal != call.Spec.CallerGoal || len(got.Transcript) != 1 ||
+		got.Metrics.FirstResponseMS != 850 || len(got.BridgeExits) != 1 ||
+		got.BridgeExits[0].Reason != "caller_done" {
+		t.Fatalf("voice call=%#v", got)
+	}
+	event := voiceCallEvent(got)
+	if event["call_id"] != call.ID || event["run_id"] != call.RunID || len(event["transcript"].([]VoiceTranscriptTurn)) != 1 {
+		t.Fatalf("voice event=%#v", event)
+	}
+	if len(event["bridge_exits"].([]VoiceBridgeExitResult)) != 1 {
+		t.Fatalf("voice event bridge exits=%#v", event["bridge_exits"])
+	}
+	if err := validateVoiceSpec(VoiceFixtureSpec{CallerGoal: "Help me", TimeoutSeconds: 90}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateVoiceSpec(VoiceFixtureSpec{TimeoutSeconds: 90}); err == nil {
+		t.Fatal("accepted voice call without caller goal")
+	}
 }
 
 func TestDefinitionAndRunPersistence(t *testing.T) {
@@ -162,6 +285,11 @@ func TestEmbeddedAndSourceManifestsExposeSameTools(t *testing.T) {
 	}
 	if source.Name != embedded.Name || source.Version != embedded.Version || !reflect.DeepEqual(toolNames(*source), toolNames(embedded)) {
 		t.Fatalf("manifest drift: source=%s@%s embedded=%s@%s", source.Name, source.Version, embedded.Name, embedded.Version)
+	}
+	expectedRef := "environments/v" + source.Version
+	if source.Runtime.Source == nil || embedded.Runtime.Source == nil ||
+		source.Runtime.Source.Ref != expectedRef || embedded.Runtime.Source.Ref != expectedRef {
+		t.Fatalf("manifest runtime ref drift: expected=%s source=%v embedded=%v", expectedRef, source.Runtime.Source, embedded.Runtime.Source)
 	}
 }
 

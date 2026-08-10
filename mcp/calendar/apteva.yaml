@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: calendar
 display_name: Calendar
-version: 0.3.5
+version: 0.3.6
 description: |
   Self-contained calendar — multiple calendars per project, events with
   recurrence, holidays helper. Agents read + write via MCP tools; the
@@ -12,7 +12,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/calendar
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/calendar/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [calendar, scheduling, productivity, time]
 
 scopes: [project, global]

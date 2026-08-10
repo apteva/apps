@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: webinars
 display_name: Webinars
-version: 0.1.1
+version: 0.1.2
 description: |
   Live, scheduled, and on-demand webinars. Composes the streaming app
   for the pipe (RTMP→HLS+recording), CRM for the contact + activity
@@ -17,7 +17,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/webinars
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/webinars/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [webinars, video, live, funnel, attendance]
 
 scopes: [project, global]

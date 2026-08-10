@@ -6,6 +6,7 @@ triggers:
   - computer_context_create
   - computer_context_list
   - computer_context_get
+  - computer_proxy_profile_list
   - browser_recording
   - dialog
   - modal
@@ -36,28 +37,51 @@ goal, pick the lowest.
 no Set-of-Mark labels. Use `computer_use(action="screenshot")` for navigation,
 or pass `annotate=true` to `browser_screenshot` only when labels are desired.
 
-## Chat attachments
+## Chat attachments are agent-selected
 
-When you do something visible to the browser, attach a component
-instead of describing it in prose. All render-only — never use them
-to ask the operator a question.
+Opening or driving a browser does not create an attachment automatically. You
+still decide which card belongs in the response. However, when the user directly
+asks you to open, show, inspect, review, or navigate to a webpage, the final
+response must include exactly one `browser-view` unless the user explicitly asks
+for text only or the destination channel does not support components. All cards
+are render-only; never use them to ask the operator a question.
 
 | When | Component | Key props |
 |---|---|---|
-| After `browser_session(open)` succeeds | `browser-card` | `instance_id`, `backend`, `url`, `status` |
-| After `screenshot` | `screenshot-with-som` | `screenshot_url`, `som: [{label,x,y,w,h,kind}]`, `caption` |
-| After traversing several pages | `navigation-timeline` | `steps: [{url,title,thumbnail,ts}]` |
-| Mid-flow "watch me work" tile | `live-view` | `instance_id`, `height`, `mode` |
+| Open, show, inspect, review, or navigate to a webpage | `browser-view` | `session_id` |
+| Session metadata is the result, but page pixels are not useful | `browser-session` | `session_id` |
+| Several distinct pages are part of the result | `browser-timeline` | `session_id` |
+| A specific marked screenshot is needed | legacy `screenshot-with-som` | `screenshot_url`, `som`, `caption` |
 
 Attach via:
 
 ```
-respond(components=[{ app: "computer", name: "<from-table>", props: {...} }])
+channels_send(
+  channel="current",
+  text="<final outcome>",
+  components=[{ app: "computer", name: "browser-view", props: {session_id: "br_..."} }]
+)
 ```
 
-Default `live-view` to `mode: "thumb"` (polled image). `mode: "live"`
-is the full screencast — only when the view IS the message; multiple
-live tiles in one transcript get expensive.
+`browser_session(open)` and `browser_session(close)` return a `view` object that
+is already shaped like a channel component. Copy that object into the final
+`channels_send(..., components=[...])`. Do not add `screenshot_url` or a display
+mode.
+
+The canonical `browser-view` follows the session lifecycle itself. While the
+session is active, it shows the live stream when available and otherwise follows
+the latest frame. After close, it automatically settles on the durable clean
+final frame. The same attachment therefore works whether it is sent during the
+browse or after cleanup.
+
+The acknowledgement before browser work is text-only. The single final outcome
+contains the `browser-view`; do not send a second component-only message. Do not
+attach both `browser-session` and `browser-view` for the same result unless both
+metadata and pixels are independently useful.
+
+The older names `browser-card`, `screenshot-with-som`, `live-view`, and
+`navigation-timeline` remain compatibility aliases for existing transcripts.
+Use the canonical names above for new messages.
 
 ## Session cleanup
 
@@ -77,6 +101,42 @@ Treat browser sessions like resources you open and close.
   `processing`, then use the returned app-owned playlist URL when `ready`.
 - Local, Browser Engine, and service sessions currently return
   `status="unsupported"` for recordings.
+
+## Presentation mode for recordings
+
+Open a session with `presentation_mode="demo"` when the browser is performing
+a user-facing walkthrough or recording:
+
+```
+browser_session(
+  action="open",
+  backend="browserbase",
+  presentation_mode="demo",
+  url="https://example.com"
+)
+```
+
+- The default `fast` mode is a strict presentation no-op and preserves normal
+  automation timing and behavior.
+- On local, Browserbase, Steel, and Browser Engine backends, demo mode adds an
+  in-page cursor and click pulse, types short `computer_use(action="type")`
+  text character by character, shows a brief cue over every supported
+  structured control change (`upload_file`, `select_option`, `set_checked`,
+  `set_temporal`, and `set_text`), and holds each completed action long enough
+  to read in a live view or recording.
+- Browserbase and Steel provider recordings capture the in-page presentation
+  layer. Local and Browser Engine expose it in their live browser views but do
+  not currently produce recordings.
+- Service backends get the paced typing and holds without an in-page cursor,
+  because their wire protocol does not expose a browser DOM connection.
+- For visible short-form entry in a demo, click the field and use `type`. Keep
+  using `set_text` for long content, rich editors, or exact bulk replacement;
+  those actions remain atomic and get a post-action visual cue.
+- Presentation elements use `pointer-events: none`, are hidden from
+  accessibility APIs, and never focus, scroll, click, type, or dispatch browser
+  input events. The real agent action and its resolved target stay unchanged.
+- Presentation rendering is best-effort. If a restricted page prevents the
+  overlay from being injected, the underlying action still runs.
 
 ## Web-browsing patterns
 
@@ -148,6 +208,29 @@ Use app contexts when cookies/storage should survive across sessions.
   Browser Engine context id. Prefer app `context_id` or `context_name` unless
   importing an existing provider context.
 - `persist=false` means load the context read-only for that session.
+
+## Proxy routing
+
+Proxy choice is agent-driven unless the operator locked the Computer app's
+proxy policy. Keep the tool contract provider-neutral:
+
+- Omit proxy arguments, or use `proxy_mode="auto"`, when no location or
+  routing requirement exists.
+- Use `proxy_mode="direct"` only when the task explicitly requires bypassing
+  every configured or backend-managed proxy.
+- Use `proxy_mode="managed"` plus an optional two-letter `proxy_country` for
+  the selected browser backend's own proxy network.
+- Use `computer_proxy_profile_list()` before selecting
+  `proxy_mode="profile"`. Pass the returned profile id or exact unique name in
+  `proxy_profile`; never invent a profile or request its credentials.
+- A profile may accept an optional two-letter `proxy_country` override and
+  `proxy_sticky="rotating"|"session"|"context"`. Context stickiness requires
+  an app-managed `context_id` or `context_name`, so the same browser identity
+  deterministically gets the same provider session tag.
+- Session results expose only the safe routing summary (mode, profile name,
+  country, stickiness). Proxy URLs, usernames, passwords, and integration
+  tokens are resolved privately by Computer and must never be requested or
+  copied into the conversation.
 
 **Cookie / consent banners.** Dismiss FIRST. Look for "Accept",
 "Accept all", "OK", "Agree", "Got it". Some live in closed shadow

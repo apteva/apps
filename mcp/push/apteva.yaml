@@ -1,0 +1,87 @@
+schema: apteva-app/v1
+
+name: push
+display_name: Push
+version: 0.3.0
+description: Self-hostable Apple push notification relay for Apteva mobile clients.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/push
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [push, notifications, mobile, ios]
+
+scopes: [global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.connections.execute
+    - platform.connections.read_credentials
+    - platform.apps.call
+    - platform.ingress.write
+  integrations:
+    - role: ios_provider
+      kind: integration
+      compatible_slugs: [apple-push-notifications]
+      capabilities: [push.ios.send]
+      tools:
+        push.ios.send: send_notification
+      required: true
+      label: Apple Push Notifications
+      hint: Bind the APNs connection used to deliver notifications to the Apteva iOS app.
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.upsert_record]
+      required: false
+      label: Domains (relay DNS)
+      hint: Optional. When bound, Push can publish the relay hostname's DNS record. Server-native ingress owns the route and managed TLS certificate.
+
+provides:
+  http_routes:
+    - prefix: /
+    - prefix: /v1/
+      no_auth: true
+  ui_panels:
+    - slot: project.page
+      label: Push
+      icon: bell
+      entry: /ui/PushPanel.mjs
+  publishes:
+    - name: device.registered
+      description: A mobile device registered for push notifications.
+    - name: device.revoked
+      description: A mobile push device was revoked.
+    - name: delivery.sent
+      description: A push notification was accepted by its provider.
+    - name: delivery.failed
+      description: A push notification delivery failed.
+    - name: relay.domain_configured
+      description: The public relay hostname, DNS, and managed TLS route were configured.
+    - name: relay.domain_detached
+      description: The public relay hostname was detached from platform ingress.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/push
+  port: 8080
+  health_check: /health
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/push.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

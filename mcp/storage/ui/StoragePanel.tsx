@@ -490,7 +490,7 @@ export default function StoragePanel({ projectId, installId }: NativePanelProps)
   };
 
   const handleDownload = (f: FileRow) => {
-    window.open(`${API}/files/${f.id}/content?${withParams({})}`, "_blank");
+    window.open(`${API}/files/${f.id}/download/${encodeURIComponent(f.name)}?${withParams({})}`, "_blank");
   };
 
   const contentURL = (f: FileRow) => `${API}/files/${f.id}/content?${withParams({})}`;

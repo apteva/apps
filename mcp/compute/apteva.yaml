@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: compute
 display_name: Compute
-version: 0.1.0
+version: 0.1.1
 description: |
   Shared transient compute queue for Apteva apps. Apps submit short-
   lived resource-heavy jobs, and Compute serializes them across local
@@ -13,7 +13,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/compute
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/compute/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [compute, queue, workloads, render, infrastructure]
 
 scopes: [project, global]

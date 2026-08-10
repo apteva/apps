@@ -331,6 +331,9 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 	currentThumbX := int(math.Round(float64(srcX) * float64(tW) / float64(srcW)))
 	currentThumbX = clampInt(currentThumbX, 0, windowN-1)
 	currentScore := scores[currentThumbX]
+	rawThumbX := int(math.Round(float64(rawSrcX) * float64(tW) / float64(srcW)))
+	rawThumbX = clampInt(rawThumbX, 0, windowN-1)
+	rawScore := scores[rawThumbX]
 	total := 0.0
 	for _, v := range smooth {
 		total += v
@@ -339,6 +342,9 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 		return srcX, false
 	}
 	if bestScore < currentScore*1.08 || bestScore < total*0.18 {
+		if rawX, ok := concentratedRawSubjectCropX(rawSrcX, srcX, srcW, cropW, rawScore, bestScore, total); ok {
+			return rawX, true
+		}
 		return srcX, false
 	}
 
@@ -399,6 +405,7 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 	// person or warm object elsewhere in the scene cannot pull the crop across
 	// the frame. At 1920 -> 9:16 this is about 150 source pixels.
 	edgeHalo := maxInt(6, thumbCropW/4)
+	extendedHalo := maxInt(edgeHalo, thumbCropW/2)
 
 	pixels := normalizedSmartCropRGB(img, w, h)
 	components := warmSubjectComponents(pixels, w, h, thumbCropW, 0, w-1)
@@ -412,12 +419,22 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 		// the hand at the crop edge can push the actual face out of frame. A
 		// useful reclining-head component is closer to square at this scale;
 		// reject short hand blobs and broad furniture/hair regions here. The
-		// bounds intentionally retain the production reclining-face fixture
-		// (35x38 at 320x180) and both synthetic edge-face regressions.
-		if componentW < maxInt(6, w*11/100) || componentW > w*18/100 ||
-			componentH < maxInt(10, h*15/100) || componentH > h*35/100 ||
-			component.minY < h*30/100 || component.maxY > h*88/100 ||
-			component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo ||
+		// bounds intentionally retain the exact-timestamp production reclining
+		// face fixture (32x37 at 320x180) and both synthetic regressions.
+		smallTallFace := componentW >= maxInt(6, w*5/100) &&
+			componentH >= maxInt(10, h*12/100) &&
+			componentH*10 >= componentW*11
+		originalFace := componentW >= maxInt(6, w*10/100) &&
+			componentH >= maxInt(10, h*15/100)
+		strongExtendedHead := srcW >= 3000 && component.score >= minScore*3 &&
+			componentH >= h*25/100 &&
+			component.maxX >= currentStart-extendedHalo && component.minX <= currentEnd+extendedHalo
+		if (!smallTallFace && !originalFace) || componentW > w*18/100 ||
+			componentH > h*35/100 ||
+			component.minY < h*30/100 ||
+			(component.maxY > h*88/100 && (!strongExtendedHead || component.maxY > h*90/100)) ||
+			(!strongExtendedHead &&
+				(component.maxX < currentStart-edgeHalo || component.minX > currentEnd+edgeHalo)) ||
 			component.score < minScore {
 			continue
 		}
@@ -440,6 +457,163 @@ func headAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, boo
 		newStart = best.minX - margin
 	} else if best.maxX > currentEnd-margin {
 		newStart = best.maxX + margin - thumbCropW + 1
+	} else {
+		return srcX, false
+	}
+	newStart = clampInt(newStart, 0, w-thumbCropW)
+	x := clampInt(roundEven(int(math.Round(float64(newStart)*float64(srcW)/float64(w)))), 0, srcW-cropW)
+	if x == srcX {
+		return srcX, false
+	}
+	return x, true
+}
+
+// tallSubjectExtentAwareNarrowSmartCropX recovers the upper end of a tall,
+// connected skin component when a leaning head, neck, shoulder, and arm merge
+// into one blob. A compact face detector cannot separate that shape, while
+// torso-centred saliency can strand a substantial part of it outside the crop.
+//
+// Callers gate this with confident, subject-anchored temporal motion. The
+// geometry below is therefore only an edge-containment refinement; it cannot
+// make a static wall, cushion, or warm piece of furniture become the subject.
+func tallSubjectExtentAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
+	if img == nil || srcW <= cropW || cropW <= 0 || float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return srcX, false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	if thumbCropW >= w {
+		return srcX, false
+	}
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	currentEnd := currentStart + thumbCropW - 1
+	components := warmSubjectComponents(normalizedSmartCropRGB(img, w, h), w, h, thumbCropW, 0, w-1)
+	var best warmSubjectComponent
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		boxArea := maxInt(1, componentW*componentH)
+		fill := float64(component.area) / float64(boxArea)
+		if componentW < w*10/100 || componentW > w*25/100 ||
+			componentH < h*50/100 || component.minY > h*45/100 || component.maxY < h*80/100 ||
+			fill < 0.16 || fill > 0.75 {
+			continue
+		}
+		leftClipped := maxInt(0, currentStart-component.minX)
+		rightClipped := maxInt(0, component.maxX-currentEnd)
+		if maxInt(leftClipped, rightClipped) < componentW/4 || leftClipped == rightClipped {
+			continue
+		}
+		if component.score > best.score {
+			best = component
+		}
+	}
+	if best.score == 0 {
+		return srcX, false
+	}
+	margin := maxInt(4, thumbCropW/5)
+	newStart := currentStart
+	if best.minX < currentStart {
+		newStart = best.minX - margin
+	} else if best.maxX > currentEnd {
+		newStart = best.maxX + margin - thumbCropW + 1
+	}
+	newStart = clampInt(newStart, 0, w-thumbCropW)
+	x := clampInt(roundEven(int(math.Round(float64(newStart)*float64(srcW)/float64(w)))), 0, srcW-cropW)
+	if x == srcX {
+		return srcX, false
+	}
+	return x, true
+}
+
+// recliningSubjectAwareNarrowSmartCropX protects the full horizontal extent
+// of a reclining person when no isolated face-shaped component is available.
+// A face can merge with a hand, hair, or patterned cushion and evade the
+// compact head guard above, while the torso and head-side skin regions still
+// form two strong, tall components along the lower edge of the frame.
+//
+// The rule is deliberately narrow: both components must be lower-frame,
+// person-sized, similarly substantial, close to each other, and already touch
+// the current crop or its small halo. It therefore does not turn generic warm
+// furniture elsewhere in the room into a new subject. The correction moves
+// only far enough to give the outer component breathing room.
+func recliningSubjectAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW int) (int, bool) {
+	if img == nil || srcW <= cropW || cropW <= 0 ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return srcX, false
+	}
+	w := minInt(320, b.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(b.Dy())/float64(b.Dx()))))
+	thumbCropW := clampInt(int(math.Round(float64(cropW)*float64(w)/float64(srcW))), 1, w)
+	if thumbCropW >= w {
+		return srcX, false
+	}
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(w)/float64(srcW))), 0, w-thumbCropW)
+	currentEnd := currentStart + thumbCropW - 1
+	components := warmSubjectComponents(normalizedSmartCropRGB(img, w, h), w, h, thumbCropW, 0, w-1)
+	minScore := 260.0 * float64(w*h) / (320.0 * 180.0)
+	eligible := make([]warmSubjectComponent, 0, len(components))
+	for _, component := range components {
+		componentW := component.maxX - component.minX + 1
+		componentH := component.maxY - component.minY + 1
+		boxArea := maxInt(1, componentW*componentH)
+		fill := float64(component.area) / float64(boxArea)
+		if componentW < maxInt(6, w*6/100) || componentW > w*20/100 ||
+			componentH < maxInt(10, h*18/100) || componentH > h*48/100 ||
+			component.minY < h*55/100 || component.maxY < h*88/100 ||
+			component.score < minScore || fill < 0.14 || fill > 0.82 {
+			continue
+		}
+		eligible = append(eligible, component)
+	}
+	if len(eligible) < 2 {
+		return srcX, false
+	}
+
+	halo := maxInt(6, thumbCropW/4)
+	var left, right warmSubjectComponent
+	bestScore := 0.0
+	for i := 0; i < len(eligible); i++ {
+		for j := i + 1; j < len(eligible); j++ {
+			a, c := eligible[i], eligible[j]
+			if a.centerX > c.centerX {
+				a, c = c, a
+			}
+			gap := c.centerX - a.centerX
+			span := c.maxX - a.minX + 1
+			if gap < float64(thumbCropW)/3.0 || gap > float64(thumbCropW) ||
+				span > thumbCropW*3/2 ||
+				c.maxX < currentStart-halo || a.minX > currentEnd+halo {
+				continue
+			}
+			ratio := a.score / c.score
+			if ratio < 0.35 || ratio > 2.85 {
+				continue
+			}
+			if score := a.score + c.score; score > bestScore {
+				left, right, bestScore = a, c, score
+			}
+		}
+	}
+	if bestScore == 0 {
+		return srcX, false
+	}
+
+	margin := maxInt(4, thumbCropW/5)
+	newStart := currentStart
+	if left.minX < currentStart+margin {
+		newStart = left.minX - margin
+	} else if right.maxX > currentEnd-margin {
+		newStart = right.maxX + margin - thumbCropW + 1
 	} else {
 		return srcX, false
 	}
@@ -487,6 +661,139 @@ func subjectColumnWeights(img image.Image) []float64 {
 		}
 	}
 	return cols
+}
+
+type smartCropSilhouetteWindow struct {
+	Start        int
+	Score        float64
+	CurrentScore float64
+	Total        float64
+	RowCoverage  float64
+}
+
+// smartCropSilhouetteWindow finds a tall dark/neutral foreground region. It
+// complements the warm-pixel detector for people wearing dark clothes, while
+// its row-coverage and concentration metrics let callers reject ordinary dark
+// furniture or isolated edges.
+func findSmartCropSilhouetteWindow(img image.Image, currentStart, cropW int) (smartCropSilhouetteWindow, bool) {
+	if img == nil {
+		return smartCropSilhouetteWindow{}, false
+	}
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if w <= 0 || h <= 0 || cropW <= 0 || cropW >= w {
+		return smartCropSilhouetteWindow{}, false
+	}
+	cols := make([]float64, w)
+	active := make([]bool, w*h)
+	pixels := normalizedSmartCropRGB(img, w, h)
+	for y := 0; y < h; y++ {
+		yWeight := 1.0
+		if y < h*8/100 {
+			yWeight = 0.25
+		}
+		for x := 0; x < w; x++ {
+			idx := (y*w + x) * 3
+			r, g, bl := int(pixels[idx]), int(pixels[idx+1]), int(pixels[idx+2])
+			gray := gray8(r, g, bl)
+			spread := maxInt(r, maxInt(g, bl)) - minInt(r, minInt(g, bl))
+			if gray < 12 || gray > 135 || spread > 90 {
+				continue
+			}
+			var grad int
+			if x > 0 {
+				left := idx - 3
+				lr, lg, lb := int(pixels[left]), int(pixels[left+1]), int(pixels[left+2])
+				grad += absInt(gray - gray8(lr, lg, lb))
+			}
+			if y > 0 {
+				up := idx - w*3
+				ur, ug, ub := int(pixels[up]), int(pixels[up+1]), int(pixels[up+2])
+				grad += absInt(gray - gray8(ur, ug, ub))
+			}
+			edge := math.Min(float64(grad)/32.0, 2.0)
+			cols[x] += (0.35 + edge) * (float64(136-gray) / 124.0) * yWeight
+			active[y*w+x] = true
+		}
+	}
+	smooth := smoothColumns(cols, 7)
+	windowN := w - cropW + 1
+	scores := make([]float64, windowN)
+	var running, total float64
+	for _, score := range smooth {
+		total += score
+	}
+	for x := 0; x < cropW; x++ {
+		running += smooth[x]
+	}
+	scores[0] = running
+	bestStart, bestScore := 0, running
+	for start := 1; start < windowN; start++ {
+		running += smooth[start+cropW-1] - smooth[start-1]
+		scores[start] = running
+		if running > bestScore {
+			bestStart, bestScore = start, running
+		}
+	}
+	coveredRows := 0
+	for y := 0; y < h; y++ {
+		pixels := 0
+		for x := bestStart; x < bestStart+cropW; x++ {
+			if active[y*w+x] {
+				pixels++
+			}
+		}
+		if pixels >= maxInt(3, cropW/25) {
+			coveredRows++
+		}
+	}
+	currentStart = clampInt(currentStart, 0, windowN-1)
+	return smartCropSilhouetteWindow{
+		Start:        bestStart,
+		Score:        bestScore,
+		CurrentScore: scores[currentStart],
+		Total:        total,
+		RowCoverage:  float64(coveredRows) / float64(h),
+	}, total > 0
+}
+
+func silhouetteAwareNarrowSmartCropX(img image.Image, srcX, srcW, cropW, thumbCropW int) (int, bool) {
+	if img == nil || srcW <= cropW || cropW <= 0 || thumbCropW <= 0 ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	b := img.Bounds()
+	if b.Dx() <= thumbCropW || b.Dy() <= 0 {
+		return srcX, false
+	}
+	windowN := b.Dx() - thumbCropW + 1
+	currentStart := clampInt(int(math.Round(float64(srcX)*float64(b.Dx())/float64(srcW))), 0, windowN-1)
+	x, candidate, ok := strongSmartCropSilhouetteX(img, srcW, cropW, thumbCropW, currentStart)
+	if !ok || candidate.Score < candidate.CurrentScore*1.20 {
+		return srcX, false
+	}
+	if candidate.Start == 0 && candidate.Score < candidate.CurrentScore*1.50 {
+		return srcX, false
+	}
+	if absInt(x-srcX) <= maxInt(24, cropW/10) {
+		return srcX, false
+	}
+	return x, true
+}
+
+func strongSmartCropSilhouetteX(img image.Image, srcW, cropW, thumbCropW, currentStart int) (int, smartCropSilhouetteWindow, bool) {
+	if img == nil || srcW <= cropW || cropW <= 0 || thumbCropW <= 0 {
+		return 0, smartCropSilhouetteWindow{}, false
+	}
+	b := img.Bounds()
+	candidate, ok := findSmartCropSilhouetteWindow(img, currentStart, thumbCropW)
+	if !ok || candidate.Total < float64(b.Dx()*b.Dy())*0.04 ||
+		candidate.Score < candidate.Total*0.55 || candidate.RowCoverage < 0.65 ||
+		(candidate.Start == 0 && candidate.RowCoverage < 0.85) {
+		return 0, candidate, false
+	}
+	x := clampInt(roundEven(int(math.Round(float64(candidate.Start)*float64(srcW)/float64(b.Dx())))), 0, srcW-cropW)
+	return x, candidate, true
 }
 
 func motionAwareNarrowSmartCropX(
@@ -562,6 +869,7 @@ func motionAwareNarrowSmartCropXFromImages(img image.Image, neighbors []image.Im
 		for x := 0; x < tW; x++ {
 			r, g, b := rgb8(img.At(bounds.Min.X+x, bounds.Min.Y+y))
 			var maxDiff float64
+			minDiff := math.Inf(1)
 			for _, n := range usable {
 				nb := n.Bounds()
 				nr, ng, nbv := rgb8(n.At(nb.Min.X+x, nb.Min.Y+y))
@@ -569,8 +877,18 @@ func motionAwareNarrowSmartCropXFromImages(img image.Image, neighbors []image.Im
 				if diff > maxDiff {
 					maxDiff = diff
 				}
+				if diff < minDiff {
+					minDiff = diff
+				}
 			}
-			weight := (maxDiff - 12.0) / 40.0
+			// With frames on both sides, require activity against both. Using
+			// the maximum creates motion ghosts at the subject's previous and
+			// next positions and can make the crop chase an empty room region.
+			motionDiff := maxDiff
+			if len(usable) >= 2 {
+				motionDiff = minDiff
+			}
+			weight := (motionDiff - 12.0) / 40.0
 			if weight <= 0 {
 				continue
 			}
@@ -658,6 +976,28 @@ func bestColumnWindow(cols []float64, windowW, srcX, srcW int) (bestX int, bestS
 		if running > bestScore {
 			bestScore = running
 			bestX = x
+		}
+	}
+	// Coverage has a broad plateau when a person is narrower than the portrait
+	// window. The first maximum strands that person on the right edge. Among
+	// windows retaining 99% of the best evidence, choose the one that balances
+	// the evidence around its centre.
+	if srcW >= 3000 {
+		bestBalance := math.Inf(1)
+		for start, score := range scores {
+			if score < bestScore*0.99 || score <= 0 {
+				continue
+			}
+			center := float64(start) + float64(windowW-1)/2
+			distance := 0.0
+			for x := start; x < start+windowW; x++ {
+				distance += cols[x] * math.Abs(float64(x)-center)
+			}
+			distance /= math.Max(score, 1)
+			if distance < bestBalance {
+				bestBalance = distance
+				bestX = start
+			}
 		}
 	}
 	currentX := int(math.Round(float64(srcX) * float64(len(cols)) / float64(srcW)))

@@ -16,16 +16,44 @@ const testProject = "creators-test"
 
 type storageLookupPlatform struct {
 	tk.BasePlatformClient
-	found bool
+	found       bool
+	wrapped     bool
+	contentType string
+	signedURL   string
+	uploadID    int64
+	uploadName  string
 }
 
 func (p *storageLookupPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
-	if app != "storage" || tool != "files_get" {
+	if app != "storage" {
 		return nil
 	}
-	file := out.(*storageFileMetadata)
-	if p.found {
-		*file = storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: "image/png", SizeBytes: 68}
+	switch tool {
+	case "files_get":
+		result := out.(*storageFileLookupResult)
+		if p.found {
+			contentType := p.contentType
+			if contentType == "" {
+				contentType = "image/png"
+			}
+			file := storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: contentType, SizeBytes: 68}
+			if p.wrapped {
+				result.File = &file
+				result.Found = true
+			} else {
+				result.ID = file.ID
+				result.Name = file.Name
+				result.ContentType = file.ContentType
+				result.SizeBytes = file.SizeBytes
+			}
+		}
+	case "files_get_url":
+		result := out.(*map[string]any)
+		*result = map[string]any{"url": p.signedURL}
+	case "files_upload":
+		p.uploadName = strArg(input, "name")
+		result := out.(*storageUploadResult)
+		result.ID = p.uploadID
 	}
 	return nil
 }
@@ -67,7 +95,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.5" {
+	if m.Name != "creators" || m.Version != "0.3.5" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
@@ -334,7 +362,7 @@ func TestCRMStateAttributesAreNamespacedByCreatorSpace(t *testing.T) {
 }
 
 func TestAddFromStorageValidatesFileAndUsesAuthoritativeMetadata(t *testing.T) {
-	platform := &storageLookupPlatform{found: true}
+	platform := &storageLookupPlatform{found: true, wrapped: true}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	globalCtx = ctx
 	space := mustSpace(t, ctx, testProject, "Primary", "primary")
@@ -355,6 +383,42 @@ func TestAddFromStorageValidatesFileAndUsesAuthoritativeMetadata(t *testing.T) {
 	platform.found = false
 	if _, err := addAttachment(ctx, testProject, space.ID, map[string]any{"post_id": post.ID, "storage_file_id": int64(10)}); err == nil {
 		t.Fatal("missing storage file was attached")
+	}
+}
+
+func TestUploadAttachmentUsesCurrentStorageContract(t *testing.T) {
+	platform := &storageLookupPlatform{found: true, wrapped: true, uploadID: 321}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
+	globalCtx = ctx
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	post, err := createPost(ctx, testProject, space.ID, map[string]any{"title": "Upload picture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.NewReader(`{
+		"post_id": ` + jsonNumber(post.ID) + `,
+		"filename": "cover.png",
+		"content_base64": "iVBORw0KGgo=",
+		"content_type": "image/png"
+	}`)
+	request := httptest.NewRequest(http.MethodPost, "/attachments?project_id="+testProject+"&space_id="+jsonNumber(space.ID), body)
+	recorder := httptest.NewRecorder()
+	(&App{}).handleAttachments(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("upload status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if platform.uploadName != "cover.png" {
+		t.Fatalf("storage upload name = %q, want cover.png", platform.uploadName)
+	}
+	var response struct {
+		Attachment Attachment `json:"attachment"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	attachment := response.Attachment
+	if attachment.StorageFileID != platform.uploadID || attachment.Filename != "trusted.png" {
+		t.Fatalf("uploaded attachment = %#v", attachment)
 	}
 }
 

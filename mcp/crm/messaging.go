@@ -13,6 +13,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,11 @@ const (
 	channelEmail    = "email"
 	channelSMS      = "sms"
 	channelWhatsApp = "whatsapp"
+
+	outboundIdempotencyWindow = 5 * time.Minute
 )
+
+var outboundSendLocks [64]sync.Mutex
 
 type actionableToolError struct {
 	Code             string `json:"error_code"`
@@ -534,6 +539,7 @@ type logMessageActivityInput struct {
 	ConversationID  int64
 	MessageIDHeader string // outbound: Message-Id we sent; inbound: Message-Id we received
 	MessagingID     int64  // messaging-app row id; used for inbound dedup
+	IdempotencyKey  string // outbound caller key or CRM-generated short-window key
 }
 
 func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, error) {
@@ -550,7 +556,7 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 	}
 	defer tx.Rollback()
 
-	var convoArg, sdArg, msgIDArg, messagingIDArg any
+	var convoArg, sdArg, msgIDArg, messagingIDArg, idempotencyKeyArg any
 	if in.ConversationID > 0 {
 		convoArg = in.ConversationID
 	}
@@ -563,14 +569,18 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 	if in.MessagingID > 0 {
 		messagingIDArg = in.MessagingID
 	}
+	if strings.TrimSpace(in.IdempotencyKey) != "" {
+		idempotencyKeyArg = strings.TrimSpace(in.IdempotencyKey)
+	}
 
 	res, err := tx.Exec(
 		`INSERT INTO contact_activities
 			(project_id, contact_id, kind, body, occurred_at, source,
-			 source_detail, conversation_id, message_id_header, messaging_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 source_detail, conversation_id, message_id_header, messaging_id,
+			 idempotency_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ProjectID, in.ContactID, in.Kind, in.Body, in.OccurredAt, in.Source,
-		sdArg, convoArg, msgIDArg, messagingIDArg,
+		sdArg, convoArg, msgIDArg, messagingIDArg, idempotencyKeyArg,
 	)
 	if err != nil {
 		// Inbound dedup: messaging may retry the same delivery. The
@@ -605,11 +615,64 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 	return &Activity{
 		ID: aid, ContactID: in.ContactID, Kind: in.Kind, Body: in.Body,
 		OccurredAt: in.OccurredAt, Source: in.Source,
-		ConversationID: in.ConversationID,
+		SourceDetail:    string(sdJSON),
+		ConversationID:  in.ConversationID,
+		MessageIDHeader: in.MessageIDHeader,
+		MessagingID:     in.MessagingID,
+		IdempotencyKey:  in.IdempotencyKey,
 	}, nil
 }
 
 var errDuplicateMessagingID = errors.New("duplicate messaging_id (inbound already logged)")
+
+func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64) (*Activity, error) {
+	if messagingID <= 0 {
+		return nil, nil
+	}
+	return scanActivityRow(db.QueryRow(
+		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
+		        COALESCE(source_detail,''), COALESCE(conversation_id,0),
+		        COALESCE(message_id_header,''), COALESCE(messaging_id,0),
+		        COALESCE(idempotency_key,'')
+		 FROM contact_activities
+		 WHERE project_id = ? AND messaging_id = ?`,
+		pid, messagingID,
+	))
+}
+
+func dbActivityByIdempotencyKey(db *sql.DB, pid, key, since string) (*Activity, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, nil
+	}
+	return scanActivityRow(db.QueryRow(
+		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
+		        COALESCE(source_detail,''), COALESCE(conversation_id,0),
+		        COALESCE(message_id_header,''), COALESCE(messaging_id,0),
+		        COALESCE(idempotency_key,'')
+		 FROM contact_activities
+		 WHERE project_id = ?
+		   AND idempotency_key = ?
+		   AND (? = '' OR datetime(occurred_at) >= datetime(?))
+		 ORDER BY id DESC
+		 LIMIT 1`,
+		pid, key, since, since,
+	))
+}
+
+func scanActivityRow(row *sql.Row) (*Activity, error) {
+	a := &Activity{}
+	if err := row.Scan(
+		&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source,
+		&a.SourceDetail, &a.ConversationID, &a.MessageIDHeader, &a.MessagingID,
+		&a.IdempotencyKey,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return a, nil
+}
 
 func isUniqueViolation(err error) bool {
 	if err == nil {
@@ -1194,6 +1257,71 @@ func validateOutboundMessageArgs(args map[string]any) (int64, string, int64, str
 	return cid, body, templateID, contentSID, nil
 }
 
+func validateStandaloneEmailArgs(args map[string]any, channel string, templateID int64) error {
+	if channel != channelEmail || int64Arg(args, "conversation_id") > 0 || templateID > 0 {
+		return nil
+	}
+	if strings.TrimSpace(strArg(args, "subject")) == "" {
+		return errors.New("subject required for a new email conversation; use contacts_reply or pass conversation_id when replying")
+	}
+	return nil
+}
+
+func outboundContentFingerprint(
+	pid string,
+	contactID int64,
+	isTest bool,
+	sendArgs map[string]any,
+) string {
+	fingerprint := map[string]any{
+		"project_id":      pid,
+		"contact_id":      contactID,
+		"test":            isTest,
+		"channel":         sendArgs["channel"],
+		"to":              sendArgs["to"],
+		"from":            sendArgs["from"],
+		"subject":         sendArgs["subject"],
+		"body":            sendArgs["body"],
+		"body_html":       sendArgs["body_html"],
+		"template_id":     sendArgs["template_id"],
+		"content_sid":     sendArgs["content_sid"],
+		"vars":            sendArgs["vars"],
+		"conversation_id": sendArgs["conversation_id"],
+	}
+	encoded, _ := json.Marshal(fingerprint)
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:16])
+}
+
+func automaticOutboundIdempotencyKey(fingerprint string, now time.Time) string {
+	window := now.UTC().Unix() / int64(outboundIdempotencyWindow/time.Second)
+	return fmt.Sprintf("crm-auto-v1:%s:%d", fingerprint, window)
+}
+
+func lockOutboundSend(key string) func() {
+	sum := sha256.Sum256([]byte(key))
+	lock := &outboundSendLocks[int(sum[0])%len(outboundSendLocks)]
+	lock.Lock()
+	return lock.Unlock
+}
+
+func outboundSendResult(
+	act *Activity,
+	channel, to, providerMessageID, idempotencyKey string,
+	deduped bool,
+) map[string]any {
+	return map[string]any{
+		"activity":            act,
+		"channel":             channel,
+		"to":                  to,
+		"messaging_id":        act.MessagingID,
+		"provider_message_id": providerMessageID,
+		"conversation_id":     act.ConversationID,
+		"idempotency_key":     idempotencyKey,
+		"deduped":             deduped,
+	}
+}
+
 func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1202,12 +1330,6 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	cid, body, templateID, contentSID, err := validateOutboundMessageArgs(args)
 	if err != nil {
 		return nil, err
-	}
-	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
-	}
-	if err := ensureMessagingInboundRoutes(ctx, pid); err != nil {
-		ctx.Logger().Warn("crm messaging inbound route auto-wire failed", "project_id", pid, "err", err)
 	}
 
 	c, err := dbGetByID(ctx.AppDB(), pid, cid)
@@ -1222,6 +1344,15 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	addr, err := resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
 	if err != nil {
 		return nil, err
+	}
+	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
+		return nil, err
+	}
+	if messagingBound(ctx) == nil {
+		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
+	}
+	if err := ensureMessagingInboundRoutes(ctx, pid); err != nil {
+		ctx.Logger().Warn("crm messaging inbound route auto-wire failed", "project_id", pid, "err", err)
 	}
 
 	if !isTest {
@@ -1273,13 +1404,59 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if contentSID != "" {
 		sendArgs["content_sid"] = contentSID
 	}
-	if idem := strArg(args, "idempotency_key"); idem != "" {
-		sendArgs["idempotency_key"] = idem
-	}
 	if vars, ok := args["template_vars"].(map[string]any); ok {
 		sendArgs["vars"] = vars
 	} else if vars, ok := args["vars"].(map[string]any); ok {
 		sendArgs["vars"] = vars
+	}
+	if convoID := int64Arg(args, "conversation_id"); convoID > 0 {
+		sendArgs["conversation_id"] = convoID
+	}
+
+	type idempotencyCandidate struct {
+		key   string
+		since string
+	}
+	now := time.Now().UTC()
+	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key"))
+	lockKey := idempotencyKey
+	candidates := []idempotencyCandidate{{key: idempotencyKey}}
+	if idempotencyKey == "" {
+		fingerprint := outboundContentFingerprint(pid, cid, isTest, sendArgs)
+		idempotencyKey = automaticOutboundIdempotencyKey(fingerprint, now)
+		lockKey = "crm-auto-lock:" + fingerprint
+		candidates = []idempotencyCandidate{
+			{key: idempotencyKey},
+			{
+				key:   automaticOutboundIdempotencyKey(fingerprint, now.Add(-outboundIdempotencyWindow)),
+				since: now.Add(-outboundIdempotencyWindow).Format(time.RFC3339Nano),
+			},
+		}
+	}
+	sendArgs["idempotency_key"] = idempotencyKey
+	unlock := lockOutboundSend(lockKey)
+	defer unlock()
+
+	var existingActivity *Activity
+	for _, candidate := range candidates {
+		existingActivity, err = dbActivityByIdempotencyKey(ctx.AppDB(), pid, candidate.key, candidate.since)
+		if err != nil {
+			return nil, fmt.Errorf("idempotency lookup: %w", err)
+		}
+		if existingActivity == nil {
+			continue
+		}
+		if existingActivity.ContactID != cid {
+			return nil, errors.New("idempotency_key already used for a different CRM contact")
+		}
+		return outboundSendResult(
+			existingActivity,
+			addr.Channel,
+			addr.Address,
+			existingActivity.MessageIDHeader,
+			candidate.key,
+			true,
+		), nil
 	}
 
 	// Conversation linkage. caller-supplied conversation_id wins; else
@@ -1348,11 +1525,31 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	}
 
 	providerMsgID, _ := resp["provider_message_id"].(string)
-	msgIDF, _ := resp["id"].(float64)
-	msgID := int64(msgIDF)
+	msgID := int64FromAny(resp["id"])
+	if msgID <= 0 {
+		return nil, errors.New("messaging.send_message returned no message id")
+	}
+	existingActivity, err = dbActivityByMessagingID(ctx.AppDB(), pid, msgID)
+	if err != nil {
+		return nil, fmt.Errorf("messaging activity lookup: %w", err)
+	}
+	if existingActivity != nil {
+		if existingActivity.ContactID != cid {
+			return nil, errors.New("messaging idempotency result belongs to a different CRM contact")
+		}
+		return outboundSendResult(
+			existingActivity,
+			addr.Channel,
+			addr.Address,
+			providerMsgID,
+			idempotencyKey,
+			true,
+		), nil
+	}
 
 	// New email thread → create the conversation now, rooted at the
 	// outbound provider Message-Id.
+	var createdConversationID int64
 	if !isTest && convo == nil && addr.Channel == channelEmail {
 		tx, err := ctx.AppDB().Begin()
 		if err == nil {
@@ -1362,6 +1559,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			if err != nil {
 				tx.Rollback()
 			} else if err := tx.Commit(); err == nil {
+				createdConversationID = id
 				convo, _ = dbConversationGet(ctx.AppDB(), pid, id)
 			}
 		}
@@ -1394,11 +1592,44 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			"from":                from,
 			"to":                  addr.Address,
 			"test":                isTest,
+			"idempotency_key":     idempotencyKey,
 		},
 		ConversationID:  convoIDForLog,
 		MessageIDHeader: providerMsgID,
 		MessagingID:     msgID,
+		IdempotencyKey:  idempotencyKey,
 	})
+	if errors.Is(err, errDuplicateMessagingID) {
+		if createdConversationID > 0 {
+			_, _ = ctx.AppDB().Exec(
+				`DELETE FROM contact_conversations
+				 WHERE project_id = ? AND id = ?
+				   AND NOT EXISTS (
+				     SELECT 1 FROM contact_activities
+				     WHERE project_id = ? AND conversation_id = ?
+				   )`,
+				pid, createdConversationID, pid, createdConversationID,
+			)
+		}
+		existingActivity, lookupErr := dbActivityByMessagingID(ctx.AppDB(), pid, msgID)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existingActivity == nil {
+			return nil, err
+		}
+		if existingActivity.ContactID != cid {
+			return nil, errors.New("messaging idempotency result belongs to a different CRM contact")
+		}
+		return outboundSendResult(
+			existingActivity,
+			addr.Channel,
+			addr.Address,
+			providerMsgID,
+			idempotencyKey,
+			true,
+		), nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1427,14 +1658,14 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		"source":          act.Source,
 	})
 
-	return map[string]any{
-		"activity":            act,
-		"channel":             addr.Channel,
-		"to":                  addr.Address,
-		"messaging_id":        msgID,
-		"provider_message_id": providerMsgID,
-		"conversation_id":     convoIDForLog,
-	}, nil
+	return outboundSendResult(
+		act,
+		addr.Channel,
+		addr.Address,
+		providerMsgID,
+		idempotencyKey,
+		false,
+	), nil
 }
 
 // ─── Tool: contacts_reply ─────────────────────────────────────────
@@ -1447,9 +1678,6 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cid, body, templateID, contentSID, err := validateOutboundMessageArgs(args)
 	if err != nil {
 		return nil, err
-	}
-	if messagingBound(ctx) == nil {
-		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
 	}
 
 	convoID := int64Arg(args, "conversation_id")

@@ -531,6 +531,65 @@ type voiceEntry struct {
 	Preview  string `json:"preview,omitempty"`
 }
 
+type fishVoiceModel struct {
+	ID        string   `json:"_id"`
+	Type      string   `json:"type"`
+	Title     string   `json:"title"`
+	State     string   `json:"state"`
+	Languages []string `json:"languages"`
+	Samples   []struct {
+		Audio string `json:"audio"`
+	} `json:"samples"`
+}
+
+func listFishVoiceModels(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, input map[string]any) ([]voiceEntry, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voice_models", input)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		return nil, errors.New("fish-audio list_voice_models non-2xx")
+	}
+	var body struct {
+		Items []fishVoiceModel `json:"items"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		return nil, err
+	}
+	out := make([]voiceEntry, 0, len(body.Items))
+	for _, model := range body.Items {
+		if model.ID == "" ||
+			(model.Type != "" && !strings.EqualFold(model.Type, "tts")) ||
+			strings.EqualFold(model.State, "failed") {
+			continue
+		}
+		preview := ""
+		if len(model.Samples) > 0 {
+			preview = model.Samples[0].Audio
+		}
+		out = append(out, voiceEntry{
+			ID: model.ID, Name: firstNonEmpty(model.Title, model.ID),
+			Language: strings.Join(model.Languages, ", "), Preview: preview,
+		})
+	}
+	return out, nil
+}
+
+func mergeVoiceEntries(groups ...[]voiceEntry) []voiceEntry {
+	seen := map[string]bool{}
+	out := []voiceEntry{}
+	for _, group := range groups {
+		for _, voice := range group {
+			if voice.ID == "" || seen[voice.ID] {
+				continue
+			}
+			seen[voice.ID] = true
+			out = append(out, voice)
+		}
+	}
+	return out
+}
+
 // handleListVoices → GET /voices. Returns the bound provider's voice
 // catalog. ?kind=audio_tts reads audio_provider; default/avatar reads
 // avatar_provider. Empty for Tavus (voice is part of the replica).
@@ -682,40 +741,80 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 		}
 		return out, nil
 	case "fish-audio":
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voice_models",
+		owned, ownedErr := listFishVoiceModels(ctx, bound,
 			map[string]any{"page_size": 100, "page_number": 1, "self": true, "sort_by": "created_at"})
+		available, availableErr := listFishVoiceModels(ctx, bound,
+			map[string]any{"page_size": 100, "page_number": 1, "self": false, "sort_by": "task_count"})
+		if ownedErr != nil && availableErr != nil {
+			return nil, fmt.Errorf("fish-audio voice catalogs: owned: %v; available: %v", ownedErr, availableErr)
+		}
+		return mergeVoiceEntries(owned, available), nil
+	case "cartesia":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"limit": 100, "expand[]": []string{"preview_file_url"}})
 		if err != nil {
 			return nil, err
 		}
 		if res == nil || !res.Success {
-			return nil, errors.New("fish-audio list_voice_models non-2xx")
+			return nil, errors.New("cartesia list_voices non-2xx")
 		}
 		var body struct {
-			Items []struct {
-				ID        string   `json:"_id"`
-				Title     string   `json:"title"`
-				State     string   `json:"state"`
-				Languages []string `json:"languages"`
-				Samples   []struct {
-					Audio string `json:"audio"`
-				} `json:"samples"`
-			} `json:"items"`
+			Data []struct {
+				ID             string `json:"id"`
+				Name           string `json:"name"`
+				Language       string `json:"language"`
+				Gender         string `json:"gender"`
+				PreviewFileURL string `json:"preview_file_url"`
+			} `json:"data"`
 		}
 		if err := json.Unmarshal(res.Data, &body); err != nil {
 			return nil, err
 		}
-		out := make([]voiceEntry, 0, len(body.Items))
-		for _, model := range body.Items {
-			if model.ID == "" || strings.EqualFold(model.State, "failed") {
+		out := make([]voiceEntry, 0, len(body.Data))
+		for _, voice := range body.Data {
+			if voice.ID == "" {
 				continue
 			}
-			preview := ""
-			if len(model.Samples) > 0 {
-				preview = model.Samples[0].Audio
+			out = append(out, voiceEntry{
+				ID: voice.ID, Name: firstNonEmpty(voice.Name, voice.ID),
+				Language: voice.Language, Gender: voice.Gender, Preview: voice.PreviewFileURL,
+			})
+		}
+		return out, nil
+	case "minimax-audio":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voices",
+			map[string]any{"voice_type": "all"})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("minimax-audio list_voices non-2xx")
+		}
+		type miniMaxVoice struct {
+			VoiceID     string   `json:"voice_id"`
+			VoiceName   string   `json:"voice_name"`
+			Description []string `json:"description"`
+		}
+		var body struct {
+			SystemVoice     []miniMaxVoice      `json:"system_voice"`
+			VoiceCloning    []miniMaxVoice      `json:"voice_cloning"`
+			VoiceGeneration []miniMaxVoice      `json:"voice_generation"`
+			BaseResp        miniMaxBaseResponse `json:"base_resp"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		if err := body.BaseResp.Err(); err != nil {
+			return nil, err
+		}
+		all := append(append(body.SystemVoice, body.VoiceCloning...), body.VoiceGeneration...)
+		out := make([]voiceEntry, 0, len(all))
+		for _, voice := range all {
+			if voice.VoiceID == "" {
+				continue
 			}
 			out = append(out, voiceEntry{
-				ID: model.ID, Name: firstNonEmpty(model.Title, model.ID),
-				Language: strings.Join(model.Languages, ", "), Preview: preview,
+				ID: voice.VoiceID, Name: firstNonEmpty(voice.VoiceName, voice.VoiceID),
 			})
 		}
 		return out, nil
@@ -726,5 +825,5 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 		// Voice is part of the Tavus replica — no separate voice list.
 		return []voiceEntry{}, nil
 	}
-	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
+	return nil, fmt.Errorf("unsupported voice provider: %s", bound.AppSlug)
 }

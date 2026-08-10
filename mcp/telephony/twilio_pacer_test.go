@@ -217,29 +217,6 @@ func TestTwilioAudioPacerOverflowClearsAndRemainsUsable(t *testing.T) {
 	}
 }
 
-func TestPCMSpeechStartDetectorRequiresSpeechAndRearms(t *testing.T) {
-	detector := newPCMSpeechStartDetector()
-	silence := make([]int16, 160)
-	loud := make([]int16, 160)
-	for i := range loud {
-		loud[i] = 4000
-	}
-	if detector.observe(loud) || !detector.observe(loud) {
-		t.Fatal("speech detector did not require exactly the configured loud-frame run")
-	}
-	if detector.observe(loud) {
-		t.Fatal("active speech emitted a duplicate start")
-	}
-	for i := 0; i < detector.requiredSilence; i++ {
-		if detector.observe(silence) {
-			t.Fatal("silence emitted speech start")
-		}
-	}
-	if detector.observe(loud) || !detector.observe(loud) {
-		t.Fatal("speech detector did not rearm after silence")
-	}
-}
-
 func TestTwilioAudioPacerSerializesConcurrentCommands(t *testing.T) {
 	pacer, cancel, _ := testTwilioPacer(t)
 	defer cancel()

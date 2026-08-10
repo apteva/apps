@@ -29,10 +29,37 @@ interface User {
   status: string;
   has_password: boolean;
   mfa_enabled: boolean;
+  authorization_version: number;
   last_login_at?: string;
   locked_until?: string;
   created_at?: string;
   updated_at?: string;
+}
+
+interface Role {
+  id: number;
+  organization_id: number;
+  key: string;
+  name: string;
+  description?: string;
+  permissions: string[];
+}
+
+interface Permission {
+  id: number;
+  organization_id: number;
+  key: string;
+  name: string;
+  description?: string;
+}
+
+interface AuthorizationContext {
+  user_id: string;
+  organization_id: string;
+  organization_slug: string;
+  roles: string[];
+  permissions: string[];
+  authorization_version: number;
 }
 
 interface Client {
@@ -112,7 +139,7 @@ interface OIDCInfo {
   lockout_initial_minutes: number;
 }
 
-type Tab = "overview" | "organizations" | "users" | "clients" | "endpoints";
+type Tab = "overview" | "organizations" | "users" | "authorization" | "clients" | "endpoints";
 
 interface Organization {
   id: number;
@@ -227,6 +254,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
         <NavTab label="Overview" value="overview" current={tab} onClick={setTab} />
         <NavTab label="Organizations" value="organizations" current={tab} onClick={setTab} count={orgs.length} />
         <NavTab label="Users" value="users" current={tab} onClick={setTab} count={stats ? stats.active + stats.disabled : undefined} />
+        <NavTab label="Roles" value="authorization" current={tab} onClick={setTab} />
         <NavTab label="Clients" value="clients" current={tab} onClick={setTab} />
         <NavTab label="Endpoints" value="endpoints" current={tab} onClick={setTab} />
         <span className="ml-auto text-text-dim text-xs truncate max-w-xs" title={status}>{status}</span>
@@ -264,6 +292,13 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
           <ClientsTab
             activeOrgSlug={activeOrgSlug}
             orgs={orgs}
+            projectId={projectId}
+            setStatus={setStatus}
+          />
+        )}
+        {tab === "authorization" && (
+          <AuthorizationTab
+            activeOrgSlug={activeOrgSlug}
             projectId={projectId}
             setStatus={setStatus}
           />
@@ -754,6 +789,253 @@ function slugify(s: string): string {
     .slice(0, 32);
 }
 
+// ─── Authorization tab ───────────────────────────────────────────────
+
+function AuthorizationTab({ activeOrgSlug, projectId, setStatus }: {
+  activeOrgSlug: string | null;
+  projectId: string;
+  setStatus: (s: string) => void;
+}) {
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [permissions, setPermissions] = useState<Permission[]>([]);
+  const [roleKey, setRoleKey] = useState("");
+  const [roleName, setRoleName] = useState("");
+  const [permissionKey, setPermissionKey] = useState("");
+  const [permissionName, setPermissionName] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!activeOrgSlug) {
+      setRoles([]);
+      setPermissions([]);
+      return;
+    }
+    try {
+      const [rolesResponse, permissionsResponse] = await Promise.all([
+        fetch(`${API}/admin/roles${orgQS(activeOrgSlug)}`, { credentials: "same-origin" }),
+        fetch(`${API}/admin/permissions${orgQS(activeOrgSlug)}`, { credentials: "same-origin" }),
+      ]);
+      if (!rolesResponse.ok) throw new Error(`roles ${rolesResponse.status}`);
+      if (!permissionsResponse.ok) throw new Error(`permissions ${permissionsResponse.status}`);
+      const [roleData, permissionData] = await Promise.all([rolesResponse.json(), permissionsResponse.json()]);
+      setRoles(roleData.roles || []);
+      setPermissions(permissionData.permissions || []);
+    } catch (e) {
+      setStatus(`authorization: ${(e as Error).message}`);
+    }
+  }, [activeOrgSlug, setStatus]);
+
+  useEffect(() => { load(); }, [load, projectId]);
+
+  const createRole = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrgSlug || !roleKey.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/roles${orgQS(activeOrgSlug)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: roleKey.trim(), name: roleName.trim() || roleKey.trim() }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `create role ${r.status}`);
+      setRoleKey("");
+      setRoleName("");
+      await load();
+    } catch (e2) {
+      setStatus(`create role: ${(e2 as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createPermission = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeOrgSlug || !permissionKey.trim()) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/permissions${orgQS(activeOrgSlug)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: permissionKey.trim(),
+          name: permissionName.trim() || permissionKey.trim(),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `create permission ${r.status}`);
+      setPermissionKey("");
+      setPermissionName("");
+      await load();
+    } catch (e2) {
+      setStatus(`create permission: ${(e2 as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const togglePermission = async (role: Role, permission: Permission) => {
+    if (!activeOrgSlug) return;
+    const selected = new Set(role.permissions || []);
+    if (selected.has(permission.key)) selected.delete(permission.key);
+    else selected.add(permission.key);
+    const permissionIds = permissions.filter((p) => selected.has(p.key)).map((p) => p.id);
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/roles/${role.id}/permissions${orgQS(activeOrgSlug)}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permission_ids: permissionIds }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `set permissions ${r.status}`);
+      setRoles((current) => current.map((item) => item.id === role.id ? data.role : item));
+    } catch (e) {
+      setStatus(`set permissions: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (kind: "roles" | "permissions", id: number, key: string) => {
+    if (!activeOrgSlug || !window.confirm(`Delete ${kind === "roles" ? "role" : "permission"} "${key}"?`)) return;
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/${kind}/${id}${orgQS(activeOrgSlug)}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `delete ${r.status}`);
+      await load();
+    } catch (e) {
+      setStatus(`delete authorization record: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!activeOrgSlug) {
+    return (
+      <EmptyState
+        icon={<KeyIcon />}
+        title="Choose an organization"
+        hint="Roles and permissions are configured independently for each organization."
+      />
+    );
+  }
+
+  return (
+    <div className="p-4 grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <section className="border border-border rounded bg-bg-card">
+        <header className="px-3 py-2 border-b border-border">
+          <h3 className="text-sm font-semibold text-text">Roles</h3>
+          <p className="text-xs text-text-dim mt-0.5">Roles are configurable bundles of permissions.</p>
+        </header>
+        <form onSubmit={createRole} className="p-3 border-b border-border flex gap-2">
+          <input
+            value={roleKey}
+            onChange={(e) => setRoleKey(e.target.value.toLowerCase())}
+            placeholder="role key"
+            className="w-36 bg-bg-input border border-border rounded px-2 py-1 text-sm text-text font-mono"
+          />
+          <input
+            value={roleName}
+            onChange={(e) => setRoleName(e.target.value)}
+            placeholder="Display name"
+            className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+          />
+          <button disabled={busy || !roleKey.trim()} className="px-3 py-1 text-sm bg-accent text-bg rounded disabled:opacity-50">
+            Add
+          </button>
+        </form>
+        {roles.length === 0 ? (
+          <div className="p-4 text-sm text-text-dim">No roles configured.</div>
+        ) : (
+          <div className="divide-y divide-border">
+            {roles.map((role) => (
+              <div key={role.id} className="p-3">
+                <div className="flex items-start gap-2">
+                  <div className="flex-1">
+                    <div className="text-sm text-text font-medium">{role.name}</div>
+                    <div className="text-xs text-text-dim font-mono">{role.key}</div>
+                  </div>
+                  <button
+                    onClick={() => remove("roles", role.id, role.key)}
+                    disabled={busy}
+                    className="text-xs text-text-dim hover:text-warning disabled:opacity-50"
+                  >Delete</button>
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1">
+                  {permissions.length === 0 ? (
+                    <span className="text-xs text-text-dim">Create permissions to configure this role.</span>
+                  ) : permissions.map((permission) => (
+                    <label key={permission.id} className="inline-flex items-center gap-1.5 text-xs text-text-muted">
+                      <input
+                        type="checkbox"
+                        checked={(role.permissions || []).includes(permission.key)}
+                        disabled={busy}
+                        onChange={() => togglePermission(role, permission)}
+                      />
+                      <span className="font-mono">{permission.key}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="border border-border rounded bg-bg-card">
+        <header className="px-3 py-2 border-b border-border">
+          <h3 className="text-sm font-semibold text-text">Permission catalog</h3>
+          <p className="text-xs text-text-dim mt-0.5">Use stable namespaced keys such as documents:read.</p>
+        </header>
+        <form onSubmit={createPermission} className="p-3 border-b border-border flex gap-2">
+          <input
+            value={permissionKey}
+            onChange={(e) => setPermissionKey(e.target.value.toLowerCase())}
+            placeholder="resource:action"
+            className="w-44 bg-bg-input border border-border rounded px-2 py-1 text-sm text-text font-mono"
+          />
+          <input
+            value={permissionName}
+            onChange={(e) => setPermissionName(e.target.value)}
+            placeholder="Display name"
+            className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+          />
+          <button disabled={busy || !permissionKey.trim()} className="px-3 py-1 text-sm bg-accent text-bg rounded disabled:opacity-50">
+            Add
+          </button>
+        </form>
+        {permissions.length === 0 ? (
+          <div className="p-4 text-sm text-text-dim">No permissions configured.</div>
+        ) : (
+          <div className="divide-y divide-border">
+            {permissions.map((permission) => (
+              <div key={permission.id} className="px-3 py-2 flex items-start gap-2">
+                <div className="flex-1">
+                  <div className="text-sm text-text">{permission.name}</div>
+                  <div className="text-xs text-text-dim font-mono">{permission.key}</div>
+                </div>
+                <button
+                  onClick={() => remove("permissions", permission.id, permission.key)}
+                  disabled={busy}
+                  className="text-xs text-text-dim hover:text-warning disabled:opacity-50"
+                >Delete</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
 // ─── Users tab ───────────────────────────────────────────────────────
 
 function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }: {
@@ -1097,7 +1379,12 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   onChanged: () => void;
   setStatus: (s: string) => void;
 }) {
-  const [data, setData] = useState<{ user: User; sessions: Session[]; audit_log: AuditEvent[] } | null>(null);
+  const [data, setData] = useState<{
+    user: User;
+    authorization: AuthorizationContext;
+    sessions: Session[];
+    audit_log: AuditEvent[];
+  } | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -1227,6 +1514,15 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
             >Mark verified</button>
           )}
         </div>
+
+        <UserRolesEditor
+          userId={u.id}
+          orgSlug={orgSlug}
+          authorization={data.authorization}
+          projectId={projectId}
+          onChanged={load}
+          setStatus={setStatus}
+        />
 
         <DetailGrid>
           <div className="flex justify-between gap-3 py-1.5 px-3 border-b border-border text-sm items-center">
@@ -1366,6 +1662,101 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
         />
       )}
     </aside>
+  );
+}
+
+function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged, setStatus }: {
+  userId: number;
+  orgSlug: string;
+  authorization: AuthorizationContext;
+  projectId: string;
+  onChanged: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  const loadRoles = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/admin/roles${orgQS(orgSlug)}`, { credentials: "same-origin" });
+      if (!r.ok) throw new Error(`roles ${r.status}`);
+      const data = await r.json();
+      const nextRoles: Role[] = data.roles || [];
+      setRoles(nextRoles);
+      setSelected(nextRoles.filter((role) => (authorization.roles || []).includes(role.key)).map((role) => role.id));
+    } catch (e) {
+      setStatus(`roles: ${(e as Error).message}`);
+    }
+  }, [orgSlug, authorization.authorization_version, setStatus]);
+
+  useEffect(() => { loadRoles(); }, [loadRoles, projectId]);
+
+  const toggle = (roleID: number) => {
+    setSelected((current) => current.includes(roleID)
+      ? current.filter((id) => id !== roleID)
+      : [...current, roleID]);
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/users/${userId}/roles${orgQS(orgSlug)}`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role_ids: selected }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `set roles ${r.status}`);
+      await onChanged();
+    } catch (e) {
+      setStatus(`set roles: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const configured = new Set(authorization.roles || []);
+  const changed = roles.some((role) => selected.includes(role.id) !== configured.has(role.key));
+
+  return (
+    <section className="border border-border rounded p-3">
+      <div className="flex items-center gap-2">
+        <div className="flex-1">
+          <h4 className="text-text-dim text-xs uppercase tracking-wide">Roles</h4>
+          <div className="text-text-dim text-xs mt-0.5">
+            Authorization version {authorization.authorization_version}
+          </div>
+        </div>
+        <button
+          onClick={save}
+          disabled={busy || !changed}
+          className="px-2.5 py-1 text-xs bg-accent text-bg rounded disabled:opacity-40"
+        >{busy ? "Saving…" : "Save roles"}</button>
+      </div>
+      {roles.length === 0 ? (
+        <div className="text-text-dim text-sm mt-2">No roles configured for this organization.</div>
+      ) : (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2">
+          {roles.map((role) => (
+            <label key={role.id} className="inline-flex items-center gap-1.5 text-sm text-text-muted">
+              <input type="checkbox" checked={selected.includes(role.id)} onChange={() => toggle(role.id)} />
+              {role.name}
+            </label>
+          ))}
+        </div>
+      )}
+      {(authorization.permissions || []).length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-2">
+          {authorization.permissions.map((permission) => (
+            <span key={permission} className="px-1.5 py-0.5 rounded bg-bg-input text-text-dim text-xs font-mono">
+              {permission}
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

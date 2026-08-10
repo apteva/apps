@@ -38,6 +38,16 @@ func (storagePlatformStub) CallAppResult(app, tool string, _ map[string]any, out
 	return json.Unmarshal(raw, out)
 }
 
+type identityPlatformStub struct {
+	tk.BasePlatformClient
+	installID int64
+	publicURL string
+}
+
+func (p identityPlatformStub) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{InstallID: p.installID, PublicURL: p.publicURL}, nil
+}
+
 func seedWorker(t *testing.T, ctx *sdk.AppCtx, project string, contactID int64) int64 {
 	t.Helper()
 	res, err := ctx.AppDB().Exec(`INSERT INTO workers (project_id,contact_id,status) VALUES (?,?,'active')`, project, contactID)
@@ -72,6 +82,64 @@ func seedAssignment(t *testing.T, ctx *sdk.AppCtx, gigID, workerID int64, status
 	return id
 }
 
+func TestManifestOnlyExposesWorkerRouteWithoutAuth(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if manifest.Version != "0.1.21" {
+		t.Fatalf("version=%q", manifest.Version)
+	}
+	var public []sdk.RouteSpec
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if route.NoAuth {
+			public = append(public, route)
+		}
+	}
+	if len(public) != 1 || public[0].Prefix != "/worker/" || public[0].Method != "" {
+		t.Fatalf("public routes=%+v", public)
+	}
+}
+
+func TestWorkerURLUsesExactInstallAndWorkerPagePreservesIt(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(identityPlatformStub{
+		installID: 42,
+		publicURL: "https://agents.example.test/",
+	}))
+	got, err := buildWorkerURL(ctx, "worker-token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "https://agents.example.test/api/apps/gigs/_install/42/worker/worker-token"
+	if got != want {
+		t.Fatalf("worker URL=%q want=%q", got, want)
+	}
+
+	other := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-b"), tk.WithPlatform(identityPlatformStub{
+		installID: 84,
+		publicURL: "https://agents.example.test",
+	}))
+	otherURL, err := buildWorkerURL(other, "worker-token", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if otherURL == got || !strings.Contains(otherURL, "/_install/84/") {
+		t.Fatalf("install-isolated URL=%q first=%q", otherURL, got)
+	}
+
+	html := workerPageHTML("worker-token")
+	if !strings.Contains(html, `const API = window.location.pathname.replace(/\/+$/, "");`) {
+		t.Fatal("worker page does not preserve its exact-install path")
+	}
+	if strings.Contains(html, `const API = "/api/apps/gigs/worker/"`) {
+		t.Fatal("worker page still hard-codes the ambiguous app-name route")
+	}
+}
+
+func TestWorkerURLFailsClosedWithoutInstallIdentity(t *testing.T) {
+	ctx := testCtx(t)
+	if got, err := buildWorkerURL(ctx, "worker-token", ""); err == nil || got != "" {
+		t.Fatalf("worker URL=%q err=%v", got, err)
+	}
+}
+
 func TestGigActionRoutesRequirePost(t *testing.T) {
 	ctx := testCtx(t)
 	old := globalCtx
@@ -93,7 +161,7 @@ func TestAssignGigDoesNotCrossProjectBoundary(t *testing.T) {
 	ctx := testCtx(t)
 	workerID := seedWorker(t, ctx, "project-a", 10)
 	gigID := seedGig(t, ctx, "project-b", "open", `{"type":"object","properties":{}}`)
-	if _, err := assignGig(ctx, "project-a", gigID, workerID, "direct", false); err == nil || !strings.Contains(err.Error(), "gig not found") {
+	if _, err := assignGig(ctx, "project-a", gigID, workerID, "direct", false, 0); err == nil || !strings.Contains(err.Error(), "gig not found") {
 		t.Fatalf("expected project isolation error, got %v", err)
 	}
 }
@@ -197,6 +265,60 @@ func TestLifecycleExpiresGigAndRevokesAssignments(t *testing.T) {
 	}
 	if gigStatus != "expired" || assignmentStatus != "withdrawn" || !revoked {
 		t.Fatalf("gig=%s assignment=%s revoked=%v", gigStatus, assignmentStatus, revoked)
+	}
+}
+
+func TestWorkerEndpointsRejectExpiredAndRevokedTokens(t *testing.T) {
+	ctx := testCtx(t)
+	old := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = old })
+
+	workerID := seedWorker(t, ctx, "project-a", 16)
+	gigID := seedGig(t, ctx, "project-a", "accepted", `{"type":"object","properties":{}}`)
+	expiredID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "expired-token")
+	revokedID := seedAssignment(t, ctx, gigID, workerID, "accepted", "direct", "revoked-token")
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET token_expires_at=datetime('now','-1 minute') WHERE id=?`, expiredID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_assignments SET token_revoked_at=CURRENT_TIMESTAMP WHERE id=?`, revokedID); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &App{}
+	for _, tc := range []struct {
+		token       string
+		writeStatus int
+	}{
+		{token: "expired-token", writeStatus: http.StatusNotFound},
+		{token: "revoked-token", writeStatus: http.StatusGone},
+	} {
+		token := tc.token
+		t.Run(token+"/read", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			app.handleWorkerGigJSON(rec, httptest.NewRequest(http.MethodGet, "/worker/"+token+"/api/gig", nil), token)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+		t.Run(token+"/submit", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/worker/"+token+"/submit", bytes.NewBufferString(`{"payload":{}}`))
+			req.Header.Set("Content-Type", "application/json")
+			app.handleWorkerSubmit(rec, req, token)
+			if rec.Code != tc.writeStatus {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+		t.Run(token+"/upload", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/worker/"+token+"/upload/init", bytes.NewBufferString(`{"name":"proof.txt","content_type":"text/plain","size_bytes":5}`))
+			req.Header.Set("Content-Type", "application/json")
+			app.handleWorkerUploadInit(rec, req, token)
+			if rec.Code != tc.writeStatus {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 

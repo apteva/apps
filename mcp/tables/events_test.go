@@ -41,6 +41,16 @@ func TestEmit_RowInsertedAndUpdatedAndDeleted(t *testing.T) {
 	})
 	if got := rec.EventsByTopic(topicRowUpdated); len(got) != 1 {
 		t.Errorf("rows_update: expected 1 %s event, got %d", topicRowUpdated, len(got))
+	} else {
+		data := got[0].Data.(map[string]any)
+		fields, ok := data["fields"].(map[string]any)
+		if !ok || fields["title"] != "X-renamed" {
+			t.Errorf("row.updated fields payload: %+v", data)
+		}
+		row, ok := data["row"].(map[string]any)
+		if !ok || row["title"] != "X-renamed" || row["id"] != int64(1) {
+			t.Errorf("row.updated row payload: %+v", data)
+		}
 	}
 
 	mustCall(t, app, ctx, "rows_delete", map[string]any{"table": "books", "id": int64(2)})

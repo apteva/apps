@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -56,6 +57,81 @@ func TestSessionHistoryPersistsProviderIDBeforeClose(t *testing.T) {
 	}
 	if row.BackendSessionID != "provider-session-1" || row.Status != "closed" || row.CloseReason != "explicit_close" || row.RecordingStatus != "processing" || row.ClosedAt == nil {
 		t.Fatalf("history after close = %+v", row)
+	}
+}
+
+func TestClosedSessionKeepsFinalFrameAndPresentation(t *testing.T) {
+	previousBackend := newBackend
+	previousGlobalCtx := globalCtx
+	t.Cleanup(func() {
+		newBackend = previousBackend
+		globalCtx = previousGlobalCtx
+	})
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-final")
+	globalCtx = ctx
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	png := []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01}
+	fake := &historyFakeComp{
+		sessionID: "provider-final",
+		url:       "https://example.com/",
+		png:       png,
+	}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+
+	opened, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "browserbase", "url": "https://example.com/",
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	id := opened.(map[string]any)["session_id"].(string)
+	screenshot, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": id})
+	if err != nil {
+		t.Fatalf("browser_screenshot: %v", err)
+	}
+	if got := screenshot.(map[string]any)["screenshot_url"]; got != "/api/apps/computer/sessions/"+id+"/screenshot?project_id=project-final" {
+		t.Fatalf("screenshot_url = %v", got)
+	}
+	if _, err := app.toolBrowserClose(ctx, map[string]any{"session_id": id}); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	row, err := dbGetSession(ctx.AppDB(), id)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if !bytes.Equal(row.FinalScreenshot, png) || row.FinalScreenshotMIME != "image/png" {
+		t.Fatalf("final screenshot = %x, %q", row.FinalScreenshot, row.FinalScreenshotMIME)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/sessions/"+id+"/screenshot?project_id=project-final", nil)
+	rec := httptest.NewRecorder()
+	app.handleSessionScreenshot(rec, req)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), png) || rec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("closed screenshot: status=%d type=%q body=%x", rec.Code, rec.Header().Get("Content-Type"), rec.Body.Bytes())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/sessions/"+id+"/presentation?project_id=project-final", nil)
+	rec = httptest.NewRecorder()
+	app.handleSessionPresentation(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("presentation: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var presentation map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &presentation); err != nil {
+		t.Fatalf("decode presentation: %v", err)
+	}
+	if presentation["screenshot_url"] != "/api/apps/computer/sessions/"+id+"/screenshot?project_id=project-final" {
+		t.Fatalf("presentation screenshot_url = %v", presentation["screenshot_url"])
+	}
+
+	steps, err := dbListNavigation(ctx.AppDB(), id)
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	if len(steps) != 1 || steps[0].URL != "https://example.com/" {
+		t.Fatalf("timeline = %+v", steps)
 	}
 }
 
@@ -313,6 +389,7 @@ func putRecordingHistory(t *testing.T, ctx *sdk.AppCtx, id, backend string, clos
 type historyFakeComp struct {
 	sessionID  string
 	url        string
+	png        []byte
 	executeErr error
 	closeHook  func() error
 	display    backends.DisplaySize
@@ -321,6 +398,9 @@ type historyFakeComp struct {
 func (f *historyFakeComp) Execute(backends.Action) ([]byte, error) {
 	if f.executeErr != nil {
 		return nil, f.executeErr
+	}
+	if len(f.png) > 0 {
+		return f.png, nil
 	}
 	return []byte{0x89, 0x50, 0x4e, 0x47}, nil
 }

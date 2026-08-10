@@ -9,6 +9,12 @@ account filtering.
 
 Shared SaaS access control for Apteva apps.
 
+New paid plans default to `metadata.collection_method=charge_automatically`.
+Set it explicitly to `send_invoice` for manual collection. Automatic plans save
+the payment method during the first hosted checkout, then ask Billing to collect
+later renewal invoices. The v0.8.1 migration pins older paid plans that omitted
+this setting to `send_invoice`, so upgrading does not change their behavior.
+
 SaaS generalizes the access, lifecycle, and live-usage parts that worked
 well in Hosting without assuming every sold product is a container. Apps
 such as CRM and Storage stay installed once; SaaS sells access to them
@@ -164,6 +170,25 @@ Later lifecycle actions can use stored metadata:
 Supported lifecycle events are `account_active`, `account_past_due`,
 `account_suspended`, `account_resumed`, `account_cancelled`, `plan_upgraded`,
 `plan_downgraded`, and `plan_changed`.
+
+Fulfillment inputs and outputs are persisted as `redacted` by default. Common
+credential fields are removed recursively, and actions can name additional
+sensitive paths:
+
+```json
+{
+  "persist_input": "redacted",
+  "persist_output": "none",
+  "sensitive_input_paths": ["provider.credentials"],
+  "sensitive_output_paths": ["session.exchange_code"]
+}
+```
+
+Persistence modes are `redacted`, `none`, and `full`. `full` must be selected
+explicitly. Actions using `persist_output: none` cannot configure `store`
+mappings because there would be no durable response available to resume the
+mapping after an interrupted call. Sensitive output values cannot be mapped
+into account metadata.
 
 ## Live Usage
 

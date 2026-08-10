@@ -33,6 +33,7 @@ CREATE TABLE orders (
   payment_status         TEXT    NOT NULL DEFAULT 'unpaid',
   order_status           TEXT    NOT NULL DEFAULT 'draft',
   fulfillment_status     TEXT    NOT NULL DEFAULT 'unsubmitted',
+  order_type             TEXT    NOT NULL DEFAULT 'physical',
 
   metadata               TEXT    NOT NULL DEFAULT '{}',
 
@@ -52,6 +53,7 @@ CREATE INDEX ix_orders_status ON orders(project_id, order_status, updated_at DES
 CREATE INDEX ix_orders_fulfillment ON orders(project_id, fulfillment_status, updated_at DESC);
 CREATE INDEX ix_orders_invoice ON orders(project_id, invoice_id)
   WHERE invoice_id IS NOT NULL;
+CREATE INDEX ix_orders_type ON orders(project_id, order_type, updated_at DESC);
 
 CREATE TABLE order_items (
   id                    INTEGER PRIMARY KEY,
@@ -68,7 +70,9 @@ CREATE TABLE order_items (
 
   source_item_ref        TEXT,
   fulfillment_sku        TEXT,
-  metadata              TEXT    NOT NULL DEFAULT '{}',
+  fulfillment_type       TEXT    NOT NULL DEFAULT 'warehouse_shipment',
+  fulfillment_app        TEXT    NOT NULL DEFAULT 'orders',
+  metadata               TEXT    NOT NULL DEFAULT '{}',
 
   created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -77,6 +81,7 @@ CREATE TABLE order_items (
 CREATE INDEX ix_order_items_order ON order_items(order_id, position);
 CREATE INDEX ix_order_items_sku ON order_items(sku);
 CREATE INDEX ix_order_items_catalog ON order_items(catalog_product_id, catalog_price_id);
+CREATE INDEX ix_order_items_fulfillment ON order_items(fulfillment_app, fulfillment_type);
 
 CREATE TABLE fulfillments (
   id                    INTEGER PRIMARY KEY,
@@ -87,6 +92,11 @@ CREATE TABLE fulfillments (
   provider_order_id      TEXT,
   warehouse_id          TEXT,
   service               TEXT,
+  fulfillment_type       TEXT    NOT NULL DEFAULT 'warehouse_shipment',
+  fulfillment_app        TEXT    NOT NULL DEFAULT 'orders',
+  external_ref           TEXT,
+  idempotency_key        TEXT,
+  attempt_count          INTEGER NOT NULL DEFAULT 0,
   status                TEXT    NOT NULL DEFAULT 'queued',
 
   request_payload        TEXT    NOT NULL DEFAULT '{}',
@@ -104,6 +114,10 @@ CREATE TABLE fulfillments (
 CREATE INDEX ix_fulfillments_order ON fulfillments(order_id, updated_at DESC);
 CREATE INDEX ix_fulfillments_provider ON fulfillments(project_id, provider, provider_order_id);
 CREATE INDEX ix_fulfillments_status ON fulfillments(project_id, status, updated_at DESC);
+CREATE INDEX ix_fulfillments_app ON fulfillments(project_id, fulfillment_app, fulfillment_type, status);
+CREATE UNIQUE INDEX ux_fulfillments_idempotency
+  ON fulfillments(project_id, idempotency_key)
+  WHERE idempotency_key IS NOT NULL AND idempotency_key != '';
 
 CREATE TABLE shipments (
   id                    INTEGER PRIMARY KEY,

@@ -22,12 +22,14 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	migration, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql"} {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return store{db: db}
 }
@@ -39,7 +41,17 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	if err := db.saveSuite(suite); err != nil {
 		t.Fatal(err)
 	}
-	item := &Case{ID: "case-one", SuiteID: suite.ID, Name: "Create record", Prompt: "Create it", Goals: []string{"Record exists"}, Assertions: []Assertion{{Name: "record", Type: "app_state", App: "crm", Tool: "contacts_get"}}, Enabled: true}
+	item := &Case{
+		ID: "case-one", SuiteID: suite.ID, Name: "Answer a caller", Mode: "voice",
+		Prompt: "Help the caller book an appointment", Goals: []string{"The appointment is booked"},
+		Assertions: []Assertion{{Name: "record", Type: "app_state", App: "crm", Tool: "contacts_get"}},
+		Voice: &VoiceCase{
+			CallerGoal: "Book an appointment for tomorrow", CallerPersona: "A concise customer",
+			MaxFirstResponseMS: 2000, Transport: "carrier", ProtocolFixture: "telephony-carrier",
+			AudioConditions: &VoiceAudioConditions{Preset: "cafe", Intensity: "moderate", Codec: "none", Seed: 42},
+		},
+		Enabled: true,
+	}
 	if err := db.saveCase(item); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +71,7 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || len(got.Runs) != 2 || got.Runs[0].CaseSnapshot.Prompt != "Create it" {
+	if got == nil || len(got.Runs) != 2 || got.Runs[0].CaseSnapshot.Mode != "voice" || got.Runs[0].CaseSnapshot.Voice == nil || got.Runs[0].CaseSnapshot.Voice.CallerGoal != "Book an appointment for tomorrow" || got.Runs[0].CaseSnapshot.Voice.Transport != "carrier" || got.Runs[0].CaseSnapshot.Voice.AudioConditions == nil || got.Runs[0].CaseSnapshot.Voice.AudioConditions.Preset != "cafe" {
 		t.Fatalf("experiment=%#v", got)
 	}
 
@@ -67,6 +79,17 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("claim=%#v err=%v", claimed, err)
 	}
+	if claimed.Stage != "starting" {
+		t.Fatalf("claimed stage=%q", claimed.Stage)
+	}
+	if err := db.updateRunProgress(claimed.ID, "agent_running", "env-run-one"); err != nil {
+		t.Fatal(err)
+	}
+	progress, err := db.getRun(claimed.ID)
+	if err != nil || progress.Stage != "agent_running" || progress.EnvironmentRunID != "env-run-one" {
+		t.Fatalf("progress=%#v err=%v", progress, err)
+	}
+	claimed.Stage, claimed.EnvironmentRunID = progress.Stage, progress.EnvironmentRunID
 	value := 100.0
 	finished := time.Now().UTC()
 	claimed.Status, claimed.OverallScore, claimed.FinishedAt = "pass", &value, &finished
@@ -83,6 +106,59 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 }
 
+func TestInvalidSimulationRetriesSameLogicalRunOnce(t *testing.T) {
+	db := testStore(t)
+	suite := &Suite{ID: "suite-retry", Name: "Retry", RequiredPassRate: 1, Enabled: true}
+	if err := db.saveSuite(suite); err != nil {
+		t.Fatal(err)
+	}
+	item := Case{
+		ID: "case-retry", SuiteID: suite.ID, Name: "Voice", Mode: "voice",
+		Prompt: "Complete the call", Goals: []string{"Finish naturally"},
+		Voice: &VoiceCase{CallerGoal: "Complete the call"}, Enabled: true,
+	}
+	if err := db.saveCase(&item); err != nil {
+		t.Fatal(err)
+	}
+	experiment := &Experiment{
+		ID: "exp-retry", SuiteID: suite.ID, SuiteRevision: 1, Name: "Retry",
+		TriggerType: "manual", Targets: []Target{{AgentID: 1}}, Repetitions: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := db.createExperiment(experiment, []Case{item}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.claimRun()
+	if err != nil || run == nil {
+		t.Fatalf("claim run: run=%#v err=%v", run, err)
+	}
+	run.EnvironmentRunID = "env-first"
+	run.VoiceCall = &EnvironmentVoiceCall{ID: "call-first"}
+	run.Assertions = []AssertionResult{{Name: "valid", Passed: false}}
+
+	retried, err := db.retryInvalidSimulation(run)
+	if err != nil || !retried {
+		t.Fatalf("retry invalid simulation: retried=%v err=%v", retried, err)
+	}
+	requeued, err := db.getRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requeued.Status != "queued" || requeued.Stage != "retrying_simulation" ||
+		requeued.SimulationAttempt != 1 || requeued.EnvironmentRunID != "" ||
+		requeued.VoiceCall != nil || len(requeued.Assertions) != 0 {
+		t.Fatalf("requeued run=%#v", requeued)
+	}
+	requeued, err = db.claimRun()
+	if err != nil || requeued == nil {
+		t.Fatalf("claim retry: run=%#v err=%v", requeued, err)
+	}
+	retried, err = db.retryInvalidSimulation(requeued)
+	if err != nil || retried {
+		t.Fatalf("second retry: retried=%v err=%v", retried, err)
+	}
+}
+
 func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	status, correctness, judgeScore, overall := scoreRun([]AssertionResult{{Passed: true}, {Passed: false}}, &JudgeVerdict{Passed: true, Score: 100})
 	if status != "fail" || *correctness != 50 || *judgeScore != 100 || *overall > 49 {
@@ -91,6 +167,101 @@ func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	status, _, _, overall = scoreRun(nil, &JudgeVerdict{Passed: true, Score: 82})
 	if status != "pass" || *overall != 82 {
 		t.Fatalf("judge-only status=%s score=%v", status, *overall)
+	}
+}
+
+func TestScoreRunDoesNotCountVoiceValidityAsCorrectness(t *testing.T) {
+	status, correctness, judgeScore, overall := scoreRun(
+		[]AssertionResult{
+			{Name: "Valid two-sided voice simulation", Passed: true, Gating: true},
+			{Name: "No realtime audio errors", Passed: true, Gating: true},
+		},
+		&JudgeVerdict{Passed: false, Score: 36.875},
+	)
+	if status != "fail" || correctness != nil || judgeScore == nil || *judgeScore != 36.875 || overall == nil || *overall != 36.875 {
+		t.Fatalf("status=%s correctness=%v judge=%v overall=%v", status, correctness, judgeScore, overall)
+	}
+}
+
+func TestVoiceSimulationIssuesRejectsOneSidedCall(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:     "invalid_simulation",
+		Validity:   VoiceCallValidity{Status: "invalid", Reasons: []string{"caller produced no audio", "transcript has no caller turn"}},
+		Transcript: []VoiceTranscriptTurn{{Speaker: "receptionist", Text: "Hello"}},
+		Metrics:    VoiceCallMetrics{EndedBy: "audio_disconnected", ReceptionistAudioS: 1},
+	}
+	issues := voiceSimulationIssues(call)
+	if len(issues) != 2 || !strings.Contains(strings.Join(issues, " "), "caller produced no audio") {
+		t.Fatalf("issues=%v", issues)
+	}
+	results := voiceAssertionResults(&VoiceCase{}, call)
+	if len(results) < 4 || results[0].Passed || !results[0].Gating {
+		t.Fatalf("results=%#v", results)
+	}
+}
+
+func TestVoiceSimulationIssuesAcceptsValidConversation(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:   "completed",
+		Validity: VoiceCallValidity{Status: "valid"},
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "Hello"},
+			{Speaker: "caller", Text: "Please call me tomorrow"},
+		},
+		Metrics: VoiceCallMetrics{EndedBy: "caller_done", ReceptionistAudioS: 1, CallerAudioS: 1},
+	}
+	if issues := voiceSimulationIssues(call); len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+	for _, result := range voiceAssertionResults(&VoiceCase{}, call) {
+		if result.Gating && !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
+	}
+}
+
+func TestVoiceSimulationIssuesAcceptsConversationIdle(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:   "completed",
+		Validity: VoiceCallValidity{Status: "valid"},
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "When should we call?"},
+			{Speaker: "caller", Text: "Monday at four."},
+			{Speaker: "receptionist", Text: "Your callback is booked. Goodbye."},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "conversation_idle", ReceptionistAudioS: 1, CallerAudioS: 1,
+		},
+	}
+	if issues := voiceSimulationIssues(call); len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+	for _, result := range voiceAssertionResults(&VoiceCase{}, call) {
+		if result.Gating && !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
+	}
+}
+
+func TestVoiceSimulationIssuesAcceptsTargetCompletion(t *testing.T) {
+	call := &EnvironmentVoiceCall{
+		Status:   "completed",
+		Validity: VoiceCallValidity{Status: "valid"},
+		Transcript: []VoiceTranscriptTurn{
+			{Speaker: "receptionist", Text: "When should we call?"},
+			{Speaker: "caller", Text: "Monday at four."},
+		},
+		Metrics: VoiceCallMetrics{
+			EndedBy: "target_done", ReceptionistAudioS: 1, CallerAudioS: 1,
+		},
+	}
+	if issues := voiceSimulationIssues(call); len(issues) != 0 {
+		t.Fatalf("issues=%v", issues)
+	}
+	for _, result := range voiceAssertionResults(&VoiceCase{}, call) {
+		if result.Gating && !result.Passed {
+			t.Fatalf("result=%#v", result)
+		}
 	}
 }
 
@@ -115,6 +286,94 @@ func TestParseJudgeToleratesSurroundingTextAndBoundsScore(t *testing.T) {
 	}
 }
 
+func TestParseJudgeDerivesScenarioResultFromGoalScores(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": true,
+		"score": 100,
+		"reasoning": "one requirement was only partially met",
+		"per_goal": [
+			{"goal": "Greet the caller clearly", "score": 100, "passed": false, "why": "Clear greeting"},
+			{"goal": "Confirm the requested callback", "score": 60, "passed": true, "why": "Time was repeated but not confirmed"}
+		]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Passed || verdict.Score != 79 {
+		t.Fatalf("scenario verdict=%#v", verdict)
+	}
+	if !verdict.PerGoal[0].Passed || verdict.PerGoal[1].Passed {
+		t.Fatalf("goal verdicts=%#v", verdict.PerGoal)
+	}
+	if verdict.PerGoal[0].Score == nil || *verdict.PerGoal[0].Score != 100 || verdict.PerGoal[1].Score == nil || *verdict.PerGoal[1].Score != 60 {
+		t.Fatalf("goal scores=%#v", verdict.PerGoal)
+	}
+}
+
+func TestParseJudgePreservesLegacyGoalVerdicts(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": false,
+		"score": 72,
+		"reasoning": "legacy verdict",
+		"per_goal": [{"goal": "Complete the task", "passed": false, "why": "Incomplete"}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Passed || verdict.Score != 72 || verdict.PerGoal[0].Score != nil || verdict.PerGoal[0].Passed {
+		t.Fatalf("legacy verdict=%#v", verdict)
+	}
+}
+
+func TestParseJudgeClampsGoalScores(t *testing.T) {
+	verdict, err := parseJudge(`{
+		"passed": true,
+		"score": 100,
+		"reasoning": "out of bounds",
+		"per_goal": [
+			{"goal": "First", "score": -5, "passed": true, "why": "Missed"},
+			{"goal": "Second", "score": 120, "passed": false, "why": "Met"}
+		]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Score != 49 || verdict.Passed || *verdict.PerGoal[0].Score != 0 || *verdict.PerGoal[1].Score != 100 {
+		t.Fatalf("verdict=%#v", verdict)
+	}
+}
+
+func TestAlignJudgeGoalsUsesConfiguredGoalsAndFailsMissingResults(t *testing.T) {
+	first := 90.0
+	verdict := &JudgeVerdict{
+		Passed:  true,
+		Score:   90,
+		PerGoal: []GoalVerdict{{Goal: "paraphrased goal", Score: &first, Passed: true, Why: "Met"}},
+	}
+	alignJudgeGoals(verdict, []string{"Greet the caller", "Confirm the callback"})
+	if verdict.Passed || verdict.Score != 45 || len(verdict.PerGoal) != 2 {
+		t.Fatalf("verdict=%#v", verdict)
+	}
+	if verdict.PerGoal[0].Goal != "Greet the caller" || verdict.PerGoal[1].Goal != "Confirm the callback" || *verdict.PerGoal[1].Score != 0 {
+		t.Fatalf("goals=%#v", verdict.PerGoal)
+	}
+}
+
+func TestJudgeRequestOmitsTemperatureForEveryModel(t *testing.T) {
+	codex := judgeRequest("openai-codex/gpt-5.6-terra", map[string]any{"task": "test"})
+	if _, ok := codex["temperature"]; ok {
+		t.Fatalf("Codex request contains unsupported temperature: %#v", codex)
+	}
+	other := judgeRequest("opencode-go/glm-5.2", map[string]any{"task": "test"})
+	if _, ok := other["temperature"]; ok {
+		t.Fatalf("non-Codex request contains model-specific temperature: %#v", other)
+	}
+	claude := judgeRequest("anthropic/claude-fable-5", map[string]any{"task": "test"})
+	if _, ok := claude["temperature"]; ok {
+		t.Fatalf("Claude request contains deprecated temperature: %#v", claude)
+	}
+}
+
 func TestManifestAndToolsStayAligned(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	provided := make([]string, 0, len(manifest.Provides.MCPTools))
@@ -127,8 +386,25 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.1.3" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.5.4" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
+	}
+	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
+		t.Fatalf("manifest runtime ref=%v version=%s", manifest.Runtime.Source, manifest.Version)
+	}
+}
+
+func TestPanelUsesProductionJSXRuntime(t *testing.T) {
+	panel, err := os.ReadFile("ui/EvalsPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(panel)
+	if strings.Contains(source, "react/jsx-dev-runtime") || strings.Contains(source, "jsxDEV") {
+		t.Fatal("EvalsPanel.mjs uses React's development JSX runtime")
+	}
+	if !strings.Contains(source, "react/jsx-runtime") {
+		t.Fatal("EvalsPanel.mjs does not import React's production JSX runtime")
 	}
 }
 

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,13 +99,16 @@ func (a *App) createVoiceIdentity(ctx *sdk.AppCtx, pid string, args map[string]a
 		return mcpError(err.Error()), nil
 	}
 	if bound == nil {
-		return mcpError("no compatible audio_provider bound — bind ElevenLabs and/or Fish Audio in app settings"), nil
+		return mcpError("no compatible voice provider bound — bind ElevenLabs, Fish Audio, Cartesia, or MiniMax in app settings"), nil
 	}
 	if sourceType == "audio" {
 		return a.createAudioCloneIdentity(ctx, pid, bound, args)
 	}
+	if bound.AppSlug == "minimax-audio" {
+		return a.createMiniMaxDesignedVoiceIdentity(ctx, pid, bound, args)
+	}
 	if bound.AppSlug != "elevenlabs" {
-		return mcpError("prompt-based voice design is supported by ElevenLabs; use source_type=audio for Fish Audio"), nil
+		return mcpError("prompt-based voice design is supported by ElevenLabs and MiniMax; use source_type=audio for this provider"), nil
 	}
 
 	description := strings.TrimSpace(firstNonEmpty(
@@ -184,6 +189,89 @@ func (a *App) createVoiceIdentity(ctx *sdk.AppCtx, pid string, args map[string]a
 	})
 	if identity.ProviderIdentityID == "" {
 		return mcpError("provider response missing voice_id"), nil
+	}
+	id, err := upsertMediaIdentity(ctx, identity)
+	if err != nil {
+		return mcpError("voice created at provider but local identity row failed: " + err.Error()), nil
+	}
+	identity.ID = id
+	ctx.EmitWithProject("identity.created", pid, map[string]any{
+		"id": id, "kind": identity.Kind, "provider": identity.Provider, "provider_identity_id": identity.ProviderIdentityID,
+	})
+	return identityCreateMCPResult(identityCreateResult{Identity: identity, Previews: previews}), nil
+}
+
+func (a *App) createMiniMaxDesignedVoiceIdentity(ctx *sdk.AppCtx, pid string, bound *sdk.BoundIntegration, args map[string]any) (any, error) {
+	name := strings.TrimSpace(strArg(args, "name", ""))
+	description := strings.TrimSpace(firstNonEmpty(
+		strArg(args, "voice_description", ""),
+		strArg(args, "prompt", ""),
+	))
+	if description == "" {
+		return nil, errors.New("prompt or voice_description required")
+	}
+	previewText := firstNonEmpty(
+		strArg(args, "preview_text", ""),
+		optionString(args, "preview_text"),
+		optionString(args, "text"),
+		"Hello, this is a preview of my new voice.",
+	)
+	providerArgs := map[string]any{
+		"prompt": description, "preview_text": previewText,
+	}
+	if voiceID := firstNonEmpty(strArg(args, "provider_voice_id", ""), strArg(args, "voice_id", ""), optionString(args, "voice_id")); voiceID != "" {
+		providerArgs["voice_id"] = voiceID
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "design_voice", providerArgs)
+	if err != nil {
+		return mcpError("provider call failed: " + err.Error()), nil
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return mcpError("provider returned non-2xx: " + body), nil
+	}
+	var body struct {
+		VoiceID    string              `json:"voice_id"`
+		TrialAudio string              `json:"trial_audio"`
+		BaseResp   miniMaxBaseResponse `json:"base_resp"`
+	}
+	if err := json.Unmarshal(res.Data, &body); err != nil {
+		return mcpError("provider response parse: " + err.Error()), nil
+	}
+	if err := body.BaseResp.Err(); err != nil {
+		return mcpError("provider response parse: " + err.Error()), nil
+	}
+	if body.VoiceID == "" {
+		return mcpError("provider response missing voice_id"), nil
+	}
+	previews := []voicePreview{}
+	if body.TrialAudio != "" {
+		audio, err := hex.DecodeString(body.TrialAudio)
+		if err != nil {
+			return mcpError("provider response trial_audio is not valid hex: " + err.Error()), nil
+		}
+		previews = append(previews, voicePreview{
+			AudioBase64:      base64.StdEncoding.EncodeToString(audio),
+			GeneratedVoiceID: body.VoiceID,
+			MediaType:        "audio/mpeg",
+		})
+	}
+	identity := mediaIdentity{
+		ProjectID:          pid,
+		Kind:               identityKindVoice,
+		Provider:           bound.AppSlug,
+		Name:               name,
+		SourceType:         "prompt",
+		ProviderIdentityID: body.VoiceID,
+		Prompt:             description,
+		Status:             "ready",
+		MetadataJSON: compactJSON(map[string]any{
+			"request":      json.RawMessage(sanitizedIdentityCreateJSON(args)),
+			"preview_text": previewText,
+		}),
 	}
 	id, err := upsertMediaIdentity(ctx, identity)
 	if err != nil {

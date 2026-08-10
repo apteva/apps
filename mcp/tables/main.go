@@ -24,9 +24,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.11
+version: 0.1.13
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
@@ -73,11 +75,13 @@ provides:
         ids: array
         count: integer
     - name: row.updated
-      description: Rows were updated in a table.
+      description: Rows were updated in a table. Single-row updates include the changed fields and current row.
       payload:
         table: string
         id: integer
         count: integer
+        fields: object
+        row: object
     - name: row.deleted
       description: Rows were deleted from a table.
       payload:

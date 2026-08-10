@@ -1,0 +1,1 @@
+ALTER TABLE eval_runs ADD COLUMN simulation_attempt INTEGER NOT NULL DEFAULT 0;

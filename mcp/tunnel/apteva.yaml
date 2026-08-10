@@ -1,0 +1,115 @@
+schema: apteva-app/v1
+
+name: tunnel
+display_name: Tunnel
+version: 0.1.0
+description: |
+  Self-hosted, multi-tenant HTTP tunnels for Apteva. Tunnel reserves stable
+  hostnames under an operator-controlled domain and carries traffic over an
+  outbound encrypted WebSocket connection to a local HTTP service.
+
+  The domain, DNS target, edge, credentials, and data remain under the
+  operator's control. There is no ngrok, zrok, or Apteva-hosted service
+  dependency.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tunnel
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [tunnel, ingress, networking, developer-tools, self-hosted]
+
+scopes: [global]
+min_apteva_version: "0.29.2"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.ingress.write
+  integrations:
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.upsert_record]
+      required: false
+      label: Domains (wildcard DNS)
+      hint: Optional. When bound, Tunnel publishes the wildcard DNS record for the configured base domain. DNS can also be configured manually.
+
+provides:
+  http_routes:
+    - prefix: /
+    - prefix: /v1/connect
+      method: GET
+      no_auth: true
+  mcp_tools:
+    - name: tunnel_configure_domain
+      description: Configure the operator-owned base domain and optionally publish wildcard DNS.
+    - name: tunnel_create
+      description: Reserve a stable tunnel name for the current project and return its connector token once.
+    - name: tunnel_list
+      description: List tunnels owned by the current project.
+    - name: tunnel_rotate_token
+      description: Rotate a tunnel connector token and return the new token once.
+    - name: tunnel_delete
+      description: Revoke a tunnel and remove its public ingress route.
+  ui_panels:
+    - slot: project.page
+      label: Tunnel
+      icon: network
+      entry: /ui/TunnelPanel.mjs
+  publishes:
+    - name: tunnel.created
+      description: A stable tunnel hostname was reserved.
+    - name: tunnel.connected
+      description: A tunnel connector came online.
+    - name: tunnel.disconnected
+      description: A tunnel connector went offline.
+    - name: tunnel.deleted
+      description: A tunnel was revoked and its ingress route removed.
+    - name: tunnel.domain_configured
+      description: The operator configured a tunnel base domain.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tunnel
+  port: 8080
+  health_check: /health
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/tunnel.db
+  migrations: migrations/
+
+config_schema:
+  - name: max_tunnels_per_project
+    type: text
+    default: "5"
+    label: Tunnels per project
+    description: Maximum active tunnel reservations owned by one project.
+  - name: max_request_bytes
+    type: text
+    default: "10485760"
+    label: Maximum request size
+    description: Maximum buffered request or response body size in bytes. Defaults to 10 MiB.
+  - name: request_timeout_seconds
+    type: text
+    default: "60"
+    label: Request timeout
+    description: Maximum time a public request may wait for the local connector.
+  - name: max_concurrent_requests_per_tunnel
+    type: text
+    default: "32"
+    label: Concurrent requests per tunnel
+    description: Maximum public requests in flight through one connector. Excess requests receive HTTP 429 instead of consuming unbounded memory.
+
+upgrade_policy: auto-patch

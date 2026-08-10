@@ -499,10 +499,14 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				})
 				continue
 			}
+			status := "ok"
+			if len(report.Warnings) > 0 {
+				status = "partial"
+			}
 			results = append(results, syncResult{
 				SocialAccountID: id,
 				Platform:        platform,
-				Status:          "ok",
+				Status:          status,
 				Report:          report,
 			})
 		default:

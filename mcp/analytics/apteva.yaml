@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.8.6
+version: 0.9.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -64,8 +64,17 @@ description: |
   v0.8.6 restores anonymous static-site tracking under the server's
   explicit public-route policy while preserving existing tag URLs.
 
+  v0.8.7 adds Analytics' adaptive themed app icon and updates the app
+  to the current Apteva app SDK.
+
+  v0.9 adds measurable objectives and targets over events already stored
+  in Analytics. Targets use project-scoped count, sum, or distinct queries;
+  no external app dependency or cross-app call is required.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [analytics, events, observability]
 
 scopes: [global]
@@ -137,6 +146,27 @@ provides:
       requires: events.read
     - name: analytics_event_violations
       description: List recent current-project event spec validation violations.
+      requires: events.read
+    - name: analytics_objectives_create
+      description: Create an objective with targets over current-project Analytics data.
+      requires: events.write
+    - name: analytics_objectives_get
+      description: Get one objective and its cached target progress.
+      requires: events.read
+    - name: analytics_objectives_search
+      description: Search current-project objectives.
+      requires: events.read
+    - name: analytics_objectives_update
+      description: Update objective metadata or replace its targets.
+      requires: events.write
+    - name: analytics_objectives_archive
+      description: Archive an objective without deleting its history.
+      requires: events.write
+    - name: analytics_objective_progress
+      description: Evaluate objective targets against stored Analytics events.
+      requires: events.read
+    - name: analytics_objective_metrics_list
+      description: List Analytics metric-query templates for objectives.
       requires: events.read
   ui_panels:
     - slot: project.page

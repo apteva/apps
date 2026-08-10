@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: todo
 display_name: Todo
-version: 0.4.9
+version: 0.4.10
 description: |
   Personal todo list — human-first counterpart to the agent mission
   board (`tasks`). Inbox / Today / Upcoming views, lists (the
@@ -14,7 +14,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/todo
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/todo/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [productivity, todo, personal, gtd]
 
 scopes: [project, global]

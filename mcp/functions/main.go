@@ -54,7 +54,7 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.6.0
+version: 1.6.1
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -63,6 +63,8 @@ description: |
   endpoint at /fn/<name>, plus optional public Function URLs at
   /url/<name>/<token>.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:

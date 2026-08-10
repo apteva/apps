@@ -513,6 +513,44 @@ func (a *App) mcpTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolSitesDetachDomain,
 		},
+		// ── Generic app extensions ─────────────────────────────
+		{
+			Name:        "extensions_upsert",
+			Description: "Install or update a generic app-provided public surface on a Content site. Args: key, provider_app, manifest, publish?. The opaque manifest may declare routes, templates, assets, data sources, actions, settings, and editor schemas.",
+			InputSchema: schemaObject(map[string]any{
+				"key":          map[string]any{"type": "string"},
+				"provider_app": map[string]any{"type": "string"},
+				"manifest":     map[string]any{"type": "object"},
+				"publish":      map[string]any{"type": "boolean"},
+			}, []string{"key", "provider_app", "manifest"}),
+			Handler: a.toolExtensionsUpsert,
+		},
+		{
+			Name:        "extensions_remove",
+			Description: "Remove an installed public-surface extension from a Content site. Args: key.",
+			InputSchema: schemaObject(map[string]any{
+				"key": map[string]any{"type": "string"},
+			}, []string{"key"}),
+			Handler: a.toolExtensionsRemove,
+		},
+		{
+			Name:        "extensions_update_settings",
+			Description: "Update validated settings for an installed Content extension. Changes are saved as a draft unless publish is true. Args: key, settings, publish?.",
+			InputSchema: schemaObject(map[string]any{
+				"key":      map[string]any{"type": "string"},
+				"settings": map[string]any{"type": "object"},
+				"publish":  map[string]any{"type": "boolean"},
+			}, []string{"key", "settings"}),
+			Handler: a.toolExtensionsUpdateSettings,
+		},
+		{
+			Name:        "extensions_invalidate",
+			Description: "Invalidate rendered output for a Content site after provider data changes. Args: site selector plus optional cache tags reserved for future selective invalidation.",
+			InputSchema: schemaObject(map[string]any{
+				"tags": map[string]any{"type": "array"},
+			}, nil),
+			Handler: a.toolExtensionsInvalidate,
+		},
 		// ── core/form submissions ──────────────────────────────
 		{
 			Name:        "forms_list",

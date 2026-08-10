@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 )
@@ -96,5 +97,26 @@ func blockedIP(ip net.IP) bool {
 			return true
 		}
 	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	addr = addr.Unmap()
+	for _, prefix := range blockedNetworkPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
 	return false
+}
+
+var blockedNetworkPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("2001:db8::/32"),
 }

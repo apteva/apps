@@ -48,7 +48,7 @@ func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{
 		Name:     "subscription-lifecycle",
-		Schedule: "@every 15m",
+		Schedule: "@every 60s",
 		Run: func(_ context.Context, appCtx *sdk.AppCtx) error {
 			if appCtx == nil {
 				appCtx = globalCtx
@@ -102,6 +102,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"id": map[string]any{"type": "integer"}, "metadata_patch": map[string]any{"type": "object"}, "actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
 		}, []string{"id", "metadata_patch"}), Handler: a.toolSubscriptionsUpdateMetadata},
 		{Name: "subscriptions_cancel", Description: "Cancel a subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "at_period_end": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionsCancel},
+		{Name: "subscriptions_resume", Description: "Clear a scheduled period-end cancellation on an active subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionsResume},
 		{Name: "subscription_items_create", Description: "Add a flat or metered item to a subscription.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "product_id": map[string]any{"type": "integer"}, "price_id": map[string]any{"type": "integer"}, "sku": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "quantity": map[string]any{"type": "number"}, "unit_amount_cents": map[string]any{"type": "integer"}, "currency": map[string]any{"type": "string"}, "billing_scheme": map[string]any{"type": "string"}, "meter_key": map[string]any{"type": "string"}, "included_units": map[string]any{"type": "integer"}, "unit_size": map[string]any{"type": "integer"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "title"}), Handler: a.toolSubscriptionItemsCreate},
@@ -383,6 +384,21 @@ func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any
 	return map[string]any{"subscription": sub}, nil
 }
 
+func (a *App) toolSubscriptionsResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sub, changed, err := dbSubscriptionResume(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		ctx.Emit("subscription.resumed", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+	}
+	return map[string]any{"subscription": sub, "changed": changed}, nil
+}
+
 func (a *App) toolSubscriptionItemsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -536,15 +552,27 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 	if err := dbSeedTrialAttempts(ctx.AppDB(), pid, now, 100); err != nil {
 		return err
 	}
+	if err := dbSeedRenewalAttempts(ctx.AppDB(), pid, now, 100); err != nil {
+		return err
+	}
 	attempts, err := dbClaimLifecycleAttempts(ctx.AppDB(), pid, now, 100)
 	if err != nil {
 		return err
 	}
 	for _, attempt := range attempts {
-		if err := processTrialEnd(ctx, attempt, now); err != nil {
-			ctx.Logger().Warn("subscription trial-end attempt failed", "project", pid, "subscription_id", attempt.SubscriptionID, "attempt_id", attempt.ID, "err", err)
-			if failErr := dbFailLifecycleAttempt(ctx.AppDB(), attempt, now, err); failErr != nil {
-				ctx.Logger().Warn("persist subscription trial-end failure", "attempt_id", attempt.ID, "err", failErr)
+		var processErr error
+		switch attempt.Action {
+		case "trial_end":
+			processErr = processTrialEnd(ctx, attempt, now)
+		case "renewal":
+			processErr = processRenewal(ctx, attempt, now)
+		default:
+			processErr = fmt.Errorf("unsupported subscription lifecycle action %q", attempt.Action)
+		}
+		if processErr != nil {
+			ctx.Logger().Warn("subscription lifecycle attempt failed", "project", pid, "subscription_id", attempt.SubscriptionID, "attempt_id", attempt.ID, "action", attempt.Action, "err", processErr)
+			if failErr := dbFailLifecycleAttempt(ctx.AppDB(), attempt, now, processErr); failErr != nil {
+				ctx.Logger().Warn("persist subscription lifecycle failure", "attempt_id", attempt.ID, "err", failErr)
 			}
 		}
 	}
@@ -567,6 +595,62 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 		emitSubscriptionLifecycle(ctx, updated)
 	}
 	return nil
+}
+
+func dbSeedRenewalAttempts(db *sql.DB, pid string, now time.Time, limit int) error {
+	nowStr := now.UTC().Format(time.RFC3339)
+	_, err := db.Exec(`INSERT OR IGNORE INTO subscription_lifecycle_attempts
+		(project_id,subscription_id,action,effective_at,status,next_attempt_at)
+		SELECT project_id,id,'renewal',next_renewal_at,'pending',?
+		FROM subscriptions
+		WHERE project_id=? AND status='active'
+		  AND next_renewal_at IS NOT NULL AND next_renewal_at<=?
+		ORDER BY next_renewal_at,id LIMIT ?`, nowStr, pid, nowStr, limit)
+	return err
+}
+
+func processRenewal(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) error {
+	sub, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, attempt.SubscriptionID, true)
+	if err != nil || sub == nil {
+		return firstErr(err, errors.New("subscription not found"))
+	}
+	if sub.Status != "active" {
+		return dbCloseLifecycleAttempt(ctx.AppDB(), attempt, now)
+	}
+	start, ok := parseTime(attempt.EffectiveAt)
+	if !ok {
+		return errors.New("renewal lifecycle effective_at is invalid")
+	}
+	if cancelAt, hasCancel := parseTime(sub.CancelAt); hasCancel && !cancelAt.After(start) {
+		meta := mapFromAny(sub.Metadata)
+		meta["ended_at_period_end"] = now.UTC().Format(time.RFC3339)
+		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), attempt.ProjectID, sub.ID, "ended", meta, "subscription.period_ended", map[string]any{
+			"from_status": sub.Status,
+			"to_status":   "ended",
+			"cancel_at":   sub.CancelAt,
+		}, now)
+		if err != nil {
+			return err
+		}
+		emitSubscriptionLifecycle(ctx, updated)
+		return dbCloseLifecycleAttempt(ctx.AppDB(), attempt, now)
+	}
+
+	// Apply any item change scheduled exactly for the new period before the
+	// cycle snapshot is created. The separate worker remains the recovery path.
+	if err := runSubscriptionChangeWorker(ctx, start); err != nil {
+		return fmt.Errorf("apply due subscription change: %w", err)
+	}
+	sub, err = dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, attempt.SubscriptionID, true)
+	if err != nil || sub == nil {
+		return firstErr(err, errors.New("subscription not found after applying changes"))
+	}
+	end := subscriptionPeriodEnd(start, sub.Interval, sub.IntervalCount)
+	cycle, err := dbEnsureLifecycleCycle(ctx.AppDB(), attempt, sub, start, end)
+	if err != nil {
+		return err
+	}
+	return dbCompleteRenewalAttempt(ctx, attempt, sub, cycle, now)
 }
 
 func processTrialEnd(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) error {
@@ -1065,7 +1149,7 @@ func dbEnsureLifecycleCycle(db *sql.DB, attempt *LifecycleAttempt, sub *Subscrip
 	cycle, _, err := dbCycleCreate(db, attempt.ProjectID, map[string]any{
 		"subscription_id": sub.ID, "period_start": start.Format(time.RFC3339), "period_end": end.Format(time.RFC3339),
 		"due_at": start.Format(time.RFC3339), "payment_status": "pending", "lifecycle_attempt_id": attempt.ID,
-		"metadata": map[string]any{"source": "trial_end", "lifecycle_attempt_id": attempt.ID},
+		"metadata": map[string]any{"source": attempt.Action, "lifecycle_attempt_id": attempt.ID},
 	})
 	if err != nil {
 		return nil, err
@@ -1075,6 +1159,36 @@ func dbEnsureLifecycleCycle(db *sql.DB, attempt *LifecycleAttempt, sub *Subscrip
 	}
 	attempt.CycleID = &cycle.ID
 	return cycle, nil
+}
+
+func dbCompleteRenewalAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub *Subscription, cycle *Cycle, now time.Time) error {
+	if cycle == nil {
+		return errors.New("renewal cycle required")
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	details := cycleDueDetails(sub, cycle)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.renewal_due", details); err != nil {
+		return err
+	}
+	if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.cycle_due", details); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE subscription_lifecycle_attempts
+		SET status='completed',cycle_id=?,result=?,last_error=NULL,lease_until=NULL,completed_at=?,updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND project_id=?`,
+		cycle.ID, jsonOrEmpty(details, "{}"), nowStr, attempt.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	emitCycleDue(ctx, sub, cycle)
+	return nil
 }
 
 func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub *Subscription, targetStatus string, cycle *Cycle, now time.Time) error {
@@ -1120,15 +1234,29 @@ func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub 
 	}
 	emitSubscriptionLifecycle(ctx, updated)
 	if cycle != nil {
-		ctx.Emit("subscription.cycle_due", map[string]any{
-			"subscription_id": updated.ID, "cycle_id": cycle.ID, "customer_id": updated.CustomerID,
-			"customer_email": updated.CustomerEmail, "kind": updated.Kind, "currency": cycle.Currency,
-			"subtotal_cents": cycle.SubtotalCents, "discount_cents": cycle.DiscountCents, "total_cents": cycle.TotalCents,
-			"period_start": cycle.PeriodStart, "period_end": cycle.PeriodEnd,
-			"source": updated.Source, "source_ref": updated.SourceRef, "metadata": mapFromAny(updated.Metadata),
-		})
+		emitCycleDue(ctx, updated, cycle)
 	}
 	return nil
+}
+
+func cycleDueDetails(sub *Subscription, cycle *Cycle) map[string]any {
+	if sub == nil || cycle == nil {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"subscription_id": sub.ID, "cycle_id": cycle.ID, "customer_id": sub.CustomerID,
+		"customer_email": sub.CustomerEmail, "kind": sub.Kind, "currency": cycle.Currency,
+		"subtotal_cents": cycle.SubtotalCents, "discount_cents": cycle.DiscountCents, "total_cents": cycle.TotalCents,
+		"period_start": cycle.PeriodStart, "period_end": cycle.PeriodEnd,
+		"source": sub.Source, "source_ref": sub.SourceRef, "metadata": mapFromAny(sub.Metadata),
+	}
+}
+
+func emitCycleDue(ctx *sdk.AppCtx, sub *Subscription, cycle *Cycle) {
+	if ctx == nil || sub == nil || cycle == nil {
+		return
+	}
+	ctx.Emit("subscription.cycle_due", cycleDueDetails(sub, cycle))
 }
 
 func dbCloseLifecycleAttempt(db *sql.DB, attempt *LifecycleAttempt, now time.Time) error {
@@ -1203,6 +1331,42 @@ func dbSubscriptionCancel(db *sql.DB, pid string, args map[string]any) (*Subscri
 		return nil, err
 	}
 	return dbSubscriptionGet(db, pid, id, true)
+}
+
+func dbSubscriptionResume(db *sql.DB, pid string, args map[string]any) (*Subscription, bool, error) {
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, false, errors.New("id required")
+	}
+	sub, err := dbSubscriptionGet(db, pid, id, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if sub == nil {
+		return nil, false, errors.New("subscription not found")
+	}
+	if sub.Status != "active" {
+		return nil, false, fmt.Errorf("only active subscriptions can resume a scheduled cancellation (status=%s)", sub.Status)
+	}
+	if sub.CancelAt == "" {
+		return sub, false, nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscriptions SET cancel_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND status='active'`, id, pid); err != nil {
+		return nil, false, err
+	}
+	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.resumed", map[string]any{"reason": strArg(args, "reason")}); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	sub, err = dbSubscriptionGet(db, pid, id, true)
+	return sub, true, err
 }
 
 func dbSubscriptionItemCreate(db *sql.DB, pid string, args map[string]any) (*SubItem, error) {
@@ -2060,6 +2224,18 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, map[string]any{"subscription": sub})
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/resume") && r.Method == http.MethodPost {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		body["id"] = id
+		sub, changed, err := dbSubscriptionResume(ctx.AppDB(), pid, body)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"subscription": sub, "changed": changed})
 		return
 	}
 	if r.Method == http.MethodGet {

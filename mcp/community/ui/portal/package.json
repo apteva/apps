@@ -9,7 +9,7 @@
     "dev": "bun run --watch build.ts"
   },
   "dependencies": {
-    "@apteva/web-sdk": "^0.5.1",
+    "@apteva/web-sdk": "^0.5.2",
     "lucide-react": "^0.468.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

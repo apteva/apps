@@ -1,8 +1,67 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 interface NativePanelProps {
   installId: number;
   projectId: string;
+}
+
+interface AppEventEnvelope<T = unknown> {
+  topic: string;
+  app: string;
+  project_id: string;
+  install_id: number;
+  seq: number;
+  time: string;
+  data: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (event: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (event: AppEventEnvelope<T>) => handlerRef.current(event);
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(app: string, projectId: string, fn: (event: AppEventEnvelope<T>) => void): () => void;
+      };
+    }).__aptevaAppEvents;
+    if (bridge) return bridge.subscribe(app, projectId, handler);
+
+    let lastSeq = 0;
+    let source: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url = `/api/app-events/${encodeURIComponent(app)}?project_id=${encodeURIComponent(projectId)}${lastSeq > 0 ? `&since=${lastSeq}` : ""}`;
+      source = new EventSource(url, { withCredentials: true });
+      source.onmessage = (message) => {
+        try {
+          const event = JSON.parse(message.data) as AppEventEnvelope<T>;
+          if (event.seq <= lastSeq) return;
+          lastSeq = event.seq;
+          handlerRef.current(event);
+        } catch {}
+      };
+      source.onerror = () => {
+        if (source?.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      source?.close();
+    };
+  }, [app, projectId]);
 }
 
 interface Agent {
@@ -23,6 +82,12 @@ interface Model {
   display_name?: string;
   provider?: string;
   model_id?: string;
+}
+
+interface RealtimeProvider {
+  name: string;
+  models?: Record<string, string>;
+  default_voice?: string;
 }
 
 interface Environment {
@@ -60,6 +125,14 @@ interface Integration {
   tool_count?: number;
 }
 
+interface ManagedMCP {
+  id: number;
+  name: string;
+  description?: string;
+  status: string;
+  tool_count: number;
+}
+
 interface EnvironmentTool {
   name: string;
   description?: string;
@@ -77,10 +150,12 @@ interface EnvironmentSpec {
   ttl_seconds: number;
   app_install_ids: number[];
   connection_ids: number[];
+  mcp_server_ids: number[];
   network_mode: string;
   integration_mode: string;
   integration_bindings: Record<string, any>[];
   seeds: SeedStep[];
+  protocol_fixtures?: { id: string; pack: string; version: string; target_app: string; config?: Record<string, any> }[];
 }
 
 interface TaskDraft {
@@ -101,6 +176,7 @@ interface Assertion {
   name: string;
   type: string;
   app?: string;
+  mcp?: string;
   tool?: string;
   input?: Record<string, any>;
   path?: string;
@@ -118,6 +194,8 @@ interface EvalCase {
   suite_id: string;
   name: string;
   prompt: string;
+  mode?: "text" | "voice";
+  voice?: VoiceCase;
   goals: string[];
   assertions: Assertion[];
   environment_id?: string;
@@ -127,6 +205,90 @@ interface EvalCase {
   revision: number;
 }
 
+interface VoiceCase {
+  caller_name?: string;
+  caller_persona?: string;
+  caller_goal: string;
+  caller_behavior?: string;
+  provider?: string;
+  voice?: string;
+  caller_provider?: string;
+  caller_voice?: string;
+  greeting?: string;
+  max_first_response_ms?: number;
+  max_average_response_ms?: number;
+  transport?: "direct" | "carrier";
+  protocol_fixture?: string;
+  audio_conditions?: VoiceAudioConditions;
+}
+
+interface VoiceAudioConditions {
+  preset: "clean" | "office" | "cafe" | "street" | "train_station" | "poor_phone";
+  intensity: "light" | "moderate" | "heavy";
+  codec: "none" | "g711_mulaw";
+  seed: number;
+}
+
+interface VoiceTranscriptTurn {
+  speaker: string;
+  text: string;
+  time: string;
+  at_ms: number;
+}
+
+interface VoiceCall {
+  id: string;
+  status: string;
+  error?: string;
+  validity?: {
+    status: string;
+    reasons?: string[];
+  };
+  transcript: VoiceTranscriptTurn[];
+  metrics: {
+    duration_ms: number;
+    first_response_ms?: number;
+    average_response_ms?: number;
+    receptionist_audio_seconds: number;
+    caller_audio_seconds: number;
+    delivered_caller_audio_seconds?: number;
+    interruptions: number;
+    tool_calls: number;
+    realtime_errors: number;
+    receptionist_realtime_errors: number;
+    caller_realtime_errors: number;
+    dropped_audio_events: number;
+    ended_by: string;
+    audio_conditions?: {
+      preset: string;
+      intensity: string;
+      codec: string;
+      seed: number;
+      target_snr_db?: number;
+      processed_frames: number;
+      clipped_samples: number;
+    };
+  };
+  delivered_caller_recording?: string;
+}
+
+interface AssertionResult {
+  name?: string;
+  passed: boolean;
+  actual?: any;
+  message?: string;
+  gating?: boolean;
+}
+
+interface LiveVoiceCall {
+  call_id: string;
+  run_id: string;
+  status: string;
+  transcript: VoiceTranscriptTurn[];
+}
+
+type LiveVoiceCalls = Record<string, LiveVoiceCall>;
+
 interface Suite {
   id: string;
   name: string;
@@ -134,10 +296,11 @@ interface Suite {
   environment_id?: string;
   judge_model?: string;
   continuous_targets?: Target[];
-  schedule_minutes: number;
+  schedule_minutes?: number;
   required_pass_rate: number;
   enabled: boolean;
   revision: number;
+  next_run_at?: string;
   cases: EvalCase[];
 }
 
@@ -168,6 +331,8 @@ interface EvalRun {
   id: string;
   case_id: string;
   status: string;
+  stage?: string;
+  environment_run_id?: string;
   target_index: number;
   repetition: number;
   case: EvalCase;
@@ -176,8 +341,9 @@ interface EvalRun {
   correctness_score?: number;
   judge_score?: number;
   error?: string;
-  assertions: any[];
+  assertions: AssertionResult[];
   suggestions?: { id: string; directive: string; reason: string; status: string }[];
+  voice_call?: VoiceCall;
   execution?: {
     status: string;
     reason: string;
@@ -189,8 +355,19 @@ interface EvalRun {
     passed: boolean;
     score: number;
     reasoning: string;
-    per_goal: any[];
+    per_goal: GoalVerdict[];
   };
+}
+
+interface GoalVerdict {
+  goal: string;
+  score?: number;
+  passed: boolean;
+  why: string;
+}
+
+interface DisplayGoal extends GoalVerdict {
+  judged: boolean;
 }
 
 interface TargetSummary {
@@ -238,7 +415,9 @@ interface Catalog {
   apps: CatalogApp[];
   connections: Connection[];
   integrations: Integration[];
+  managed_mcps: ManagedMCP[];
   snapshots: any[];
+  realtime_providers: RealtimeProvider[];
 }
 
 const API = "/api/apps/evals/api";
@@ -260,11 +439,38 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json();
 }
 
+function appURL(path: string) {
+  const url = new URL(API + path, window.location.origin);
+  if (installID) url.searchParams.set("install_id", String(installID));
+  if (projectID) url.searchParams.set("project_id", projectID);
+  return url.pathname + url.search;
+}
+
 const modelID = (model: Model) =>
   model.gateway_model || `${model.provider || ""}/${model.model_id || ""}`.replace(/^\//, "");
 const modelLabel = (model: Model) => model.display_name || modelID(model);
+const audioPresetOptions: { value: VoiceAudioConditions["preset"]; label: string }[] = [
+  { value: "clean", label: "Clean audio" },
+  { value: "office", label: "Busy office" },
+  { value: "cafe", label: "Cafe" },
+  { value: "street", label: "Street traffic" },
+  { value: "train_station", label: "Train station" },
+  { value: "poor_phone", label: "Poor phone line" },
+];
+const audioPresetLabel = (value?: string) =>
+  audioPresetOptions.find((option) => option.value === value)?.label || "Clean audio";
 const pct = (value?: number) => `${Math.round((value || 0) * 100)}%`;
 const score = (value?: number) => (value == null ? "-" : String(Math.round(value)));
+const resultTone = (value: number | undefined, passed: boolean) =>
+  value == null ? (passed ? "good" : "bad") : value >= 80 ? "good" : value >= 50 ? "warn" : "bad";
+const resultLabel = (value: number | undefined, passed: boolean) =>
+  value == null ? (passed ? "Met" : "Missed") : value >= 80 ? "Met" : value >= 50 ? "Partial" : "Missed";
+const visibleGoals = (run: EvalRun): DisplayGoal[] => {
+  if (run.judge?.per_goal?.length) {
+    return run.judge.per_goal.map((goal) => ({ ...goal, judged: true }));
+  }
+  return (run.case.goals || []).map((goal) => ({ goal, passed: false, why: "", judged: false }));
+};
 const goalsFromText = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
 const formatDate = (value: string) => new Date(value).toLocaleString([], {
   month: "short",
@@ -272,6 +478,47 @@ const formatDate = (value: string) => new Date(value).toLocaleString([], {
   hour: "2-digit",
   minute: "2-digit",
 });
+const scheduleLabel = (minutes?: number) => {
+  if (!minutes) return "Manual";
+  if (minutes === 60) return "Hourly";
+  if (minutes === 360) return "Every 6 hours";
+  if (minutes === 1440) return "Daily";
+  if (minutes === 10080) return "Weekly";
+  return `Every ${minutes} minutes`;
+};
+const scenarioCountLabel = (count: number) => `${count} ${count === 1 ? "scenario" : "scenarios"}`;
+const stageLabel = (stage?: string) => ({
+  starting: "Starting",
+  preparing_environment: "Preparing environment",
+  spawning_agent: "Spawning agent",
+  connecting_voice_call: "Connecting voice call",
+  live_voice_call: "Live voice call",
+  sending_task: "Sending task",
+  agent_running: "Agent working",
+  checking_results: "Checking results",
+  judging: "Judging",
+  completed: "Complete",
+  invalid_simulation: "Invalid simulation",
+  failed: "Failed",
+}[stage || ""] || "Running");
+const experimentOutcome = (experiment: Experiment) => {
+  if (experiment.status !== "completed") return experiment.status;
+  if (!experiment.summary) return "completed";
+  return experiment.summary.failed + experiment.summary.errors > 0 ? "fail" : "pass";
+};
+const suiteHealth = (suite: Suite, experiments: Experiment[]) => {
+  if (!suite.enabled) return { label: "Paused", tone: "muted" };
+  const relevant = suite.schedule_minutes > 0
+    ? experiments.find((experiment) => experiment.trigger_type === "schedule")
+    : experiments[0];
+  if (!relevant) return { label: suite.schedule_minutes > 0 ? "Waiting" : "Not run", tone: "muted" };
+  if (relevant.status === "queued" || relevant.status === "running") {
+    return { label: relevant.status === "queued" ? "Queued" : "Running", tone: "active" };
+  }
+  if (relevant.status !== "completed" || !relevant.summary) return { label: "Error", tone: "bad" };
+  const passing = relevant.summary.pass_rate >= suite.required_pass_rate;
+  return { label: passing ? "Passing" : "Regression", tone: passing ? "good" : "bad" };
+};
 
 const styles = `
 .ev-shell,.ev-shell *{box-sizing:border-box}.ev-shell{height:100%;width:100%;overflow:auto;background:var(--color-bg);color:var(--color-text)}
@@ -281,11 +528,13 @@ const styles = `
 .ev-error{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:14px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--color-error) 45%,transparent);border-radius:6px;background:color-mix(in srgb,var(--color-error) 10%,transparent);color:var(--color-error);font-size:12px}
 .ev-workspace{display:grid;grid-template-columns:minmax(280px,360px) minmax(0,1fr);min-height:calc(100vh - 126px);border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-run-list{min-width:0;border-right:1px solid var(--color-border);background:var(--color-bg-card)}.ev-pane-heading{display:flex;align-items:center;justify-content:space-between;min-height:44px;padding:0 14px;border-bottom:1px solid var(--color-border);font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
 .ev-run-row{display:block;width:100%;padding:12px 14px;border-bottom:1px solid var(--color-border);text-align:left}.ev-run-row:hover{background:var(--color-bg-hover)}.ev-run-row[data-active=true]{background:var(--color-bg)}.ev-run-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600}.ev-run-meta,.ev-muted{color:var(--color-text-dim);font-size:11px}.ev-run-meta{display:flex;justify-content:space-between;gap:10px;margin-top:5px}.ev-run-stat{font-variant-numeric:tabular-nums}
-.ev-detail{min-width:0}.ev-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--color-border)}.ev-detail-title{margin:0;font-size:16px;font-weight:650}.ev-detail-id{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-status{font-size:11px;font-weight:700;text-transform:uppercase}.ev-status[data-tone=good]{color:var(--color-success)}.ev-status[data-tone=bad]{color:var(--color-error)}.ev-status[data-tone=active]{color:var(--color-accent)}.ev-status[data-tone=muted]{color:var(--color-text-dim)}
-.ev-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));border-bottom:1px solid var(--color-border)}.ev-metric{min-width:0;padding:13px 18px;border-right:1px solid var(--color-border)}.ev-metric:last-child{border-right:0}.ev-metric-label{display:block;color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-metric-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}.ev-section{padding:17px 18px;border-bottom:1px solid var(--color-border)}.ev-section:last-child{border-bottom:0}.ev-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.ev-section-title{font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
-.ev-table{border:1px solid var(--color-border);border-radius:5px;overflow:hidden}.ev-target-grid{display:grid;grid-template-columns:minmax(180px,1fr) 92px 82px 100px 90px;gap:12px;align-items:center}.ev-case-grid{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(160px,1fr) 66px 70px 78px;gap:12px;align-items:center}.ev-table-head{padding:8px 11px;border-bottom:1px solid var(--color-border);background:var(--color-bg-card);color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-table-row{width:100%;padding:9px 11px;border-bottom:1px solid var(--color-border);font-size:12px;text-align:left}.ev-table-row:last-child{border-bottom:0}.ev-table-row:hover{background:var(--color-bg-hover)}.ev-truncate{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev-eval-row{display:block;width:100%;padding:12px 14px;border-bottom:1px solid var(--color-border);text-align:left}.ev-eval-row:hover{background:var(--color-bg-hover)}.ev-eval-row[data-active=true]{background:var(--color-bg)}.ev-eval-row-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.ev-eval-row-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:650}.ev-eval-row-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:6px;color:var(--color-text-dim);font-size:11px}.ev-eval-row-score{font-variant-numeric:tabular-nums}
+.ev-detail{min-width:0}.ev-detail-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 18px;border-bottom:1px solid var(--color-border)}.ev-detail-title{margin:0;font-size:16px;font-weight:650}.ev-detail-id{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-detail-actions{display:flex;align-items:center;gap:8px}.ev-status{font-size:11px;font-weight:700;text-transform:uppercase}.ev-status[data-tone=good]{color:var(--color-success)}.ev-status[data-tone=bad]{color:var(--color-error)}.ev-status[data-tone=active]{color:var(--color-accent)}.ev-status[data-tone=muted]{color:var(--color-text-dim)}
+.ev-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));border-bottom:1px solid var(--color-border)}.ev-eval-metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.ev-metric{min-width:0;padding:13px 18px;border-right:1px solid var(--color-border)}.ev-metric:last-child{border-right:0}.ev-metric-label{display:block;color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-metric-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:18px;font-weight:650;font-variant-numeric:tabular-nums}.ev-section{padding:17px 18px;border-bottom:1px solid var(--color-border)}.ev-section:last-child{border-bottom:0}.ev-section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:9px}.ev-section-title{font-size:11px;font-weight:650;text-transform:uppercase;color:var(--color-text-dim)}
+.ev-config{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-config-item{min-width:0;padding:11px 18px;border-right:1px solid var(--color-border)}.ev-config-item:last-child{border-right:0}.ev-config-label{display:block;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-config-value{display:block;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.ev-selected-run-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.ev-selected-run-title{font-size:13px;font-weight:650}.ev-selected-run-meta{margin-top:2px;color:var(--color-text-dim);font-size:11px}.ev-history-grid{display:grid;grid-template-columns:minmax(150px,1.2fr) 100px 88px 72px 78px;gap:12px;align-items:center}.ev-table-row[data-active=true]{background:var(--color-bg-hover)}
+.ev-table{border:1px solid var(--color-border);border-radius:5px;overflow:hidden}.ev-target-grid{display:grid;grid-template-columns:minmax(180px,1fr) 92px 82px 100px 90px;gap:12px;align-items:center}.ev-case-grid{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(160px,1fr) 66px 70px 78px;gap:12px;align-items:center}.ev-table-head{padding:8px 11px;border-bottom:1px solid var(--color-border);background:var(--color-bg-card);color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-table-row{width:100%;padding:9px 11px;border-bottom:1px solid var(--color-border);font-size:12px;text-align:left}.ev-table-row:last-child{border-bottom:0}.ev-table-row:hover{background:var(--color-bg-hover)}.ev-case-result:last-child>.ev-table-row{border-bottom:0}.ev-case-result[data-has-goals=true]>.ev-table-row{border-bottom:1px solid var(--color-border)}.ev-inline-goals{border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-case-result:last-child .ev-inline-goals{border-bottom:0}.ev-inline-goals-head{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-truncate{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ev-empty{display:flex;min-height:220px;align-items:center;justify-content:center;padding:32px;text-align:center;color:var(--color-text-dim);font-size:13px}.ev-empty strong{display:block;margin-bottom:6px;color:var(--color-text);font-size:14px}.ev-empty .ev-primary{margin-top:14px}
-.ev-plan-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-plan{border-bottom:1px solid var(--color-border)}.ev-plan:last-child{border-bottom:0}.ev-plan-header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px 16px}.ev-plan-name{font-size:14px;font-weight:650}.ev-plan-meta{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-scenarios{border-top:1px solid var(--color-border);background:var(--color-bg-card)}.ev-scenario{display:flex;width:100%;align-items:center;justify-content:space-between;gap:16px;padding:10px 16px;border-bottom:1px solid var(--color-border);text-align:left}.ev-scenario:last-child{border-bottom:0}.ev-scenario:hover{background:var(--color-bg-hover)}.ev-scenario-name{font-size:12px;font-weight:600}.ev-scenario-prompt{max-width:760px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-dim);font-size:11px}
+.ev-plan-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-plan{border-bottom:1px solid var(--color-border)}.ev-plan:last-child{border-bottom:0}.ev-plan-header{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:14px 16px}.ev-plan-name{font-size:14px;font-weight:650}.ev-plan-meta{margin-top:4px;color:var(--color-text-dim);font-size:11px}.ev-scenarios{border-top:1px solid var(--color-border);background:var(--color-bg-card)}.ev-scenario{display:block;width:100%;padding:10px 16px;border-bottom:1px solid var(--color-border);text-align:left}.ev-scenario:last-child{border-bottom:0}.ev-scenario:hover{background:var(--color-bg-hover)}.ev-scenario-top{display:flex;align-items:center;justify-content:space-between;gap:16px}.ev-scenario-name{display:block;font-size:12px;font-weight:600}.ev-scenario-prompt{display:block;max-width:760px;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--color-text-dim);font-size:11px}.ev-definition-list{display:grid;gap:4px;margin-top:9px;padding-top:8px;border-top:1px solid color-mix(in srgb,var(--color-border) 70%,transparent)}.ev-definition-goal{display:grid;grid-template-columns:7px minmax(0,1fr);align-items:start;gap:8px;color:var(--color-text-dim);font-size:11px;line-height:1.4}.ev-definition-dot{width:5px;height:5px;margin-top:5px;border-radius:50%;background:var(--color-text-dim)}
 .ev-drawer-backdrop{position:fixed;inset:0;z-index:40;display:flex;justify-content:flex-end;background:rgba(0,0,0,.58)}.ev-drawer{display:flex;height:100%;width:min(760px,100%);flex-direction:column;border-left:1px solid var(--color-border);background:var(--color-bg);box-shadow:0 0 30px rgba(0,0,0,.35)}.ev-drawer-header{display:flex;height:56px;flex:none;align-items:center;justify-content:space-between;padding:0 20px;border-bottom:1px solid var(--color-border)}.ev-drawer-title{font-size:14px;font-weight:650}.ev-drawer-body{min-height:0;flex:1;overflow:auto;padding:20px}.ev-drawer-footer{display:flex;flex:none;justify-content:flex-end;gap:8px;padding:12px 20px;border-top:1px solid var(--color-border)}
 .ev-form{display:grid;gap:18px}.ev-grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.ev-label{display:block;margin-bottom:6px;color:var(--color-text-dim);font-size:10px;font-weight:650;text-transform:uppercase}.ev-field{display:block;width:100%;min-height:38px;padding:8px 10px;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg-card);color:var(--color-text);font:inherit;font-size:13px;outline:none}.ev-field:focus{border-color:var(--color-accent)}textarea.ev-field{resize:vertical;line-height:1.45}.ev-help{display:block;margin-top:5px;color:var(--color-text-dim);font-size:11px;line-height:1.4}.ev-search{position:relative}.ev-search-menu{position:absolute;z-index:10;top:calc(100% + 4px);width:100%;max-height:230px;overflow:auto;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg);box-shadow:0 12px 28px rgba(0,0,0,.3)}.ev-search-option{display:block;width:100%;padding:9px 10px;border-bottom:1px solid var(--color-border);font-size:12px;text-align:left}.ev-search-option:last-child{border-bottom:0}.ev-search-option:hover{background:var(--color-bg-hover)}.ev-selected{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 12px;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg-card)}.ev-selected-name{font-size:13px;font-weight:650}.ev-selected-meta{margin-top:2px;color:var(--color-text-dim);font-size:11px}.ev-divider{padding-top:18px;border-top:1px solid var(--color-border)}.ev-check{display:flex;align-items:center;gap:8px;font-size:12px}.ev-advanced{border-top:1px solid var(--color-border);padding-top:14px}.ev-advanced summary{cursor:pointer;color:var(--color-text-dim);font-size:12px}.ev-advanced-body{display:grid;gap:12px;margin-top:14px}
 .ev-segment{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));padding:3px;border:1px solid var(--color-border);border-radius:7px;background:var(--color-bg-card)}.ev-segment button{min-height:34px;border-radius:5px;color:var(--color-text-dim);font-size:12px}.ev-segment button[data-active=true]{background:var(--color-bg);color:var(--color-text);box-shadow:0 0 0 1px var(--color-border)}
@@ -293,8 +542,10 @@ const styles = `
 .ev-picker{display:grid;gap:8px}.ev-picker-list{max-height:190px;overflow:auto;border:1px solid var(--color-border);border-radius:5px}.ev-picker-row{display:flex;width:100%;align-items:flex-start;gap:9px;padding:8px 9px;border-bottom:1px solid var(--color-border);text-align:left}.ev-picker-row:last-child{border-bottom:0}.ev-picker-row:hover{background:var(--color-bg-hover)}.ev-picker-mark{display:flex;width:16px;height:16px;flex:none;align-items:center;justify-content:center;border:1px solid var(--color-border);border-radius:3px;font-size:10px}.ev-picker-row[data-selected=true] .ev-picker-mark{border-color:var(--color-accent);background:var(--color-accent);color:var(--color-bg)}.ev-picker-name{display:block;font-size:12px;font-weight:600}.ev-picker-detail{display:block;margin-top:2px;color:var(--color-text-dim);font-size:10px}.ev-chip-list{display:flex;flex-wrap:wrap;gap:6px}.ev-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;padding:5px 7px;border:1px solid var(--color-border);border-radius:5px;background:var(--color-bg);font-size:11px}.ev-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ev-chip button{color:var(--color-text-dim)}
 .ev-task-list{display:grid;gap:10px}.ev-task-card{padding:12px;border:1px solid var(--color-border);border-radius:6px;background:var(--color-bg-card)}.ev-task-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.ev-task-number{font-size:11px;font-weight:700;text-transform:uppercase;color:var(--color-text-dim)}.ev-task-fields{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:10px}.ev-task-fields textarea{min-height:94px}.ev-seed-card{padding:10px;border:1px solid var(--color-border);border-radius:5px;background:var(--color-bg)}.ev-seed-head{display:grid;grid-template-columns:minmax(120px,.8fr) minmax(160px,1.2fr) 32px;gap:8px;align-items:center}.ev-seed-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}.ev-seed-fields .ev-label{text-transform:none}
 .ev-inspector-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-inspector-section{margin-top:20px}.ev-result-list{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-result-row{display:flex;align-items:flex-start;gap:10px;padding:9px 11px;border-bottom:1px solid var(--color-border)}.ev-result-row:last-child{border-bottom:0}.ev-trace-role{margin-bottom:4px;color:var(--color-text-dim);font-size:9px;font-weight:650;text-transform:uppercase}.ev-trace-text{white-space:pre-wrap;font-size:12px;line-height:1.45}.ev-code{max-height:170px;overflow:auto;white-space:pre-wrap;padding:8px;border-radius:4px;background:var(--color-bg-card);font-family:monospace;font-size:10px}.ev-suggestion{padding:12px;border:1px solid var(--color-border);border-radius:6px}.ev-suggestion-actions{display:flex;justify-content:flex-end;margin-top:10px}
-@media(max-width:900px){.ev-workspace{grid-template-columns:1fr}.ev-run-list{max-height:300px;overflow:auto;border-right:0;border-bottom:1px solid var(--color-border)}.ev-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-metric:nth-child(3){border-right:0}.ev-metric:nth-child(n+4){border-top:1px solid var(--color-border)}}
-@media(max-width:680px){.ev-page{padding:14px}.ev-toolbar{align-items:stretch;flex-direction:column}.ev-actions{display:grid;grid-template-columns:1fr 1fr}.ev-actions>*{width:100%}.ev-grid-2,.ev-task-fields,.ev-seed-fields{grid-template-columns:1fr}.ev-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-plan-header{align-items:flex-start;flex-direction:column}.ev-plan-header .ev-actions{display:flex;width:100%}.ev-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(2n){border-right:0}.ev-metric:nth-child(n+3){border-top:1px solid var(--color-border)}.ev-target-grid,.ev-case-grid{grid-template-columns:minmax(0,1fr) 78px}.ev-table-head{display:none}.ev-table-row>*:nth-child(n+3){display:none}.ev-scenario{align-items:flex-start;flex-direction:column}.ev-drawer-body{padding:16px}.ev-seed-head{grid-template-columns:1fr 32px}.ev-seed-head select:nth-child(2){grid-column:1/-1;grid-row:2}.ev-selected{align-items:flex-start;flex-direction:column}.ev-selected .ev-actions{display:flex;width:100%}}
+.ev-live-stage{display:inline-flex;align-items:center;gap:7px;color:var(--color-accent);font-size:10px;font-weight:700;text-transform:uppercase}.ev-live-dot{width:7px;height:7px;border-radius:50%;background:var(--color-accent);animation:ev-live-pulse 1.25s ease-in-out infinite}.ev-live-call{border-bottom:1px solid var(--color-border);background:var(--color-bg-card)}.ev-live-call-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 12px;border-bottom:1px solid var(--color-border)}.ev-live-turn{display:grid;grid-template-columns:86px minmax(0,1fr);gap:10px;padding:8px 12px;border-bottom:1px solid var(--color-border);font-size:11px;line-height:1.45}.ev-live-turn:last-child{border-bottom:0}.ev-live-speaker{color:var(--color-text-dim);font-size:9px;font-weight:700;text-transform:uppercase}.ev-live-waiting{padding:10px 12px;color:var(--color-text-dim);font-size:11px}@keyframes ev-live-pulse{0%,100%{opacity:.35;transform:scale(.78)}50%{opacity:1;transform:scale(1)}}@media(prefers-reduced-motion:reduce){.ev-live-dot{animation:none}}
+.ev-evaluation{border:1px solid var(--color-border);border-radius:6px;overflow:hidden}.ev-evaluation-head{padding:12px}.ev-evaluation-result{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:7px}.ev-evaluation-score{font-size:17px;font-variant-numeric:tabular-nums}.ev-evaluation-score[data-tone=good],.ev-goal-row[data-tone=good] .ev-goal-result{color:var(--color-success)}.ev-evaluation-score[data-tone=warn],.ev-goal-row[data-tone=warn] .ev-goal-result{color:#d89a2b}.ev-evaluation-score[data-tone=bad],.ev-goal-row[data-tone=bad] .ev-goal-result{color:var(--color-error)}.ev-evaluation-reason{font-size:12px;line-height:1.5}.ev-goal-list{border-top:1px solid var(--color-border)}.ev-goal-row{display:grid;grid-template-columns:7px minmax(0,1fr) auto auto;align-items:start;column-gap:9px;row-gap:3px;padding:9px 12px;border-bottom:1px solid var(--color-border)}.ev-goal-row:last-child{border-bottom:0}.ev-goal-dot{width:6px;height:6px;margin-top:5px;border-radius:50%;background:var(--color-text-dim)}.ev-goal-row[data-tone=good] .ev-goal-dot{background:var(--color-success)}.ev-goal-row[data-tone=warn] .ev-goal-dot{background:#d89a2b}.ev-goal-row[data-tone=bad] .ev-goal-dot{background:var(--color-error)}.ev-goal-row[data-tone=muted] .ev-goal-result{color:var(--color-text-dim)}.ev-goal-name{min-width:0;font-size:12px;font-weight:600;line-height:1.4}.ev-goal-result{font-size:10px;font-weight:700;text-transform:uppercase}.ev-goal-score{min-width:24px;text-align:right;font-size:12px;font-weight:650;font-variant-numeric:tabular-nums}.ev-goal-why{grid-column:2/-1;color:var(--color-text-dim);font-size:11px;line-height:1.4}
+@media(max-width:900px){.ev-workspace{grid-template-columns:1fr}.ev-run-list{max-height:300px;overflow:auto;border-right:0;border-bottom:1px solid var(--color-border)}.ev-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.ev-eval-metrics,.ev-config{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(3){border-right:0}.ev-metric:nth-child(n+4){border-top:1px solid var(--color-border)}.ev-eval-metrics .ev-metric:nth-child(2){border-right:0}.ev-eval-metrics .ev-metric:nth-child(3){border-top:1px solid var(--color-border);border-right:1px solid var(--color-border)}.ev-config-item:nth-child(2){border-right:0}.ev-config-item:nth-child(n+3){border-top:1px solid var(--color-border)}}
+@media(max-width:680px){.ev-page{padding:14px}.ev-toolbar{align-items:stretch;flex-direction:column}.ev-actions{display:grid;grid-template-columns:1fr 1fr}.ev-actions>*{width:100%}.ev-grid-2,.ev-task-fields,.ev-seed-fields{grid-template-columns:1fr}.ev-summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-plan-header,.ev-detail-header{align-items:flex-start;flex-direction:column}.ev-plan-header .ev-actions,.ev-detail-actions{display:flex;width:100%}.ev-detail-actions .ev-button,.ev-detail-actions .ev-primary{flex:1}.ev-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.ev-metric:nth-child(2n){border-right:0}.ev-metric:nth-child(n+3){border-top:1px solid var(--color-border)}.ev-config{grid-template-columns:1fr}.ev-config-item{border-right:0;border-top:1px solid var(--color-border)}.ev-config-item:first-child{border-top:0}.ev-target-grid,.ev-case-grid,.ev-history-grid{grid-template-columns:minmax(0,1fr) 78px}.ev-table-head{display:none}.ev-table-row>*:nth-child(n+3){display:none}.ev-scenario-top{align-items:flex-start;flex-direction:column}.ev-drawer-body{padding:16px}.ev-seed-head{grid-template-columns:1fr 32px}.ev-seed-head select:nth-child(2){grid-column:1/-1;grid-row:2}.ev-selected{align-items:flex-start;flex-direction:column}.ev-selected .ev-actions{display:flex;width:100%}}
 `;
 
 function Status({ value }: { value: string }) {
@@ -307,6 +558,24 @@ function Status({ value }: { value: string }) {
         : "muted";
   const label = value === "completed" ? "Complete" : value === "queued" ? "Queued" : value;
   return <span className="ev-status" data-tone={tone}>{label}</span>;
+}
+
+function LiveStage({ stage }: { stage?: string }) {
+  return <span className="ev-live-stage"><span className="ev-live-dot" aria-hidden="true" />{stageLabel(stage)}</span>;
+}
+
+function LiveVoiceTranscript({ call }: { call: LiveVoiceCall }) {
+  return <div className="ev-live-call">
+    <div className="ev-live-call-head"><LiveStage stage="live_voice_call" /><span className="ev-muted">{call.transcript?.length || 0} turns</span></div>
+    {call.transcript?.length > 0
+      ? call.transcript.map((turn, index) => <div className="ev-live-turn" key={`${turn.at_ms}-${index}`}><span className="ev-live-speaker">{turn.speaker} · {(turn.at_ms / 1000).toFixed(1)}s</span><span>{turn.text}</span></div>)
+      : <div className="ev-live-waiting">Waiting for the first transcript turn...</div>}
+  </div>;
+}
+
+function EvalHealth({ suite, experiments }: { suite: Suite; experiments: Experiment[] }) {
+  const health = suiteHealth(suite, experiments);
+  return <span className="ev-status" data-tone={health.tone}>{health.label}</span>;
 }
 
 function Empty({ title, detail, action }: { title: string; detail?: string; action?: ReactNode }) {
@@ -435,12 +704,14 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   onCreated: (experiment: Experiment) => void;
 }) {
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [mode, setMode] = useState<"text" | "voice">("text");
   const [name, setName] = useState("");
   const [tasks, setTasks] = useState<TaskDraft[]>([newTask(1)]);
   const [environmentMode, setEnvironmentMode] = useState<"clone" | "saved">("clone");
   const [savedEnvironmentID, setSavedEnvironmentID] = useState("");
   const [environmentName, setEnvironmentName] = useState("");
   const [selectedAppIDs, setSelectedAppIDs] = useState<number[]>([]);
+  const [selectedMCPIDs, setSelectedMCPIDs] = useState<number[]>([]);
   const [fakeSlugs, setFakeSlugs] = useState<string[]>([]);
   const [seeds, setSeeds] = useState<SeedStep[]>([]);
   const [seedAppID, setSeedAppID] = useState("");
@@ -448,12 +719,32 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   const [judgeModel, setJudgeModel] = useState("");
   const [maxTurns, setMaxTurns] = useState(10);
   const [timeoutSeconds, setTimeoutSeconds] = useState(600);
+  const [realtimeProvider, setRealtimeProvider] = useState("");
+  const [receptionistVoice, setReceptionistVoice] = useState("");
+  const [callerVoice, setCallerVoice] = useState("");
+  const [callerPersona, setCallerPersona] = useState("A natural, concise customer");
+  const [callerBehavior, setCallerBehavior] = useState("Ask follow-up questions when needed. End the call once the goal is resolved or clearly cannot be resolved.");
+  const [greeting, setGreeting] = useState("");
+  const [maxFirstResponseMS, setMaxFirstResponseMS] = useState(2000);
+  const [voiceTransport, setVoiceTransport] = useState<"direct" | "carrier">("direct");
+  const [audioPreset, setAudioPreset] = useState<VoiceAudioConditions["preset"]>("clean");
+  const [audioIntensity, setAudioIntensity] = useState<VoiceAudioConditions["intensity"]>("moderate");
+  const [audioCodec, setAudioCodec] = useState<VoiceAudioConditions["codec"]>("none");
+  const [audioSeed, setAudioSeed] = useState(42);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!judgeModel && catalog.models.length > 0) setJudgeModel(modelID(catalog.models[0]));
   }, [catalog.models, judgeModel]);
+
+  useEffect(() => {
+    if (realtimeProvider || catalog.realtime_providers.length === 0) return;
+    const provider = catalog.realtime_providers[0];
+    setRealtimeProvider(provider.name);
+    setReceptionistVoice(provider.default_voice || "");
+    setCallerVoice(provider.default_voice || "");
+  }, [catalog.realtime_providers, realtimeProvider]);
 
   useEffect(() => {
     if (!agent) return;
@@ -479,9 +770,21 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   }, [agent?.id, catalog.apps.length, catalog.connections.length, catalog.integrations.length]);
 
   const selectedApps = catalog.apps.filter((item) => selectedAppIDs.includes(item.install_id));
+  const selectedMCPs = (catalog.managed_mcps || []).filter((item) => selectedMCPIDs.includes(item.id));
   const selectedIntegrations = catalog.integrations.filter((item) => fakeSlugs.includes(item.slug));
   const tasksValid = tasks.length > 0 && tasks.every((item) => item.prompt.trim() && goalsFromText(item.success).length > 0);
   const environmentValid = environmentMode === "clone" ? Boolean(environmentName.trim()) : Boolean(savedEnvironmentID);
+  const telephonyApp = catalog.apps.find((item) => item.name === "telephony");
+  const savedEnvironment = catalog.environments.find((item) => item.id === savedEnvironmentID);
+  const savedCarrierFixture = savedEnvironment?.spec?.protocol_fixtures?.find((item) => item.pack === "telephony-carrier");
+  const carrierFixtureID = environmentMode === "clone" ? "telephony-carrier" : savedCarrierFixture?.id || "";
+  const carrierReady = voiceTransport === "direct" || (environmentMode === "clone" ? Boolean(telephonyApp) : Boolean(savedCarrierFixture));
+  const voiceValid = mode === "text" || (Boolean(realtimeProvider) && carrierReady);
+
+  useEffect(() => {
+    if (mode !== "voice" || voiceTransport !== "carrier" || environmentMode !== "clone" || !telephonyApp) return;
+    setSelectedAppIDs((current) => current.includes(telephonyApp.install_id) ? current : [...current, telephonyApp.install_id]);
+  }, [mode, voiceTransport, environmentMode, telephonyApp?.install_id]);
 
   const toggleApp = (item: CatalogApp) => {
     if (selectedAppIDs.includes(item.install_id)) {
@@ -491,6 +794,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
       setSelectedAppIDs([...selectedAppIDs, item.install_id]);
     }
   };
+  const toggleMCP = (item: ManagedMCP) => setSelectedMCPIDs(selectedMCPIDs.includes(item.id) ? selectedMCPIDs.filter((id) => id !== item.id) : [...selectedMCPIDs, item.id]);
   const toggleIntegration = (item: Integration) => setFakeSlugs(fakeSlugs.includes(item.slug) ? fakeSlugs.filter((slug) => slug !== item.slug) : [...fakeSlugs, item.slug]);
   const updateTask = (id: number, patch: Partial<TaskDraft>) => setTasks(tasks.map((item) => item.id === id ? { ...item, ...patch } : item));
   const removeTask = (id: number) => setTasks(tasks.filter((item) => item.id !== id));
@@ -510,7 +814,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   };
 
   const run = async () => {
-    if (!agent || !tasksValid || !environmentValid || !judgeModel) return;
+    if (!agent || !tasksValid || !environmentValid || !judgeModel || !voiceValid) return;
     setBusy(true);
     setError("");
     let suite: Suite | null = null;
@@ -526,12 +830,19 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             spec: {
               version: 1,
               ttl_seconds: 3600,
-              app_install_ids: selectedAppIDs,
-              connection_ids: [],
+	              app_install_ids: selectedAppIDs,
+	              connection_ids: [],
+	              mcp_server_ids: selectedMCPIDs,
               network_mode: "block",
               integration_mode: "mock",
               integration_bindings: integrationBindings(),
               seeds,
+              protocol_fixtures: mode === "voice" && voiceTransport === "carrier" ? [{
+                id: "telephony-carrier",
+                pack: "telephony-carrier",
+                version: "1.0.0",
+                target_app: "telephony",
+              }] : [],
             } satisfies EnvironmentSpec,
           }),
         });
@@ -559,9 +870,29 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
             suite_id: suite.id,
             name: task.name.trim() || `Task ${index + 1}`,
             prompt: task.prompt.trim(),
+            mode,
+            voice: mode === "voice" ? {
+              caller_goal: task.prompt.trim(),
+              caller_persona: callerPersona.trim(),
+              caller_behavior: callerBehavior.trim(),
+              provider: realtimeProvider,
+              voice: receptionistVoice.trim(),
+              caller_provider: realtimeProvider,
+              caller_voice: callerVoice.trim(),
+              greeting: greeting.trim(),
+              max_first_response_ms: maxFirstResponseMS,
+              transport: voiceTransport,
+              protocol_fixture: voiceTransport === "carrier" ? carrierFixtureID : undefined,
+              audio_conditions: {
+                preset: audioPreset,
+                intensity: audioIntensity,
+                codec: voiceTransport === "carrier" ? "none" : audioCodec,
+                seed: audioSeed,
+              },
+            } satisfies VoiceCase : undefined,
             goals: goalsFromText(task.success),
             assertions: [],
-            timeout_seconds: timeoutSeconds,
+            timeout_seconds: mode === "voice" ? Math.min(timeoutSeconds, 300) : timeoutSeconds,
             max_turns: maxTurns,
             enabled: true,
           }),
@@ -589,7 +920,7 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
   return <Drawer
     title="Validate an agent"
     onClose={onClose}
-    footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !agent || !tasksValid || !environmentValid || !judgeModel} onClick={run} className="ev-primary">{busy ? "Starting..." : `Run ${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`}</button></>}
+    footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !agent || !tasksValid || !environmentValid || !judgeModel || !voiceValid} onClick={run} className="ev-primary">{busy ? "Starting..." : `Run ${tasks.length} ${mode === "voice" ? (tasks.length === 1 ? "call" : "calls") : (tasks.length === 1 ? "task" : "tasks")}`}</button></>}
   >
     <div className="ev-form">
       <label>
@@ -597,29 +928,55 @@ function QuickRunBuilder({ catalog, onClose, onCreated }: {
         {agent ? <div className="ev-selected"><div><div className="ev-selected-name">{agent.name}</div><div className="ev-selected-meta">Current production directive snapshot · {agent.status}</div></div><div className="ev-actions"><a href={`/agents/${agent.id}`} className="ev-button">Edit production directive</a><button type="button" onClick={() => setAgent(null)} className="ev-button">Change</button></div></div> : <SearchSelect placeholder="Search agents" items={catalog.agents} label={(item) => `${item.name} · ${item.status}`} onSelect={setAgent} />}
       </label>
       <section>
+        <span className="ev-label">Test type</span>
+        <div className="ev-segment"><button type="button" data-active={mode === "text"} onClick={() => { setMode("text"); setTimeoutSeconds(600); }}>Text task</button><button type="button" data-active={mode === "voice"} onClick={() => { setMode("voice"); setTimeoutSeconds(90); }}>Voice call</button></div>
+        {mode === "voice" && <div className="ev-setup" style={{ marginTop: 10 }}>
+          <label style={{ display: "block", marginBottom: 12 }}><span className="ev-label">Call path</span><div className="ev-segment"><button type="button" data-active={voiceTransport === "direct"} onClick={() => setVoiceTransport("direct")}>Direct audio</button><button type="button" data-active={voiceTransport === "carrier"} onClick={() => setVoiceTransport("carrier")}>Through Telephony</button></div><span className="ev-help">{voiceTransport === "carrier" ? "Exercises Telephony inbound routing, signed callbacks, Media Streams, and carrier audio codecs inside the environment." : "Connects the simulated caller directly to the realtime agent."}</span></label>
+          {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
+            <label><span className="ev-label">Realtime provider</span><select value={realtimeProvider} onChange={(event) => { const provider = catalog.realtime_providers.find((item) => item.name === event.target.value); setRealtimeProvider(event.target.value); setReceptionistVoice(provider?.default_voice || ""); setCallerVoice(provider?.default_voice || ""); }} className="ev-field">{catalog.realtime_providers.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></label>
+            <label><span className="ev-label">Receptionist voice</span><input value={receptionistVoice} onChange={(event) => setReceptionistVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
+            <label><span className="ev-label">Caller voice</span><input value={callerVoice} onChange={(event) => setCallerVoice(event.target.value)} placeholder="Provider default" className="ev-field" /></label>
+            <label><span className="ev-label">Maximum first response</span><div style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="number" min={250} max={10000} step={250} value={maxFirstResponseMS} onChange={(event) => setMaxFirstResponseMS(Number(event.target.value))} className="ev-field" /><span className="ev-muted">ms</span></div></label>
+          </div>}
+          <div style={{ marginTop: 12 }}>
+            <span className="ev-label">Caller audio conditions</span>
+            <div className="ev-grid-2">
+              <label><span className="ev-label">Background</span><select value={audioPreset} onChange={(event) => { const preset = event.target.value as VoiceAudioConditions["preset"]; setAudioPreset(preset); setAudioCodec(preset === "poor_phone" ? "g711_mulaw" : "none"); }} className="ev-field">{audioPresetOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+              <label><span className="ev-label">Noise level</span><select value={audioIntensity} onChange={(event) => setAudioIntensity(event.target.value as VoiceAudioConditions["intensity"])} disabled={audioPreset === "clean"} className="ev-field"><option value="light">Light · 18 dB SNR</option><option value="moderate">Moderate · 10 dB SNR</option><option value="heavy">Heavy · 4 dB SNR</option></select></label>
+              <label><span className="ev-label">Line quality</span><select value={voiceTransport === "carrier" ? "none" : audioCodec} onChange={(event) => setAudioCodec(event.target.value as VoiceAudioConditions["codec"])} disabled={voiceTransport === "carrier"} className="ev-field"><option value="none">Full-band audio</option><option value="g711_mulaw">8 kHz phone codec</option></select></label>
+              <label><span className="ev-label">Repeatable seed</span><input type="number" min={0} step={1} value={audioSeed} onChange={(event) => setAudioSeed(Math.max(0, Number(event.target.value) || 0))} className="ev-field" /></label>
+            </div>
+            <span className="ev-help">{voiceTransport === "carrier" ? "Background conditions are mixed before the carrier applies its own phone codec." : "The caller remains a live realtime agent; Environments alters only the audio delivered to the agent under test."}</span>
+          </div>
+          {voiceTransport === "carrier" && !carrierReady && <div className="ev-error" style={{ marginTop: 10 }}><span>{environmentMode === "clone" ? "Install Telephony in this project before using the carrier path." : "The selected environment has no Telephony carrier fixture."}</span></div>}
+	          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={callerPersona} onChange={(event) => setCallerPersona(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={callerBehavior} onChange={(event) => setCallerBehavior(event.target.value)} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={greeting} onChange={(event) => setGreeting(event.target.value)} placeholder="First response only" className="ev-field" /></label></div></details>
+        </div>}
+      </section>
+      <section>
         <span className="ev-label">2. Environment</span>
         <div className="ev-segment"><button type="button" data-active={environmentMode === "clone"} onClick={() => setEnvironmentMode("clone")}>Clone this project</button><button type="button" data-active={environmentMode === "saved"} onClick={() => setEnvironmentMode("saved")}>Select environment</button></div>
         {environmentMode === "clone" ? <div className="ev-setup" style={{ marginTop: 10 }}>
-          <div className="ev-setup-title">Reusable isolated project clone</div><div className="ev-setup-copy">Fresh app data, mocked project connections, and blocked external traffic. The environment is saved in Environments and reused by this test plan.</div>
+          <div className="ev-setup-title">Reusable isolated project clone</div><div className="ev-setup-copy">Fresh app data, mocked project connections, and blocked external traffic. The environment is saved in Environments and reused by this eval.</div>
           <label style={{ display: "block", marginTop: 12 }}><span className="ev-label">Environment name</span><input value={environmentName} onChange={(event) => setEnvironmentName(event.target.value)} placeholder="Agent evaluation environment" className="ev-field" /></label>
-          <div className="ev-summary-grid"><div className="ev-summary-item"><span className="ev-summary-value">{capabilitiesLoading ? "…" : selectedApps.length}</span><span className="ev-summary-label">agent apps</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedIntegrations.length}</span><span className="ev-summary-label">mocked integrations</span></div><div className="ev-summary-item"><span className="ev-summary-value">{seeds.length}</span><span className="ev-summary-label">seed steps</span></div></div>
-          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Customize project clone</summary><div className="ev-advanced-body">
-            <div><span className="ev-label">Installed apps</span><TogglePicker placeholder="Search project apps" items={catalog.apps} selected={new Set(selectedAppIDs.map(String))} keyOf={(item) => String(item.install_id)} titleOf={(item) => item.display_name || item.name} detailOf={(item) => item.description || item.name} onToggle={toggleApp} /></div>
+	          <div className="ev-summary-grid"><div className="ev-summary-item"><span className="ev-summary-value">{capabilitiesLoading ? "…" : selectedApps.length}</span><span className="ev-summary-label">agent apps</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedMCPs.length}</span><span className="ev-summary-label">MCP servers</span></div><div className="ev-summary-item"><span className="ev-summary-value">{selectedIntegrations.length}</span><span className="ev-summary-label">mocked integrations</span></div><div className="ev-summary-item"><span className="ev-summary-value">{seeds.length}</span><span className="ev-summary-label">seed steps</span></div></div>
+	          <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Customize project clone</summary><div className="ev-advanced-body">
+	            <div><span className="ev-label">Installed apps</span><TogglePicker placeholder="Search project apps" items={catalog.apps} selected={new Set(selectedAppIDs.map(String))} keyOf={(item) => String(item.install_id)} titleOf={(item) => item.display_name || item.name} detailOf={(item) => item.description || item.name} onToggle={toggleApp} /></div>
+	            <div><span className="ev-label">Managed MCP servers</span><TogglePicker placeholder="Search project MCP servers" items={catalog.managed_mcps || []} selected={new Set(selectedMCPIDs.map(String))} keyOf={(item) => String(item.id)} titleOf={(item) => item.name} detailOf={(item) => item.description || `${item.tool_count || 0} tools`} onToggle={toggleMCP} /></div>
             <div><span className="ev-label">Fake integrations</span><TogglePicker placeholder="Search integrations" items={catalog.integrations} selected={new Set(fakeSlugs)} keyOf={(item) => item.slug} titleOf={(item) => item.name} detailOf={(item) => item.description || `${item.tool_count || 0} tools`} onToggle={toggleIntegration} /></div>
             <div><span className="ev-label">Seed test data</span><select value={seedAppID} onChange={(event) => { const app = selectedApps.find((item) => String(item.install_id) === event.target.value); if (app) setSeeds([...seeds, { app: app.name, tool: "", input: {} }]); setSeedAppID(""); }} className="ev-field"><option value="">Add seed step from an app</option>{selectedApps.map((item) => <option key={item.install_id} value={item.install_id}>{item.display_name || item.name}</option>)}</select><div className="ev-task-list" style={{ marginTop: 8 }}>{seeds.map((seed, index) => { const app = catalog.apps.find((item) => item.name === seed.app); return app ? <SeedEditor key={`${seed.app}-${index}`} app={app} seed={seed} onChange={(next) => setSeeds(seeds.map((item, itemIndex) => itemIndex === index ? next : item))} onRemove={() => setSeeds(seeds.filter((_, itemIndex) => itemIndex !== index))} /> : null; })}</div></div>
           </div></details>
         </div> : <div className="ev-setup" style={{ marginTop: 10 }}><label><span className="ev-label">Saved environment</span><select value={savedEnvironmentID} onChange={(event) => setSavedEnvironmentID(event.target.value)} className="ev-field"><option value="">Choose an environment</option>{catalog.environments.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{catalog.environments.length === 0 && <div className="ev-help">No saved environments yet. Use Clone this project to create one here.</div>}</div>}
       </section>
       <section>
-        <div className="ev-section-heading"><span className="ev-label" style={{ margin: 0 }}>3. Tasks to verify</span><button type="button" onClick={addTask} className="ev-button">Add task</button></div>
-        <div className="ev-task-list">{tasks.map((task, index) => <div className="ev-task-card" key={task.id}><div className="ev-task-header"><span className="ev-task-number">Task {index + 1}</span>{tasks.length > 1 && <button type="button" onClick={() => removeTask(task.id)} title="Remove task" className="ev-icon-button">×</button>}</div><label><span className="ev-label">Name</span><input value={task.name} onChange={(event) => updateTask(task.id, { name: event.target.value })} placeholder={`Task ${index + 1}`} className="ev-field" /></label><div className="ev-task-fields" style={{ marginTop: 10 }}><label><span className="ev-label">What should the agent do?</span><textarea value={task.prompt} onChange={(event) => updateTask(task.id, { prompt: event.target.value })} placeholder="Describe the task exactly as the agent should receive it." className="ev-field" /></label><label><span className="ev-label">Pass when</span><textarea value={task.success} onChange={(event) => updateTask(task.id, { success: event.target.value })} placeholder={"One requirement per line\nExpected state or outcome\nActions that must not happen"} className="ev-field" /></label></div></div>)}</div>
-        <span className="ev-help">Each task runs independently in the selected environment. The evaluation model grades every success criterion using the agent trace.</span>
+        <div className="ev-section-heading"><span className="ev-label" style={{ margin: 0 }}>3. {mode === "voice" ? "Calls" : "Tasks"} to verify</span><button type="button" onClick={addTask} className="ev-button">Add {mode === "voice" ? "call" : "task"}</button></div>
+        <div className="ev-task-list">{tasks.map((task, index) => <div className="ev-task-card" key={task.id}><div className="ev-task-header"><span className="ev-task-number">{mode === "voice" ? "Call" : "Task"} {index + 1}</span>{tasks.length > 1 && <button type="button" onClick={() => removeTask(task.id)} title={`Remove ${mode === "voice" ? "call" : "task"}`} className="ev-icon-button">×</button>}</div><label><span className="ev-label">Name</span><input value={task.name} onChange={(event) => updateTask(task.id, { name: event.target.value })} placeholder={`${mode === "voice" ? "Call" : "Task"} ${index + 1}`} className="ev-field" /></label><div className="ev-task-fields" style={{ marginTop: 10 }}><label><span className="ev-label">{mode === "voice" ? "What does the caller need?" : "What should the agent do?"}</span><textarea value={task.prompt} onChange={(event) => updateTask(task.id, { prompt: event.target.value })} placeholder={mode === "voice" ? "Describe the caller's goal in ordinary language." : "Describe the task exactly as the agent should receive it."} className="ev-field" /></label><label><span className="ev-label">Pass when</span><textarea value={task.success} onChange={(event) => updateTask(task.id, { success: event.target.value })} placeholder={"One requirement per line\nExpected state or outcome\nActions that must not happen"} className="ev-field" /></label></div></div>)}</div>
+        <span className="ev-help">{mode === "voice" ? "Each simulated caller has a real realtime conversation with the isolated agent. The evaluation model grades the transcript, tool trace, and resulting environment state." : "Each task runs independently in the selected environment. The evaluation model grades every success criterion using the agent trace."}</span>
       </section>
       <div className="ev-grid-2">
-        <label><span className="ev-label">Test plan name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={agent ? `${agent.name} validation` : "Agent validation"} className="ev-field" /></label>
+        <label><span className="ev-label">Eval name</span><input value={name} onChange={(event) => setName(event.target.value)} placeholder={agent ? `${agent.name} validation` : "Agent validation"} className="ev-field" /></label>
         <label><span className="ev-label">Evaluation model</span><select value={judgeModel} onChange={(event) => setJudgeModel(event.target.value)} className="ev-field"><option value="">Choose a model</option>{catalog.models.map((item) => <option key={modelID(item)} value={modelID(item)}>{modelLabel(item)}</option>)}</select></label>
       </div>
-      <details className="ev-advanced"><summary>Execution limits</summary><div className="ev-advanced-body ev-grid-2"><label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value))} className="ev-field" /></label><label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={1800} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} className="ev-field" /></label></div></details>
+      <details className="ev-advanced"><summary>Execution limits</summary><div className="ev-advanced-body ev-grid-2">{mode === "text" && <label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={maxTurns} onChange={(event) => setMaxTurns(Number(event.target.value))} className="ev-field" /></label>}<label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={mode === "voice" ? 300 : 1800} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Number(event.target.value))} className="ev-field" /></label></div></details>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
   </Drawer>;
@@ -658,10 +1015,10 @@ function PlanRunBuilder({ suites, catalog, initialSuiteID, onClose, onCreated }:
     }
   };
 
-  return <Drawer title="Run a test plan" onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !suiteID || targets.length === 0} onClick={run} className="ev-primary">Run test plan</button></>}>
+  return <Drawer title="Run an eval" onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !suiteID || targets.length === 0} onClick={run} className="ev-primary">Run eval</button></>}>
     <div className="ev-form">
       <div className="ev-grid-2">
-        <label><span className="ev-label">Test plan</span><select value={suiteID} onChange={(event) => { setSuiteID(event.target.value); setJudgeModel(suites.find((item) => item.id === event.target.value)?.judge_model || ""); }} className="ev-field">{suites.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.cases?.length || 0} scenarios</option>)}</select></label>
+        <label><span className="ev-label">Eval</span><select value={suiteID} onChange={(event) => { setSuiteID(event.target.value); setJudgeModel(suites.find((item) => item.id === event.target.value)?.judge_model || ""); }} className="ev-field">{suites.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.cases?.length || 0} scenarios</option>)}</select></label>
         <label><span className="ev-label">Repetitions</span><input type="number" min={1} max={20} value={repetitions} onChange={(event) => setRepetitions(Number(event.target.value))} className="ev-field" /></label>
       </div>
       <section><span className="ev-label">Agents and models</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(item) => `${item.name} · ${item.status}`} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div><div className="ev-selected-name">{agent.name}</div><div className="ev-selected-meta">Add its default model, or compare another model</div></div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}{agent && <div style={{ marginTop: 8 }}><SearchSelect placeholder="Search models to compare" items={catalog.models} label={modelLabel} onSelect={addTarget} /></div>}<div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{targets.map((item, index) => <span key={`${item.agent_id}-${item.model}-${index}`} className="ev-button">{item.agent_name} · {item.model || "default"}<button type="button" onClick={() => setTargets(targets.filter((_, targetIndex) => targetIndex !== index))} title="Remove" style={{ marginLeft: 7 }}>×</button></span>)}</div></section>
@@ -675,7 +1032,7 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   initial?: Suite;
   catalog: Catalog;
   onClose: () => void;
-  onSaved: () => void;
+  onSaved: (suite: Suite) => void;
 }) {
   const [item, setItem] = useState<Partial<Suite>>(initial || { name: "", description: "", environment_id: "", judge_model: "", schedule_minutes: 0, required_pass_rate: 1, enabled: true, continuous_targets: [] });
   const [agent, setAgent] = useState<Agent | null>(null);
@@ -690,8 +1047,8 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   const save = async () => {
     setBusy(true);
     try {
-      await request(initial ? `/suites/${initial.id}` : "/suites", { method: initial ? "PUT" : "POST", body: JSON.stringify(item) });
-      onSaved();
+      const saved = await request<Suite>(initial ? `/suites/${initial.id}` : "/suites", { method: initial ? "PUT" : "POST", body: JSON.stringify(item) });
+      onSaved(saved);
       onClose();
     } catch (cause: any) {
       setError(cause.message);
@@ -700,7 +1057,7 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
     }
   };
 
-  return <Drawer title={initial ? "Edit test plan" : "New test plan"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !item.name} onClick={save} className="ev-primary">Save test plan</button></>}>
+  return <Drawer title={initial ? "Edit eval" : "New eval"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" disabled={busy || !item.name} onClick={save} className="ev-primary">Save eval</button></>}>
     <div className="ev-form">
       <label><span className="ev-label">Name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
       <label><span className="ev-label">Description</span><textarea rows={3} value={item.description || ""} onChange={(event) => setItem({ ...item, description: event.target.value })} className="ev-field" /></label>
@@ -712,13 +1069,15 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
   </Drawer>;
 }
 
-function ScenarioEditor({ suite, initial, onClose, onSaved }: {
+function ScenarioEditor({ suite, initial, catalog, onClose, onSaved }: {
   suite: Suite;
   initial?: EvalCase;
+  catalog: Catalog;
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [item, setItem] = useState<Partial<EvalCase>>(initial || { suite_id: suite.id, name: "", prompt: "", goals: [""], assertions: [], timeout_seconds: 600, max_turns: 10, enabled: true });
+  const defaultProvider = catalog.realtime_providers[0];
+  const [item, setItem] = useState<Partial<EvalCase>>(initial || { suite_id: suite.id, name: "", prompt: "", mode: "text", goals: [""], assertions: [], timeout_seconds: 600, max_turns: 10, enabled: true });
   const [assertionRaw, setAssertionRaw] = useState(JSON.stringify(initial?.assertions || [], null, 2));
   const [error, setError] = useState("");
   const save = async () => {
@@ -733,12 +1092,31 @@ function ScenarioEditor({ suite, initial, onClose, onSaved }: {
     }
   };
 
-  return <Drawer title={initial ? "Edit scenario" : "New scenario"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" onClick={save} disabled={!item.name || !item.prompt} className="ev-primary">Save scenario</button></>}>
+  return <Drawer title={initial ? "Edit scenario" : "New scenario"} onClose={onClose} footer={<><button type="button" onClick={onClose} className="ev-button">Cancel</button><button type="button" onClick={save} disabled={!item.name || !item.prompt || (item.mode === "voice" && catalog.realtime_providers.length === 0)} className="ev-primary">Save scenario</button></>}>
     <div className="ev-form">
       <label><span className="ev-label">Scenario name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
-      <label><span className="ev-label">Task to perform</span><textarea rows={5} value={item.prompt || ""} onChange={(event) => setItem({ ...item, prompt: event.target.value })} className="ev-field" /></label>
+      <div><span className="ev-label">Scenario type</span><div className="ev-segment"><button type="button" data-active={(item.mode || "text") === "text"} onClick={() => setItem({ ...item, mode: "text", voice: undefined, timeout_seconds: 600 })}>Text task</button><button type="button" data-active={item.mode === "voice"} onClick={() => setItem({ ...item, mode: "voice", timeout_seconds: 90, voice: item.voice || { caller_goal: item.prompt || "", provider: defaultProvider?.name, caller_provider: defaultProvider?.name, voice: defaultProvider?.default_voice, caller_voice: defaultProvider?.default_voice, max_first_response_ms: 2000, audio_conditions: { preset: "clean", intensity: "moderate", codec: "none", seed: 42 } } })}>Voice call</button></div></div>
+      <label><span className="ev-label">{item.mode === "voice" ? "What does the caller need?" : "Task to perform"}</span><textarea rows={5} value={item.prompt || ""} onChange={(event) => setItem({ ...item, prompt: event.target.value, voice: item.mode === "voice" ? { ...(item.voice || { caller_goal: "" }), caller_goal: event.target.value } : item.voice })} className="ev-field" /></label>
+      {item.mode === "voice" && <div className="ev-setup">
+        {catalog.realtime_providers.length === 0 ? <div className="ev-error" style={{ margin: 0 }}><span>No realtime voice provider is configured for this project.</span></div> : <div className="ev-grid-2">
+          <label><span className="ev-label">Realtime provider</span><select value={item.voice?.provider || defaultProvider?.name || ""} onChange={(event) => { const provider = catalog.realtime_providers.find((value) => value.name === event.target.value); setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), provider: event.target.value, caller_provider: event.target.value, voice: provider?.default_voice, caller_voice: provider?.default_voice } }); }} className="ev-field">{catalog.realtime_providers.map((provider) => <option key={provider.name} value={provider.name}>{provider.name}</option>)}</select></label>
+          <label><span className="ev-label">Receptionist voice</span><input value={item.voice?.voice || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), voice: event.target.value } })} placeholder="Provider default" className="ev-field" /></label>
+          <label><span className="ev-label">Caller voice</span><input value={item.voice?.caller_voice || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_voice: event.target.value } })} placeholder="Provider default" className="ev-field" /></label>
+          <label><span className="ev-label">Maximum first response (ms)</span><input type="number" min={250} max={10000} step={250} value={item.voice?.max_first_response_ms || 2000} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), max_first_response_ms: Number(event.target.value) } })} className="ev-field" /></label>
+        </div>}
+        <div style={{ marginTop: 12 }}>
+          <span className="ev-label">Caller audio conditions</span>
+          <div className="ev-grid-2">
+            <label><span className="ev-label">Background</span><select value={item.voice?.audio_conditions?.preset || "clean"} onChange={(event) => { const preset = event.target.value as VoiceAudioConditions["preset"]; setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { intensity: "moderate", seed: 42 }), preset, codec: preset === "poor_phone" ? "g711_mulaw" : "none" } } }); }} className="ev-field">{audioPresetOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+            <label><span className="ev-label">Noise level</span><select value={item.voice?.audio_conditions?.intensity || "moderate"} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", codec: "none", seed: 42 }), intensity: event.target.value as VoiceAudioConditions["intensity"] } } })} disabled={(item.voice?.audio_conditions?.preset || "clean") === "clean"} className="ev-field"><option value="light">Light · 18 dB SNR</option><option value="moderate">Moderate · 10 dB SNR</option><option value="heavy">Heavy · 4 dB SNR</option></select></label>
+            <label><span className="ev-label">Line quality</span><select value={item.voice?.audio_conditions?.codec || "none"} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", intensity: "moderate", seed: 42 }), codec: event.target.value as VoiceAudioConditions["codec"] } } })} className="ev-field"><option value="none">Full-band audio</option><option value="g711_mulaw">8 kHz phone codec</option></select></label>
+            <label><span className="ev-label">Repeatable seed</span><input type="number" min={0} step={1} value={item.voice?.audio_conditions?.seed ?? 42} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), audio_conditions: { ...(item.voice?.audio_conditions || { preset: "clean", intensity: "moderate", codec: "none" }), seed: Math.max(0, Number(event.target.value) || 0) } } })} className="ev-field" /></label>
+          </div>
+        </div>
+        <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={item.voice?.caller_persona || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_persona: event.target.value } })} placeholder="A natural, concise customer" className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={item.voice?.caller_behavior || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_behavior: event.target.value } })} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={item.voice?.greeting || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), greeting: event.target.value } })} placeholder="First response only" className="ev-field" /></label></div></details>
+      </div>}
       <label><span className="ev-label">Success criteria</span><textarea rows={5} value={(item.goals || []).join("\n")} onChange={(event) => setItem({ ...item, goals: event.target.value.split("\n") })} placeholder="One requirement per line" className="ev-field" /></label>
-      <details className="ev-advanced"><summary>Deterministic checks and execution limits</summary><div className="ev-advanced-body"><label><span className="ev-label">Deterministic checks (JSON)</span><textarea rows={9} value={assertionRaw} onChange={(event) => setAssertionRaw(event.target.value)} spellCheck={false} className="ev-field" style={{ fontFamily: "monospace", fontSize: 11 }} /></label><div className="ev-grid-2"><label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={item.max_turns || 10} onChange={(event) => setItem({ ...item, max_turns: Number(event.target.value) })} className="ev-field" /></label><label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={1800} value={item.timeout_seconds || 600} onChange={(event) => setItem({ ...item, timeout_seconds: Number(event.target.value) })} className="ev-field" /></label></div></div></details>
+      <details className="ev-advanced"><summary>Deterministic checks and execution limits</summary><div className="ev-advanced-body"><label><span className="ev-label">Deterministic checks (JSON)</span><textarea rows={9} value={assertionRaw} onChange={(event) => setAssertionRaw(event.target.value)} spellCheck={false} className="ev-field" style={{ fontFamily: "monospace", fontSize: 11 }} /></label><div className="ev-grid-2">{item.mode !== "voice" && <label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={item.max_turns || 10} onChange={(event) => setItem({ ...item, max_turns: Number(event.target.value) })} className="ev-field" /></label>}<label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={item.mode === "voice" ? 300 : 1800} value={item.timeout_seconds || (item.mode === "voice" ? 90 : 600)} onChange={(event) => setItem({ ...item, timeout_seconds: Number(event.target.value) })} className="ev-field" /></label></div></div></details>
       <label className="ev-check"><input type="checkbox" checked={item.enabled !== false} onChange={(event) => setItem({ ...item, enabled: event.target.checked })} /> Enabled</label>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
@@ -747,6 +1125,12 @@ function ScenarioEditor({ suite, initial, onClose, onSaved }: {
 
 function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   const trace = run.execution?.trace || [];
+  const goals = run.judge?.per_goal || [];
+  const simulationChecks = (run.assertions || []).filter((result) => result.gating);
+  const successChecks = (run.assertions || []).filter((result) => !result.gating);
+  const audioConditions = run.voice_call?.metrics.audio_conditions;
+  const configuredAudio = run.case.voice?.audio_conditions;
+  const hasConditionedAudio = Boolean(run.voice_call?.delivered_caller_recording || audioConditions);
   const [suggestions, setSuggestions] = useState(run.suggestions || []);
   const [error, setError] = useState("");
   const apply = async (id: string) => {
@@ -760,60 +1144,163 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
   return <Drawer title={`${run.case.name} · ${run.target.agent_name || run.target.agent_id}`} onClose={onClose} footer={<button type="button" onClick={onClose} className="ev-button">Close</button>}>
     <div className="ev-inspector-summary"><Metric label="Result" value={run.status} /><Metric label="Score" value={score(run.overall_score)} /><Metric label="Turns" value={String(run.execution?.turns || 0)} /></div>
     {(run.error || error) && <div className="ev-error" style={{ marginTop: 16 }}><span>{run.error || error}</span></div>}
-    <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Success checks</div>{run.assertions?.length ? <div className="ev-result-list">{run.assertions.map((result: any, index) => <div className="ev-result-row" key={index}><span style={{ color: result.passed ? "var(--color-success)" : "var(--color-error)" }}>{result.passed ? "✓" : "×"}</span><div><div style={{ fontSize: 12 }}>{result.name || `Check ${index + 1}`}</div><div className="ev-muted">{result.message}</div></div></div>)}</div> : <div className="ev-muted">No deterministic checks</div>}</section>
-    {run.judge && <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Evaluation</div><div className="ev-suggestion"><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><Status value={run.judge.passed ? "pass" : "fail"} /><strong>{score(run.judge.score)}</strong></div><div style={{ fontSize: 12, lineHeight: 1.5 }}>{run.judge.reasoning}</div></div></section>}
+    {run.voice_call && <section className="ev-inspector-section">
+      <div className="ev-section-heading"><div className="ev-section-title">Voice simulation</div><Status value={run.voice_call.validity?.status === "valid" ? "pass" : run.voice_call.validity?.status === "invalid" ? "error" : "unknown"} /></div>
+      {run.voice_call.validity?.status === "invalid" && <div className="ev-error"><span>{run.voice_call.validity.reasons?.join("; ") || "The simulated conversation was invalid."}</span></div>}
+      <div className="ev-inspector-summary"><Metric label="Duration" value={`${(run.voice_call.metrics.duration_ms / 1000).toFixed(1)}s`} /><Metric label="First response" value={run.voice_call.metrics.first_response_ms ? `${run.voice_call.metrics.first_response_ms}ms` : "-"} /><Metric label="End reason" value={run.voice_call.metrics.ended_by || "-"} /><Metric label="Receptionist audio" value={`${run.voice_call.metrics.receptionist_audio_seconds.toFixed(1)}s`} /><Metric label="Caller audio" value={`${run.voice_call.metrics.caller_audio_seconds.toFixed(1)}s`} /><Metric label="Audio errors" value={String(run.voice_call.metrics.realtime_errors)} /></div>
+      {(audioConditions || configuredAudio) && <div className="ev-inspector-summary" style={{ marginTop: 10 }}><Metric label="Background" value={audioPresetLabel(audioConditions?.preset || configuredAudio?.preset)} /><Metric label="Noise level" value={audioConditions?.intensity || configuredAudio?.intensity || "-"} /><Metric label="Line quality" value={(audioConditions?.codec || configuredAudio?.codec || "none").replace("carrier_", "").replace("g711_mulaw", "8 kHz phone")} /><Metric label="Seed" value={String(audioConditions?.seed ?? configuredAudio?.seed ?? 42)} />{audioConditions?.target_snr_db != null && <Metric label="Target SNR" value={`${audioConditions.target_snr_db} dB`} />}</div>}
+      <div className="ev-grid-2" style={{ marginTop: 10 }}><label><span className="ev-label">Receptionist recording</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/receptionist`)} style={{ width: "100%", height: 36 }} /></label><label><span className="ev-label">{hasConditionedAudio ? "Clean caller recording" : "Caller recording"}</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller`)} style={{ width: "100%", height: 36 }} /></label>{hasConditionedAudio && <label><span className="ev-label">Audio delivered to agent</span><audio controls preload="none" src={appURL(`/runs/${run.id}/recordings/caller-delivered`)} style={{ width: "100%", height: 36 }} /></label>}</div>
+      <div className="ev-result-list" style={{ marginTop: 10 }}>{run.voice_call.transcript.length === 0 ? <Empty title="No transcript recorded" /> : run.voice_call.transcript.map((turn, index) => <div className="ev-result-row" key={`${turn.at_ms}-${index}`}><div style={{ width: "100%" }}><div className="ev-trace-role">{turn.speaker} · {(turn.at_ms / 1000).toFixed(1)}s</div><div className="ev-trace-text">{turn.text}</div></div></div>)}</div>
+    </section>}
+    {simulationChecks.length > 0 && <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Simulation checks</div><div className="ev-result-list">{simulationChecks.map((result, index) => <div className="ev-result-row" key={index}><span style={{ color: result.passed ? "var(--color-success)" : "var(--color-error)" }}>{result.passed ? "✓" : "×"}</span><div><div style={{ fontSize: 12 }}>{result.name || `Check ${index + 1}`}</div><div className="ev-muted">{result.message}</div></div></div>)}</div></section>}
+    <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Success checks</div>{successChecks.length ? <div className="ev-result-list">{successChecks.map((result, index) => <div className="ev-result-row" key={index}><span style={{ color: result.passed ? "var(--color-success)" : "var(--color-error)" }}>{result.passed ? "✓" : "×"}</span><div><div style={{ fontSize: 12 }}>{result.name || `Check ${index + 1}`}</div><div className="ev-muted">{result.message}</div></div></div>)}</div> : <div className="ev-muted">No deterministic success checks</div>}</section>
+    {run.judge && <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Evaluation</div><div className="ev-evaluation"><div className="ev-evaluation-head"><div className="ev-evaluation-result"><Status value={run.judge.passed ? "pass" : "fail"} /><strong className="ev-evaluation-score" data-tone={resultTone(run.judge.score, run.judge.passed)}>{score(run.judge.score)}</strong></div><div className="ev-evaluation-reason">{run.judge.reasoning}</div></div>{goals.length > 0 && <div className="ev-goal-list">{goals.map((goal, index) => {
+      const tone = resultTone(goal.score, goal.passed);
+      return <div className="ev-goal-row" data-tone={tone} key={`${goal.goal}-${index}`}><span className="ev-goal-dot" aria-hidden="true" /><span className="ev-goal-name">{goal.goal}</span><span className="ev-goal-result">{resultLabel(goal.score, goal.passed)}</span><span className="ev-goal-score">{goal.score == null ? "" : score(goal.score)}</span>{goal.why && <span className="ev-goal-why">{goal.why}</span>}</div>;
+    })}</div>}</div></section>}
     {suggestions.map((item) => <section className="ev-inspector-section" key={item.id}><div className="ev-section-title" style={{ marginBottom: 8 }}>Production directive change</div><div className="ev-suggestion"><div className="ev-muted" style={{ marginBottom: 8 }}>{item.reason}</div><pre className="ev-code">{item.directive}</pre><div className="ev-suggestion-actions"><button type="button" disabled={item.status !== "proposed"} onClick={() => apply(item.id)} className="ev-primary">{item.status === "applied" ? "Applied to production" : "Apply to production"}</button></div></div></section>)}
     <section className="ev-inspector-section"><div className="ev-section-title" style={{ marginBottom: 8 }}>Agent trace</div><div className="ev-result-list">{trace.length === 0 ? <Empty title="No trace recorded" /> : trace.map((event) => <div className="ev-result-row" key={event.index}><div style={{ width: "100%" }}><div className="ev-trace-role">{event.role}</div>{event.content && <div className="ev-trace-text">{event.content}</div>}{event.tool_call && <div><code style={{ color: "var(--color-accent)", fontSize: 11 }}>{event.tool_call.name}</code>{event.tool_call.input && <pre className="ev-code">{typeof event.tool_call.input === "string" ? event.tool_call.input : JSON.stringify(event.tool_call.input, null, 2)}</pre>}{event.tool_call.output && <pre className="ev-code" style={event.tool_call.is_error ? { color: "var(--color-error)" } : undefined}>{event.tool_call.output}</pre>}</div>}</div></div>)}</div></section>
   </Drawer>;
 }
 
-function RunDetail({ experiment, onInspect }: { experiment: Experiment; onInspect: (run: EvalRun) => void }) {
-  const summary = experiment.summary;
-  const runs = experiment.runs || [];
-  return <div className="ev-detail">
-    <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Continuous check" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experiment.status} /></header>
-    <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String((summary?.failed || 0) + (summary?.errors || 0))} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
-    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
-    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenarios</span><span className="ev-muted">{runs.length} runs</span></div><div className="ev-table"><div className="ev-table-head ev-case-grid"><span>Scenario</span><span>Agent and model</span><span>Repeat</span><span>Score</span><span>Result</span></div>{runs.map((run) => <button type="button" key={run.id} onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span><Status value={run.status} /></button>)}</div></section>
+function RunRows({ runs, onInspect, liveVoiceCalls }: { runs: EvalRun[]; onInspect: (run: EvalRun) => void; liveVoiceCalls: LiveVoiceCalls }) {
+  if (runs.length === 0) return <div className="ev-muted">No scenario results in this run.</div>;
+  return <div className="ev-table">
+    <div className="ev-table-head ev-case-grid"><span>Scenario</span><span>Agent and model</span><span>Repeat</span><span>Score</span><span>Result</span></div>
+    {runs.map((run) => {
+      const goals = visibleGoals(run);
+      const liveCall = run.status === "running" && run.environment_run_id ? liveVoiceCalls[run.environment_run_id] : undefined;
+      return <div className="ev-case-result" data-has-goals={goals.length > 0} key={run.id}>
+        <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span>{run.status === "running" ? <LiveStage stage={run.stage} /> : <Status value={run.status} />}</button>
+        {liveCall && <LiveVoiceTranscript call={liveCall} />}
+        {goals.length > 0 && <div className="ev-inline-goals"><div className="ev-inline-goals-head"><span>Goal results</span><span>{goals.length}</span></div>{goals.map((goal, index) => {
+          const tone = goal.judged ? resultTone(goal.score, goal.passed) : "muted";
+          return <div className="ev-goal-row" data-tone={tone} key={`${goal.goal}-${index}`}><span className="ev-goal-dot" aria-hidden="true" /><span className="ev-goal-name">{goal.goal}</span><span className="ev-goal-result">{goal.judged ? resultLabel(goal.score, goal.passed) : "Not judged"}</span><span className="ev-goal-score">{goal.score == null ? "" : score(goal.score)}</span></div>;
+        })}</div>}
+      </div>;
+    })}
   </div>;
 }
 
-function RunsView({ experiments, selected, detail, onSelect, onInspect, onQuickRun }: {
+function RunDetail({ experiment, onInspect, liveVoiceCalls }: { experiment: Experiment; onInspect: (run: EvalRun) => void; liveVoiceCalls: LiveVoiceCalls }) {
+  const summary = experiment.summary;
+  const runs = experiment.runs || [];
+  return <div className="ev-detail">
+    <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Scheduled run" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experimentOutcome(experiment)} /></header>
+    <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String(summary?.failed || 0)} /><Metric label="Invalid / error" value={String(summary?.errors || 0)} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
+    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
+    <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenario results</span><span className="ev-muted">{runs.length} runs</span></div><RunRows runs={runs} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} /></section>
+  </div>;
+}
+
+function RunsView({ experiments, selected, detail, liveVoiceCalls, onSelect, onInspect, onQuickRun }: {
   experiments: Experiment[];
   selected: string;
   detail: Experiment | null;
+  liveVoiceCalls: LiveVoiceCalls;
   onSelect: (id: string) => void;
   onInspect: (run: EvalRun) => void;
   onQuickRun: () => void;
 }) {
   if (experiments.length === 0) return <div className="ev-plan-list"><Empty title="No test runs yet" detail="Start with one production agent and one expected behavior." action={<button type="button" onClick={onQuickRun} className="ev-primary">Test an agent</button>} /></div>;
   return <div className="ev-workspace">
-    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Recent runs</span><span>{experiments.length}</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelect(experiment.id)} className="ev-run-row" data-active={selected === experiment.id}><span className="ev-run-name">{experiment.name}</span><span className="ev-run-meta"><Status value={experiment.status} /><span className="ev-run-stat">{pct(experiment.summary?.pass_rate)} · {formatDate(experiment.created_at)}</span></span></button>)}</aside>
-    {detail ? <RunDetail experiment={detail} onInspect={onInspect} /> : <Empty title="Select a run" />}
+    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Recent runs</span><span>{experiments.length}</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelect(experiment.id)} className="ev-run-row" data-active={selected === experiment.id}><span className="ev-run-name">{experiment.name}</span><span className="ev-run-meta"><Status value={experimentOutcome(experiment)} /><span className="ev-run-stat">{pct(experiment.summary?.pass_rate)} · {formatDate(experiment.created_at)}</span></span></button>)}</aside>
+    {detail ? <RunDetail experiment={detail} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} /> : <Empty title="Select a run" />}
   </div>;
 }
 
-function PlansView({ suites, catalog, onNew, onEdit, onScenario, onRun }: {
-  suites: Suite[];
+function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, liveVoiceCalls, onSelectExperiment, onEdit, onScenario, onRun, onInspect }: {
+  suite: Suite;
+  experiments: Experiment[];
+  selectedExperiment: string;
+  detail: Experiment | null;
   catalog: Catalog;
+  liveVoiceCalls: LiveVoiceCalls;
+  onSelectExperiment: (id: string) => void;
+  onEdit: (suite: Suite) => void;
+  onScenario: (suite: Suite, item?: EvalCase) => void;
+  onRun: (suite: Suite) => void;
+  onInspect: (run: EvalRun) => void;
+}) {
+  const latest = experiments[0];
+  const selected = experiments.find((experiment) => experiment.id === selectedExperiment) || latest;
+  const selectedDetail = detail?.id === selected?.id ? detail : null;
+  const environment = catalog.environments.find((item) => item.id === suite.environment_id);
+  const targets = suite.continuous_targets?.length ? suite.continuous_targets : latest?.targets || [];
+  const targetLabel = targets.length > 0
+    ? targets.map((target) => `${target.agent_name || target.agent_id}${target.model ? ` · ${target.model}` : ""}`).join(", ")
+    : "Chosen when run";
+  const health = suiteHealth(suite, experiments);
+  return <div className="ev-detail">
+    <header className="ev-detail-header">
+      <div><h2 className="ev-detail-title">{suite.name}</h2><div className="ev-detail-id">{suite.schedule_minutes > 0 ? `Continuous · ${scheduleLabel(suite.schedule_minutes)}` : "Manual eval"} · revision {suite.revision}</div></div>
+      <div className="ev-detail-actions"><span className="ev-status" data-tone={health.tone}>{health.label}</span><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run now</button></div>
+    </header>
+    <div className="ev-metrics ev-eval-metrics"><Metric label="Latest score" value={score(latest?.summary?.average_score)} /><Metric label="Latest pass rate" value={latest ? pct(latest.summary?.pass_rate) : "-"} /><Metric label="Last run" value={latest ? formatDate(latest.created_at) : "-"} /><Metric label="Next run" value={suite.schedule_minutes > 0 && suite.next_run_at ? formatDate(suite.next_run_at) : "-"} /></div>
+    <div className="ev-config">
+      <div className="ev-config-item"><span className="ev-config-label">Environment</span><span className="ev-config-value">{environment?.name || "Fresh isolated environment"}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Schedule</span><span className="ev-config-value">{suite.enabled ? scheduleLabel(suite.schedule_minutes) : "Paused"}{suite.schedule_minutes > 0 ? ` · ${Math.round(suite.required_pass_rate * 100)}% required` : ""}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Evaluation model</span><span className="ev-config-value">{suite.judge_model || "Deterministic checks only"}</span></div>
+      <div className="ev-config-item"><span className="ev-config-label">Targets</span><span className="ev-config-value" title={targetLabel}>{targetLabel}</span></div>
+    </div>
+    <section className="ev-section">
+      <div className="ev-section-heading"><span className="ev-section-title">Scenarios and goals</span><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button></div>
+      {suite.cases.length > 0 ? <div className="ev-table">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span className="ev-scenario-top"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.assertions.length} checks</span></span>{item.goals.length > 0 && <span className="ev-definition-list">{item.goals.map((goal, index) => <span className="ev-definition-goal" key={`${goal}-${index}`}><span className="ev-definition-dot" aria-hidden="true" /><span>{goal}</span></span>)}</span>}</button>)}</div> : <div className="ev-muted">No scenarios configured.</div>}
+    </section>
+    <section className="ev-section">
+      <div className="ev-selected-run-head"><div><div className="ev-selected-run-title">{selected?.id === latest?.id ? "Latest run" : "Selected run"}</div>{selected && <div className="ev-selected-run-meta">{selected.trigger_type === "schedule" ? "Scheduled" : "Manual"} · {formatDate(selected.created_at)}</div>}</div>{selected && <Status value={experimentOutcome(selected)} />}</div>
+      {!selected ? <div className="ev-muted">This eval has not run yet.</div> : !selectedDetail ? <div className="ev-muted">Loading run results...</div> : <>
+        <div className="ev-inspector-summary" style={{ marginBottom: 10 }}><Metric label="Score" value={score(selectedDetail.summary?.average_score)} /><Metric label="Pass rate" value={pct(selectedDetail.summary?.pass_rate)} /><Metric label="Results" value={String(selectedDetail.runs?.length || 0)} /></div>
+        <RunRows runs={selectedDetail.runs || []} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} />
+      </>}
+    </section>
+    <section className="ev-section">
+      <div className="ev-section-heading"><span className="ev-section-title">Run history</span><span className="ev-muted">{experiments.length} runs</span></div>
+      {experiments.length > 0 ? <div className="ev-table"><div className="ev-table-head ev-history-grid"><span>Run</span><span>Result</span><span>Trigger</span><span>Pass rate</span><span>Score</span></div>{experiments.map((experiment) => <button type="button" key={experiment.id} onClick={() => onSelectExperiment(experiment.id)} className="ev-table-row ev-history-grid" data-active={selected?.id === experiment.id}><span><strong>{formatDate(experiment.created_at)}</strong><span className="ev-muted" style={{ display: "block", marginTop: 2 }}>{experiment.name}</span></span><Status value={experimentOutcome(experiment)} /><span>{experiment.trigger_type === "schedule" ? "Scheduled" : "Manual"}</span><span>{pct(experiment.summary?.pass_rate)}</span><span>{score(experiment.summary?.average_score)}</span></button>)}</div> : <div className="ev-muted">No run history yet.</div>}
+    </section>
+  </div>;
+}
+
+function EvalsView({ suites, experiments, selectedSuite, selectedExperiment, detail, catalog, liveVoiceCalls, onSelectSuite, onSelectExperiment, onNew, onEdit, onScenario, onRun, onInspect }: {
+  suites: Suite[];
+  experiments: Experiment[];
+  selectedSuite: string;
+  selectedExperiment: string;
+  detail: Experiment | null;
+  catalog: Catalog;
+  liveVoiceCalls: LiveVoiceCalls;
+  onSelectSuite: (id: string) => void;
+  onSelectExperiment: (id: string) => void;
   onNew: () => void;
   onEdit: (suite: Suite) => void;
   onScenario: (suite: Suite, item?: EvalCase) => void;
   onRun: (suite: Suite) => void;
+  onInspect: (run: EvalRun) => void;
 }) {
-  if (suites.length === 0) return <div className="ev-plan-list"><Empty title="No test plans yet" detail="A test plan groups reusable scenarios and success criteria." action={<button type="button" onClick={onNew} className="ev-primary">New test plan</button>} /></div>;
-  return <div className="ev-plan-list">{suites.map((suite) => <section className="ev-plan" key={suite.id}><header className="ev-plan-header"><div><div className="ev-plan-name">{suite.name}</div><div className="ev-plan-meta">{suite.cases.length} scenarios · {catalog.environments.find((item) => item.id === suite.environment_id)?.name || "fresh environment"}{suite.schedule_minutes > 0 ? ` · every ${suite.schedule_minutes} minutes` : ""}</div></div><div className="ev-actions"><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button><button type="button" onClick={() => onEdit(suite)} className="ev-button">Settings</button><button type="button" onClick={() => onRun(suite)} className="ev-primary">Run</button></div></header>{suite.cases.length > 0 && <div className="ev-scenarios">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.goals.length} criteria · {item.assertions.length} checks</span></button>)}</div>}</section>)}</div>;
+  if (suites.length === 0) return <div className="ev-plan-list"><Empty title="No evals yet" detail="An eval groups reusable scenarios and success criteria." action={<button type="button" onClick={onNew} className="ev-primary">New eval</button>} /></div>;
+  const selected = suites.find((suite) => suite.id === selectedSuite) || suites[0];
+  const selectedHistory = experiments.filter((experiment) => experiment.suite_id === selected.id);
+  return <div className="ev-workspace">
+    <aside className="ev-run-list"><div className="ev-pane-heading"><span>Evals</span><span>{suites.length}</span></div>{suites.map((suite) => {
+      const history = experiments.filter((experiment) => experiment.suite_id === suite.id);
+      const latest = history[0];
+      return <button type="button" key={suite.id} onClick={() => onSelectSuite(suite.id)} className="ev-eval-row" data-active={selected.id === suite.id}><span className="ev-eval-row-head"><span className="ev-eval-row-name">{suite.name}</span><EvalHealth suite={suite} experiments={history} /></span><span className="ev-eval-row-meta"><span>{scheduleLabel(suite.schedule_minutes)} · {scenarioCountLabel(suite.cases.length)}</span><span className="ev-eval-row-score">{latest ? score(latest.summary?.average_score) : "-"}</span></span></button>;
+    })}</aside>
+    <EvalDetail suite={selected} experiments={selectedHistory} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} liveVoiceCalls={liveVoiceCalls} onSelectExperiment={onSelectExperiment} onEdit={onEdit} onScenario={onScenario} onRun={onRun} onInspect={onInspect} />
+  </div>;
 }
 
 export default function EvalsPanel(props: NativePanelProps) {
   installID = props.installId;
   projectID = props.projectId;
-  const [tab, setTab] = useState<"runs" | "plans">("runs");
+  const [tab, setTab] = useState<"evals" | "runs">("evals");
   const [suites, setSuites] = useState<Suite[]>([]);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
-  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], snapshots: [] });
-  const [selected, setSelected] = useState("");
+  const [catalog, setCatalog] = useState<Catalog>({ agents: [], models: [], environments: [], apps: [], connections: [], integrations: [], managed_mcps: [], snapshots: [], realtime_providers: [] });
+  const [selectedSuite, setSelectedSuite] = useState("");
+  const [selectedExperiment, setSelectedExperiment] = useState("");
   const [detail, setDetail] = useState<Experiment | null>(null);
+  const [liveVoiceCalls, setLiveVoiceCalls] = useState<LiveVoiceCalls>({});
   const [quickRun, setQuickRun] = useState(false);
   const [planRun, setPlanRun] = useState<string | null>(null);
   const [planEditor, setPlanEditor] = useState<Suite | true | null>(null);
@@ -831,30 +1318,91 @@ export default function EvalsPanel(props: NativePanelProps) {
       setSuites(suiteRows);
       setExperiments(experimentRows);
       setCatalog(catalogValue);
-      setSelected((current) => current || experimentRows[0]?.id || "");
+      setSelectedSuite((current) => suiteRows.some((suite) => suite.id === current) ? current : suiteRows[0]?.id || "");
+      setSelectedExperiment((current) => experimentRows.some((experiment) => experiment.id === current) ? current : experimentRows[0]?.id || "");
       setError("");
     } catch (cause: any) {
       setError(cause.message);
     }
   }, []);
 
+  const refreshExperiments = useCallback(async () => {
+    try {
+      const rows = await request<Experiment[]>("/experiments");
+      setExperiments(rows);
+      setSelectedExperiment((current) => rows.some((experiment) => experiment.id === current) ? current : rows[0]?.id || "");
+      setError("");
+    } catch (cause: any) {
+      setError(cause.message);
+    }
+  }, []);
+
+  const refreshDetail = useCallback((id: string) => {
+    if (!id) return;
+    request<Experiment>(`/experiments/${id}`).then(setDetail).catch((cause) => setError(cause.message));
+  }, []);
+
   useEffect(() => {
     load();
-    const timer = window.setInterval(load, 3000);
+    const timer = window.setInterval(load, 30000);
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const selectedSummary = experiments.find((item) => item.id === selected);
+  useAppEvents<{ experiment_id?: string }>("evals", props.projectId, (event) => {
+    if (!event.topic.startsWith("eval.")) return;
+    refreshExperiments();
+    const experimentID = event.data?.experiment_id;
+    if (experimentID && experimentID === selectedExperiment) refreshDetail(experimentID);
+  });
+
+  useAppEvents<LiveVoiceCall>("environments", props.projectId, (event) => {
+    if (!event.topic.startsWith("environment.voice_call.")) return;
+    const call = event.data;
+    if (!call?.run_id || !call.call_id) return;
+    setLiveVoiceCalls((current) => ({ ...current, [call.run_id]: call }));
+  });
+
+  const selectedSuiteHistory = useMemo(
+    () => experiments.filter((experiment) => experiment.suite_id === selectedSuite),
+    [experiments, selectedSuite],
+  );
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    request<Experiment>(`/experiments/${selected}`).then(setDetail).catch((cause) => setError(cause.message));
-  }, [selected, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running]);
+    if (!selectedSuite) return;
+    if (!selectedSuiteHistory.some((experiment) => experiment.id === selectedExperiment)) {
+      setSelectedExperiment(selectedSuiteHistory[0]?.id || "");
+    }
+  }, [selectedSuite, selectedExperiment, selectedSuiteHistory]);
+
+  const selectedSummary = experiments.find((item) => item.id === selectedExperiment);
+  useEffect(() => {
+    if (!selectedExperiment) { setDetail(null); return; }
+    setDetail((current) => current?.id === selectedExperiment ? current : null);
+    refreshDetail(selectedExperiment);
+  }, [selectedExperiment, selectedSummary?.status, selectedSummary?.summary?.queued, selectedSummary?.summary?.running, refreshDetail]);
+
+  const selectSuite = (id: string) => {
+    setSelectedSuite(id);
+    setSelectedExperiment(experiments.find((experiment) => experiment.suite_id === id)?.id || "");
+  };
+
+  const selectExperiment = (id: string) => {
+    const experiment = experiments.find((item) => item.id === id);
+    if (experiment) setSelectedSuite(experiment.suite_id);
+    setSelectedExperiment(id);
+  };
 
   const created = (experiment: Experiment) => {
     setQuickRun(false);
     setPlanRun(null);
-    setTab("runs");
-    setSelected(experiment.id);
+    setTab("evals");
+    setSelectedSuite(experiment.suite_id);
+    setSelectedExperiment(experiment.id);
+    load();
+  };
+
+  const savedEval = (suite: Suite) => {
+    setSelectedSuite(suite.id);
+    setSelectedExperiment(experiments.find((experiment) => experiment.suite_id === suite.id)?.id || "");
     load();
   };
 
@@ -862,16 +1410,18 @@ export default function EvalsPanel(props: NativePanelProps) {
     <style>{styles}</style>
     <div className="ev-page">
       <header className="ev-toolbar">
-        <div><h1 className="ev-title">Evals</h1><nav className="ev-tabs"><button type="button" onClick={() => setTab("runs")} className="ev-tab" data-active={tab === "runs"}>Runs</button><button type="button" onClick={() => setTab("plans")} className="ev-tab" data-active={tab === "plans"}>Test plans</button></nav></div>
-        <div className="ev-actions">{tab === "runs" && suites.length > 0 && <button type="button" onClick={() => setPlanRun(suites[0].id)} className="ev-button">Run test plan</button>}<button type="button" onClick={() => tab === "runs" ? setQuickRun(true) : setPlanEditor(true)} className="ev-primary">{tab === "runs" ? "Test an agent" : "New test plan"}</button></div>
+        <div><h1 className="ev-title">Evals</h1><nav className="ev-tabs"><button type="button" onClick={() => setTab("evals")} className="ev-tab" data-active={tab === "evals"}>Evals</button><button type="button" onClick={() => setTab("runs")} className="ev-tab" data-active={tab === "runs"}>All runs</button></nav></div>
+        <div className="ev-actions"><button type="button" onClick={() => setQuickRun(true)} className="ev-button">Test an agent</button><button type="button" onClick={() => setPlanEditor(true)} className="ev-primary">New eval</button></div>
       </header>
       {error && <div className="ev-error"><span>{error}</span><button type="button" onClick={() => setError("")} title="Dismiss" className="ev-icon-button">×</button></div>}
-      {tab === "runs" ? <RunsView experiments={experiments} selected={selected} detail={detail} onSelect={setSelected} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} /> : <PlansView suites={suites} catalog={catalog} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => { setTab("runs"); setPlanRun(suite.id); }} />}
+      {tab === "evals"
+        ? <EvalsView suites={suites} experiments={experiments} selectedSuite={selectedSuite} selectedExperiment={selectedExperiment} detail={detail} catalog={catalog} liveVoiceCalls={liveVoiceCalls} onSelectSuite={selectSuite} onSelectExperiment={selectExperiment} onNew={() => setPlanEditor(true)} onEdit={setPlanEditor} onScenario={(suite, item) => setScenarioEditor({ suite, item })} onRun={(suite) => setPlanRun(suite.id)} onInspect={setInspected} />
+        : <RunsView experiments={experiments} selected={selectedExperiment} detail={detail} liveVoiceCalls={liveVoiceCalls} onSelect={selectExperiment} onInspect={setInspected} onQuickRun={() => setQuickRun(true)} />}
     </div>
     {quickRun && <QuickRunBuilder catalog={catalog} onClose={() => setQuickRun(false)} onCreated={created} />}
     {planRun !== null && <PlanRunBuilder initialSuiteID={planRun} suites={suites} catalog={catalog} onClose={() => setPlanRun(null)} onCreated={created} />}
-    {planEditor && <PlanEditor initial={planEditor === true ? undefined : planEditor} catalog={catalog} onClose={() => setPlanEditor(null)} onSaved={load} />}
-    {scenarioEditor && <ScenarioEditor suite={scenarioEditor.suite} initial={scenarioEditor.item} onClose={() => setScenarioEditor(null)} onSaved={load} />}
+    {planEditor && <PlanEditor initial={planEditor === true ? undefined : planEditor} catalog={catalog} onClose={() => setPlanEditor(null)} onSaved={savedEval} />}
+    {scenarioEditor && <ScenarioEditor suite={scenarioEditor.suite} initial={scenarioEditor.item} catalog={catalog} onClose={() => setScenarioEditor(null)} onSaved={load} />}
     {inspected && <RunInspector run={inspected} onClose={() => setInspected(null)} />}
   </div>;
 }

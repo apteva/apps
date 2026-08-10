@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,16 +42,26 @@ const (
 )
 
 type eventTrigger struct {
-	ctx        *sdk.AppCtx
-	gatewayURL string
-	token      string
-	client     *http.Client
+	ctx            *sdk.AppCtx
+	gatewayURL     string
+	token          string
+	client         *http.Client
+	reconnectDelay time.Duration
+	runSlots       chan struct{}
 
-	mu    sync.Mutex
-	lanes map[laneKey]*eventLane
+	mu                 sync.Mutex
+	lanes              map[laneKey]*eventLane
+	started            bool
+	configured         bool
+	missingConfig      []string
+	lastReconcileAt    string
+	lastReconcileError string
 
-	stop chan struct{}
-	kick chan struct{}
+	stop     chan struct{}
+	done     chan struct{}
+	kick     chan struct{}
+	stopOnce sync.Once
+	laneWG   sync.WaitGroup
 }
 
 type laneKey struct {
@@ -65,38 +77,78 @@ type eventLane struct {
 	key    laneKey
 	cancel context.CancelFunc
 
-	mu        sync.Mutex
-	workflows []*Workflow
-	lastSeq   uint64
+	mu             sync.Mutex
+	workflows      []*Workflow
+	lastSeq        uint64
+	state          string
+	connectedAt    string
+	lastEventAt    string
+	lastError      string
+	lastErrorAt    string
+	reconnectCount int
 }
 
 func newEventTrigger(ctx *sdk.AppCtx) *eventTrigger {
+	gatewayURL := strings.TrimSuffix(strings.TrimSpace(os.Getenv("APTEVA_GATEWAY_URL")), "/")
+	token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN"))
+	missing := make([]string, 0, 2)
+	if gatewayURL == "" {
+		missing = append(missing, "APTEVA_GATEWAY_URL")
+	}
+	if token == "" {
+		missing = append(missing, "APTEVA_APP_TOKEN")
+	}
 	return &eventTrigger{
 		ctx:        ctx,
-		gatewayURL: strings.TrimSuffix(os.Getenv("APTEVA_GATEWAY_URL"), "/"),
-		token:      os.Getenv("APTEVA_APP_TOKEN"),
-		client:     &http.Client{}, // no timeout — SSE stays open
-		lanes:      map[laneKey]*eventLane{},
-		stop:       make(chan struct{}),
-		kick:       make(chan struct{}, 1),
+		gatewayURL: gatewayURL,
+		token:      token,
+		client: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				ResponseHeaderTimeout: 15 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			},
+		}, // no whole-request timeout — a healthy SSE stream stays open
+		reconnectDelay: eventReconnectDelay,
+		runSlots:       make(chan struct{}, 32),
+		lanes:          map[laneKey]*eventLane{},
+		configured:     len(missing) == 0,
+		missingConfig:  missing,
+		stop:           make(chan struct{}),
+		done:           make(chan struct{}),
+		kick:           make(chan struct{}, 1),
 	}
 }
 
 // Start spawns the reconcile loop. Safe to call when there's nothing
 // to subscribe to; it'll come back on the next CRUD-triggered Kick.
 func (m *eventTrigger) Start() {
-	go m.reconcileLoop()
+	m.mu.Lock()
+	if m.started {
+		m.mu.Unlock()
+		return
+	}
+	m.started = true
+	m.mu.Unlock()
+	go func() {
+		defer close(m.done)
+		m.reconcileLoop()
+	}()
 	m.Kick()
 }
 
 // Stop tears down every lane and ends the reconcile loop.
 func (m *eventTrigger) Stop() {
-	select {
-	case <-m.stop:
-		return // already stopped
-	default:
+	m.stopOnce.Do(func() { close(m.stop) })
+	m.mu.Lock()
+	started := m.started
+	m.mu.Unlock()
+	if started {
+		<-m.done
+	} else {
+		m.shutdownAll()
 	}
-	close(m.stop)
+	m.laneWG.Wait()
 }
 
 // Kick requests an out-of-band reconcile. Called from workflow CRUD
@@ -130,14 +182,23 @@ func (m *eventTrigger) reconcileLoop() {
 // lanes, stops orphan ones, refreshes the workflow snapshot on lanes
 // that already exist.
 func (m *eventTrigger) reconcile() {
-	if m.gatewayURL == "" || m.token == "" {
-		// Not configured — tests / dev runs that don't talk to a real
-		// gateway. No-op; come back on the next Kick or tick.
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	m.mu.Lock()
+	m.lastReconcileAt = now
+	if !m.configured {
+		m.lastReconcileError = "missing required subscriber configuration: " + strings.Join(m.missingConfig, ", ")
+		errText := m.lastReconcileError
+		m.mu.Unlock()
+		log.Printf("[WF-EVENT] degraded: %s", errText)
 		return
 	}
+	m.mu.Unlock()
 
 	workflows, err := dbListEventTriggeredWorkflowsAll(m.ctx.AppDB())
 	if err != nil {
+		m.mu.Lock()
+		m.lastReconcileError = err.Error()
+		m.mu.Unlock()
 		log.Printf("[WF-EVENT] reconcile list failed: %v", err)
 		return
 	}
@@ -154,6 +215,7 @@ func (m *eventTrigger) reconcile() {
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastReconcileError = ""
 
 	// Drop lanes that no longer have any workflows.
 	for k, ln := range m.lanes {
@@ -172,11 +234,15 @@ func (m *eventTrigger) reconcile() {
 			existing.mu.Unlock()
 			continue
 		}
-		ln := &eventLane{key: k, workflows: wfs}
+		ln := &eventLane{key: k, workflows: wfs, state: "connecting"}
 		ctx, cancel := context.WithCancel(context.Background())
 		ln.cancel = cancel
 		m.lanes[k] = ln
-		go m.runLane(ctx, ln)
+		m.laneWG.Add(1)
+		go func() {
+			defer m.laneWG.Done()
+			m.runLane(ctx, ln)
+		}()
 		log.Printf("[WF-EVENT] lane started source=%s project=%s workflows=%d",
 			k.source, k.projectID, len(wfs))
 	}
@@ -196,20 +262,32 @@ func (m *eventTrigger) shutdownAll() {
 func (m *eventTrigger) runLane(ctx context.Context, ln *eventLane) {
 	for {
 		if ctx.Err() != nil {
+			m.setLaneState(ln, "stopped", nil)
 			return
 		}
 		err := m.streamLane(ctx, ln)
 		if ctx.Err() != nil {
+			m.setLaneState(ln, "stopped", nil)
 			return
 		}
 		if err != nil {
+			m.setLaneState(ln, "reconnecting", err)
 			log.Printf("[WF-EVENT] lane source=%s project=%s stream err: %v",
 				ln.key.source, ln.key.projectID, err)
 		}
+		delay := m.reconnectDelay
+		if delay <= 0 {
+			delay = eventReconnectDelay
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			m.setLaneState(ln, "stopped", nil)
 			return
-		case <-time.After(eventReconnectDelay):
+		case <-timer.C:
 		}
 	}
 }
@@ -241,8 +319,17 @@ func (m *eventTrigger) streamLane(ctx context.Context, ln *eventLane) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		detail := strings.TrimSpace(string(body))
+		if detail == "" {
+			return fmt.Errorf("status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("status %d: %s", resp.StatusCode, detail)
 	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(ct), "text/event-stream") {
+		return fmt.Errorf("unexpected content type %q", ct)
+	}
+	m.setLaneState(ln, "connected", nil)
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 8<<20) // match server's frame cap
@@ -266,16 +353,23 @@ func (m *eventTrigger) streamLane(ctx context.Context, ln *eventLane) error {
 			if strings.HasPrefix(payload, " ") {
 				payload = payload[1:]
 			}
-			dataBuf = payload
+			if dataBuf != "" {
+				dataBuf += "\n"
+			}
+			dataBuf += payload
 		case strings.HasPrefix(line, "id:"):
 			idBuf = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	return io.EOF
 }
 
 // dispatchFrame parses one event and dispatches RunWorkflow on each
-// matching workflow.
+// matching workflow. Event trigger predicates are evaluated here,
+// before RunWorkflow persists a run, so discarded events remain cheap.
 func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 	var ev struct {
 		Topic     string          `json:"topic"`
@@ -286,13 +380,30 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		Data      json.RawMessage `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(dataStr), &ev); err != nil {
+		m.setLaneState(ln, "connected", fmt.Errorf("invalid event JSON: %w", err))
+		return
+	}
+	if ev.Seq == 0 && idStr != "" {
+		ev.Seq, _ = strconv.ParseUint(idStr, 10, 64)
+	}
+	if ev.App != "" && ev.App != ln.key.source {
+		m.setLaneState(ln, "connected", fmt.Errorf("event source %q does not match lane %q", ev.App, ln.key.source))
+		return
+	}
+	if ev.ProjectID != "" && ev.ProjectID != ln.key.projectID {
+		m.setLaneState(ln, "connected", fmt.Errorf("event project %q does not match lane %q", ev.ProjectID, ln.key.projectID))
 		return
 	}
 
 	ln.mu.Lock()
+	if ev.Seq > 0 && ev.Seq <= ln.lastSeq {
+		ln.mu.Unlock()
+		return
+	}
 	if ev.Seq > ln.lastSeq {
 		ln.lastSeq = ev.Seq
 	}
+	ln.lastEventAt = time.Now().UTC().Format(time.RFC3339Nano)
 	workflows := append([]*Workflow{}, ln.workflows...)
 	ln.mu.Unlock()
 
@@ -316,6 +427,21 @@ func (m *eventTrigger) dispatchFrame(ln *eventLane, idStr, dataStr string) {
 		if !topicMatches(trig.Topic, ev.Topic) {
 			continue
 		}
+		if strings.TrimSpace(trig.When) != "" {
+			matched, err := EvalTriggerCondition(trig.When, TemplateContext{
+				Input: input,
+				Steps: map[string]any{},
+				Env:   map[string]string{},
+				Now:   ev.Time,
+			})
+			if err != nil {
+				log.Printf("[WF-EVENT] trigger predicate workflow=%s err: %v", wf.Name, err)
+				continue
+			}
+			if !matched {
+				continue
+			}
+		}
 		m.runMatched(wf, input)
 	}
 }
@@ -329,12 +455,142 @@ func (m *eventTrigger) runMatched(wf *Workflow, input map[string]any) {
 	if wf.ProjectID != "" {
 		runCtx = m.ctx.WithProject(wf.ProjectID)
 	}
+	select {
+	case m.runSlots <- struct{}{}:
+	case <-m.stop:
+		return
+	}
 	go func() {
+		defer func() { <-m.runSlots }()
 		if _, err := RunWorkflow(context.Background(), runCtx, wf.ProjectID, wf, input,
 			runOptions{triggerKind: "event"}); err != nil {
 			log.Printf("[WF-EVENT] run workflow=%s err: %v", wf.Name, err)
 		}
 	}()
+}
+
+func (m *eventTrigger) setLaneState(ln *eventLane, state string, err error) {
+	ln.mu.Lock()
+	defer ln.mu.Unlock()
+	ln.state = state
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if state == "connected" && ln.connectedAt == "" {
+		ln.connectedAt = now
+	}
+	if err != nil {
+		ln.lastError = err.Error()
+		ln.lastErrorAt = now
+		if state == "reconnecting" {
+			ln.reconnectCount++
+		}
+	}
+}
+
+type eventSubscriberLaneStatus struct {
+	Source         string `json:"source"`
+	ProjectID      string `json:"project_id"`
+	WorkflowCount  int    `json:"workflow_count"`
+	State          string `json:"state"`
+	ConnectedAt    string `json:"connected_at,omitempty"`
+	LastEventAt    string `json:"last_event_at,omitempty"`
+	LastEventSeq   uint64 `json:"last_event_seq,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	LastErrorAt    string `json:"last_error_at,omitempty"`
+	ReconnectCount int    `json:"reconnect_count"`
+}
+
+type eventSubscriberStatus struct {
+	Healthy            bool                        `json:"healthy"`
+	State              string                      `json:"state"`
+	Configured         bool                        `json:"configured"`
+	MissingConfig      []string                    `json:"missing_configuration,omitempty"`
+	LastReconcileAt    string                      `json:"last_reconcile_at,omitempty"`
+	LastReconcileError string                      `json:"last_reconcile_error,omitempty"`
+	LaneCount          int                         `json:"lane_count"`
+	WorkflowCount      int                         `json:"workflow_count"`
+	Lanes              []eventSubscriberLaneStatus `json:"lanes"`
+}
+
+func (m *eventTrigger) Status() eventSubscriberStatus {
+	m.mu.Lock()
+	status := eventSubscriberStatus{
+		Configured:         m.configured,
+		MissingConfig:      append([]string(nil), m.missingConfig...),
+		LastReconcileAt:    m.lastReconcileAt,
+		LastReconcileError: m.lastReconcileError,
+		LaneCount:          len(m.lanes),
+		Lanes:              make([]eventSubscriberLaneStatus, 0, len(m.lanes)),
+	}
+	lanes := make([]*eventLane, 0, len(m.lanes))
+	for _, ln := range m.lanes {
+		lanes = append(lanes, ln)
+	}
+	m.mu.Unlock()
+
+	allConnected := true
+	for _, ln := range lanes {
+		ln.mu.Lock()
+		laneStatus := eventSubscriberLaneStatus{
+			Source:         ln.key.source,
+			ProjectID:      ln.key.projectID,
+			WorkflowCount:  len(ln.workflows),
+			State:          ln.state,
+			ConnectedAt:    ln.connectedAt,
+			LastEventAt:    ln.lastEventAt,
+			LastEventSeq:   ln.lastSeq,
+			LastError:      ln.lastError,
+			LastErrorAt:    ln.lastErrorAt,
+			ReconnectCount: ln.reconnectCount,
+		}
+		ln.mu.Unlock()
+		status.WorkflowCount += laneStatus.WorkflowCount
+		if laneStatus.State != "connected" {
+			allConnected = false
+		}
+		status.Lanes = append(status.Lanes, laneStatus)
+	}
+
+	switch {
+	case !status.Configured || status.LastReconcileError != "":
+		status.State = "degraded"
+	case status.LaneCount == 0:
+		status.State = "idle"
+		status.Healthy = true
+	case allConnected:
+		status.State = "connected"
+		status.Healthy = true
+	default:
+		status.State = "reconnecting"
+	}
+	return status
+}
+
+func (a *App) handleSubscriberStatus(w http.ResponseWriter, _ *http.Request) {
+	if globalEventTrigger == nil {
+		httpJSON(w, eventSubscriberStatus{
+			Healthy: false,
+			State:   "stopped",
+			Lanes:   []eventSubscriberLaneStatus{},
+		})
+		return
+	}
+	httpJSON(w, globalEventTrigger.Status())
+}
+
+func (a *App) handleSubscriberHealth(w http.ResponseWriter, _ *http.Request) {
+	status := eventSubscriberStatus{
+		Healthy: false,
+		State:   "starting",
+		Lanes:   []eventSubscriberLaneStatus{},
+	}
+	if globalEventTrigger != nil {
+		status = globalEventTrigger.Status()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !status.Healthy {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(status)
 }
 
 // topicMatches: exact match, "*" wildcard for "every topic", or

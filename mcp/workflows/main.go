@@ -1,23 +1,21 @@
-// Workflows v0.1 — deterministic, on-demand pipelines.
+// Workflows — deterministic, auditable pipelines.
 //
 // A workflow is a YAML/JSON definition: a list of typed steps
 // (http, function, app, emit, branch) chained linearly with goto-
-// style branching. v0.1 runs synchronously: an HTTP trigger or
-// the workflows_run MCP tool kicks off RunWorkflow inline, which
-// walks the steps, records a per-step audit row, and returns the
-// finished Run.
+// style branching. Manual, HTTP, and app-event triggers execute
+// RunWorkflow, which walks the steps and records a per-step audit row.
 //
 // Strict separation from agents: workflows never call LLMs. If a
 // step needs judgment, the workflow emits an event and the agent
 // handles it; a downstream workflow picks up the agent's reply.
 //
-// Out of scope for v0.1: event triggers, scheduled triggers (use
-// the Jobs app instead), wait-on-event step, parallel/fan-out,
-// integration step kind. All on the v0.2 list.
+// Scheduled triggers still belong in the Jobs app. Wait-on-event and
+// parallel/fan-out steps remain out of scope.
 package main
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 
@@ -30,13 +28,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: workflows
 display_name: Workflows
-version: 0.4.5
+version: 0.4.9
 description: |
   Deterministic, on-demand pipelines. A workflow is a YAML/JSON
-  graph of typed steps (http, function, app, emit, branch) with
-  goto-style branching and per-step retry. Synchronous in v0.1.
+  graph of typed steps (http, function, app, integration, emit,
+  branch) with event triggers, goto-style branching and retry.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
+min_apteva_version: "0.18.0"
 requires:
   permissions:
     - db.write.app
@@ -69,6 +70,14 @@ provides:
       description: Re-run a past run, optionally skipping ahead to a specific step.
     - name: workflows_cancel
       description: Cancel an in-flight run.
+  publishes:
+    - { name: workflow.created, description: "A workflow was created." }
+    - { name: workflow.updated, description: "A workflow was updated." }
+    - { name: workflow.deleted, description: "A workflow was deleted." }
+    - { name: workflow.step.started, description: "A workflow step started." }
+    - { name: workflow.step.completed, description: "A workflow step completed." }
+    - { name: workflow.run.finished, description: "A workflow run reached a terminal state." }
+    - { name: workflow.run.cancelled, description: "Cancellation was requested for a workflow run." }
   ui_panels:
     - slot: project.page
       label: Workflows
@@ -81,11 +90,26 @@ runtime:
     ref: main
     entry: mcp/workflows
   port: 8080
-  health_check: /health
+  health_check: /subscriber/health
+  resources:
+    cpu: 0.1
+    memory: 96
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
 db:
   driver: sqlite
   path: /data/workflows.db
   migrations: migrations/
+config_schema: []
 upgrade_policy: auto-patch
 `
 
@@ -112,8 +136,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	// Start the event-trigger manager: opens one SSE per
 	// (source_app, project) lane for every active workflow whose
-	// trigger.kind=event. No-ops cleanly when the gateway URL or
-	// app token aren't set (tests / dev runs).
+	// trigger.kind=event. Missing platform configuration is exposed
+	// as degraded readiness and in subscriber diagnostics.
 	globalEventTrigger = newEventTrigger(ctx)
 	globalEventTrigger.Start()
 	ctx.Logger().Info("workflows mounted",
@@ -144,6 +168,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// already project-checked at lookup.
 		{Pattern: "/runs", Handler: a.handleHTTPRunsCollection},
 		{Pattern: "/runs/", Handler: a.handleHTTPRunItem},
+		{Method: http.MethodGet, Pattern: "/subscriber/status", Handler: a.handleSubscriberStatus},
+		// The platform supervisor probes without a sidecar bearer. This
+		// response contains no credentials and the process binds loopback.
+		{Method: http.MethodGet, Pattern: "/subscriber/health", Handler: a.handleSubscriberHealth, NoAuth: true},
 	}
 }
 
@@ -158,7 +186,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"source_kind":  map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
 				"repo_id":      map[string]any{"type": "integer"},
 				"repo_path":    map[string]any{"type": "string"},
-				"trigger_kind": map[string]any{"type": "string", "enum": []any{"http", "manual", "event", "schedule"}},
+				"trigger_kind": map[string]any{"type": "string", "enum": []any{"http", "manual", "event"}},
 				"trigger_json": map[string]any{"type": "string"},
 				"status":       map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
 			}, []string{"name"}),

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -132,6 +133,7 @@ func (a *App) handleHTTPCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	globalCtx.WithProject(pid).Emit("workflow.created", map[string]any{"id": wf.ID, "name": wf.Name})
 	kickEventTrigger()
 	httpJSON(w, map[string]any{"workflow": wf})
 }
@@ -170,6 +172,7 @@ func (a *App) handleHTTPUpdateWorkflow(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	globalCtx.WithProject(pid).Emit("workflow.updated", map[string]any{"id": wf.ID, "name": wf.Name})
 	kickEventTrigger()
 	httpJSON(w, map[string]any{"workflow": wf})
 }
@@ -184,6 +187,7 @@ func (a *App) handleHTTPDeleteWorkflow(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	globalCtx.WithProject(pid).Emit("workflow.deleted", map[string]any{"id": id})
 	kickEventTrigger()
 	httpJSON(w, map[string]any{"deleted": true, "id": id})
 }
@@ -276,19 +280,57 @@ func (a *App) handleHTTPRunsCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHTTPRunItem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	rest := strings.TrimPrefix(r.URL.Path, "/runs/")
-	id, _ := strconv.ParseInt(rest, 10, 64)
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/runs/"), "/"), "/")
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
 	if id == 0 {
 		httpErr(w, http.StatusBadRequest, "run_id required")
+		return
+	}
+	if len(parts) == 2 {
+		switch parts[1] {
+		case "replay":
+			if r.Method != http.MethodPost {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			var body struct {
+				FromStep string `json:"from_step"`
+			}
+			if r.Body != nil {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+			}
+			run, err := replayWorkflowRun(r.Context(), globalCtx.WithProject(pid), pid, id, body.FromStep)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			httpJSON(w, map[string]any{"run": run})
+			return
+		case "cancel":
+			if r.Method != http.MethodPost {
+				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			requested, err := requestRunCancellation(globalCtx.AppDB(), pid, id)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			globalCtx.WithProject(pid).Emit("workflow.run.cancelled", map[string]any{"run_id": id})
+			httpJSON(w, map[string]any{"cancelled": true, "cancellation_requested": requested, "run_id": id})
+			return
+		default:
+			httpErr(w, http.StatusNotFound, "not found")
+			return
+		}
+	}
+	if len(parts) != 1 || r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	run, err := dbGetRun(globalCtx.AppDB(), pid, id)
@@ -498,6 +540,14 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("run_id required")
 	}
+	run, err := replayWorkflowRun(context.Background(), ctx, pid, id, strArg(args, "from_step"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"run": run}, nil
+}
+
+func replayWorkflowRun(runCtx context.Context, ctx *sdk.AppCtx, pid string, id int64, fromStep string) (*Run, error) {
 	prev, err := dbGetRun(dbFor(ctx), pid, id)
 	if err != nil {
 		return nil, err
@@ -517,14 +567,14 @@ func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if prev.InputJSON != "" {
 		_ = json.Unmarshal([]byte(prev.InputJSON), &input)
 	}
-	run, err := RunWorkflow(context.Background(), ctx, pid, wf, input, runOptions{
+	run, err := RunWorkflow(runCtx, ctx, pid, wf, input, runOptions{
 		triggerKind: "manual",
-		fromStep:    strArg(args, "from_step"),
+		fromStep:    fromStep,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"run": run}, nil
+	return run, nil
 }
 
 func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -536,18 +586,33 @@ func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("run_id required")
 	}
-	// v0.1 is sync — by the time the agent sees a "running" run it
-	// either already completed (status row reflects that) or it's
-	// pinned to the calling thread. So cancel = mark as cancelled
-	// in the DB, with the understanding that an actively-running
-	// step will still complete its current call. Documented limit.
-	if err := dbUpdateRunState(dbFor(ctx), pid, id, "cancelled", "", "cancelled by user", true); err != nil {
+	requested, err := requestRunCancellation(dbFor(ctx), pid, id)
+	if err != nil {
 		return nil, err
 	}
 	if ctx != nil {
 		ctx.Emit("workflow.run.cancelled", map[string]any{"run_id": id})
 	}
-	return map[string]any{"cancelled": true, "run_id": id}, nil
+	return map[string]any{"cancelled": true, "cancellation_requested": requested, "run_id": id}, nil
+}
+
+func requestRunCancellation(db *sql.DB, pid string, id int64) (bool, error) {
+	run, err := dbGetRun(db, pid, id)
+	if err != nil {
+		return false, err
+	}
+	if run == nil {
+		return false, errors.New("run not found")
+	}
+	switch run.Status {
+	case "completed", "failed", "cancelled":
+		return false, fmt.Errorf("run is already %s", run.Status)
+	}
+	requested := cancelActiveRun(id)
+	if err := dbUpdateRunState(db, pid, id, "cancelled", "", "cancelled by user", true); err != nil {
+		return false, err
+	}
+	return requested, nil
 }
 
 // ─── Shared create / update plumbing ───────────────────────────────
@@ -561,6 +626,7 @@ func buildAndCreateWorkflow(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 		RepoPath:    strArg(args, "repo_path"),
 		TriggerKind: strArg(args, "trigger_kind"),
 		TriggerJSON: strArg(args, "trigger_json"),
+		Status:      strArg(args, "status"),
 	}
 	if rid := int64Arg(args, "repo_id"); rid != 0 {
 		wf.RepoID = &rid
@@ -637,10 +703,19 @@ func updateAndRehashWorkflow(ctx *sdk.AppCtx, pid string, id int64, patch map[st
 		if err != nil {
 			return nil, err
 		}
-		// Re-parse the *new* source to fail fast on broken updates.
-		if _, err := ParseDefinition(bytes); err != nil {
+		// Re-parse the *new* source to fail fast on broken updates and
+		// refresh the denormalised trigger. Without this, editing an
+		// event source/topic in the UI leaves the old SSE lane active.
+		def, err := ParseDefinition(bytes)
+		if err != nil {
 			return nil, err
 		}
+		triggerJSON, err := json.Marshal(def.Trigger)
+		if err != nil {
+			return nil, err
+		}
+		patch["trigger_kind"] = def.Trigger.Kind
+		patch["trigger_json"] = string(triggerJSON)
 		newHash = hashSource(bytes)
 	}
 

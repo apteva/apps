@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.6.1
+version: 0.7.2
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -21,10 +21,17 @@ description: |
   history and generic proration calculations for external orchestrators.
   v0.6.0 applies opaque source metadata atomically with item changes and
   supports idempotent metadata reconciliation without lifecycle transitions.
+  v0.7.0 adds durable active-subscription renewal scheduling. The lifecycle
+  worker creates exactly one pending cycle at next_renewal_at, applies due
+  next-cycle item changes first, honors cancellation at period end, and emits
+  subscription.cycle_due without taking ownership of payment collection.
+  v0.7.2 adds an idempotent resume operation for active subscriptions with a
+  scheduled period-end cancellation.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/subscriptions/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [subscriptions, recurring, commerce, saas, memberships]
 
 scopes: [project, global]
@@ -62,6 +69,8 @@ provides:
       description: Subscription entered past_due status.
     - name: subscription.cancelled
       description: Subscription was cancelled.
+    - name: subscription.resumed
+      description: A scheduled period-end cancellation was removed.
     - name: subscription.paused
       description: Subscription entered paused status.
     - name: subscription.ended
@@ -95,6 +104,8 @@ provides:
       description: Merge an opaque metadata patch without changing subscription lifecycle state.
     - name: subscriptions_cancel
       description: Cancel a subscription immediately or at period end.
+    - name: subscriptions_resume
+      description: Resume an active subscription by clearing its scheduled period-end cancellation.
     - name: subscription_items_create
       description: Add a flat or metered item to a subscription.
     - name: subscription_items_list

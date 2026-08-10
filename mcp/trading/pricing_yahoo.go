@@ -22,10 +22,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -97,6 +99,10 @@ func (y *yahooPublic) Bars(symbol, rng string) ([]Bar, error) {
 // app treats end as inclusive, so the request and local filter use an
 // expanded effective end for daily/weekly bars.
 func (y *yahooPublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	return y.BacktestBarsContext(context.Background(), symbol, interval, start, end, limit)
+}
+
+func (y *yahooPublic) BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
 	yahooInterval, aggregateFourHour, err := yahooBacktestInterval(interval)
 	if err != nil {
 		return nil, err
@@ -104,33 +110,77 @@ func (y *yahooPublic) BacktestBars(symbol, interval string, start, end time.Time
 	if start.IsZero() || end.IsZero() || end.Before(start) {
 		return nil, fmt.Errorf("yahoo: valid backtest start and end required")
 	}
-	if limit <= 0 || limit > 1000 {
-		limit = 1000
+	if limit <= 0 {
+		return nil, errors.New("yahoo: positive backtest bar limit required")
 	}
 	effectiveEnd := end.UTC()
 	if yahooInterval == "1d" || yahooInterval == "1wk" {
 		effectiveEnd = time.Date(effectiveEnd.Year(), effectiveEnd.Month(), effectiveEnd.Day(), 23, 59, 59, 0, time.UTC)
 	}
-	q := url.Values{}
-	q.Set("period1", fmt.Sprint(start.UTC().Unix()))
-	q.Set("period2", fmt.Sprint(effectiveEnd.Add(time.Second).Unix()))
-	q.Set("interval", yahooInterval)
-	bars, _, err := y.fetchChartQuery(symbol, q)
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]Bar, 0, len(bars))
-	for _, bar := range bars {
-		at := time.Unix(bar.T, 0).UTC()
-		if at.Before(start.UTC()) || at.After(effectiveEnd) {
-			continue
+
+	byTime := make(map[int64]Bar)
+	cursor := start.UTC()
+	exclusiveEnd := effectiveEnd.Add(time.Second)
+	pageSpan := yahooBacktestPageSpan(yahooInterval)
+	for cursor.Before(exclusiveEnd) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		pageEnd := cursor.Add(pageSpan)
+		if pageEnd.After(exclusiveEnd) {
+			pageEnd = exclusiveEnd
+		}
+		q := url.Values{}
+		q.Set("period1", fmt.Sprint(cursor.Unix()))
+		q.Set("period2", fmt.Sprint(pageEnd.Unix()))
+		q.Set("interval", yahooInterval)
+		bars, err := retryBacktestBars(ctx, func() ([]Bar, error) {
+			bars, _, err := y.fetchChartQueryContext(ctx, symbol, q)
+			return bars, err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("yahoo history %s to %s: %w",
+				cursor.Format("2006-01-02"), pageEnd.Add(-time.Second).Format("2006-01-02"), err)
+		}
+		for _, bar := range bars {
+			at := time.Unix(bar.T, 0).UTC()
+			if at.Before(start.UTC()) || at.After(effectiveEnd) || bar.C <= 0 {
+				continue
+			}
+			byTime[bar.T] = bar
+		}
+		if !pageEnd.After(cursor) {
+			return nil, errors.New("yahoo: history pagination made no progress")
+		}
+		cursor = pageEnd
+	}
+
+	filtered := make([]Bar, 0, len(byTime))
+	for _, bar := range byTime {
 		filtered = append(filtered, bar)
 	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].T < filtered[j].T })
 	if aggregateFourHour {
 		filtered = aggregateYahooFourHourBars(filtered)
 	}
 	return filtered, nil
+}
+
+func yahooBacktestPageSpan(interval string) time.Duration {
+	switch interval {
+	case "5m":
+		return 7 * 24 * time.Hour
+	case "15m":
+		return 28 * 24 * time.Hour
+	case "1h":
+		return 90 * 24 * time.Hour
+	case "1d":
+		return 2 * 365 * 24 * time.Hour
+	case "1wk":
+		return 10 * 365 * 24 * time.Hour
+	default:
+		return 90 * 24 * time.Hour
+	}
 }
 
 func yahooBacktestInterval(interval string) (string, bool, error) {
@@ -251,13 +301,17 @@ func (y *yahooPublic) fetchChart(symbol, rng, interval string) ([]Bar, *yahooMet
 }
 
 func (y *yahooPublic) fetchChartQuery(symbol string, q url.Values) ([]Bar, *yahooMeta, error) {
+	return y.fetchChartQueryContext(context.Background(), symbol, q)
+}
+
+func (y *yahooPublic) fetchChartQueryContext(parent context.Context, symbol string, q url.Values) ([]Bar, *yahooMeta, error) {
 	// Yahoo silently drops calls with the Go default UA; the integration
 	// catalog declares a browser-ish UA + the client sets the same here
 	// for the direct-call path. If Yahoo tightens auth further (cookie
 	// + crumb), the parse fails explicitly and no synthetic data is used.
 	u := y.base + "/v8/finance/chart/" + url.PathEscape(strings.ToUpper(symbol)) + "?" + q.Encode()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; Apteva-Trading/0.4)")

@@ -2,25 +2,25 @@ schema: apteva-app/v1
 
 name: torrent
 display_name: Torrent
-version: 0.1.16
+version: 0.2.1
 description: |
   BitTorrent client + indexer-search frontend. Search across
   configured Jackett / Prowlarr / RSS sources, add downloads by
   magnet or .torrent URL, and on completion the resulting files are
-  uploaded to the `storage` app and probed by `media`.
+  uploaded to the `storage` app. Optional media indexing consumes the
+  storage events independently.
 
   This is a generic BitTorrent client. The user supplies search
   sources and is responsible for what they download. The app ships
   with no indexers preconfigured.
 
-  v0.1 is library-side functional but not battle-tested at high
-  concurrency: large downloads should ride out, but expect to tune
-  max_concurrent_downloads if your storage app's upload pipe is
-  thinner than your bittorrent ingress.
+  Downloads are concurrency- and rate-limited, restart-safe, and use
+  resumable chunked handoff for large completed files.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/torrent
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/torrent/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [torrent, bittorrent, downloads, media, search, jackett]
 
 scopes: [project, global]
@@ -30,12 +30,13 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
   integrations: []
   apps:
     - name: storage
       reason: "Final destination for completed downloads."
     - name: media
-      reason: "Probe video/audio leaves on completion for duration / codec metadata."
+      reason: "Optionally index storage.file events for duration and codec metadata."
       optional: true
 
 provides:

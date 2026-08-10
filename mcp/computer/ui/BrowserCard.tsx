@@ -1,73 +1,67 @@
-// BrowserCard — chat-attached card showing one browser session the
-// agent just opened. The agent calls
-// respond(components=[{app:"computer", name:"browser-card", props:{...}}])
-// after browser_session(open) succeeds and the dashboard mounts this
-// under that message bubble.
-//
-// Pure render from props — no fetch. The "watch live" button deep-links
-// to the operator panel where the live view + chat are composed together.
+import { useEffect, useState } from "react";
+import { AppCardHeader, Card, DataList } from "@apteva/ui-kit";
+import { BACKEND_LABEL, hostFor, panelURL, sessionURL } from "./shared";
 
-import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
+interface SessionInfo {
+  session_id: string;
+  backend: string;
+  current_url: string;
+  status: string;
+}
 
 interface Props {
-  instance_id: string;
-  backend: "local" | "browserbase" | "steel" | "browser-engine" | "service" | string;
-  url: string;
+  session_id?: string;
+  /** v0.7.57 compatibility */
+  instance_id?: string;
+  backend?: string;
+  url?: string;
   status?: string;
-  /** Injected by the host — preview mode renders synthetic data so
-   *  the dashboard's component-detail page doesn't need a live agent. */
+  projectId?: string;
   preview?: boolean;
 }
 
-const BACKEND_LABEL: Record<string, string> = {
-  local: "Local Chrome",
-  browserbase: "Browserbase",
-  steel: "Steel",
-  "browser-engine": "Browser Engine",
-  service: "Browser Service",
-};
-
-const computerLogo = (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-    <rect x="3" y="4" width="18" height="12" rx="2" />
-    <path d="M8 20h8" />
-    <path d="M12 16v4" />
-  </svg>
-);
-
-const computerVendor: CardVendor = {
-  name: "Computer",
-  logo: computerLogo,
-  color: { light: "#2563eb", dark: "#93c5fd" },
-};
-
 export default function BrowserCard(props: Props) {
-  const status = props.status ?? "active";
-  const watchURL = `/apps/computer/?instance=${encodeURIComponent(
-    props.instance_id,
-  )}`;
+  const id = props.session_id ?? props.instance_id ?? "";
+  const [remote, setRemote] = useState<SessionInfo | null>(null);
 
-  let host = "";
-  try {
-    host = new URL(props.url).host;
-  } catch {
-    host = props.url;
-  }
+  useEffect(() => {
+    if (props.preview || !id) return;
+    let active = true;
+    fetch(sessionURL(id, "presentation", props.projectId), { credentials: "include" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((body) => active && setRemote(body.session))
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [id, props.preview, props.projectId]);
+
+  const session = remote ?? {
+    session_id: id || "br_example",
+    backend: props.backend ?? "local",
+    current_url: props.url ?? "https://example.com/",
+    status: props.status ?? "active",
+  };
 
   return (
     <Card>
-      <CardHeader
-        vendor={computerVendor}
-        title={host || "Browser session"}
-        subtitle={BACKEND_LABEL[props.backend] ?? props.backend}
-        status={{ label: status, variant: status === "active" ? "active" : "muted" }}
-        action={props.preview ? undefined : { label: "Open", href: watchURL }}
+      <AppCardHeader
+        title={hostFor(session.current_url) || "Browser session"}
+        subtitle={BACKEND_LABEL[session.backend] ?? session.backend}
+        status={{
+          label: session.status,
+          variant: session.status === "active" ? "active" : "muted",
+        }}
+        action={props.preview ? undefined : { label: "Open", href: panelURL(session.session_id) }}
       />
       <div className="px-4 py-3 border-t border-border">
         <DataList
           items={[
-            { label: "URL", value: props.url },
-            { label: "Session", value: props.instance_id },
+            { label: "URL", value: session.current_url },
+            { label: "Session", value: session.session_id },
           ]}
         />
       </div>

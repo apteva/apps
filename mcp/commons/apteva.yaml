@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commons
 display_name: Commons
-version: 0.1.1
+version: 0.1.2
 description: |
   User-owned public social node for the open web. Commons hosts local
   profiles, posts, follows, blocks, ActivityPub/WebFinger endpoints,
@@ -10,7 +10,8 @@ description: |
   domain.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commons
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/commons/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [social, federation, activitypub, fediverse, community]
 
 scopes: [project, global]

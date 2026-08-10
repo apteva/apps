@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -20,6 +21,14 @@ func TestManifestParses(t *testing.T) {
 	if len(m.Provides.MCPTools) == 0 {
 		t.Error("expected MCP tools in manifest")
 	}
+	if m.Runtime.HealthCheck != "/subscriber/health" {
+		t.Errorf("health_check = %q, want /subscriber/health", m.Runtime.HealthCheck)
+	}
+	for _, key := range []string{"APTEVA_GATEWAY_URL", "APTEVA_APP_TOKEN"} {
+		if env, ok := m.Runtime.Env[key]; !ok || env.From != "platform" {
+			t.Errorf("runtime.env[%s] = %+v, want from: platform", key, env)
+		}
+	}
 }
 
 func TestAppManifestRoundtrips(t *testing.T) {
@@ -27,6 +36,36 @@ func TestAppManifestRoundtrips(t *testing.T) {
 	m := app.Manifest()
 	if m.Name != "workflows" {
 		t.Errorf("Name = %q, want workflows", m.Name)
+	}
+}
+
+func TestEmbeddedManifestMatchesInstallManifest(t *testing.T) {
+	diskBytes, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(diskBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded := (&App{}).Manifest()
+	if embedded.Name != disk.Name || embedded.Version != disk.Version {
+		t.Fatalf("identity drift: embedded=%s@%s disk=%s@%s",
+			embedded.Name, embedded.Version, disk.Name, disk.Version)
+	}
+	if embedded.Runtime.HealthCheck != disk.Runtime.HealthCheck {
+		t.Fatalf("health_check drift: embedded=%q disk=%q",
+			embedded.Runtime.HealthCheck, disk.Runtime.HealthCheck)
+	}
+	if embedded.MinAptevaVersion != disk.MinAptevaVersion {
+		t.Fatalf("min_apteva_version drift: embedded=%q disk=%q",
+			embedded.MinAptevaVersion, disk.MinAptevaVersion)
+	}
+	for _, key := range []string{"APTEVA_GATEWAY_URL", "APTEVA_APP_TOKEN"} {
+		if embedded.Runtime.Env[key] != disk.Runtime.Env[key] {
+			t.Fatalf("runtime.env[%s] drift: embedded=%+v disk=%+v",
+				key, embedded.Runtime.Env[key], disk.Runtime.Env[key])
+		}
 	}
 }
 

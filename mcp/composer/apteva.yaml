@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.11
+version: 0.6.2
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,20 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.6.1 implements composition-level timing reflow across layered tracks.
+  Clips sharing a section_id or group_id now move as one timed section when
+  reflow is set to composition, so generated avatar durations can compact
+  fullscreen, screenshot, and PIP layouts without desynchronizing overlays.
+
+  v0.6.0 replaces the Composer panel with an AI-native multi-track editing
+  workspace while retaining the stable V1 composition and render contract.
+  It adds layered visual lanes, draggable and resizable clips, snapping,
+  timeline zoom, undo/redo, split and duplicate commands, visible text/audio/
+  silence/soundtrack timing, a composited playback stage, visual layout and
+  PIP controls, searchable composition navigation, focused drawers, keyboard
+  shortcuts, and responsive desktop/mobile behavior. This release changes
+  the panel only; MCP tools, backend APIs, schemas, and renderers are unchanged.
 
   v0.5.11 routes remote render uploads through the same binding-gated Storage
   callback proxy used by Media, allowing the platform to validate Composer's
@@ -219,6 +233,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/composer
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [video, composition, render, ffmpeg, timeline]
 
 scopes: [project, global]

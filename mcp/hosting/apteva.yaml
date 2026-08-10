@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.11.0
+version: 1.11.1
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -15,7 +15,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/hosting/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [hosting, tenants, containers, apteva, infrastructure]
 
 scopes: [project, global]

@@ -1,5 +1,5 @@
-github.com/apteva/app-sdk v0.36.5 h1:YB5gg6/7gb/4W6hK4vU8uSwYrPZmVqyeq7DpgMbE/u8=
-github.com/apteva/app-sdk v0.36.5/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
+github.com/apteva/app-sdk v0.44.0 h1:2IZZtdiJq+CWQYfh093IKQzkHALJEcdTnP9SncC6Too=
+github.com/apteva/app-sdk v0.44.0/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
 github.com/aymerick/douceur v0.2.0 h1:Mv+mAeH1Q+n9Fr+oyamOlAkUNPWPlA8PPGR0QAaYuPk=
 github.com/aymerick/douceur v0.2.0/go.mod h1:wlT5vV2O3h55X9m7iVYN0TBM0NH/MmbLnd30/FjWUq4=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=

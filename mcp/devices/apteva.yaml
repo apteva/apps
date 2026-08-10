@@ -1,0 +1,120 @@
+schema: apteva-app/v1
+
+name: devices
+display_name: Devices
+version: 0.1.1
+description: |
+  Provision and control Arduino, ESP8266/ESP32, Raspberry Pi, and other
+  MQTT-capable hardware. Devices owns identity, narrowly-scoped credentials,
+  capabilities, GPIO operations, live state, telemetry, and correlated command
+  history while the MQTT app remains the transport and broker.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/devices
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [devices, iot, mqtt, arduino, esp32, raspberry-pi, gpio]
+
+scopes: [project]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: mqtt
+      version: ">=0.3.0"
+      reason: "Provides the project-scoped MQTT broker, per-device credentials and ACLs, retained state, and device event bridge."
+      events:
+        - mqtt.devices.message
+        - mqtt.client.connected
+        - mqtt.client.disconnected
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: devices_list, description: "List managed devices. Args: status?, q?, limit?." }
+    - { name: devices_get, description: "Get one device with capabilities and current state. Args: device_id." }
+    - { name: devices_provision, description: "Provision a device and return its one-time MQTT password, endpoint, ACL topics, and setup details. Args: name, device_id?, protocol?, model?, manufacturer?, metadata?, capabilities?." }
+    - { name: devices_update, description: "Update device name, model, description, or metadata. Args: device_id, patch." }
+    - { name: devices_enable, description: "Enable a device credential. Args: device_id." }
+    - { name: devices_disable, description: "Disable and disconnect a device credential. Args: device_id." }
+    - { name: devices_rotate_secret, description: "Rotate a device MQTT password, disconnecting the old session. The new password is returned once. Args: device_id." }
+    - { name: devices_delete, description: "Delete a managed device and its MQTT credential. Args: device_id, confirm=true." }
+    - { name: devices_state_get, description: "Get current state values for a device. Args: device_id, key?." }
+    - { name: devices_capabilities_set, description: "Set the allowlisted variables, functions, and pins for a device. Required for GPIO pins that firmware cannot self-advertise. Args: device_id, manifest." }
+    - { name: devices_capabilities_refresh, description: "Ask a device to report its variables, functions, pins, and identity. Args: device_id, wait?, timeout_ms?." }
+    - { name: devices_variable_get, description: "Read an exposed device variable. Args: device_id, name, wait?, timeout_ms?." }
+    - { name: devices_function_call, description: "Call an exposed firmware function. Args: device_id, name, arguments?, wait?, timeout_ms?, idempotency_key?." }
+    - { name: devices_pin_read, description: "Read an allowlisted digital or analog pin. Args: device_id, pin, kind?, wait?, timeout_ms?." }
+    - { name: devices_pin_write, description: "Write an allowlisted digital or PWM pin. Args: device_id, pin, value, kind?, wait?, timeout_ms?, idempotency_key?." }
+    - { name: devices_pin_mode, description: "Change an allowlisted pin mode on native Apteva device clients. Args: device_id, pin, mode (input|input_pullup|output), wait?, timeout_ms?." }
+    - name: devices_command_send
+      description: "Send a correlated structured command. Prefer the variable/function/pin helpers for standard operations. Args: device_id, operation, target?, arguments?, wait?, timeout_ms?, idempotency_key?."
+      async_result:
+        id_field: command_id
+        notify:
+          target: caller
+          mode: once
+          events: [devices.command.completed, devices.command.failed, devices.command.timed_out]
+          match: { command_id: "$result.command_id" }
+          expires_after: 5m
+    - { name: devices_command_get, description: "Get one command and its response. Args: command_id." }
+    - { name: devices_commands_list, description: "List recent commands. Args: device_id?, status?, limit?." }
+  ui_panels:
+    - slot: project.page
+      label: Devices
+      icon: cpu
+      entry: /ui/DevicesPanel.mjs
+  publishes:
+    - { name: devices.device.created, description: "A device was provisioned." }
+    - { name: devices.device.updated, description: "Device metadata or capabilities changed." }
+    - { name: devices.device.deleted, description: "A device and its broker credential were deleted." }
+    - { name: devices.device.connected, description: "A managed device authenticated to MQTT." }
+    - { name: devices.device.disconnected, description: "A managed device disconnected from MQTT." }
+    - { name: devices.device.status_changed, description: "A device availability status changed." }
+    - { name: devices.state.changed, description: "One or more current device state values changed." }
+    - { name: devices.telemetry.received, description: "A bounded device telemetry sample was accepted." }
+    - { name: devices.command.completed, description: "A correlated device command succeeded." }
+    - { name: devices.command.failed, description: "A correlated device command failed." }
+    - { name: devices.command.timed_out, description: "A device command passed its response deadline." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/devices
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/devices.db
+  migrations: migrations/
+
+config_schema:
+  - name: command_timeout_ms
+    type: text
+    default: "10000"
+    label: Default command timeout (ms)
+    description: How long commands wait for a correlated device response. Clamped between 500 and 60000 milliseconds.
+  - name: telemetry_retention_hours
+    type: text
+    default: "168"
+    label: Telemetry retention (hours)
+    description: Recent raw telemetry retention. Current state is stored separately and is not pruned.
+  - name: telemetry_max_rows_per_device
+    type: text
+    default: "10000"
+    label: Telemetry rows per device
+    description: Per-device safety ceiling for raw telemetry rows.
+  - name: command_retention_days
+    type: text
+    default: "90"
+    label: Command history retention (days)
+    description: Completed commands and lifecycle audit events older than this are pruned. Active commands are never pruned.
+
+upgrade_policy: auto-patch

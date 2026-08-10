@@ -49,6 +49,14 @@ func (a *App) requireFileAccess(ctx context.Context, app *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
+	// A missing/soft-deleted row has no resource to authorize. Return
+	// it to the wrapper so each tool can preserve its own documented
+	// contract (files_get => found=false, delete => idempotent success,
+	// mutations/content/URL => not-found error). In particular, never
+	// dereference f.Folder below when f is nil.
+	if f == nil {
+		return nil, nil
+	}
 	if caller := sdk.CallerFrom(ctx); caller != nil {
 		res := fileResource(f.Folder)
 		if !caller.Allows(permission, res) {
@@ -65,19 +73,30 @@ func (a *App) toolGetCtx(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	return f, nil
+	if f == nil {
+		return map[string]any{"file": nil, "found": false}, nil
+	}
+	return map[string]any{"file": f, "found": true}, nil
 }
 
 func (a *App) toolGetURLCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := a.requireFileAccess(ctx, app, args, "files.read"); err != nil {
+	f, err := a.requireFileAccess(ctx, app, args, "files.read")
+	if err != nil {
 		return nil, err
+	}
+	if f == nil {
+		return nil, errors.New("file not found")
 	}
 	return a.toolGetURL(app, args)
 }
 
 func (a *App) toolGetContentCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := a.requireFileAccess(ctx, app, args, "files.read"); err != nil {
+	f, err := a.requireFileAccess(ctx, app, args, "files.read")
+	if err != nil {
 		return nil, err
+	}
+	if f == nil {
+		return nil, errors.New("file not found")
 	}
 	return a.toolGetContent(app, args)
 }
@@ -86,21 +105,80 @@ func (a *App) toolDeleteCtx(ctx context.Context, app *sdk.AppCtx, args map[strin
 	if _, err := a.requireFileAccess(ctx, app, args, "files.delete"); err != nil {
 		return nil, err
 	}
+	// Deletion is intentionally idempotent. A missing row has no
+	// protected resource and toolDelete already returns
+	// {deleted:true, hard:false} without emitting an event.
 	return a.toolDelete(app, args)
 }
 
 func (a *App) toolSetTagsCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := a.requireFileAccess(ctx, app, args, "files.write"); err != nil {
+	f, err := a.requireFileAccess(ctx, app, args, "files.write")
+	if err != nil {
 		return nil, err
+	}
+	if f == nil {
+		return nil, errors.New("file not found")
 	}
 	return a.toolSetTags(app, args)
 }
 
 func (a *App) toolSetVisibilityCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := a.requireFileAccess(ctx, app, args, "files.write"); err != nil {
+	f, err := a.requireFileAccess(ctx, app, args, "files.write")
+	if err != nil {
 		return nil, err
 	}
+	if f == nil {
+		return nil, errors.New("file not found")
+	}
 	return a.toolSetVisibility(app, args)
+}
+
+// toolMoveCtx protects both ends of a move. The source folder is loaded
+// from the file row; the destination is either args.folder or the existing
+// source folder for rename-only calls. The old manifest-only gate could
+// check the destination but never the source, and treated an omitted folder
+// as root even for a rename in place.
+func (a *App) toolMoveCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	f, err := a.requireFileAccess(ctx, app, args, "files.write")
+	if err != nil {
+		return nil, err
+	}
+	if f == nil {
+		return nil, errors.New("file not found")
+	}
+	if caller := sdk.CallerFrom(ctx); caller != nil {
+		destination := f.Folder
+		if raw, exists := args["folder"]; exists {
+			if folder, ok := raw.(string); ok {
+				destination = normaliseFolder(folder)
+			}
+		}
+		resource := fileResource(destination)
+		if !caller.Allows("files.write", resource) {
+			return nil, sdk.Forbidden("files.write", resource)
+		}
+	}
+	return a.toolMove(app, args)
+}
+
+// Dedupe is a discovery operation: an unauthorized hash match must look
+// identical to no match, otherwise callers can enumerate file metadata
+// outside their read scope.
+func (a *App) toolDedupeCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.toolDedupe(app, args)
+	if err != nil {
+		return nil, err
+	}
+	caller := sdk.CallerFrom(ctx)
+	if caller == nil {
+		return out, nil
+	}
+	result := out.(map[string]any)
+	f, _ := result["file"].(*File)
+	if f == nil || caller.Allows("files.read", fileResource(f.Folder)) {
+		return result, nil
+	}
+	return map[string]any{"found": false}, nil
 }
 
 func (a *App) toolRenameFolderCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

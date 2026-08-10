@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Builder takes an unpacked source tree and produces an artifact
@@ -29,6 +32,8 @@ type BuildOverrides struct {
 	StartCmd         string            // (used by runtime, not builder; passed through for context)
 	Env              map[string]string // user-provided env from the deployment's env_json (e.g. VITE_*, NEXT_PUBLIC_*); applied to every build process
 	TargetConfigJSON string            // target-specific, non-secret mobile build settings
+	Credentials      runnerCredentials // build-only signing credentials supplied by a remote runner request
+	Context          context.Context   // optional cancellation context for remote runner jobs
 }
 
 // buildEnv composes the env each builder hands to exec.Cmd. Starts
@@ -115,9 +120,9 @@ func (*goBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.W
 	if ov.BuildCmd != "" {
 		// Honour the override but still write to artifactDir/app so
 		// the runtime knows where to find the binary.
-		return runShellInSrc(srcDir, ov.BuildCmd, logW, binPath, ov.Env)
+		return runShellInSrc(buildContext(ov), srcDir, ov.BuildCmd, logW, binPath, ov.Env)
 	}
-	cmd := exec.Command("go", args...)
+	cmd := newBuildCommand(buildContext(ov), "go", args...)
 	cmd.Dir = srcDir
 	cmd.Stdout = logW
 	cmd.Stderr = logW
@@ -141,7 +146,7 @@ func (*staticBuilder) Framework() string { return "static" }
 func (*staticBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
 	if ov.BuildCmd != "" {
 		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
-		c := exec.Command("sh", "-c", ov.BuildCmd)
+		c := newBuildCommand(buildContext(ov), "sh", "-c", ov.BuildCmd)
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
@@ -188,7 +193,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 	}
 	if ov.BuildCmd != "" {
 		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
-		c := exec.Command("sh", "-c", ov.BuildCmd)
+		c := newBuildCommand(buildContext(ov), "sh", "-c", ov.BuildCmd)
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
@@ -198,7 +203,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 		}
 	} else {
 		fmt.Fprintf(logW, "+ %s install (cwd=%s)\n", pm, srcDir)
-		ic := exec.Command(pm, "install")
+		ic := newBuildCommand(buildContext(ov), pm, "install")
 		ic.Dir = srcDir
 		ic.Stdout = logW
 		ic.Stderr = logW
@@ -208,7 +213,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 		}
 		if hasNpmScript(srcDir, "build") {
 			fmt.Fprintf(logW, "+ %s run build (cwd=%s)\n", pm, srcDir)
-			bc := exec.Command(pm, "run", "build")
+			bc := newBuildCommand(buildContext(ov), pm, "run", "build")
 			bc.Dir = srcDir
 			bc.Stdout = logW
 			bc.Stderr = logW
@@ -225,7 +230,7 @@ func (*nodeBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io
 				fmt.Fprintf(logW, "skipping build: no \"build\" script and bun (for build.ts) not on PATH\n")
 			} else {
 				fmt.Fprintf(logW, "+ bun run %s (cwd=%s) — Bun-script convention\n", buildScript, srcDir)
-				bc := exec.Command("bun", "run", buildScript)
+				bc := newBuildCommand(buildContext(ov), "bun", "run", buildScript)
 				bc.Dir = srcDir
 				bc.Stdout = logW
 				bc.Stderr = logW
@@ -290,7 +295,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	}
 	if ov.BuildCmd != "" {
 		fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
-		c := exec.Command("sh", "-c", ov.BuildCmd)
+		c := newBuildCommand(buildContext(ov), "sh", "-c", ov.BuildCmd)
 		c.Dir = srcDir
 		c.Stdout = logW
 		c.Stderr = logW
@@ -300,7 +305,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		}
 	} else {
 		fmt.Fprintf(logW, "+ bun install (cwd=%s)\n", srcDir)
-		ic := exec.Command("bun", "install")
+		ic := newBuildCommand(buildContext(ov), "bun", "install")
 		ic.Dir = srcDir
 		ic.Stdout = logW
 		ic.Stderr = logW
@@ -311,7 +316,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		switch {
 		case hasNpmScript(srcDir, "build"):
 			fmt.Fprintf(logW, "+ bun run build (cwd=%s)\n", srcDir)
-			bc := exec.Command("bun", "run", "build")
+			bc := newBuildCommand(buildContext(ov), "bun", "run", "build")
 			bc.Dir = srcDir
 			bc.Stdout = logW
 			bc.Stderr = logW
@@ -322,7 +327,7 @@ func (*bunBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		default:
 			if buildScript := findBunBuildScript(srcDir); buildScript != "" {
 				fmt.Fprintf(logW, "+ bun run %s (cwd=%s) — Bun-script convention\n", buildScript, srcDir)
-				bc := exec.Command("bun", "run", buildScript)
+				bc := newBuildCommand(buildContext(ov), "bun", "run", buildScript)
 				bc.Dir = srcDir
 				bc.Stdout = logW
 				bc.Stderr = logW
@@ -434,7 +439,7 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 		return "", nil
 	}
 	fmt.Fprintf(logW, "+ %s (cwd=%s)\n", ov.BuildCmd, srcDir)
-	c := exec.Command("sh", "-c", ov.BuildCmd)
+	c := newBuildCommand(buildContext(ov), "sh", "-c", ov.BuildCmd)
 	c.Dir = srcDir
 	c.Stdout = logW
 	c.Stderr = logW
@@ -453,9 +458,9 @@ func (*blankBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW i
 // runShellInSrc executes a build_cmd in srcDir. Always returns the
 // binPath the caller suggested — the override is responsible for
 // producing a binary at that path.
-func runShellInSrc(srcDir, cmd string, logW io.Writer, expectedOutput string, env map[string]string) (string, error) {
+func runShellInSrc(ctx context.Context, srcDir, cmd string, logW io.Writer, expectedOutput string, env map[string]string) (string, error) {
 	fmt.Fprintf(logW, "+ %s (cwd=%s)\n", cmd, srcDir)
-	c := exec.Command("sh", "-c", cmd)
+	c := newBuildCommand(ctx, "sh", "-c", cmd)
 	c.Dir = srcDir
 	c.Stdout = logW
 	c.Stderr = logW
@@ -464,6 +469,33 @@ func runShellInSrc(srcDir, cmd string, logW io.Writer, expectedOutput string, en
 		return "", err
 	}
 	return expectedOutput, nil
+}
+
+func buildContext(override BuildOverrides) context.Context {
+	if override.Context != nil {
+		return override.Context
+	}
+	return context.Background()
+}
+
+func newBuildCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		return err
+	}
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
 }
 
 func exists(path string) bool {

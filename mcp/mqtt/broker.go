@@ -20,16 +20,24 @@ import (
 )
 
 type Broker struct {
-	server *mqtt.Server
-	port   int
-	app    *App
+	server  *mqtt.Server
+	port    int
+	address string
+	app     *App
 }
 
 // NewBroker constructs a server with hooks wired up and the TCP
 // listener bound. Doesn't start serving yet — that's the worker.
 func NewBroker(a *App) (*Broker, error) {
+	capabilities := mqtt.NewDefaultServerCapabilities()
+	capabilities.MaximumClients = int64(clampConfigInt(a.ctx, "max_clients", 1000, 1, 1000000))
+	capabilities.MaximumPacketSize = uint32(clampConfigInt(a.ctx, "max_payload_bytes", 1048576, 1024, 268435455))
+	capabilities.ReceiveMaximum = uint16(clampConfigInt(a.ctx, "max_inflight_per_client", 128, 1, 65535))
+	capabilities.MaximumInflight = capabilities.ReceiveMaximum
+	capabilities.MaximumClientWritesPending = int32(clampConfigInt(a.ctx, "max_pending_writes_per_client", 1024, 1, 1048576))
 	server := mqtt.New(&mqtt.Options{
 		InlineClient: true, // needed for the bus loopback subscriber.
+		Capabilities: capabilities,
 	})
 
 	br := &Broker{server: server, app: a}
@@ -44,25 +52,47 @@ func NewBroker(a *App) (*Broker, error) {
 	if err := server.AddHook(&busHook{app: a}, nil); err != nil {
 		return nil, fmt.Errorf("bus hook: %w", err)
 	}
+	if err := server.AddHook(&lifecycleHook{app: a}, nil); err != nil {
+		return nil, fmt.Errorf("lifecycle hook: %w", err)
+	}
+	if err := server.AddHook(newPublishGuardHook(a), nil); err != nil {
+		return nil, fmt.Errorf("publish guard hook: %w", err)
+	}
+	if err := server.AddHook(&retainedHook{app: a}, nil); err != nil {
+		return nil, fmt.Errorf("retained storage hook: %w", err)
+	}
 
 	port, err := pickListenerPort(a)
 	if err != nil {
 		return nil, err
 	}
-	br.port = port
-
-	cfg := listeners.Config{
-		Type:    "tcp",
-		ID:      "tcp1",
-		Address: bindAddress(a, port),
-	}
-	if err := server.AddListener(listeners.NewTCP(cfg)); err != nil {
-		return nil, fmt.Errorf("add listener %s: %w", cfg.Address, err)
+	br.port, br.address, err = attachTCPListener(server, a, port)
+	if err != nil {
+		_ = server.Close()
+		return nil, err
 	}
 	return br, nil
 }
 
-func (b *Broker) Port() int { return b.port }
+func attachTCPListener(server *mqtt.Server, a *App, port int) (int, string, error) {
+	cfg := listeners.Config{Type: "tcp", ID: "tcp1", Address: bindAddress(a, port)}
+	tcpListener := listeners.NewTCP(cfg)
+	if err := server.AddListener(tcpListener); err != nil {
+		return 0, "", fmt.Errorf("add listener %s: %w", cfg.Address, err)
+	}
+	_, actualPort, err := net.SplitHostPort(tcpListener.Address())
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve listener address %s: %w", tcpListener.Address(), err)
+	}
+	resolved, err := strconv.Atoi(actualPort)
+	if err != nil {
+		return 0, "", fmt.Errorf("resolve listener port %s: %w", actualPort, err)
+	}
+	return resolved, tcpListener.Address(), nil
+}
+
+func (b *Broker) Port() int       { return b.port }
+func (b *Broker) Address() string { return b.address }
 
 // Serve blocks on the broker's main loop. Worker stops it via Close
 // when ctx is cancelled — mochi's Server doesn't take a Context, so
@@ -107,40 +137,61 @@ func (b *Broker) Subscribe(filter string, subID int, fn func(cl *mqtt.Client, su
 	return b.server.Subscribe(filter, subID, fn)
 }
 
-// pickListenerPort resolves config["listen_port"] to a free TCP port.
-// Default 1883; 0 means kernel-assigned; on bind-conflict we fall
-// back to a random port (same pattern torrent uses for ListenPort)
-// so a stale broker doesn't make the install hang.
+func (b *Broker) Unsubscribe(filter string, subID int) error {
+	return b.server.Unsubscribe(filter, subID)
+}
+
+func (b *Broker) Clients() []*mqtt.Client {
+	if b == nil || b.server == nil {
+		return nil
+	}
+	out := make([]*mqtt.Client, 0, b.server.Clients.Len())
+	for _, client := range b.server.Clients.GetAll() {
+		if client.Net.Inline || client.Closed() {
+			continue
+		}
+		out = append(out, client)
+	}
+	return out
+}
+
+func (b *Broker) DisconnectUser(username string) {
+	if b == nil || b.server == nil {
+		return
+	}
+	for _, client := range b.Clients() {
+		client.RLock()
+		matches := string(client.Properties.Username) == username
+		client.RUnlock()
+		if matches {
+			_ = b.server.DisconnectClient(client, packets.ErrNotAuthorized)
+		}
+	}
+}
+
+func (b *Broker) DeleteRetained(topic string) error {
+	if b == nil || b.server == nil {
+		return nil
+	}
+	// MQTT's retained-delete operation is a retained publish with an empty
+	// payload. Going through Publish notifies subscribers and the storage hook,
+	// keeping clients, memory, and SQLite in sync.
+	return b.server.Publish(topic, nil, true, 0)
+}
+
+// pickListenerPort validates config["listen_port"]. The Mochi TCP listener
+// performs the actual bind during NewBroker, eliminating the probe/close/bind
+// race. Port 0 stays zero until that bind, then Broker.port records the actual
+// kernel-assigned port.
 func pickListenerPort(a *App) (int, error) {
 	want := configInt(a.ctx, "listen_port", 1883)
-	if want < 0 {
-		want = 1883
+	if want < 0 || want > 65535 {
+		return 0, fmt.Errorf("listen_port must be between 0 and 65535")
 	}
-	if want == 0 {
-		// Caller asked for kernel-assigned. Bind once to find a port.
-		l, err := net.Listen("tcp", bindAddress(a, 0))
-		if err != nil {
-			return 0, fmt.Errorf("free port: %w", err)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		return port, nil
+	if want != 0 && want != 1883 {
+		return 0, fmt.Errorf("listen_port must be 1883 for managed installs or 0 for local development/tests")
 	}
-	// Probe whether the requested port is free; otherwise relocate.
-	addr := bindAddress(a, want)
-	if l, err := net.Listen("tcp", addr); err == nil {
-		_ = l.Close()
-		return want, nil
-	} else {
-		a.ctx.Logger().Warn("listen busy — relocating", "want", want, "err", err.Error())
-		l2, err2 := net.Listen("tcp", bindAddress(a, 0))
-		if err2 != nil {
-			return 0, fmt.Errorf("relocate listen: %w", err2)
-		}
-		port := l2.Addr().(*net.TCPAddr).Port
-		_ = l2.Close()
-		return port, nil
-	}
+	return want, nil
 }
 
 func bindAddress(a *App, port int) string {

@@ -69,6 +69,9 @@ const (
 	// reserved domain on paid plans; we discover the URL by scraping
 	// ngrok's logfmt-mode stdout for `url=https://...`.
 	ModeNgrok Mode = "ngrok"
+	// ModeZrok runs zrok2 locally against the app-owned native environment.
+	// A reserved public name makes the URL stable across process restarts.
+	ModeZrok Mode = "zrok"
 )
 
 // StartParams bundles everything the Manager needs to spawn a tunnel
@@ -78,13 +81,16 @@ const (
 //	Named (cloudflared): Binary, RunID, Token, Hostname (Target optional, label only)
 //	Ngrok:               Binary, Target, RunID, Authtoken (Hostname optional — pre-reserved domain)
 type StartParams struct {
-	Binary    string
-	Target    string // local URL to forward to (used as label in named mode)
-	RunID     int64
-	Mode      Mode
-	Token     string // named-cloudflare: connector token from cfd_tunnel create
-	Hostname  string // named-cloudflare: e.g. "tunnel.example.com"; pre-known public host. ngrok: optional reserved domain (paid plans).
-	Authtoken string // ngrok: agent authtoken from operator's ngrok integration
+	Binary        string
+	Target        string // local URL to forward to (used as label in named mode)
+	RunID         int64
+	Mode          Mode
+	Token         string // named-cloudflare: connector token from cfd_tunnel create
+	Hostname      string // named-cloudflare: e.g. "tunnel.example.com"; pre-known public host. ngrok: optional reserved domain (paid plans).
+	Authtoken     string // ngrok: agent authtoken from operator's ngrok integration
+	ZrokName      string // zrok: reserved name
+	ZrokNamespace string // zrok: namespace token (v0.6 uses "public")
+	ZrokHome      string // zrok: isolated HOME containing .zrok2
 }
 
 // Manager owns the tunnel-agent subprocess for one app install.
@@ -113,6 +119,7 @@ type Manager struct {
 	// failed: ..." that the panel + DB row both expose.
 	recentOutput []string
 	redactions   []string
+	outputWG     sync.WaitGroup
 
 	// Hooks the caller (main.go) installs to persist state.
 	onURLAssigned func(runID int64, url string)
@@ -174,6 +181,19 @@ func (m *Manager) Start(p StartParams) error {
 		if p.Authtoken == "" {
 			return errors.New("ngrok mode: authtoken is empty (bind the ngrok integration first)")
 		}
+	case ModeZrok:
+		if p.Target == "" {
+			return errors.New("zrok mode: target URL is empty")
+		}
+		if p.ZrokName == "" || p.ZrokNamespace == "" {
+			return errors.New("zrok mode: reserved name is not configured")
+		}
+		if p.ZrokHome == "" {
+			return errors.New("zrok mode: isolated home directory is empty")
+		}
+		if p.Hostname == "" {
+			return errors.New("zrok mode: public URL is empty")
+		}
 	default:
 		return fmt.Errorf("unknown mode %q", p.Mode)
 	}
@@ -202,16 +222,28 @@ func (m *Manager) Start(p StartParams) error {
 		if p.Hostname != "" {
 			args = append(args, "--url", "https://"+p.Hostname)
 		}
+	case ModeZrok:
+		args = []string{
+			"share", "public", p.Target,
+			"--headless", "--force-local",
+			"--name-selection", p.ZrokNamespace + ":" + p.ZrokName,
+		}
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	// Never inherit stale tunnel credentials, and never put live credentials
 	// in argv where process listings and crash reports can expose them.
-	cmd.Env = withoutEnvKeys(os.Environ(), "TUNNEL_TOKEN", "NGROK_AUTHTOKEN")
+	cmd.Env = withoutEnvKeys(os.Environ(), "TUNNEL_TOKEN", "NGROK_AUTHTOKEN", "ZROK2_API_ENDPOINT", "ZROK2_DEFAULT_NAMESPACE", "ZROK2_HEADLESS", "HOME")
 	switch p.Mode {
 	case ModeNamed:
 		cmd.Env = append(cmd.Env, "TUNNEL_TOKEN="+p.Token)
 	case ModeNgrok:
 		cmd.Env = append(cmd.Env, "NGROK_AUTHTOKEN="+p.Authtoken)
+	case ModeZrok:
+		cmd.Env = append(cmd.Env,
+			"HOME="+p.ZrokHome,
+			"ZROK2_HEADLESS=true",
+			"ZROK2_DEFAULT_NAMESPACE="+p.ZrokNamespace,
+		)
 	}
 	// Combined stderr is where cloudflared writes the assigned URL.
 	// Stdout is mostly empty but we read it anyway so the pipe doesn't
@@ -235,6 +267,8 @@ func (m *Manager) Start(p StartParams) error {
 			hint := "install from github.com/cloudflare/cloudflared or set the cloudflared_path config"
 			if p.Mode == ModeNgrok {
 				hint = "install ngrok (brew install ngrok) or set the ngrok_path config"
+			} else if p.Mode == ModeZrok {
+				hint = "install zrok2 or set the zrok2_path config"
 			}
 			return fmt.Errorf("agent binary not found at %q — %s", binary, hint)
 		}
@@ -260,13 +294,11 @@ func (m *Manager) Start(p StartParams) error {
 		m.redactions = append(m.redactions, p.Authtoken)
 	}
 
-	// Wait for exit in the background; clean up when it ends.
-	go m.waitForExit(p.RunID)
-
 	// Per-mode wiring of stdout vs stderr to URL-scanner vs Discard.
 	// cloudflared writes its URL to STDERR; ngrok writes ours to STDOUT
 	// (because we passed --log stdout). Named mode knows the URL up
 	// front and just drains both streams.
+	m.outputWG.Add(2)
 	switch p.Mode {
 	case ModeQuick:
 		go m.scanForURL(stdout, p.RunID, nil)
@@ -292,7 +324,19 @@ func (m *Manager) Start(p StartParams) error {
 		if cb != nil {
 			go cb(runID, url)
 		}
+	case ModeZrok:
+		go m.scanForURL(stdout, p.RunID, nil)
+		go m.scanForURL(stderr, p.RunID, nil)
+		m.publicURL = p.Hostname
+		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
+		if cb != nil {
+			go cb(runID, url)
+		}
 	}
+	// Start waiting only after both output readers are registered. Otherwise a
+	// fast-failing child can exit before its diagnostic line reaches the
+	// bounded output buffer.
+	go m.waitForExit(p.RunID)
 
 	return nil
 }
@@ -321,6 +365,7 @@ func withoutEnvKeys(env []string, keys ...string) []string {
 // — lets ngrok's `url=https://...` line strip the prefix without a
 // post-match substring.
 func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
+	defer m.outputWG.Done()
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
 	// Agent lines fit easily in the default 64KB Scanner buffer.
@@ -382,6 +427,9 @@ func (m *Manager) waitForExit(runID int64) {
 	}
 
 	waitErr := cmd.Wait()
+	// cmd.Wait closes the child pipes. Wait for both scanners to drain their
+	// remaining lines before constructing the failure reason.
+	m.outputWG.Wait()
 
 	m.mu.Lock()
 	// If the manager has already moved on (someone called Start again
@@ -422,15 +470,11 @@ func (m *Manager) waitForExit(runID int64) {
 		}
 	}
 
-	// If the agent died without publishing a URL, attach the tail of
-	// its output to the exit reason. Without this the panel just shows
-	// "exit 1" and operators have no path forward; with it they see
-	// the actual ngrok / cloudflared error message ("ERR_NGROK_105
-	// authentication failed", "tunnel limit reached", etc.). Only
-	// triggered for failures (clean stop has nothing to diagnose) and
-	// only when we never got a URL (a URL-bearing run that died later
-	// is a transient connection issue, not a startup misconfig).
-	if finalStatus == StatusFailed && m.publicURL == "" && len(m.recentOutput) > 0 {
+	// Attach the output tail to every failed run. Stable providers know their
+	// URL before the child is healthy, so publicURL being populated does not
+	// prove startup succeeded. The old publicURL=="" condition hid zrok's
+	// shareConflict diagnostics and reduced the panel to an unhelpful "exit 1".
+	if finalStatus == StatusFailed && len(m.recentOutput) > 0 {
 		// Show last 5 lines — enough to surface the error, short enough
 		// to fit in a panel toast or row.
 		start := 0

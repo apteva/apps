@@ -286,8 +286,43 @@ EOF
 printf '{"timestamp":"%s","cpu":{"total_pct":%s,"cores":%s},"mem":{"used_bytes":%s,"total_bytes":%s,"available_bytes":%s,"swap_used_bytes":%s},"disk":[%s],"net":[%s],"load":{"l1":%s,"l5":%s,"l15":%s},"uptime_s":%s,"process_count":%s}\n' "$TS" "$CPU_TOTAL" "$CPU_CORES" "$used" "$total" "$avail" "$swap" "$DISK" "$NET" "$l1" "$l5" "$l15" "$UPTIME" "$PROCS"
 `
 
+const remoteMacOSVitalsScript = `
+set -e
+export LC_ALL=C
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+CPU_TOTAL=$(top -l 2 -n 0 -s 1 | awk '/CPU usage:/ {idle=$7; gsub(/%/, "", idle); used=100-idle} END {if (used < 0 || used > 100) used=0; printf "%.1f", used}')
+CPU_CORES=$(sysctl -n hw.logicalcpu 2>/dev/null || printf 1)
+MEM_TOTAL=$(sysctl -n hw.memsize)
+PAGE_SIZE=$(sysctl -n hw.pagesize)
+MEM_AVAILABLE=$(vm_stat | awk -v page="$PAGE_SIZE" '
+  /Pages free:/ {gsub(/\./, "", $3); free=$3}
+  /Pages inactive:/ {gsub(/\./, "", $3); inactive=$3}
+  /Pages speculative:/ {gsub(/\./, "", $3); speculative=$3}
+  END {printf "%.0f", (free+inactive+speculative)*page}
+')
+MEM_USED=$(awk -v total="$MEM_TOTAL" -v available="$MEM_AVAILABLE" 'BEGIN {used=total-available; if (used < 0) used=0; printf "%.0f", used}')
+set -- $(sysctl -n vm.loadavg | tr -d '{}')
+L1=${1:-0}; L5=${2:-0}; L15=${3:-0}
+BOOT=$(sysctl -n kern.boottime | awk -F'[=,]' '{gsub(/ /, "", $2); print $2}')
+NOW=$(date +%s)
+UPTIME=$((NOW-BOOT))
+PROCS=$(ps -ax -o pid= | wc -l | tr -d ' ')
+DISK=$(df -kP -l 2>/dev/null | tail -n +2 | awk '
+  {mount=$6; for(i=7;i<=NF;i++) mount=mount " " $i; gsub(/\\/, "\\\\", mount); gsub(/"/, "\\\"", mount); pct=$5; gsub(/%/, "", pct); printf "{\"mount\":\"%s\",\"used_bytes\":%.0f,\"total_bytes\":%.0f,\"used_pct\":%s},", mount, $3*1024, $2*1024, pct}
+' | sed 's/,$//')
+NET=$(netstat -ibn 2>/dev/null | awk '
+  NR>1 && $1 != "lo0" && $7 ~ /^[0-9]+$/ && $10 ~ /^[0-9]+$/ {if ($7 > rx[$1]) rx[$1]=$7; if ($10 > tx[$1]) tx[$1]=$10}
+  END {for (iface in rx) printf "{\"iface\":\"%s\",\"rx_bytes\":%.0f,\"tx_bytes\":%.0f},", iface, rx[iface], tx[iface]}
+' | sed 's/,$//')
+printf '{"timestamp":"%s","cpu":{"total_pct":%s,"cores":%s},"mem":{"used_bytes":%s,"total_bytes":%s,"available_bytes":%s,"swap_used_bytes":0},"disk":[%s],"net":[%s],"load":{"l1":%s,"l5":%s,"l15":%s},"uptime_s":%s,"process_count":%s}\n' "$TS" "$CPU_TOTAL" "$CPU_CORES" "$MEM_USED" "$MEM_TOTAL" "$MEM_AVAILABLE" "$DISK" "$NET" "$L1" "$L5" "$L15" "$UPTIME" "$PROCS"
+`
+
 func collectRemoteMetrics(inst *Instance) (*Metrics, error) {
-	output, exit, err := runSSH(inst, remoteVitalsScript, 10*time.Second)
+	script := remoteVitalsScript
+	if strings.EqualFold(inst.Platform, "macos") {
+		script = remoteMacOSVitalsScript
+	}
+	output, exit, err := runSSH(inst, script, 10*time.Second)
 	if err != nil && exit != 0 {
 		return nil, fmt.Errorf("vitals script failed (exit=%d): %v · output=%q", exit, err, truncate(output, 200))
 	}

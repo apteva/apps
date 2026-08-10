@@ -129,6 +129,50 @@ func TestSubjectAwareNarrowSmartCropX_NoSubjectNoOp(t *testing.T) {
 	}
 }
 
+func TestSilhouetteAwareNarrowSmartCropCentersTallDarkSubject(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 225, G: 218, B: 204, A: 255})
+	// Bright textured furniture at the left represents the generic saliency
+	// winner; the person is the tall neutral region farther right.
+	for y := 35; y < 175; y++ {
+		for x := 0; x < 75; x++ {
+			if (x+y)%9 < 4 {
+				img.SetRGBA(x, y, color.RGBA{R: 245, G: 244, B: 238, A: 255})
+			} else {
+				img.SetRGBA(x, y, color.RGBA{R: 35, G: 80, B: 210, A: 255})
+			}
+		}
+	}
+	for y := 18; y < 180; y++ {
+		left, right := 128, 180
+		if y < 52 {
+			left, right = 140, 164
+		}
+		for x := left; x < right; x++ {
+			shade := uint8(42 + (x+y)%18)
+			img.SetRGBA(x, y, color.RGBA{R: shade, G: shade + 4, B: shade + 7, A: 255})
+		}
+	}
+	x, ok := silhouetteAwareNarrowSmartCropX(img, 0, 1920, 606, 101)
+	if !ok || x < 450 || x > 750 {
+		candidate, _ := findSmartCropSilhouetteWindow(img, 0, 101)
+		t.Fatalf("tall subject crop x=%d changed=%v candidate=%+v", x, ok, candidate)
+	}
+}
+
+func TestSilhouetteAwareNarrowSmartCropRejectsLowFurniture(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	fillImage(img, color.RGBA{R: 225, G: 218, B: 204, A: 255})
+	for y := 125; y < 178; y++ {
+		for x := 145; x < 235; x++ {
+			img.SetRGBA(x, y, color.RGBA{R: 55, G: 58, B: 62, A: 255})
+		}
+	}
+	if x, ok := silhouetteAwareNarrowSmartCropX(img, 0, 1920, 606, 101); ok || x != 0 {
+		t.Fatalf("low furniture was mistaken for a person: x=%d changed=%v", x, ok)
+	}
+}
+
 func TestSubjectAwareNarrowSmartCropX_DoesNotPullAwayFromRawSmartCrop(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	for y := 0; y < 180; y++ {

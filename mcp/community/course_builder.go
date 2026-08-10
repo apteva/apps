@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -92,12 +94,18 @@ type EnrollmentRule struct {
 }
 
 type CourseEnrollment struct {
-	SpaceID     string  `json:"space_id"`
-	MemberID    string  `json:"member_id"`
-	Status      string  `json:"status"`
-	EnrolledAt  string  `json:"enrolled_at"`
-	CompletedAt *string `json:"completed_at,omitempty"`
+	SpaceID         string  `json:"space_id"`
+	MemberID        string  `json:"member_id"`
+	Status          string  `json:"status"`
+	Source          string  `json:"source"`
+	SourceRef       *string `json:"source_ref,omitempty"`
+	AccessExpiresAt *string `json:"access_expires_at,omitempty"`
+	AccessRevokedAt *string `json:"access_revoked_at,omitempty"`
+	EnrolledAt      string  `json:"enrolled_at"`
+	CompletedAt     *string `json:"completed_at,omitempty"`
 }
+
+var currencyRE = regexp.MustCompile(`^[A-Z]{3}$`)
 
 func courseBuilderTools() []sdk.Tool {
 	return []sdk.Tool{
@@ -163,6 +171,15 @@ func courseBuilderTools() []sdk.Tool {
 			Description: "List resources for a lesson. Args: lesson_id.",
 			InputSchema: schemaObject(map[string]any{"lesson_id": map[string]any{"type": "string"}}, []string{"lesson_id"}),
 			Handler:     toolLessonResourcesList,
+		},
+		{
+			Name:        "lesson_bundle_get",
+			Description: "Fetch one available lesson with its resources, quizzes, assignments, comments, and caller progress.",
+			InputSchema: schemaObject(map[string]any{
+				"id":        map[string]any{"type": "string"},
+				"member_id": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: toolLessonBundleGet,
 		},
 		{
 			Name:        "lesson_resources_delete",
@@ -267,6 +284,16 @@ func courseBuilderTools() []sdk.Tool {
 			Handler:     toolCourseEnrollmentsList,
 		},
 		{
+			Name:        "course_enrollment_update",
+			Description: "Approve, reject, cancel, activate, or complete an enrollment. Operator only. Args: space_id, member_id, status.",
+			InputSchema: schemaObject(map[string]any{
+				"space_id":  map[string]any{"type": "string"},
+				"member_id": map[string]any{"type": "string"},
+				"status":    map[string]any{"type": "string"},
+			}, []string{"space_id", "member_id", "status"}),
+			Handler: toolCourseEnrollmentUpdate,
+		},
+		{
 			Name:        "course_analytics",
 			Description: "Course analytics summary: content counts, enrollment counts, comments, and progress averages. Args: space_id.",
 			InputSchema: schemaObject(map[string]any{"space_id": map[string]any{"type": "string"}}, []string{"space_id"}),
@@ -344,7 +371,11 @@ func toolCoursesUpdateDetails(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cur.PriceCents = v
 	}
 	if v, ok := args["currency"].(string); ok && strings.TrimSpace(v) != "" {
-		cur.Currency = strings.ToUpper(strings.TrimSpace(v))
+		currency := strings.ToUpper(strings.TrimSpace(v))
+		if !currencyRE.MatchString(currency) {
+			return nil, errors.New("currency must be a three-letter ISO code")
+		}
+		cur.Currency = currency
 	}
 	if v, ok := stringArrayArg(args, "prerequisites"); ok {
 		cur.Prerequisites = v
@@ -473,11 +504,11 @@ func toolLessonResourcesAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateStorageFile(ctx, fileID); err != nil {
-		return nil, err
-	}
 	l, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateStorageFile(ctx, fileID); err != nil {
 		return nil, err
 	}
 	name := strArg(args, "name", "")
@@ -530,7 +561,44 @@ func toolLessonResourcesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		out = append(out, r)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"resources": out}, nil
+}
+
+func toolLessonBundleGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, err := mustStr(args, "id")
+	if err != nil {
+		return nil, err
+	}
+	lesson, err := toolLessonsGet(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resources, err := toolLessonResourcesList(ctx, map[string]any{"lesson_id": id})
+	if err != nil {
+		return nil, err
+	}
+	quizzes, err := toolQuizzesList(ctx, map[string]any{"lesson_id": id})
+	if err != nil {
+		return nil, err
+	}
+	assignments, err := toolAssignmentsList(ctx, map[string]any{"lesson_id": id})
+	if err != nil {
+		return nil, err
+	}
+	comments, err := toolLessonCommentsList(ctx, map[string]any{"lesson_id": id, "limit": int64(200)})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"lesson":      lesson,
+		"resources":   resources.(map[string]any)["resources"],
+		"quizzes":     quizzes.(map[string]any)["quizzes"],
+		"assignments": assignments.(map[string]any)["assignments"],
+		"comments":    comments.(map[string]any)["comments"],
+	}, nil
 }
 
 func toolLessonResourcesDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -571,6 +639,9 @@ func toolQuizzesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := intArg(args, "passing_score"); ok {
 		score = v
 	}
+	if score < 0 || score > 100 {
+		return nil, errors.New("passing_score must be between 0 and 100")
+	}
 	pos := int64(0)
 	if v, ok := intArg(args, "position"); ok {
 		pos = v
@@ -608,6 +679,9 @@ func toolQuizzesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		vals = append(vals, j)
 	}
 	if v, ok := intArg(args, "passing_score"); ok {
+		if v < 0 || v > 100 {
+			return nil, errors.New("passing_score must be between 0 and 100")
+		}
 		sets = append(sets, "passing_score = ?")
 		vals = append(vals, v)
 	}
@@ -647,6 +721,9 @@ func toolQuizzesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, q)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"quizzes": out}, nil
 }
 
@@ -675,6 +752,9 @@ func toolAssignmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	var due any
 	if v, ok := intArg(args, "due_after_days"); ok {
+		if v < 0 {
+			return nil, errors.New("due_after_days cannot be negative")
+		}
 		due = v
 	}
 	id := newID("asgn")
@@ -706,6 +786,9 @@ func toolAssignmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		vals = append(vals, v)
 	}
 	if v, ok := intArg(args, "due_after_days"); ok {
+		if v < 0 {
+			return nil, errors.New("due_after_days cannot be negative")
+		}
 		sets = append(sets, "due_after_days = ?")
 		vals = append(vals, v)
 	}
@@ -751,6 +834,9 @@ func toolAssignmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"assignments": out}, nil
 }
@@ -837,7 +923,18 @@ func toolDripScheduleSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	releaseAt := nullableString(args, "release_at")
 	var releaseAfter any
 	if v, ok := intArg(args, "release_after_days"); ok {
+		if v < 0 {
+			return nil, errors.New("release_after_days cannot be negative")
+		}
 		releaseAfter = v
+	}
+	if releaseAt != nil && releaseAfter != nil {
+		return nil, errors.New("set release_at or release_after_days, not both")
+	}
+	if releaseAt != nil {
+		if _, err := time.Parse(time.RFC3339, releaseAt.(string)); err != nil {
+			return nil, errors.New("release_at must be RFC3339")
+		}
 	}
 	id := newID("drip")
 	if _, err := ctx.AppDB().Exec(
@@ -876,6 +973,9 @@ func toolDripScheduleList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"schedules": out}, nil
 }
@@ -923,6 +1023,9 @@ func toolEnrollmentRulesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if v == "" {
 			cur.StartsAt = nil
 		} else {
+			if _, err := time.Parse(time.RFC3339, v); err != nil {
+				return nil, errors.New("starts_at must be RFC3339")
+			}
 			cur.StartsAt = &v
 		}
 	}
@@ -930,7 +1033,17 @@ func toolEnrollmentRulesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if v == "" {
 			cur.EndsAt = nil
 		} else {
+			if _, err := time.Parse(time.RFC3339, v); err != nil {
+				return nil, errors.New("ends_at must be RFC3339")
+			}
 			cur.EndsAt = &v
+		}
+	}
+	if cur.StartsAt != nil && cur.EndsAt != nil {
+		start, _ := time.Parse(time.RFC3339, *cur.StartsAt)
+		end, _ := time.Parse(time.RFC3339, *cur.EndsAt)
+		if !start.Before(end) {
+			return nil, errors.New("starts_at must be before ends_at")
 		}
 	}
 	if _, err := ctx.AppDB().Exec(
@@ -970,9 +1083,35 @@ func toolCourseEnroll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	delegated := strArg(args, "_viewer_member_id", "") != ""
+	if delegated && rule.AccessMode != "free" {
+		return nil, fmt.Errorf("%s courses require operator approval or an external purchase/invitation", rule.AccessMode)
+	}
+	now := time.Now().UTC()
+	if rule.StartsAt != nil {
+		start, err := time.Parse(time.RFC3339, *rule.StartsAt)
+		if err != nil || now.Before(start) {
+			return nil, errors.New("course enrollment has not opened")
+		}
+	}
+	if rule.EndsAt != nil {
+		end, err := time.Parse(time.RFC3339, *rule.EndsAt)
+		if err != nil || now.After(end) {
+			return nil, errors.New("course enrollment has closed")
+		}
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if rule.MaxEnrollments != nil {
 		var count int64
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM course_enrollments WHERE space_id = ? AND status IN ('pending','active','completed')`, spaceID).Scan(&count); err != nil {
+		if err := tx.QueryRow(
+			`SELECT COUNT(*) FROM course_enrollments
+			  WHERE space_id = ? AND member_id <> ? AND status IN ('pending','active','completed')`,
+			spaceID, memberID,
+		).Scan(&count); err != nil {
 			return nil, err
 		}
 		if count >= *rule.MaxEnrollments {
@@ -980,21 +1119,76 @@ func toolCourseEnroll(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	status := strArg(args, "status", "active")
+	if delegated {
+		status = "active"
+	}
 	if rule.RequiresApproval && status == "active" {
 		status = "pending"
 	}
 	if !map[string]bool{"pending": true, "active": true}[status] {
 		return nil, fmt.Errorf("status %q invalid", status)
 	}
-	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO course_enrollments (space_id, member_id, status)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(space_id, member_id) DO UPDATE SET status = excluded.status`,
+	if _, err := tx.Exec(
+		`INSERT INTO course_enrollments (space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at)
+		 VALUES (?, ?, ?, 'manual', NULL, NULL, NULL)
+		 ON CONFLICT(space_id, member_id) DO UPDATE SET
+		   status = excluded.status,
+		   source = 'manual',
+		   source_ref = NULL,
+		   access_expires_at = NULL,
+		   access_revoked_at = NULL,
+		   completed_at = CASE WHEN excluded.status = 'completed' THEN COALESCE(course_enrollments.completed_at, CURRENT_TIMESTAMP) ELSE NULL END`,
 		spaceID, memberID, status,
 	); err != nil {
 		return nil, err
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	emit(ctx, "course.enrolled", map[string]any{"community_id": space.CommunityID, "space_id": spaceID, "member_id": memberID, "status": status})
+	return loadCourseEnrollment(ctx.AppDB(), spaceID, memberID)
+}
+
+func toolCourseEnrollmentUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	spaceID, err := mustStr(args, "space_id")
+	if err != nil {
+		return nil, err
+	}
+	memberID, err := mustStr(args, "member_id")
+	if err != nil {
+		return nil, err
+	}
+	status, err := mustStr(args, "status")
+	if err != nil {
+		return nil, err
+	}
+	if !map[string]bool{"pending": true, "active": true, "rejected": true, "cancelled": true, "completed": true}[status] {
+		return nil, fmt.Errorf("status %q invalid", status)
+	}
+	space, err := ensureCourseSpace(ctx, ctx.AppDB(), spaceID)
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.AppDB().Exec(
+		`UPDATE course_enrollments
+		    SET status = ?,
+		        source = CASE WHEN ? = 'active' THEN 'manual' ELSE source END,
+		        source_ref = CASE WHEN ? = 'active' THEN NULL ELSE source_ref END,
+		        access_expires_at = CASE WHEN ? = 'active' THEN NULL ELSE access_expires_at END,
+		        access_revoked_at = CASE WHEN ? = 'active' THEN NULL ELSE access_revoked_at END,
+		        completed_at = CASE WHEN ? = 'completed' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END
+		  WHERE space_id = ? AND member_id = ?`,
+		status, status, status, status, status, status, spaceID, memberID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if changed, _ := res.RowsAffected(); changed == 0 {
+		return nil, errors.New("enrollment not found")
+	}
+	emit(ctx, "course.enrollment_updated", map[string]any{
+		"community_id": space.CommunityID, "space_id": spaceID, "member_id": memberID, "status": status,
+	})
 	return loadCourseEnrollment(ctx.AppDB(), spaceID, memberID)
 }
 
@@ -1007,7 +1201,9 @@ func toolCourseEnrollmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	status := strArg(args, "status", "")
-	q := `SELECT space_id, member_id, status, enrolled_at, completed_at FROM course_enrollments WHERE space_id = ?`
+	q := `SELECT space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at,
+	             enrolled_at, completed_at
+	        FROM course_enrollments WHERE space_id = ?`
 	vals := []any{spaceID}
 	if status != "" {
 		q += ` AND status = ?`
@@ -1026,6 +1222,9 @@ func toolCourseEnrollmentsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 			return nil, err
 		}
 		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"enrollments": out}, nil
 }
@@ -1119,7 +1318,7 @@ func validateStorageFile(ctx *sdk.AppCtx, id string) error {
 	if strings.TrimSpace(id) == "" {
 		return errors.New("storage file id required")
 	}
-	if ctx == nil || ctx.PlatformAPI() == nil {
+	if ctx == nil || ctx.PlatformAPI() == nil || ctx.IntegrationFor("storage") == nil {
 		return nil
 	}
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1138,14 +1337,10 @@ func validateStorageFile(ctx *sdk.AppCtx, id string) error {
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", args, &out); err != nil {
 		return fmt.Errorf("storage.files_get(%s): %w", id, err)
 	}
-	if !storageFileLookupFound(out.ID, out.Found, out.File) {
+	if out.ID == 0 && !out.Found && out.File == nil {
 		return fmt.Errorf("storage file %q not found", id)
 	}
 	return nil
-}
-
-func storageFileLookupFound(id int64, found bool, file any) bool {
-	return id != 0 || found || file != nil
 }
 
 func storageFileArg(args map[string]any, key string) (string, bool) {
@@ -1153,6 +1348,9 @@ func storageFileArg(args map[string]any, key string) (string, bool) {
 	case string:
 		return strings.TrimSpace(v), true
 	case float64:
+		if v != float64(int64(v)) {
+			return "", false
+		}
 		return strconv.FormatInt(int64(v), 10), true
 	case int:
 		return strconv.Itoa(v), true
@@ -1393,9 +1591,21 @@ func loadEnrollmentRule(db *sql.DB, spaceID string) (EnrollmentRule, error) {
 
 func scanCourseEnrollment(scan func(...any) error) (CourseEnrollment, error) {
 	var e CourseEnrollment
-	var completed sql.NullString
-	if err := scan(&e.SpaceID, &e.MemberID, &e.Status, &e.EnrolledAt, &completed); err != nil {
+	var sourceRef, expires, revoked, completed sql.NullString
+	if err := scan(
+		&e.SpaceID, &e.MemberID, &e.Status, &e.Source, &sourceRef, &expires, &revoked,
+		&e.EnrolledAt, &completed,
+	); err != nil {
 		return e, err
+	}
+	if sourceRef.Valid {
+		e.SourceRef = &sourceRef.String
+	}
+	if expires.Valid {
+		e.AccessExpiresAt = &expires.String
+	}
+	if revoked.Valid {
+		e.AccessRevokedAt = &revoked.String
 	}
 	if completed.Valid {
 		e.CompletedAt = &completed.String
@@ -1404,7 +1614,12 @@ func scanCourseEnrollment(scan func(...any) error) (CourseEnrollment, error) {
 }
 
 func loadCourseEnrollment(db *sql.DB, spaceID, memberID string) (CourseEnrollment, error) {
-	row := db.QueryRow(`SELECT space_id, member_id, status, enrolled_at, completed_at FROM course_enrollments WHERE space_id = ? AND member_id = ?`, spaceID, memberID)
+	row := db.QueryRow(
+		`SELECT space_id, member_id, status, source, source_ref, access_expires_at, access_revoked_at,
+		        enrolled_at, completed_at
+		   FROM course_enrollments WHERE space_id = ? AND member_id = ?`,
+		spaceID, memberID,
+	)
 	e, err := scanCourseEnrollment(row.Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, fmt.Errorf("course_enrollment %q/%q not found", spaceID, memberID)

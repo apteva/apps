@@ -1,4 +1,4 @@
-// Tests pinning v0.1.0 contracts:
+// Tests pinning MQTT app contracts:
 //
 //   * topic ACL glob matching is MQTT-conformant (+ one level, # rest)
 //   * bcrypt verify round-trips
@@ -15,13 +15,24 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/binary"
+	"errors"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/apteva/app-sdk/testkit"
+	mqtt "github.com/mochi-mqtt/server/v2"
+	"github.com/mochi-mqtt/server/v2/packets"
 	"golang.org/x/crypto/bcrypt"
 	_ "modernc.org/sqlite"
 )
@@ -33,12 +44,19 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	body, err := os.ReadFile("migrations/001_init.sql")
+	paths, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(body)); err != nil {
-		t.Fatal(err)
+	sort.Strings(paths)
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
 	}
 	return db
 }
@@ -105,37 +123,97 @@ func TestUserAuth_AddListVerify(t *testing.T) {
 	}
 }
 
-// TestPortFallback — listen on a port, then ask pickListenerPort
-// for that same port; should return a different free one without
-// erroring out, mirroring the torrent-engine fallback behavior.
-func TestPortFallback(t *testing.T) {
+func TestExplicitCredentialLifecycleKeepsPasswordAndACLSeparate(t *testing.T) {
+	db := openTestDB(t)
+	if err := createUser(db, "device-1", "first", []string{"devices/1/#"}, []string{"devices/1/commands"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := createUser(db, "device-1", "replacement", nil, nil); err == nil {
+		t.Fatal("duplicate create unexpectedly replaced user")
+	}
+	before, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := updateUserACL(db, "device-1", []string{"devices/1/telemetry"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterACL, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.passwordHash != afterACL.passwordHash {
+		t.Fatal("ACL update changed password hash")
+	}
+	if len(afterACL.AllowPublishTopics) != 1 || afterACL.AllowPublishTopics[0] != "devices/1/telemetry" || afterACL.AllowSubscribeTopics[0] != "devices/1/commands" {
+		t.Fatalf("ACL after update=%#v", afterACL)
+	}
+	if err := rotateUserPassword(db, "device-1", "second"); err != nil {
+		t.Fatal(err)
+	}
+	afterRotate, err := getUser(db, "device-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRotate.passwordHash == afterACL.passwordHash {
+		t.Fatal("password rotation did not change hash")
+	}
+	if afterRotate.AllowPublishTopics[0] != "devices/1/telemetry" {
+		t.Fatal("password rotation changed ACL")
+	}
+}
+
+// TestFixedPortConflictFails — a declared fixed port must never silently
+// relocate, because clients and runtime metadata depend on it.
+func TestFixedPortConflictFails(t *testing.T) {
 	l, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Close()
 	busy := l.Addr().(*net.TCPAddr).Port
-	t.Setenv("APTEVA_PROJECT_ID", "test")
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("test"),
+		testkit.WithConfig(map[string]string{"listen_port": strconv.Itoa(busy)}),
+	)
+	app := &App{ctx: ctx}
+	server := mqtt.New(nil)
+	_, _, err = attachTCPListener(server, app, busy)
+	if err == nil {
+		t.Fatalf("NewBroker accepted busy fixed port %d", busy)
+	}
+	if !strings.Contains(err.Error(), "address already in use") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
-	app := &App{ctx: testCtx(t, busy)}
-	got, err := pickListenerPort(app)
-	if err != nil {
-		t.Fatalf("pickListenerPort: %v", err)
+func TestDynamicPortRequiresExplicitZero(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("test"),
+		testkit.WithConfig(map[string]string{"listen_port": "0"}),
+	)
+	broker, err := NewBroker(&App{ctx: ctx})
+	if err != nil || broker.Port() <= 0 {
+		t.Fatalf("dynamic port=%d err=%v", broker.Port(), err)
 	}
-	if got == busy {
-		t.Errorf("returned busy port %d; expected fallback to a different one", busy)
-	}
-	if got <= 0 {
-		t.Errorf("invalid port %d", got)
+	t.Cleanup(func() { _ = broker.Close() })
+}
+
+func TestManagedPortDeclarationCannotDrift(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("test"),
+		testkit.WithConfig(map[string]string{"listen_port": "1884"}),
+	)
+	if _, err := pickListenerPort(&App{ctx: ctx}); err == nil || !strings.Contains(err.Error(), "managed installs") {
+		t.Fatalf("unexpected drift validation error: %v", err)
 	}
 }
 
 // TestHADiscoveryParser ensures the convention parser pulls fields
 // out of a typical HA-format payload and writes a row.
 func TestHADiscoveryParser(t *testing.T) {
-	db := openTestDB(t)
-	t.Setenv("APTEVA_PROJECT_ID", "proj-test")
-	app := &App{ctx: testCtxWithDB(t, db)}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("proj-test"))
+	app := &App{ctx: ctx}
 	const fixture = `{
 		"name":"Living Room Light","unique_id":"lr1",
 		"state_topic":"home/livingroom/light/state",
@@ -145,7 +223,7 @@ func TestHADiscoveryParser(t *testing.T) {
 	app.handleHAConfig("homeassistant/light/livingroom/config", []byte(fixture))
 
 	var name, manuf, model, st string
-	err := db.QueryRow(`SELECT display_name, manufacturer, model, state_topic
+	err := ctx.AppDB().QueryRow(`SELECT display_name, manufacturer, model, state_topic
 		FROM mqtt_devices WHERE slug = 'homeassistant/light/livingroom'`).
 		Scan(&name, &manuf, &model, &st)
 	if err != nil {
@@ -161,24 +239,340 @@ func TestHADiscoveryParser(t *testing.T) {
 	// Empty payload should remove.
 	app.handleHAConfig("homeassistant/light/livingroom/config", []byte(""))
 	var n int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM mqtt_devices`).Scan(&n)
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM mqtt_devices`).Scan(&n)
 	if n != 0 {
 		t.Errorf("empty payload didn't delete: %d rows remaining", n)
+	}
+}
+
+func TestRetainedMessagesRoundTripThroughSQLite(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("proj-test"))
+	app := &App{ctx: ctx}
+	hook := &retainedHook{app: app}
+	pk := packets.Packet{
+		TopicName: "devices/lamp/state", Payload: []byte(`{"on":true}`),
+		FixedHeader: packets.FixedHeader{Type: packets.Publish, Qos: 1, Retain: true},
+	}
+	hook.OnRetainMessage(nil, pk, 1)
+	stored, err := hook.StoredRetainedMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].TopicName != pk.TopicName || string(stored[0].Payload) != string(pk.Payload) {
+		t.Fatalf("stored retained = %#v", stored)
+	}
+	hook.OnRetainMessage(nil, packets.Packet{TopicName: pk.TopicName}, -1)
+	stored, err = hook.StoredRetainedMessages()
+	if err != nil || len(stored) != 0 {
+		t.Fatalf("retained delete: len=%d err=%v", len(stored), err)
+	}
+}
+
+func TestRetainedPublicHelpersFilterGetAndDelete(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec(`INSERT INTO mqtt_retained(topic,payload,qos,properties) VALUES
+		('devices/one/state','on',1,'{}'), ('other/state','off',0,'{}')`); err != nil {
+		t.Fatal(err)
+	}
+	list, err := listRetainedMessages(db, "devices/+/state", 100)
+	if err != nil || len(list) != 1 || list[0].Topic != "devices/one/state" || list[0].Payload != "on" {
+		t.Fatalf("retained list=%#v err=%v", list, err)
+	}
+	got, err := getRetainedMessage(db, "devices/one/state")
+	if err != nil || got.Topic != "devices/one/state" || got.QoS != 1 {
+		t.Fatalf("retained get=%#v err=%v", got, err)
+	}
+}
+
+func TestPublishGuardDropsOverLimit(t *testing.T) {
+	app := &App{}
+	hook := &publishGuardHook{app: app, clients: map[*mqtt.Client]*tokenBucket{}, rate: 1, burst: 1}
+	client := &mqtt.Client{ID: "noisy"}
+	pk := packets.Packet{TopicName: "devices/noisy/state"}
+	if _, err := hook.OnPublish(client, pk); err != nil {
+		t.Fatalf("first publish: %v", err)
+	}
+	if _, err := hook.OnPublish(client, pk); !errors.Is(err, packets.CodeSuccessIgnore) {
+		t.Fatalf("second publish error=%v", err)
+	}
+	if app.rateLimitedMessages.Load() != 1 {
+		t.Fatalf("rate limited=%d", app.rateLimitedMessages.Load())
+	}
+}
+
+func TestAuditPayloadIsBounded(t *testing.T) {
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithConfig(map[string]string{"max_log_payload_bytes": "4"}))
+	app := &App{ctx: ctx, messageLogCh: make(chan messageRecord, 1)}
+	hook := &busHook{app: app}
+	hook.recordMessage("client", "device", packets.Packet{Payload: []byte("abcdef")})
+	rec := <-app.messageLogCh
+	if string(rec.payload) != "abcd" || rec.payloadSize != 6 || !rec.truncated {
+		t.Fatalf("record=%#v", rec)
+	}
+}
+
+func TestBusSubscriptionUpsertReturnsStableIDAndScopesByProject(t *testing.T) {
+	db := openTestDB(t)
+	first, err := addBusSubscription(db, "p1", "devices/+/state", "device.state", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := addBusSubscription(db, "p1", "devices/+/state", "device.state", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID <= 0 || second.ID != first.ID {
+		t.Fatalf("IDs first=%d second=%d", first.ID, second.ID)
+	}
+	if _, err := addBusSubscription(db, "p2", "devices/+/state", "device.state", "test"); err != nil {
+		t.Fatal(err)
+	}
+	subs, err := listBusSubscriptions(db, "p1")
+	if err != nil || len(subs) != 1 || subs[0].ProjectID != "p1" {
+		t.Fatalf("p1 subscriptions=%#v err=%v", subs, err)
+	}
+}
+
+func TestPublishValidation(t *testing.T) {
+	for _, tc := range []struct {
+		topic string
+		qos   int
+		ok    bool
+	}{
+		{"devices/lamp/set", 0, true},
+		{"devices/+/set", 0, false},
+		{"", 0, false},
+		{"devices/lamp/set", 3, false},
+	} {
+		if got := validatePublish(tc.topic, tc.qos) == nil; got != tc.ok {
+			t.Errorf("validatePublish(%q,%d) ok=%v, want %v", tc.topic, tc.qos, got, tc.ok)
+		}
+	}
+}
+
+func TestEncodePayloadSupportsStructuredValues(t *testing.T) {
+	payload, err := encodePayload(map[string]any{"on": true, "level": float64(2)}, true)
+	if err != nil || string(payload) != `{"level":2,"on":true}` {
+		t.Fatalf("payload=%s err=%v", payload, err)
+	}
+	payload, err = encodePayload(nil, false)
+	if err != nil || len(payload) != 0 {
+		t.Fatalf("missing payload=%q err=%v", payload, err)
+	}
+}
+
+func TestBrokerRawTCPPublishReachesEventBusAndLog(t *testing.T) {
+	recorder := testkit.NewEmitRecorder()
+	ctx := testkit.NewAppCtx(t, "apteva.yaml",
+		testkit.WithProjectID("proj-test"),
+		testkit.WithEmitter(recorder),
+		testkit.WithConfig(map[string]string{
+			"listen_port":          "0",
+			"allow_anonymous":      "false",
+			"ha_discovery_enabled": "false",
+		}),
+	)
+	if err := createUser(ctx.AppDB(), "device-one", "secret", []string{"devices/#"}, []string{"devices/#"}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	brokerDone := make(chan error, 1)
+	persistenceDone := make(chan error, 1)
+	go func() { brokerDone <- app.broker.Serve(workerCtx) }()
+	go func() { persistenceDone <- app.runPersistence(workerCtx) }()
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(app.broker.Port()))
+	var conn net.Conn
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, _ = net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if conn != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("broker did not listen on %s", addr)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// MQTT 3.1.1 CONNECT with clean-session, client id "test1", and
+	// an authenticated device identity.
+	connectPacket := []byte{
+		0x10, 0x25,
+		0x00, 0x04, 'M', 'Q', 'T', 'T', 0x04, 0xc2, 0x00, 0x3c,
+		0x00, 0x05, 't', 'e', 's', 't', '1',
+		0x00, 0x0a, 'd', 'e', 'v', 'i', 'c', 'e', '-', 'o', 'n', 'e',
+		0x00, 0x06, 's', 'e', 'c', 'r', 'e', 't',
+	}
+	if _, err := conn.Write(connectPacket); err != nil {
+		t.Fatal(err)
+	}
+	connack := make([]byte, 4)
+	if _, err := io.ReadFull(conn, connack); err != nil {
+		t.Fatal(err)
+	}
+	if connack[0] != 0x20 || connack[3] != 0x00 {
+		t.Fatalf("CONNACK = %x", connack)
+	}
+	firstBridge, err := app.toolSubscribe(ctx, map[string]any{
+		"topic_pattern": "devices/+/+",
+		"bus_topic":     "devices.message",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBridge, err := app.toolSubscribe(ctx, map[string]any{
+		"topic_pattern": "devices/+/+",
+		"bus_topic":     "devices.message",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstBridge.(*BusSubscription).ID != secondBridge.(*BusSubscription).ID {
+		t.Fatalf("ensure bridge IDs differ: %#v %#v", firstBridge, secondBridge)
+	}
+
+	topic := "devices/test/state"
+	payload := []byte(`{"on":true}`)
+	remaining := 2 + len(topic) + len(payload)
+	if remaining >= 128 {
+		t.Fatal("test packet unexpectedly needs multi-byte remaining length")
+	}
+	publish := []byte{0x30, byte(remaining), 0, 0}
+	binary.BigEndian.PutUint16(publish[2:4], uint16(len(topic)))
+	publish = append(publish, topic...)
+	publish = append(publish, payload...)
+	if _, err := conn.Write(publish); err != nil {
+		t.Fatal(err)
+	}
+
+	var data map[string]any
+	eventDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(eventDeadline) {
+		for _, event := range recorder.EventsByTopic("mqtt.message") {
+			candidate, _ := event.Data.(map[string]any)
+			if candidate["topic"] == topic {
+				data = candidate
+				break
+			}
+		}
+		if data != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if data == nil || data["payload"] != string(payload) || data["username"] != "device-one" {
+		t.Fatalf("matching mqtt.message data = %#v", data)
+	}
+	deviceEvents := recorder.EventsByTopic("mqtt.devices.message")
+	if len(deviceEvents) != 1 {
+		t.Fatalf("filtered device events=%#v", deviceEvents)
+	}
+	deviceData, _ := deviceEvents[0].Data.(map[string]any)
+	if deviceData["username"] != "device-one" || deviceData["topic"] != topic {
+		t.Fatalf("filtered device data=%#v", deviceData)
+	}
+	connected := recorder.EventsByTopic("mqtt.client.connected")
+	if len(connected) != 1 {
+		t.Fatalf("connected events=%#v", connected)
+	}
+	connectedData, _ := connected[0].Data.(map[string]any)
+	if connectedData["username"] != "device-one" || connectedData["client_id"] != "test1" {
+		t.Fatalf("connected data=%#v", connectedData)
+	}
+	logDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(logDeadline) {
+		var count int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&count); err == nil && count == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("message log count=%d err=%v", count, err)
+	}
+	var loggedUsername string
+	if err := ctx.AppDB().QueryRow(`SELECT username FROM mqtt_message_log WHERE topic = ?`, topic).Scan(&loggedUsername); err != nil || loggedUsername != "device-one" {
+		t.Fatalf("logged username=%q err=%v", loggedUsername, err)
+	}
+
+	_ = conn.Close()
+	disconnectDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(disconnectDeadline) && len(recorder.EventsByTopic("mqtt.client.disconnected")) == 0 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	disconnected := recorder.EventsByTopic("mqtt.client.disconnected")
+	if len(disconnected) != 1 {
+		t.Fatalf("disconnected events=%#v", disconnected)
+	}
+
+	cancel()
+	select {
+	case err := <-brokerDone:
+		if err != nil {
+			t.Fatalf("broker shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("broker did not stop")
+	}
+	select {
+	case err := <-persistenceDone:
+		if err != nil {
+			t.Fatalf("persistence shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("persistence worker did not stop")
 	}
 }
 
 // TestManifestValidates — the same belt-and-braces check we do for
 // torrent. The embedded const must round-trip through ParseManifest.
 func TestManifestValidates(t *testing.T) {
-	if _, err := sdk.ParseManifest([]byte(manifestYAML)); err != nil {
+	handlers := (&App{}).EventHandlers()
+	if len(handlers) != 1 || handlers[0].Event != "mqtt.publish_request" || handlers[0].Handler == nil {
+		t.Fatalf("event handlers=%#v", handlers)
+	}
+	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
 		t.Fatalf("embedded manifest invalid: %v", err)
+	}
+	if len(m.Provides.Publishes) != 4 || m.Provides.Publishes[0].Name != "mqtt.message" {
+		t.Fatalf("publishes=%#v", m.Provides.Publishes)
+	}
+	if len(m.Runtime.Ports) != 1 || m.Runtime.Ports[0].ContainerPort != 1883 {
+		t.Fatalf("embedded runtime ports=%#v", m.Runtime.Ports)
+	}
+	declaredTools := map[string]bool{}
+	for _, tool := range m.Provides.MCPTools {
+		declaredTools[tool.Name] = true
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if !declaredTools[tool.Name] {
+			t.Errorf("runtime MCP tool %q missing from manifest", tool.Name)
+		}
+		delete(declaredTools, tool.Name)
+	}
+	if len(declaredTools) != 0 {
+		t.Errorf("manifest declares MCP tools not implemented at runtime: %v", declaredTools)
 	}
 	body, err := os.ReadFile("apteva.yaml")
 	if err != nil {
 		t.Fatalf("read apteva.yaml: %v", err)
 	}
-	if _, err := sdk.ParseManifest(body); err != nil {
+	fileManifest, err := sdk.ParseManifest(body)
+	if err != nil {
 		t.Fatalf("apteva.yaml invalid: %v", err)
+	}
+	if len(fileManifest.Runtime.Ports) != 1 || fileManifest.Runtime.Ports[0].ContainerPort != 1883 {
+		t.Fatalf("runtime ports=%#v", fileManifest.Runtime.Ports)
 	}
 }
 
@@ -197,10 +591,13 @@ func TestPanelContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	tsx := string(body)
+	if !strings.Contains(tsx, "/_install/${encodeURIComponent(String(installId))}") {
+		t.Error("panel API must select its exact install; unscoped project installs are rejected by the app proxy")
+	}
 	// Every fetch(`${API}/foo…`) — extract the literal path segment
 	// and assert the route exists. Simple-grep, not a parser; good
 	// enough until someone aliases API.
-	for _, want := range []string{"/status", "/messages", "/users", "/subscriptions", "/devices", "/test_publish"} {
+	for _, want := range []string{"/status", "/clients", "/messages", "/users", "/subscriptions", "/retained", "/devices", "/test_publish"} {
 		if !strings.Contains(tsx, "${API}"+want) {
 			t.Errorf("panel doesn't fetch %s — drift?", want)
 		}
@@ -209,50 +606,4 @@ func TestPanelContract(t *testing.T) {
 			t.Errorf("backend missing route %s — panel will hang", want)
 		}
 	}
-}
-
-// ─── test helpers ───────────────────────────────────────────────────
-
-// testCtx — a stub *sdk.AppCtx wired up just enough for the tests
-// that don't need a DB. Currently only pickListenerPort which reads
-// listen_port from config; we patch the config via env.
-//
-// The SDK doesn't expose a New(...) that takes a custom config, so
-// we test pickListenerPort indirectly by setting APTEVA_PROJECT_ID
-// and trusting configString's defaults.
-//
-// nil ctx works for resolveWorkingDir-style helpers but not for
-// configString — pickListenerPort calls configInt(ctx, "listen_port",
-// 1883) which walks ctx.Config(). For now, give a real ctx but with
-// a synthesised installation; the SDK testkit handles this.
-func testCtx(t *testing.T, configPort int) *sdk.AppCtx {
-	t.Helper()
-	// Without testkit access (avoiding the larger import), create a
-	// nil-tolerant ctx by calling pickListenerPort directly through
-	// config-via-env hack: configString reads ctx.Config() not env,
-	// so we end up using the default 1883 and pickListenerPort hits
-	// the busy-port fallback path naturally because the test holds a
-	// listener on a different port. That's actually what we want for
-	// TestPortFallback — verify the fallback finds *some* free port.
-	//
-	// Using nil keeps the test independent of SDK internals.
-	_ = configPort
-	return nil
-}
-
-func testCtxWithDB(t *testing.T, db *sql.DB) *sdk.AppCtx {
-	t.Helper()
-	// Same disclaimer — the test only uses ctx via a.ctx.AppDB() path.
-	// Since handleHAConfig calls a.ctx.AppDB() and projectScope() reads
-	// the env var, we can't pass nil here. We construct a minimal
-	// AppCtx wrapper that returns the test DB.
-	//
-	// SDK's *AppCtx is defined in app-sdk; we can't construct one
-	// directly here without exporting a constructor. Workaround: use
-	// the handleHAConfig logic against an App that has its own ctx
-	// shim. That requires a small refactor we accept later. For now,
-	// SKIP this construction by using a different code path — call
-	// a helper that takes the DB directly.
-	t.Skip("ctx construction requires SDK testkit — covered by integration tests once we add them")
-	return nil
 }

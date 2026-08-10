@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: docs
 display_name: Documents
-version: 0.4.1
+version: 0.4.2
 description: |
   Generate client-facing documents from Markdown or authored HTML/CSS and
   store them in storage. Templates live in this app's DB; agents call
@@ -20,6 +20,8 @@ description: |
   derivation pointer.
 
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [documents, pdf, templates, invoices, contracts, lead-magnets, html]
 
 scopes: [project]

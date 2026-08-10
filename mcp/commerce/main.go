@@ -2,15 +2,16 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -45,11 +46,18 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
-func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{Name: "provider-dispatch-reconcile", Schedule: "@every 30s", Run: a.reconcileProviderDispatches},
+		{Name: "provider-source-sync", Schedule: "@every 15m", Run: a.reconcileProviderSources},
+	}
+}
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
 		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
 		{Topic: "checkout.paid", Handler: a.handleCheckoutPaid},
+		{Topic: "checkout.expired", Handler: a.handleCheckoutExpired},
+		{Topic: "inventory.reservation.expired", Handler: a.handleInventoryReservationExpired},
 	}
 }
 
@@ -58,6 +66,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/summary", Handler: a.handleSummary},
 		{Pattern: "/admin/stores", Handler: a.handleStores},
 		{Pattern: "/admin/stores/", Handler: a.handleStore},
+		{Pattern: "/admin/store-settings", Handler: a.handleStoreSettings},
 		{Pattern: "/admin/products", Handler: a.handleProducts},
 		{Pattern: "/admin/products/", Handler: a.handleProduct},
 		{Pattern: "/admin/variants/", Handler: a.handleVariant},
@@ -66,7 +75,16 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/admin/carts", Handler: a.handleCarts},
 		{Pattern: "/admin/sales", Handler: a.handleSales},
 		{Pattern: "/admin/sales/", Handler: a.handleSale},
-		{Pattern: "/s/", Handler: a.handlePublic, NoAuth: true},
+		{Pattern: "/admin/providers", Handler: a.handleProviders},
+		{Pattern: "/admin/provider-catalog", Handler: a.handleProviderCatalog},
+		{Pattern: "/admin/provider-products", Handler: a.handleProviderProduct},
+		{Pattern: "/admin/provider-products/import", Handler: a.handleProviderProduct},
+		{Pattern: "/admin/variant-sources", Handler: a.handleVariantSources},
+		{Pattern: "/admin/shipping/quote", Handler: a.handleShippingQuote},
+		{Pattern: "/admin/dispatches", Handler: a.handleDispatches},
+		{Pattern: "/admin/dispatches/", Handler: a.handleDispatch},
+		{Pattern: "/admin/storefront", Handler: a.handleStorefrontConfiguration},
+		{Pattern: "/admin/marketing-channel", Handler: a.handleMarketingChannel},
 	}
 }
 
@@ -76,49 +94,72 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "commerce_stores_list", Description: "List stores.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolStoresList},
 		{Name: "commerce_stores_get", Description: "Fetch one store by id or slug.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "slug": typ("string")}, nil), Handler: a.toolStoresGet},
 		{Name: "commerce_stores_update", Description: "Patch a store. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolStoresUpdate},
+		{Name: "commerce_store_settings_get", Description: "Return Commerce-owned shipping, transactional tax, market, and payment settings for a store.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string")}, nil), Handler: a.toolStoreSettingsGet},
+		{Name: "commerce_store_settings_update", Description: "Patch Commerce-owned shipping, transactional tax, market, or payment settings without replacing unrelated store metadata. Args: store_id, patch.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "patch": typ("object")}, []string{"store_id", "patch"}), Handler: a.toolStoreSettingsUpdate},
 		{Name: "commerce_products_create", Description: "Create a storefront listing and optional first variant. Args: store_id, title, handle?, description_html?, catalog_product_id?, price_cents?, sku?, inventory_item_id?.", InputSchema: schemaObject(productCreateProps(), []string{"title"}), Handler: a.toolProductsCreate},
 		{Name: "commerce_products_list", Description: "List storefront listings. Args: store_id?, status?, q?, limit?.", InputSchema: schemaObject(listingFilterProps(), nil), Handler: a.toolProductsList},
-		{Name: "commerce_products_get", Description: "Fetch one listing with variants. Args: id? or handle? plus store_id?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolProductsGet},
+		{Name: "commerce_products_get", Description: "Fetch one listing with variants. Args: id? or handle? plus store_id?, status?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolProductsGet},
 		{Name: "commerce_products_update", Description: "Patch a storefront listing. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolProductsUpdate},
 		{Name: "commerce_products_publish", Description: "Publish a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsPublish},
 		{Name: "commerce_products_archive", Description: "Archive a listing. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolProductsArchive},
 		{Name: "commerce_variants_create", Description: "Create a listing variant. Args: listing_id, sku?, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?.", InputSchema: schemaObject(variantProps(), []string{"listing_id"}), Handler: a.toolVariantsCreate},
 		{Name: "commerce_variants_update", Description: "Patch a variant. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolVariantsUpdate},
 		{Name: "commerce_collections_create", Description: "Create a collection. Args: store_id, handle?, title, description_html?.", InputSchema: schemaObject(collectionProps(), []string{"title"}), Handler: a.toolCollectionsCreate},
-		{Name: "commerce_collections_list", Description: "List collections. Args: store_id?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, nil), Handler: a.toolCollectionsList},
-		{Name: "commerce_collections_get", Description: "Fetch a collection with products. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolCollectionsGet},
+		{Name: "commerce_collections_list", Description: "List collections. Args: store_id?, status?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolCollectionsList},
+		{Name: "commerce_collections_get", Description: "Fetch a collection with products. Args: id? or handle? plus store_id?, status?.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "handle": typ("string"), "store_id": typ("integer"), "status": typ("string")}, nil), Handler: a.toolCollectionsGet},
 		{Name: "commerce_collections_update", Description: "Patch a collection. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolCollectionsUpdate},
 		{Name: "commerce_collections_add_product", Description: "Add a listing to a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer"), "sort_order": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsAddProduct},
 		{Name: "commerce_collections_remove_product", Description: "Remove a listing from a collection. Args: collection_id, listing_id.", InputSchema: schemaObject(map[string]any{"collection_id": typ("integer"), "listing_id": typ("integer")}, []string{"collection_id", "listing_id"}), Handler: a.toolCollectionsRemoveProduct},
 		{Name: "commerce_cart_create", Description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "session_token": typ("string")}, nil), Handler: a.toolCartCreate},
-		{Name: "commerce_carts_list", Description: "List Commerce carts. Args: store_id?, status?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolCartsList},
+		{Name: "commerce_carts_list", Description: "List Commerce carts, including inactive abandonment candidates. Args: store_id?, status?, updated_before? (RFC3339), updated_after? (RFC3339), inactive_for_minutes?, has_items?, abandoned_only? (nonempty open/checkout carts; defaults to 24h inactivity), sort? (updated_desc|updated_asc), limit?.", InputSchema: schemaObject(cartFilterProps(), nil), Handler: a.toolCartsList},
 		{Name: "commerce_cart_get", Description: "Fetch a Commerce cart with items. Args: cart_id? or session_token? plus store_id?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "session_token": typ("string"), "store_id": typ("integer")}, nil), Handler: a.toolCartGet},
 		{Name: "commerce_cart_add_item", Description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "variant_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "variant_id"}), Handler: a.toolCartAddItem},
 		{Name: "commerce_cart_set_quantity", Description: "Set a Commerce cart item's quantity. Args: cart_id, item_id, quantity.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "item_id": typ("integer"), "quantity": typ("number")}, []string{"cart_id", "item_id", "quantity"}), Handler: a.toolCartSetQuantity},
 		{Name: "commerce_checkout_start", Description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer")}, []string{"cart_id"}), Handler: a.toolCheckoutStart},
+		{Name: "commerce_checkout_bootstrap", Description: "Return browser-safe durable cart, quote, checkout, sale, and optional resumed payment state. Args: store_id, session_token, include_payment?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "session_token": typ("string"), "include_payment": typ("boolean")}, []string{"session_token"}), Handler: a.toolCheckoutBootstrap},
+		{Name: "commerce_checkout_quote", Description: "Calculate and persist a unified shipping, Catalog discount, and transactional tax quote. Args: cart_id, shipping_address?, shipping_option_id?, discount_code?, remove_discount?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "shipping_address": typ("object"), "shipping_option_id": typ("string"), "discount_code": typ("string"), "remove_discount": typ("boolean"), "customer_ref": typ("string")}, []string{"cart_id"}), Handler: a.toolCheckoutQuote},
 		{Name: "commerce_checkout_update", Description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer"), "patch": typ("object")}, []string{"checkout_id", "patch"}), Handler: a.toolCheckoutUpdate},
 		{Name: "commerce_checkout_cancel", Description: "Cancel a checkout and release active inventory reservations. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutCancel},
-		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
+		{Name: "commerce_checkout_pay", Description: "Submit the backing Checkout session using the store payment configuration and create a Commerce sale record. Args: checkout_id.", InputSchema: schemaObject(map[string]any{"checkout_id": typ("integer")}, []string{"checkout_id"}), Handler: a.toolCheckoutPay},
+		{Name: "commerce_checkout_status", Description: "Return the browser-safe checkout status for a storefront session. Args: store_id, session_token.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "session_token": typ("string")}, []string{"store_id", "session_token"}), Handler: a.toolCheckoutStatus},
 		{Name: "commerce_checkout_mark_paid", Description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id.", InputSchema: schemaObject(map[string]any{"sale_id": typ("integer")}, []string{"sale_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "commerce_sales_list", Description: "List sales. Args: store_id?, status?, payment_status?, limit?.", InputSchema: schemaObject(salesFilterProps(), nil), Handler: a.toolSalesList},
 		{Name: "commerce_sales_get", Description: "Fetch one sale. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolSalesGet},
+		{Name: "commerce_providers_list", Description: "List supplier provider connections and store policies. Args: store_id?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, nil), Handler: a.toolProvidersList},
+		{Name: "commerce_provider_policy_set", Description: "Set a store's provider policy. Args: store_id, connection_id, enabled?, fulfillment_mode?, margin_bps?, settings?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "enabled": typ("boolean"), "fulfillment_mode": typ("string"), "margin_bps": typ("integer"), "settings": typ("object")}, []string{"store_id", "connection_id"}), Handler: a.toolProviderPolicySet},
+		{Name: "commerce_provider_catalog", Description: "Browse a bound provider using provider-specific input. Args: store_id, connection_id, provider_input?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "provider_input": typ("object")}, []string{"store_id", "connection_id"}), Handler: a.toolProviderCatalog},
+		{Name: "commerce_provider_product_get", Description: "Fetch and adapt one provider product. Args: store_id, connection_id, external_product_id, provider_input?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "external_product_id": typ("string"), "provider_input": typ("object")}, []string{"store_id", "connection_id", "external_product_id"}), Handler: a.toolProviderProductGet},
+		{Name: "commerce_provider_product_import", Description: "Import selected provider variants into Catalog and a draft Commerce listing. Args: store_id, connection_id, external_product_id or product, variant_ids?, price_cents_by_variant?, provider_input?. Prodigi requires provider_input.assets with printArea and a public url.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "connection_id": typ("integer"), "external_product_id": typ("string"), "product": typ("object"), "variant_ids": typ("array"), "price_cents_by_variant": typ("object"), "provider_input": typ("object"), "title": typ("string"), "handle": typ("string"), "vendor": typ("string"), "product_type": typ("string")}, []string{"store_id", "connection_id"}), Handler: a.toolProviderProductImport},
+		{Name: "commerce_variant_sources_list", Description: "List imported provider variant mappings. Args: store_id?, listing_id?, provider?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "listing_id": typ("integer"), "provider": typ("string")}, nil), Handler: a.toolVariantSourcesList},
+		{Name: "commerce_variant_source_update", Description: "Patch an imported variant's supplier SKU, cost, currency, availability, or quantity. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolVariantSourceUpdate},
+		{Name: "commerce_shipping_quote", Description: "Quote provider shipping for sourced cart lines and freeze the selected total on the Commerce cart. Args: cart_id, shipping_address, apply?.", InputSchema: schemaObject(map[string]any{"cart_id": typ("integer"), "shipping_address": typ("object"), "apply": typ("boolean")}, []string{"cart_id", "shipping_address"}), Handler: a.toolShippingQuote},
+		{Name: "commerce_dispatches_list", Description: "List provider dispatch jobs. Args: store_id?, sale_id?, status?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "sale_id": typ("integer"), "status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolDispatchesList},
+		{Name: "commerce_dispatch_submit", Description: "Approve or retry one provider dispatch job. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolDispatchSubmit},
+		{Name: "commerce_sources_sync", Description: "Synchronize imported provider variant cost and availability. Args: store_id?, listing_id?, provider?, limit?.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer"), "listing_id": typ("integer"), "provider": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolSourcesSync},
+		{Name: "commerce_marketing_channel_options", Description: "List Meta ad accounts and Pixels available through the optional Ads app. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelOptions},
+		{Name: "commerce_marketing_channel_get", Description: "Return the configured marketing channel for a store. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelGet},
+		{Name: "commerce_marketing_channel_configure", Description: "Select or create a Meta Pixel and install consent-gated browser tracking on the Content storefront.", InputSchema: schemaObject(marketingChannelProps(), []string{"store_id", "ad_account_id"}), Handler: a.toolMarketingChannelConfigure},
+		{Name: "commerce_marketing_channel_disconnect", Description: "Disable a store marketing channel and remove it from the published storefront. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelDisconnect},
+		{Name: "commerce_marketing_channel_public_get", Description: "Return browser-public tracking configuration for a store. Args: store_id.", InputSchema: schemaObject(map[string]any{"store_id": typ("integer")}, []string{"store_id"}), Handler: a.toolMarketingChannelPublicGet},
 	}
 }
 
 type Store struct {
-	ID                int64          `json:"id"`
-	Slug              string         `json:"slug"`
-	Name              string         `json:"name"`
-	Status            string         `json:"status"`
-	PublicBaseURL     string         `json:"public_base_url"`
-	DefaultCurrency   string         `json:"default_currency"`
-	DefaultLocale     string         `json:"default_locale"`
-	Timezone          string         `json:"timezone"`
-	OrderNumberFormat string         `json:"order_number_format"`
-	CheckoutMode      string         `json:"checkout_mode"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	ID                  int64          `json:"id"`
+	Slug                string         `json:"slug"`
+	Name                string         `json:"name"`
+	Status              string         `json:"status"`
+	PublicBaseURL       string         `json:"public_base_url"`
+	DefaultCurrency     string         `json:"default_currency"`
+	DefaultLocale       string         `json:"default_locale"`
+	Timezone            string         `json:"timezone"`
+	OrderNumberFormat   string         `json:"order_number_format"`
+	CheckoutMode        string         `json:"checkout_mode"`
+	PaymentProvider     string         `json:"payment_provider"`
+	PaymentPresentation string         `json:"payment_presentation"`
+	Metadata            map[string]any `json:"metadata,omitempty"`
+	CreatedAt           string         `json:"created_at"`
+	UpdatedAt           string         `json:"updated_at"`
 }
 
 type Listing struct {
@@ -176,20 +217,21 @@ type Collection struct {
 }
 
 type Cart struct {
-	ID             int64       `json:"id"`
-	StoreID        int64       `json:"store_id"`
-	CheckoutCartID *int64      `json:"checkout_cart_id,omitempty"`
-	SessionToken   string      `json:"session_token"`
-	Status         string      `json:"status"`
-	SubtotalCents  int64       `json:"subtotal_cents"`
-	DiscountCents  int64       `json:"discount_cents"`
-	TaxCents       int64       `json:"tax_cents"`
-	ShippingCents  int64       `json:"shipping_cents"`
-	TotalCents     int64       `json:"total_cents"`
-	Currency       string      `json:"currency"`
-	Items          []*CartItem `json:"items,omitempty"`
-	CreatedAt      string      `json:"created_at"`
-	UpdatedAt      string      `json:"updated_at"`
+	ID             int64          `json:"id"`
+	StoreID        int64          `json:"store_id"`
+	CheckoutCartID *int64         `json:"checkout_cart_id,omitempty"`
+	SessionToken   string         `json:"session_token"`
+	Status         string         `json:"status"`
+	SubtotalCents  int64          `json:"subtotal_cents"`
+	DiscountCents  int64          `json:"discount_cents"`
+	TaxCents       int64          `json:"tax_cents"`
+	ShippingCents  int64          `json:"shipping_cents"`
+	TotalCents     int64          `json:"total_cents"`
+	Currency       string         `json:"currency"`
+	Metadata       map[string]any `json:"metadata,omitempty"`
+	Items          []*CartItem    `json:"items,omitempty"`
+	CreatedAt      string         `json:"created_at"`
+	UpdatedAt      string         `json:"updated_at"`
 }
 
 type CartItem struct {
@@ -202,6 +244,7 @@ type CartItem struct {
 	CatalogPriceID  *int64  `json:"catalog_price_id,omitempty"`
 	SKU             string  `json:"sku"`
 	TitleSnapshot   string  `json:"title_snapshot"`
+	ImageURL        string  `json:"image_url,omitempty"`
 	UnitAmountCents int64   `json:"unit_amount_cents"`
 	Currency        string  `json:"currency"`
 	Quantity        float64 `json:"quantity"`
@@ -210,20 +253,22 @@ type CartItem struct {
 }
 
 type CheckoutSession struct {
-	ID                int64          `json:"id"`
-	StoreID           int64          `json:"store_id"`
-	CartID            int64          `json:"cart_id"`
-	CheckoutSessionID *int64         `json:"checkout_session_id,omitempty"`
-	Status            string         `json:"status"`
-	ReservationIDs    []int64        `json:"reservation_ids"`
-	InvoiceID         *int64         `json:"invoice_id,omitempty"`
-	InvoiceNumber     string         `json:"invoice_number"`
-	CustomerEmail     string         `json:"customer_email"`
-	CustomerName      string         `json:"customer_name"`
-	ShippingAddress   map[string]any `json:"shipping_address,omitempty"`
-	BillingAddress    map[string]any `json:"billing_address,omitempty"`
-	CreatedAt         string         `json:"created_at"`
-	UpdatedAt         string         `json:"updated_at"`
+	ID                    int64          `json:"id"`
+	StoreID               int64          `json:"store_id"`
+	CartID                int64          `json:"cart_id"`
+	CheckoutSessionID     *int64         `json:"checkout_session_id,omitempty"`
+	Status                string         `json:"status"`
+	ReservationIDs        []int64        `json:"reservation_ids"`
+	InvoiceID             *int64         `json:"invoice_id,omitempty"`
+	InvoiceNumber         string         `json:"invoice_number"`
+	CustomerEmail         string         `json:"customer_email"`
+	CustomerName          string         `json:"customer_name"`
+	ShippingAddress       map[string]any `json:"shipping_address,omitempty"`
+	BillingAddress        map[string]any `json:"billing_address,omitempty"`
+	DiscountReservationID string         `json:"discount_reservation_id,omitempty"`
+	Quote                 map[string]any `json:"quote,omitempty"`
+	CreatedAt             string         `json:"created_at"`
+	UpdatedAt             string         `json:"updated_at"`
 }
 
 type Sale struct {
@@ -418,6 +463,11 @@ func (a *App) toolProductsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	out, err := resolveListing(ctx.AppDB(), pid, args)
+	if err == nil && out != nil {
+		if status := strArg(args, "status"); status != "" && out.Status != status {
+			return nil, errors.New("product not found")
+		}
+	}
 	return map[string]any{"product": out}, err
 }
 
@@ -524,7 +574,15 @@ func (a *App) toolCollectionsGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, intArg(args, "id"))
+	collection, err := resolveCollection(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status")
+	if status != "" && collection.Status != status {
+		return nil, errors.New("collection not found")
+	}
+	out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, collection.ID, status)
 	return map[string]any{"collection": out}, err
 }
 
@@ -607,11 +665,59 @@ func (a *App) toolCheckoutCancel(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolCheckoutPay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	sale, checkout, err := a.checkoutPay(ctx, args)
+	sale, checkout, payment, err := a.checkoutPay(ctx, args)
 	if err == nil {
 		ctx.Emit("commerce.sale.created", map[string]any{"sale_id": sale.ID, "checkout_id": checkout.ID, "store_id": sale.StoreID})
 	}
-	return map[string]any{"sale": sale, "checkout": checkout}, err
+	return map[string]any{"sale": sale, "checkout": checkout, "payment": payment}, err
+}
+
+func (a *App) toolCheckoutStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(strArg(args, "session_token"))
+	if token == "" {
+		return nil, errors.New("session_token required")
+	}
+	cart, err := dbCartGetBySession(ctx.AppDB(), pid, intArg(args, "store_id"), token)
+	if err != nil || cart == nil {
+		return map[string]any{"status": "not_found"}, err
+	}
+	checkout, err := dbCheckoutGetByCart(ctx.AppDB(), pid, cart.ID)
+	if err != nil || checkout == nil {
+		return map[string]any{"status": cart.Status, "payment_status": "unpaid"}, err
+	}
+	sale, err := dbSaleGetByCheckout(ctx.AppDB(), pid, checkout.ID)
+	if err != nil {
+		return nil, err
+	}
+	if sale == nil {
+		return map[string]any{
+			"status": checkout.Status, "payment_status": "unpaid",
+		}, nil
+	}
+	contents := make([]map[string]any, 0, len(sale.Items))
+	for _, item := range sale.Items {
+		contentID := ""
+		if item.VariantID != nil {
+			contentID = fmt.Sprintf("commerce-variant-%d", *item.VariantID)
+		}
+		if contentID != "" {
+			contents = append(contents, map[string]any{"id": contentID, "quantity": item.Quantity, "item_price": float64(item.UnitAmountCents) / 100})
+		}
+	}
+	return map[string]any{
+		"status":             sale.Status,
+		"payment_status":     sale.PaymentStatus,
+		"fulfillment_status": sale.FulfillmentStatus,
+		"invoice_number":     sale.InvoiceNumber,
+		"sale_id":            sale.ID,
+		"total_cents":        sale.TotalCents,
+		"currency":           sale.Currency,
+		"contents":           contents,
+	}, nil
 }
 
 func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -709,6 +815,37 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		return nil, errors.New("store is not active")
 	}
 	token := firstNonEmpty(strArg(args, "session_token"), newToken())
+	if existing, err := dbCartGetBySession(ctx.AppDB(), pid, store.ID, token); err != nil {
+		return nil, err
+	} else if existing != nil {
+		if existing.Status == "checkout" {
+			checkout, err := dbCheckoutGetByCart(ctx.AppDB(), pid, existing.ID)
+			if err != nil {
+				return nil, err
+			}
+			if checkout == nil {
+				return nil, errors.New("checkout cart is missing its checkout session")
+			}
+			if _, err := a.checkoutCancel(ctx, map[string]any{
+				"_project_id": pid,
+				"checkout_id": checkout.ID,
+			}); err != nil {
+				return nil, fmt.Errorf("reopen storefront cart: %w", err)
+			}
+			reopened, err := dbCartGet(ctx.AppDB(), pid, existing.ID, true)
+			if err != nil {
+				return nil, err
+			}
+			return a.rebuildCheckoutCart(ctx, pid, reopened)
+		}
+		if existing.Status == "converted" {
+			return a.replaceConvertedCart(ctx, pid, store, existing, token)
+		}
+		if existing.Status != "open" && existing.Status != "checkout" && existing.Status != "awaiting_payment" {
+			return nil, fmt.Errorf("session cart is %s; start a new storefront session", existing.Status)
+		}
+		return existing, nil
+	}
 	var checkoutResp map[string]any
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
@@ -729,6 +866,128 @@ func (a *App) createCart(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		return nil, err
 	}
 	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
+}
+
+func (a *App) replaceConvertedCart(ctx *sdk.AppCtx, pid string, store *Store, converted *Cart, sessionToken string) (*Cart, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	var created map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
+		"_project_id":   pid,
+		"session_token": newToken(),
+		"metadata": map[string]any{
+			"source":                    "commerce",
+			"store_id":                  store.ID,
+			"previous_commerce_cart_id": converted.ID,
+		},
+	}, &created); err != nil {
+		return nil, fmt.Errorf("create post-purchase Checkout cart: %w", err)
+	}
+	checkoutCartID := intArg(unwrap(created, "cart"), "id")
+	if checkoutCartID == 0 {
+		return nil, errors.New("post-purchase Checkout cart response missing id")
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	archivedToken := fmt.Sprintf("%s:converted:%d:%s", sessionToken, converted.ID, newToken())
+	if _, err := tx.Exec(
+		`UPDATE commerce_carts SET session_token=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND status='converted'`,
+		archivedToken, pid, converted.ID,
+	); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(
+		`INSERT INTO commerce_carts (project_id, store_id, checkout_cart_id, session_token, currency, metadata_json)
+		 VALUES (?, ?, ?, ?, ?, '{}')`,
+		pid, store.ID, checkoutCartID, sessionToken, store.DefaultCurrency,
+	)
+	if err != nil {
+		return nil, err
+	}
+	newCartID, _ := result.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbCartGet(ctx.AppDB(), pid, newCartID, true)
+}
+
+func (a *App) rebuildCheckoutCart(ctx *sdk.AppCtx, pid string, cart *Cart) (*Cart, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	var created map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_create", map[string]any{
+		"_project_id":   pid,
+		"session_token": newToken(),
+		"metadata": map[string]any{
+			"source":           "commerce",
+			"store_id":         cart.StoreID,
+			"commerce_cart_id": cart.ID,
+			"recovered":        true,
+		},
+	}, &created); err != nil {
+		return nil, fmt.Errorf("create replacement Checkout cart: %w", err)
+	}
+	checkoutCartID := intArg(unwrap(created, "cart"), "id")
+	if checkoutCartID == 0 {
+		return nil, errors.New("replacement Checkout cart response missing id")
+	}
+	checkoutItemIDs := make(map[int64]int64, len(cart.Items))
+	for _, item := range cart.Items {
+		if item.CatalogPriceID == nil || *item.CatalogPriceID == 0 {
+			return nil, fmt.Errorf("cart item %d is missing its Catalog price", item.ID)
+		}
+		var replayed map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{
+			"_project_id": pid,
+			"cart_id":     checkoutCartID,
+			"price_id":    *item.CatalogPriceID,
+			"quantity":    item.Quantity,
+		}, &replayed); err != nil {
+			return nil, fmt.Errorf("replay cart item %d: %w", item.ID, err)
+		}
+		checkoutItemID, checkoutQty := checkoutCartItem(replayed, *item.CatalogPriceID)
+		if checkoutItemID == 0 || math.Abs(checkoutQty-item.Quantity) > 1e-9 {
+			return nil, fmt.Errorf("replacement Checkout cart returned an inconsistent item %d", item.ID)
+		}
+		checkoutItemIDs[item.ID] = checkoutItemID
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE commerce_carts SET checkout_cart_id=?, status='open', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, checkoutCartID, pid, cart.ID); err != nil {
+		return nil, err
+	}
+	for itemID, checkoutItemID := range checkoutItemIDs {
+		if _, err := tx.Exec(`UPDATE commerce_cart_items SET checkout_item_id=?, updated_at=CURRENT_TIMESTAMP
+			WHERE project_id=? AND cart_id=? AND id=?`, checkoutItemID, pid, cart.ID, itemID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbCartGet(ctx.AppDB(), pid, cart.ID, true)
+}
+
+func checkoutCartRequiresRebuild(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "only 'open' carts") ||
+		strings.Contains(message, "only open carts") ||
+		strings.Contains(message, "cart is converted") ||
+		strings.Contains(message, "cart is cancelled") ||
+		strings.Contains(message, "cart is expired")
 }
 
 func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
@@ -791,8 +1050,19 @@ func (a *App) addCartItem(ctx *sdk.AppCtx, args map[string]any) (*Cart, error) {
 		}
 	}
 	var checkoutCart map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": price.ID, "quantity": qty}, &checkoutCart); err != nil {
-		return nil, fmt.Errorf("checkout cart add item: %w", err)
+	addArgs := map[string]any{"_project_id": pid, "cart_id": *cart.CheckoutCartID, "price_id": price.ID, "quantity": qty}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", addArgs, &checkoutCart); err != nil {
+		if !checkoutCartRequiresRebuild(err) {
+			return nil, fmt.Errorf("checkout cart add item: %w", err)
+		}
+		cart, err = a.rebuildCheckoutCart(ctx, pid, cart)
+		if err != nil {
+			return nil, fmt.Errorf("rebuild stale Checkout cart: %w", err)
+		}
+		addArgs["cart_id"] = *cart.CheckoutCartID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_add_item", addArgs, &checkoutCart); err != nil {
+			return nil, fmt.Errorf("checkout cart add item after rebuild: %w", err)
+		}
 	}
 	checkoutItemID, checkoutQty := checkoutCartItem(checkoutCart, price.ID)
 	if checkoutItemID == 0 || math.Abs(checkoutQty-(previousQty+qty)) > 1e-9 {
@@ -853,10 +1123,26 @@ func (a *App) setCartItemQuantity(ctx *sdk.AppCtx, args map[string]any) (*Cart, 
 		return nil, errors.New("cart item is not synchronized with Checkout")
 	}
 	var checkoutCart map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", map[string]any{
+	setArgs := map[string]any{
 		"_project_id": pid, "cart_id": *cart.CheckoutCartID, "item_id": *item.CheckoutItemID, "quantity": qty,
-	}, &checkoutCart); err != nil {
-		return nil, fmt.Errorf("checkout cart set quantity: %w", err)
+	}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", setArgs, &checkoutCart); err != nil {
+		if !checkoutCartRequiresRebuild(err) {
+			return nil, fmt.Errorf("checkout cart set quantity: %w", err)
+		}
+		cart, err = a.rebuildCheckoutCart(ctx, pid, cart)
+		if err != nil {
+			return nil, fmt.Errorf("rebuild stale Checkout cart: %w", err)
+		}
+		item, err = dbCartItemGet(ctx.AppDB(), pid, cart.ID, item.ID)
+		if err != nil || item == nil || item.CheckoutItemID == nil {
+			return nil, firstErr(err, errors.New("rebuilt cart item is not synchronized with Checkout"))
+		}
+		setArgs["cart_id"] = *cart.CheckoutCartID
+		setArgs["item_id"] = *item.CheckoutItemID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "cart_set_quantity", setArgs, &checkoutCart); err != nil {
+			return nil, fmt.Errorf("checkout cart set quantity after rebuild: %w", err)
+		}
 	}
 	if err := dbCartSetQuantity(ctx.AppDB(), pid, cart.ID, item.ID, qty); err != nil {
 		if compensationErr := setCheckoutItemQuantity(ctx, pid, *cart.CheckoutCartID, *item.CheckoutItemID, item.Quantity); compensationErr != nil {
@@ -887,6 +1173,19 @@ func (a *App) checkoutStart(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSess
 	if len(cart.Items) == 0 {
 		return nil, errors.New("cannot checkout an empty cart")
 	}
+	if _, err := cartSourceGroups(ctx.AppDB(), pid, cart); err != nil {
+		return nil, err
+	}
+	discountReservationID, err := a.reserveCartDiscount(ctx, pid, cart)
+	if err != nil {
+		return nil, err
+	}
+	started := false
+	defer func() {
+		if !started && discountReservationID != "" {
+			_ = a.releaseDiscountReservation(ctx, pid, discountReservationID)
+		}
+	}()
 	resIDs := []int64{}
 	if ctx.PlatformAPI() == nil || cart.CheckoutCartID == nil {
 		return nil, errors.New("cart is not linked to Checkout")
@@ -921,19 +1220,39 @@ func (a *App) checkoutStart(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSess
 		}
 		return nil, errors.New("Checkout response missing session id")
 	}
+	var adjustmentResp map[string]any
+	quoteSnapshot := mapArg(cart.Metadata, "checkout_quote")
+	if len(quoteSnapshot) == 0 {
+		quoteSnapshot = mapArg(cart.Metadata, "shipping_quote")
+	}
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_set_adjustments", map[string]any{
+		"_project_id":    pid,
+		"session_id":     checkoutSessionID,
+		"shipping_cents": cart.ShippingCents,
+		"discount_cents": cart.DiscountCents,
+		"tax_cents":      cart.TaxCents,
+		"adjustments":    quoteSnapshot,
+	}, &adjustmentResp); err != nil {
+		if compensationErr := a.cancelCheckoutAndRelease(ctx, pid, checkoutSessionID, resIDs); compensationErr != nil {
+			return nil, fmt.Errorf("checkout_set_adjustments: %w; compensation failed: %v", err, compensationErr)
+		}
+		return nil, fmt.Errorf("checkout_set_adjustments: %w", err)
+	}
+	checkoutSession = unwrap(adjustmentResp, "session")
 	if intArg(checkoutSession, "total_cents") != cart.TotalCents || strings.ToUpper(strArg(checkoutSession, "currency")) != cart.Currency {
 		if compensationErr := a.cancelCheckoutAndRelease(ctx, pid, checkoutSessionID, resIDs); compensationErr != nil {
 			return nil, fmt.Errorf("Commerce and Checkout cart totals do not match; compensation failed: %w", compensationErr)
 		}
 		return nil, errors.New("Commerce and Checkout cart totals do not match")
 	}
-	out, err := dbCheckoutCreate(ctx.AppDB(), pid, cart, checkoutSessionID, resIDs)
+	out, err := dbCheckoutCreate(ctx.AppDB(), pid, cart, checkoutSessionID, resIDs, discountReservationID, quoteSnapshot)
 	if err != nil {
 		if compensationErr := a.cancelCheckoutAndRelease(ctx, pid, checkoutSessionID, resIDs); compensationErr != nil {
 			return nil, fmt.Errorf("persist checkout: %w; compensation failed: %v", err, compensationErr)
 		}
 		return nil, err
 	}
+	started = true
 	return out, nil
 }
 
@@ -955,13 +1274,44 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		patch["customer_name"] = name
 		delete(patch, "name")
 	}
+	if checkoutPatchMatches(ch, patch) {
+		return ch, nil
+	}
 	if ch.Status != "started" {
+		if ch.Status == "awaiting_payment" && ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
+			if matches, err := checkoutRemotePatchMatches(ctx, pid, *ch.CheckoutSessionID, patch); err != nil {
+				return nil, err
+			} else if matches {
+				return ch, nil
+			}
+		}
 		return nil, fmt.Errorf("checkout is %s; only started checkouts accept updates", ch.Status)
 	}
 	if ch.CheckoutSessionID != nil && ctx.PlatformAPI() != nil {
 		var out map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_update", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID, "patch": patch}, &out); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "awaiting_payment") {
+				if matches, matchErr := checkoutRemotePatchMatches(ctx, pid, *ch.CheckoutSessionID, patch); matchErr != nil {
+					return nil, matchErr
+				} else if matches {
+					return ch, nil
+				}
+			}
 			return nil, fmt.Errorf("checkout_update: %w", err)
+		}
+		if step := firstNonEmpty(strArg(patch, "current_step"), strArg(patch, "step")); step != "" {
+			advanceArgs := map[string]any{
+				"_project_id": pid, "session_id": *ch.CheckoutSessionID, "step": step,
+			}
+			if value, ok := patch["buyer_details"]; ok {
+				advanceArgs["buyer_details"] = value
+			}
+			if selected := mapArg(ch.Quote, "selected_shipping"); len(selected) > 0 {
+				advanceArgs["selected_shipping"] = selected
+			}
+			if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_advance", advanceArgs, &out); err != nil {
+				return nil, fmt.Errorf("checkout_advance: %w", err)
+			}
 		}
 	}
 	if err := dbCheckoutPatch(ctx.AppDB(), pid, ch.ID, patch); err != nil {
@@ -970,50 +1320,122 @@ func (a *App) checkoutUpdate(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 	return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
 }
 
-func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, error) {
+func checkoutPatchMatches(ch *CheckoutSession, patch map[string]any) bool {
+	if hasKey(patch, "current_step") || hasKey(patch, "step") || hasKey(patch, "buyer_details") {
+		return false
+	}
+	if hasKey(patch, "email") && !strings.EqualFold(ch.CustomerEmail, strArg(patch, "email")) {
+		return false
+	}
+	if hasKey(patch, "customer_name") && strings.TrimSpace(ch.CustomerName) != strArg(patch, "customer_name") {
+		return false
+	}
+	if hasKey(patch, "shipping_address") && jsonText(ch.ShippingAddress, "{}") != jsonText(patch["shipping_address"], "{}") {
+		return false
+	}
+	if hasKey(patch, "billing_address") && jsonText(ch.BillingAddress, "{}") != jsonText(patch["billing_address"], "{}") {
+		return false
+	}
+	return true
+}
+
+func checkoutRemotePatchMatches(ctx *sdk.AppCtx, pid string, sessionID int64, patch map[string]any) (bool, error) {
+	var response map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{
+		"_project_id": pid,
+		"session_id":  sessionID,
+	}, &response); err != nil {
+		return false, fmt.Errorf("checkout_get: %w", err)
+	}
+	return checkoutExternalPatchMatches(unwrap(response, "session"), patch), nil
+}
+
+func checkoutExternalPatchMatches(session, patch map[string]any) bool {
+	for key, value := range patch {
+		switch key {
+		case "current_step", "step":
+			if !strings.EqualFold(strArg(session, "current_step"), strings.TrimSpace(fmt.Sprint(value))) {
+				return false
+			}
+		case "buyer_details", "shipping_address", "billing_address":
+			if jsonText(session[key], "{}") != jsonText(value, "{}") {
+				return false
+			}
+		case "email", "customer_email":
+			if !strings.EqualFold(strArg(session, "email"), strings.TrimSpace(fmt.Sprint(value))) {
+				return false
+			}
+		case "customer_name", "name":
+			if strArg(session, "customer_name") != strings.TrimSpace(fmt.Sprint(value)) {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(patch) > 0
+}
+
+func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *CheckoutSession, map[string]any, error) {
 	pid, err := requireProject(ctx, args)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ch, err := dbCheckoutGet(ctx.AppDB(), pid, intArg(args, "checkout_id"))
 	if err != nil || ch == nil {
-		return nil, nil, firstErr(err, errors.New("checkout not found"))
+		return nil, nil, nil, firstErr(err, errors.New("checkout not found"))
 	}
 	if ch.CheckoutSessionID == nil || ctx.PlatformAPI() == nil {
-		return nil, nil, errors.New("checkout is not linked to Checkout")
+		return nil, nil, nil, errors.New("checkout is not linked to Checkout")
 	}
-	if existing, err := dbSaleGetByCheckout(ctx.AppDB(), pid, ch.ID); err != nil {
-		return nil, nil, err
-	} else if existing != nil {
-		return existing, ch, nil
+	existing, err := dbSaleGetByCheckout(ctx.AppDB(), pid, ch.ID)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	var checkoutResponse map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_get", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
-		return nil, nil, fmt.Errorf("checkout_get: %w", err)
+		return nil, nil, nil, fmt.Errorf("checkout_get: %w", err)
 	}
 	external := unwrap(checkoutResponse, "session")
 	externalStatus := strArg(external, "status")
 	if externalStatus != "started" && externalStatus != "awaiting_payment" && externalStatus != "paid" && externalStatus != "completed" {
-		return nil, nil, fmt.Errorf("Checkout session cannot be paid from status %q", externalStatus)
+		return nil, nil, nil, fmt.Errorf("Checkout session cannot be paid from status %q", externalStatus)
 	}
 	cart, err := dbCartGet(ctx.AppDB(), pid, ch.CartID, true)
 	if err != nil || cart == nil {
-		return nil, nil, firstErr(err, errors.New("cart not found"))
+		return nil, nil, nil, firstErr(err, errors.New("cart not found"))
 	}
 	if intArg(external, "total_cents") != cart.TotalCents || strings.ToUpper(strArg(external, "currency")) != cart.Currency {
-		return nil, nil, errors.New("Commerce and Checkout totals do not match")
+		return nil, nil, nil, errors.New("Commerce and Checkout totals do not match")
 	}
-	if strArg(external, "status") == "started" {
+	store, err := dbStoreGetByID(ctx.AppDB(), pid, ch.StoreID)
+	if err != nil || store == nil {
+		return nil, nil, nil, firstErr(err, errors.New("store not found"))
+	}
+	payment := map[string]any{
+		"provider": store.PaymentProvider, "presentation": store.PaymentPresentation,
+	}
+	if externalStatus == "started" || externalStatus == "awaiting_payment" {
+		paymentArgs, err := commercePaymentArgs(ctx, pid, store, ch)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 		checkoutResponse = nil
-		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", map[string]any{"_project_id": pid, "session_id": *ch.CheckoutSessionID}, &checkoutResponse); err != nil {
-			return nil, nil, fmt.Errorf("checkout_pay: %w", err)
+		paymentArgs["_project_id"] = pid
+		paymentArgs["session_id"] = *ch.CheckoutSessionID
+		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_pay", paymentArgs, &checkoutResponse); err != nil {
+			return nil, nil, nil, fmt.Errorf("checkout_pay: %w", err)
 		}
 		external = unwrap(checkoutResponse, "session")
+		externalStatus = strArg(external, "status")
+		if value := mapArg(checkoutResponse, "payment"); len(value) > 0 {
+			payment = value
+		}
 	}
 	invoiceID := firstNonZero(intArg(checkoutResponse, "invoice_id"), intArg(external, "invoice_id"))
 	invoiceNumber := strArg(checkoutResponse, "invoice_number")
 	if invoiceID == 0 {
-		return nil, nil, errors.New("Checkout has not produced an invoice")
+		return nil, nil, nil, errors.New("Checkout has not produced an invoice")
 	}
 	if invoiceNumber == "" {
 		var billingResponse map[string]any
@@ -1022,17 +1444,101 @@ func (a *App) checkoutPay(ctx *sdk.AppCtx, args map[string]any) (*Sale, *Checkou
 		}
 	}
 	if err := dbCheckoutInvoice(ctx.AppDB(), pid, ch.ID, invoiceID, invoiceNumber); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	ch, err = dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
 	if err != nil || ch == nil {
-		return nil, nil, firstErr(err, errors.New("checkout disappeared after invoice creation"))
+		return nil, nil, nil, firstErr(err, errors.New("checkout disappeared after invoice creation"))
 	}
-	sale, err := dbSaleCreateFromCheckout(ctx.AppDB(), pid, ch)
+	sale := existing
+	if sale == nil {
+		sale, err = dbSaleCreateFromCheckout(ctx.AppDB(), pid, ch)
+	}
 	if err == nil && (externalStatus == "paid" || externalStatus == "completed") {
 		sale, err = a.completePaidSale(ctx, sale, true)
 	}
-	return sale, ch, err
+	return sale, ch, payment, err
+}
+
+func commercePaymentArgs(ctx *sdk.AppCtx, pid string, store *Store, checkout *CheckoutSession) (map[string]any, error) {
+	provider := strings.ToLower(strings.TrimSpace(store.PaymentProvider))
+	if provider == "" {
+		provider = "manual"
+	}
+	if provider == "manual" {
+		return map[string]any{"provider": "manual", "presentation": "manual"}, nil
+	}
+	if provider != "stripe" {
+		return nil, fmt.Errorf("unsupported store payment provider %q", provider)
+	}
+	presentation := strings.ToLower(strings.TrimSpace(store.PaymentPresentation))
+	if presentation == "" {
+		presentation = "elements"
+	}
+	if presentation != "elements" && presentation != "hosted" {
+		return nil, fmt.Errorf("unsupported Stripe presentation %q", presentation)
+	}
+	returnURL, cancelURL, err := commerceCheckoutURLs(ctx, pid, store)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"provider":        provider,
+		"presentation":    presentation,
+		"idempotency_key": fmt.Sprintf("commerce-stripe-%s-v2-%s-%d-%s", presentation, pid, checkout.ID, checkoutPaymentFingerprint(checkout)),
+	}
+	paymentSettings := mapArg(store.Metadata, "payments")
+	if methods := providerRows(paymentSettings["payment_method_types"]); len(methods) > 0 {
+		out["payment_method_types"] = methods
+	}
+	if boolArg(paymentSettings, "save_payment_method") {
+		out["save_payment_method"] = true
+	}
+	if boolArg(paymentSettings, "set_default_payment_method") {
+		out["set_default_payment_method"] = true
+	}
+	if presentation == "elements" {
+		out["return_url"] = returnURL
+	} else {
+		out["success_url"] = returnURL
+		out["cancel_url"] = cancelURL
+	}
+	return out, nil
+}
+
+func checkoutPaymentFingerprint(checkout *CheckoutSession) string {
+	payload, _ := json.Marshal(map[string]any{
+		"checkout_session_id": checkout.CheckoutSessionID,
+		"quote":               checkout.Quote,
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:8])
+}
+
+func commerceReturnURL(ctx *sdk.AppCtx, pid string, store *Store) (string, error) {
+	returnURL, _, err := commerceCheckoutURLs(ctx, pid, store)
+	return returnURL, err
+}
+
+func commerceCheckoutURLs(ctx *sdk.AppCtx, pid string, store *Store) (string, string, error) {
+	if base := strings.TrimRight(strings.TrimSpace(store.PublicBaseURL), "/"); base != "" {
+		u, err := url.Parse(base)
+		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+			return "", "", errors.New("store public_base_url must be an absolute http(s) URL")
+		}
+		return base + "/checkout/return", base + "/checkout", nil
+	}
+	info, err := ctx.PlatformInfo()
+	if err != nil || info == nil || strings.TrimSpace(info.PublicURL) == "" {
+		return "", "", errors.New("Stripe checkout requires the store public_base_url or the platform public_url")
+	}
+	siteSlug := strArg(store.Metadata, "content_site_slug")
+	if siteSlug == "" {
+		return "", "", errors.New("Stripe checkout requires a configured Content storefront")
+	}
+	query := url.Values{"project_id": []string{pid}, "site": []string{siteSlug}}
+	base := strings.TrimRight(info.PublicURL, "/") + "/api/apps/content/public"
+	return base + "/checkout/return?" + query.Encode(), base + "/checkout?" + query.Encode(), nil
 }
 
 func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSession, error) {
@@ -1048,7 +1554,17 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		return nil, errors.New("paid checkout cannot be cancelled")
 	}
 	if ch.Status == "cancelled" {
-		return ch, nil
+		if err := a.voidCheckoutInvoice(ctx, pid, ch); err != nil {
+			return nil, err
+		}
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE commerce_sales SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+			  WHERE project_id=? AND checkout_id=? AND payment_status!='paid'`,
+			pid, ch.ID,
+		); err != nil {
+			return nil, err
+		}
+		return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
 	}
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
@@ -1057,9 +1573,15 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 		var response map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("checkout", "checkout_cancel", map[string]any{
 			"_project_id": pid, "session_id": *ch.CheckoutSessionID,
-		}, &response); err != nil && !strings.Contains(err.Error(), "already cancelled") {
-			return nil, fmt.Errorf("checkout_cancel: %w", err)
+		}, &response); err != nil {
+			message := strings.ToLower(err.Error())
+			if !strings.Contains(message, "already cancelled") && !strings.Contains(message, "already expired") {
+				return nil, fmt.Errorf("checkout_cancel: %w", err)
+			}
 		}
+	}
+	if err := a.releaseDiscountReservation(ctx, pid, ch.DiscountReservationID); err != nil {
+		return nil, err
 	}
 	if err := dbReservationLinksEnsure(ctx.AppDB(), ch.ID, ch.ReservationIDs); err != nil {
 		return nil, err
@@ -1080,6 +1602,9 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 			return nil, err
 		}
 	}
+	if err := a.voidCheckoutInvoice(ctx, pid, ch); err != nil {
+		return nil, err
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -1091,10 +1616,36 @@ func (a *App) checkoutCancel(ctx *sdk.AppCtx, args map[string]any) (*CheckoutSes
 	if _, err := tx.Exec(`UPDATE commerce_carts SET status='open', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=? AND status='checkout'`, pid, ch.CartID); err != nil {
 		return nil, err
 	}
+	if _, err := tx.Exec(
+		`UPDATE commerce_sales SET status='cancelled', updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND checkout_id=? AND payment_status!='paid'`,
+		pid, ch.ID,
+	); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbCheckoutGet(ctx.AppDB(), pid, ch.ID)
+}
+
+func (a *App) voidCheckoutInvoice(ctx *sdk.AppCtx, pid string, checkout *CheckoutSession) error {
+	if checkout == nil || checkout.InvoiceID == nil || *checkout.InvoiceID == 0 {
+		return nil
+	}
+	if ctx.PlatformAPI() == nil {
+		return errors.New("platform API unavailable")
+	}
+	var response map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_void", map[string]any{
+		"_project_id": pid, "invoice_id": *checkout.InvoiceID, "reason": "commerce checkout cancelled",
+	}, &response); err != nil {
+		message := strings.ToLower(err.Error())
+		if !strings.Contains(message, "already void") && !strings.Contains(message, "already cancelled") {
+			return fmt.Errorf("void Billing invoice: %w", err)
+		}
+	}
+	return nil
 }
 
 func (a *App) markSalePaid(ctx *sdk.AppCtx, args map[string]any) (*Sale, error) {
@@ -1112,6 +1663,12 @@ func (a *App) markSalePaid(ctx *sdk.AppCtx, args map[string]any) (*Sale, error) 
 func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent bool) (*Sale, error) {
 	pid := ctx.CurrentProject()
 	if sale.PaymentStatus == "paid" && sale.Status == "paid" {
+		if err := a.queueSaleDispatches(ctx, pid, sale); err != nil {
+			message := "queue provider fulfillment: " + err.Error()
+			_ = dbSaleSetProcessingError(ctx.AppDB(), pid, sale.ID, message)
+			ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": sale.ID, "error": message})
+			return nil, errors.New(message)
+		}
 		return sale, nil
 	}
 	if sale.InvoiceID == nil || *sale.InvoiceID == 0 {
@@ -1170,6 +1727,12 @@ func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent 
 			return nil, err
 		}
 	}
+	if err := a.redeemDiscountReservation(ctx, pid, ch.DiscountReservationID); err != nil {
+		message := err.Error()
+		_ = dbSaleSetProcessingError(ctx.AppDB(), pid, sale.ID, message)
+		ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": sale.ID, "error": message})
+		return nil, err
+	}
 	orderID := ptrValue(sale.OrderID)
 	if orderID == 0 {
 		orderID, err = a.createOrderForSale(ctx, pid, sale)
@@ -1200,10 +1763,17 @@ func (a *App) completePaidSale(ctx *sdk.AppCtx, sale *Sale, trustedBillingEvent 
 		return nil, err
 	}
 	completed, err := dbSaleGet(ctx.AppDB(), pid, sale.ID)
-	if err == nil && completed != nil {
-		ctx.Emit("commerce.sale.paid", map[string]any{"sale_id": completed.ID, "store_id": completed.StoreID})
+	if err != nil || completed == nil {
+		return completed, err
 	}
-	return completed, err
+	if err := a.queueSaleDispatches(ctx, pid, completed); err != nil {
+		message := "queue provider fulfillment: " + err.Error()
+		_ = dbSaleSetProcessingError(ctx.AppDB(), pid, completed.ID, message)
+		ctx.Emit("commerce.sale.processing_failed", map[string]any{"sale_id": completed.ID, "error": message})
+		return nil, errors.New(message)
+	}
+	ctx.Emit("commerce.sale.paid", map[string]any{"sale_id": completed.ID, "store_id": completed.StoreID})
+	return completed, nil
 }
 
 func (a *App) createOrderForSale(ctx *sdk.AppCtx, pid string, sale *Sale) (int64, error) {
@@ -1242,7 +1812,10 @@ func (a *App) createOrderForSale(ctx *sdk.AppCtx, pid string, sale *Sale) (int64
 			"quantity":           it.Quantity,
 			"unit_amount_cents":  it.UnitAmountCents,
 			"currency":           it.Currency,
-			"metadata":           map[string]any{"commerce_variant_id": ptrValue(it.VariantID), "commerce_listing_id": ptrValue(it.ListingID)},
+			"metadata": map[string]any{
+				"commerce_variant_id": ptrValue(it.VariantID), "commerce_listing_id": ptrValue(it.ListingID),
+				"inventory_item_id": ptrValue(it.InventoryItemID),
+			},
 		})
 	}
 	var out map[string]any
@@ -1288,11 +1861,17 @@ func dbStoreCreate(db *sql.DB, pid string, args map[string]any) (*Store, error) 
 	if !looksLikeCurrency(currency) {
 		return nil, errors.New("default_currency must be a 3-letter ISO code")
 	}
+	paymentProvider := strings.ToLower(firstNonEmpty(strArg(args, "payment_provider"), "manual"))
+	paymentPresentation := strings.ToLower(firstNonEmpty(strArg(args, "payment_presentation"), "elements"))
+	if err := validateStorePayment(paymentProvider, paymentPresentation); err != nil {
+		return nil, err
+	}
 	res, err := db.Exec(`INSERT INTO commerce_stores
-		(project_id, slug, name, public_base_url, default_currency, default_locale, timezone, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		(project_id, slug, name, public_base_url, default_currency, default_locale, timezone, payment_provider, payment_presentation, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, slug, name, strArg(args, "public_base_url"), currency,
-		firstNonEmpty(strArg(args, "default_locale"), "en"), firstNonEmpty(strArg(args, "timezone"), "UTC"), jsonText(args["metadata"], "{}"))
+		firstNonEmpty(strArg(args, "default_locale"), "en"), firstNonEmpty(strArg(args, "timezone"), "UTC"),
+		paymentProvider, paymentPresentation, jsonText(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -1390,6 +1969,17 @@ func dbStoreUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Sto
 		sets = append(sets, "default_currency=?")
 		vals = append(vals, v)
 	}
+	paymentProvider := firstNonEmpty(strArg(patch, "payment_provider"), store.PaymentProvider)
+	paymentPresentation := firstNonEmpty(strArg(patch, "payment_presentation"), store.PaymentPresentation)
+	if hasKey(patch, "payment_provider") || hasKey(patch, "payment_presentation") {
+		paymentProvider = strings.ToLower(paymentProvider)
+		paymentPresentation = strings.ToLower(paymentPresentation)
+		if err := validateStorePayment(paymentProvider, paymentPresentation); err != nil {
+			return nil, err
+		}
+		sets = append(sets, "payment_provider=?", "payment_presentation=?")
+		vals = append(vals, paymentProvider, paymentPresentation)
+	}
 	if _, ok := patch["metadata"]; ok {
 		sets = append(sets, "metadata_json=?")
 		vals = append(vals, jsonText(patch["metadata"], "{}"))
@@ -1435,6 +2025,10 @@ func dbListingsList(db *sql.DB, pid string, args map[string]any) ([]*Listing, er
 	if id := intArg(args, "store_id"); id != 0 {
 		where = append(where, "store_id=?")
 		vals = append(vals, id)
+	}
+	if status := strArg(args, "status"); status != "" {
+		where = append(where, "status=?")
+		vals = append(vals, status)
 	}
 	if st := strArg(args, "status"); st != "" {
 		where = append(where, "status=?")
@@ -1692,6 +2286,30 @@ func dbCollectionGet(db *sql.DB, pid string, id int64) (*Collection, error) {
 	return c, err
 }
 
+func resolveCollection(db *sql.DB, pid string, args map[string]any) (*Collection, error) {
+	if id := intArg(args, "id"); id != 0 {
+		collection, err := dbCollectionGet(db, pid, id)
+		if err != nil || collection == nil {
+			return nil, firstErr(err, errors.New("collection not found"))
+		}
+		return collection, nil
+	}
+	handle := strArg(args, "handle")
+	if handle == "" {
+		return nil, errors.New("id or handle required")
+	}
+	store, err := resolveStore(db, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	row := db.QueryRow(collectionSelect()+` WHERE project_id=? AND store_id=? AND handle=?`, pid, store.ID, slugify(handle))
+	collection, err := scanCollection(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errors.New("collection not found")
+	}
+	return collection, err
+}
+
 func dbCollectionAddListing(db *sql.DB, pid string, collectionID, listingID int64, sortOrder int) error {
 	if collectionID == 0 || listingID == 0 {
 		return errors.New("collection_id and listing_id required")
@@ -1733,6 +2351,19 @@ func dbCartCreate(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	return dbCartGet(db, pid, id, true)
 }
 
+func dbCartGetBySession(db *sql.DB, pid string, storeID int64, token string) (*Cart, error) {
+	row := db.QueryRow(cartSelect()+` WHERE project_id=? AND store_id=? AND session_token=?`, pid, storeID, token)
+	cart, err := scanCart(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	cart.Items, err = dbCartItems(db, pid, cart.ID)
+	return cart, err
+}
+
 func resolveCart(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if id := firstNonZero(intArg(args, "cart_id"), intArg(args, "id")); id != 0 {
 		c, err := dbCartGet(db, pid, id, true)
@@ -1746,14 +2377,9 @@ func resolveCart(db *sql.DB, pid string, args map[string]any) (*Cart, error) {
 	if token == "" || storeID == 0 {
 		return nil, errors.New("cart_id or session_token+store_id required")
 	}
-	row := db.QueryRow(cartSelect()+` WHERE project_id=? AND store_id=? AND session_token=?`, pid, storeID, token)
-	c, err := scanCart(row)
-	if err != nil {
-		return nil, firstErr(skipNoRows(err), errors.New("cart not found"))
-	}
-	c.Items, err = dbCartItems(db, pid, c.ID)
-	if err != nil {
-		return nil, err
+	c, err := dbCartGetBySession(db, pid, storeID, token)
+	if err != nil || c == nil {
+		return nil, firstErr(err, errors.New("cart not found"))
 	}
 	return c, nil
 }
@@ -1781,21 +2407,27 @@ func dbCartAddItem(db *sql.DB, pid string, cartID int64, v *Variant, qty float64
 	if err != nil || listing == nil {
 		return firstErr(err, errors.New("listing not found"))
 	}
-	title := listing.Title
-	if v.Title != "" && v.Title != "Default" {
-		title += " - " + v.Title
-	}
+	title := cartItemTitle(listing.Title, v.Title)
 	_, err = db.Exec(`INSERT INTO commerce_cart_items
 		(project_id, cart_id, checkout_item_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(cart_id, variant_id) DO UPDATE SET quantity=quantity+excluded.quantity,
 		checkout_item_id=excluded.checkout_item_id, unit_amount_cents=excluded.unit_amount_cents,
-		currency=excluded.currency, updated_at=CURRENT_TIMESTAMP`,
+		currency=excluded.currency, title_snapshot=excluded.title_snapshot, updated_at=CURRENT_TIMESTAMP`,
 		pid, cartID, nullableInt(checkoutItemID), v.ID, v.ListingID, nullablePtrInt(v.InventoryItemID), nullablePtrInt(v.CatalogPriceID), v.SKU, title, v.PriceCents, v.Currency, qty)
 	if err != nil {
 		return err
 	}
 	return recomputeCart(db, pid, cartID)
+}
+
+func cartItemTitle(productTitle, variantTitle string) string {
+	productTitle = strings.TrimSpace(productTitle)
+	variantTitle = strings.TrimSpace(variantTitle)
+	if variantTitle == "" || strings.EqualFold(variantTitle, "Default") || strings.EqualFold(variantTitle, productTitle) {
+		return productTitle
+	}
+	return productTitle + " - " + variantTitle
 }
 
 func dbCartSetQuantity(db *sql.DB, pid string, cartID, itemID int64, qty float64) error {
@@ -1851,13 +2483,31 @@ func recomputeCart(db *sql.DB, pid string, cartID int64) error {
 	if currency == "" {
 		currency = "USD"
 	}
-	_, err = db.Exec(`UPDATE commerce_carts SET subtotal_cents=?, total_cents=?-discount_cents+tax_cents+shipping_cents, currency=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, subtotal, subtotal, currency, pid, cartID)
+	var metadataText string
+	if err := db.QueryRow(
+		`SELECT metadata_json FROM commerce_carts WHERE project_id=? AND id=?`,
+		pid, cartID).Scan(&metadataText); err != nil {
+		return err
+	}
+	metadata := jsonMap(metadataText)
+	delete(metadata, "checkout_quote")
+	delete(metadata, "shipping_quote")
+	_, err = db.Exec(`UPDATE commerce_carts
+		SET subtotal_cents=?, discount_cents=0, tax_cents=0, shipping_cents=0,
+		    total_cents=?, currency=?, metadata_json=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`,
+		subtotal, subtotal, currency, jsonText(metadata, "{}"), pid, cartID)
 	return err
 }
 
 func dbCartItems(db *sql.DB, pid string, cartID int64) ([]*CartItem, error) {
-	rows, err := db.Query(`SELECT id, cart_id, checkout_item_id, variant_id, listing_id, inventory_item_id, catalog_price_id, sku, title_snapshot, unit_amount_cents, currency, quantity, created_at, updated_at
-		FROM commerce_cart_items WHERE project_id=? AND cart_id=? ORDER BY id`, pid, cartID)
+	rows, err := db.Query(`SELECT ci.id, ci.cart_id, ci.checkout_item_id, ci.variant_id, ci.listing_id,
+		ci.inventory_item_id, ci.catalog_price_id, ci.sku, ci.title_snapshot,
+		COALESCE(l.metadata_json, '{}'), ci.unit_amount_cents, ci.currency, ci.quantity,
+		ci.created_at, ci.updated_at
+		FROM commerce_cart_items ci
+		LEFT JOIN commerce_listings l ON l.project_id=ci.project_id AND l.id=ci.listing_id
+		WHERE ci.project_id=? AND ci.cart_id=? ORDER BY ci.id`, pid, cartID)
 	if err != nil {
 		return nil, err
 	}
@@ -1866,18 +2516,22 @@ func dbCartItems(db *sql.DB, pid string, cartID int64) ([]*CartItem, error) {
 	for rows.Next() {
 		var it CartItem
 		var checkoutID, invID, priceID sql.NullInt64
-		if err := rows.Scan(&it.ID, &it.CartID, &checkoutID, &it.VariantID, &it.ListingID, &invID, &priceID, &it.SKU, &it.TitleSnapshot, &it.UnitAmountCents, &it.Currency, &it.Quantity, &it.CreatedAt, &it.UpdatedAt); err != nil {
+		var listingMetadata string
+		if err := rows.Scan(&it.ID, &it.CartID, &checkoutID, &it.VariantID, &it.ListingID, &invID, &priceID,
+			&it.SKU, &it.TitleSnapshot, &listingMetadata, &it.UnitAmountCents, &it.Currency, &it.Quantity,
+			&it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
 		}
 		it.CheckoutItemID = ptrIfValid(checkoutID)
 		it.InventoryItemID = ptrIfValid(invID)
 		it.CatalogPriceID = ptrIfValid(priceID)
+		it.ImageURL = strArg(jsonMap(listingMetadata), "image_url")
 		out = append(out, &it)
 	}
 	return out, rows.Err()
 }
 
-func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int64, reservations []int64) (*CheckoutSession, error) {
+func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int64, reservations []int64, discountReservationID string, quote map[string]any) (*CheckoutSession, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -1890,8 +2544,8 @@ func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int6
 	}
 	if id == 0 {
 		res, err := tx.Exec(`INSERT INTO commerce_checkout_sessions
-			(project_id, store_id, cart_id, checkout_session_id, status, reservation_ids_json)
-			VALUES (?, ?, ?, ?, 'started', ?)`, pid, cart.StoreID, cart.ID, nullableInt(checkoutSessionID), jsonText(reservations, "[]"))
+			(project_id, store_id, cart_id, checkout_session_id, status, reservation_ids_json, discount_reservation_id, quote_json)
+			VALUES (?, ?, ?, ?, 'started', ?, ?, ?)`, pid, cart.StoreID, cart.ID, nullableInt(checkoutSessionID), jsonText(reservations, "[]"), discountReservationID, jsonText(quote, "{}"))
 		if err != nil {
 			return nil, err
 		}
@@ -1899,7 +2553,8 @@ func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int6
 	} else {
 		if _, err := tx.Exec(`UPDATE commerce_checkout_sessions SET checkout_session_id=?, status='started', reservation_ids_json=?,
 			invoice_id=NULL, invoice_number='', customer_email='', customer_name='', shipping_address_json='{}', billing_address_json='{}',
-			completed_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, nullableInt(checkoutSessionID), jsonText(reservations, "[]"), pid, id); err != nil {
+			discount_reservation_id=?, quote_json=?, completed_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
+			nullableInt(checkoutSessionID), jsonText(reservations, "[]"), discountReservationID, jsonText(quote, "{}"), pid, id); err != nil {
 			return nil, err
 		}
 		if _, err := tx.Exec(`DELETE FROM commerce_reservation_links WHERE checkout_id=?`, id); err != nil {
@@ -1927,13 +2582,13 @@ func dbCheckoutCreate(db *sql.DB, pid string, cart *Cart, checkoutSessionID int6
 
 func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 	row := db.QueryRow(`SELECT id, store_id, cart_id, checkout_session_id, status, reservation_ids_json, invoice_id, invoice_number, customer_email, customer_name,
-		shipping_address_json, billing_address_json, created_at, updated_at
+		shipping_address_json, billing_address_json, discount_reservation_id, quote_json, created_at, updated_at
 		FROM commerce_checkout_sessions WHERE project_id=? AND id=?`, pid, id)
 	var ch CheckoutSession
 	var checkoutID, invoiceID sql.NullInt64
-	var reservations, shipping, billing string
+	var reservations, shipping, billing, quote string
 	if err := row.Scan(&ch.ID, &ch.StoreID, &ch.CartID, &checkoutID, &ch.Status, &reservations, &invoiceID, &ch.InvoiceNumber, &ch.CustomerEmail, &ch.CustomerName,
-		&shipping, &billing, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
+		&shipping, &billing, &ch.DiscountReservationID, &quote, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -1946,6 +2601,7 @@ func dbCheckoutGet(db *sql.DB, pid string, id int64) (*CheckoutSession, error) {
 	}
 	ch.ShippingAddress = jsonMap(shipping)
 	ch.BillingAddress = jsonMap(billing)
+	ch.Quote = jsonMap(quote)
 	return &ch, nil
 }
 
@@ -2095,7 +2751,7 @@ func dbSalesList(db *sql.DB, pid string, args map[string]any) ([]*Sale, error) {
 }
 
 func storeSelect() string {
-	return `SELECT id, slug, name, status, public_base_url, default_currency, default_locale, timezone, order_number_format, checkout_mode, metadata_json, created_at, updated_at FROM commerce_stores`
+	return `SELECT id, slug, name, status, public_base_url, default_currency, default_locale, timezone, order_number_format, checkout_mode, payment_provider, payment_presentation, metadata_json, created_at, updated_at FROM commerce_stores`
 }
 
 func listingSelect() string {
@@ -2111,7 +2767,7 @@ func collectionSelect() string {
 }
 
 func cartSelect() string {
-	return `SELECT id, store_id, checkout_cart_id, session_token, status, subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, created_at, updated_at FROM commerce_carts`
+	return `SELECT id, store_id, checkout_cart_id, session_token, status, subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, metadata_json, created_at, updated_at FROM commerce_carts`
 }
 
 func saleSelect() string {
@@ -2125,7 +2781,7 @@ type scanner interface{ Scan(dest ...any) error }
 func scanStore(s scanner) (*Store, error) {
 	var st Store
 	var meta string
-	if err := s.Scan(&st.ID, &st.Slug, &st.Name, &st.Status, &st.PublicBaseURL, &st.DefaultCurrency, &st.DefaultLocale, &st.Timezone, &st.OrderNumberFormat, &st.CheckoutMode, &meta, &st.CreatedAt, &st.UpdatedAt); err != nil {
+	if err := s.Scan(&st.ID, &st.Slug, &st.Name, &st.Status, &st.PublicBaseURL, &st.DefaultCurrency, &st.DefaultLocale, &st.Timezone, &st.OrderNumberFormat, &st.CheckoutMode, &st.PaymentProvider, &st.PaymentPresentation, &meta, &st.CreatedAt, &st.UpdatedAt); err != nil {
 		return nil, err
 	}
 	st.Metadata = jsonMap(meta)
@@ -2172,10 +2828,12 @@ func scanCollection(s scanner) (*Collection, error) {
 func scanCart(s scanner) (*Cart, error) {
 	var c Cart
 	var checkoutID sql.NullInt64
-	if err := s.Scan(&c.ID, &c.StoreID, &checkoutID, &c.SessionToken, &c.Status, &c.SubtotalCents, &c.DiscountCents, &c.TaxCents, &c.ShippingCents, &c.TotalCents, &c.Currency, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	var metadata string
+	if err := s.Scan(&c.ID, &c.StoreID, &checkoutID, &c.SessionToken, &c.Status, &c.SubtotalCents, &c.DiscountCents, &c.TaxCents, &c.ShippingCents, &c.TotalCents, &c.Currency, &metadata, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
 	c.CheckoutCartID = ptrIfValid(checkoutID)
+	c.Metadata = jsonMap(metadata)
 	return &c, nil
 }
 
@@ -2277,6 +2935,36 @@ func (a *App) handleStore(w http.ResponseWriter, r *http.Request) {
 		}
 		out, err := dbStoreUpdate(ctx.AppDB(), pid, id, patch)
 		httpResult(w, out, notFoundErr(out, err, "store not found"))
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleStoreSettings(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, err := requestAppContext(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	storeID, _ := strconv.ParseInt(r.URL.Query().Get("store_id"), 10, 64)
+	if storeID == 0 {
+		httpErr(w, http.StatusBadRequest, "store_id required")
+		return
+	}
+	args := map[string]any{"_project_id": pid, "store_id": storeID}
+	switch r.Method {
+	case http.MethodGet:
+		out, err := a.toolStoreSettingsGet(ctx, args)
+		httpResult(w, out, err)
+	case http.MethodPatch:
+		var body map[string]any
+		if err := readJSON(r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		args["patch"] = mapArg(body, "patch")
+		out, err := a.toolStoreSettingsUpdate(ctx, args)
+		httpResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -2434,7 +3122,7 @@ func (a *App) handleCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, id)
+		out, err := dbCollectionGetWithProducts(ctx.AppDB(), pid, id, "")
 		httpResult(w, out, err)
 	case http.MethodPatch:
 		var patch map[string]any
@@ -2513,87 +3201,6 @@ func (a *App) handleSale(w http.ResponseWriter, r *http.Request) {
 	httpResult(w, out, notFoundErr(out, err, "sale not found"))
 }
 
-func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	ctx, pid, err := requestAppContext(r)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/s/"), "/")
-	parts := strings.Split(rest, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
-		return
-	}
-	store, err := dbStoreGetBySlug(ctx.AppDB(), pid, parts[0])
-	if err != nil || store == nil || store.Status != "active" {
-		http.NotFound(w, r)
-		return
-	}
-	if len(parts) == 1 && !strings.HasSuffix(r.URL.Path, "/") {
-		target := r.URL.Path + "/"
-		if r.URL.RawQuery != "" {
-			target += "?" + r.URL.RawQuery
-		}
-		http.Redirect(w, r, target, http.StatusPermanentRedirect)
-		return
-	}
-	if len(parts) >= 3 && parts[1] == "products" {
-		row := ctx.AppDB().QueryRow(listingSelect()+` WHERE project_id=? AND store_id=? AND handle=? AND status='active'`, pid, store.ID, slugify(parts[2]))
-		product, err := scanListing(row)
-		if err != nil || product == nil {
-			http.NotFound(w, r)
-			return
-		}
-		product.Variants, err = dbVariantsForListing(ctx.AppDB(), pid, product.ID)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeProductHTML(w, store, product, pid)
-		return
-	}
-	if len(parts) != 1 {
-		http.NotFound(w, r)
-		return
-	}
-	products, err := dbListingsList(ctx.AppDB(), pid, map[string]any{"store_id": store.ID, "status": "active", "limit": int64(100)})
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeStoreHTML(w, store, products, pid)
-}
-
-func writeStoreHTML(w http.ResponseWriter, store *Store, products []*Listing, pid string) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px}.card{border:1px solid #ddd;padding:16px;border-radius:8px}a{color:#111}</style></head><body>", template.HTMLEscapeString(store.Name))
-	fmt.Fprintf(&b, "<h1>%s</h1><div class=grid>", template.HTMLEscapeString(store.Name))
-	for _, p := range products {
-		fmt.Fprintf(&b, "<div class=card><h2><a href=\"./products/%s?project_id=%s\">%s</a></h2><p>%s</p></div>", template.URLQueryEscaper(p.Handle), template.URLQueryEscaper(pid), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
-	}
-	b.WriteString("</div></body></html>")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(b.String()))
-}
-
-func writeProductHTML(w http.ResponseWriter, store *Store, p *Listing, pid string) {
-	var b strings.Builder
-	fmt.Fprintf(&b, "<!doctype html><html><head><meta charset=utf-8><title>%s</title><style>body{font-family:system-ui;margin:40px;max-width:760px}.price{font-size:22px;font-weight:700}</style></head><body>", template.HTMLEscapeString(p.Title))
-	fmt.Fprintf(&b, "<p><a href=\"../../?project_id=%s\">%s</a></p><h1>%s</h1><div>%s</div>", template.URLQueryEscaper(pid), template.HTMLEscapeString(store.Name), template.HTMLEscapeString(p.Title), template.HTMLEscapeString(stripTags(p.DescriptionHTML)))
-	if len(p.Variants) > 0 {
-		v := p.Variants[0]
-		fmt.Fprintf(&b, "<p class=price>%s %.2f</p><p>SKU: %s</p>", template.HTMLEscapeString(v.Currency), float64(v.PriceCents)/100, template.HTMLEscapeString(v.SKU))
-	}
-	b.WriteString("</body></html>")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(b.String()))
-}
-
 func schemaObject(props map[string]any, required []string) map[string]any {
 	out := map[string]any{"type": "object", "properties": props}
 	if len(required) > 0 {
@@ -2604,13 +3211,51 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 func typ(t string) map[string]any { return map[string]any{"type": t} }
 func storeProps() map[string]any {
-	return map[string]any{"slug": typ("string"), "name": typ("string"), "public_base_url": typ("string"), "default_currency": typ("string"), "default_locale": typ("string"), "timezone": typ("string"), "metadata": typ("object")}
+	return map[string]any{"slug": typ("string"), "name": typ("string"), "public_base_url": typ("string"), "default_currency": typ("string"), "default_locale": typ("string"), "timezone": typ("string"), "payment_provider": typ("string"), "payment_presentation": typ("string"), "metadata": typ("object")}
+}
+
+func validateStorePayment(provider, presentation string) error {
+	if provider != "manual" && provider != "stripe" {
+		return errors.New("payment_provider must be 'manual' or 'stripe'")
+	}
+	if presentation != "elements" && presentation != "hosted" {
+		return errors.New("payment_presentation must be 'elements' or 'hosted'")
+	}
+	return nil
 }
 func productCreateProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "store_slug": typ("string"), "title": typ("string"), "handle": typ("string"), "description_html": typ("string"), "vendor": typ("string"), "product_type": typ("string"), "catalog_product_id": typ("integer"), "catalog_price_id": typ("integer"), "price_cents": typ("integer"), "currency": typ("string"), "sku": typ("string"), "inventory_item_id": typ("integer"), "metadata": typ("object")}
 }
 func listingFilterProps() map[string]any {
 	return map[string]any{"store_id": typ("integer"), "status": typ("string"), "q": typ("string"), "limit": typ("integer")}
+}
+func cartFilterProps() map[string]any {
+	return map[string]any{
+		"store_id": typ("integer"),
+		"status":   typ("string"),
+		"updated_before": map[string]any{
+			"type": "string", "format": "date-time",
+			"description": "Return carts last updated before this RFC3339 timestamp.",
+		},
+		"updated_after": map[string]any{
+			"type": "string", "format": "date-time",
+			"description": "Return carts last updated after this RFC3339 timestamp.",
+		},
+		"inactive_for_minutes": map[string]any{
+			"type": "integer", "minimum": 1, "maximum": 525600,
+			"description": "Return carts with no activity for at least this many minutes.",
+		},
+		"has_items": map[string]any{
+			"type": "boolean", "description": "Filter by whether the cart contains a positive-quantity item.",
+		},
+		"abandoned_only": map[string]any{
+			"type": "boolean", "description": "Return nonempty open or checkout carts past the inactivity cutoff; defaults to 24 hours.",
+		},
+		"sort": map[string]any{
+			"type": "string", "enum": []string{"updated_desc", "updated_asc"},
+		},
+		"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+	}
 }
 func variantProps() map[string]any {
 	return map[string]any{"listing_id": typ("integer"), "catalog_price_id": typ("integer"), "inventory_item_id": typ("integer"), "sku": typ("string"), "title": typ("string"), "option1": typ("string"), "option2": typ("string"), "option3": typ("string"), "price_cents": typ("integer"), "compare_at_price_cents": typ("integer"), "currency": typ("string"), "taxable": typ("boolean"), "requires_shipping": typ("boolean"), "sort_order": typ("integer"), "metadata": typ("object")}

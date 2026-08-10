@@ -16,7 +16,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -32,6 +31,13 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 	if run.RemoteKey == "" {
 		return nil, fmt.Errorf("run %d has no remote_key — destination did not return one", runID)
 	}
+	release, err := acquireOperation("restore")
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	opCtx, cancelOperation := context.WithTimeout(context.Background(), transferTimeout)
+	defer cancelOperation()
 	dest, err := dbGetDestination(ctx.AppDB(), run.DestinationID)
 	if err != nil {
 		return nil, fmt.Errorf("destination %d for run %d: %w", run.DestinationID, runID, err)
@@ -41,9 +47,7 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 		return nil, fmt.Errorf("open destination: %w", err)
 	}
 
-	dlCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-	body, err := writer.Get(dlCtx, run.RemoteKey)
+	body, err := writer.Get(opCtx, run.RemoteKey)
 	if err != nil {
 		return nil, fmt.Errorf("download %s: %w", run.RemoteKey, err)
 	}
@@ -55,7 +59,7 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 	storedPath := stored.Name()
 	defer os.Remove(storedPath)
 	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(stored, hash), body); err != nil {
+	if _, err := io.Copy(io.MultiWriter(stored, hash), contextReader{ctx: opCtx, r: body}); err != nil {
 		_ = stored.Close()
 		return nil, fmt.Errorf("download %s: %w", run.RemoteKey, err)
 	}
@@ -66,35 +70,38 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 	if run.SHA256 != "" && !strings.EqualFold(actualSHA, run.SHA256) {
 		return nil, fmt.Errorf("backup integrity check failed: expected sha256 %s, got %s", run.SHA256, actualSHA)
 	}
-	restorePath := storedPath
-	cleanupDecrypted := func() {}
+	var restoreBody io.ReadCloser
 	if run.Encrypted || strings.HasSuffix(run.RemoteKey, ".age") {
-		restorePath, cleanupDecrypted, err = decryptStoredSnapshot(ctx, storedPath)
+		restoreBody, err = openDecryptedSnapshot(ctx, storedPath)
 		if err != nil {
 			return nil, err
 		}
-		defer cleanupDecrypted()
-	}
-	restoreBody, err := os.Open(restorePath)
-	if err != nil {
-		return nil, err
+	} else {
+		restoreBody, err = os.Open(storedPath)
+		if err != nil {
+			return nil, err
+		}
 	}
 	defer restoreBody.Close()
 	if run.Scope.Kind != "" && run.Scope.Kind != "platform" {
-		return restoreProviderRunStream(ctx, run, restoreBody)
+		return restoreProviderRunStream(opCtx, ctx, run, restoreBody)
 	}
-	info, err := restoreBody.Stat()
-	if err != nil {
-		return nil, err
+	restoreSize := int64(-1)
+	if file, ok := restoreBody.(*os.File); ok {
+		info, statErr := file.Stat()
+		if statErr != nil {
+			return nil, statErr
+		}
+		restoreSize = info.Size()
 	}
-	report, err := postRestoreReader(restoreBody, info.Size())
+	report, err := postRestoreReader(opCtx, restoreBody, restoreSize)
 	if err != nil {
 		return nil, err
 	}
 	return report, nil
 }
 
-func restoreProviderRunStream(ctx *sdk.AppCtx, run *Run, body io.Reader) (map[string]any, error) {
+func restoreProviderRunStream(opCtx context.Context, ctx *sdk.AppCtx, run *Run, body io.Reader) (map[string]any, error) {
 	tool, err := providerRestoreTool(run.Scope)
 	if err != nil {
 		return nil, err
@@ -119,9 +126,7 @@ func restoreProviderRunStream(ctx *sdk.AppCtx, run *Run, body io.Reader) (map[st
 	if err := validateProviderStreamURL(prepared.UploadURL); err != nil {
 		return nil, err
 	}
-	uploadCtx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-	defer cancel()
-	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPost, prepared.UploadURL, body)
+	req, err := http.NewRequestWithContext(opCtx, http.MethodPost, prepared.UploadURL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -139,14 +144,16 @@ func restoreProviderRunStream(ctx *sdk.AppCtx, run *Run, body io.Reader) (map[st
 	if err := json.Unmarshal(raw, &report); err != nil {
 		return nil, fmt.Errorf("decode provider restore report: %w", err)
 	}
-	return report, nil
+	return annotateRestoreReport(report), nil
 }
 
 func postRestore(body []byte) (map[string]any, error) {
-	return postRestoreReader(bytes.NewReader(body), int64(len(body)))
+	ctx, cancel := context.WithTimeout(context.Background(), transferTimeout)
+	defer cancel()
+	return postRestoreReader(ctx, bytes.NewReader(body), int64(len(body)))
 }
 
-func postRestoreReader(body io.Reader, size int64) (map[string]any, error) {
+func postRestoreReader(ctx context.Context, body io.Reader, size int64) (map[string]any, error) {
 	gateway := os.Getenv("APTEVA_GATEWAY_URL")
 	if gateway == "" {
 		return nil, fmt.Errorf("APTEVA_GATEWAY_URL not set")
@@ -155,7 +162,7 @@ func postRestoreReader(body io.Reader, size int64) (map[string]any, error) {
 	if token == "" {
 		return nil, fmt.Errorf("APTEVA_APP_TOKEN not set")
 	}
-	req, err := http.NewRequest("POST",
+	req, err := http.NewRequestWithContext(ctx, "POST",
 		strings.TrimRight(gateway, "/")+"/api/platform/restore",
 		body)
 	if err != nil {
@@ -164,14 +171,19 @@ func postRestoreReader(body io.Reader, size int64) (map[string]any, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/gzip")
 	req.Header.Set("X-Confirm-Restore", "yes")
-	req.ContentLength = size
+	if size >= 0 {
+		req.ContentLength = size
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := platformTransferClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+	if readErr != nil {
+		return nil, fmt.Errorf("read restore report: %w", readErr)
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("restore endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
@@ -179,5 +191,53 @@ func postRestoreReader(body io.Reader, size int64) (map[string]any, error) {
 	if err := json.Unmarshal(respBody, &report); err != nil {
 		return nil, fmt.Errorf("decode restore report: %w", err)
 	}
-	return report, nil
+	return annotateRestoreReport(report), nil
+}
+
+func annotateRestoreReport(report map[string]any) map[string]any {
+	if report == nil {
+		return report
+	}
+	textValue := func(value any) string {
+		if value == nil {
+			return ""
+		}
+		return strings.TrimSpace(fmt.Sprint(value))
+	}
+	failures := []string{}
+	if installs, ok := report["installs"].([]any); ok {
+		for _, raw := range installs {
+			entry, ok := raw.(map[string]any)
+			if !ok || !strings.EqualFold(textValue(entry["status"]), "error") {
+				continue
+			}
+			label := "install"
+			if installID := textValue(entry["install_id"]); installID != "" {
+				label += " " + installID
+			}
+			if path := textValue(entry["archive_path"]); path != "" {
+				label = path
+			}
+			if note := textValue(entry["note"]); note != "" {
+				label += ": " + note
+			}
+			failures = append(failures, label)
+		}
+	}
+	if status := strings.ToLower(textValue(report["status"])); status == "error" || status == "failed" {
+		message := textValue(report["error"])
+		if message == "" {
+			message = "restore reported " + status
+		}
+		failures = append(failures, message)
+	}
+	if len(failures) > 0 {
+		report["partial_failure"] = true
+		report["failures"] = failures
+		report["failure_count"] = len(failures)
+	} else {
+		report["partial_failure"] = false
+		report["failure_count"] = 0
+	}
+	return report
 }

@@ -3,23 +3,23 @@
 // SSDP is the discovery half of UPnP. It runs over multicast UDP on
 // 239.255.255.250:1900. Two flows we participate in:
 //
-//   1. CLIENT M-SEARCH (active discovery): a TV sends a multicast
-//      datagram with `MAN: "ssdp:discover"` and an ST (search target)
-//      header. We unicast back HTTP/1.1 200 OK including a LOCATION
-//      header pointing at our /device.xml.
+//  1. CLIENT M-SEARCH (active discovery): a TV sends a multicast
+//     datagram with `MAN: "ssdp:discover"` and an ST (search target)
+//     header. We unicast back HTTP/1.1 200 OK including a LOCATION
+//     header pointing at our /device.xml.
 //
-//   2. SERVER NOTIFY (passive announcement): every ~30 minutes we
-//      send a multicast NOTIFY with `NTS: ssdp:alive` for each of our
-//      service types. On shutdown we send `NTS: ssdp:byebye` so TVs
-//      don't keep us in their picker for hours.
+//  2. SERVER NOTIFY (passive announcement): every ~30 minutes we
+//     send a multicast NOTIFY with `NTS: ssdp:alive` for each of our
+//     service types. On shutdown we send `NTS: ssdp:byebye` so TVs
+//     don't keep us in their picker for hours.
 //
 // Service types we advertise (one alive per type, repeated):
 //
-//   upnp:rootdevice
-//   urn:schemas-upnp-org:device:MediaServer:1
-//   urn:schemas-upnp-org:service:ContentDirectory:1
-//   urn:schemas-upnp-org:service:ConnectionManager:1
-//   uuid:{device_uuid}
+//	upnp:rootdevice
+//	urn:schemas-upnp-org:device:MediaServer:1
+//	urn:schemas-upnp-org:service:ContentDirectory:1
+//	urn:schemas-upnp-org:service:ConnectionManager:1
+//	uuid:{device_uuid}
 //
 // Multicast networking caveat: this requires `network_mode: host` (or
 // equivalent CNI multicast support). In default Docker bridge mode,
@@ -35,16 +35,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
+	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	ssdpAddr     = "239.255.255.250:1900"
-	ssdpHost     = "239.255.255.250"
-	ssdpPort     = 1900
+	ssdpAddr = "239.255.255.250:1900"
+	ssdpHost = "239.255.255.250"
+	ssdpPort = 1900
 	// notifyPeriod was 30 min (UPnP-spec maximum). Recovery from a
 	// dropped multicast packet was therefore "up to 30 minutes" —
 	// brutal on Wi-Fi where loss is the rule, not the exception, and
@@ -82,7 +85,8 @@ type SSDPServer struct {
 	// announceCh — operator-triggered immediate alive burst signal.
 	// Used by the dlna_announce MCP tool so a freshly-powered-on TV
 	// doesn't have to wait the periodic cycle.
-	announceCh chan struct{}
+	announceCh  chan struct{}
+	responseSem chan struct{}
 }
 
 func newSSDPServer(uuid string, port int, lanIP string, friendly func() string, log func(string, string)) *SSDPServer {
@@ -98,6 +102,7 @@ func newSSDPServer(uuid string, port int, lanIP string, friendly func() string, 
 		doneCh:       make(chan struct{}),
 		logFn:        log,
 		announceCh:   make(chan struct{}, 4), // small buffer; collapse bursts
+		responseSem:  make(chan struct{}, 32),
 	}
 }
 
@@ -302,16 +307,50 @@ func (s *SSDPServer) handleDatagram(src *net.UDPAddr, raw []byte) {
 	if man != "ssdp:discover" {
 		return
 	}
+	mx, err := strconv.Atoi(strings.TrimSpace(headers["MX"]))
+	if err != nil || mx < 1 {
+		mx = 1
+	}
+	if mx > 5 {
+		mx = 5
+	}
 	// Match the search target against our advertised types. ST="ssdp:all"
 	// means "send one response per type".
 	for _, target := range s.allTargets() {
 		if st == "ssdp:all" || st == target[0] {
-			s.respondMSearch(src, target[0], target[1])
+			s.scheduleMSearchResponse(src, target[0], target[1], time.Duration(mx)*time.Second)
 		}
 	}
 	if s.onMSearch != nil {
 		s.onMSearch(src.IP.String(), st)
 	}
+}
+
+// scheduleMSearchResponse honours the request's MX window. Randomized
+// replies prevent multiple servers from answering a TV in the same instant;
+// the bounded semaphore also stops a LAN packet flood from creating an
+// unbounded number of timers and goroutines.
+func (s *SSDPServer) scheduleMSearchResponse(dst *net.UDPAddr, nt, usn string, window time.Duration) {
+	select {
+	case s.responseSem <- struct{}{}:
+	default:
+		return
+	}
+	copyDst := *dst
+	go func() {
+		defer func() { <-s.responseSem }()
+		delay := time.Duration(rand.Int64N(max(int64(window), 1)))
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			if s.IsRunning() {
+				s.respondMSearch(&copyDst, nt, usn)
+			}
+		case <-s.stopCh:
+		case <-s.doneCh:
+		}
+	}()
 }
 
 // respondMSearch unicasts a 200 OK back to the searcher. The
@@ -322,7 +361,7 @@ func (s *SSDPServer) respondMSearch(dst *net.UDPAddr, nt, usn string) {
 	resp := strings.Join([]string{
 		"HTTP/1.1 200 OK",
 		fmt.Sprintf("CACHE-CONTROL: max-age=%d", maxAge),
-		"DATE: " + time.Now().UTC().Format(time.RFC1123),
+		"DATE: " + time.Now().UTC().Format(http.TimeFormat),
 		"EXT:",
 		"LOCATION: " + location,
 		"SERVER: Apteva/1.0 UPnP/1.0 dlna/0.1",
@@ -333,7 +372,11 @@ func (s *SSDPServer) respondMSearch(dst *net.UDPAddr, nt, usn string) {
 		"", "",
 	}, "\r\n")
 
-	conn, err := net.DialUDP("udp4", nil, dst)
+	var laddr *net.UDPAddr
+	if ip := net.ParseIP(s.LANIP); ip != nil {
+		laddr = &net.UDPAddr{IP: ip, Port: 0}
+	}
+	conn, err := net.DialUDP("udp4", laddr, dst)
 	if err != nil {
 		return
 	}

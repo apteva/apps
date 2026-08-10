@@ -22,6 +22,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -161,6 +162,9 @@ type sessionResponse struct {
 }
 
 func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
+	if o.ExternalProxy != nil {
+		return "", fmt.Errorf("browser-engine does not support external proxy profiles")
+	}
 	// Defaults match what frontends/browser/browser-app sends on every
 	// session create — the API rejects requests missing initial_url /
 	// timeout / metadata even though they're nominally optional.
@@ -774,7 +778,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
@@ -783,6 +787,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
 			}
+		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		if err := c.dispatchClick(x, y, 1); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
@@ -797,7 +804,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "double_click":
@@ -807,31 +814,35 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 				x, y = e.Center()
 			}
 		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
+		}
 		if err := c.dispatchClick(x, y, 2); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "type":
-		if err := textinput.Type(c.ctx, action.Text, "[BROWSER_ENGINE]"); err != nil {
+		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
+		if err := textinput.TypeWithDelay(c.ctx, action.Text, "[BROWSER_ENGINE]", delay); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
 		if err := keyinput.Dispatch(c.ctx, action.Key, "[BROWSER_ENGINE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "wait":
@@ -843,10 +854,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "select_option":
-		if _, err := c.selectOption(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.selectOption(action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		c.cueTarget(action, res.Selector, "Option selected")
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	default:
@@ -878,6 +892,55 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 		c.setLastSelectResult(&res)
 	}
 	return res, err
+}
+
+func (c *Computer) cueTarget(action computer.Action, selector, caption string) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		c.ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		c.ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation move unavailable, continuing action: %v\n", err)
+	}
 }
 
 func (c *Computer) LastSelectResult() *selectinput.Result {

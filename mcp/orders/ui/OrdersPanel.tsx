@@ -15,6 +15,29 @@ interface OrderItem {
   currency: string;
 }
 
+interface FulfillmentItem {
+  order_item_id: number;
+  quantity: number;
+}
+
+interface Fulfillment {
+  id: number;
+  provider: string;
+  provider_order_id?: string;
+  status: string;
+  error?: string;
+  items?: FulfillmentItem[];
+}
+
+interface Shipment {
+  id: number;
+  provider: string;
+  carrier?: string;
+  tracking_number?: string;
+  tracking_url?: string;
+  status: string;
+}
+
 interface Order {
   id: number;
   order_number: string;
@@ -30,8 +53,8 @@ interface Order {
   created_at?: string;
   updated_at?: string;
   items?: OrderItem[];
-  fulfillments?: Array<Record<string, unknown>>;
-  shipments?: Array<Record<string, unknown>>;
+  fulfillments?: Fulfillment[];
+  shipments?: Shipment[];
   returns?: Array<Record<string, unknown>>;
   events?: Array<Record<string, unknown>>;
 }
@@ -261,6 +284,16 @@ export default function OrdersPanel({ projectId, installId }: NativePanelProps) 
                 <MiniStat label="Shipments" value={selected.shipments?.length || 0} />
                 <MiniStat label="Returns" value={selected.returns?.length || 0} />
               </div>
+
+              {(selected.fulfillments || []).length > 0 && <section className="border border-border rounded overflow-hidden">
+                <h3 className="text-sm font-medium p-3 border-b border-border">Fulfillments</h3>
+                <div className="divide-y divide-border">{selected.fulfillments!.map((fulfillment) => <div key={fulfillment.id} className="p-3 flex items-start justify-between gap-3 text-sm"><div className="min-w-0"><div className="font-medium capitalize">{fulfillment.provider} #{fulfillment.id}</div><div className="text-xs text-text-muted">{fulfillment.items?.length || 0} order line{fulfillment.items?.length === 1 ? "" : "s"}{fulfillment.provider_order_id ? ` · provider order ${fulfillment.provider_order_id}` : ""}</div>{fulfillment.error && <div className="mt-1 text-xs text-red-500">{fulfillment.error}</div>}</div><StatusBadge value={fulfillment.status} /></div>)}</div>
+              </section>}
+
+              {(selected.shipments || []).length > 0 && <section className="border border-border rounded overflow-hidden">
+                <h3 className="text-sm font-medium p-3 border-b border-border">Shipments</h3>
+                <div className="divide-y divide-border">{selected.shipments!.map((shipment) => <div key={shipment.id} className="p-3 flex items-start justify-between gap-3 text-sm"><div className="min-w-0"><div className="font-medium">{shipment.carrier || shipment.provider}</div>{shipment.tracking_url ? <a href={shipment.tracking_url} target="_blank" rel="noreferrer" className="text-xs text-blue-500 hover:underline">{shipment.tracking_number || "Open tracking"}</a> : <div className="text-xs text-text-muted">{shipment.tracking_number || "Tracking pending"}</div>}</div><StatusBadge value={shipment.status} /></div>)}</div>
+              </section>}
             </div>
           )}
         </section>

@@ -36,6 +36,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -48,7 +49,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.78
+version: 0.14.84
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -93,7 +94,7 @@ provides:
   workers:
     - { name: scheduled_publisher, schedule: "@every 1m" }
     - { name: inbox_collector, schedule: "@every 5m" }
-    - { name: analytics_collector, schedule: "@every 6h" }
+    - { name: analytics_collector, schedule: "@every 1h" }
   mcp_tools:
     - { name: account_add,                description: "Begin OAuth for a platform." }
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
@@ -340,6 +341,10 @@ var platforms = map[string]platformDef{
 		},
 		DeleteTool:    "delete_tweet",
 		DeleteIDField: "tweet_id",
+		OptionFields: []optionField{
+			{Name: "allow_longform", Type: "boolean", Label: "Allow long-form post",
+				Help: "Bypass the standard 280-character preflight for X accounts whose API access supports long-form posts."},
+		},
 		Inbox: inboxCaps{
 			CommentsRead:   true,
 			CommentsWrite:  true,
@@ -618,7 +623,7 @@ func (a *App) Workers() []sdk.Worker {
 		},
 		{
 			Name:     "analytics_collector",
-			Schedule: "@every 6h",
+			Schedule: "@every 1h",
 			Run:      a.runAnalyticsCollector,
 		},
 	}
@@ -761,6 +766,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. " +
+				"X accepts {body, allow_longform}; normal posts are validated against X's 280-character weighted limit before media is uploaded. " +
 				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
 				"Body resolution per target: target.body if set, else post-level body. Top-level body may be omitted only when every target has its own non-empty body. " +
@@ -773,7 +779,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Per-target overrides. Each entry: {social_account_id (required), body? required when top-level body is omitted, plus platform-specific keys like title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
+					"description": "Per-target overrides. Each entry: {social_account_id (required), body? required when top-level body is omitted, plus platform-specific keys such as allow_longform for X or title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
 					"items":       map[string]any{"type": "object"},
 				},
 				"schedule_at":       map[string]any{"type": "string"},
@@ -1350,6 +1356,12 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 			return nil, err
 		}
 		if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
+			return nil, err
+		}
+		// A reconnect can add scopes that were unavailable on the old
+		// token. Clear capability backoffs so the next worker tick tests
+		// the new credentials immediately.
+		if _, err := tx.Exec(`DELETE FROM inbox_cursors WHERE social_account_id=?`, existingID); err != nil {
 			return nil, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -2575,10 +2587,16 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
 		if err != nil {
 			var warning *publishedWarningError
-			if errors.As(err, &warning) && platformPostID != "" {
+			if errors.As(err, &warning) && (platformPostID != "" || warning.operationID != "") {
 				_, _ = ctx.AppDB().Exec(
-					`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, published_at=CURRENT_TIMESTAMP, last_error=? WHERE id=?`,
-					nullable(platformPostID), nullable(platformURL), warning.Error(), j.targetID,
+					`UPDATE post_targets
+					    SET status='published', platform_post_id=?, platform_url=?,
+					        publish_operation_id=?, identity_resolve_attempts=0,
+					        identity_resolve_after=CASE WHEN ?!='' THEN datetime('now','+5 minutes') ELSE NULL END,
+					        published_at=CURRENT_TIMESTAMP, last_error=?
+					  WHERE id=?`,
+					nullable(platformPostID), nullable(platformURL), warning.operationID,
+					warning.operationID, warning.Error(), j.targetID,
 				)
 				ctx.Emit("target.published_warning", map[string]any{
 					"target_id": j.targetID,
@@ -2593,7 +2611,11 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			continue
 		}
 		_, _ = ctx.AppDB().Exec(
-			`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, published_at=CURRENT_TIMESTAMP, last_error=NULL WHERE id=?`,
+			`UPDATE post_targets
+			    SET status='published', platform_post_id=?, platform_url=?,
+			        publish_operation_id='', identity_resolve_after=NULL,
+			        published_at=CURRENT_TIMESTAMP, last_error=NULL
+			  WHERE id=?`,
 			nullable(platformPostID), nullable(platformURL), j.targetID,
 		)
 		ctx.Emit("target.published", map[string]any{
@@ -2614,7 +2636,10 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 	})
 }
 
-type publishedWarningError struct{ warning string }
+type publishedWarningError struct {
+	warning     string
+	operationID string
+}
 
 func (e *publishedWarningError) Error() string { return e.warning }
 
@@ -2784,6 +2809,13 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 // then creates the post with media.media_ids. Text-only posts still use
 // the simple post_tweet path. X accepts up to 4 images, or one video/GIF.
 func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	allowLongform, _ := boolOption(j.options, "allow_longform")
+	if weighted := twitterWeightedTextLength(j.body); weighted > 280 && !allowLongform {
+		return "", "", fmt.Errorf(
+			"X post is %d weighted characters; the standard limit is 280. Shorten it or set targets[].allow_longform=true for an account with long-form API access",
+			weighted,
+		)
+	}
 	bodyField := def.BodyField
 	if bodyField == "" {
 		bodyField = "text"
@@ -2811,6 +2843,35 @@ func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	ctx.Logger().Info("publishTwitter: published",
 		"platform_post_id", id, "platform_url", url)
 	return id, url, nil
+}
+
+var twitterURLPattern = regexp.MustCompile(`https?://[^\s]+`)
+
+func twitterWeightedTextLength(text string) int {
+	weighted := 0
+	offset := 0
+	for _, match := range twitterURLPattern.FindAllStringIndex(text, -1) {
+		weighted += twitterWeightedRunes(text[offset:match[0]])
+		weighted += 23
+		offset = match[1]
+	}
+	return weighted + twitterWeightedRunes(text[offset:])
+}
+
+func twitterWeightedRunes(text string) int {
+	weighted := 0
+	for _, r := range text {
+		switch {
+		case r <= 0x10FF,
+			r >= 0x2000 && r <= 0x200D,
+			r >= 0x2010 && r <= 0x201F,
+			r >= 0x2032 && r <= 0x2037:
+			weighted++
+		default:
+			weighted += 2
+		}
+	}
+	return weighted
 }
 
 func (a *App) uploadTwitterMedia(ctx *sdk.AppCtx, connID int64, media []mediaItem) ([]string, error) {
@@ -3725,44 +3786,91 @@ func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string)
 	}
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
-		if err != nil || res == nil || !res.Success {
+		status, failReason, postIDs, err := a.getTikTokPublishStatus(ctx, connID, publishID)
+		if err != nil {
 			message := "TikTok accepted the upload, but publish status could not be verified"
-			if err != nil {
-				message += ": " + err.Error()
-			} else if res != nil {
-				message += ": " + upstreamError(res).Error()
-			}
-			return publishID, "", &publishedWarningError{warning: message}
+			message += ": " + err.Error()
+			return "", "", &publishedWarningError{warning: message, operationID: publishID}
 		}
-		var payload struct {
-			Data struct {
-				Status  string   `json:"status"`
-				Fail    string   `json:"fail_reason"`
-				PostIDs []string `json:"publicaly_available_post_id"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(res.Data, &payload); err != nil {
-			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but returned an unreadable publish status"}
-		}
-		switch payload.Data.Status {
+		switch status {
 		case "PUBLISH_COMPLETE":
-			if len(payload.Data.PostIDs) > 0 && payload.Data.PostIDs[0] != "" {
-				return payload.Data.PostIDs[0], "", nil
+			if len(postIDs) > 0 && postIDs[0] != "" {
+				return postIDs[0], "", nil
 			}
-			return publishID, "", nil
+			return "", "", &publishedWarningError{
+				warning:     "TikTok published the upload, but its public post ID is not available yet",
+				operationID: publishID,
+			}
 		case "FAILED":
-			return "", "", fmt.Errorf("TikTok publish failed: %s", payload.Data.Fail)
+			return "", "", fmt.Errorf("TikTok publish failed: %s", failReason)
 		case "PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD":
 			// Keep polling below.
 		default:
-			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but returned unexpected publish status " + strconv.Quote(payload.Data.Status)}
+			return "", "", &publishedWarningError{
+				warning:     "TikTok accepted the upload, but returned unexpected publish status " + strconv.Quote(status),
+				operationID: publishID,
+			}
 		}
 		if time.Now().After(deadline) {
-			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but it was still processing after 5 minutes"}
+			return "", "", &publishedWarningError{
+				warning:     "TikTok accepted the upload, but it was still processing after 5 minutes",
+				operationID: publishID,
+			}
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+type exactJSONID string
+
+func (id *exactJSONID) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		*id = ""
+		return nil
+	}
+	if raw[0] == '"' {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		*id = exactJSONID(value)
+		return nil
+	}
+	for _, ch := range raw {
+		if ch < '0' || ch > '9' {
+			return fmt.Errorf("invalid numeric id %q", raw)
+		}
+	}
+	*id = exactJSONID(string(raw))
+	return nil
+}
+
+func (a *App) getTikTokPublishStatus(ctx *sdk.AppCtx, connID int64, publishID string) (string, string, []string, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
+	if err != nil {
+		return "", "", nil, err
+	}
+	if res == nil || !res.Success {
+		return "", "", nil, upstreamError(res)
+	}
+	var payload struct {
+		Data struct {
+			Status  string        `json:"status"`
+			Fail    string        `json:"fail_reason"`
+			PostIDs []exactJSONID `json:"publicaly_available_post_id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &payload); err != nil {
+		return "", "", nil, err
+	}
+	postIDs := make([]string, 0, len(payload.Data.PostIDs))
+	for _, id := range payload.Data.PostIDs {
+		if id != "" {
+			postIDs = append(postIDs, string(id))
+		}
+	}
+	return payload.Data.Status, payload.Data.Fail, postIDs, nil
 }
 
 // publishTikTokPullFromURL is the original PULL_FROM_URL implementation,
@@ -4483,6 +4591,9 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 	if pid == "" {
 		return nil
 	}
+	if err := a.resolvePendingTikTokPostIDs(runCtx, ctx, pid); err != nil {
+		ctx.Logger().Warn("resolve pending TikTok post IDs", "project", pid, "err", err)
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id FROM posts
 		  WHERE project_id=? AND status='scheduled' AND job_id=0
@@ -4516,6 +4627,73 @@ func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) err
 			continue
 		}
 		a.publishPostTargets(ctx, id)
+	}
+	return nil
+}
+
+func (a *App) resolvePendingTikTokPostIDs(runCtx context.Context, ctx *sdk.AppCtx, pid string) error {
+	if strings.TrimSpace(pid) == "" {
+		return nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT t.id, t.social_account_id, a.connection_id,
+		        COALESCE(t.platform_post_id,''), COALESCE(t.publish_operation_id,'')
+		   FROM post_targets t
+		   JOIN posts p ON p.id=t.post_id
+		   JOIN social_accounts a ON a.id=t.social_account_id
+		  WHERE p.project_id=? AND a.project_id=?
+		    AND a.platform='tiktok' AND a.status='active' AND t.status='published'
+		    AND (
+		      t.publish_operation_id!=''
+		      OR t.platform_post_id LIKE 'v_pub_%'
+		      OR t.platform_post_id LIKE 'p_pub_%'
+		    )
+		    AND (t.identity_resolve_after IS NULL OR t.identity_resolve_after<=CURRENT_TIMESTAMP)
+		  ORDER BY COALESCE(t.identity_resolve_after,t.published_at), t.id
+		  LIMIT 20`,
+		pid, pid,
+	)
+	if err != nil {
+		return err
+	}
+	var targets []metricsTarget
+	for rows.Next() {
+		var target metricsTarget
+		if err := rows.Scan(
+			&target.TargetID, &target.SocialAccountID, &target.ConnID,
+			&target.ExtPostID, &target.PublishOperationID,
+		); err == nil {
+			target.Platform = "tiktok"
+			targets = append(targets, target)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, target := range targets {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		if _, err := a.resolveTikTokPublicPostID(ctx, target); err != nil {
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE post_targets
+				    SET identity_resolve_attempts=identity_resolve_attempts+1,
+				        identity_resolve_after=CASE
+				          WHEN identity_resolve_attempts<2 THEN datetime('now','+5 minutes')
+				          WHEN identity_resolve_attempts<5 THEN datetime('now','+30 minutes')
+				          WHEN identity_resolve_attempts<12 THEN datetime('now','+6 hours')
+				          ELSE datetime('now','+7 days')
+				        END,
+				        last_error=?
+				  WHERE id=?`,
+				err.Error(), target.TargetID,
+			)
+			continue
+		}
+		ctx.Emit("target.identity_resolved", map[string]any{
+			"target_id": target.TargetID,
+			"platform":  "tiktok",
+		})
 	}
 	return nil
 }
@@ -4628,11 +4806,14 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 // etc.) that don't fit the common shape.
 
 type normalizedMetrics struct {
-	Views    int64           `json:"views"`
-	Likes    int64           `json:"likes"`
-	Comments int64           `json:"comments"`
-	Shares   int64           `json:"shares"`
-	Raw      json.RawMessage `json:"raw,omitempty"`
+	Views     int64           `json:"views"`
+	Reach     int64           `json:"reach"`
+	Likes     int64           `json:"likes"`
+	Comments  int64           `json:"comments"`
+	Shares    int64           `json:"shares"`
+	Saves     int64           `json:"saves"`
+	Available []string        `json:"available,omitempty"`
+	Raw       json.RawMessage `json:"raw,omitempty"`
 }
 
 type targetMetricsOutcome struct {
@@ -4644,6 +4825,7 @@ type targetMetricsOutcome struct {
 	Status          string             `json:"status"` // ok | unsupported | skipped | failed
 	Reason          string             `json:"reason,omitempty"`
 	Error           string             `json:"error,omitempty"`
+	Warnings        []string           `json:"warnings,omitempty"`
 	Metrics         *normalizedMetrics `json:"metrics,omitempty"`
 }
 
@@ -4655,10 +4837,12 @@ type targetMetricsOutcome struct {
 type metricsTarget struct {
 	TargetID, SocialAccountID, ConnID int64
 	Platform, ExtPostID, ExtURL       string
+	ExternalAccountID                 string
 	PageCreds                         string
 	ProviderSlug                      string
 	ProviderAccountID                 string
 	ProviderPostID                    string
+	PublishOperationID                string
 }
 
 // getPostMetrics dispatches to the per-platform fetcher for one
@@ -4672,7 +4856,7 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		PlatformPostID:  target.ExtPostID,
 		PlatformURL:     target.ExtURL,
 	}
-	if target.ExtPostID == "" && target.ProviderPostID == "" {
+	if target.ExtPostID == "" && target.ProviderPostID == "" && target.PublishOperationID == "" {
 		out.Status = "skipped"
 		out.Reason = "target was never published — no platform or provider post id"
 		return out
@@ -4686,9 +4870,9 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 	case "youtube":
 		return a.getYoutubePostMetrics(ctx, out, target.ConnID)
 	case "tiktok":
-		return a.getTikTokPostMetrics(ctx, out, target.ConnID)
+		return a.getTikTokPostMetrics(ctx, out, target)
 	case "facebook":
-		return a.getFacebookPostMetrics(ctx, out, target.ConnID, target.PageCreds)
+		return a.getFacebookPostMetrics(ctx, out, target.ConnID, target.ExternalAccountID, target.PageCreds)
 	case "instagram":
 		return a.getInstagramPostMetrics(ctx, out, target.ConnID, target.PageCreds)
 	default:
@@ -4727,53 +4911,84 @@ func extractPageToken(pageCreds string) string {
 	return creds["access_token"]
 }
 
-// getTwitterPostMetrics calls get_tweet_analytics for a single tweet
-// and maps Twitter's public_metrics to our normalized shape. Twitter's
-// response wraps under {data: {public_metrics: {...}}}; some shapes
-// also nest under {data: [{...}]} when called for multiple tweets,
-// which we don't use here.
+type twitterMetricCounts struct {
+	ImpressionCount int64 `json:"impression_count"`
+	LikeCount       int64 `json:"like_count"`
+	ReplyCount      int64 `json:"reply_count"`
+	RetweetCount    int64 `json:"retweet_count"`
+	QuoteCount      int64 `json:"quote_count"`
+	BookmarkCount   int64 `json:"bookmark_count"`
+}
+
+// getTwitterPostMetrics uses the standard tweet lookup first. It is
+// available to normal OAuth clients and already includes owner-only
+// metrics when the caller owns the post. The separate analytics endpoint
+// is an enrollment-gated fallback, not a prerequisite for basic stats.
 func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
-	if rich := a.getTwitterPostAnalytics(ctx, out, connID); rich.Status == "ok" && rich.Metrics != nil && hasAnyMetrics(rich.Metrics) {
-		return rich
+	var res *sdk.ExecuteResult
+	for _, fields := range []string{
+		"public_metrics,non_public_metrics,organic_metrics",
+		"public_metrics",
+	} {
+		current, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
+			"tweet_id":     out.PlatformPostID,
+			"tweet.fields": fields,
+		})
+		if err == nil && current != nil && current.Success {
+			res = current
+			break
+		}
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
-		"tweet_id":     out.PlatformPostID,
-		"tweet.fields": "public_metrics,non_public_metrics,organic_metrics",
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
+	if res == nil {
+		return a.getTwitterPostAnalytics(ctx, out, connID)
 	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	// Pull public_metrics out of either {data: {public_metrics}} or
-	// {public_metrics} top-level depending on the integration's response
-	// shape.
 	var resp struct {
 		Data struct {
-			PublicMetrics struct {
-				ImpressionCount int64 `json:"impression_count"`
-				LikeCount       int64 `json:"like_count"`
-				ReplyCount      int64 `json:"reply_count"`
-				RetweetCount    int64 `json:"retweet_count"`
-				QuoteCount      int64 `json:"quote_count"`
-				BookmarkCount   int64 `json:"bookmark_count"`
-			} `json:"public_metrics"`
+			PublicMetrics    twitterMetricCounts `json:"public_metrics"`
+			NonPublicMetrics twitterMetricCounts `json:"non_public_metrics"`
+			OrganicMetrics   twitterMetricCounts `json:"organic_metrics"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(res.Data, &resp)
-	pm := resp.Data.PublicMetrics
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		out.Status, out.Error = "failed", "decode X post metrics: "+err.Error()
+		return out
+	}
+	pm := mergeTwitterMetricCounts(
+		resp.Data.PublicMetrics,
+		resp.Data.NonPublicMetrics,
+		resp.Data.OrganicMetrics,
+	)
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
-		Views:    pm.ImpressionCount,
-		Likes:    pm.LikeCount,
-		Comments: pm.ReplyCount,
-		Shares:   pm.RetweetCount + pm.QuoteCount, // group retweets + quotes under shares
-		Raw:      sanitizeRawJSON(res.Data),
+		Views:     pm.ImpressionCount,
+		Likes:     pm.LikeCount,
+		Comments:  pm.ReplyCount,
+		Shares:    pm.RetweetCount + pm.QuoteCount, // group retweets + quotes under shares
+		Saves:     pm.BookmarkCount,
+		Available: []string{"views", "likes", "comments", "shares", "saves"},
+		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
+}
+
+func mergeTwitterMetricCounts(groups ...twitterMetricCounts) twitterMetricCounts {
+	var merged twitterMetricCounts
+	for _, group := range groups {
+		merged.ImpressionCount = maxInt64(merged.ImpressionCount, group.ImpressionCount)
+		merged.LikeCount = maxInt64(merged.LikeCount, group.LikeCount)
+		merged.ReplyCount = maxInt64(merged.ReplyCount, group.ReplyCount)
+		merged.RetweetCount = maxInt64(merged.RetweetCount, group.RetweetCount)
+		merged.QuoteCount = maxInt64(merged.QuoteCount, group.QuoteCount)
+		merged.BookmarkCount = maxInt64(merged.BookmarkCount, group.BookmarkCount)
+	}
+	return merged
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
@@ -4791,6 +5006,19 @@ func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 		return out
 	}
 	values := extractNamedNumbers(res.Data)
+	available := []string{}
+	if namedMetricPresent(values, "impressions", "media_views", "views") {
+		available = append(available, "views")
+	}
+	if namedMetricPresent(values, "likes", "like_count") {
+		available = append(available, "likes")
+	}
+	if namedMetricPresent(values, "replies", "reply_count", "comments") {
+		available = append(available, "comments")
+	}
+	if namedMetricPresent(values, "retweets", "retweet_count", "quote_tweets", "quote_count") {
+		available = append(available, "shares")
+	}
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
 		Views:    firstMetricValue(values, "impressions", "media_views", "views"),
@@ -4798,13 +5026,14 @@ func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 		Comments: firstMetricValue(values, "replies", "reply_count", "comments"),
 		Shares: firstMetricValue(values, "retweets", "retweet_count") +
 			firstMetricValue(values, "quote_tweets", "quote_count"),
-		Raw: sanitizeRawJSON(res.Data),
+		Available: available,
+		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
 }
 
 func hasAnyMetrics(m *normalizedMetrics) bool {
-	return m != nil && (m.Views > 0 || m.Likes > 0 || m.Comments > 0 || m.Shares > 0)
+	return m != nil && (len(m.Available) > 0 || m.Views > 0 || m.Reach > 0 || m.Likes > 0 || m.Comments > 0 || m.Shares > 0 || m.Saves > 0)
 }
 
 func extractNamedNumbers(raw json.RawMessage) map[string]int64 {
@@ -4850,6 +5079,15 @@ func firstMetricValue(values map[string]int64, keys ...string) int64 {
 	return 0
 }
 
+func namedMetricPresent(values map[string]int64, keys ...string) bool {
+	for _, key := range keys {
+		if _, ok := values[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // getYoutubePostMetrics calls get_video?part=statistics and maps the
 // YouTube Data API v3 statistics block. Response shape:
 // {items: [{statistics: {viewCount, likeCount, commentCount, ...}}]}.
@@ -4886,11 +5124,12 @@ func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 	stats := resp.Items[0].Statistics
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
-		Views:    parseInt64(stats.ViewCount),
-		Likes:    parseInt64(stats.LikeCount),
-		Comments: parseInt64(stats.CommentCount),
-		Shares:   0, // YouTube doesn't expose share count via Data API
-		Raw:      sanitizeRawJSON(res.Data),
+		Views:     parseInt64(stats.ViewCount),
+		Likes:     parseInt64(stats.LikeCount),
+		Comments:  parseInt64(stats.CommentCount),
+		Shares:    0, // YouTube doesn't expose share count via Data API
+		Available: []string{"views", "likes", "comments"},
+		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
 }
@@ -4898,10 +5137,26 @@ func (a *App) getYoutubePostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 // getTikTokPostMetrics calls query_videos with filters.video_ids + the
 // metric fields. Response shape:
 // {data: {videos: [{view_count, like_count, comment_count, share_count}]}}.
-func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "query_videos", map[string]any{
-		"filters": map[string]any{"video_ids": []string{out.PlatformPostID}},
-		"fields":  "id,title,view_count,like_count,comment_count,share_count",
+func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, target metricsTarget) targetMetricsOutcome {
+	publicID := strings.TrimSpace(target.ExtPostID)
+	if isTikTokPublishOperationID(publicID) || publicID == "" {
+		var err error
+		publicID, err = a.resolveTikTokPublicPostID(ctx, target)
+		if err != nil {
+			out.Status = "skipped"
+			out.Reason = err.Error()
+			return out
+		}
+		out.PlatformPostID = publicID
+	}
+	if isTikTokPublishOperationID(publicID) {
+		out.Status = "skipped"
+		out.Reason = "TikTok public post ID is still pending"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(target.ConnID, "query_videos", map[string]any{
+		"filters": map[string]any{"video_ids": []string{publicID}},
+		"fields":  "id,title,share_url,view_count,like_count,comment_count,share_count",
 	})
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -4914,10 +5169,12 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, co
 	var resp struct {
 		Data struct {
 			Videos []struct {
-				ViewCount    int64 `json:"view_count"`
-				LikeCount    int64 `json:"like_count"`
-				CommentCount int64 `json:"comment_count"`
-				ShareCount   int64 `json:"share_count"`
+				ID           exactJSONID `json:"id"`
+				ShareURL     string      `json:"share_url"`
+				ViewCount    int64       `json:"view_count"`
+				LikeCount    int64       `json:"like_count"`
+				CommentCount int64       `json:"comment_count"`
+				ShareCount   int64       `json:"share_count"`
 			} `json:"videos"`
 		} `json:"data"`
 	}
@@ -4928,15 +5185,57 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, co
 		return out
 	}
 	v := resp.Data.Videos[0]
+	if v.ShareURL != "" {
+		out.PlatformURL = v.ShareURL
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, v.ShareURL, target.TargetID)
+	}
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
-		Views:    v.ViewCount,
-		Likes:    v.LikeCount,
-		Comments: v.CommentCount,
-		Shares:   v.ShareCount,
-		Raw:      sanitizeRawJSON(res.Data),
+		Views:     v.ViewCount,
+		Likes:     v.LikeCount,
+		Comments:  v.CommentCount,
+		Shares:    v.ShareCount,
+		Available: []string{"views", "likes", "comments", "shares"},
+		Raw:       sanitizeRawJSON(res.Data),
 	}
 	return out
+}
+
+func isTikTokPublishOperationID(id string) bool {
+	return strings.HasPrefix(id, "v_pub_") || strings.HasPrefix(id, "p_pub_")
+}
+
+func (a *App) resolveTikTokPublicPostID(ctx *sdk.AppCtx, target metricsTarget) (string, error) {
+	operationID := strings.TrimSpace(target.PublishOperationID)
+	if operationID == "" && isTikTokPublishOperationID(target.ExtPostID) {
+		operationID = target.ExtPostID
+	}
+	if operationID == "" {
+		return "", errors.New("TikTok target has no public post ID")
+	}
+	status, failReason, postIDs, err := a.getTikTokPublishStatus(ctx, target.ConnID, operationID)
+	if err != nil {
+		return "", fmt.Errorf("TikTok public post ID could not be resolved: %w", err)
+	}
+	if status == "FAILED" {
+		return "", fmt.Errorf("TikTok publish failed while resolving public post ID: %s", failReason)
+	}
+	if len(postIDs) == 0 || postIDs[0] == "" {
+		return "", fmt.Errorf("TikTok public post ID is not available yet (status %s)", status)
+	}
+	publicID := postIDs[0]
+	_, err = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET platform_post_id=?, publish_operation_id='',
+		        identity_resolve_attempts=0, identity_resolve_after=NULL,
+		        last_error=NULL
+		  WHERE id=?`,
+		publicID, target.TargetID,
+	)
+	if err != nil {
+		return "", err
+	}
+	return publicID, nil
 }
 
 // getFacebookPostMetrics calls facebook_get_post with engagement-summary
@@ -4946,28 +5245,19 @@ func (a *App) getTikTokPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, co
 // likes (the raw "like" reactions), and stash the broader reactions
 // total in raw for callers that want it. Views are not exposed on
 // organic FB posts via this endpoint; needs /insights for that.
-func (a *App) getFacebookPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64, pageCreds string) targetMetricsOutcome {
+func (a *App) getFacebookPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64, pageID, pageCreds string) targetMetricsOutcome {
 	token := extractPageToken(pageCreds)
 	if token == "" {
 		out.Status = "failed"
 		out.Error = "facebook page access_token missing — reconnect the account"
 		return out
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "facebook_get_post", map[string]any{
-		"postId":       out.PlatformPostID,
-		"fields":       "likes.summary(true),comments.summary(true),shares,reactions.summary(true)",
-		"access_token": token,
-	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
-	}
-	var resp struct {
-		Likes struct {
+	type engagementResponse struct {
+		ID        string `json:"id"`
+		PostID    string `json:"post_id"`
+		Permalink string `json:"permalink_url"`
+		Views     int64  `json:"views"`
+		Likes     struct {
 			Summary struct {
 				TotalCount int64 `json:"total_count"`
 			} `json:"summary"`
@@ -4981,14 +5271,74 @@ func (a *App) getFacebookPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, 
 			Count int64 `json:"count"`
 		} `json:"shares"`
 	}
-	_ = json.Unmarshal(res.Data, &resp)
+	call := func(tool string, input map[string]any) (engagementResponse, json.RawMessage, error) {
+		var parsed engagementResponse
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+		if err != nil {
+			return parsed, nil, err
+		}
+		if res == nil || !res.Success {
+			return parsed, nil, upstreamError(res)
+		}
+		if err := json.Unmarshal(res.Data, &parsed); err != nil {
+			return parsed, nil, err
+		}
+		return parsed, sanitizeRawJSON(res.Data), nil
+	}
+
+	input := map[string]any{"access_token": token}
+	var base engagementResponse
+	var baseRaw json.RawMessage
+	var err error
+	feedID := out.PlatformPostID
+	available := []string{"likes", "comments"}
+	if !strings.Contains(out.PlatformPostID, "_") {
+		input["videoId"] = out.PlatformPostID
+		input["fields"] = "id,post_id,permalink_url,views,likes.limit(0).summary(true),comments.limit(0).summary(true)"
+		base, baseRaw, err = call("facebook_get_video", input)
+		available = append(available, "views")
+		if base.PostID != "" && pageID != "" {
+			feedID = pageID + "_" + base.PostID
+		}
+	} else {
+		input["postId"] = out.PlatformPostID
+		input["fields"] = "id,permalink_url,likes.limit(0).summary(true),comments.limit(0).summary(true)"
+		base, baseRaw, err = call("facebook_get_post", input)
+	}
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if base.Permalink != "" {
+		out.PlatformURL = base.Permalink
+		_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, base.Permalink, out.TargetID)
+	}
+	rawParts := map[string]json.RawMessage{"base": baseRaw}
+	shares := int64(0)
+	if strings.Contains(feedID, "_") {
+		shareInput := map[string]any{
+			"postId":       feedID,
+			"fields":       "shares",
+			"access_token": token,
+		}
+		shareResp, shareRaw, shareErr := call("facebook_get_post", shareInput)
+		if shareErr != nil {
+			out.Warnings = append(out.Warnings, "Facebook shares unavailable: "+shareErr.Error())
+		} else {
+			shares = shareResp.Shares.Count
+			available = append(available, "shares")
+			rawParts["shares"] = shareRaw
+		}
+	}
+	combinedRaw, _ := json.Marshal(rawParts)
 	out.Status = "ok"
 	out.Metrics = &normalizedMetrics{
-		Views:    0, // not exposed on this endpoint; would need /insights for impressions/reach
-		Likes:    resp.Likes.Summary.TotalCount,
-		Comments: resp.Comments.Summary.TotalCount,
-		Shares:   resp.Shares.Count,
-		Raw:      sanitizeRawJSON(res.Data),
+		Views:     base.Views,
+		Likes:     base.Likes.Summary.TotalCount,
+		Comments:  base.Comments.Summary.TotalCount,
+		Shares:    shares,
+		Available: available,
+		Raw:       sanitizeRawJSON(combinedRaw),
 	}
 	return out
 }
@@ -5006,43 +5356,117 @@ func (a *App) getInstagramPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome,
 		out.Error = "instagram page access_token missing — reconnect the account"
 		return out
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media_insights", map[string]any{
+	values := map[string]int64{}
+	available := []string{}
+	rawParts := map[string]json.RawMessage{}
+
+	mediaRes, mediaErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media", map[string]any{
 		"mediaId":      out.PlatformPostID,
-		"metric":       "reach,likes,comments,saves,shares",
+		"fields":       "id,media_type,media_product_type,permalink,like_count,comments_count",
 		"access_token": token,
 	})
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
+	if mediaErr == nil && mediaRes != nil && mediaRes.Success {
+		var media struct {
+			Permalink    string `json:"permalink"`
+			LikeCount    int64  `json:"like_count"`
+			CommentCount int64  `json:"comments_count"`
+		}
+		if json.Unmarshal(mediaRes.Data, &media) == nil {
+			values["likes"] = media.LikeCount
+			values["comments"] = media.CommentCount
+			available = append(available, "likes", "comments")
+			if media.Permalink != "" {
+				out.PlatformURL = media.Permalink
+				_, _ = ctx.AppDB().Exec(`UPDATE post_targets SET platform_url=? WHERE id=?`, media.Permalink, out.TargetID)
+			}
+		}
+		rawParts["media"] = sanitizeRawJSON(mediaRes.Data)
+	} else {
+		if mediaErr != nil {
+			out.Warnings = append(out.Warnings, "Instagram media details unavailable: "+mediaErr.Error())
+		} else {
+			out.Warnings = append(out.Warnings, "Instagram media details unavailable: "+upstreamError(mediaRes).Error())
+		}
+	}
+
+	metricNames := []string{"views", "reach", "saved", "shares"}
+	if len(available) == 0 {
+		metricNames = append(metricNames, "likes", "comments")
+	}
+	for _, metric := range metricNames {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media_insights", map[string]any{
+			"mediaId":      out.PlatformPostID,
+			"metric":       metric,
+			"access_token": token,
+		})
+		if err != nil || res == nil || !res.Success {
+			reason := err
+			if reason == nil {
+				reason = upstreamError(res)
+			}
+			out.Warnings = append(out.Warnings, "Instagram "+metric+" unavailable: "+reason.Error())
+			continue
+		}
+		value, ok := parseInstagramInsightValue(res.Data, metric)
+		if !ok {
+			out.Warnings = append(out.Warnings, "Instagram "+metric+" returned no value")
+			continue
+		}
+		values[metric] = value
+		normalizedName := metric
+		if metric == "saved" {
+			normalizedName = "saves"
+		}
+		available = append(available, normalizedName)
+		rawParts[metric] = sanitizeRawJSON(res.Data)
+	}
+	if len(available) == 0 {
+		out.Status = "failed"
+		out.Error = "Instagram returned no supported metrics"
 		return out
 	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
+	combinedRaw, _ := json.Marshal(rawParts)
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:     values["views"],
+		Reach:     values["reach"],
+		Likes:     values["likes"],
+		Comments:  values["comments"],
+		Shares:    values["shares"],
+		Saves:     values["saved"],
+		Available: available,
+		Raw:       sanitizeRawJSON(combinedRaw),
 	}
+	return out
+}
+
+func parseInstagramInsightValue(raw json.RawMessage, metric string) (int64, bool) {
 	var resp struct {
 		Data []struct {
 			Name   string `json:"name"`
 			Values []struct {
-				Value int64 `json:"value"`
+				Value any `json:"value"`
 			} `json:"values"`
+			TotalValue struct {
+				Value any `json:"value"`
+			} `json:"total_value"`
 		} `json:"data"`
 	}
-	_ = json.Unmarshal(res.Data, &resp)
-	byName := map[string]int64{}
-	for _, m := range resp.Data {
-		if len(m.Values) > 0 {
-			byName[m.Name] = m.Values[0].Value
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return 0, false
+	}
+	for _, item := range resp.Data {
+		if item.Name != "" && item.Name != metric {
+			continue
+		}
+		if len(item.Values) > 0 {
+			return insightValueToInt64(item.Values[len(item.Values)-1].Value), true
+		}
+		if item.TotalValue.Value != nil {
+			return insightValueToInt64(item.TotalValue.Value), true
 		}
 	}
-	out.Status = "ok"
-	out.Metrics = &normalizedMetrics{
-		Views:    byName["reach"],
-		Likes:    byName["likes"],
-		Comments: byName["comments"],
-		Shares:   byName["shares"],
-		Raw:      sanitizeRawJSON(res.Data), // includes saves under data[].name="saves"
-	}
-	return out
+	return 0, false
 }
 
 // parseInt64 is a forgiving int64 parser that returns 0 for empty,
@@ -5570,7 +5994,11 @@ func mergeInsightSeries(dst, src insightSeries) {
 	}
 }
 
-const analyticsSnapshotMinInterval = 4 * time.Hour
+const (
+	analyticsSnapshotMinInterval  = 4 * time.Hour
+	postAnalyticsBatchSize        = 50
+	postAnalyticsCandidateScanMax = 200
+)
 
 const (
 	defaultAccountMetricsHistoryDays = 30
@@ -5588,6 +6016,9 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 		}
 		if err := a.collectProjectAccountMetrics(ctx, app, pid); err != nil {
 			app.Logger().Warn("analytics_collector: project failed", "project", pid, "err", err)
+		}
+		if err := a.collectProjectPostMetrics(ctx, app, pid); err != nil {
+			app.Logger().Warn("analytics_collector: post metrics failed", "project", pid, "err", err)
 		}
 	}
 	return nil
@@ -5659,6 +6090,163 @@ func (a *App) collectProjectAccountMetrics(runCtx context.Context, app *sdk.AppC
 		}
 	}
 	return nil
+}
+
+type postAnalyticsCandidate struct {
+	PostID     int64
+	ProfileID  int64
+	Published  string
+	LastRun    string
+	LastStatus string
+	Target     metricsTarget
+}
+
+func (a *App) collectProjectPostMetrics(runCtx context.Context, app *sdk.AppCtx, pid string) error {
+	rows, err := app.AppDB().Query(
+		`SELECT p.id, COALESCE(p.profile_id,0),
+		        COALESCE(t.published_at, p.published_at, p.created_at, ''),
+		        t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
+		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
+		        COALESCE(a.external_account_id,''), COALESCE(a.page_credentials,''),
+		        COALESCE(a.provider_slug,'native'), COALESCE(a.provider_account_id,''),
+		        COALESCE(t.provider_post_id,''), COALESCE(t.publish_operation_id,''),
+		        COALESCE((
+		          SELECT point_time FROM social_metric_points mp
+		           WHERE mp.project_id=p.project_id AND mp.scope='post'
+		             AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		           ORDER BY mp.point_time DESC, mp.id DESC LIMIT 1
+		        ), ''),
+		        COALESCE((
+		          SELECT status FROM social_metric_points mp
+		           WHERE mp.project_id=p.project_id AND mp.scope='post'
+		             AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		           ORDER BY mp.point_time DESC, mp.id DESC LIMIT 1
+		        ), '')
+		   FROM post_targets t
+		   JOIN posts p ON p.id=t.post_id
+		   JOIN social_accounts a ON a.id=t.social_account_id
+		  WHERE p.project_id=? AND t.status='published' AND a.status='active'
+		    AND (
+		      COALESCE(t.platform_post_id,'')<>''
+		      OR COALESCE(t.provider_post_id,'')<>''
+		      OR COALESCE(t.publish_operation_id,'')<>''
+		    )
+		  ORDER BY
+		    CASE WHEN EXISTS(
+		      SELECT 1 FROM social_metric_points mp
+		       WHERE mp.project_id=p.project_id AND mp.scope='post'
+		         AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		    ) THEN 1 ELSE 0 END,
+		    COALESCE((
+		      SELECT MAX(point_time) FROM social_metric_points mp
+		       WHERE mp.project_id=p.project_id AND mp.scope='post'
+		         AND mp.post_target_id=t.id AND mp.metric='_refresh'
+		    ), ''),
+		    t.id
+		  LIMIT ?`,
+		pid, postAnalyticsCandidateScanMax,
+	)
+	if err != nil {
+		return err
+	}
+	candidates := make([]postAnalyticsCandidate, 0, postAnalyticsCandidateScanMax)
+	for rows.Next() {
+		var candidate postAnalyticsCandidate
+		if err := rows.Scan(
+			&candidate.PostID, &candidate.ProfileID, &candidate.Published,
+			&candidate.Target.TargetID, &candidate.Target.SocialAccountID,
+			&candidate.Target.ExtPostID, &candidate.Target.ExtURL,
+			&candidate.Target.Platform, &candidate.Target.ConnID,
+			&candidate.Target.ExternalAccountID, &candidate.Target.PageCreds,
+			&candidate.Target.ProviderSlug, &candidate.Target.ProviderAccountID,
+			&candidate.Target.ProviderPostID, &candidate.Target.PublishOperationID,
+			&candidate.LastRun, &candidate.LastStatus,
+		); err == nil {
+			candidates = append(candidates, candidate)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	refreshed := 0
+	for _, candidate := range candidates {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		if refreshed >= postAnalyticsBatchSize {
+			break
+		}
+		if !postAnalyticsDue(candidate.Published, candidate.LastRun, candidate.LastStatus, now) {
+			continue
+		}
+		outcome := a.getPostMetrics(app, candidate.Target)
+		if err := persistPostMetricOutcome(app, pid, candidate.ProfileID, candidate.PostID, outcome); err != nil {
+			app.Logger().Warn("analytics_collector: post persist failed",
+				"project", pid, "post", candidate.PostID, "target", candidate.Target.TargetID, "err", err)
+			continue
+		}
+		refreshed++
+		if outcome.Status == "failed" {
+			app.Logger().Warn("analytics_collector: post metrics provider failed",
+				"project", pid, "post", candidate.PostID, "target", candidate.Target.TargetID,
+				"platform", candidate.Target.Platform, "err", outcome.Error)
+		}
+		if outcome.Status == "ok" {
+			app.EmitWithProject("metrics.updated", pid, map[string]any{
+				"post_id":              candidate.PostID,
+				"post_target_id":       candidate.Target.TargetID,
+				"social_account_id":    candidate.Target.SocialAccountID,
+				"platform":             candidate.Target.Platform,
+				"status":               outcome.Status,
+				"automatic_collection": true,
+			})
+		}
+	}
+	return nil
+}
+
+func postAnalyticsDue(publishedAt, lastRun, lastStatus string, now time.Time) bool {
+	if strings.TrimSpace(lastRun) == "" {
+		return true
+	}
+	last, ok := parseMetricPointTime(lastRun)
+	if !ok {
+		return true
+	}
+	published, ok := parseMetricPointTime(publishedAt)
+	if !ok {
+		published = now
+	}
+	age := now.Sub(published)
+	interval := time.Hour
+	switch {
+	case age > 90*24*time.Hour:
+		interval = 7 * 24 * time.Hour
+	case age > 30*24*time.Hour:
+		interval = 24 * time.Hour
+	case age > 7*24*time.Hour:
+		interval = 6 * time.Hour
+	}
+	switch lastStatus {
+	case "unsupported", "skipped":
+		interval = maxDuration(interval, 7*24*time.Hour)
+	case "failed":
+		interval = maxDuration(interval, 6*time.Hour)
+	}
+	return !last.After(now) && now.Sub(last) >= interval
+}
+
+func maxDuration(a, b time.Duration) time.Duration {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterval time.Duration) (bool, error) {
@@ -5835,22 +6423,43 @@ func (a *App) persistAccountMetrics(ctx *sdk.AppCtx, pid string, res accountMetr
 }
 
 func persistPostMetricOutcome(ctx *sdk.AppCtx, pid string, profileID, postID int64, outcome targetMetricsOutcome) error {
-	if outcome.Status != "ok" || outcome.Metrics == nil || pid == "" || outcome.SocialAccountID <= 0 {
+	if pid == "" || outcome.SocialAccountID <= 0 || outcome.TargetID <= 0 || outcome.Platform == "" {
 		return nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	status := outcome.Status
+	if status == "" {
+		status = "failed"
+	}
+	note := strings.TrimSpace(strings.Join(append([]string{outcome.Error, outcome.Reason}, outcome.Warnings...), "; "))
+	noteRunes := []rune(note)
+	if len(noteRunes) > 500 {
+		note = string(noteRunes[:500])
+	}
+	if err := insertSocialMetricPoint(
+		ctx, pid, profileID, outcome.SocialAccountID, postID, outcome.TargetID,
+		outcome.Platform, "post", "_refresh", "heartbeat", now, 1,
+		outcome.Platform+"_post_refresh", status, note,
+	); err != nil {
+		return err
+	}
+	if status != "ok" || outcome.Metrics == nil {
+		return nil
+	}
 	points := []struct {
 		name  string
 		value int64
 	}{
 		{"views", outcome.Metrics.Views},
+		{"reach", outcome.Metrics.Reach},
 		{"likes", outcome.Metrics.Likes},
 		{"comments", outcome.Metrics.Comments},
 		{"shares", outcome.Metrics.Shares},
+		{"saves", outcome.Metrics.Saves},
 	}
 	source := outcome.Platform + "_post_snapshot"
 	for _, point := range points {
-		if point.value <= 0 {
+		if !metricAvailable(outcome.Metrics, point.name) {
 			continue
 		}
 		if err := insertSocialMetricPoint(ctx, pid, profileID, outcome.SocialAccountID, postID, outcome.TargetID, outcome.Platform, "post", point.name, "snapshot", now, point.value, source, "ok", ""); err != nil {
@@ -5858,6 +6467,18 @@ func persistPostMetricOutcome(ctx *sdk.AppCtx, pid string, profileID, postID int
 		}
 	}
 	return nil
+}
+
+func metricAvailable(metrics *normalizedMetrics, name string) bool {
+	if metrics == nil {
+		return false
+	}
+	for _, available := range metrics.Available {
+		if available == name {
+			return true
+		}
+	}
+	return false
 }
 
 func insertSocialMetricPoint(ctx *sdk.AppCtx, pid string, profileID, accountID, postID, targetID int64, platform, scope, metric, period, pointTime string, value int64, source, status, note string) error {
@@ -6082,8 +6703,10 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
 		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
-		        COALESCE(a.page_credentials,''), COALESCE(a.provider_slug,'native'),
+		        COALESCE(a.external_account_id,''), COALESCE(a.page_credentials,''),
+		        COALESCE(a.provider_slug,'native'),
 		        COALESCE(a.provider_account_id,''), COALESCE(t.provider_post_id,'')
+		        , COALESCE(t.publish_operation_id,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=?`,
@@ -6100,7 +6723,8 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		var platform sql.NullString
 		if err := rows.Scan(
 			&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID,
-			&r.PageCreds, &r.ProviderSlug, &r.ProviderAccountID, &r.ProviderPostID,
+			&r.ExternalAccountID, &r.PageCreds, &r.ProviderSlug, &r.ProviderAccountID,
+			&r.ProviderPostID, &r.PublishOperationID,
 		); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String

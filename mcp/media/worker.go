@@ -30,7 +30,9 @@ import (
 )
 
 const (
-	indexerBatchSize = 25
+	indexerBatchSize         = 25
+	directIndexerBatchSize   = 20
+	storageInventoryPageSize = 5000
 )
 
 // runIndexer is the worker body. The framework calls it on the
@@ -91,17 +93,6 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	}
 	sc := newStorageClient()
 
-	// Pull the file inventory once per tick. Storage's /files paginates;
-	// we ask for a generous slab on the assumption most projects sit
-	// well under a few thousand. The exact limit also gates the orphan
-	// cleanup below — only safe when we know we got a complete view.
-	const storageListLimit = 5000
-	files, err := sc.SearchFiles(ctx, projectID, storageListLimit)
-	if err != nil {
-		app.Logger().Warn("storage search failed", "err", err)
-		return nil
-	}
-
 	// Cascade-cleanup: any media row whose source file is no longer
 	// in storage (soft-deleted, re-uploaded under a new id, etc.)
 	// gets dropped along with its derivations + transcripts. Skipped
@@ -115,23 +106,57 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 	// — the storage call is bounded by media's row count, not
 	// storage's file count, and is correct under any listing cap.
 	//
-	// `files` is still computed up-front because filterMediaFiles +
-	// indexerCandidates use it for the indexing side; purgeOrphans
-	// itself doesn't consume it anymore.
 	if n, err := purgeOrphans(app, sc, app.AppDB(), projectID, nil); err != nil {
 		app.Logger().Warn("purge orphan media failed", "err", err)
 	} else if n > 0 {
 		app.Logger().Info("purged orphan media", "count", n)
 	}
 
-	media := filterMediaFiles(files)
-	candidates := indexerCandidates(app.AppDB(), projectID, media, indexerBatchSize)
+	// Resolve known pending/failed rows by exact Storage ID first. This is
+	// the durable queue behind media_reindex: a requested file is eligible
+	// even when it sits outside every formerly fixed inventory window.
+	candidates, err := resolvePendingIndexerFiles(
+		ctx, sc, app.AppDB(), projectID, directIndexerBatchSize,
+	)
+	if err != nil {
+		app.Logger().Warn("resolve pending media failed", "err", err)
+		candidates = nil
+	}
+	directCount := len(candidates)
+
+	// Reserve part of each tick for discovery so a permanently failing row
+	// cannot starve new uploads. Discovery itself walks every Storage page;
+	// there is no 5,000/10,000-row catalog ceiling.
+	var files []StorageFile
+	var media []StorageFile
+	remaining := indexerBatchSize - len(candidates)
+	if remaining > 0 {
+		files, err = sc.SearchAllFiles(ctx, projectID, storageInventoryPageSize)
+		if err != nil {
+			app.Logger().Warn("storage inventory scan failed", "err", err)
+		} else {
+			media = filterMediaFiles(files)
+			selected := make(map[int64]struct{}, len(candidates))
+			for _, f := range candidates {
+				selected[f.ID] = struct{}{}
+			}
+			unselected := make([]StorageFile, 0, len(media))
+			for _, f := range media {
+				if _, exists := selected[f.ID]; !exists {
+					unselected = append(unselected, f)
+				}
+			}
+			candidates = append(candidates,
+				indexerCandidates(app.AppDB(), projectID, unselected, remaining)...)
+		}
+	}
 	if len(candidates) == 0 {
 		return nil
 	}
 	app.Logger().Info("indexer tick",
 		"total_in_storage", len(files),
 		"media_in_storage", len(media),
+		"direct_candidates", directCount,
 		"candidates", len(candidates),
 	)
 
@@ -143,6 +168,38 @@ func runIndexer(ctx context.Context, app *sdk.AppCtx) error {
 			maxSizeMB, thumbSeek, thumbWidth, waveW, waveH)
 	}
 	return nil
+}
+
+// resolvePendingIndexerFiles fetches the exact Storage rows referenced by
+// Media's durable pending/failed queue. ResolveFiles preserves no ordering,
+// so rebuild the slice in DB priority order before handing it to processOne.
+func resolvePendingIndexerFiles(
+	ctx context.Context,
+	sc *storageClient,
+	db *sql.DB,
+	projectID string,
+	limit int,
+) ([]StorageFile, error) {
+	ids, err := pendingIndexerFileIDs(db, projectID, limit)
+	if err != nil || len(ids) == 0 {
+		return nil, err
+	}
+	resolved, err := sc.ResolveFiles(ctx, projectID, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StorageFile, 0, len(ids))
+	for _, id := range ids {
+		f := resolved[id]
+		if f == nil || isExcludedFromCatalog(f.Folder) {
+			continue
+		}
+		if !isMediaContentType(f.ContentType) && !isMediaByExt(f.Name) {
+			continue
+		}
+		out = append(out, *f)
+	}
+	return out, nil
 }
 
 // indexOneFile runs the indexer pipeline for a single file —

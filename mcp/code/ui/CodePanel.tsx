@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DeviceFrame } from "./components/DeviceFrame";
+import { parseCodePanelLink } from "./components/codeLinks";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -373,10 +374,13 @@ function cleanRel(p: string): string {
 }
 
 export default function CodePanel({ projectId, installId }: NativePanelProps) {
+  const initialLink = useRef(
+    parseCodePanelLink(typeof window === "undefined" ? "" : window.location.search),
+  ).current;
   const [repos, setRepos] = useState<Repo[]>([]);
   const [includeArchived, setIncludeArchived] = useState(false);
   const [query, setQuery] = useState("");
-  const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedSlug, setSelectedSlug] = useState<string | null>(initialLink.repo || null);
   const [tree, setTree] = useState<FileMeta[]>([]);
   const [openFile, setOpenFile] = useState<{ path: string; content: string } | null>(null);
   const [draft, setDraft] = useState<string>("");
@@ -391,7 +395,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
-  const [activeView, setActiveView] = useState<"code" | "issues">("code");
+  const [activeView, setActiveView] = useState<"code" | "issues">(
+    initialLink.view === "issues" ? "issues" : "code",
+  );
   // Lifted from DevBar so the main content area can render the live
   // device view for remote (Simulator-app) dev runs.
   const [devRun, setDevRun] = useState<DevRunWire | null>(null);
@@ -400,6 +406,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [forkSlug, setForkSlug] = useState<string | null>(null);
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
   const uploadRef = useRef<HTMLInputElement | null>(null);
+  const fileViewRef = useRef<HTMLPreElement | null>(null);
 
   const selectedRepo = repos.find((r) => r.slug === selectedSlug);
 
@@ -556,12 +563,37 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     [withParams],
   );
 
+  const initialLinkApplied = useRef(false);
+  useEffect(() => {
+    if (initialLinkApplied.current || initialLink.view !== "repositories" || !initialLink.repo) return;
+    initialLinkApplied.current = true;
+    loadTree(initialLink.repo);
+    if (initialLink.path) openPath(initialLink.repo, initialLink.path);
+  }, [initialLink, loadTree, openPath]);
+
+  const initialLineApplied = useRef(false);
+  useEffect(() => {
+    if (
+      initialLineApplied.current ||
+      !initialLink.line ||
+      !initialLink.path ||
+      openFile?.path !== initialLink.path ||
+      !fileViewRef.current
+    ) return;
+    initialLineApplied.current = true;
+    fileViewRef.current.parentElement?.scrollTo({
+      top: Math.max(0, initialLink.line - 1) * 20,
+      behavior: "auto",
+    });
+  }, [initialLink, openFile]);
+
   // Live refresh — react to repo + file mutations from agents, other
   // tabs, AND this panel's own writes (the backend emits on every
   // mutation, REST-driven or MCP-driven).
   useAppEvents<FileEventData>("code", projectId, (ev) => {
     switch (ev.topic) {
       case "repo.added":
+      case "repo.updated":
       case "repo.archived":
       case "repo.deleted":
         loadRepos();
@@ -892,6 +924,8 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             repos={repos}
             projectId={projectId}
             api={api}
+            initialRepoSlug={initialLink.view === "issues" ? initialLink.repo : undefined}
+            initialIssueNumber={initialLink.view === "issues" ? initialLink.issue : undefined}
             currentPath={openFile?.path}
             currentRepoSlug={selectedSlug ?? undefined}
             onOpenPath={(repoSlug, path) => {
@@ -1045,7 +1079,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                     <header className="p-3 border-b border-border flex items-center gap-2">
                       <span className="text-xs uppercase tracking-wide text-text-dim">file</span>
                       <span className="text-text font-mono text-sm truncate flex-1">
-                        {openFile.path}{dirty ? " •" : ""}
+                        {openFile.path}
+                        {initialLink.path === openFile.path && initialLink.line ? `:${initialLink.line}` : ""}
+                        {dirty ? " •" : ""}
                       </span>
                       {isLikelyText(openFile.path) && (
                         editing ? (
@@ -1089,7 +1125,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                           }}
                         />
                       ) : (
-                        <pre className="text-[11px] font-mono p-4 text-text whitespace-pre overflow-auto">
+                        <pre ref={fileViewRef} className="text-[11px] leading-5 font-mono p-4 text-text whitespace-pre overflow-auto">
                           {openFile.content}
                         </pre>
                       )}
@@ -2086,6 +2122,8 @@ function IssuesView({
   repos,
   projectId,
   api,
+  initialRepoSlug,
+  initialIssueNumber,
   currentPath,
   currentRepoSlug,
   onOpenPath,
@@ -2093,6 +2131,8 @@ function IssuesView({
   repos: Repo[];
   projectId: string;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  initialRepoSlug?: string;
+  initialIssueNumber?: number;
   currentPath?: string;
   currentRepoSlug?: string;
   onOpenPath: (repoSlug: string, path: string) => void;
@@ -2100,7 +2140,7 @@ function IssuesView({
   const [issues, setIssues] = useState<CodeIssue[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
-  const [repoFilter, setRepoFilter] = useState("");
+  const [repoFilter, setRepoFilter] = useState(initialRepoSlug || "");
   const [state, setState] = useState("all");
   const [status, setStatus] = useState("all");
   const [query, setQuery] = useState("");
@@ -2109,6 +2149,7 @@ function IssuesView({
   const [showCreate, setShowCreate] = useState(false);
   const [showMetaEdit, setShowMetaEdit] = useState(false);
   const [comment, setComment] = useState("");
+  const initialIssueApplied = useRef(false);
 
   const loadIssues = useCallback(async () => {
     try {
@@ -2118,14 +2159,25 @@ function IssuesView({
       const r = await api<{ issues: CodeIssue[] }>("GET", "/issues", undefined, extra);
       const list = r.issues || [];
       setIssues(list);
-      setSelected((cur) => (cur && list.some((i) => i.id === cur) ? cur : list[0]?.id ?? null));
+      setSelected((cur) => {
+        if (!initialIssueApplied.current && initialIssueNumber) {
+          const linked = list.find((issue) =>
+            issue.number === initialIssueNumber && (!initialRepoSlug || issue.repo_slug === initialRepoSlug),
+          );
+          if (linked) {
+            initialIssueApplied.current = true;
+            return linked.id;
+          }
+        }
+        return cur && list.some((issue) => issue.id === cur) ? cur : list[0]?.id ?? null;
+      });
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
       setIssues([]);
       setSelected(null);
     }
-  }, [api, repoFilter, state, status, query]);
+  }, [api, repoFilter, state, status, query, initialIssueNumber, initialRepoSlug]);
 
   const loadDetail = useCallback(async (issueId: number | null) => {
     if (!issueId) {

@@ -68,6 +68,7 @@ func waitTestConnection(t *testing.T, connections <-chan net.Conn) net.Conn {
 
 func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 	t.Setenv("APTEVA_PUBLIC_URL", "https://public.example.test")
+	t.Setenv("TELEPHONY_LOCAL_BARGE_IN_MODE", "fallback")
 	platform := &answerPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
 	previousCtx := globalCtx
@@ -234,7 +235,7 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 	// verify the complete caller -> Core -> Telephony -> Twilio interruption
 	// control loop while outbound audio is still buffered.
 	silence := make([]int16, 160)
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 25; i++ {
 		writeTwilioTestMedia(t, twilio, "MZ-full-duplex", silence)
 	}
 	longResponse := sinePCM(24000, 700, 24000*3)
@@ -250,12 +251,11 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	loud := make([]int16, 160)
-	for i := range loud {
-		loud[i] = 6000
+	waitForTwilioTestMedia(t, twilio)
+	callerSpeech := telephoneSpeech(8000, 500, 3500)
+	for offset := 0; offset < len(callerSpeech); offset += 160 {
+		writeTwilioTestMedia(t, twilio, "MZ-full-duplex", callerSpeech[offset:min(len(callerSpeech), offset+160)])
 	}
-	writeTwilioTestMedia(t, twilio, "MZ-full-duplex", loud)
-	writeTwilioTestMedia(t, twilio, "MZ-full-duplex", loud)
 	bargeInDeadline := time.After(time.Second)
 	bargeInObserved := false
 	for !bargeInObserved {
@@ -309,6 +309,36 @@ func writeTwilioTestMedia(t *testing.T, conn net.Conn, streamSID string, pcm []i
 	if err := wsutil.WriteClientText(conn, media); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func waitForTwilioTestMedia(t *testing.T, conn net.Conn) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+		data, op, err := wsutil.ReadServerData(conn)
+		if err != nil || op != ws.OpText {
+			continue
+		}
+		var event struct {
+			Event string `json:"event"`
+		}
+		if json.Unmarshal(data, &event) != nil {
+			continue
+		}
+		if event.Event == "mark" {
+			if err := wsutil.WriteClientText(conn, data); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if event.Event == "media" {
+			return
+		}
+	}
+	t.Fatal("timed out waiting for queued Twilio playback")
 }
 
 func longestNearZeroRun(samples []int16, threshold int) int {

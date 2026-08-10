@@ -53,6 +53,10 @@ func (s *service) saveSuite(item *Suite, creating bool) (*Suite, error) {
 
 func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	item.ID, item.SuiteID, item.Name, item.Prompt = strings.TrimSpace(item.ID), strings.TrimSpace(item.SuiteID), strings.TrimSpace(item.Name), strings.TrimSpace(item.Prompt)
+	item.Mode = strings.ToLower(strings.TrimSpace(item.Mode))
+	if item.Mode == "" {
+		item.Mode = "text"
+	}
 	if item.ID == "" {
 		item.ID = "case_" + token(10)
 	}
@@ -61,6 +65,33 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	}
 	if item.SuiteID == "" || item.Name == "" || item.Prompt == "" {
 		return nil, errors.New("suite_id, name, and prompt required")
+	}
+	if item.Mode != "text" && item.Mode != "voice" {
+		return nil, errors.New("mode must be text or voice")
+	}
+	if item.Mode == "voice" {
+		if item.Voice == nil {
+			return nil, errors.New("voice settings required")
+		}
+		item.Voice.CallerGoal = strings.TrimSpace(item.Voice.CallerGoal)
+		if item.Voice.CallerGoal == "" {
+			item.Voice.CallerGoal = item.Prompt
+		}
+		if item.TimeoutSeconds > 300 {
+			return nil, errors.New("voice timeout_seconds must be at most 300")
+		}
+		item.Voice.Transport = strings.ToLower(strings.TrimSpace(item.Voice.Transport))
+		if item.Voice.Transport == "" {
+			item.Voice.Transport = "direct"
+		}
+		if item.Voice.Transport != "direct" && item.Voice.Transport != "carrier" {
+			return nil, errors.New("voice transport must be direct or carrier")
+		}
+		if item.Voice.Transport == "carrier" && strings.TrimSpace(item.Voice.ProtocolFixture) == "" {
+			return nil, errors.New("voice protocol_fixture required for carrier transport")
+		}
+	} else {
+		item.Voice = nil
 	}
 	if suite, err := s.db.getSuite(item.SuiteID); err != nil {
 		return nil, err
@@ -224,6 +255,9 @@ func (s *service) runNext(ctx context.Context) error {
 	if err != nil || run == nil {
 		return err
 	}
+	s.ctx.Emit("eval.run.started", map[string]any{
+		"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage,
+	})
 	return s.executeRun(ctx, run)
 }
 

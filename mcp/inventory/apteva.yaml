@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: inventory
 display_name: Inventory
-version: 0.1.1
+version: 0.2.0
 description: |
   Reusable stock ledger for Apteva apps. Tracks SKUs, locations,
   on-hand stock, reservations, transfers, adjustments, receipts, and
@@ -12,6 +12,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/inventory
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [inventory, stock, warehouse, sku, commerce, ecommerce, fulfillment]
 
 scopes: [project, global]
@@ -88,12 +90,25 @@ provides:
         item_id: integer
         location_id: integer
         quantity: number
+    - name: inventory.reservation.expired
+      description: An inventory reservation reached its TTL and was released.
+      payload:
+        reservation_id: integer
+        item_id: integer
+        location_id: integer
+        quantity: number
+        reference_app: string
+        reference_type: string
+        reference_id: string
+  workers:
+    - name: reservation-expiration
+      schedule: "@every 1m"
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: inventory/v0.2.0
     entry: mcp/inventory
   port: 8080
   health_check: /health
@@ -102,5 +117,12 @@ db:
   driver: sqlite
   path: /data/inventory.db
   migrations: migrations/
+
+config_schema:
+  - name: reservation_ttl_minutes
+    type: text
+    default: "60"
+    label: Reservation TTL (minutes)
+    description: Default lifetime for reservations that do not provide expires_at.
 
 upgrade_policy: auto-patch

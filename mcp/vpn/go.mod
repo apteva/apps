@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/vpn
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.14.1
+	github.com/apteva/app-sdk v0.43.0
 	golang.org/x/crypto v0.28.0
 	modernc.org/sqlite v1.50.0
 	rsc.io/qr v0.2.0

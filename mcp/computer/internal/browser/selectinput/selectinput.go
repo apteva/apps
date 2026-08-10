@@ -8,6 +8,8 @@ import (
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+
+	"github.com/apteva/apps/mcp/computer/internal/browser/domselector"
 )
 
 type Target struct {
@@ -69,6 +71,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
   function norm(s) {
     return String(s || '').replace(/\s+/g, ' ').trim();
   }
+%s
   function lower(s) { return norm(s).toLowerCase(); }
   function visible(el) {
     if (!el || !el.getBoundingClientRect) return false;
@@ -235,9 +238,12 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 
   var targetEl = resolveTarget();
   if (!targetEl) return {error:'select_option: target not found'};
-  if (targetEl.tagName && targetEl.tagName.toLowerCase() === 'select') return nativeSelect(targetEl);
-  return await customSelect(targetEl);
-})(%s, %s)`, string(targetJSON), string(reqJSON))
+  var result = targetEl.tagName && targetEl.tagName.toLowerCase() === 'select'
+    ? nativeSelect(targetEl)
+    : await customSelect(targetEl);
+  if (result && result.ok) result.selector = cssPath(targetEl);
+  return result;
+})(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
 	var out struct {
 		Result

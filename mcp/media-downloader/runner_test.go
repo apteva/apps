@@ -1,25 +1,45 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
+type fixtureRunner struct {
+	stdout []string
+	stderr []string
+	err    error
+	args   []string
+}
+
+func (r *fixtureRunner) Run(_ context.Context, _ string, args []string, stdout func(string), stderr func(string)) error {
+	r.args = append([]string(nil), args...)
+	for _, line := range r.stdout {
+		stdout(line)
+	}
+	for _, line := range r.stderr {
+		stderr(line)
+	}
+	return r.err
+}
+
 func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 	req := downloadRequest{
-		URL:            "https://www.youtube.com/watch?v=abc",
-		Mode:           "audio",
-		AudioFormat:    "m4a",
-		NoPlaylist:     true,
-		FFmpegLocation: "/usr/bin/ffmpeg",
-		YoutubePlayer:  "android",
-		YTDLPExtraArgs: []string{"--js-runtimes", "node:/usr/bin/node"},
+		URL:              "https://www.youtube.com/watch?v=abc",
+		Mode:             "audio",
+		AudioFormat:      "m4a",
+		FFmpegLocation:   "/usr/bin/ffmpeg",
+		YoutubePlayer:    "android",
+		YTDLPExtraArgs:   []string{"--js-runtimes", "node:/usr/bin/node"},
+		ProxyURL:         "http://127.0.0.1:1234",
+		MaxDownloadBytes: 1048576,
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--js-runtimes node:/usr/bin/node", "--proxy http://127.0.0.1:1234", "--max-filesize 1048576", "--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "--print before_dl:__APTEVA_META__", "--print after_move:__APTEVA_FILE__", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -56,12 +76,72 @@ func TestBuildDownloadArgsSkipsYouTubeArgsForOtherHosts(t *testing.T) {
 }
 
 func TestBuildProbeArgsIncludesExtraArgs(t *testing.T) {
-	args := buildProbeArgs("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt", []string{"--js-runtimes", "node:/usr/bin/node"})
+	args := buildProbeArgs("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt", []string{"--js-runtimes", "node:/usr/bin/node"}, "http://127.0.0.1:1234")
 	got := stringsJoin(args)
-	for _, want := range []string{"--dump-single-json", "--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt"} {
+	for _, want := range []string{"--dump-single-json", "--js-runtimes node:/usr/bin/node", "--proxy http://127.0.0.1:1234", "--cookies /tmp/cookies.txt"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("probe args missing %q: %v", want, args)
 		}
+	}
+}
+
+func TestBuildSearchArgs(t *testing.T) {
+	args := buildSearchArgs("coffee documentary", 50, "/tmp/cookies.txt", []string{"--remote-components", "ejs:github"}, "http://127.0.0.1:1234")
+	got := stringsJoin(args)
+	for _, want := range []string{
+		"--flat-playlist",
+		"--dump-single-json",
+		"--playlist-end 25",
+		"--remote-components ejs:github",
+		"--proxy http://127.0.0.1:1234",
+		"--cookies /tmp/cookies.txt",
+		"ytsearch25:coffee documentary",
+	} {
+		if !containsArgSequence(got, want) {
+			t.Fatalf("search args missing %q: %v", want, args)
+		}
+	}
+}
+
+func TestSearchYouTubeNormalizesResults(t *testing.T) {
+	runner := &fixtureRunner{stdout: []string{`{
+		"entries": [
+			{
+				"id": "abc-123",
+				"title": "Coffee Story",
+				"channel": "Example Channel",
+				"duration": 125.5,
+				"age_limit": 18,
+				"thumbnails": [
+					{"url": "small.jpg", "width": 120, "height": 90},
+					{"url": "large.jpg", "width": 1280, "height": 720}
+				]
+			},
+			{"id": "second", "title": "Second Result"}
+		]
+	}`}}
+	results, err := searchYouTube(context.Background(), runner, "yt-dlp", " coffee documentary ", "", 1, nil, "http://127.0.0.1:1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %#v, want one normalized result", results)
+	}
+	got := results[0]
+	if got.ID != "abc-123" || got.Title != "Coffee Story" || got.Channel != "Example Channel" || got.URL != "https://www.youtube.com/watch?v=abc-123" || got.Thumbnail != "large.jpg" || got.DurationSeconds != 125.5 || got.AgeLimit != 18 {
+		t.Fatalf("normalized result = %#v", got)
+	}
+	if !containsArgSequence(stringsJoin(runner.args), "ytsearch1:coffee documentary") {
+		t.Fatalf("runner args = %v", runner.args)
+	}
+}
+
+func TestSearchYouTubeValidatesQuery(t *testing.T) {
+	if _, err := searchYouTube(context.Background(), &fixtureRunner{}, "yt-dlp", "", "", 10, nil, ""); err == nil {
+		t.Fatal("expected empty query to fail")
+	}
+	if _, err := searchYouTube(context.Background(), &fixtureRunner{}, "yt-dlp", strings.Repeat("x", 301), "", 10, nil, ""); err == nil {
+		t.Fatal("expected long query to fail")
 	}
 }
 
@@ -115,7 +195,7 @@ func TestFindOutputFileUsesPrintedPath(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := findOutputFile(dir, []string{path})
+	got, err := findOutputFile(dir, []string{"__APTEVA_FILE__" + path})
 	if err != nil {
 		t.Fatal(err)
 	}

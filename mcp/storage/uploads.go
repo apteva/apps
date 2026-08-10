@@ -728,15 +728,20 @@ func (a *App) handleUploadAbort(w http.ResponseWriter, r *http.Request, id strin
 	httpJSON(w, map[string]any{"aborted": id, "bytes_freed": bytesFreed})
 }
 
-// toolAbortUploadCtx — MCP wrapper around abortUploadSession. The
-// tool surface intentionally skips the ownership check (admin-style
-// abort): operators clearing leaked sessions don't necessarily own
-// them. Use the HTTP DELETE for client-initiated cancels which DO
-// want the X-User-ID gate.
-func (a *App) toolAbortUploadCtx(_ context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
+// toolAbortUploadCtx — MCP wrapper around abortUploadSession. MCP does
+// not use the HTTP endpoint's user ownership model, but it must still
+// enforce project isolation and files.write scope for the session's
+// destination folder.
+func (a *App) toolAbortUploadCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
 	id, _ := args["id"].(string)
 	if id == "" {
 		return nil, errors.New("id required")
+	}
+	if _, _, err := a.requireUploadSessionWriteAccess(ctx, app, args); err != nil {
+		if errors.Is(err, errUploadSessionNotFound) {
+			return map[string]any{"found": false, "id": id}, nil
+		}
+		return nil, err
 	}
 	reason, _ := args["reason"].(string)
 	if reason == "" {

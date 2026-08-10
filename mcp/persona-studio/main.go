@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -90,7 +91,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_item_create", Description: "Create a reusable item/product/prop/location/brand asset. Args: persona_id, name, kind?, description?, usage_rules?, visual_rules?, storage_file_ids?, metadata?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "kind": sString(), "description": sString(), "usage_rules": sString(), "visual_rules": sString(), "storage_file_ids": sArray("integer"), "metadata": sObject()}, []string{"persona_id", "name"}), Handler: a.toolItemCreate},
 		{Name: "persona_item_update", Description: "Update a reusable item. Args: id, patch object.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolItemUpdate},
 		{Name: "persona_item_list", Description: "List items. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolItemList},
-		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, source_images, voice, avatar, storage_folder, options}). Image/video/avatar generation automatically sends linked persona/item visual references via source_images up to the selected model's limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
+		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, source_images, source_image_limit, voice, avatar, storage_folder, options}). Image/video/avatar generation automatically ranks linked persona/item visual references. Persona video requires at least one visual reference, selects or validates a reference-to-video Media Studio model, and honors its source-image limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
 		{Name: "persona_generate_pack", Description: "Generate a starter pack. Args: persona_id, campaign_id?, prompts? object, use_cache?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "campaign_id": sInteger(), "prompts": sObject(), "use_cache": sBool()}, []string{"persona_id"}), Handler: a.toolGeneratePack},
 		{Name: "persona_campaign_create", Description: "Create a campaign. Args: persona_id, name, brief?, platforms?, content_pillars?, status?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "brief": sString(), "platforms": sArray("string"), "content_pillars": sArray("string"), "status": sString()}, []string{"persona_id", "name"}), Handler: a.toolCampaignCreate},
 		{Name: "persona_create_clip_plan", Description: "Create a structured clip plan. Args: persona_id, brief, campaign_id?, asset_ids?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "brief": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id", "brief"}), Handler: a.toolCreateClipPlan},
@@ -964,7 +965,22 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	itemIDs := int64SliceArg(args, "item_ids")
 	items, _ := listItemsByIDs(ctx.AppDB(), pid, personaID, itemIDs)
 	settings := cloneMap(mapArg(args, "settings"))
+	if style != nil {
+		for k, v := range jsonObject(style.ProviderSettings) {
+			if _, exists := settings[k]; !exists {
+				settings[k] = v
+			}
+		}
+	}
 	if compositionKindUsesVisualSources(assetType) {
+		if assetType == "video" {
+			if len(visualSourceCandidates(refs, items, settings)) == 0 {
+				return nil, errors.New("persona video generation requires at least one visual reference image")
+			}
+			if err := prepareVideoReferenceSettings(ctx, pid, settings); err != nil {
+				return nil, err
+			}
+		}
 		sourceImages := defaultVisualSourceRefs(assetType, refs, items, settings)
 		if len(sourceImages) > 0 {
 			// Always use Media Studio's provider-neutral multi-reference path,
@@ -972,7 +988,9 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			// lets Media Studio choose the correct edit tool per provider.
 			delete(settings, "source_image")
 			settings["source_images"] = sourceImages
-			settings["source_image"] = sourceImages[0]
+			if assetType != "video" {
+				settings["source_image"] = sourceImages[0]
+			}
 			if assetType == "image" && !isImageEditModel(strArg(settings, "model")) {
 				delete(settings, "model")
 			}
@@ -1005,14 +1023,10 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		"_project_id": pid,
 	}
 	for k, v := range settings {
-		call[k] = v
-	}
-	if call["model"] == nil && style != nil {
-		for k, v := range jsonObject(style.ProviderSettings) {
-			if _, exists := call[k]; !exists {
-				call[k] = v
-			}
+		if k == "source_image_limit" || k == "max_source_images" {
+			continue
 		}
+		call[k] = v
 	}
 	if assetType == "audio_tts" && call["voice"] == nil && persona.DefaultVoiceID != "" {
 		call["voice"] = persona.DefaultVoiceID
@@ -2238,11 +2252,19 @@ func defaultVisualSourceRefs(assetType string, refs []Reference, items []Item, s
 	if limit <= 0 {
 		return nil
 	}
+	candidates := visualSourceCandidates(refs, items, settings)
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
+	}
+	return candidates
+}
+
+func visualSourceCandidates(refs []Reference, items []Item, settings map[string]any) []string {
 	out := []string{}
 	seen := map[string]bool{}
 	add := func(ref string) {
 		ref = strings.TrimSpace(ref)
-		if ref == "" || seen[ref] || len(out) >= limit {
+		if ref == "" || seen[ref] {
 			return
 		}
 		seen[ref] = true
@@ -2252,11 +2274,21 @@ func defaultVisualSourceRefs(assetType string, refs []Reference, items []Item, s
 		add(ref)
 	}
 	add(strArg(settings, "source_image"))
-	for _, ref := range refs {
-		if strings.EqualFold(ref.Kind, "voice") || strings.EqualFold(ref.Kind, "avatar") {
-			continue
+
+	visualRefs := append([]Reference(nil), refs...)
+	sort.SliceStable(visualRefs, func(i, j int) bool {
+		left, right := visualRefs[i], visualRefs[j]
+		leftPriority, rightPriority := visualReferencePriority(left.Kind), visualReferencePriority(right.Kind)
+		if leftPriority != rightPriority {
+			return leftPriority < rightPriority
 		}
-		if ref.StorageFileID > 0 {
+		if left.Weight != right.Weight {
+			return left.Weight > right.Weight
+		}
+		return left.ID < right.ID
+	})
+	for _, ref := range visualRefs {
+		if visualReferencePriority(ref.Kind) == 0 && ref.StorageFileID > 0 {
 			add(fmt.Sprintf("storage:%d", ref.StorageFileID))
 		}
 	}
@@ -2267,7 +2299,35 @@ func defaultVisualSourceRefs(assetType string, refs []Reference, items []Item, s
 			}
 		}
 	}
+	for _, ref := range visualRefs {
+		if priority := visualReferencePriority(ref.Kind); priority > 0 && priority < 100 && ref.StorageFileID > 0 {
+			add(fmt.Sprintf("storage:%d", ref.StorageFileID))
+		}
+	}
 	return out
+}
+
+func visualReferencePriority(kind string) int {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "face":
+		return 0
+	case "outfit":
+		return 10
+	case "pose":
+		return 20
+	case "style":
+		return 30
+	case "product":
+		return 40
+	case "location":
+		return 50
+	case "brand":
+		return 60
+	case "voice", "avatar":
+		return 100
+	default:
+		return 90
+	}
 }
 
 func visualSourceLimit(assetType string, settings map[string]any) int {
@@ -2281,10 +2341,144 @@ func visualSourceLimit(assetType string, settings map[string]any) int {
 		if n := intArg(settings, "max_source_images", 0); n > 0 {
 			return n
 		}
+		if normalizeAssetType(assetType) == "video" {
+			if n := inferredVideoReferenceLimit(strArg(settings, "model")); n > 0 {
+				return n
+			}
+		}
 		return 3
 	default:
 		return 0
 	}
+}
+
+type mediaModelCapability struct {
+	ID              string
+	ModelType       string
+	MaxSourceImages int
+}
+
+func prepareVideoReferenceSettings(ctx *sdk.AppCtx, pid string, settings map[string]any) error {
+	models, catalogErr := loadMediaModelCapabilities(ctx, pid, "video")
+	selectedID := strArg(settings, "model")
+	if len(models) > 0 {
+		var selected *mediaModelCapability
+		if selectedID != "" {
+			for i := range models {
+				if models[i].ID == selectedID {
+					selected = &models[i]
+					break
+				}
+			}
+			if selected == nil {
+				return fmt.Errorf("video model %q is not available from Media Studio", selectedID)
+			}
+		} else {
+			for i := range models {
+				if mediaModelReferenceLimit(models[i]) <= 0 {
+					continue
+				}
+				if selected == nil || mediaModelReferenceLimit(models[i]) > mediaModelReferenceLimit(*selected) {
+					selected = &models[i]
+				}
+			}
+			if selected == nil {
+				return errors.New("Media Studio has no reference-to-video model for persona generation")
+			}
+			selectedID = selected.ID
+			settings["model"] = selectedID
+		}
+		limit := mediaModelReferenceLimit(*selected)
+		if limit <= 0 {
+			return fmt.Errorf("video model %q is not a reference-to-video model", selectedID)
+		}
+		settings["source_image_limit"] = requestedVisualSourceLimit(settings, limit)
+		return nil
+	}
+
+	if selectedID == "" {
+		if catalogErr != nil {
+			return fmt.Errorf("load Media Studio video models: %w", catalogErr)
+		}
+		return errors.New("Media Studio has no reference-to-video model for persona generation")
+	}
+	if !isReferenceToVideoModel(selectedID, "") {
+		return fmt.Errorf("video model %q is not a reference-to-video model", selectedID)
+	}
+	limit := inferredVideoReferenceLimit(selectedID)
+	if limit <= 0 {
+		return fmt.Errorf("video model %q cannot be verified as reference-to-video", selectedID)
+	}
+	settings["source_image_limit"] = requestedVisualSourceLimit(settings, limit)
+	return nil
+}
+
+func requestedVisualSourceLimit(settings map[string]any, modelLimit int) int {
+	for _, key := range []string{"source_image_limit", "max_source_images"} {
+		if requested := intArg(settings, key, 0); requested > 0 && requested < modelLimit {
+			return requested
+		}
+	}
+	return modelLimit
+}
+
+func loadMediaModelCapabilities(ctx *sdk.AppCtx, pid, kind string) ([]mediaModelCapability, error) {
+	var out map[string]any
+	err := ctx.WithProject(pid).PlatformAPI().CallAppResult("media-studio", "media_models", map[string]any{
+		"kind":        kind,
+		"_project_id": pid,
+	}, &out)
+	if err != nil {
+		return nil, err
+	}
+	rawModels, _ := out["models"].([]any)
+	models := make([]mediaModelCapability, 0, len(rawModels))
+	for _, raw := range rawModels {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := strFromMap(row, "id")
+		if id == "" {
+			continue
+		}
+		models = append(models, mediaModelCapability{
+			ID:              id,
+			ModelType:       strFromMap(row, "model_type"),
+			MaxSourceImages: int(int64FromAny(row["max_source_images"])),
+		})
+	}
+	return models, nil
+}
+
+func mediaModelReferenceLimit(model mediaModelCapability) int {
+	if !isReferenceToVideoModel(model.ID, model.ModelType) {
+		return 0
+	}
+	if model.MaxSourceImages > 0 {
+		return model.MaxSourceImages
+	}
+	return 9
+}
+
+func inferredVideoReferenceLimit(model string) int {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if index := strings.IndexByte(model, ':'); index >= 0 {
+		model = model[index+1:]
+	}
+	if strings.Contains(model, "reference-to-video") {
+		return 9
+	}
+	if strings.Contains(model, "image-to-video") {
+		return 1
+	}
+	return 0
+}
+
+func isReferenceToVideoModel(id, modelType string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	modelType = strings.ToLower(strings.TrimSpace(modelType))
+	return strings.Contains(id, "reference-to-video") || modelType == "reference-to-video"
 }
 
 func compositionKindUsesVisualSources(kind string) bool {

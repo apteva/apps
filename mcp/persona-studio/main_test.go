@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,38 @@ import (
 func newPersonaCtx(t *testing.T) *sdk.AppCtx {
 	t.Helper()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"))
+	globalCtx = ctx
+	return ctx
+}
+
+type personaMediaPlatform struct {
+	tk.BasePlatformClient
+	models       []map[string]any
+	generateOut  map[string]any
+	generateCall map[string]any
+}
+
+func (p *personaMediaPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	var value any
+	switch appName + ":" + tool {
+	case "media-studio:media_models":
+		value = map[string]any{"kind": "video", "bound": true, "provider": "venice-ai", "models": p.models}
+	case "media-studio:media_generate":
+		p.generateCall = cloneMap(input)
+		value = p.generateOut
+	default:
+		return tk.ErrNotImplemented
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func newPersonaCtxWithPlatform(t *testing.T, platform sdk.PlatformClient) *sdk.AppCtx {
+	t.Helper()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("test-proj"), tk.WithPlatform(platform))
 	globalCtx = ctx
 	return ctx
 }
@@ -273,6 +306,148 @@ func TestDefaultVisualSourceRefsVideoPreservesExplicitThenPersonaRefs(t *testing
 	}
 }
 
+func TestVisualSourceCandidatesPrioritizeWeightedFacesThenSelectedItems(t *testing.T) {
+	refs := []Reference{
+		{ID: 1, StorageFileID: 41, Kind: "style", Weight: 5},
+		{ID: 2, StorageFileID: 42, Kind: "face", Weight: 1},
+		{ID: 3, StorageFileID: 43, Kind: "face", Weight: 2},
+		{ID: 4, StorageFileID: 44, Kind: "outfit", Weight: 10},
+	}
+	items := []Item{{ID: 7, StorageFileIDs: []int64{90}}}
+	got := visualSourceCandidates(refs, items, map[string]any{"source_images": []any{"storage:99"}})
+	want := []string{"storage:99", "storage:43", "storage:42", "storage:90", "storage:44", "storage:41"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("visual source order = %#v, want %#v", got, want)
+	}
+}
+
+func TestGenerateVideoAutoSelectsBestReferenceModelAndSendsRankedSources(t *testing.T) {
+	platform := &personaMediaPlatform{
+		models: []map[string]any{
+			{"id": "kling-text-to-video", "model_type": "text-to-video"},
+			{"id": "seedance-image-to-video", "model_type": "image-to-video", "max_source_images": 1},
+			{"id": "seedance-reference-to-video", "model_type": "image-to-video", "max_source_images": 9},
+		},
+		generateOut: map[string]any{
+			"_meta": map[string]any{
+				"status":        "queued",
+				"job_id":        71,
+				"generation_id": 81,
+				"provider":      "venice-ai",
+				"model":         "seedance-reference-to-video",
+			},
+		},
+	}
+	ctx := newPersonaCtxWithPlatform(t, platform)
+	app := &App{}
+	persona := mustPersona(t, app, ctx)
+	for _, input := range []map[string]any{
+		{"persona_id": persona.ID, "storage_file_id": 42, "kind": "face", "weight": 2},
+		{"persona_id": persona.ID, "storage_file_id": 43, "kind": "outfit", "weight": 3},
+	} {
+		if _, err := app.toolReferenceAdd(ctx, input); err != nil {
+			t.Fatalf("add reference: %v", err)
+		}
+	}
+	itemOut, err := app.toolItemCreate(ctx, map[string]any{
+		"persona_id":       persona.ID,
+		"name":             "Black sequin dress",
+		"kind":             "wardrobe",
+		"storage_file_ids": []any{90},
+	})
+	if err != nil {
+		t.Fatalf("create item: %v", err)
+	}
+	item := itemOut.(map[string]any)["item"].(*Item)
+	out, err := app.toolGenerateAsset(ctx, map[string]any{
+		"persona_id": persona.ID,
+		"asset_type": "video",
+		"prompt":     "Walk into the party wearing the selected dress.",
+		"item_ids":   []any{item.ID},
+		"settings":   map[string]any{"aspect": "9:16", "duration": 5},
+	})
+	if err != nil {
+		t.Fatalf("generate video: %v", err)
+	}
+	asset := out.(map[string]any)["asset"].(*Asset)
+	if asset.Status != "queued" || asset.MediaJobID != 71 {
+		t.Fatalf("queued asset not recorded: %#v", asset)
+	}
+	if platform.generateCall["model"] != "seedance-reference-to-video" {
+		t.Fatalf("model = %#v, want multi-reference model", platform.generateCall["model"])
+	}
+	sources, ok := platform.generateCall["source_images"].([]string)
+	if !ok {
+		t.Fatalf("source_images type/value = %#v", platform.generateCall["source_images"])
+	}
+	want := []string{"storage:42", "storage:90", "storage:43"}
+	if strings.Join(sources, ",") != strings.Join(want, ",") {
+		t.Fatalf("source_images = %#v, want %#v", sources, want)
+	}
+	if _, leaked := platform.generateCall["source_image_limit"]; leaked {
+		t.Fatalf("internal source_image_limit leaked to Media Studio: %#v", platform.generateCall)
+	}
+	if _, leaked := platform.generateCall["reference_image_urls"]; leaked {
+		t.Fatalf("provider-specific reference_image_urls leaked from Persona Studio: %#v", platform.generateCall)
+	}
+	if _, legacy := platform.generateCall["source_image"]; legacy {
+		t.Fatalf("persona video should use the generic source_images array only: %#v", platform.generateCall)
+	}
+}
+
+func TestPrepareVideoReferenceSettingsRejectsTextOnlyModel(t *testing.T) {
+	platform := &personaMediaPlatform{
+		models: []map[string]any{{"id": "kling-text-to-video", "model_type": "text-to-video"}},
+	}
+	ctx := newPersonaCtxWithPlatform(t, platform)
+	settings := map[string]any{"model": "kling-text-to-video"}
+	err := prepareVideoReferenceSettings(ctx, "test-proj", settings)
+	if err == nil || !strings.Contains(err.Error(), "not a reference-to-video model") {
+		t.Fatalf("expected reference capability error, got %v", err)
+	}
+}
+
+func TestGenerateVideoRequiresVisualReference(t *testing.T) {
+	platform := &personaMediaPlatform{
+		models: []map[string]any{{"id": "seedance-reference-to-video", "max_source_images": 9}},
+	}
+	ctx := newPersonaCtxWithPlatform(t, platform)
+	app := &App{}
+	persona := mustPersona(t, app, ctx)
+	_, err := app.toolGenerateAsset(ctx, map[string]any{
+		"persona_id": persona.ID,
+		"asset_type": "video",
+		"prompt":     "Walk into the party.",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires at least one visual reference image") {
+		t.Fatalf("expected missing visual reference error, got %v", err)
+	}
+	if platform.generateCall != nil {
+		t.Fatalf("Media Studio generation should not be called without a visual reference")
+	}
+}
+
+func TestPrepareVideoReferenceSettingsHonorsModelAndRequestedLimits(t *testing.T) {
+	platform := &personaMediaPlatform{
+		models: []map[string]any{
+			{"id": "seedance-image-to-video", "max_source_images": 1},
+			{"id": "seedance-reference-to-video", "max_source_images": 9},
+		},
+	}
+	ctx := newPersonaCtxWithPlatform(t, platform)
+	single := map[string]any{"model": "seedance-image-to-video", "source_image_limit": 5}
+	if err := prepareVideoReferenceSettings(ctx, "test-proj", single); err == nil || !strings.Contains(err.Error(), "not a reference-to-video model") {
+		t.Fatalf("image-to-video model should be rejected, got %v", err)
+	}
+	multi := map[string]any{"model": "seedance-reference-to-video", "source_image_limit": 4}
+	if err := prepareVideoReferenceSettings(ctx, "test-proj", multi); err != nil {
+		t.Fatalf("prepare multi-reference model: %v", err)
+	}
+	if got := intArg(multi, "source_image_limit", 0); got != 4 {
+		t.Fatalf("requested lower limit = %d, want 4", got)
+	}
+}
+
 func TestReferenceRemoveUnlinksActiveReference(t *testing.T) {
 	ctx := newPersonaCtx(t)
 	app := &App{}
@@ -308,12 +483,12 @@ func TestDefaultImageSourceRefsIncludesItemsAndHonorsLimit(t *testing.T) {
 	}
 	items := []Item{{ID: 7, StorageFileIDs: []int64{20, 21}}}
 	got := defaultImageSourceRefs(refs, items, map[string]any{"model": "firered-image-edit"})
-	want := []string{"storage:10", "storage:11", "storage:12"}
+	want := []string{"storage:10", "storage:20", "storage:21"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("got %#v, want %#v", got, want)
 	}
 	got = defaultImageSourceRefs(refs, items, map[string]any{"model": "gemini-2.5-flash-image"})
-	if len(got) != 5 || got[3] != "storage:20" || got[4] != "storage:21" {
+	if len(got) != 5 || got[1] != "storage:20" || got[2] != "storage:21" || got[3] != "storage:12" || got[4] != "storage:11" {
 		t.Fatalf("gemini refs should include item images up to 5, got %#v", got)
 	}
 }

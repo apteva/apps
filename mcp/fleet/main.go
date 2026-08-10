@@ -5,6 +5,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -18,9 +19,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.22
+version: 0.8.25
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
@@ -149,7 +152,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.22
+    ref: fleet/v0.8.25
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -181,16 +184,17 @@ type App struct {
 	// when network detection fails (offline dev box, locked-down VPS).
 	publicHost string
 
-	transferMu     sync.Mutex
-	transfers      map[string]*tenantTransfer
-	transferSecret []byte
-	metaMu         sync.Mutex
-	metaCache      map[string]metaCacheEntry
-	hostedTunnelMu sync.Mutex
-	hostedTunnels  map[hostedTunnelKey]int
-	dirtyTunnels   map[hostedTunnelKey]bool
-	runtimeMu      sync.Mutex
-	runtimeReady   map[int64]time.Time
+	transferMu         sync.Mutex
+	transfers          map[string]*tenantTransfer
+	transferSecret     []byte
+	metaMu             sync.Mutex
+	metaCache          map[string]metaCacheEntry
+	hostedTunnelMu     sync.Mutex
+	hostedTunnels      map[hostedTunnelKey]int
+	dirtyTunnels       map[hostedTunnelKey]bool
+	startupRetryDelays []time.Duration
+	runtimeMu          sync.Mutex
+	runtimeReady       map[int64]time.Time
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -228,7 +232,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.publicHost = detectPublicHost()
 	globalCtx = ctx
 	if err := a.reconcileOnBoot(ctx); err != nil {
-		ctx.Logger().Warn("fleet: reconcile on boot", "err", err)
+		return fmt.Errorf("fleet startup reconciliation failed: %w", err)
 	}
 	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot(), "public_host", a.publicHost)
 	return nil

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ffmpeg
 display_name: FFmpeg
-version: 0.1.1
+version: 0.1.2
 description: |
   Stateless ffmpeg-as-a-service for sibling Apteva apps. Wraps the
   local `ffmpeg` and `ffprobe` binaries behind three sync MCP tools
@@ -20,7 +20,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ffmpeg
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/ffmpeg/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [ffmpeg, video, infrastructure, executor]
 
 scopes: [project, global]

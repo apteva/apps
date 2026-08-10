@@ -1,7 +1,7 @@
 // CommunityPanel — project.page operator surface for the community app.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent, KeyboardEvent, ReactNode } from "react";
 
 const API = "/api/apps/community";
 
@@ -89,6 +89,7 @@ interface Community {
 interface Member {
   id: string;
   community_id: string;
+  auth_user_id?: string;
   handle: string;
   display_name: string;
   bio: string;
@@ -132,6 +133,48 @@ interface Lesson {
   progress?: LessonProgress;
 }
 
+interface CourseOffer {
+  space_id: string;
+  catalog_product_id: number;
+  catalog_price_id: number;
+  product_name: string;
+  price_nickname?: string;
+  unit_amount_cents: number;
+  currency: string;
+  active: boolean;
+}
+
+interface CoursePurchase {
+  id: string;
+  member_id: string;
+  customer_email: string;
+  status: string;
+  unit_amount_cents: number;
+  currency: string;
+  created_at: string;
+}
+
+interface MembershipPlan {
+  id: string;
+  name: string;
+  description: string;
+  catalog_price_id: number;
+  unit_amount_cents: number;
+  currency: string;
+  interval: string;
+  interval_count: number;
+  scope_type: "all_courses" | "selected_courses" | "course_tags";
+  active: boolean;
+}
+
+interface MemberSubscription {
+  id: string;
+  member_id: string;
+  plan_id: string;
+  status: string;
+  cancel_at?: string;
+}
+
 interface Thread {
   id: string;
   community_id: string;
@@ -171,13 +214,19 @@ type DialogKind =
   | "section"
   | "lesson"
   | "edit_lesson"
-  | "video";
+  | "video"
+  | "offer"
+  | "membership_plan";
 
-async function getJSON<T>(path: string): Promise<T> {
-  const res = await fetch(`${API}${path}`, {
+async function getJSON<T>(path: string, projectId: string): Promise<T> {
+  const separator = path.includes("?") ? "&" : "?";
+  const res = await fetch(
+    `${API}${path}${separator}project_id=${encodeURIComponent(projectId)}`,
+    {
     credentials: "same-origin",
     cache: "no-store",
-  });
+    },
+  );
   if (!res.ok) throw new Error(`${path}: ${res.status}: ${await res.text()}`);
   return res.json() as Promise<T>;
 }
@@ -198,7 +247,7 @@ async function callTool<T>(
   args: Record<string, unknown>,
   projectId: string,
 ): Promise<T> {
-  const res = await fetch(`${API}/mcp`, {
+  const res = await fetch(`${API}/mcp?project_id=${encodeURIComponent(projectId)}`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "content-type": "application/json" },
@@ -228,6 +277,14 @@ function formatDuration(seconds: number): string {
   return `${s}s`;
 }
 
+function formatMoney(cents: number, currency: string): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
+  } catch {
+    return `${currency} ${(cents / 100).toFixed(2)}`;
+  }
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -255,6 +312,10 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   const [posts, setPosts] = useState<Post[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
   const [lessons, setLessons] = useState<Lesson[]>([]);
+  const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
+  const [coursePurchases, setCoursePurchases] = useState<CoursePurchase[]>([]);
+  const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
+  const [memberSubscriptions, setMemberSubscriptions] = useState<MemberSubscription[]>([]);
   const [lessonId, setLessonId] = useState<string | null>(null);
   const [newLessonSectionId, setNewLessonSectionId] = useState("");
   const [dialog, setDialog] = useState<DialogKind | null>(null);
@@ -266,68 +327,91 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   }, []);
 
   const refreshCommunities = useCallback(async () => {
-    const d = await getJSON<{ communities: Community[] }>("/communities");
+    const d = await getJSON<{ communities: Community[] }>("/communities", projectId);
     setCommunities(d.communities || []);
     setCommunityId((prev) =>
       prev && d.communities.some((c) => c.id === prev) ? prev : d.communities[0]?.id ?? null,
     );
     setStatus(`${d.communities.length} communities`);
     return d.communities || [];
-  }, []);
+  }, [projectId]);
 
   const refreshMembers = useCallback(async (cid: string) => {
     const d = await getJSON<{ members: Member[] }>(
       `/members?community_id=${encodeURIComponent(cid)}&status=active`,
+      projectId,
     );
     setMembers(d.members || []);
     setMemberId((prev) =>
       prev && d.members.some((m) => m.id === prev) ? prev : d.members[0]?.id ?? "",
     );
     return d.members || [];
-  }, []);
+  }, [projectId]);
 
   const refreshSpaces = useCallback(async (cid: string) => {
     const d = await getJSON<{ spaces: Space[] }>(
       `/spaces?community_id=${encodeURIComponent(cid)}`,
+      projectId,
     );
     setSpaces(d.spaces || []);
     setSpaceId((prev) =>
       prev && d.spaces.some((s) => s.id === prev) ? prev : d.spaces[0]?.id ?? null,
     );
     return d.spaces || [];
-  }, []);
+  }, [projectId]);
+
+  const refreshMemberships = useCallback(async (cid: string) => {
+    const [plansOut, subscriptionsOut] = await Promise.all([
+      callTool<{ plans: MembershipPlan[] }>("membership_plans_list", { community_id: cid }, projectId),
+      callTool<{ subscriptions: MemberSubscription[] }>("membership_subscriptions_list", { community_id: cid, limit: 100 }, projectId),
+    ]);
+    setMembershipPlans(plansOut.plans || []);
+    setMemberSubscriptions(subscriptionsOut.subscriptions || []);
+  }, [projectId]);
 
   const refreshThreads = useCallback(async (sid: string) => {
     const d = await getJSON<{ threads: Thread[] }>(
       `/threads?space_id=${encodeURIComponent(sid)}`,
+      projectId,
     );
     setThreads(d.threads || []);
     setThreadId((prev) =>
       prev && d.threads.some((t) => t.id === prev) ? prev : d.threads[0]?.id ?? null,
     );
     return d.threads || [];
-  }, []);
+  }, [projectId]);
 
   const refreshCourse = useCallback(async (sid: string) => {
-    const [s, l] = await Promise.all([
-      getJSON<{ sections: Section[] }>(`/sections?space_id=${encodeURIComponent(sid)}`),
+    const [s, l, offerOut, purchasesOut] = await Promise.all([
+      getJSON<{ sections: Section[] }>(
+        `/sections?space_id=${encodeURIComponent(sid)}`,
+        projectId,
+      ),
       getJSON<{ lessons: Lesson[] }>(
         `/lessons?space_id=${encodeURIComponent(sid)}&include_drafts=true`,
+        projectId,
       ),
+      callTool<{ offer: CourseOffer | null }>("course_offer_get", { space_id: sid }, projectId),
+      callTool<{ purchases: CoursePurchase[] }>("course_purchases_list", { space_id: sid, limit: 100 }, projectId),
     ]);
     setSections(s.sections || []);
     setLessons(l.lessons || []);
+    setCourseOffer(offerOut.offer || null);
+    setCoursePurchases(purchasesOut.purchases || []);
     setLessonId((prev) =>
       prev && l.lessons.some((x) => x.id === prev) ? prev : l.lessons[0]?.id ?? null,
     );
     return l.lessons || [];
-  }, []);
+  }, [projectId]);
 
   const refreshPosts = useCallback(async (tid: string) => {
-    const d = await getJSON<{ posts: Post[] }>(`/posts?thread_id=${encodeURIComponent(tid)}`);
+    const d = await getJSON<{ posts: Post[] }>(
+      `/posts?thread_id=${encodeURIComponent(tid)}`,
+      projectId,
+    );
     setPosts(d.posts || []);
     return d.posts || [];
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     refreshCommunities().catch((e) => fail("Load communities", e));
@@ -337,13 +421,15 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
     if (!communityId) {
       setMembers([]);
       setSpaces([]);
+      setMembershipPlans([]);
+      setMemberSubscriptions([]);
       setSpaceId(null);
       return;
     }
-    Promise.all([refreshMembers(communityId), refreshSpaces(communityId)]).catch((e) =>
+    Promise.all([refreshMembers(communityId), refreshSpaces(communityId), refreshMemberships(communityId)]).catch((e) =>
       fail("Load community", e),
     );
-  }, [communityId, refreshMembers, refreshSpaces, fail]);
+  }, [communityId, refreshMembers, refreshSpaces, refreshMemberships, fail]);
 
   const activeCommunity = useMemo(
     () => communities.find((c) => c.id === communityId) ?? null,
@@ -368,6 +454,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
     if (!spaceId || !isCourseSpace) {
       setSections([]);
       setLessons([]);
+      setCourseOffer(null);
+      setCoursePurchases([]);
       setLessonId(null);
       return;
     }
@@ -388,7 +476,11 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
     (ev) => {
       const t = ev.topic;
       const d = ev.data ?? {};
-      if (t === "community.community.created" || t === "community.community.updated") {
+      if (
+        t === "community.community.created" ||
+        t === "community.community.updated" ||
+        t === "community.community.archived"
+      ) {
         refreshCommunities().catch(() => {});
         return;
       }
@@ -396,7 +488,15 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
       if (t.startsWith("community.member.")) {
         refreshMembers(communityId).catch(() => {});
       }
-      if (t === "community.space.created" || t === "community.space.updated" || t === "community.space.member_added") {
+      if (t.startsWith("community.membership.")) {
+        refreshMemberships(communityId).catch(() => {});
+      }
+      if (
+        t === "community.space.created" ||
+        t === "community.space.updated" ||
+        t === "community.space.archived" ||
+        t === "community.space.member_added"
+      ) {
         refreshSpaces(communityId).catch(() => {});
         return;
       }
@@ -414,7 +514,11 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         isCourseSpace &&
         (t.startsWith("community.section.") ||
           t.startsWith("community.sections.") ||
-          t.startsWith("community.lesson."))
+          t.startsWith("community.lesson.") ||
+          t.startsWith("community.course.offer") ||
+          t.startsWith("community.course.purchase") ||
+          t.startsWith("community.course.refund") ||
+          t.startsWith("community.course.access"))
       ) {
         refreshCourse(spaceId).catch(() => {});
       }
@@ -464,8 +568,8 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="relative flex h-full w-full bg-bg text-text">
-      <aside className="w-72 shrink-0 border-r border-border flex flex-col min-h-0">
+    <div className="relative flex h-full w-full flex-col overflow-auto bg-bg text-text lg:flex-row lg:overflow-hidden">
+      <aside className="flex w-full shrink-0 flex-col border-b border-border min-h-0 max-h-80 lg:h-full lg:w-72 lg:max-h-none lg:border-b-0 lg:border-r">
         <div className="p-3 border-b border-border space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="text-text-muted text-xs uppercase tracking-wide">Community</div>
@@ -516,6 +620,30 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
           </select>
         </div>
 
+        <div className="p-3 border-b border-border space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <div className="text-text-muted text-xs uppercase tracking-wide">Memberships</div>
+              <div className="text-xs text-text-muted">{memberSubscriptions.filter((s) => s.status === "active" || s.status === "trialing").length} active</div>
+            </div>
+            <button className={buttonClass("ghost")} disabled={!communityId} onClick={() => setDialog("membership_plan")}>
+              + Plan
+            </button>
+          </div>
+          {membershipPlans.length === 0 ? (
+            <div className="text-xs text-text-muted">No recurring plans.</div>
+          ) : (
+            <div className="space-y-1">
+              {membershipPlans.slice(0, 3).map((plan) => (
+                <div key={plan.id} className="rounded border border-border px-2 py-1.5 text-xs">
+                  <div className="font-medium">{plan.name}</div>
+                  <div className="text-text-muted">{formatMoney(plan.unit_amount_cents, plan.currency)} / {plan.interval}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
         <div className="p-3 flex-1 overflow-auto min-h-0">
           <div className="flex items-center justify-between gap-2 mb-2">
             <div className="text-text-muted text-xs uppercase tracking-wide">Spaces</div>
@@ -564,7 +692,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </aside>
 
-      <section className="w-96 shrink-0 border-r border-border flex flex-col min-h-0">
+      <section className="flex w-full shrink-0 flex-col border-b border-border min-h-0 max-h-96 lg:h-full lg:w-96 lg:max-h-none lg:border-b-0 lg:border-r">
         <header className="p-3 border-b border-border flex items-center justify-between gap-2">
           <div className="min-w-0">
             <div className="font-medium truncate">{activeSpace?.name ?? "No space selected"}</div>
@@ -573,9 +701,14 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             </div>
           </div>
           {isCourseSpace ? (
-            <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
-              + Section
-            </button>
+            <div className="flex gap-2">
+              <button className={buttonClass()} onClick={() => setDialog("offer")}>
+                {courseOffer?.active ? "Edit sale" : "Configure sale"}
+              </button>
+              <button className={buttonClass("primary")} onClick={() => setDialog("section")}>
+                + Section
+              </button>
+            </div>
           ) : (
             <button
               className={buttonClass("primary")}
@@ -666,7 +799,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
         </div>
       </section>
 
-      <main className="flex-1 flex flex-col min-w-0 min-h-0">
+      <main className="flex min-h-[28rem] min-w-0 flex-1 flex-col lg:min-h-0">
         <header className="p-3 border-b border-border flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="font-medium truncate">
@@ -690,6 +823,54 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
           ) : null}
         </header>
         <div className="flex-1 overflow-auto p-4 space-y-3 min-h-0">
+          {isCourseSpace ? (
+            <section className="border border-border rounded bg-bg-secondary p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs uppercase tracking-wide text-text-muted">Course sales</div>
+                  {courseOffer?.active ? (
+                    <>
+                      <div className="font-medium mt-1">{formatMoney(courseOffer.unit_amount_cents, courseOffer.currency)}</div>
+                      <div className="text-xs text-text-muted">
+                        Catalog price #{courseOffer.catalog_price_id} · {coursePurchases.length} purchases
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-sm text-text-muted mt-1">No active offer. This course cannot be purchased.</div>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {courseOffer?.active ? (
+                    <button
+                      className={buttonClass("ghost")}
+                      onClick={() => {
+                        runTool("Archive sale", "course_offer_archive", { space_id: spaceId })
+                          .then(async () => {
+                            if (spaceId) await refreshCourse(spaceId);
+                          })
+                          .catch(() => {});
+                      }}
+                    >
+                      Stop sales
+                    </button>
+                  ) : null}
+                  <button className={buttonClass()} onClick={() => setDialog("offer")}>
+                    {courseOffer?.active ? "Change price" : "Set Catalog price"}
+                  </button>
+                </div>
+              </div>
+              {coursePurchases.length > 0 ? (
+                <div className="mt-3 grid gap-1 border-t border-border pt-3">
+                  {coursePurchases.slice(0, 4).map((purchase) => (
+                    <div key={purchase.id} className="flex items-center justify-between gap-3 text-xs">
+                      <span className="truncate">{purchase.customer_email}</span>
+                      <span className="text-text-muted">{purchase.status.replaceAll("_", " ")}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
           {isCourseSpace ? (
             !activeLesson ? (
               <EmptyState label={lessons.length > 0 ? "Pick a lesson." : "No lessons in this course yet."} />
@@ -777,7 +958,9 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
           community={activeCommunity}
           space={activeSpace}
           sections={sections}
+          spaces={spaces}
           lesson={activeLesson}
+          offer={courseOffer}
           initialSectionId={newLessonSectionId}
           memberId={memberId}
           projectId={projectId}
@@ -790,12 +973,22 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             if (target.threadId) setThreadId(target.threadId);
             if (target.lessonId) setLessonId(target.lessonId);
             if (communityId) {
-              await Promise.all([refreshMembers(communityId), refreshSpaces(communityId)]);
+              await Promise.all([refreshMembers(communityId), refreshSpaces(communityId), refreshMemberships(communityId)]);
             } else {
               await refreshCommunities();
             }
-            if (target.spaceId || (spaceId && isCourseSpace)) await refreshCourse(target.spaceId || spaceId!);
-            if (spaceId && !isCourseSpace) await refreshThreads(spaceId);
+            const createdCourseContent =
+              dialog === "course" ||
+              dialog === "section" ||
+              dialog === "lesson" ||
+              dialog === "edit_lesson" ||
+              dialog === "video" ||
+              dialog === "offer";
+            if (createdCourseContent && (target.spaceId || spaceId)) {
+              await refreshCourse(target.spaceId || spaceId!);
+            } else if (target.spaceId || spaceId) {
+              await refreshThreads(target.spaceId || spaceId!);
+            }
             if (target.communityId) setCommunityId(target.communityId);
             if (target.memberId) setMemberId(target.memberId);
             if (target.spaceId) setSpaceId(target.spaceId);
@@ -827,11 +1020,61 @@ function DialogShell({
   onClose: () => void;
   children: ReactNode;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog.focus();
+    return () => previous?.focus();
+  }, []);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(
+      event.currentTarget.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    if (focusable.length === 0) {
+      event.preventDefault();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
-    <div className="absolute inset-0 bg-black/40 flex items-center justify-center p-4 z-20">
-      <div className="w-full max-w-xl bg-bg border border-border rounded shadow-xl">
+    <div
+      className="absolute inset-0 bg-black/40 flex items-center justify-center p-4 z-20"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="community-dialog-title"
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        className="w-full max-w-xl bg-bg border border-border rounded shadow-xl outline-none"
+      >
         <header className="px-4 py-3 border-b border-border flex items-center justify-between">
-          <div className="font-medium">{title}</div>
+          <div id="community-dialog-title" className="font-medium">{title}</div>
           <button className={buttonClass("ghost")} onClick={onClose}>
             Close
           </button>
@@ -864,7 +1107,9 @@ function CommunityDialog({
   community,
   space,
   sections,
+  spaces,
   lesson,
+  offer,
   initialSectionId,
   memberId,
   projectId,
@@ -876,7 +1121,9 @@ function CommunityDialog({
   community: Community | null;
   space: Space | null;
   sections: Section[];
+  spaces: Space[];
   lesson: Lesson | null;
+  offer: CourseOffer | null;
   initialSectionId: string;
   memberId: string;
   projectId: string;
@@ -887,6 +1134,7 @@ function CommunityDialog({
   const [name, setName] = useState(kind === "edit_lesson" ? lesson?.title || "" : "");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
+  const [authUserId, setAuthUserId] = useState("");
   const [visibility, setVisibility] = useState<"members" | "public">("members");
   const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
   const [sectionId, setSectionId] = useState(initialSectionId || sections[0]?.id || "");
@@ -894,6 +1142,13 @@ function CommunityDialog({
   const [published, setPublished] = useState(Boolean(lesson?.published_at));
   const [storageKey, setStorageKey] = useState("");
   const [duration, setDuration] = useState("");
+  const [catalogPriceId, setCatalogPriceId] = useState(offer?.catalog_price_id ? String(offer.catalog_price_id) : "");
+  const [planScope, setPlanScope] = useState<MembershipPlan["scope_type"]>("all_courses");
+  const [collectionMethod, setCollectionMethod] = useState("automatic");
+  const [trialDays, setTrialDays] = useState("0");
+  const [graceDays, setGraceDays] = useState("7");
+  const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
+  const [planTags, setPlanTags] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -914,6 +1169,10 @@ function CommunityDialog({
       ? "Edit lesson"
       : kind === "video"
       ? "Attach lesson video"
+      : kind === "offer"
+      ? "Configure course sale"
+      : kind === "membership_plan"
+      ? "New membership plan"
       : "New thread";
 
   const submit = async (e: FormEvent) => {
@@ -935,6 +1194,7 @@ function CommunityDialog({
           handle: slug || slugify(name).replace(/-/g, "_"),
           display_name: name,
           bio: description,
+          auth_user_id: authUserId.trim() || undefined,
         });
         await onCreated({ memberId: out.id });
       } else if (kind === "space" || kind === "course") {
@@ -984,6 +1244,36 @@ function CommunityDialog({
         if (duration.trim()) args.duration_seconds = Number(duration);
         await runTool<Lesson>("Attach video", "lessons_attach_video", args);
         await onCreated({ spaceId: space?.id, lessonId: lesson.id });
+      } else if (kind === "offer") {
+        await runTool<{ offer: CourseOffer }>("Save course sale", "course_offer_upsert", {
+          space_id: space?.id,
+          catalog_price_id: Number(catalogPriceId),
+        });
+        await onCreated({ spaceId: space?.id });
+      } else if (kind === "membership_plan") {
+        const out = await runTool<{ plan: MembershipPlan }>("Create membership plan", "membership_plans_upsert", {
+          community_id: community?.id,
+          name,
+          description,
+          catalog_price_id: Number(catalogPriceId),
+          scope_type: planScope,
+          collection_method: collectionMethod,
+          trial_days: Number(trialDays || 0),
+          grace_days: Number(graceDays || 0),
+        });
+        if (planScope === "selected_courses") {
+          await runTool("Set included courses", "membership_plan_courses_set", {
+            id: out.plan.id,
+            space_ids: selectedCourseIds,
+          });
+        }
+        if (planScope === "course_tags") {
+          await runTool("Set included tags", "membership_plan_tags_set", {
+            id: out.plan.id,
+            tags: planTags.split(",").map((tag) => tag.trim()).filter(Boolean),
+          });
+        }
+        await onCreated({});
       } else if (kind === "thread") {
         const out = await runTool<{ thread: Thread }>("Create thread", "threads_create", {
           space_id: space?.id,
@@ -1002,7 +1292,9 @@ function CommunityDialog({
 
   const needsSlug = kind === "community" || kind === "member" || kind === "space" || kind === "course";
   const canSubmit =
-    kind === "video"
+    kind === "offer" || kind === "membership_plan"
+      ? Number.isInteger(Number(catalogPriceId)) && Number(catalogPriceId) > 0
+      : kind === "video"
       ? Boolean(storageKey.trim())
       : kind === "lesson"
       ? Boolean(name.trim() && sectionId)
@@ -1025,7 +1317,7 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind !== "video" ? (
+        {kind !== "video" && kind !== "offer" ? (
           <Field label={kind === "member" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
             <input
               className={inputClass}
@@ -1066,9 +1358,20 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind === "community" || kind === "member" ? (
+        {kind === "community" || kind === "member" || kind === "membership_plan" ? (
           <Field label={kind === "community" ? "Description" : "Bio"}>
             <textarea className={`${inputClass} min-h-[92px]`} value={description} onChange={(e) => setDescription(e.target.value)} />
+          </Field>
+        ) : null}
+
+        {kind === "member" ? (
+          <Field label="Auth user ID">
+            <input
+              className={inputClass}
+              value={authUserId}
+              onChange={(e) => setAuthUserId(e.target.value)}
+              placeholder="Link the ID shown by the member portal"
+            />
           </Field>
         ) : null}
 
@@ -1093,6 +1396,70 @@ function CommunityDialog({
             <Field label="Duration seconds">
               <input className={inputClass} type="number" min="0" value={duration} onChange={(e) => setDuration(e.target.value)} />
             </Field>
+          </>
+        ) : null}
+
+        {kind === "offer" ? (
+          <>
+            <Field label="Catalog price ID">
+              <input
+                className={inputClass}
+                type="number"
+                min="1"
+                step="1"
+                value={catalogPriceId}
+                onChange={(e) => setCatalogPriceId(e.target.value)}
+                autoFocus
+              />
+            </Field>
+            <div className="text-sm text-text-muted">
+              Community validates that this is an active, flat, one-time Catalog price. Billing uses it for every new checkout.
+            </div>
+          </>
+        ) : null}
+
+        {kind === "membership_plan" ? (
+          <>
+            <Field label="Recurring Catalog price ID">
+              <input className={inputClass} type="number" min="1" step="1" value={catalogPriceId} onChange={(e) => setCatalogPriceId(e.target.value)} />
+            </Field>
+            <Field label="Course access">
+              <select className={inputClass} value={planScope} onChange={(e) => setPlanScope(e.target.value as MembershipPlan["scope_type"])}>
+                <option value="all_courses">All courses</option>
+                <option value="selected_courses">Selected courses</option>
+                <option value="course_tags">Courses with tags</option>
+              </select>
+            </Field>
+            {planScope === "selected_courses" ? (
+              <Field label="Included courses">
+                <div className="space-y-2 rounded border border-border p-3">
+                  {spaces.filter((item) => item.kind === "course").map((course) => (
+                    <label key={course.id} className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" checked={selectedCourseIds.includes(course.id)} onChange={(e) => setSelectedCourseIds((current) => e.target.checked ? [...current, course.id] : current.filter((id) => id !== course.id))} />
+                      {course.name}
+                    </label>
+                  ))}
+                </div>
+              </Field>
+            ) : null}
+            {planScope === "course_tags" ? (
+              <Field label="Course tags (comma-separated)">
+                <input className={inputClass} value={planTags} onChange={(e) => setPlanTags(e.target.value)} placeholder="beginner, premium" />
+              </Field>
+            ) : null}
+            <Field label="Renewal collection">
+              <select className={inputClass} value={collectionMethod} onChange={(e) => setCollectionMethod(e.target.value)}>
+                <option value="automatic">Automatic saved-card collection</option>
+                <option value="send_invoice">Send hosted payment link</option>
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Trial days"><input className={inputClass} type="number" min="0" value={trialDays} onChange={(e) => setTrialDays(e.target.value)} /></Field>
+              <Field label="Grace days"><input className={inputClass} type="number" min="0" value={graceDays} onChange={(e) => setGraceDays(e.target.value)} /></Field>
+            </div>
+            <div className="text-sm text-text-muted">
+              Community validates the recurring Catalog price and orchestrates Billing plus Subscriptions directly.
+            </div>
           </>
         ) : null}
 

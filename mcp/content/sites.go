@@ -49,24 +49,38 @@ func dbCreateSite(db *sql.DB, projectID, slug, name, hostname string) (*Site, er
 		return nil, errors.New("slug required")
 	}
 	slug = slugify(slug)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		name = slug
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
 	// Is this the first live site for the project? If so, make it default.
 	var existing int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sites WHERE project_id=? AND archived_at IS NULL`, projectID).Scan(&existing); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sites WHERE project_id=? AND archived_at IS NULL`, projectID).Scan(&existing); err != nil {
 		return nil, err
 	}
 	isDefault := 0
 	if existing == 0 {
 		isDefault = 1
 	}
-	res, err := db.Exec(`INSERT INTO sites (project_id, slug, name, hostname, is_default) VALUES (?, ?, ?, ?, ?)`,
+	res, err := tx.Exec(`INSERT INTO sites (project_id, slug, name, hostname, is_default) VALUES (?, ?, ?, ?, ?)`,
 		projectID, slug, name, hostname, isDefault)
 	if err != nil {
 		return nil, fmt.Errorf("insert site: %w", err)
 	}
 	id, _ := res.LastInsertId()
+	if _, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, 'site_title', ?)`,
+		projectID, id, name); err != nil {
+		return nil, fmt.Errorf("initialize site title: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return dbGetSite(db, projectID, id)
 }
 

@@ -63,10 +63,8 @@ func TestVATCalculationFormula(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := calculateOutputs("vat", rule, map[string]any{
-		"revenue_cents":    int64(1000000),
-		"expenses_cents":   int64(200000),
-		"output_tax_cents": int64(0),
-		"input_tax_cents":  int64(0),
+		"revenue_cents":  int64(1000000),
+		"expenses_cents": int64(200000),
 	}, "2026-04-01", "2026-06-30")
 	if out["estimated_payable_cents"].(int64) != 168000 {
 		t.Fatalf("payable=%v, want 168000", out["estimated_payable_cents"])
@@ -88,7 +86,7 @@ func TestInsertEstimatedObligation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	obligation, err := insertObligation(db, profile, 0, 0, "vat", "Q2 IVA", 168000, "EUR", "2026-07-20", "Agencia Tributaria", "estimated", nil)
+	obligation, err := insertObligation(db, profile, 0, 0, "vat", "Q2 IVA", 168000, "EUR", "2026-07-20", "Agencia Tributaria", "payable", "estimated", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +132,7 @@ func TestInferPeriodsForSpanishAutonomo(t *testing.T) {
 		Name:          "Autonomo",
 		Country:       "ES",
 		Structure:     "ES_AUTONOMO",
+		VATRegistered: true,
 		FilingCadence: "quarterly",
 		Currency:      "EUR",
 	}
@@ -185,12 +184,14 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	raw, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(raw)); err != nil {
-		t.Fatal(err)
+	for _, migration := range []string{"migrations/001_init.sql", "migrations/002_integrity.sql"} {
+		raw, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return db
 }

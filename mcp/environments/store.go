@@ -209,6 +209,170 @@ func (s store) setSetting(key, value string) error {
 	return err
 }
 
+func (s store) saveVoiceCall(call *VoiceCall) error {
+	spec, err := json.Marshal(call.Spec)
+	if err != nil {
+		return err
+	}
+	result, err := json.Marshal(call)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	created := call.StartedAt
+	if created.IsZero() {
+		created = time.Now().UTC()
+	}
+	_, err = s.db.Exec(`INSERT INTO environment_voice_calls(id,run_id,status,spec_json,result_json,error,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET status=excluded.status,result_json=excluded.result_json,error=excluded.error,updated_at=excluded.updated_at`,
+		call.ID, call.RunID, call.Status, string(spec), string(result), call.Error, created.Format(time.RFC3339Nano), now)
+	return err
+}
+
+func (s store) getVoiceCall(id string) (*VoiceCall, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT result_json FROM environment_voice_calls WHERE id=?`, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var call VoiceCall
+	if err := json.Unmarshal([]byte(raw), &call); err != nil {
+		return nil, err
+	}
+	return &call, nil
+}
+
+func (s store) listVoiceCalls(runID string) ([]VoiceCall, error) {
+	rows, err := s.db.Query(`SELECT result_json FROM environment_voice_calls WHERE run_id=? ORDER BY created_at DESC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []VoiceCall{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var call VoiceCall
+		if err := json.Unmarshal([]byte(raw), &call); err != nil {
+			return nil, err
+		}
+		out = append(out, call)
+	}
+	return out, rows.Err()
+}
+
+func (s store) createProtocolFixture(x *ProtocolFixtureInstance) error {
+	config, err := json.Marshal(x.Config)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if x.CreatedAt.IsZero() {
+		x.CreatedAt = now
+	}
+	x.UpdatedAt = now
+	_, err = s.db.Exec(`INSERT INTO environment_protocol_fixtures(run_id,fixture_id,pack,pack_version,protocol,target_app,status,config_json,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?)`, x.RunID, x.ID, x.Pack, x.Version, x.Protocol, x.TargetApp, x.Status, string(config), x.CreatedAt.Format(time.RFC3339Nano), x.UpdatedAt.Format(time.RFC3339Nano))
+	return err
+}
+
+func (s store) getProtocolFixture(runID, fixtureID string) (*ProtocolFixtureInstance, error) {
+	return scanProtocolFixture(s.db.QueryRow(`SELECT run_id,fixture_id,pack,pack_version,protocol,target_app,status,config_json,created_at,updated_at
+		FROM environment_protocol_fixtures WHERE run_id=? AND fixture_id=?`, runID, fixtureID))
+}
+
+func (s store) listProtocolFixtures(runID string) ([]ProtocolFixtureInstance, error) {
+	rows, err := s.db.Query(`SELECT run_id,fixture_id,pack,pack_version,protocol,target_app,status,config_json,created_at,updated_at
+		FROM environment_protocol_fixtures WHERE run_id=? ORDER BY fixture_id`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ProtocolFixtureInstance{}
+	for rows.Next() {
+		x, err := scanProtocolFixture(rows)
+		if err != nil {
+			return nil, err
+		}
+		if x != nil {
+			out = append(out, *x)
+		}
+	}
+	return out, rows.Err()
+}
+
+func scanProtocolFixture(row rowScanner) (*ProtocolFixtureInstance, error) {
+	var x ProtocolFixtureInstance
+	var config, created, updated string
+	err := row.Scan(&x.RunID, &x.ID, &x.Pack, &x.Version, &x.Protocol, &x.TargetApp, &x.Status, &config, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(config), &x.Config); err != nil {
+		return nil, err
+	}
+	x.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+	x.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	return &x, nil
+}
+
+func (s store) setProtocolFixturesStatus(runID, status string) error {
+	_, err := s.db.Exec(`UPDATE environment_protocol_fixtures SET status=?,updated_at=? WHERE run_id=?`, status, time.Now().UTC().Format(time.RFC3339Nano), runID)
+	return err
+}
+
+func (s store) addProtocolEvent(event *ProtocolFixtureEvent) error {
+	data, err := json.Marshal(event.Data)
+	if err != nil {
+		return err
+	}
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	result, err := s.db.Exec(`INSERT INTO environment_protocol_events(run_id,fixture_id,call_id,type,direction,data_json,created_at)
+		VALUES(?,?,?,?,?,?,?)`, event.RunID, event.FixtureID, event.CallID, event.Type, event.Direction, string(data), event.CreatedAt.Format(time.RFC3339Nano))
+	if err == nil {
+		event.ID, _ = result.LastInsertId()
+	}
+	return err
+}
+
+func (s store) listProtocolEvents(runID, fixtureID, callID string) ([]ProtocolFixtureEvent, error) {
+	query := `SELECT id,run_id,fixture_id,call_id,type,direction,data_json,created_at FROM environment_protocol_events WHERE run_id=? AND fixture_id=?`
+	args := []any{runID, fixtureID}
+	if callID != "" {
+		query += ` AND call_id=?`
+		args = append(args, callID)
+	}
+	query += ` ORDER BY id`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ProtocolFixtureEvent{}
+	for rows.Next() {
+		var event ProtocolFixtureEvent
+		var data, created string
+		if err := rows.Scan(&event.ID, &event.RunID, &event.FixtureID, &event.CallID, &event.Type, &event.Direction, &data, &created); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(data), &event.Data)
+		event.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 func (s store) createWebFixture(x *WebFixtureInstance) error {
 	seed, err := json.Marshal(x.Seed)
 	if err != nil {

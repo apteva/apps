@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.39
+version: 0.4.41
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -25,7 +25,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/trading
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/trading/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [trading, finance, agent, polymarket, crypto]
 
 scopes: [project, global]
@@ -191,6 +192,14 @@ config_schema:
     default: "5"
     label: Mark refresh cadence (seconds)
     description: How often the paper engine re-marks open positions and tries to fill working orders.
+  - name: backtest_max_market_rows
+    type: text
+    default: "500000"
+    label: Backtest market-data row budget
+    description: |
+      Maximum captured OHLCV rows across all symbols in one backtest. The default supports
+      a full year of 5-minute crypto data for four symbols, or decades of hourly data.
+      Raise this only when the app has enough memory and disk for larger immutable replays.
   - name: pricing_provider
     type: text
     default: "live"

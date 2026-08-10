@@ -1,7 +1,7 @@
 // Live Link app — give a locally-installed Apteva instance a public
 // HTTPS URL.
 //
-// Three providers, selected explicitly in-panel:
+// Four providers, selected explicitly in-panel:
 //
 //   - quick  (v0.1, default): Cloudflare Quick Tunnel. Anonymous, free,
 //     fresh https://<random>.trycloudflare.com URL on every start. No
@@ -19,6 +19,10 @@
 //
 //   - ngrok: a random or reserved ngrok URL. The app reads the bound
 //     connection credential just in time and passes it only in child env.
+//
+//   - zrok: a stable public name on zrok's free public namespace. The
+//     one-time enable token comes from a bound connection, is never put in
+//     argv or SQLite, and is persisted only in zrok's private native files.
 //
 // Provider choice and desired live/off intent are explicit persistent state.
 // Run history is bounded and records the provider used for each run.
@@ -113,6 +117,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.providers = []Provider{
 		&cloudflareNamedProvider{app: a},
 		&ngrokProvider{app: a},
+		&zrokProvider{app: a},
 		&cloudflareQuickProvider{app: a},
 	}
 	a.lifecycleCtx, a.lifecycleCancel = context.WithCancel(context.Background())
@@ -253,6 +258,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/runs", Handler: a.handleRuns},
 		{Pattern: "/install", Handler: a.handleInstall},
 		{Pattern: "/provider", Handler: a.handleProvider},
+		{Pattern: "/provider/configure", Handler: a.handleProviderConfigure},
 		{Pattern: "/destroy", Handler: a.handleDestroy},
 		{Pattern: "/named/zones", Handler: a.handleNamedZones},
 		{Pattern: "/named/configure", Handler: a.handleNamedConfigure},
@@ -294,8 +300,10 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// has a non-nil binding on this install.
 	cfBinding := ctx.IntegrationFor("cloudflare")
 	ngrokBinding := ctx.IntegrationFor("ngrok")
+	zrokBinding := ctx.IntegrationFor("zrok")
 	out["cloudflare_bound"] = cfBinding != nil && cfBinding.ConnectionID != 0
 	out["ngrok_bound"] = ngrokBinding != nil && ngrokBinding.ConnectionID != 0
+	out["zrok_bound"] = zrokBinding != nil && zrokBinding.ConnectionID != 0
 	if nt, _ := dbFirstNamedTunnel(ctx.AppDB()); nt != nil {
 		out["hostname"] = nt.Hostname
 		out["named_configured"] = true
@@ -306,6 +314,26 @@ func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// "currently configured" hint when the active provider is ngrok.
 	if v := strings.TrimSpace(ctx.Config().Get("ngrok_domain")); v != "" {
 		out["ngrok_domain"] = v
+	}
+	zrokState, _ := dbZrokState(ctx.AppDB())
+	if zrokState != nil {
+		out["zrok_configured"] = true
+		out["zrok_name"] = zrokState.Name
+		out["zrok_url"] = zrokState.PublicURL
+	} else {
+		out["zrok_configured"] = false
+	}
+	out["providers"] = map[string]any{
+		providerNameQuick: map[string]any{"available": true, "configured": true},
+		providerNameNamed: map[string]any{
+			"available": out["cloudflare_bound"], "configured": out["named_configured"],
+		},
+		providerNameNgrok: map[string]any{
+			"available": out["ngrok_bound"], "configured": out["ngrok_bound"],
+		},
+		providerNameZrok: map[string]any{
+			"available": out["zrok_bound"], "configured": out["zrok_configured"],
+		},
 	}
 	httpJSON(w, out)
 }
@@ -381,17 +409,55 @@ func (a *App) handleProvider(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"provider": body.Provider})
 }
 
-// handleDestroy tears down the named tunnel: deletes the CF-side
-// tunnel + DNS record, then drops the local row. Refuses while a
-// tunnel is up — operator must stop it first. No-op for installs
-// that never created a named tunnel.
+// handleProviderConfigure configures persistent resources through one generic
+// route. Provider-specific fields live inside config; callers do not need
+// zrok-specific or Cloudflare-specific lifecycle endpoints.
+func (a *App) handleProviderConfigure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		Provider string          `json:"provider"`
+		Config   json.RawMessage `json:"config"`
+	}
+	if err := decodeJSONBody(w, r, &body); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := a.configureProvider(getAppCtx(r), strings.TrimSpace(body.Provider), body.Config)
+	if err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, errTunnelRunning) {
+			code = http.StatusConflict
+		}
+		httpErr(w, code, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"provider": body.Provider, "configuration": result})
+}
+
+// handleDestroy tears down the explicitly requested provider's persistent
+// resource. An omitted provider preserves the pre-v0.6 Cloudflare behavior.
 func (a *App) handleDestroy(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx := getAppCtx(r)
-	destroyed, err := a.destroyNamedTunnelSafe(ctx)
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSONBody(w, r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	provider := strings.TrimSpace(body.Provider)
+	if provider == "" {
+		provider = providerNameNamed
+	}
+	destroyed, err := a.destroyProviderSafe(getAppCtx(r), provider)
 	if err != nil {
 		if errors.Is(err, errTunnelRunning) {
 			httpErr(w, http.StatusConflict, err.Error())
@@ -400,7 +466,7 @@ func (a *App) handleDestroy(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	httpJSON(w, map[string]any{"destroyed": destroyed})
+	httpJSON(w, map[string]any{"destroyed": destroyed, "provider": provider})
 }
 
 func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
@@ -445,9 +511,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "expose_destroy",
-			Description: "Tear down the named tunnel: delete it on Cloudflare and remove the CNAME record. Refuses while the tunnel is running. No-op when no named tunnel was ever created. Quick-mode tunnels have nothing to destroy.",
-			InputSchema: schemaObject(nil, nil),
-			Handler:     a.toolDestroy,
+			Description: "Destroy a provider's persistent remote resource. Supports cloudflare-named and zrok; refuses while a tunnel is running. Omitting provider preserves the legacy cloudflare-named behavior.",
+			InputSchema: schemaObject(map[string]any{
+				"provider": map[string]any{
+					"type": "string",
+					"enum": []string{providerNameNamed, providerNameZrok, providerNameNgrok, providerNameQuick},
+				},
+			}, nil),
+			Handler: a.toolDestroy,
 		},
 	}
 }
@@ -491,12 +562,17 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	}, nil
 }
 
-func (a *App) toolDestroy(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	destroyed, err := a.destroyNamedTunnelSafe(ctx)
+func (a *App) toolDestroy(ctx *sdk.AppCtx, input map[string]any) (any, error) {
+	provider, _ := input["provider"].(string)
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		provider = providerNameNamed
+	}
+	destroyed, err := a.destroyProviderSafe(ctx, provider)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"destroyed": destroyed}, nil
+	return map[string]any{"destroyed": destroyed, "provider": provider}, nil
 }
 
 // waitForURL polls the manager for up to 15s, waiting for the agent to
@@ -601,6 +677,18 @@ func (a *App) selectProvider(ctx *sdk.AppCtx, name string) error {
 		if bound == nil || bound.ConnectionID == 0 {
 			return errors.New("bind an ngrok connection before selecting ngrok")
 		}
+	case providerNameZrok:
+		bound := ctx.IntegrationFor("zrok")
+		if bound == nil || bound.ConnectionID == 0 {
+			return errors.New("bind a zrok connection before selecting zrok")
+		}
+		state, err := dbZrokState(ctx.AppDB())
+		if err != nil || state == nil {
+			return errors.New("reserve a zrok name before selecting zrok")
+		}
+		if state.ConnectionID != bound.ConnectionID {
+			return errors.New("the configured zrok name belongs to a different bound connection")
+		}
 	}
 	return dbSetActiveProvider(ctx.AppDB(), name)
 }
@@ -616,6 +704,8 @@ func (a *App) reinstallActiveProvider(ctx *sdk.AppCtx) (string, string, error) {
 	var err error
 	if provider == providerNameNgrok {
 		path, err = resolveNgrokBinary(ctx.Config().Get("ngrok_path"), ctx.DataDir(), true, ctx.Logger().Info)
+	} else if provider == providerNameZrok {
+		path, err = resolveZrokBinary(ctx.Config().Get("zrok2_path"), ctx.DataDir(), true, ctx.Logger().Info)
 	} else {
 		path, err = resolveBinary(ctx.Config().Get("cloudflared_path"), ctx.DataDir(), true, ctx.Logger().Info)
 	}
@@ -623,21 +713,60 @@ func (a *App) reinstallActiveProvider(ctx *sdk.AppCtx) (string, string, error) {
 }
 
 func (a *App) destroyNamedTunnelSafe(ctx *sdk.AppCtx) (bool, error) {
+	return a.destroyProviderSafe(ctx, providerNameNamed)
+}
+
+func (a *App) destroyProviderSafe(ctx *sdk.AppCtx, name string) (bool, error) {
+	if !validProviderName(name) {
+		return false, fmt.Errorf("unknown provider %q", name)
+	}
 	a.opMu.Lock()
 	defer a.opMu.Unlock()
 	if a.mgr.Snapshot().Status == StatusRunning {
 		return false, errTunnelRunning
 	}
-	destroyed, err := a.destroyNamedTunnel(ctx)
+	provider := a.providerByName(name)
+	if provider == nil {
+		return false, fmt.Errorf("provider %q is not initialized", name)
+	}
+	destroyed, err := provider.Destroy(ctx)
 	if err != nil {
 		return false, err
 	}
-	if destroyed && a.activeProviderName(ctx) == providerNameNamed {
+	if destroyed && a.activeProviderName(ctx) == name {
 		if err := dbSetActiveProvider(ctx.AppDB(), providerNameQuick); err != nil {
 			return false, err
 		}
 	}
 	return destroyed, nil
+}
+
+func (a *App) providerByName(name string) Provider {
+	for _, provider := range a.providers {
+		if provider.Name() == name {
+			return provider
+		}
+	}
+	return nil
+}
+
+func (a *App) configureProvider(ctx *sdk.AppCtx, name string, config json.RawMessage) (any, error) {
+	if name != providerNameNamed && name != providerNameZrok {
+		return nil, fmt.Errorf("provider %q has no persistent configuration", name)
+	}
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	if a.mgr.Snapshot().Status == StatusRunning {
+		return nil, errTunnelRunning
+	}
+	switch name {
+	case providerNameNamed:
+		return a.configureNamed(ctx, config)
+	case providerNameZrok:
+		return a.configureZrok(ctx, config)
+	default:
+		return nil, fmt.Errorf("unknown provider %q", name)
+	}
 }
 
 // currentMode reports which legacy v0.3-shape mode is active. v0.4
@@ -834,66 +963,71 @@ func (a *App) handleNamedConfigure(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	ctx := getAppCtx(r)
-	hostname, err := normalizeDNSName(body.Hostname)
+	raw, _ := json.Marshal(body)
+	result, err := a.configureProvider(getAppCtx(r), providerNameNamed, raw)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		code := http.StatusBadRequest
+		if errors.Is(err, errTunnelRunning) {
+			code = http.StatusConflict
+		}
+		httpErr(w, code, err.Error())
 		return
+	}
+	httpJSON(w, result)
+}
+
+// configureNamed is the Cloudflare implementation behind the generic
+// /provider/configure endpoint and the legacy /named/configure adapter.
+// The caller holds opMu.
+func (a *App) configureNamed(ctx *sdk.AppCtx, raw json.RawMessage) (map[string]any, error) {
+	var config struct {
+		ZoneID   string `json:"zone_id"`
+		Hostname string `json:"hostname"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, fmt.Errorf("invalid Cloudflare config: %w", err)
+	}
+	hostname, err := normalizeDNSName(config.Hostname)
+	if err != nil {
+		return nil, err
 	}
 	connID, err := a.cfConnectionID(ctx)
 	if err != nil {
-		httpErr(w, http.StatusFailedDependency, err.Error())
-		return
+		return nil, err
 	}
 	zones, err := cfListZones(ctx, connID)
 	if err != nil {
-		httpErr(w, http.StatusBadGateway, err.Error())
-		return
+		return nil, err
 	}
 	var selected *cfZone
 	for i := range zones {
-		if zones[i].ID == strings.TrimSpace(body.ZoneID) {
+		if zones[i].ID == strings.TrimSpace(config.ZoneID) {
 			selected = &zones[i]
 			break
 		}
 	}
 	if selected == nil {
-		httpErr(w, http.StatusBadRequest, "zone_id is not accessible through the bound Cloudflare connection")
-		return
+		return nil, errors.New("zone_id is not accessible through the bound Cloudflare connection")
 	}
 	if err := validateHostnameInZone(hostname, selected.Name); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, err
 	}
-
-	a.opMu.Lock()
-	defer a.opMu.Unlock()
-	if a.mgr.Snapshot().Status == StatusRunning {
-		httpErr(w, http.StatusConflict, errTunnelRunning.Error())
-		return
-	}
-
 	existing, _ := dbFirstNamedTunnel(ctx.AppDB())
-	nt, err := a.ensureNamedTunnel(ctx, hostname, body.ZoneID)
+	nt, err := a.ensureNamedTunnel(ctx, hostname, config.ZoneID)
 	if err != nil {
-		httpErr(w, http.StatusBadGateway, err.Error())
-		return
+		return nil, err
 	}
 	if existing != nil && existing.Hostname != nt.Hostname {
 		if _, err := a.destroyNamedTunnelResource(ctx, existing); err != nil {
-			httpErr(w, http.StatusBadGateway, "new hostname is ready, but the previous tunnel could not be removed: "+err.Error())
-			return
+			return nil, fmt.Errorf("new hostname is ready, but the previous tunnel could not be removed: %w", err)
 		}
 	}
 	if err := dbSetActiveProvider(ctx.AppDB(), providerNameNamed); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, err
 	}
-	httpJSON(w, map[string]any{
-		"hostname":  nt.Hostname,
-		"tunnel_id": nt.TunnelID,
-		"zone_id":   nt.ZoneID,
-	})
+	return map[string]any{
+		"hostname": nt.Hostname, "tunnel_id": nt.TunnelID, "zone_id": nt.ZoneID,
+	}, nil
 }
 
 func (a *App) handleNamedCurrent(w http.ResponseWriter, r *http.Request) {

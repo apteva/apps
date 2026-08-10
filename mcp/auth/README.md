@@ -1,6 +1,37 @@
-# Auth (v0.1.0)
+# Auth (v0.8.0)
 
-Identity layer for Apteva-deployed SaaS. The shape borrows from Auth0 / AWS Cognito / Keycloak: **one user pool per project, many `clients` (frontends / mobile apps / backend services / M2M integrations) inside it.**
+Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
+install owns multiple organizations; each has isolated users, clients, signing
+keys, sessions, roles, and permissions.
+
+## Trusted authorization context
+
+Login, session-creating signup, refresh, and `/me` return a server-managed
+`authorization` object, and the same fields are signed into the access JWT:
+
+```json
+{
+  "user_id": "123",
+  "organization_id": "8",
+  "organization_slug": "acme",
+  "roles": ["supervisor"],
+  "permissions": ["calls:view_team", "commercials:supervise"],
+  "authorization_version": 4
+}
+```
+
+Auth never derives trusted authorization from self-service user metadata.
+Changing a user's roles, changing an assigned role's permissions, or deleting
+an effective role or permission increments affected users'
+`authorization_version`. Auth rejects stale access tokens on its authenticated
+routes; refresh tokens mint a current context. Offline consumers that require
+immediate revocation must compare the signed version with current server state.
+
+The dashboard **Roles** tab manages roles and permissions, and the user drawer
+manages role assignments. The equivalent MCP tools are
+`auth_roles_{list,create,update,delete}`,
+`auth_permissions_{list,create,update,delete}`,
+`auth_role_permissions_set`, and `auth_user_roles_set`.
 
 ## Pipeline of an Apteva-deployed SaaS
 
@@ -12,28 +43,24 @@ SaaS frontend ─POST /apps/auth/signup──▶  auth-app sidecar ──▶ use
                                                 └──▶ messaging app (verify, reset, magic link)
 ```
 
-Agents administer the pool via MCP tools; the deployed SaaS frontend hits the HTTP routes; the dashboard renders Users / Clients / Settings panels.
+Agents administer the pool via MCP tools; deployed frontends use the HTTP
+routes; the dashboard manages organizations, users, roles, permissions,
+clients, and OIDC settings.
 
-## What ships in v0.1.0
+## Core capabilities
 
-**Schema (9 tables)** — `users`, `clients`, `oauth_identities`, `sessions`, `verification_tokens`, `mfa_factors`, `recovery_codes`, `signing_keys`, `audit_log`. Every row partitioned by `project_id`.
+**Identity** — email/password signup and login, verification, password reset,
+magic links, TOTP MFA, rotating refresh tokens, per-organization EdDSA signing
+keys and JWKS, and an audit trail.
 
-**HTTP surface** — `/health`, `/.well-known/jwks.json`, `/.well-known/openid-configuration`, `/signup`, `/login`, `/refresh`, `/logout`, `/me`. Email + password core. Refresh-token rotation is on by default; replaying a rotated token is rejected with 401.
+**Organizations** — users, OAuth clients, sessions, signing keys, roles,
+permissions, and audit events are partitioned by `(project_id,
+organization_id)`.
 
-**MCP surface (12 tools)** — `auth_users_search`, `_get`, `_get_context`, `_disable`, `_enable`, `_revoke_sessions`, `auth_audit_search`, `auth_stats`, `auth_clients_list`, `_create`, `_rotate_secret`, `_disable`.
+**Authorization** — organization-owned roles and permissions with atomic
+role-permission and user-role replacement. Machine keys are immutable.
 
 **Crypto** — argon2id passwords (PHC string format, portable), EdDSA JWTs with rotating signing keys, sha256-hashed refresh + verification tokens. JWT verification uses JWKS — every consumer (other apps, the SaaS's own backend) verifies offline, no network call to auth.
-
-## What's deliberately deferred
-
-- `/password/forgot` + `/password/reset` (mail.go has the helper plumbing)
-- `/email/verify` consumer endpoint (token issuance is wired; the consume route is the next step)
-- `/magic-link/request` + `/magic-link/consume`
-- `/mfa/totp/enroll` + `/mfa/totp/verify` (table is shipped)
-- `/oauth/{provider}` + `/oauth/{provider}/callback` (Google, GitHub, Apple)
-- Admin MCP tools: `auth_users_create`, `_invite`, `_delete`, `_set_email`, `_send_password_reset`
-- UI panels (Users / Clients / Settings)
-- SAML, WebAuthn, SMS OTP — out of scope for v0.x
 
 ## Local development
 
@@ -65,14 +92,14 @@ Tier 3 covers: register a client, disable a spam user, revoke sessions during an
 ## Auth flow at a glance
 
 ```
-POST /signup    { email, password, client_id }        → 201 { user, access_token, refresh_token, expires_in }
+POST /signup    { email, password, client_id }        → 201 { user, authorization, access_token, refresh_token, expires_in }
                                                       → 202 { user } when email_verification_required=true
-POST /login     { email, password, client_id }        → 200 { user, access_token, refresh_token, expires_in }
+POST /login     { email, password, client_id }        → 200 { user, authorization, access_token, refresh_token, expires_in }
                                                       → 401 invalid_grant
                                                       → 423 account_locked
-POST /refresh   { refresh_token, client_id }          → 200 { access_token, refresh_token, expires_in } (rotated)
+POST /refresh   { refresh_token, client_id }          → 200 { authorization, access_token, refresh_token, expires_in } (rotated)
 POST /logout    { refresh_token }                     → 204
-GET  /me        Authorization: Bearer <access_token>  → 200 { user }
+GET  /me        Authorization: Bearer <access_token>  → 200 { user, authorization }
 GET  /.well-known/jwks.json                           → public keys for JWT verification
 ```
 

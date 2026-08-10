@@ -109,8 +109,9 @@ func buildThemeFuncMap(theme *Theme) template.FuncMap {
 			}
 			return "_media/" + strings.TrimPrefix(storagePath, "/.media/")
 		},
-		"markdown": renderInlineMarkdown,
-		"safeHTML": sanitizeHTML,
+		"markdown":      renderInlineMarkdown,
+		"markdownBlock": renderMarkdown,
+		"safeHTML":      sanitizeHTML,
 		"formatDate": func(s, layout string) string {
 			t, err := parseFlexibleTime(s)
 			if err != nil {
@@ -234,13 +235,7 @@ func renderSingle(data PageData) (string, error) {
 	if t == nil {
 		return "", fmt.Errorf("no theme loaded")
 	}
-	set := t.singleTpl
-	if data.Post != nil && data.Post.Template != "" {
-		if alt, ok := t.pageTemplates[data.Post.Template]; ok {
-			set = alt
-		}
-	}
-	return executeBase(set, data)
+	return executeBase(singleTemplateSet(t, data), data)
 }
 
 func renderList(data PageData) (string, error) {
@@ -249,6 +244,41 @@ func renderList(data PageData) (string, error) {
 		return "", fmt.Errorf("no theme loaded")
 	}
 	return executeBase(t.listTpl, data)
+}
+
+func renderSingleMain(data PageData) (template.HTML, error) {
+	if data.Theme == nil {
+		return "", fmt.Errorf("no theme loaded")
+	}
+	return executeMain(singleTemplateSet(data.Theme, data), data)
+}
+
+func renderListMain(data PageData) (template.HTML, error) {
+	if data.Theme == nil {
+		return "", fmt.Errorf("no theme loaded")
+	}
+	return executeMain(data.Theme.listTpl, data)
+}
+
+func singleTemplateSet(theme *Theme, data PageData) *template.Template {
+	set := theme.singleTpl
+	if data.Post != nil && data.Post.Template != "" {
+		if alt, ok := theme.pageTemplates[data.Post.Template]; ok {
+			set = alt
+		}
+	}
+	return set
+}
+
+func executeMain(set *template.Template, data PageData) (template.HTML, error) {
+	if set == nil {
+		return "", fmt.Errorf("layout template set missing")
+	}
+	var buf bytes.Buffer
+	if err := set.ExecuteTemplate(&buf, "main", data); err != nil {
+		return "", err
+	}
+	return template.HTML(buf.String()), nil
 }
 
 // executeBase runs base.html against a pre-built layout set. Each set
@@ -308,6 +338,8 @@ type cacheEntry struct {
 	body        string
 	contentType string
 	etag        string
+	csp         string
+	extLayout   bool
 	storedAt    time.Time
 }
 
@@ -342,7 +374,7 @@ func cacheGet(key string) (cacheEntry, bool) {
 	return e, true
 }
 
-func cacheSet(key, body, contentType, etag string) {
+func cacheSet(key, body, contentType, etag, csp string, extLayout bool) {
 	pageCacheMu.Lock()
 	defer pageCacheMu.Unlock()
 	const maxPageCacheEntries = 2048
@@ -356,7 +388,10 @@ func cacheSet(key, body, contentType, etag string) {
 		}
 		delete(pageCache, oldestKey)
 	}
-	pageCache[key] = cacheEntry{body: body, contentType: contentType, etag: etag, storedAt: time.Now()}
+	pageCache[key] = cacheEntry{
+		body: body, contentType: contentType, etag: etag, csp: csp,
+		extLayout: extLayout, storedAt: time.Now(),
+	}
 }
 
 func invalidatePageCacheForSite(siteID int64) {

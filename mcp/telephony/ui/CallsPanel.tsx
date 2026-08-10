@@ -98,6 +98,7 @@ interface Recording {
 const LIVE_STATUSES = new Set(["initiated", "ringing", "in-progress", "answered"]);
 const TERMINAL_STATUSES = new Set(["completed", "failed", "no-answer", "busy", "canceled"]);
 const CALL_COLUMNS = "8rem minmax(0,1fr) minmax(0,1fr) 8rem 7rem 6rem 7rem";
+const CONNECTED_NUMBER_COLUMNS = "minmax(12rem,1.3fr) 7rem minmax(8rem,0.8fr) minmax(10rem,1fr) minmax(11rem,1fr) minmax(9rem,0.8fr) minmax(11rem,0.9fr)";
 const NUMBER_COLUMNS = "10rem 7rem minmax(0,1fr) 9rem 9rem 9rem 9rem 7rem";
 const ADDRESS_COLUMNS = "10rem minmax(0,1fr) 8rem 9rem 12rem";
 const DETAILS_COLUMNS = "7.5rem minmax(0,1fr)";
@@ -628,6 +629,37 @@ interface NumberSearchResponse {
   pricing_note?: string;
 }
 
+interface ConnectedRoute {
+  id: string;
+  agent_id: number;
+  agent_name?: string;
+  enabled: boolean;
+  answer_mode: string;
+  voice?: string;
+  recording_mode: string;
+}
+
+interface ConnectedNumber {
+  phone_number: string;
+  provider: string;
+  provider_number_id?: string;
+  friendly_name?: string;
+  capabilities: string[];
+  carrier_status?: string;
+  route_status: "enabled" | "disabled" | "not_configured";
+  route?: ConnectedRoute;
+  voice_webhook_status: string;
+  status_callback_status: string;
+  routing_health: string;
+  health_message?: string;
+}
+
+interface ConnectedNumbersResponse {
+  provider: string;
+  count: number;
+  numbers: ConnectedNumber[];
+}
+
 interface ProviderAddress {
   sid: string;
   friendly_name?: string;
@@ -671,7 +703,32 @@ function money(value?: string, currency?: string, suffix = ""): string {
   return `${currency ? `${currency} ` : ""}${rendered}${suffix}`;
 }
 
+function healthLabel(value: string): string {
+  switch (value) {
+    case "configured": return "Configured";
+    case "not_configured": return "Not configured";
+    case "mismatch": return "Mismatch";
+    case "missing": return "Missing";
+    case "disabled": return "Disabled";
+    case "unsupported": return "Unsupported";
+    case "unknown": return "Unverified";
+    default: return value || "Unknown";
+  }
+}
+
+function healthClass(value: string): string {
+  if (value === "configured" || value === "healthy") return "border-success/30 bg-success/10 text-success";
+  if (value === "mismatch" || value === "missing" || value === "degraded") return "border-error/30 bg-error/10 text-error";
+  if (value === "unknown" || value === "unverified") return "border-warn/30 bg-warn/10 text-warn";
+  return "border-border bg-bg-muted text-text-muted";
+}
+
 function NumbersView({ projectId }: NativePanelProps) {
+  const connectedRequestRef = useRef(0);
+  const [connectedNumbers, setConnectedNumbers] = useState<ConnectedNumber[]>([]);
+  const [connectedProvider, setConnectedProvider] = useState("");
+  const [connectedLoading, setConnectedLoading] = useState(false);
+  const [connectedError, setConnectedError] = useState("");
   const [countries, setCountries] = useState("EE, AT");
   const [numberType, setNumberType] = useState("local");
   const [offers, setOffers] = useState<NumberOffer[]>([]);
@@ -692,6 +749,39 @@ function NumbersView({ projectId }: NativePanelProps) {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
     return `${API}${path}${query}`;
   }, [projectId]);
+
+  const loadConnected = useCallback(async () => {
+    const requestId = ++connectedRequestRef.current;
+    setConnectedLoading(true);
+    setConnectedError("");
+    try {
+      const data = await postJSON<ConnectedNumbersResponse>(endpoint("/numbers/connected"), {});
+      if (requestId !== connectedRequestRef.current) return;
+      setConnectedProvider(data.provider || "");
+      setConnectedNumbers(data.numbers ?? []);
+    } catch (e) {
+      if (requestId !== connectedRequestRef.current) return;
+      setConnectedNumbers([]);
+      setConnectedProvider("");
+      setConnectedError((e as Error).message || "Could not load connected numbers");
+    } finally {
+      if (requestId === connectedRequestRef.current) setConnectedLoading(false);
+    }
+  }, [endpoint]);
+
+  useEffect(() => {
+    setOffers([]);
+    setProvider("");
+    setSupportedTypes([]);
+    setStatus("");
+    setSelected(null);
+    setAddressSid("");
+    setBundleSid("");
+    setAddresses([]);
+    setBundles([]);
+    setPurchaseResult("");
+    void loadConnected();
+  }, [loadConnected]);
 
   const search = async () => {
     const values = countries
@@ -761,6 +851,7 @@ function NumbersView({ projectId }: NativePanelProps) {
       setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
       setSelected(null);
       setStatus("Purchase completed");
+      await loadConnected();
     } catch (e) {
       setPurchaseResult((e as Error).message || "Purchase failed");
     } finally {
@@ -770,103 +861,219 @@ function NumbersView({ projectId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <header className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-end gap-3">
-        <label className="flex-1" style={{ minWidth: "12rem", maxWidth: "28rem" }}>
-          <span className="block text-xs text-text-muted mb-1">Countries</span>
-          <input
-            value={countries}
-            onChange={(event) => setCountries(event.target.value)}
-            placeholder="EE, AT, DE"
-            className="h-9 w-full rounded border border-border bg-bg px-3 text-sm outline-none focus:border-text-dim"
-          />
-        </label>
-        <label className="w-40">
-          <span className="block text-xs text-text-muted mb-1">Number type</span>
-          <select
-            value={numberType}
-            onChange={(event) => setNumberType(event.target.value)}
-            className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
-          >
-            <option value="local">Local</option>
-            <option value="mobile">Mobile</option>
-            <option value="national">National</option>
-            <option value="toll_free">Toll-free</option>
-            <option value="any">Any</option>
-          </select>
-        </label>
-        <button
-          type="button"
-          onClick={search}
-          disabled={loading}
-          className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50"
-        >
-          {loading ? "Searching..." : "Search"}
-        </button>
-        <div className="text-right text-xs text-text-muted" style={{ minWidth: "10rem" }}>
-          <div>{provider ? `Carrier: ${provider}` : ""}</div>
-          <div className="truncate">{status}</div>
-        </div>
-      </header>
-
       <main className="min-h-0 flex-1 overflow-auto">
-        {supportedTypes.length > 0 && numberType !== "any" && !supportedTypes.includes(numberType) ? (
-          <div className="border-b border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
-            {provider} supports {supportedTypes.join(", ")} number searches.
-          </div>
-        ) : null}
-        {purchaseResult ? (
-          <div className="border-b border-border px-4 py-3 text-sm">{purchaseResult}</div>
-        ) : null}
-        {offers.length === 0 ? (
-          <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>
-            {status || "Search the bound carrier's live number inventory."}
-          </div>
-        ) : (
-          <div style={{ minWidth: "64rem" }}>
-            <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: NUMBER_COLUMNS }}>
-              <div>Number</div>
-              <div>Country</div>
-              <div>Location</div>
-              <div>Monthly</div>
-              <div>Inbound</div>
-              <div>Setup</div>
-              <div>Requirement</div>
-              <div />
+        <section className="border-b border-border">
+          <header className="px-4 py-3 flex flex-wrap items-center gap-3 border-b border-border">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-sm font-semibold">Connected numbers</h2>
+              <p className="mt-0.5 truncate text-xs text-text-muted">
+                {connectedLoading
+                  ? "Loading carrier numbers..."
+                  : connectedError
+                    ? "Carrier numbers unavailable"
+                    : `${connectedNumbers.length} number${connectedNumbers.length === 1 ? "" : "s"}${connectedProvider ? ` on ${connectedProvider}` : ""}`}
+              </p>
             </div>
-            {offers.map((offer) => (
-              <div
-                key={`${offer.provider}-${offer.phone_number}`}
-                className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
-                style={{ gridTemplateColumns: NUMBER_COLUMNS }}
-              >
-                <div className="font-medium truncate">{offer.phone_number}</div>
-                <div>
-                  <div>{offer.country}</div>
-                  <div className="text-xs text-text-dim">{offer.number_type.replace("_", " ")}</div>
+            <button
+              type="button"
+              onClick={loadConnected}
+              disabled={connectedLoading}
+              className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-50"
+            >
+              Refresh
+            </button>
+          </header>
+
+          {connectedLoading && connectedNumbers.length === 0 ? (
+            <div className="flex items-center justify-center px-6 text-sm text-text-muted" style={{ minHeight: "10rem" }}>
+              Loading connected numbers...
+            </div>
+          ) : connectedError ? (
+            <div className="flex items-center justify-between gap-4 px-4 py-6">
+              <div className="min-w-0 text-sm text-error whitespace-pre-wrap">{connectedError}</div>
+              <button type="button" onClick={loadConnected} className="h-8 shrink-0 px-3 rounded border border-border text-xs hover:bg-bg-muted">Retry</button>
+            </div>
+          ) : connectedNumbers.length === 0 ? (
+            <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "10rem" }}>
+              No phone numbers found in the bound carrier account.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div style={{ minWidth: "76rem" }}>
+                <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: CONNECTED_NUMBER_COLUMNS }}>
+                  <div>Number</div>
+                  <div>Provider</div>
+                  <div>Capabilities</div>
+                  <div>Route</div>
+                  <div>Assigned agent</div>
+                  <div>Mode</div>
+                  <div>Routing health</div>
                 </div>
-                <div className="min-w-0">
-                  <div className="truncate">{[offer.locality, offer.region].filter(Boolean).join(", ") || "-"}</div>
-                  <div className="truncate text-xs text-text-dim">{(offer.features ?? []).join(", ")}</div>
-                </div>
-                <div className="tabular-nums">{money(offer.monthly_price, offer.currency, "/mo")}</div>
-                <div className="tabular-nums">{money(offer.inbound_price, offer.currency, "/min")}</div>
-                <div className="tabular-nums">{money(offer.upfront_price, offer.currency)}</div>
-                <div className="truncate text-xs text-text-muted" title={offer.purchase_blocker || offer.address_requirement}>
-                  {offer.purchase_blocker || (offer.compliance_required ? "compliance profile" : offer.address_requirement) || "none stated"}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => review(offer)}
-                  disabled={!offer.purchase_ready}
-                  title={offer.purchase_blocker || "Review purchase"}
-                  className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-40"
-                >
-                  Review
-                </button>
+                {connectedNumbers.map((number) => (
+                  <div
+                    key={`${number.provider}-${number.provider_number_id || number.phone_number}`}
+                    className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
+                    style={{ gridTemplateColumns: CONNECTED_NUMBER_COLUMNS }}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{number.phone_number}</div>
+                      <div className="truncate text-xs text-text-muted">{number.friendly_name || "-"}</div>
+                      <div className="truncate font-mono text-xs text-text-dim" title={number.provider_number_id}>{compactId(number.provider_number_id || "")}</div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate capitalize">{number.provider}</div>
+                      <div className="truncate text-xs text-text-dim">{number.carrier_status || "owned"}</div>
+                    </div>
+                    <div className="truncate text-xs text-text-muted">{number.capabilities.length > 0 ? number.capabilities.join(", ") : "-"}</div>
+                    <div className="min-w-0">
+                      {number.route ? (
+                        <>
+                          <div className="truncate font-mono text-xs" title={number.route.id}>{compactId(number.route.id)}</div>
+                          <span className={`mt-1 inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
+                            {number.route.enabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </>
+                      ) : <span className="text-xs text-text-muted">Not routed</span>}
+                    </div>
+                    <div className="min-w-0">
+                      {number.route ? (
+                        <>
+                          <div className="truncate">{number.route.agent_name || `Agent ${number.route.agent_id}`}</div>
+                          <div className="truncate text-xs text-text-dim">ID {number.route.agent_id}</div>
+                        </>
+                      ) : <span className="text-xs text-text-muted">-</span>}
+                    </div>
+                    <div className="min-w-0">
+                      {number.route ? (
+                        <>
+                          <div className="truncate capitalize">{number.route.answer_mode.replaceAll("_", " ")}</div>
+                          <div className="truncate text-xs text-text-dim">{number.route.voice || "Default voice"}</div>
+                        </>
+                      ) : <span className="text-xs text-text-muted">-</span>}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-text-dim">Voice</span>
+                        <span className={`rounded border px-1.5 py-0.5 ${healthClass(number.voice_webhook_status)}`}>{healthLabel(number.voice_webhook_status)}</span>
+                      </div>
+                      <div className="mt-1 flex items-center justify-between gap-2 text-xs">
+                        <span className="text-text-dim">Events</span>
+                        <span className={`rounded border px-1.5 py-0.5 ${healthClass(number.status_callback_status)}`}>{healthLabel(number.status_callback_status)}</span>
+                      </div>
+                      {number.health_message ? (
+                        <div className="mt-1 truncate text-xs text-text-muted" title={number.health_message}>{number.health_message}</div>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
+            </div>
+          )}
+        </section>
+
+        <section>
+          <header className="border-b border-border px-4 py-3">
+            <h2 className="mb-3 text-sm font-semibold">Find a number</h2>
+            <div className="flex flex-wrap items-end gap-3">
+              <label className="flex-1" style={{ minWidth: "12rem", maxWidth: "28rem" }}>
+                <span className="block text-xs text-text-muted mb-1">Countries</span>
+                <input
+                  value={countries}
+                  onChange={(event) => setCountries(event.target.value)}
+                  placeholder="EE, AT, DE"
+                  className="h-9 w-full rounded border border-border bg-bg px-3 text-sm outline-none focus:border-text-dim"
+                />
+              </label>
+              <label className="w-40">
+                <span className="block text-xs text-text-muted mb-1">Number type</span>
+                <select
+                  value={numberType}
+                  onChange={(event) => setNumberType(event.target.value)}
+                  className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
+                >
+                  <option value="local">Local</option>
+                  <option value="mobile">Mobile</option>
+                  <option value="national">National</option>
+                  <option value="toll_free">Toll-free</option>
+                  <option value="any">Any</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={search}
+                disabled={loading}
+                className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50"
+              >
+                {loading ? "Searching..." : "Search"}
+              </button>
+              <div className="text-right text-xs text-text-muted" style={{ minWidth: "10rem" }}>
+                <div>{provider ? `Carrier: ${provider}` : ""}</div>
+                <div className="truncate">{status}</div>
+              </div>
+            </div>
+          </header>
+
+          {supportedTypes.length > 0 && numberType !== "any" && !supportedTypes.includes(numberType) ? (
+            <div className="border-b border-warn/30 bg-warn/10 px-4 py-2 text-xs text-warn">
+              {provider} supports {supportedTypes.join(", ")} number searches.
+            </div>
+          ) : null}
+          {purchaseResult ? (
+            <div className="border-b border-border px-4 py-3 text-sm">{purchaseResult}</div>
+          ) : null}
+          {offers.length === 0 ? (
+            <div className="flex items-center justify-center px-6 text-center text-sm text-text-muted" style={{ minHeight: "14rem" }}>
+              {status || "Search the bound carrier's live number inventory."}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div style={{ minWidth: "64rem" }}>
+                <div className="grid gap-3 px-4 py-2 border-b border-border text-xs uppercase tracking-normal text-text-dim" style={{ gridTemplateColumns: NUMBER_COLUMNS }}>
+                  <div>Number</div>
+                  <div>Country</div>
+                  <div>Location</div>
+                  <div>Monthly</div>
+                  <div>Inbound</div>
+                  <div>Setup</div>
+                  <div>Requirement</div>
+                  <div />
+                </div>
+                {offers.map((offer) => (
+                  <div
+                    key={`${offer.provider}-${offer.phone_number}`}
+                    className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
+                    style={{ gridTemplateColumns: NUMBER_COLUMNS }}
+                  >
+                    <div className="font-medium truncate">{offer.phone_number}</div>
+                    <div>
+                      <div>{offer.country}</div>
+                      <div className="text-xs text-text-dim">{offer.number_type.replace("_", " ")}</div>
+                    </div>
+                    <div className="min-w-0">
+                      <div className="truncate">{[offer.locality, offer.region].filter(Boolean).join(", ") || "-"}</div>
+                      <div className="truncate text-xs text-text-dim">{(offer.features ?? []).join(", ")}</div>
+                    </div>
+                    <div className="tabular-nums">{money(offer.monthly_price, offer.currency, "/mo")}</div>
+                    <div className="tabular-nums">{money(offer.inbound_price, offer.currency, "/min")}</div>
+                    <div className="tabular-nums">{money(offer.upfront_price, offer.currency)}</div>
+                    <div className="truncate text-xs text-text-muted" title={offer.purchase_blocker || offer.address_requirement}>
+                      {offer.purchase_blocker || (offer.compliance_required ? "compliance profile" : offer.address_requirement) || "none stated"}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => review(offer)}
+                      disabled={!offer.purchase_ready}
+                      title={offer.purchase_blocker || "Review purchase"}
+                      className="h-8 px-3 rounded border border-border text-xs hover:bg-bg-muted disabled:opacity-40"
+                    >
+                      Review
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
       </main>
 
       {selected ? (
@@ -1316,7 +1523,7 @@ export default function CallsPanel(props: NativePanelProps) {
       </nav>
       <div className="min-h-0 flex-1">
         {view === "calls" ? <CallsView {...props} /> : null}
-        {view === "numbers" ? <NumbersView {...props} /> : null}
+        {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}
         {view === "bundles" ? <BundlesView {...props} /> : null}
       </div>

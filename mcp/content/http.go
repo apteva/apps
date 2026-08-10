@@ -52,6 +52,13 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// App-provided public surfaces are resolved before native CMS pages.
+	// Their route manifests are generic; Content has no provider-specific
+	// routing or rendering code.
+	if a.tryHandleExtensionRoute(w, r, ctx, pid, siteID) {
+		return
+	}
+
 	// Page cache. Site segments the key alongside prefix/host/path so
 	// no two sites can return each other's cached body.
 	prefix := computeURLPrefix(r)
@@ -60,6 +67,13 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		trackCachedPageView(ctx, pid, siteID, r)
 		w.Header().Set("Content-Type", e.contentType)
 		w.Header().Set("ETag", e.etag)
+		if e.extLayout {
+			if e.csp != "" {
+				w.Header().Set("Content-Security-Policy", e.csp)
+			}
+			w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+		}
 		if r.Header.Get("If-None-Match") == e.etag {
 			w.WriteHeader(http.StatusNotModified)
 			return
@@ -170,11 +184,12 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		}
 		data.Pagination = &pag
 	}
-	body, err := renderList(data)
+	body, policy, err := renderListForSite(ctx, pid, siteID, data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	applyExtensionBrowserPolicy(w, policy)
 	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
@@ -252,11 +267,12 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 		Type:        "article",
 		Image:       data.FeaturedMediaURL,
 	}
-	body, err := renderSingle(data)
+	body, policy, err := renderSingleForSite(ctx, pid, siteID, data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	applyExtensionBrowserPolicy(w, policy)
 	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
@@ -288,11 +304,12 @@ func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk
 	data.Posts = posts
 	data.ListTitle = term.Name
 	data.PageTitle = term.Name
-	body, err := renderList(data)
+	body, policy, err := renderListForSite(ctx, pid, siteID, data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	applyExtensionBrowserPolicy(w, policy)
 	cacheAndWrite(w, r, body, "text/html; charset=utf-8", siteID)
 }
 
@@ -457,11 +474,12 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	data.Terms = terms
 	data.PageTitle = post.Title + " (preview)"
 	w.Header().Set("X-Robots-Tag", "noindex")
-	body, err := renderSingle(data)
+	body, policy, err := renderSingleForSite(ctx, pid, siteID, data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	applyExtensionBrowserPolicy(w, policy)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(body))
 }
@@ -736,7 +754,8 @@ func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType str
 	sum := sha256.Sum256([]byte(body))
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
 	key := cacheKeyMulti(r.Host, r.URL.Path, "", computeURLPrefix(r), siteID)
-	cacheSet(key, body, contentType, etag)
+	cacheSet(key, body, contentType, etag, w.Header().Get("Content-Security-Policy"),
+		w.Header().Get("X-Content-Type-Options") == "nosniff")
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("ETag", etag)
 	if r.Header.Get("If-None-Match") == etag {

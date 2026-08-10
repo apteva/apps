@@ -103,7 +103,7 @@ func scanSuite(row interface{ Scan(...any) error }) (*Suite, error) {
 }
 
 func (s store) listCases(suiteID string) ([]Case, error) {
-	rows, err := s.db.Query(`SELECT id,suite_id,name,prompt,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE suite_id=? ORDER BY created_at`, suiteID)
+	rows, err := s.db.Query(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE suite_id=? ORDER BY created_at`, suiteID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (s store) listCases(suiteID string) ([]Case, error) {
 }
 
 func (s store) getCase(id string) (*Case, error) {
-	return scanCase(s.db.QueryRow(`SELECT id,suite_id,name,prompt,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE id=?`, id))
+	return scanCase(s.db.QueryRow(`SELECT id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at FROM eval_cases WHERE id=?`, id))
 }
 
 func (s store) saveCase(item *Case) error {
@@ -141,7 +141,11 @@ func (s store) saveCase(item *Case) error {
 	if item.MaxTurns <= 0 {
 		item.MaxTurns = 10
 	}
-	_, err := s.db.Exec(`INSERT INTO eval_cases(id,suite_id,name,prompt,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET suite_id=excluded.suite_id,name=excluded.name,prompt=excluded.prompt,goals_json=excluded.goals_json,assertions_json=excluded.assertions_json,environment_id=excluded.environment_id,weight=excluded.weight,timeout_seconds=excluded.timeout_seconds,max_turns=excluded.max_turns,enabled=excluded.enabled,revision=eval_cases.revision+1,updated_at=excluded.updated_at`, item.ID, item.SuiteID, item.Name, item.Prompt, encodeJSON(item.Goals), encodeJSON(item.Assertions), item.EnvironmentID, item.Weight, item.TimeoutSeconds, item.MaxTurns, boolInt(item.Enabled), item.Revision, formatTime(item.CreatedAt), formatTime(item.UpdatedAt))
+	var voiceJSON any
+	if item.Voice != nil {
+		voiceJSON = encodeJSON(item.Voice)
+	}
+	_, err := s.db.Exec(`INSERT INTO eval_cases(id,suite_id,name,prompt,mode,voice_json,goals_json,assertions_json,environment_id,weight,timeout_seconds,max_turns,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET suite_id=excluded.suite_id,name=excluded.name,prompt=excluded.prompt,mode=excluded.mode,voice_json=excluded.voice_json,goals_json=excluded.goals_json,assertions_json=excluded.assertions_json,environment_id=excluded.environment_id,weight=excluded.weight,timeout_seconds=excluded.timeout_seconds,max_turns=excluded.max_turns,enabled=excluded.enabled,revision=eval_cases.revision+1,updated_at=excluded.updated_at`, item.ID, item.SuiteID, item.Name, item.Prompt, item.Mode, voiceJSON, encodeJSON(item.Goals), encodeJSON(item.Assertions), item.EnvironmentID, item.Weight, item.TimeoutSeconds, item.MaxTurns, boolInt(item.Enabled), item.Revision, formatTime(item.CreatedAt), formatTime(item.UpdatedAt))
 	if err == nil {
 		_, _ = s.db.Exec(`UPDATE eval_suites SET revision=revision+1,updated_at=? WHERE id=?`, formatTime(now), item.SuiteID)
 	}
@@ -163,8 +167,9 @@ func (s store) deleteCase(id string) error {
 func scanCase(row interface{ Scan(...any) error }) (*Case, error) {
 	var item Case
 	var goals, assertions, created, updated string
+	var voice sql.NullString
 	var enabled int
-	err := row.Scan(&item.ID, &item.SuiteID, &item.Name, &item.Prompt, &goals, &assertions, &item.EnvironmentID, &item.Weight, &item.TimeoutSeconds, &item.MaxTurns, &enabled, &item.Revision, &created, &updated)
+	err := row.Scan(&item.ID, &item.SuiteID, &item.Name, &item.Prompt, &item.Mode, &voice, &goals, &assertions, &item.EnvironmentID, &item.Weight, &item.TimeoutSeconds, &item.MaxTurns, &enabled, &item.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -176,6 +181,12 @@ func scanCase(row interface{ Scan(...any) error }) (*Case, error) {
 	}
 	if err := json.Unmarshal([]byte(assertions), &item.Assertions); err != nil {
 		return nil, err
+	}
+	if voice.Valid {
+		item.Voice = &VoiceCase{}
+		if err := json.Unmarshal([]byte(voice.String), item.Voice); err != nil {
+			return nil, err
+		}
 	}
 	item.Enabled = enabled != 0
 	item.CreatedAt, item.UpdatedAt = parseTime(created), parseTime(updated)
@@ -318,14 +329,14 @@ func (s store) getRun(id string) (*Run, error) {
 	return run, err
 }
 
-const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,status,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
+const runSelect = `SELECT id,experiment_id,case_id,case_revision,target_index,repetition,simulation_attempt,status,stage,case_snapshot_json,target_snapshot_json,environment_run_id,execution_json,voice_call_json,assertions_json,judge_json,correctness_score,judge_score,overall_score,started_at,finished_at,error,created_at FROM eval_runs`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
 	var caseRaw, targetRaw, assertionsRaw, created string
-	var executionRaw, judgeRaw, started, finished sql.NullString
+	var executionRaw, voiceCallRaw, judgeRaw, started, finished sql.NullString
 	var correctness, judgeScore, overall sql.NullFloat64
-	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.Status, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
+	err := row.Scan(&run.ID, &run.ExperimentID, &run.CaseID, &run.CaseRevision, &run.TargetIndex, &run.Repetition, &run.SimulationAttempt, &run.Status, &run.Stage, &caseRaw, &targetRaw, &run.EnvironmentRunID, &executionRaw, &voiceCallRaw, &assertionsRaw, &judgeRaw, &correctness, &judgeScore, &overall, &started, &finished, &run.Error, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -342,6 +353,10 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	if executionRaw.Valid {
 		run.Execution = &sdk.RuntimeAgentExecution{}
 		_ = json.Unmarshal([]byte(executionRaw.String), run.Execution)
+	}
+	if voiceCallRaw.Valid {
+		run.VoiceCall = &EnvironmentVoiceCall{}
+		_ = json.Unmarshal([]byte(voiceCallRaw.String), run.VoiceCall)
 	}
 	if judgeRaw.Valid {
 		run.Judge = &JudgeVerdict{}
@@ -382,7 +397,7 @@ func (s store) claimRun() (*Run, error) {
 		return run, err
 	}
 	now := formatTime(time.Now().UTC())
-	result, err := tx.Exec(`UPDATE eval_runs SET status='running',started_at=? WHERE id=? AND status='queued'`, now, run.ID)
+	result, err := tx.Exec(`UPDATE eval_runs SET status='running',stage='starting',started_at=? WHERE id=? AND status='queued'`, now, run.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -395,23 +410,64 @@ func (s store) claimRun() (*Run, error) {
 		return nil, err
 	}
 	value := parseTime(now)
-	run.Status, run.StartedAt = "running", &value
+	run.Status, run.Stage, run.StartedAt = "running", "starting", &value
 	return run, nil
 }
 
+func (s store) updateRunProgress(id, stage, environmentRunID string) error {
+	_, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=?`, stage, environmentRunID, id)
+	return err
+}
+
 func (s store) finishRun(run *Run) error {
-	var executionJSON, judgeJSON any
+	var executionJSON, voiceCallJSON, judgeJSON any
 	if run.Execution != nil {
 		executionJSON = encodeJSON(run.Execution)
 	}
 	if run.Judge != nil {
 		judgeJSON = encodeJSON(run.Judge)
 	}
-	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,environment_run_id=?,execution_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.EnvironmentRunID, executionJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
+	if run.VoiceCall != nil {
+		voiceCallJSON = encodeJSON(run.VoiceCall)
+	}
+	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,voice_call_json=?,assertions_json=?,judge_json=?,correctness_score=?,judge_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
 	if err != nil {
 		return err
 	}
 	return s.rollupExperiment(run.ExperimentID)
+}
+
+func (s store) retryInvalidSimulation(run *Run) (bool, error) {
+	if run == nil || run.SimulationAttempt >= 1 {
+		return false, nil
+	}
+	result, err := s.db.Exec(`
+		UPDATE eval_runs
+		SET status='queued',
+			stage='retrying_simulation',
+			simulation_attempt=simulation_attempt+1,
+			environment_run_id='',
+			execution_json=NULL,
+			voice_call_json=NULL,
+			assertions_json='[]',
+			judge_json=NULL,
+			correctness_score=NULL,
+			judge_score=NULL,
+			overall_score=NULL,
+			started_at=NULL,
+			finished_at=NULL,
+			error=''
+		WHERE id=? AND simulation_attempt=?
+	`, run.ID, run.SimulationAttempt)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return false, err
+	}
+	_, err = s.db.Exec(`UPDATE eval_experiments SET status='queued',finished_at=NULL WHERE id=?`, run.ExperimentID)
+	return true, err
 }
 
 func (s store) rollupExperiment(id string) error {
@@ -440,6 +496,7 @@ func (s store) retryRun(source *Run) (*Run, error) {
 	run := *source
 	run.ID = "run_" + token(12)
 	run.Status = "queued"
+	run.Stage = ""
 	run.Repetition++
 	run.EnvironmentRunID, run.Execution, run.Judge, run.Error = "", nil, nil, ""
 	run.Assertions, run.CorrectnessScore, run.JudgeScore, run.OverallScore = nil, nil, nil, nil

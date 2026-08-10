@@ -25,6 +25,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -171,6 +172,52 @@ type sessionCreateResponse struct {
 	// read the fields we use.
 }
 
+func resolveProxies(defaults any, o computer.OpenOptions) (any, error) {
+	if o.ExternalProxy != nil {
+		server := strings.TrimSpace(o.ExternalProxy.Server)
+		if server == "" {
+			return nil, fmt.Errorf("external proxy server is required")
+		}
+		if !strings.HasPrefix(strings.ToLower(server), "http://") && !strings.HasPrefix(strings.ToLower(server), "https://") {
+			return nil, fmt.Errorf("Browserbase external proxies require an HTTP or HTTPS server")
+		}
+		proxy := map[string]any{"type": "external", "server": server}
+		if o.ExternalProxy.Username != "" {
+			proxy["username"] = o.ExternalProxy.Username
+		}
+		if o.ExternalProxy.Password != "" {
+			proxy["password"] = o.ExternalProxy.Password
+		}
+		return []map[string]any{proxy}, nil
+	}
+	country := strings.ToUpper(strings.TrimSpace(o.ProxyCountry))
+	if country != "" {
+		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+			return nil, fmt.Errorf("proxy_country must be a two-letter ISO country code")
+		}
+		if o.Proxy != nil && !*o.Proxy {
+			return nil, fmt.Errorf("proxy_country cannot be used with proxy=false")
+		}
+		return []map[string]any{
+			{
+				"type": "browserbase",
+				"geolocation": map[string]string{
+					"country": country,
+				},
+			},
+		}, nil
+	}
+
+	// The agent's per-call choice wins over the provider-level default.
+	if o.Proxy != nil {
+		if *o.Proxy {
+			return true, nil
+		}
+		return nil, nil
+	}
+	return defaults, nil
+}
+
 func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	bs := map[string]any{
 		"viewport": map[string]int{
@@ -195,18 +242,11 @@ func (c *Computer) createSession(o computer.OpenOptions) (string, error) {
 	if o.Timeout > 0 {
 		timeout = o.Timeout
 	}
-	// Agent's per-call OpenOptions.Proxy wins over the harness default.
-	// Browserbase encodes "true" as the managed residential proxy; a
-	// custom proxy list can also be passed via Options.Proxies (kept
-	// in c.opts.Proxies). ProxyCountry is not honored here — it
-	// requires a custom proxy list, not the boolean flag.
-	proxies := c.opts.Proxies
-	if o.Proxy != nil {
-		if *o.Proxy {
-			proxies = true
-		} else {
-			proxies = nil
-		}
+	// Browserbase uses a structured managed-proxy entry when a country
+	// is selected. A bare true enables its default residential proxy.
+	proxies, err := resolveProxies(c.opts.Proxies, o)
+	if err != nil {
+		return "", fmt.Errorf("browserbase: %w", err)
 	}
 	req := sessionCreateRequest{
 		ProjectID:       c.projectID,
@@ -346,7 +386,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := navigation.Run(c.ctx, action.Type, action.URL, navigateActionTimeout); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
@@ -368,10 +408,11 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "type":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if err := textinput.Type(ctx, action.Text, "[BROWSERBASE]"); err != nil {
+		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
+		if err := textinput.TypeWithDelay(ctx, action.Text, "[BROWSERBASE]", delay); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
@@ -380,7 +421,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := keyinput.Dispatch(ctx, action.Key, "[BROWSERBASE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
@@ -389,7 +430,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := c.scroll(ctx, action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "wait":
@@ -405,46 +446,69 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "upload_file":
-		if err := c.uploadFile(action); err != nil {
+		c.moveToTarget(c.ctx, action)
+		res, err := c.uploadFile(action)
+		if err != nil {
 			return nil, fmt.Errorf("upload_file: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		cueSelector := action.Selector
+		if cueSelector == "" {
+			cueSelector = res.Selector
+		}
+		c.cueTarget(c.ctx, action, cueSelector, "File uploaded")
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "select_option":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.selectOption(ctx, action); err != nil {
+		c.moveToTarget(ctx, action)
+		res, err := c.selectOption(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		c.cueTarget(ctx, action, res.Selector, "Option selected")
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_checked":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setChecked(ctx, action); err != nil {
+		c.moveToTarget(ctx, action)
+		res, err := c.setChecked(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_checked: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		caption := "Unchecked"
+		if res.Checked {
+			caption = "Checked"
+		}
+		c.cueTarget(ctx, action, res.Selector, caption)
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_temporal":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setTemporal(ctx, action); err != nil {
+		c.moveToTarget(ctx, action)
+		res, err := c.setTemporal(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_temporal: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		c.cueTarget(ctx, action, res.Selector, "Date/time set")
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_text":
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.setText(ctx, action); err != nil {
+		c.moveToTarget(ctx, action)
+		res, err := c.setText(ctx, action)
+		if err != nil {
 			return nil, fmt.Errorf("set_text: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		c.cueTarget(ctx, action, res.Selector, "Text updated")
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	default:
@@ -519,6 +583,9 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 			x, y = e.Center()
 		}
 	}
+	if err := presentation.BeforeClick(ctx, x, y, action.Presentation); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cursor unavailable, continuing click: %v\n", err)
+	}
 	if err := c.dispatchClick(ctx, x, y, clickCount); err != nil {
 		return err
 	}
@@ -539,7 +606,7 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 			fmt.Fprintf(os.Stderr, "[BROWSERBASE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
 	}
-	time.Sleep(200 * time.Millisecond)
+	presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 	return nil
 }
 
@@ -726,9 +793,9 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	return &clone
 }
 
-func (c *Computer) uploadFile(action computer.Action) error {
+func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
 	if c.sessionID == "" {
-		return fmt.Errorf("browserbase: no active session")
+		return fileupload.Result{}, fmt.Errorf("browserbase: no active session")
 	}
 	target := fileupload.Target{Selector: action.Selector}
 	if action.Label > 0 {
@@ -744,19 +811,70 @@ func (c *Computer) uploadFile(action computer.Action) error {
 	ctx, cancel := c.actionContext("upload_file")
 	defer cancel()
 	if payloads, ok := inlineUploadPayloads(action.Files); ok {
-		_, err := fileupload.SetPayloads(ctx, target, payloads)
-		return err
+		return fileupload.SetPayloads(ctx, target, payloads)
 	}
 	remoteFiles := make([]string, 0, len(action.Files))
 	for _, file := range action.Files {
 		remote, err := c.uploadSessionFile(file)
 		if err != nil {
-			return err
+			return fileupload.Result{}, err
 		}
 		remoteFiles = append(remoteFiles, remote)
 	}
-	_, err := fileupload.SetFiles(ctx, target, remoteFiles)
-	return err
+	return fileupload.SetFiles(ctx, target, remoteFiles)
+}
+
+func (c *Computer) cueTarget(
+	ctx context.Context,
+	action computer.Action,
+	selector, caption string,
+) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(ctx context.Context, action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation move unavailable, continuing action: %v\n", err)
+	}
 }
 
 func inlineUploadPayloads(paths []string) ([]fileupload.Payload, bool) {

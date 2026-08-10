@@ -1,20 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampDuration,
+  buildVideoReferencePayload,
   DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
+  insertPromptToken,
+  isReferenceToVideoModel,
   isDurableMediaReference,
   mergeHistoryPage,
   projectScopedStorageContentURL,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldReplaceVoiceSelection,
   shouldSendVideoAspect,
   ttsOutputFormats,
   ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
+  videoReferenceImageLimit,
+  videoPromptReferences,
+  voiceProviderSupportsCreation,
+  voiceProviderSupportsPrompt,
+  voicesForProvider,
+  type VideoReferencePurpose,
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
@@ -53,6 +63,72 @@ describe("Media Panel logic", () => {
     expect(videoSourceRequired("text-to-video", "model")).toBe(false);
   });
 
+  test("builds provider-neutral reference groups for every R2V model", () => {
+    const images = ["storage:1", "https://example.test/side.jpg"];
+    expect(isReferenceToVideoModel("kling-o3-pro-reference-to-video")).toBe(true);
+    expect(buildVideoReferencePayload(
+      "kling-o3-pro-reference-to-video",
+      "identity" satisfies VideoReferencePurpose,
+      images,
+    )).toEqual({
+      reference_groups: [{ role: "identity", images }],
+    });
+    expect(buildVideoReferencePayload(
+      "happyhorse-1-1-reference-to-video",
+      "reference",
+      images,
+    )).toEqual({
+      reference_groups: [{ role: "reference", images }],
+    });
+    expect(buildVideoReferencePayload("wan-2-7-image-to-video", "identity", images))
+      .toEqual({ source_image: "storage:1" });
+    expect(videoReferenceImageLimit("kling-o3-pro-reference-to-video", "identity")).toBe(4);
+    expect(videoReferenceImageLimit("kling-o3-pro-reference-to-video", "reference")).toBe(7);
+    expect(videoReferenceImageLimit("grok-imagine-reference-to-video-private")).toBe(7);
+    expect(videoReferenceImageLimit("happyhorse-1-1-reference-to-video")).toBe(9);
+  });
+
+  test("surfaces the prompt tokens used by each Venice R2V family", () => {
+    expect(videoPromptReferences(
+      "kling-o3-pro-reference-to-video",
+      "identity",
+      3,
+    )).toEqual([{ token: "@Element1", label: "Subject" }]);
+    expect(videoPromptReferences(
+      "grok-imagine-reference-to-video-private",
+      "identity",
+      2,
+    ).map((item) => item.token)).toEqual(["@Image1", "@Image2"]);
+    expect(videoPromptReferences(
+      "happyhorse-1-0-reference-to-video",
+      "reference",
+      2,
+    ).map((item) => item.token)).toEqual(["character1", "character2"]);
+    expect(videoPromptReferences(
+      "happyhorse-1-1-reference-to-video",
+      "reference",
+      2,
+    ).map((item) => item.token)).toEqual(["[Image 1]", "[Image 2]"]);
+  });
+
+  test("inserts a reference token at the prompt cursor with stable spacing", () => {
+    expect(insertPromptToken("Walking through Barcelona", "@Element1", 0, 0))
+      .toEqual({
+        value: "@Element1 Walking through Barcelona",
+        cursor: 9,
+      });
+    expect(insertPromptToken("Walking Barcelona", "@Image1", 8, 8))
+      .toEqual({
+        value: "Walking @Image1 Barcelona",
+        cursor: 15,
+      });
+    expect(insertPromptToken("Use old reference", "@Image2", 4, 7))
+      .toEqual({
+        value: "Use @Image2 reference",
+        cursor: 11,
+      });
+  });
+
   test("only sends video aspect when live model metadata supports it", () => {
     expect(shouldSendVideoAspect(["16:9", "9:16"], true)).toBe(true);
     expect(shouldSendVideoAspect(undefined, true)).toBe(false);
@@ -68,7 +144,65 @@ describe("Media Panel logic", () => {
   test("exposes only provider-supported TTS output formats", () => {
     expect(ttsOutputFormats("deepgram")).toEqual(["mp3", "wav", "opus", "flac", "aac"]);
     expect(ttsOutputFormats("fish-audio")).toEqual(["mp3", "wav", "opus", "pcm"]);
+    expect(ttsOutputFormats("cartesia")).toEqual(["mp3", "wav", "pcm"]);
+    expect(ttsOutputFormats("minimax-audio")).toEqual(["mp3", "wav", "flac", "pcm"]);
     expect(ttsOutputFormats("elevenlabs")).toEqual([]);
+  });
+
+  test("only exposes prompt voice design for providers that support it", () => {
+    expect(voiceProviderSupportsPrompt("elevenlabs")).toBe(true);
+    expect(voiceProviderSupportsPrompt("minimax-audio")).toBe(true);
+    expect(voiceProviderSupportsPrompt("fish-audio")).toBe(false);
+    expect(voiceProviderSupportsPrompt("cartesia")).toBe(false);
+  });
+
+  test("exposes custom voice creation only for compatible providers", () => {
+    expect(voiceProviderSupportsCreation("elevenlabs")).toBe(true);
+    expect(voiceProviderSupportsCreation("fish-audio")).toBe(true);
+    expect(voiceProviderSupportsCreation("cartesia")).toBe(true);
+    expect(voiceProviderSupportsCreation("minimax-audio")).toBe(true);
+    expect(voiceProviderSupportsCreation("deepgram")).toBe(false);
+    expect(
+      ["deepgram", "fish-audio"].filter(voiceProviderSupportsCreation),
+    ).toEqual(["fish-audio"]);
+  });
+
+  test("only exposes voices from the selected provider", () => {
+    const voices = [
+      { id: "elevenlabs:voice-1", provider: "elevenlabs" },
+      { id: "fish-audio:voice-2", provider: "fish-audio" },
+      { id: "fish-audio:voice-3" },
+    ];
+    expect(voicesForProvider("fish-audio", voices).map((voice) => voice.id)).toEqual([
+      "fish-audio:voice-2",
+      "fish-audio:voice-3",
+    ]);
+    expect(voicesForProvider("elevenlabs", voices).map((voice) => voice.id)).toEqual([
+      "elevenlabs:voice-1",
+    ]);
+  });
+
+  test("preserves tracked voices that are not active in the provider catalog yet", () => {
+    expect(shouldReplaceVoiceSelection(
+      "minimax-audio:clone-1",
+      ["minimax-audio:system-1"],
+      ["minimax-audio:clone-1"],
+    )).toBe(false);
+    expect(shouldReplaceVoiceSelection(
+      "minimax-audio:missing",
+      ["minimax-audio:system-1"],
+      [],
+    )).toBe(true);
+    expect(shouldReplaceVoiceSelection(
+      "elevenlabs:stale",
+      [],
+      [],
+    )).toBe(true);
+    expect(shouldReplaceVoiceSelection(
+      "",
+      [],
+      ["fish-audio:clone-1"],
+    )).toBe(true);
   });
 
   test("formats player time without invalid or shifting values", () => {

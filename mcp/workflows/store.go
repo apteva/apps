@@ -15,20 +15,20 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Workflow struct {
-	ID          int64        `json:"id"`
-	ProjectID   string       `json:"project_id,omitempty"`
-	Name        string       `json:"name"`
-	Version     int          `json:"version"`
-	SourceKind  string       `json:"source_kind"`
-	Source      string       `json:"source,omitempty"`
-	RepoID      *int64       `json:"repo_id,omitempty"`
-	RepoPath    string       `json:"repo_path,omitempty"`
-	SourceHash  string       `json:"source_hash"`
-	TriggerKind string       `json:"trigger_kind"`
-	TriggerJSON string       `json:"trigger_json,omitempty"`
-	Status      string       `json:"status"`
-	CreatedAt   string       `json:"created_at,omitempty"`
-	UpdatedAt   string       `json:"updated_at,omitempty"`
+	ID          int64  `json:"id"`
+	ProjectID   string `json:"project_id,omitempty"`
+	Name        string `json:"name"`
+	Version     int    `json:"version"`
+	SourceKind  string `json:"source_kind"`
+	Source      string `json:"source,omitempty"`
+	RepoID      *int64 `json:"repo_id,omitempty"`
+	RepoPath    string `json:"repo_path,omitempty"`
+	SourceHash  string `json:"source_hash"`
+	TriggerKind string `json:"trigger_kind"`
+	TriggerJSON string `json:"trigger_json,omitempty"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"created_at,omitempty"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 	// Definition is the parsed source — populated lazily by callers
 	// that need to execute the workflow. Not persisted; recomputed
 	// from Source on read.
@@ -116,6 +116,12 @@ func dbCreateWorkflow(db *sql.DB, pid string, w *Workflow) (*Workflow, error) {
 	if w.TriggerKind == "" {
 		w.TriggerKind = "manual"
 	}
+	if w.Status == "" {
+		w.Status = "active"
+	}
+	if w.Status != "active" && w.Status != "disabled" {
+		return nil, fmt.Errorf("status %q must be active|disabled", w.Status)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	res, err := db.Exec(
@@ -123,10 +129,10 @@ func dbCreateWorkflow(db *sql.DB, pid string, w *Workflow) (*Workflow, error) {
 			project_id, name, version, source_kind, source, repo_id, repo_path,
 			source_hash, trigger_kind, trigger_json, status,
 			created_at, updated_at
-		 ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		 ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pid, w.Name, w.SourceKind,
 		nullStr(w.Source), nullableInt64Ptr(w.RepoID), nullStr(w.RepoPath),
-		w.SourceHash, w.TriggerKind, nullStr(w.TriggerJSON),
+		w.SourceHash, w.TriggerKind, nullStr(w.TriggerJSON), w.Status,
 		now, now)
 	if err != nil {
 		return nil, err

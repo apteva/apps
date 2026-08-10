@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/billing
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.36.4
+	github.com/apteva/app-sdk v0.44.0
 	github.com/go-pdf/fpdf v0.9.0
 	modernc.org/sqlite v1.50.0
 )

@@ -201,6 +201,9 @@ func toolCommunitiesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, c)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"communities": out}, nil
 }
 
@@ -277,7 +280,7 @@ func (a *App) httpCommunities(w http.ResponseWriter, r *http.Request) {
 		"include_archived": r.URL.Query().Get("include_archived") == "true",
 	})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)

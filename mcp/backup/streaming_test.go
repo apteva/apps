@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -38,7 +39,7 @@ func TestStreamProviderSnapshotPrefersArchiveURL(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	ctx := sdk.NewAppCtxForTest(&manifest, openTestDB(t), sdk.Config{}, platform, silentLogger{})
 	var dst bytes.Buffer
-	n, providerManifest, err := streamProviderSnapshot(ctx, &dst, Scope{Kind: "fleet_tenant", ID: "tenant-1", SourceApp: "fleet"})
+	n, providerManifest, err := streamProviderSnapshot(context.Background(), ctx, &dst, Scope{Kind: "fleet_tenant", ID: "tenant-1", SourceApp: "fleet"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +58,7 @@ func TestStreamProviderSnapshotRequiresStreamingProvider(t *testing.T) {
 	platform := &streamingProviderPlatform{}
 	manifest := (&App{}).Manifest()
 	ctx := sdk.NewAppCtxForTest(&manifest, openTestDB(t), sdk.Config{}, platform, silentLogger{})
-	_, _, err := streamProviderSnapshot(ctx, io.Discard, Scope{Kind: "fleet_tenant", ID: "tenant-1", SourceApp: "fleet"})
+	_, _, err := streamProviderSnapshot(context.Background(), ctx, io.Discard, Scope{Kind: "fleet_tenant", ID: "tenant-1", SourceApp: "fleet"})
 	if err == nil || !strings.Contains(err.Error(), "does not support streaming snapshots") {
 		t.Fatalf("stream error = %v", err)
 	}
@@ -68,7 +69,7 @@ func TestRestoreProviderRequiresStreamingProvider(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	ctx := sdk.NewAppCtxForTest(&manifest, openTestDB(t), sdk.Config{}, platform, silentLogger{})
 	run := &Run{Scope: Scope{Kind: "fleet_tenant", ID: "tenant-1", SourceApp: "fleet"}}
-	_, err := restoreProviderRunStream(ctx, run, strings.NewReader("snapshot"))
+	_, err := restoreProviderRunStream(context.Background(), ctx, run, strings.NewReader("snapshot"))
 	if err == nil || !strings.Contains(err.Error(), "does not support streaming restores") {
 		t.Fatalf("restore error = %v", err)
 	}

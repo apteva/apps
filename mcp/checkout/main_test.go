@@ -2,20 +2,86 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
 
-// Tier-1: pure-DB tests. Cross-app flows (cart_add_item, checkout_pay)
-// need catalog + billing and a stub PlatformAPI — exercised by the
-// real deployed apps, not here. The state-machine and schema
-// guarantees ARE all testable in-process.
-
 const testPID = "test-project"
+
+type wrappedCatalogPlatform struct {
+	tk.BasePlatformClient
+}
+
+type checkoutPaymentPlatform struct {
+	tk.BasePlatformClient
+	calls []string
+}
+
+func (p *checkoutPaymentPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.calls = append(p.calls, app+":"+tool)
+	var result any
+	switch app + ":" + tool {
+	case "billing:customers_upsert_by_email":
+		result = map[string]any{"customer": map[string]any{"id": 41}}
+	case "billing:invoices_create":
+		result = map[string]any{"invoice": map[string]any{"id": 91}}
+	case "billing:invoices_finalize":
+		result = map[string]any{"invoice": map[string]any{"id": 91, "number": "INV-91"}}
+	case "billing:invoices_create_payment_session":
+		result = map[string]any{
+			"provider": "stripe", "presentation": "elements",
+			"stripe_session_id": "cs_test_91", "client_secret": "cs_test_91_secret_x",
+			"publishable_key": "pk_test_public",
+		}
+	default:
+		return errors.New("unexpected app call: " + app + ":" + tool)
+	}
+	body, _ := json.Marshal(result)
+	return json.Unmarshal(body, out)
+}
+
+func (wrappedCatalogPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	var result any
+	switch app + ":" + tool {
+	case "catalog:catalog_prices_get":
+		result = map[string]any{"price": map[string]any{
+			"id": 100, "product_id": 10, "nickname": "", "unit_amount_cents": 2400,
+			"currency": "EUR", "active": true, "archived_at": "",
+		}}
+	case "catalog:catalog_products_get":
+		result = map[string]any{"product": map[string]any{"id": 10, "name": "Wrapped Catalog Product"}}
+	default:
+		return nil
+	}
+	body, _ := json.Marshal(result)
+	return json.Unmarshal(body, out)
+}
+
+func TestCartAddItemDecodesWrappedCatalogResults(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(wrappedCatalogPlatform{}))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "wrapped-catalog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := dbCartAddItem(ctx, testPID, cart.ID, 100, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.Items) != 1 || updated.Items[0].Description != "Wrapped Catalog Product" {
+		t.Fatalf("unexpected cart items: %#v", updated.Items)
+	}
+	if updated.SubtotalCents != 4800 || updated.Currency != "EUR" {
+		t.Fatalf("unexpected cart totals: %#v", updated)
+	}
+}
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
@@ -29,12 +95,14 @@ func newTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
 		t.Fatalf("enable foreign_keys: %v", err)
 	}
-	mig, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.Exec(string(mig)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, name := range []string{"001_init.sql", "002_adjustments.sql", "003_payment_presentations.sql", "004_durable_lifecycle.sql"} {
+		mig, err := os.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.Exec(string(mig)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
@@ -260,6 +328,58 @@ func TestCheckoutUpdate_HappyPath(t *testing.T) {
 	}
 }
 
+func TestCheckoutPayCreatesElementsSessionAndReusesInvoice(t *testing.T) {
+	platform := &checkoutPaymentPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(platform))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "stripe-elements"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedItem(t, ctx.AppDB(), cart.ID, 100, 10, 2400, 1)
+	tx, _ := ctx.AppDB().Begin()
+	if err := recomputeCartTotalsTx(tx, cart.ID, "USD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ctx.AppDB().Exec(`INSERT INTO checkout_sessions
+		(project_id, cart_id, provider, status, email, subtotal_cents, total_cents, currency)
+		VALUES (?, ?, 'manual', 'started', 'buyer@example.com', 2400, 2400, 'USD')`, testPID, cart.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	args := map[string]any{
+		"provider": "stripe", "presentation": "elements",
+		"idempotency_key":      "checkout-elements-1",
+		"return_url":           "https://shop.example/checkout/return",
+		"payment_method_types": []any{"card"},
+	}
+	session, invoiceID, invoiceNumber, payment, err := dbCheckoutPay(ctx, testPID, sessionID, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Status != "awaiting_payment" || session.Provider != "stripe" || session.Presentation != "elements" {
+		t.Fatalf("unexpected session: %#v", session)
+	}
+	if invoiceID != 91 || invoiceNumber != "INV-91" || payment["client_secret"] == "" || payment["publishable_key"] != "pk_test_public" {
+		t.Fatalf("unexpected payment result: invoice=%d/%q payment=%#v", invoiceID, invoiceNumber, payment)
+	}
+	if _, _, _, _, err := dbCheckoutPay(ctx, testPID, sessionID, args); err != nil {
+		t.Fatalf("retry payment: %v", err)
+	}
+	createCalls := 0
+	for _, call := range platform.calls {
+		if call == "billing:invoices_create" {
+			createCalls++
+		}
+	}
+	if createCalls != 1 {
+		t.Fatalf("invoice create calls=%d, want 1: %v", createCalls, platform.calls)
+	}
+}
+
 func TestCheckoutCancel_RejectsTerminalStates(t *testing.T) {
 	db := newTestDB(t)
 	cartID := seedCart(t, db, testPID, "tok-j", 0, "converted")
@@ -300,8 +420,9 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 	tools := app.MCPTools()
 	want := []string{
 		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
-		"checkout_start", "checkout_update", "checkout_pay",
-		"checkout_get", "checkout_cancel",
+		"checkout_start", "checkout_update", "checkout_bootstrap", "checkout_advance",
+		"checkout_restart", "checkout_set_adjustments", "checkout_pay", "checkout_get",
+		"checkout_cancel",
 	}
 	if len(tools) != len(want) {
 		t.Errorf("MCPTools count = %d, want %d", len(tools), len(want))
@@ -320,6 +441,34 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 		if !implemented[name] {
 			t.Errorf("expected tool %q not registered", name)
 		}
+	}
+}
+
+func TestCheckoutSetAdjustmentsFreezesTotal(t *testing.T) {
+	db := newTestDB(t)
+	cartID := seedCart(t, db, testPID, "adjusted", 0, "checkout")
+	res, err := db.Exec(
+		`INSERT INTO checkout_sessions
+		    (project_id, cart_id, provider, status, subtotal_cents, total_cents, currency)
+		 VALUES (?, ?, 'manual', 'started', 5000, 5000, 'USD')`, testPID, cartID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := res.LastInsertId()
+	session, err := dbCheckoutSetAdjustments(db, testPID, sessionID, map[string]any{
+		"shipping_cents": int64(700),
+		"discount_cents": int64(200),
+		"tax_cents":      int64(450),
+		"adjustments":    map[string]any{"shipping_quote_id": "quote-1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.TotalCents != 5950 || session.ShippingCents != 700 || session.DiscountCents != 200 || session.TaxCents != 450 {
+		t.Fatalf("unexpected adjusted session: %#v", session)
+	}
+	if !strings.Contains(string(session.Adjustments), "quote-1") {
+		t.Fatalf("adjustment metadata not persisted: %s", session.Adjustments)
 	}
 }
 

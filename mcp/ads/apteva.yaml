@@ -2,18 +2,64 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.5
+version: 0.1.42
 description: |
   Manage paid advertising across networks behind one MCP surface.
-  v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
-  uses direct Graph API tools; Google Ads uses customer account picking,
-  GAQL reads, and mutate operations behind the same generic MCP tools.
-  Connect ad accounts at runtime via the Add Account flow; the underlying
-  integrations system handles OAuth and token refresh.
+  v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
+  same account, resource, campaign, creative, delivery, and analytics tools.
+  Meta uses direct Graph API tools; Google Ads uses customer account picking,
+  GAQL reads, and mutate operations. X uses Ads API v12 with OAuth 1.0a,
+  and Reddit uses Ads API v3 with structured creative jobs.
+  The Add Account flow reuses project-scoped Dashboard integration
+  connections and expands Google manager hierarchies into selectable
+  client advertiser accounts.
+  v0.1.26 adds normalized daily campaign spend and performance reports.
+  v0.1.27 adds secure access links for fresh provider authorization and
+  updates Google Ads reporting for the current API pagination contract.
+  v0.1.28 adds one normalized resource registry for provider identities,
+  tracking sources, conversion actions, lead forms, audiences, and creative
+  assets, with automatic discovery and account-level defaults.
+  v0.1.29 adds normalized Meta and Google lead-form lifecycle tools, automatic
+  Page/campaign wiring, reliable Storage URL resolution, and Meta direct-image
+  fallback when image-library upload is unavailable.
+  v0.1.30 archives Meta lead forms through the supported status update rather
+  than an unsupported Graph DELETE request.
+  v0.1.31 structures Meta provider failures, retries transient idempotent
+  updates, and adds resumable leaf-to-root delivery activation with state
+  verification for Meta and Google Ads.
+  v0.1.32 adds a full campaign workspace with campaign, ad-set, and ad
+  hierarchy navigation, level-specific analytics, creative inspection, and
+  generic Meta and Google delivery controls.
+  v0.1.33 uses full-resolution Meta creative images in the campaign workspace
+  instead of stretching provider thumbnail previews.
+  v0.1.34 adds coordinated near-real-time performance collection, persistent
+  provider backoff, AppBus invalidation events, and live cache updates in the
+  Ads panel.
+  v0.1.35 adds current X Ads and Reddit Ads account discovery, required-resource
+  auto-wiring, normalized campaign hierarchy and analytics, image/video/carousel
+  creatives, resumable delivery activation, and four-provider panel support.
+  v0.1.36 adds normalized audience lifecycle management across all four providers,
+  privacy-safe Storage and CRM member sync jobs, provider diagnostics, audience
+  usage checks, AppBus updates, and a capability-driven Audiences workspace.
+  v0.1.37 adds native Meta Page-engagement audience creation from project-scoped
+  Page resources, including automatic rule construction and retention controls.
+  v0.1.38 fixes Meta audience usage discovery and blocks deletion when provider
+  usage validation fails, preserving targeting safety.
+  v0.1.39 makes Storage and CRM optional dependencies. Core campaign,
+  analytics, and provider-native audience workflows run without either app.
+  v0.1.40 adds project-managed campaign imports, descendant scope enforcement,
+  filtered analytics collection, and a provider-neutral campaign picker.
+  v0.1.41 adds capability-driven conversion tracking source creation, safe Meta
+  Pixel reuse and reconciliation, project defaults, and account-resource UI.
+  v0.1.42 adds a constrained browser installation contract for normalized Meta
+  Pixels so optional storefront apps can install tracking without receiving
+  provider credentials or using native IDs for resource selection.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
-tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google]
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google, x, twitter, reddit]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -25,29 +71,78 @@ requires:
     - platform.connections.execute
     - platform.oauth.start
     - platform.apps.call
-  integrations:
-    - role: storage
-      kind: app
-      compatible_app_names: [storage]
-      capabilities: [files.read]
-      required: false
-      label: "Storage (optional)"
-      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to supported platforms. Without storage, use platform_options for native asset payloads."
+  apps:
+    - name: storage
+      version: ">=0.1.0"
+      optional: true
+      reason: "Resolve stored creative files and privacy-safe audience CSV sources."
+    - name: crm
+      version: ">=0.5.0"
+      optional: true
+      reason: "Resolve saved CRM segments for privacy-safe audience member sync."
 
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: performance_collector
+      schedule: "@every 1m"
+    - name: audience_sync_processor
+      schedule: "@every 30s"
+  publishes:
+    - name: account.changed
+      description: "An ad-account binding was added or removed."
+    - name: entity.changed
+      description: "A campaign, ad group, or ad was created, updated, or deleted."
+    - name: performance.updated
+      description: "Normalized performance cache was refreshed for an account and level."
+    - name: performance.sync_failed
+      description: "A performance refresh failed and was scheduled for retry."
+    - name: audience.created
+      description: "An audience was created and normalized into the account resource registry."
+    - name: audience.updated
+      description: "Audience metadata or targeting was updated."
+    - name: audience.deleted
+      description: "An audience was deleted after its targeting usage was checked."
+    - name: audience.sync.progress
+      description: "A privacy-safe audience member sync was queued, processed, or accepted upstream."
+    - name: audience.ready
+      description: "An audience member sync completed."
+    - name: audience.sync.failed
+      description: "An audience member sync failed or was scheduled for retry."
+    - name: tracking_source.created
+      description: "A provider tracking source was created and normalized into the account resource registry."
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
     - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (for Meta act_12345; for Google the customer id without hyphens)." }
     - { name: account_list,                description: "List connected ad accounts in this project." }
-    - { name: account_disconnect,          description: "Remove a connected ad account; releases the underlying connection when the last reference goes." }
+    - { name: account_management_mode_get, description: "Get all or selected campaign management mode." }
+    - { name: account_management_mode_update, description: "Change campaign management mode without modifying provider data." }
+    - { name: account_context_get,         description: "Discover normalized identities, tracking sources, conversion actions, lead forms, audiences, and defaults for an ad account." }
+    - { name: resource_refresh,            description: "Refresh normalized provider resources for an ad account." }
+    - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
+    - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
+    - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
+    - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source without installing website tracking code." }
+    - { name: tracking_source_installation_get, description: "Return browser-public installation configuration for a normalized tracking source." }
+    - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
+    - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
+    - { name: lead_form_get,                description: "Get a normalized lead form by project-scoped resource id." }
+    - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
+    - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
+    - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
+    - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
+    - { name: campaign_import,             description: "Import selected campaigns into this project." }
+    - { name: campaign_remove_from_project, description: "Remove a campaign from project management without deleting it upstream." }
     - { name: campaign_list,                description: "List campaigns on a connected ad account." }
+    - { name: campaign_performance_get,     description: "Get normalized daily campaign spend and performance for a bounded date range." }
+    - { name: performance_get,              description: "Get cached or fresh normalized account, campaign, ad-group, or ad performance with derived advertising KPIs." }
     - { name: campaign_update,              description: "Update campaign fields (name, status, budget, schedule, bid strategy)." }
     - { name: campaign_pause,               description: "Convenience: set campaign status=PAUSED." }
     - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
+    - { name: delivery_activate,             description: "Safely and resumably activate an ad, its ad set/ad group, and its campaign, returning each resulting provider state." }
     - { name: campaign_delete,              description: "Delete a campaign (and its ad sets / ads upstream)." }
     - { name: adset_create,                 description: "Create an ad set under a campaign. Accepts targeting passthrough via platform_options." }
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
@@ -58,10 +153,26 @@ provides:
     - { name: ad_update,                    description: "Update an ad." }
     - { name: ad_delete,                    description: "Delete an ad." }
     - { name: creative_upload,              description: "Upload an image or video to the platform's creative library. Reads bytes from the storage app when storage_id is given, or accepts a public source_url passthrough." }
+    - { name: creative_create,              description: "Create a provider-native creative from a generic link, image, video, or carousel specification." }
+    - { name: creative_get,                 description: "Get one creative from the selected ad account." }
+    - { name: creative_delete,              description: "Delete one creative from the selected ad account when the provider supports deletion." }
+    - { name: creative_asset_status,        description: "Inspect processing/readiness for an uploaded creative asset such as a Meta video." }
+    - { name: creative_asset_delete,        description: "Delete an uploaded creative asset when supported by the provider." }
     - { name: creative_list,                description: "List creatives in the ad account." }
     - { name: audience_create_custom,       description: "Create a custom audience (passthrough payload). Use platform_options.* for source-specific payloads." }
     - { name: audience_create_lookalike,    description: "Create a lookalike audience from an existing custom audience." }
     - { name: audience_list,                description: "List audiences in the ad account." }
+    - { name: audience_capabilities_get,    description: "Get provider-supported audience kinds, operations, sources, and privacy behavior." }
+    - { name: audience_get,                 description: "Get one normalized project-scoped audience." }
+    - { name: audience_create,              description: "Create a normalized provider audience using capability-driven fields." }
+    - { name: audience_update,              description: "Update supported audience metadata or saved targeting." }
+    - { name: audience_delete,              description: "Delete an audience after checking targeting usage." }
+    - { name: audience_members_sync,        description: "Queue privacy-safe member add/remove from Storage CSV or CRM segment." }
+    - { name: audience_sync_status,         description: "Inspect audience member sync progress and provider diagnostics." }
+    - { name: audience_usage_get,           description: "List campaigns or ad groups using an audience." }
+    - { name: audience_refresh,             description: "Refresh normalized audiences from the provider." }
+    - { name: audience_source_list,         description: "List Storage CSV or CRM segment sources for audience sync." }
+    - { name: targeting_catalog_search,     description: "Search normalized provider targeting values without manually locating native IDs." }
   ui_panels:
     - slot: project.page
       label: Ads

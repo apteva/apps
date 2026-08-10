@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.6
+version: 0.9.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -46,6 +46,11 @@ description: |
   policy ingestion, strict numeric aggregates, and batched dashboards.
   v0.8.6 restores anonymous static-site tracking under the server's
   explicit public-route policy while preserving existing tag URLs.
+  v0.8.7 adds Analytics' adaptive themed app icon and updates the app
+  to the current Apteva app SDK.
+  v0.9 adds measurable objectives and targets over events already stored
+  in Analytics. Targets use project-scoped count, sum, or distinct queries;
+  no external app dependency or cross-app call is required.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -115,6 +120,27 @@ provides:
       requires: events.read
     - name: analytics_event_violations
       description: List recent event spec validation violations.
+      requires: events.read
+    - name: analytics_objectives_create
+      description: Create an objective with targets over current-project Analytics data.
+      requires: events.write
+    - name: analytics_objectives_get
+      description: Get one objective and its cached target progress.
+      requires: events.read
+    - name: analytics_objectives_search
+      description: Search current-project objectives.
+      requires: events.read
+    - name: analytics_objectives_update
+      description: Update objective metadata or replace its targets.
+      requires: events.write
+    - name: analytics_objectives_archive
+      description: Archive an objective without deleting its history.
+      requires: events.write
+    - name: analytics_objective_progress
+      description: Evaluate objective targets against stored Analytics events.
+      requires: events.read
+    - name: analytics_objective_metrics_list
+      description: List Analytics metric-query templates for objectives.
       requires: events.read
   ui_panels:
     - slot: project.page
@@ -199,6 +225,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/query-dashboard", Handler: a.handleDashboardQuery},
 		{Pattern: "/dashboard-filter-options", Handler: a.handleDashboardFilterOptions},
 
+		// Objectives and target progress over already-ingested Analytics data.
+		{Pattern: "/objectives", Handler: a.handleObjectives},
+		{Pattern: "/objectives/", Handler: a.handleObjectiveItem},
+		{Method: "GET", Pattern: "/objective-metrics", Handler: a.handleObjectiveMetrics},
+
 		// Event catalog / tracking plan.
 		{Pattern: "/event-specs", Handler: a.handleEventSpecs},
 		{Pattern: "/event-specs/", Handler: a.handleEventSpecItem},
@@ -210,7 +241,7 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "analytics_track",
 			Description: "Record one event in the current project. Args: event (required), props?, app?, user_id?, session_id?, install_id?, ts? (unix ms; defaults to now). Do not pass project_id; the platform assigns it automatically. Returns {id, ts}.",
@@ -409,6 +440,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolEventViolations,
 		},
 	}
+	return append(tools, a.objectiveTools()...)
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

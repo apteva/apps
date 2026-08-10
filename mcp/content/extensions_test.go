@@ -1,0 +1,493 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
+)
+
+type extensionPlatformStub struct {
+	tk.BasePlatformClient
+	calls []struct {
+		app, tool string
+		input     map[string]any
+	}
+	fail bool
+}
+
+func (s *extensionPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	s.calls = append(s.calls, struct {
+		app, tool string
+		input     map[string]any
+	}{app: app, tool: tool, input: input})
+	if s.fail {
+		return errors.New("provider unavailable")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"product": map[string]any{"title": "Desk Lamp", "status": "active"},
+		"cart":    map[string]any{"id": 42},
+	})
+	return json.Unmarshal(body, out)
+}
+
+func testExtensionManifest() ExtensionManifest {
+	return ExtensionManifest{
+		Name:     "Example Store",
+		Version:  "1",
+		Settings: map[string]any{"accent": "#111111"},
+		SettingsSchema: []ExtensionSetting{{
+			Key: "accent", Label: "Accent", Type: "color", Default: "#111111",
+		}},
+		Routes: []ExtensionRoute{{
+			Name: "product", Pattern: "/products/:handle", Template: "product",
+			DataSources: []string{"product"},
+		}},
+		DataSources: map[string]ExtensionCall{
+			"product": {
+				Tool: "products_get",
+				Args: map[string]any{"handle": "{{ route.handle }}", "status": "active"},
+			},
+		},
+		Actions: map[string]ExtensionAction{
+			"cart": {
+				AllowedInput: []string{"variant_id"},
+				Steps: []ExtensionCall{{
+					Tool: "cart_add",
+					Args: map[string]any{
+						"variant_id": "{{ input.variant_id }}",
+						"session":    "{{ session.token }}",
+					},
+				}},
+			},
+		},
+		Templates: map[string]string{
+			"product": `<!doctype html><title>{{index (index (index .Data "product") "product") "title"}}</title>`,
+		},
+		Assets: map[string]string{"store.css": "body{color:#111}"},
+	}
+}
+
+func TestPublicGatewayIsTheOnlyAnonymousManifestRoute(t *testing.T) {
+	manifest, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundGateway := false
+	for _, route := range manifest.Provides.HTTPRoutes {
+		if route.Prefix == "/public/" {
+			foundGateway = route.NoAuth
+			continue
+		}
+		if route.NoAuth {
+			t.Fatalf("unexpected anonymous manifest route: %#v", route)
+		}
+	}
+	if !foundGateway {
+		t.Fatal("/public/ must be declared as an anonymous manifest route")
+	}
+
+	foundRuntimeGateway := false
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.Pattern == "/public/" {
+			foundRuntimeGateway = route.NoAuth
+		}
+	}
+	if !foundRuntimeGateway {
+		t.Fatal("/public/ must be anonymous in the sidecar runtime")
+	}
+}
+
+func TestExtensionManifestValidationRejectsReservedRoutes(t *testing.T) {
+	manifest := testExtensionManifest()
+	manifest.Routes[0].Pattern = "/_actions/:name"
+	if err := validateExtensionManifest("store", "provider", manifest); err == nil {
+		t.Fatal("reserved route accepted")
+	}
+}
+
+func TestExtensionManifestValidatesBrowserPolicyOrigins(t *testing.T) {
+	manifest := testExtensionManifest()
+	manifest.BrowserPolicy = ExtensionBrowserPolicy{
+		ScriptOrigins: []string{"https://js.stripe.com"},
+		ImageOrigins:  []string{"https://*.stripe.com"},
+	}
+	if err := validateExtensionManifest("store", "provider", manifest); err != nil {
+		t.Fatalf("valid browser policy rejected: %v", err)
+	}
+	manifest.BrowserPolicy.ScriptOrigins = []string{"http://scripts.example.com"}
+	if err := validateExtensionManifest("store", "provider", manifest); err == nil {
+		t.Fatal("insecure browser policy origin accepted")
+	}
+}
+
+func TestExtensionRegistrationRejectsRouteCollisions(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, _ := dbCreateSite(db, "p1", "main", "Main", "")
+	first := testExtensionManifest()
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", first, true); err != nil {
+		t.Fatal(err)
+	}
+	second := testExtensionManifest()
+	second.Routes[0].Pattern = "/products/:slug"
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "reviews", "reviews", second, true); err == nil {
+		t.Fatal("equivalent dynamic route was registered by two extensions")
+	}
+}
+
+func TestPublishedExtensionRendersConfiguredProviderData(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "p1")
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionManifest := testExtensionManifest()
+	extensionManifest.BrowserPolicy = ExtensionBrowserPolicy{
+		ScriptOrigins:  []string{"https://js.stripe.com"},
+		FrameOrigins:   []string{"https://checkout.stripe.com"},
+		ConnectOrigins: []string{"https://api.stripe.com"},
+	}
+	ext, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.Status != "published" {
+		t.Fatalf("extension status = %q", ext.Status)
+	}
+	platform := &extensionPlatformStub{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, platform, nil)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/products/desk-lamp", nil)
+	if handled := (&App{}).tryHandleExtensionRoute(rec, req, ctx, "p1", site.ID); !handled {
+		t.Fatal("extension route not handled")
+	}
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "<title>Desk Lamp</title>") {
+		t.Fatalf("render = %d %s", rec.Code, rec.Body.String())
+	}
+	csp := rec.Header().Get("Content-Security-Policy")
+	for _, expected := range []string{"script-src 'self' https://js.stripe.com", "frame-src https://checkout.stripe.com", "connect-src 'self' https://api.stripe.com"} {
+		if !strings.Contains(csp, expected) {
+			t.Fatalf("CSP %q missing %q", csp, expected)
+		}
+	}
+	if len(platform.calls) != 1 || platform.calls[0].app != "commerce" ||
+		platform.calls[0].tool != "products_get" ||
+		platform.calls[0].input["handle"] != "desk-lamp" ||
+		platform.calls[0].input["status"] != "active" {
+		t.Fatalf("provider calls = %#v", platform.calls)
+	}
+}
+
+func TestExtensionActionRejectsUnregisteredInput(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "p1")
+	db := hardeningTestDB(t)
+	site, _ := dbCreateSite(db, "p1", "main", "Main", "")
+	_, _ = dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true)
+	platform := &extensionPlatformStub{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, platform, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/_actions/store/cart", strings.NewReader(`{"variant_id":7,"store_id":999}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "storefront")
+	(&App{}).handleExtensionAction(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "store_id") {
+		t.Fatalf("action response = %d %s", rec.Code, rec.Body.String())
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("provider was called: %#v", platform.calls)
+	}
+}
+
+func TestExtensionActionInjectsSessionAndProject(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "p1")
+	db := hardeningTestDB(t)
+	site, _ := dbCreateSite(db, "p1", "main", "Main", "")
+	_, _ = dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true)
+	platform := &extensionPlatformStub{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, platform, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/_actions/store/cart", strings.NewReader(`{"variant_id":7}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "storefront")
+	(&App{}).handleExtensionAction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("action response = %d %s", rec.Code, rec.Body.String())
+	}
+	call := platform.calls[0]
+	if call.input["variant_id"] == nil || call.input["_project_id"] != "p1" ||
+		len(call.input["session"].(string)) < 24 {
+		t.Fatalf("provider input = %#v", call.input)
+	}
+}
+
+func TestExtensionProviderRefreshPreservesSiteSettings(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, _ := dbCreateSite(db, "p1", "main", "Main", "")
+	_, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = dbExtensionUpdateSettings(db, "p1", site.ID, "store", map[string]any{"accent": "#abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshed := testExtensionManifest()
+	refreshed.Version = "2"
+	refreshed.Settings["accent"] = "#222222"
+	ext, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", refreshed, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ext.PublishedManifest.Settings["accent"] != "#abcdef" {
+		t.Fatalf("provider refresh reset site settings: %#v", ext.PublishedManifest.Settings)
+	}
+}
+
+func TestExtensionsUpdateSettingsToolSupportsDraftAndPublish(t *testing.T) {
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", testExtensionManifest(), true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	cacheKey := cacheKeyMulti("example.com", "/about", "", "/", site.ID)
+	cacheSet(cacheKey, "cached", "text/html", "etag", "", false)
+
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store",
+		"settings": map[string]any{"accent": "#abcdef"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := dbExtensionGet(db, "p1", site.ID, "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.DraftManifest.Settings["accent"] != "#abcdef" || draft.PublishedManifest.Settings["accent"] != "#111111" {
+		t.Fatalf("unexpected draft settings state: %#v / %#v", draft.DraftManifest.Settings, draft.PublishedManifest.Settings)
+	}
+	if _, ok := cacheGet(cacheKey); ok {
+		t.Fatal("extension settings update did not invalidate the site cache")
+	}
+
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store", "publish": true,
+		"settings": map[string]any{"accent": "#123456"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := dbExtensionGet(db, "p1", site.ID, "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.PublishedManifest.Settings["accent"] != "#123456" || published.HasDraftChanges {
+		t.Fatalf("settings were not published: %#v", published)
+	}
+	if _, err := (&App{}).toolExtensionsUpdateSettings(ctx, map[string]any{
+		"_project_id": "p1", "_site_id": site.ID, "key": "store",
+		"settings": map[string]any{"unknown": true},
+	}); err == nil {
+		t.Fatal("unknown extension setting was accepted")
+	}
+}
+
+func TestExtensionLayoutWrapsOrdinaryContentPages(t *testing.T) {
+	if err := initializeThemes(); err != nil {
+		t.Fatal(err)
+	}
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Example Shop", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionManifest := testExtensionManifest()
+	extensionManifest.Routes = append(extensionManifest.Routes, ExtensionRoute{
+		Name: "home", Pattern: "/", Template: "home",
+	})
+	extensionManifest.Templates["home"] = "<!doctype html><title>Store home</title>"
+	extensionManifest.Templates["site_layout"] = `<!doctype html><html><head><link rel="stylesheet" href="{{themeAsset "style.css"}}"><link rel="stylesheet" href="{{asset "store.css"}}"></head><body><header>Store header</header><main>{{.Content}}</main><footer><a href="{{href "/cart"}}">Store footer</a></footer></body></html>`
+	extensionManifest.Layout = &ExtensionLayout{Template: "site_layout"}
+	extensionManifest.BrowserPolicy = ExtensionBrowserPolicy{ConnectOrigins: []string{"https://api.example.com"}}
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	body, policy, err := renderSingleForSite(ctx, "p1", site.ID, PageData{
+		Theme: getTheme("default"), SiteID: site.ID, SiteTitle: "Example Shop", Locale: "en",
+		URLPrefix: "/api/apps/content/", ResourceQuery: "?project_id=p1&site=main",
+		PageTitle: "About", Post: &Post{Kind: "page", BodyBlocks: Document{Version: 1, Blocks: []Block{{
+			Type: "core/heading", Attrs: map[string]any{"level": 1, "text": "About us"},
+		}}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"Store header", "Store footer", "<h1>About us</h1>",
+		"/api/apps/content/_theme/default/2/style.css?project_id=p1&amp;site=main",
+		"/api/apps/content/_extensions/store/assets/store.css?project_id=p1&amp;site=main&amp;v=" + extensionAssetRevision(extensionManifest.Assets["store.css"]),
+		"/api/apps/content/cart?project_id=p1&amp;site=main",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("extension layout output missing %q: %s", expected, body)
+		}
+	}
+	if policy == nil || len(policy.ConnectOrigins) != 1 {
+		t.Fatalf("extension layout browser policy missing: %#v", policy)
+	}
+}
+
+func TestExtensionAssetURLsUseContentRevision(t *testing.T) {
+	ext := Extension{
+		Key: "store",
+		PublishedManifest: ExtensionManifest{
+			Templates: map[string]string{"page": `{{asset "store.css"}}`},
+			Assets:    map[string]string{"store.css": "body{color:red}"},
+		},
+	}
+	render := func(extension Extension) string {
+		body, err := renderExtensionSource(extension, "page", extensionPageData{
+			URLPrefix: "/api/apps/content/", ResourceQuery: "?project_id=p1&site=main",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	first := render(ext)
+	firstRevision := extensionAssetRevision("body{color:red}")
+	if !strings.Contains(first, "project_id=p1&amp;site=main&amp;v="+firstRevision) {
+		t.Fatalf("revisioned asset URL missing: %s", first)
+	}
+	ext.PublishedManifest.Assets["store.css"] = "body{color:blue}"
+	second := render(ext)
+	if first == second || strings.Contains(second, firstRevision) {
+		t.Fatalf("asset URL did not change with content: first=%s second=%s", first, second)
+	}
+}
+
+func TestExtensionAssetCachingRequiresMatchingRevision(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "p1")
+	db := hardeningTestDB(t)
+	site, err := dbCreateSite(db, "p1", "main", "Main", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	extensionManifest := testExtensionManifest()
+	if _, err := dbExtensionUpsert(db, "p1", site.ID, "store", "commerce", extensionManifest, true); err != nil {
+		t.Fatal(err)
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	revision := extensionAssetRevision(extensionManifest.Assets["store.css"])
+
+	immutable := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision, nil)
+	(&App{}).handleExtensionAsset(immutable, request)
+	if immutable.Code != http.StatusOK || immutable.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("revisioned asset response = %d, cache=%q", immutable.Code, immutable.Header().Get("Cache-Control"))
+	}
+	if got := immutable.Header().Get("ETag"); got != `"`+revision+`"` {
+		t.Fatalf("asset ETag = %q", got)
+	}
+
+	explicitRevision := httptest.NewRecorder()
+	explicitRequest := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision+"?v=storefront-theme-3", nil)
+	(&App{}).handleExtensionAsset(explicitRevision, explicitRequest)
+	if explicitRevision.Code != http.StatusOK || explicitRevision.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("explicit revision compatibility response = %d, cache=%q", explicitRevision.Code, explicitRevision.Header().Get("Cache-Control"))
+	}
+
+	legacy := httptest.NewRecorder()
+	(&App{}).handleExtensionAsset(legacy, httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css", nil))
+	if legacy.Code != http.StatusOK || legacy.Header().Get("Cache-Control") != "public, max-age=300" {
+		t.Fatalf("legacy asset response = %d, cache=%q", legacy.Code, legacy.Header().Get("Cache-Control"))
+	}
+
+	notModified := httptest.NewRecorder()
+	conditional := httptest.NewRequest(http.MethodGet, "/_extensions/store/assets/store.css?v="+revision, nil)
+	conditional.Header.Set("If-None-Match", `"`+revision+`"`)
+	(&App{}).handleExtensionAsset(notModified, conditional)
+	if notModified.Code != http.StatusNotModified {
+		t.Fatalf("conditional asset status = %d", notModified.Code)
+	}
+}
+
+func TestExtensionLayoutRequiresRootRoute(t *testing.T) {
+	manifest := testExtensionManifest()
+	manifest.Layout = &ExtensionLayout{Template: "product"}
+	if err := validateExtensionManifest("store", "commerce", manifest); err == nil {
+		t.Fatal("extension layout without root route was accepted")
+	}
+}
+
+func TestExtensionSessionRejectsTamperedCookie(t *testing.T) {
+	token := "abcdefghijklmnopqrstuvwxyz123456"
+	signed := signExtensionSession(token)
+	if got, ok := verifyExtensionSession(signed); !ok || got != token {
+		t.Fatalf("valid session rejected: %q %v", got, ok)
+	}
+	if _, ok := verifyExtensionSession(signed + "x"); ok {
+		t.Fatal("tampered session accepted")
+	}
+}
+
+func TestExtensionSessionRotationIsScopedAndSigned(t *testing.T) {
+	name := extensionSessionCookieName("p1", 9, "store")
+	original := "abcdefghijklmnopqrstuvwxyz123456"
+	req := httptest.NewRequest(http.MethodPost, "/_actions/store/checkout", nil)
+	req.AddCookie(&http.Cookie{Name: name, Value: signExtensionSession(original)})
+	rec := httptest.NewRecorder()
+	if got := extensionSession(rec, req, name, false); got != original {
+		t.Fatalf("existing session changed: %q", got)
+	}
+	rotated := extensionSession(rec, req, name, true)
+	if rotated == original {
+		t.Fatal("session was not rotated")
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != name {
+		t.Fatalf("rotation cookie = %#v", cookies)
+	}
+	if got, ok := verifyExtensionSession(cookies[0].Value); !ok || got != rotated {
+		t.Fatal("rotated cookie is not signed correctly")
+	}
+}
+
+func TestExtensionActionRequiresSameOriginSignal(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/_actions/store/cart", nil)
+	if validActionOrigin(req) {
+		t.Fatal("action without an origin or storefront request header was accepted")
+	}
+	req.Header.Set("Origin", "https://attacker.example")
+	req.Host = "shop.example"
+	if validActionOrigin(req) {
+		t.Fatal("cross-origin action was accepted")
+	}
+}

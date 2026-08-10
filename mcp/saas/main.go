@@ -69,6 +69,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("saas requires a db block")
 	}
+	if err := scrubFulfillmentHistory(ctx.AppDB()); err != nil {
+		return fmt.Errorf("scrub fulfillment history: %w", err)
+	}
 	globalCtx = ctx
 	pid := projectID(ctx, nil)
 	if pid != "" {
@@ -95,6 +98,8 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
 		{Topic: "invoice.voided", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "invoice.refunded", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "invoice.payment_failed", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "invoice.payment_action_required", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "payment_method.attached", Handler: a.handlePaymentMethodAttached},
 	}
 }
@@ -151,10 +156,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
 		{Name: "saas_plan_action_add", Description: "Register a generic fulfillment action for a SaaS plan lifecycle event.", InputSchema: schemaObject(map[string]any{
 			"plan_key": strSchema(), "event": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
-			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(),
+			"persist_input": strSchema(), "persist_output": strSchema(), "sensitive_input_paths": strArraySchema(), "sensitive_output_paths": strArraySchema(),
+			"enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
 		{Name: "saas_plan_action_update", Description: "Update a generic fulfillment action by id.", InputSchema: schemaObject(map[string]any{
-			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(),
+			"persist_input": strSchema(), "persist_output": strSchema(), "sensitive_input_paths": strArraySchema(), "sensitive_output_paths": strArraySchema(),
+			"enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"id"}), Handler: a.toolPlanActionUpdate},
 		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
@@ -274,20 +283,24 @@ type UsageSource struct {
 }
 
 type PlanAction struct {
-	ID              int64           `json:"id"`
-	ProjectID       string          `json:"project_id"`
-	PlanKey         string          `json:"plan_key"`
-	Event           string          `json:"event"`
-	AppName         string          `json:"app_name"`
-	ToolName        string          `json:"tool_name"`
-	Args            json.RawMessage `json:"args,omitempty"`
-	Store           json.RawMessage `json:"store,omitempty"`
-	FailureMode     string          `json:"failure_mode"`
-	ExecutionPolicy string          `json:"execution_policy"`
-	Enabled         bool            `json:"enabled"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt       string          `json:"created_at"`
-	UpdatedAt       string          `json:"updated_at"`
+	ID                   int64           `json:"id"`
+	ProjectID            string          `json:"project_id"`
+	PlanKey              string          `json:"plan_key"`
+	Event                string          `json:"event"`
+	AppName              string          `json:"app_name"`
+	ToolName             string          `json:"tool_name"`
+	Args                 json.RawMessage `json:"args,omitempty"`
+	Store                json.RawMessage `json:"store,omitempty"`
+	FailureMode          string          `json:"failure_mode"`
+	ExecutionPolicy      string          `json:"execution_policy"`
+	PersistInput         string          `json:"persist_input"`
+	PersistOutput        string          `json:"persist_output"`
+	SensitiveInputPaths  json.RawMessage `json:"sensitive_input_paths,omitempty"`
+	SensitiveOutputPaths json.RawMessage `json:"sensitive_output_paths,omitempty"`
+	Enabled              bool            `json:"enabled"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt            string          `json:"created_at"`
+	UpdatedAt            string          `json:"updated_at"`
 }
 
 type FulfillmentRun struct {
@@ -1820,6 +1833,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 		"subscription_id": subID, "cycle_id": cycleID, "currency": price.Currency,
 		"period_start": periodStart, "period_end": periodEnd,
 		"checkout_id": checkout.ID,
+		"metadata":    map[string]any{"collection_method": checkoutCollectionMethod(plan, price)},
 		"success_url": strArg(args, "success_url"), "cancel_url": strArg(args, "cancel_url"),
 	}}
 	if err := a.handleSubscriptionCycleDue(ctx, cycleEvent); err != nil {
@@ -2113,6 +2127,18 @@ func checkoutTrialConfig(plan *Plan, price checkoutPrice) (int64, bool) {
 	return trialDays, requiresPaymentMethod
 }
 
+func checkoutCollectionMethod(plan *Plan, price checkoutPrice) string {
+	method := strings.ToLower(firstNonEmpty(
+		strArg(price.Metadata, "collection_method"),
+		strArg(mapFromAny(plan.Metadata), "collection_method"),
+		"charge_automatically",
+	))
+	if method != "charge_automatically" {
+		return "send_invoice"
+	}
+	return method
+}
+
 func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, subscriptionCustomerID int64, plan *Plan, price checkoutPrice, discount *CheckoutDiscount, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
 	checkoutID := strArg(args, "checkout_id")
 	input := map[string]any{
@@ -2131,7 +2157,11 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 		"next_renewal_at":      periodEnd,
 		"source":               "saas",
 		"source_ref":           firstNonEmpty(checkoutID, plan.Key),
-		"metadata":             map[string]any{"saas_plan_key": plan.Key, "saas_customer_id": customer.ID},
+		"metadata": map[string]any{
+			"saas_plan_key":     plan.Key,
+			"saas_customer_id":  customer.ID,
+			"collection_method": checkoutCollectionMethod(plan, price),
+		},
 		"items": []any{map[string]any{
 			"catalog_product_id": price.ProductID,
 			"catalog_price_id":   price.PriceID,
@@ -2180,9 +2210,28 @@ func (a *App) createPaymentLink(ctx *sdk.AppCtx, pid string, invoiceID int64, ar
 	if v := strArg(args, "cancel_url"); v != "" {
 		input["cancel_url"] = v
 	}
+	if boolArg(args, "save_payment_method") {
+		input["save_payment_method"] = true
+	}
+	if boolArg(args, "set_default_payment_method") {
+		input["set_default_payment_method"] = true
+	}
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_send_payment_link", input, &out); err != nil {
 		return nil, fmt.Errorf("create payment link: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) collectInvoice(ctx *sdk.AppCtx, pid string, invoiceID int64, idempotencyKey string) (map[string]any, error) {
+	input := map[string]any{
+		"_project_id":     pid,
+		"invoice_id":      invoiceID,
+		"idempotency_key": idempotencyKey,
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_collect", input, &out); err != nil {
+		return nil, fmt.Errorf("collect invoice: %w", err)
 	}
 	return out, nil
 }
@@ -2277,8 +2326,8 @@ func (a *App) runFulfillmentForPlan(ctx *sdk.AppCtx, pid string, acct *Account, 
 		} else {
 			callErr := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
 			if callErr != nil {
-				errText := callErr.Error()
-				run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "failed", out, errText)
+				errText := redactFulfillmentError(callErr.Error(), args, out, action.SensitiveInputPaths, action.SensitiveOutputPaths)
+				run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, &action, "failed", out, errText)
 				runs[len(runs)-1] = run
 				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "error": errText})
 				switch action.FailureMode {
@@ -2288,21 +2337,22 @@ func (a *App) runFulfillmentForPlan(ctx *sdk.AppCtx, pid string, acct *Account, 
 					_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, errText)
 					continue
 				default:
-					return runs, fmt.Errorf("fulfillment %s.%s failed: %w", action.AppName, action.ToolName, callErr)
+					return runs, fmt.Errorf("fulfillment %s.%s failed: %s", action.AppName, action.ToolName, errText)
 				}
 			}
-			run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "call_succeeded", out, "")
+			run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, &action, "call_succeeded", out, "")
 			if recErr != nil {
 				return runs, recErr
 			}
 			runs[len(runs)-1] = run
 		}
 		if err := a.applyFulfillmentStore(ctx, pid, acct, action, out); err != nil {
-			run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "call_succeeded", out, err.Error())
+			run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, &action, "call_succeeded", out,
+				redactFulfillmentError(err.Error(), args, out, action.SensitiveInputPaths, action.SensitiveOutputPaths))
 			runs[len(runs)-1] = run
 			return runs, err
 		}
-		run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "succeeded", out, "")
+		run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, &action, "succeeded", out, "")
 		if recErr != nil {
 			return runs, recErr
 		}
@@ -2332,9 +2382,9 @@ func (a *App) applyFulfillmentStore(ctx *sdk.AppCtx, pid string, acct *Account, 
 		if sourcePath == "" {
 			continue
 		}
-		value, ok := valueAtPath(out, sourcePath)
-		if !ok {
-			return fmt.Errorf("fulfillment store source %q not found", sourcePath)
+		value, err := fulfillmentStoreValue(out, sourcePath, action.SensitiveOutputPaths)
+		if err != nil {
+			return err
 		}
 		target = normalizeStoreTarget(target)
 		if target == "" {
@@ -2692,11 +2742,25 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return fmt.Errorf("subscription %d is linked to multiple SaaS accounts", subID)
 	}
 	acct := accounts[0]
+	collectionMethod := strings.ToLower(strArg(mapFromAny(event.Data["metadata"]), "collection_method"))
+	if collectionMethod == "" {
+		plan, planErr := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+		if planErr != nil {
+			return planErr
+		}
+		if plan != nil {
+			collectionMethod = strings.ToLower(strArg(mapFromAny(plan.Metadata), "collection_method"))
+		}
+	}
+	if collectionMethod != "charge_automatically" {
+		collectionMethod = "send_invoice"
+	}
 	op, claimed, err := dbCommerceCycleClaim(ctx.AppDB(), pid, acct.ID, subID, cycleID)
 	if err != nil || !claimed {
 		return err
 	}
 	checkoutID := strFromAny(event.Data["checkout_id"])
+	initialCheckout := checkoutID != ""
 	if checkoutID == "" {
 		if trialCheckout, lookupErr := dbCheckoutTrialBySubscription(ctx.AppDB(), pid, subID); lookupErr != nil {
 			return lookupErr
@@ -2844,14 +2908,35 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return fail(err)
 	}
 	if len(mapFromAny(op.PaymentLink)) == 0 {
-		linkOut, err := a.createPaymentLink(ctx, pid, invoiceID, map[string]any{
-			"success_url": strFromAny(event.Data["success_url"]),
-			"cancel_url":  strFromAny(event.Data["cancel_url"]),
-		})
+		var billingOut map[string]any
+		if collectionMethod == "charge_automatically" && !initialCheckout {
+			billingOut, err = a.collectInvoice(
+				ctx, pid, invoiceID,
+				fmt.Sprintf("subscription:%d:cycle:%d:collect", subID, cycleID),
+			)
+			if err != nil && strings.Contains(strings.ToLower(err.Error()), "no reusable payment method") {
+				billingOut, err = a.createPaymentLink(ctx, pid, invoiceID, map[string]any{
+					"success_url":                strFromAny(event.Data["success_url"]),
+					"cancel_url":                 strFromAny(event.Data["cancel_url"]),
+					"save_payment_method":        true,
+					"set_default_payment_method": true,
+				})
+			}
+		} else {
+			linkArgs := map[string]any{
+				"success_url": strFromAny(event.Data["success_url"]),
+				"cancel_url":  strFromAny(event.Data["cancel_url"]),
+			}
+			if collectionMethod == "charge_automatically" {
+				linkArgs["save_payment_method"] = true
+				linkArgs["set_default_payment_method"] = true
+			}
+			billingOut, err = a.createPaymentLink(ctx, pid, invoiceID, linkArgs)
+		}
 		if err != nil {
 			return fail(err)
 		}
-		if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, linkOut); err != nil {
+		if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, billingOut); err != nil {
 			return fail(err)
 		}
 	} else if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, mapFromAny(op.PaymentLink)); err != nil {
@@ -3359,6 +3444,22 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	if discountID != 0 && billingMode == "free" && !subscriptionRequired {
 		return nil, errors.New("catalog_discount_id requires a subscription plan")
 	}
+	metadata := mapFromAny(args["metadata"])
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	if billingMode == "paid" && strArg(metadata, "collection_method") == "" {
+		var existingMetadata string
+		err := db.QueryRow(`SELECT metadata_json FROM saas_plans WHERE project_id=? AND key=?`, pid, key).Scan(&existingMetadata)
+		switch {
+		case err == nil && strArg(mapFromAny(json.RawMessage(existingMetadata)), "collection_method") != "":
+			metadata["collection_method"] = strArg(mapFromAny(json.RawMessage(existingMetadata)), "collection_method")
+		case err == nil || errors.Is(err, sql.ErrNoRows):
+			metadata["collection_method"] = "charge_automatically"
+		default:
+			return nil, err
+		}
+	}
 	_, err = db.Exec(`
 		INSERT INTO saas_plans
 			(project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, catalog_discount_id, subscription_required, metadata_json)
@@ -3374,7 +3475,7 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 			updated_at=CURRENT_TIMESTAMP`,
 		pid, key, name, billingMode,
 		nullableInt64(int64Arg(args, "catalog_product_id")), nullableInt64(priceID),
-		nullableInt64(discountID), boolInt(subscriptionRequired), jsonOrEmpty(args["metadata"], "{}"))
+		nullableInt64(discountID), boolInt(subscriptionRequired), jsonOrEmpty(metadata, "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -3751,15 +3852,37 @@ func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanActio
 	if executionPolicy != "once_per_transition" && executionPolicy != "always" {
 		return nil, fmt.Errorf("unsupported execution_policy %q", executionPolicy)
 	}
+	persistInput, err := normalizePersistenceMode(strArg(args, "persist_input"))
+	if err != nil {
+		return nil, err
+	}
+	persistOutput, err := normalizePersistenceMode(strArg(args, "persist_output"))
+	if err != nil {
+		return nil, err
+	}
+	sensitiveInputPaths, err := normalizeSensitivePaths(args["sensitive_input_paths"])
+	if err != nil {
+		return nil, err
+	}
+	sensitiveOutputPaths, err := normalizeSensitivePaths(args["sensitive_output_paths"])
+	if err != nil {
+		return nil, err
+	}
+	store := mapFromAny(args["store"])
+	if persistOutput == persistenceNone && len(store) > 0 {
+		return nil, errors.New("persist_output none cannot be combined with store mappings")
+	}
 	enabled := 1
 	if _, ok := args["enabled"]; ok {
 		enabled = boolInt(boolArg(args, "enabled"))
 	}
 	res, err := db.Exec(`
 		INSERT INTO saas_plan_actions
-			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, executionPolicy, enabled, jsonOrEmpty(args["metadata"], "{}"))
+			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+			 persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, executionPolicy,
+		persistInput, persistOutput, jsonOrEmpty(sensitiveInputPaths, "[]"), jsonOrEmpty(sensitiveOutputPaths, "[]"), enabled, jsonOrEmpty(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -3772,7 +3895,8 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	if existing, err := dbPlanActionGet(db, pid, id); err != nil {
+	existing, err := dbPlanActionGet(db, pid, id)
+	if err != nil {
 		return nil, err
 	} else if existing == nil {
 		return nil, sql.ErrNoRows
@@ -3806,6 +3930,47 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 		sets = append(sets, "execution_policy=?")
 		vals = append(vals, executionPolicy)
 	}
+	persistOutput := existing.PersistOutput
+	if _, ok := args["persist_input"]; ok {
+		mode, err := normalizePersistenceMode(strArg(args, "persist_input"))
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, "persist_input=?")
+		vals = append(vals, mode)
+	}
+	if _, ok := args["persist_output"]; ok {
+		mode, err := normalizePersistenceMode(strArg(args, "persist_output"))
+		if err != nil {
+			return nil, err
+		}
+		persistOutput = mode
+		sets = append(sets, "persist_output=?")
+		vals = append(vals, mode)
+	}
+	if _, ok := args["sensitive_input_paths"]; ok {
+		paths, err := normalizeSensitivePaths(args["sensitive_input_paths"])
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, "sensitive_input_paths_json=?")
+		vals = append(vals, jsonOrEmpty(paths, "[]"))
+	}
+	if _, ok := args["sensitive_output_paths"]; ok {
+		paths, err := normalizeSensitivePaths(args["sensitive_output_paths"])
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, "sensitive_output_paths_json=?")
+		vals = append(vals, jsonOrEmpty(paths, "[]"))
+	}
+	store := mapFromAny(existing.Store)
+	if _, ok := args["store"]; ok {
+		store = mapFromAny(args["store"])
+	}
+	if persistOutput == persistenceNone && len(store) > 0 {
+		return nil, errors.New("persist_output none cannot be combined with store mappings")
+	}
 	if _, ok := args["enabled"]; ok {
 		sets = append(sets, "enabled=?")
 		vals = append(vals, boolInt(boolArg(args, "enabled")))
@@ -3827,7 +3992,8 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 
 func dbPlanActionGet(db *sql.DB, pid string, id int64) (*PlanAction, error) {
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json, created_at, updated_at
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+		       persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json, created_at, updated_at
 		FROM saas_plan_actions WHERE project_id=? AND id=?`, pid, id)
 	if err != nil {
 		return nil, err
@@ -3854,7 +4020,8 @@ func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]
 		where = append(where, "enabled=1")
 	}
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json, created_at, updated_at
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy,
+		       persist_input, persist_output, sensitive_input_paths_json, sensitive_output_paths_json, enabled, metadata_json, created_at, updated_at
 		FROM saas_plan_actions WHERE `+strings.Join(where, " AND ")+` ORDER BY plan_key,id`, vals...)
 	if err != nil {
 		return nil, err
@@ -3874,12 +4041,15 @@ func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]
 func scanPlanAction(row rowScanner) (*PlanAction, error) {
 	var a PlanAction
 	var enabled int
-	var args, store, meta string
-	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &a.ExecutionPolicy, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	var args, store, sensitiveInputPaths, sensitiveOutputPaths, meta string
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &a.ExecutionPolicy,
+		&a.PersistInput, &a.PersistOutput, &sensitiveInputPaths, &sensitiveOutputPaths, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	a.Args = json.RawMessage(args)
 	a.Store = json.RawMessage(store)
+	a.SensitiveInputPaths = json.RawMessage(sensitiveInputPaths)
+	a.SensitiveOutputPaths = json.RawMessage(sensitiveOutputPaths)
 	a.Enabled = enabled != 0
 	a.Metadata = json.RawMessage(meta)
 	return &a, nil
@@ -4659,12 +4829,13 @@ func recordEvent(db *sql.DB, pid, accountID, eventType, actor string, payload an
 }
 
 func dbFulfillmentRunReserve(db *sql.DB, pid, accountID string, action *PlanAction, transitionID string, input any, staleAfter time.Duration) (*FulfillmentRun, string, error) {
+	persistedInput := persistedFulfillmentValue(action.PersistInput, input, action.SensitiveInputPaths)
 	res, err := db.Exec(`
 		INSERT INTO saas_fulfillment_runs
 			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error, attempt_count, started_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, '{}', '', 1, CURRENT_TIMESTAMP)
 		ON CONFLICT(project_id, account_id, plan_action_id, transition_id) DO NOTHING`,
-		pid, accountID, action.ID, transitionID, action.Event, action.AppName, action.ToolName, jsonOrEmpty(input, "{}"))
+		pid, accountID, action.ID, transitionID, action.Event, action.AppName, action.ToolName, jsonOrEmpty(persistedInput, "{}"))
 	if err != nil {
 		return nil, "", err
 	}
@@ -4691,7 +4862,7 @@ func dbFulfillmentRunReserve(db *sql.DB, pid, accountID string, action *PlanActi
 		UPDATE saas_fulfillment_runs
 		SET status='pending', input_json=?, error='', attempt_count=attempt_count+1,
 		    started_at=CURRENT_TIMESTAMP, completed_at=NULL, updated_at=CURRENT_TIMESTAMP
-		WHERE project_id=? AND id=?`, jsonOrEmpty(input, "{}"), pid, run.ID)
+		WHERE project_id=? AND id=?`, jsonOrEmpty(persistedInput, "{}"), pid, run.ID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -4699,14 +4870,15 @@ func dbFulfillmentRunReserve(db *sql.DB, pid, accountID string, action *PlanActi
 	return run, "call", err
 }
 
-func dbFulfillmentRunFinish(db *sql.DB, pid string, id int64, status string, output any, errText string) (*FulfillmentRun, error) {
+func dbFulfillmentRunFinish(db *sql.DB, pid string, id int64, action *PlanAction, status string, output any, errText string) (*FulfillmentRun, error) {
 	completed := "NULL"
 	if status == "succeeded" || status == "failed" {
 		completed = "CURRENT_TIMESTAMP"
 	}
+	persistedOutput := persistedFulfillmentValue(action.PersistOutput, output, action.SensitiveOutputPaths)
 	_, err := db.Exec(`UPDATE saas_fulfillment_runs
 		SET status=?, output_json=?, error=?, completed_at=`+completed+`, updated_at=CURRENT_TIMESTAMP
-		WHERE project_id=? AND id=?`, status, jsonOrEmpty(output, "{}"), errText, pid, id)
+		WHERE project_id=? AND id=?`, status, jsonOrEmpty(persistedOutput, "{}"), errText, pid, id)
 	if err != nil {
 		return nil, err
 	}
@@ -5542,6 +5714,9 @@ func strSchema() map[string]any  { return map[string]any{"type": "string"} }
 func intSchema() map[string]any  { return map[string]any{"type": "integer"} }
 func boolSchema() map[string]any { return map[string]any{"type": "boolean"} }
 func objSchema() map[string]any  { return map[string]any{"type": "object"} }
+func strArraySchema() map[string]any {
+	return map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+}
 
 func strArg(m map[string]any, key string) string {
 	if m == nil {

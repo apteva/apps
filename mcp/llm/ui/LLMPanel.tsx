@@ -147,7 +147,7 @@ interface AuditLog {
 type Tab = "test" | "providers" | "rates" | "policy" | "tokens" | "usage" | "audit";
 
 const API = "/api/apps/llm";
-const knownProviders = ["openai", "anthropic", "openai-codex", "opencode-go", "fireworks", "openrouter"];
+const knownProviders = ["openai", "anthropic", "openai-codex", "opencode-go", "fireworks", "openrouter", "minimax", "z-ai", "moonshot-ai"];
 const providerBaseURLs: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
@@ -155,6 +155,9 @@ const providerBaseURLs: Record<string, string> = {
   openrouter: "https://openrouter.ai/api/v1",
   "openai-codex": "https://chatgpt.com/backend-api/codex",
   "opencode-go": "https://opencode.ai/zen/go/v1",
+  minimax: "https://api.minimax.io/v1",
+  "z-ai": "https://api.z.ai/api/paas/v4",
+  "moonshot-ai": "https://api.moonshot.ai/v1",
 };
 const providerKeyRefs: Record<string, string> = { "opencode-go": "opencode_go_api_key" };
 const defaultProvider: ProviderConfig = {
@@ -319,7 +322,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
     if (!provider && !all) return;
     if (!quiet) setBusy("sync");
     try {
-      const data = await api<{ results: Array<{ provider: string; status: string; model_count: number; error?: string }> }>("/models/sync", {
+      const data = await api<{ results: Array<{ provider: string; status: string; discovery?: string; model_count: number; error?: string }> }>("/models/sync", {
         method: "POST", body: JSON.stringify(all ? {} : { provider }),
       });
       const result = data.results?.find((item) => item.provider === provider) || data.results?.[0];
@@ -328,7 +331,13 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       const modelData = await api<{ models: ProviderModel[] }>("/models");
       setModels(modelData.models || []);
       await loadRates();
-      if (!quiet) setNotice(all ? `${data.results?.reduce((sum, item) => sum + (item.model_count || 0), 0) || 0} models synced` : `${provider}: ${result?.model_count || 0} models synced`);
+      if (!quiet) {
+        setNotice(result?.discovery === "manual" && !all
+          ? `${provider}: enter a provider model ID`
+          : all
+            ? `${data.results?.reduce((sum, item) => sum + (item.model_count || 0), 0) || 0} models synced`
+            : `${provider}: ${result?.model_count || 0} models synced`);
+      }
     } catch (error) {
       if (!quiet) setStatus((error as Error).message);
     } finally {
@@ -496,7 +505,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
             </Field>
             <div className="flex items-center gap-2 min-w-0">
               <button type="button" onClick={() => void syncModels()} disabled={!!busy || !selectedProvider} className={secondaryButton}>{busy === "sync" ? "Syncing..." : "Sync models"}</button>
-              <span className="text-xs text-text-dim truncate">Models also refresh automatically.</span>
+              <span className="text-xs text-text-dim truncate">{selectedProvider === "z-ai" ? "Z.ai model IDs are entered manually." : "Models also refresh automatically."}</span>
             </div>
             <Field label="Prompt">
               <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className={`${controlClass} min-h-[180px] resize-y`} />

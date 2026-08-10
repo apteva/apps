@@ -1,9 +1,11 @@
 package main
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -138,12 +140,68 @@ func (a *App) releaseReservations(ctx *sdk.AppCtx, pid string, ids []int64) erro
 		if err := ctx.PlatformAPI().CallAppResult("inventory", "inventory_release_reservation", map[string]any{
 			"_project_id":    pid,
 			"reservation_id": id,
-		}, &response); err != nil && !strings.Contains(err.Error(), "active reservation not found") {
+		}, &response); err != nil &&
+			!strings.Contains(strings.ToLower(err.Error()), "active reservation not found") &&
+			!strings.Contains(strings.ToLower(err.Error()), "already expired") &&
+			!strings.Contains(strings.ToLower(err.Error()), "already released") {
 			failures = append(failures, fmt.Sprintf("%d: %v", id, err))
 		}
 	}
 	if len(failures) > 0 {
 		return errors.New("release reservations: " + strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+func (a *App) reserveCartDiscount(ctx *sdk.AppCtx, pid string, cart *Cart) (string, error) {
+	if cart == nil {
+		return "", nil
+	}
+	quote := mapArg(cart.Metadata, "checkout_quote")
+	discount := mapArg(quote, "discount")
+	request := copyMap(mapArg(quote, "discount_request"))
+	if !boolArg(discount, "eligible") || len(request) == 0 || intArg(discount, "discount_cents") == 0 {
+		return "", nil
+	}
+	request["_project_id"] = pid
+	request["idempotency_key"] = fmt.Sprintf("commerce-cart-%s-%d-discount-v1", pid, cart.ID)
+	request["expires_in_seconds"] = int64(checkoutQuoteTTL / time.Second)
+	var response map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_discounts_reserve", request, &response); err != nil {
+		return "", fmt.Errorf("reserve Catalog discount: %w", err)
+	}
+	reservationID := strArg(unwrap(response, "reservation"), "reservation_id")
+	if reservationID == "" {
+		return "", errors.New("Catalog discount reservation response missing reservation_id")
+	}
+	return reservationID, nil
+}
+
+func (a *App) releaseDiscountReservation(ctx *sdk.AppCtx, pid, reservationID string) error {
+	if strings.TrimSpace(reservationID) == "" {
+		return nil
+	}
+	var response map[string]any
+	err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_discounts_release", map[string]any{
+		"_project_id": pid, "reservation_id": reservationID,
+	}, &response)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "redeemed") &&
+		!strings.Contains(strings.ToLower(err.Error()), "released") {
+		return fmt.Errorf("release Catalog discount: %w", err)
+	}
+	return nil
+}
+
+func (a *App) redeemDiscountReservation(ctx *sdk.AppCtx, pid, reservationID string) error {
+	if strings.TrimSpace(reservationID) == "" {
+		return nil
+	}
+	var response map[string]any
+	err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_discounts_redeem", map[string]any{
+		"_project_id": pid, "reservation_id": reservationID,
+	}, &response)
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "redeemed") {
+		return fmt.Errorf("redeem Catalog discount: %w", err)
 	}
 	return nil
 }
@@ -254,6 +312,105 @@ func (a *App) handleCheckoutPaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	}
 	_, err = a.completePaidSale(ctx.WithProject(pid), sale, true)
 	return err
+}
+
+func (a *App) handleCheckoutExpired(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := strings.TrimSpace(event.ProjectID)
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	externalID := intArg(event.Data, "session_id")
+	if pid == "" || externalID == 0 {
+		return nil
+	}
+	var checkoutID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT id FROM commerce_checkout_sessions
+		 WHERE project_id=? AND checkout_session_id=? AND status='started'`,
+		pid, externalID).Scan(&checkoutID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return a.expireCommerceCheckout(ctx.WithProject(pid), pid, checkoutID)
+}
+
+func (a *App) handleInventoryReservationExpired(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := strings.TrimSpace(event.ProjectID)
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	reservationID := intArg(event.Data, "reservation_id")
+	if pid == "" || reservationID == 0 {
+		return nil
+	}
+	var checkoutID int64
+	err := ctx.AppDB().QueryRow(
+		`SELECT c.id
+		   FROM commerce_reservation_links l
+		   JOIN commerce_checkout_sessions c ON c.id=l.checkout_id
+		  WHERE c.project_id=? AND l.reservation_id=? AND c.status='started'`,
+		pid, reservationID).Scan(&checkoutID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return a.expireCommerceCheckout(ctx.WithProject(pid), pid, checkoutID)
+}
+
+func (a *App) expireCommerceCheckout(ctx *sdk.AppCtx, pid string, checkoutID int64) error {
+	checkout, err := dbCheckoutGet(ctx.AppDB(), pid, checkoutID)
+	if err != nil || checkout == nil || checkout.Status != "started" {
+		return err
+	}
+	if err := a.releaseDiscountReservation(ctx, pid, checkout.DiscountReservationID); err != nil {
+		return err
+	}
+	if err := dbReservationLinksEnsure(ctx.AppDB(), checkout.ID, checkout.ReservationIDs); err != nil {
+		return err
+	}
+	links, err := dbReservationLinks(ctx.AppDB(), checkout.ID)
+	if err != nil {
+		return err
+	}
+	for _, link := range links {
+		if link.Status != "active" {
+			continue
+		}
+		if err := a.releaseReservations(ctx, pid, []int64{link.ReservationID}); err != nil {
+			return err
+		}
+		if err := dbReservationLinkStatus(ctx.AppDB(), checkout.ID, link.ReservationID, "released", ""); err != nil {
+			return err
+		}
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE commerce_checkout_sessions
+		    SET status='expired', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND id=? AND status='started'`, pid, checkout.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE commerce_carts SET status='open', updated_at=CURRENT_TIMESTAMP
+		 WHERE project_id=? AND id=? AND status='checkout'`, pid, checkout.CartID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	ctx.Emit("commerce.checkout.expired", map[string]any{
+		"checkout_id": checkout.ID, "cart_id": checkout.CartID, "store_id": checkout.StoreID,
+	})
+	return nil
 }
 
 func looksLikeCurrency(value string) bool {

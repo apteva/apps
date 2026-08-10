@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -12,6 +13,7 @@ const defaultProviderSlug = "hetzner"
 var compatibleProviderSlugs = []string{
 	"hetzner",
 	"digitalocean",
+	"contabo",
 	"vultr",
 	"aws-ec2",
 	"scaleway",
@@ -60,7 +62,7 @@ func resolveInstanceProvider(ctx *sdk.AppCtx, explicit string) (string, error) {
 }
 
 func providerAdapterUnavailable(provider, operation string) error {
-	return fmt.Errorf("provider %q is compatible at the integration-binding layer, but the Instances %s adapter is not implemented yet; implemented provider adapters: hetzner, digitalocean, runpod", provider, operation)
+	return fmt.Errorf("provider %q does not implement the Instances %s operation", provider, operation)
 }
 
 func instanceCapabilities(inst *Instance) InstanceCapabilities {
@@ -70,12 +72,23 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	if inst.IsLocal() {
 		return InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true}
 	}
+	if !isCompatibleProvider(normalizeProvider(inst.Provider)) {
+		return InstanceCapabilities{}
+	}
 	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
 	switch normalizeProvider(inst.Provider) {
 	case "hetzner":
 		cap.Destroy, cap.Upgrade = true, true
 	case "digitalocean", "runpod":
 		cap.Destroy = true
+	default:
+		provider := normalizeProvider(inst.Provider)
+		// Contabo only schedules contract cancellation; it does not expose
+		// immediate instance deletion. Do not present that as Destroy.
+		cap.Destroy = isAPIProvider(provider) && provider != "contabo"
+	}
+	if cap.Destroy && isScalewayAppleInstance(inst) && !scalewayAppleCanDelete(inst, time.Now()) {
+		cap.Destroy = false
 	}
 	return cap
 }
@@ -94,6 +107,9 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 	case "runpod":
 		return runPodProvision(ctx, in)
 	default:
+		if isAPIProvider(provider) {
+			return apiProviderProvision(ctx, in)
+		}
 		return nil, providerAdapterUnavailable(provider, "provisioning")
 	}
 }
@@ -107,6 +123,9 @@ func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	case "runpod":
 		return runPodDestroy(ctx, inst)
 	default:
+		if isAPIProvider(normalizeProvider(inst.Provider)) {
+			return apiProviderDestroy(ctx, inst)
+		}
 		return providerAdapterUnavailable(inst.Provider, "destroy")
 	}
 }

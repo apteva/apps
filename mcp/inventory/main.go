@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -42,9 +44,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "reservation-expiration",
+		Schedule: "@every 1m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return expireReservations(ctx)
+		},
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -272,7 +282,14 @@ func (a *App) toolTransfer(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolReserve(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	out, err := reserveStock(ctx.AppDB(), projectScope(ctx), args)
+	input := copyMap(args)
+	if strings.TrimSpace(strArg(input, "expires_at")) == "" {
+		ttlMinutes := inventoryConfigInt(ctx, "reservation_ttl_minutes", 60)
+		input["expires_at"] = time.Now().UTC().Add(time.Duration(ttlMinutes) * time.Minute).Format(time.RFC3339)
+	} else if _, err := time.Parse(time.RFC3339, strArg(input, "expires_at")); err != nil {
+		return nil, errors.New("expires_at must be RFC3339")
+	}
+	out, err := reserveStock(ctx.AppDB(), projectScope(ctx), input)
 	if err == nil {
 		if r, ok := out["reservation"].(*Reservation); ok {
 			ctx.Emit("inventory.reservation.created", map[string]any{"reservation_id": r.ID, "item_id": r.ItemID, "location_id": r.LocationID, "quantity": r.Quantity})
@@ -592,7 +609,9 @@ func availabilityCheck(db *sql.DB, pid string, args map[string]any) (map[string]
 	}
 	available := 0.0
 	for _, l := range levels {
-		available += l.Available
+		if l.AvailableOver > 0 {
+			available += l.AvailableOver
+		}
 	}
 	quantity := numArg(args, "quantity")
 	return map[string]any{
@@ -734,8 +753,12 @@ func reserveStock(db *sql.DB, pid string, args map[string]any) (map[string]any, 
 	if err != nil {
 		return nil, err
 	}
-	if lvl.Available+1e-9 < qty && !item.AllowBackorder {
-		return nil, fmt.Errorf("insufficient available stock: available %.4f, requested %.4f", lvl.Available, qty)
+	availableOverSafety := lvl.AvailableOver
+	if availableOverSafety < 0 {
+		availableOverSafety = 0
+	}
+	if availableOverSafety+1e-9 < qty && !item.AllowBackorder {
+		return nil, fmt.Errorf("insufficient available stock above safety stock: available %.4f, requested %.4f", availableOverSafety, qty)
 	}
 	res, err := tx.Exec(`INSERT INTO inventory_reservations
 		(project_id, item_id, location_id, quantity, reference_app, reference_type, reference_id, metadata_json, expires_at)
@@ -807,6 +830,8 @@ func finishReservation(db *sql.DB, pid string, args map[string]any, status strin
 			return nil, fmt.Errorf("reservation commit would make on_hand negative: %.4f", nextOnHand)
 		}
 		movementType = "commit"
+	} else if status == "expired" {
+		movementType = "expire"
 	}
 	if _, err := tx.Exec(`UPDATE inventory_levels SET on_hand=?, reserved=?, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND item_id=? AND location_id=?`, round4(nextOnHand), round4(nextReserved), pid, r.ItemID, r.LocationID); err != nil {
@@ -941,7 +966,7 @@ func getOneLevel(db *sql.DB, pid string, itemID, locID int64) (*Level, error) {
 }
 
 func chooseReservationLocationTx(tx *sql.Tx, pid string, itemID int64, qty float64) (int64, error) {
-	rows, err := tx.Query(`SELECT location_id, on_hand - reserved AS available
+	rows, err := tx.Query(`SELECT location_id, on_hand - reserved - safety_stock AS available
 		FROM inventory_levels WHERE project_id=? AND item_id=? ORDER BY available DESC`, pid, itemID)
 	if err != nil {
 		return 0, err
@@ -1600,6 +1625,65 @@ func round4(f float64) float64 {
 		return -round4(-f)
 	}
 	return float64(int64(f*10000+0.5)) / 10000
+}
+
+func expireReservations(ctx *sdk.AppCtx) error {
+	rows, err := ctx.AppDB().Query(
+		`SELECT id, project_id FROM inventory_reservations
+		 WHERE status='active' AND expires_at IS NOT NULL
+		   AND datetime(expires_at)<=CURRENT_TIMESTAMP
+		 ORDER BY id LIMIT 500`)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		id  int64
+		pid string
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var row candidate
+		if err := rows.Scan(&row.id, &row.pid); err != nil {
+			rows.Close()
+			return err
+		}
+		candidates = append(candidates, row)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		out, err := finishReservation(ctx.AppDB(), candidate.pid, map[string]any{
+			"reservation_id": candidate.id, "actor": "system:expiration", "reason": "reservation TTL elapsed",
+		}, "expired")
+		if err != nil {
+			if strings.Contains(err.Error(), "already") || strings.Contains(err.Error(), "active reservation not found") {
+				continue
+			}
+			return err
+		}
+		if reservation, ok := out["reservation"].(*Reservation); ok {
+			ctx.WithProject(candidate.pid).Emit("inventory.reservation.expired", map[string]any{
+				"reservation_id": reservation.ID, "item_id": reservation.ItemID,
+				"location_id": reservation.LocationID, "quantity": reservation.Quantity,
+				"reference_app": reservation.ReferenceApp, "reference_type": reservation.ReferenceType,
+				"reference_id": reservation.ReferenceID,
+			})
+		}
+	}
+	return nil
+}
+
+func inventoryConfigInt(ctx *sdk.AppCtx, key string, fallback int64) int64 {
+	if ctx == nil || ctx.Config() == nil {
+		return fallback
+	}
+	value := strings.TrimSpace(ctx.Config().Get(key))
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 1 || parsed > 1440 {
+		return fallback
+	}
+	return parsed
 }
 
 func main() {

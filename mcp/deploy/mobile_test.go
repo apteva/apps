@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,12 +28,18 @@ func TestExistingDeploymentDefaultsToServiceTarget(t *testing.T) {
 	if d.TargetKind != "service" {
 		t.Fatalf("target_kind=%q, want service", d.TargetKind)
 	}
+	if d.BuildBackend != "local" || d.BuildBackendJSON != "{}" {
+		t.Fatalf("build backend=%q config=%q, want local/{}", d.BuildBackend, d.BuildBackendJSON)
+	}
 	env, err := dbEnsureProductionEnvironment(db, d)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if env.TargetConfigJSON != "{}" {
 		t.Fatalf("target_config_json=%q, want {}", env.TargetConfigJSON)
+	}
+	if env.BuildBackend != "local" || env.BuildBackendJSON != "{}" {
+		t.Fatalf("environment build backend=%q config=%q, want local/{}", env.BuildBackend, env.BuildBackendJSON)
 	}
 }
 
@@ -97,6 +104,21 @@ func TestIOSCustomBuilderStagesIPAManifest(t *testing.T) {
 	}
 }
 
+func TestSmokeOnlyMobileBuildCannotBePublished(t *testing.T) {
+	artifactDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(artifactDir, "ios-simulator-smoke.zip"), []byte("smoke"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&App{}).runMobileRelease(
+		&Deployment{TargetKind: "ios", TargetConfigJSON: `{"smoke_only":true}`},
+		&Build{ID: 9, Status: "succeeded", Framework: "ios", ArtifactPath: artifactDir},
+		releaseOptions{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "cannot be published") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
 type integrationCall struct {
 	Tool  string
 	Input map[string]any
@@ -110,8 +132,9 @@ type mobilePlatform struct {
 
 type iosPlatform struct {
 	tk.BasePlatformClient
-	calls []integrationCall
-	state string
+	calls             []integrationCall
+	state             string
+	reviewSubmissions json.RawMessage
 }
 
 func (p *iosPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -136,6 +159,11 @@ func (p *iosPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[str
 		data = json.RawMessage(`{"data":{"id":"version-1"}}`)
 	case "create_review_submission":
 		data = json.RawMessage(`{"data":{"id":"review-1"}}`)
+	case "list_review_submissions":
+		data = p.reviewSubmissions
+		if len(data) == 0 {
+			data = json.RawMessage(`{"data":[]}`)
+		}
 	case "get_app_version":
 		state := p.state
 		if state == "" {
@@ -327,7 +355,7 @@ func TestIOSReleaseSyncAssignsProcessedBuildToTestFlight(t *testing.T) {
 	if fresh.Status != "live" || fresh.ExternalID != "build-42" || fresh.ExternalStatus != "testflight_available" {
 		t.Fatalf("release=%+v", fresh)
 	}
-	want := []string{"list_builds", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group"}
+	want := []string{"list_builds", "list_beta_groups", "list_beta_groups", "create_beta_group", "add_builds_to_beta_group"}
 	if len(platform.calls) != len(want) {
 		t.Fatalf("calls=%+v", platform.calls)
 	}
@@ -371,6 +399,37 @@ func TestIOSProductionReleaseSubmitsAndTracksReview(t *testing.T) {
 	fresh, _ = dbGetRelease(ctx.AppDB(), release.ID)
 	if fresh.Status != "live" || fresh.ExternalStatus != "ready_for_sale" {
 		t.Fatalf("release=%+v", fresh)
+	}
+}
+
+func TestIOSProductionReleaseReusesCompatibleReviewDraft(t *testing.T) {
+	platform := &iosPlatform{reviewSubmissions: json.RawMessage(`{"data":[{"type":"reviewSubmissions","id":"review-existing","relationships":{"appStoreVersionForReview":{"data":{"type":"appStoreVersions","id":"version-1"}},"items":{"data":[{"type":"reviewSubmissionItems","id":"item-1"}]}}}]}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, _ := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-review-retry", TargetKind: "ios", SourceKind: "local", SourceRef: "/src", Framework: "ios",
+	})
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	build, _ := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "ios", "")
+	release, _ := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	meta := mobileReleaseMeta{
+		Platform: "ios", AppID: "app-1", AppStoreVersionID: "version-1",
+		VersionName: "1.0", BuildNumber: "42", SubmitForReview: true,
+	}
+	bound := &sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"}
+	if err := (&App{}).prepareIOSProductionRelease(bound, release, "build-42", &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.ReviewSubmissionID != "review-existing" {
+		t.Fatalf("submission=%q", meta.ReviewSubmissionID)
+	}
+	if countIntegrationCalls(platform.calls, "create_review_submission") != 0 || countIntegrationCalls(platform.calls, "create_review_submission_item") != 0 {
+		t.Fatalf("retry created duplicate review resources: %#v", platform.calls)
+	}
+	if countIntegrationCalls(platform.calls, "submit_review_submission") != 1 {
+		t.Fatalf("existing draft was not submitted: %#v", platform.calls)
 	}
 }
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: redirects
 display_name: Redirects
-version: 0.3.7
+version: 0.3.8
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 301/302/
@@ -22,7 +22,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/redirects
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/redirects/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [redirects, short-links, marketing, infrastructure]
 
 scopes: [project, global]

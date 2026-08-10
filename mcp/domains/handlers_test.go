@@ -22,6 +22,8 @@ type stubPlatform struct {
 	calls            []executeCall
 	replyByTool      map[string]*sdk.ExecuteResult
 	bindingsOverride map[string]any
+	connections      []sdk.PlatformConnection
+	connectionByID   map[int64]sdk.PlatformConnection
 	// connSlug overrides the app_slug GetConnection reports. Empty
 	// keeps the legacy default ("porkbun") the existing tests rely on.
 	connSlug    string
@@ -55,6 +57,10 @@ func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage,
 }
 func (s *stubPlatform) CallAppResult(string, string, map[string]any, any) error { return nil }
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if conn, ok := s.connectionByID[id]; ok {
+		copy := conn
+		return &copy, nil
+	}
 	slug := "porkbun"
 	if s.connSlug != "" {
 		slug = s.connSlug
@@ -65,8 +71,18 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 	}
 	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: status, ProjectID: s.connProject}, nil
 }
-func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
-	return nil, nil
+func (s *stubPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	out := make([]sdk.PlatformConnection, 0, len(s.connections))
+	for _, conn := range s.connections {
+		if filter.AppSlug != "" && conn.AppSlug != filter.AppSlug {
+			continue
+		}
+		if filter.ProjectID != "" && conn.ProjectID != "" && conn.ProjectID != filter.ProjectID {
+			continue
+		}
+		out = append(out, conn)
+	}
+	return out, nil
 }
 func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error) { return nil, nil }
 func (s *stubPlatform) SendEvent(int64, string) error                    { return nil }
@@ -130,6 +146,121 @@ func TestDomainAdd_RoundTrips(t *testing.T) {
 	got, _ := app.toolDomainGet(ctx, map[string]any{"name": "acme.com"})
 	if !got.(map[string]any)["found"].(bool) {
 		t.Error("not found after add")
+	}
+}
+
+func TestDomainAdd_MultipleBindingsUseSelectedDefault(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"dns_provider": map[string]any{
+				"ids":        []any{float64(1), float64(2)},
+				"default_id": float64(2),
+			},
+		},
+		connectionByID: map[int64]sdk.PlatformConnection{
+			1: {ID: 1, AppSlug: "porkbun", Status: "active", ProjectID: "test-proj"},
+			2: {ID: 2, AppSlug: "spaceship", Status: "active", ProjectID: "test-proj"},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+
+	out, err := (&App{}).toolDomainAdd(ctx, map[string]any{
+		"name":            "multi.example",
+		"skip_validation": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := out.(map[string]any)["domain"].(*Domain)
+	if domain.ConnectionID != 2 || domain.DNSProviderSlug != "spaceship" {
+		t.Fatalf("domain=%+v, want default Spaceship connection 2", domain)
+	}
+}
+
+func TestRegistrarFor_MultipleBindingsUsesSelectedDefault(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"dns_provider": float64(1),
+			"registrar_provider": map[string]any{
+				"ids":        []any{float64(1), float64(3)},
+				"default_id": float64(3),
+			},
+		},
+		connectionByID: map[int64]sdk.PlatformConnection{
+			1: {ID: 1, AppSlug: "porkbun", Status: "active", ProjectID: "test-proj"},
+			3: {ID: 3, AppSlug: "porkbun", Status: "active", ProjectID: "test-proj"},
+		},
+	}
+	ctx := newTestCtx(t, plat)
+
+	_, bound, err := (&App{}).registrarFor(ctx, 0, "test-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ConnectionID != 3 || !bound.IsDefault {
+		t.Fatalf("bound=%+v, want default registrar connection 3", bound)
+	}
+}
+
+func TestConnectionsList_MarksMultipleBindingsAndDefaults(t *testing.T) {
+	plat := &stubPlatform{
+		bindingsOverride: map[string]any{
+			"dns_provider": map[string]any{
+				"ids":        []any{float64(1), float64(2)},
+				"default_id": float64(2),
+			},
+			"registrar_provider": map[string]any{
+				"ids":        []any{float64(1), float64(3)},
+				"default_id": float64(3),
+			},
+		},
+		connections: []sdk.PlatformConnection{
+			{ID: 1, AppSlug: "porkbun", Name: "Primary", Status: "active", ProjectID: "test-proj"},
+			{ID: 2, AppSlug: "spaceship", Name: "Secondary", Status: "active", ProjectID: "test-proj"},
+			{ID: 3, AppSlug: "porkbun", Name: "Registrar", Status: "active", ProjectID: "test-proj"},
+			{ID: 4, AppSlug: "ionos", Name: "Legacy pin", Status: "active", ProjectID: "test-proj"},
+		},
+		connectionByID: map[int64]sdk.PlatformConnection{
+			1: {ID: 1, AppSlug: "porkbun", Status: "active", ProjectID: "test-proj"},
+			2: {ID: 2, AppSlug: "spaceship", Status: "active", ProjectID: "test-proj"},
+			3: {ID: 3, AppSlug: "porkbun", Status: "active", ProjectID: "test-proj"},
+		},
+	}
+	newTestCtx(t, plat)
+	req := httptest.NewRequest(http.MethodGet, "/connections?project_id=test-proj", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handleConnectionsList(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Connections []struct {
+			ID               int64 `json:"id"`
+			DNSBound         bool  `json:"dns_bound"`
+			DNSDefault       bool  `json:"dns_default"`
+			RegistrarBound   bool  `json:"registrar_bound"`
+			RegistrarDefault bool  `json:"registrar_default"`
+		} `json:"connections"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[int64]struct {
+		DNSBound, DNSDefault, RegistrarBound, RegistrarDefault bool
+	}{}
+	for _, conn := range response.Connections {
+		byID[conn.ID] = struct {
+			DNSBound, DNSDefault, RegistrarBound, RegistrarDefault bool
+		}{conn.DNSBound, conn.DNSDefault, conn.RegistrarBound, conn.RegistrarDefault}
+	}
+	if got := byID[2]; !got.DNSBound || !got.DNSDefault {
+		t.Errorf("connection 2 metadata=%+v, want DNS bound default", got)
+	}
+	if got := byID[3]; !got.RegistrarBound || !got.RegistrarDefault {
+		t.Errorf("connection 3 metadata=%+v, want registrar bound default", got)
+	}
+	if got := byID[4]; got.DNSBound || got.RegistrarBound {
+		t.Errorf("legacy connection 4 metadata=%+v, want available but unbound", got)
 	}
 }
 

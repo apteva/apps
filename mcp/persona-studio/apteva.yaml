@@ -2,12 +2,19 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.20
+version: 0.1.22
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
+
+  v0.1.21 makes persona video generation reference-aware end to end.
+  It selects or validates a Media Studio reference-to-video model,
+  honors the model's exact reference limit, prioritizes weighted face
+  references and selected item images, previews the images that will be
+  sent, requires at least one visual reference, and prevents incompatible
+  text-to-video or ordinary image-to-video submissions.
 
   v0.1.20 hardens generation state and the dashboard experience: failed
   provider calls return truthful HTTP errors, duplicate submits are
@@ -47,7 +54,8 @@ description: |
   UI unlink persona references, item files, and items.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/persona-studio
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/persona-studio/icon.svg
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [ai, persona, virtual-influencer, ugc, media, content]
 
 scopes: [project, global]
@@ -62,8 +70,8 @@ requires:
       version: ">=0.10.0"
       reason: Store persona references, item packshots, generated assets, and final exports.
     - name: media-studio
-      version: ">=0.10.8"
-      reason: Generate images, videos, audio, music, and avatar clips through bound providers.
+      version: ">=0.10.31"
+      reason: Generate images, multi-reference videos, audio, music, and avatar clips through bound providers.
       events:
         - media.generated
         - media.failed
@@ -97,7 +105,7 @@ provides:
     - name: persona_item_list
       description: List reusable items for a persona.
     - name: persona_generate_asset
-      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, cache, source_images, and optional provider settings.
+      description: Generate one persona-consistent asset through Media Studio, using style profiles, ranked references, selected items, cache, source_images, live video model capabilities, and optional provider settings.
     - name: persona_generate_pack
       description: Generate a small starter pack of persona assets using Media Studio.
     - name: persona_campaign_create

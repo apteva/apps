@@ -34,12 +34,13 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.23
+version: 0.5.25
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
+  renders live repository, source-file, and issue chat cards,
   manages native repo issues for bugs, feature requests, and tasks,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
@@ -56,6 +57,8 @@ description: |
   and optionally publishes dev runs at <slug>.<dev_base_hostname>
   through server-native ingress.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project, global]
 requires:
   permissions:
@@ -125,6 +128,39 @@ provides:
     - { name: issues_link_path,       description: "Link an issue to a repository path or line range." }
   ui_panels:
     - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
+  ui_components:
+    - name: repository-card
+      entry: /ui/RepositoryCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [repo]
+        properties:
+          repo: { type: string }
+      preview_props: { preview: true, repo: apteva-site }
+    - name: source-file-card
+      entry: /ui/SourceFileCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [repo, path]
+        properties:
+          repo: { type: string }
+          path: { type: string }
+          line_start: { type: integer, minimum: 1 }
+          line_end: { type: integer, minimum: 1 }
+          expected_sha256: { type: string }
+      preview_props: { preview: true, repo: apteva-site, path: src/App.tsx, line_start: 12, line_end: 14 }
+    - name: issue-card
+      entry: /ui/IssueCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [repo, issue_number]
+        properties:
+          repo: { type: string }
+          issue_number: { type: integer, minimum: 1 }
+      preview_props: { preview: true, repo: apteva-site, issue_number: 42 }
 runtime:
   kind: source
   source:

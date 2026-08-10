@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.31
+version: 0.1.32
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -14,7 +14,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bills
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/bills/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [bills, vendors, accounts-payable, finance]
 
 scopes: [project, global]

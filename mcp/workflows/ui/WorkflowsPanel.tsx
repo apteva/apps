@@ -128,6 +128,31 @@ interface Run {
   steps?: StepExecution[];
 }
 
+interface SubscriberLaneStatus {
+  source: string;
+  project_id: string;
+  workflow_count: number;
+  state: string;
+  connected_at?: string;
+  last_event_at?: string;
+  last_event_seq?: number;
+  last_error?: string;
+  last_error_at?: string;
+  reconnect_count: number;
+}
+
+interface SubscriberStatus {
+  healthy: boolean;
+  state: string;
+  configured: boolean;
+  missing_configuration?: string[];
+  last_reconcile_at?: string;
+  last_reconcile_error?: string;
+  lane_count: number;
+  workflow_count: number;
+  lanes: SubscriberLaneStatus[];
+}
+
 interface NativePanelProps {
   appName: string;
   installId: number;
@@ -195,6 +220,8 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
   const [err, setErr] = useState<string>("");
   const [showRunModal, setShowRunModal] = useState(false);
   const [showNewModal, setShowNewModal] = useState(false);
+  const [subscriber, setSubscriber] = useState<SubscriberStatus | null>(null);
+  const [showSubscriber, setShowSubscriber] = useState(false);
 
   const qs = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -261,17 +288,43 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
     [apiCall],
   );
 
-  // Initial + periodic refresh.
+  const loadSubscriber = useCallback(async () => {
+    try {
+      const status = await apiCall<SubscriberStatus>("GET", "/subscriber/status");
+      setSubscriber(status);
+    } catch (e) {
+      setSubscriber({
+        healthy: false,
+        state: "unavailable",
+        configured: false,
+        last_reconcile_error: (e as Error).message,
+        lane_count: 0,
+        workflow_count: 0,
+        lanes: [],
+      });
+    }
+  }, [apiCall]);
+
+  // Live app events provide immediate updates. Poll at a lower rate as a
+  // recovery path, and do no background work while the tab is hidden.
   useEffect(() => {
     loadWorkflows();
-  }, [loadWorkflows]);
+    loadSubscriber();
+  }, [loadWorkflows, loadSubscriber]);
   useEffect(() => {
-    const t = setInterval(() => {
+    const refresh = () => {
+      if (document.hidden) return;
       loadWorkflows();
+      loadSubscriber();
       if (selectedID) loadDetail(selectedID);
-    }, 5000);
-    return () => clearInterval(t);
-  }, [loadWorkflows, loadDetail, selectedID]);
+    };
+    const t = window.setInterval(refresh, 15_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [loadWorkflows, loadSubscriber, loadDetail, selectedID]);
 
   // Live step status overlay for the graph. Keys are step ids;
   // populated by workflow.step.started / workflow.step.completed
@@ -327,15 +380,11 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
 
   const replayRun = async (runID: number) => {
     try {
-      await apiCall<{ run: Run }>("POST", `/workflows/${selectedID}/run`, {});
-      // The platform proxy doesn't expose POST /runs/<id>/replay yet;
-      // use the MCP tool path instead via the sidecar's /workflows/<id>/run.
-      // For now, replay = re-run with empty input. v0.2 wires this fully.
+      await apiCall<{ run: Run }>("POST", `/runs/${runID}/replay`, {});
       if (selectedID) await loadDetail(selectedID);
     } catch (e) {
       setErr((e as Error).message);
     }
-    void runID;
   };
 
   const runWith = async (input: unknown) => {
@@ -386,12 +435,71 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
         </button>
         <button
           type="button"
+          onClick={() => setShowSubscriber((v) => !v)}
+          className={`px-2 py-1 text-xs border rounded ${
+            subscriber?.healthy
+              ? "border-green/40 text-green"
+              : "border-red/40 text-red"
+          }`}
+          title="Event-trigger subscriber diagnostics"
+        >
+          Events: {subscriber?.state || "loading"}
+        </button>
+        <button
+          type="button"
           onClick={() => setShowNewModal(true)}
           className="ml-auto px-3 py-1 text-sm bg-accent text-bg rounded font-bold"
         >
           + New workflow
         </button>
       </header>
+
+      {showSubscriber && subscriber && (
+        <section className="border-b border-border bg-bg-input/35 px-6 py-3 text-xs">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-text-muted">
+            <span>
+              <strong className="text-text">{subscriber.workflow_count}</strong> event workflow
+              {subscriber.workflow_count === 1 ? "" : "s"} across{" "}
+              <strong className="text-text">{subscriber.lane_count}</strong> source
+              {subscriber.lane_count === 1 ? "" : "s"}
+            </span>
+            <span>Last reconcile: {fmtTime(subscriber.last_reconcile_at)}</span>
+            {!subscriber.configured && (
+              <span className="text-red">
+                Missing: {(subscriber.missing_configuration || []).join(", ") || "platform configuration"}
+              </span>
+            )}
+            {subscriber.last_reconcile_error && (
+              <span className="text-red">{subscriber.last_reconcile_error}</span>
+            )}
+          </div>
+          {subscriber.lanes.length > 0 && (
+            <div className="mt-2 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {subscriber.lanes.map((lane) => (
+                <div
+                  key={`${lane.source}:${lane.project_id}`}
+                  className="border border-border rounded px-3 py-2 bg-bg-card"
+                >
+                  <div className="flex items-center gap-2">
+                    <code className="text-text">{lane.source}</code>
+                    <span className={lane.state === "connected" ? "text-green" : "text-red"}>
+                      {lane.state}
+                    </span>
+                    <span className="ml-auto text-text-dim">
+                      {lane.workflow_count} workflow{lane.workflow_count === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <div className="mt-1 text-text-dim">
+                    Project {lane.project_id || "global"} · last event {fmtTime(lane.last_event_at)}
+                    {lane.reconnect_count > 0 ? ` · ${lane.reconnect_count} reconnects` : ""}
+                  </div>
+                  {lane.last_error && <div className="mt-1 text-red truncate" title={lane.last_error}>{lane.last_error}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <main className="flex-1 overflow-auto">
         {err ? (
@@ -491,7 +599,7 @@ export default function WorkflowsPanel({ projectId, installId }: NativePanelProp
 // is intentionally a one-step "emit" so the workflow is valid as soon
 // as it lands — the user fills it in from there.
 
-type TriggerKind = "manual" | "http" | "event" | "schedule";
+type TriggerKind = "manual" | "http" | "event";
 
 function NewWorkflowModal({
   onClose,
@@ -504,14 +612,14 @@ function NewWorkflowModal({
   const [kind, setKind] = useState<TriggerKind>("manual");
   const [source, setSource] = useState("");
   const [topic, setTopic] = useState("");
-  const [cron, setCron] = useState("0 * * * *");
+  const [when, setWhen] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const slug = slugify(name);
   const yaml = useMemo(
-    () => starterYAML(slug || "new-workflow", kind, source, topic, cron),
-    [slug, kind, source, topic, cron],
+    () => starterYAML(slug || "new-workflow", kind, source, topic, when),
+    [slug, kind, source, topic, when],
   );
 
   const submit = async () => {
@@ -574,8 +682,8 @@ function NewWorkflowModal({
           <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
             Trigger
           </label>
-          <div className="grid grid-cols-4 gap-1">
-            {(["manual", "http", "event", "schedule"] as const).map((k) => (
+          <div className="grid grid-cols-3 gap-1">
+            {(["manual", "http", "event"] as const).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -592,6 +700,9 @@ function NewWorkflowModal({
             ))}
           </div>
           <p className="text-text-dim text-xs mt-1">{triggerHint(kind)}</p>
+          <p className="text-text-dim text-xs mt-1">
+            Need a schedule? Use Jobs to call this workflow's HTTP trigger on a cron.
+          </p>
         </div>
 
         {kind === "event" && (
@@ -620,24 +731,21 @@ function NewWorkflowModal({
                 className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
               />
             </div>
-          </div>
-        )}
-
-        {kind === "schedule" && (
-          <div>
-            <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
-              Cron
-            </label>
-            <input
-              type="text"
-              value={cron}
-              onChange={(e) => setCron(e.target.value)}
-              placeholder="0 * * * *"
-              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
-            />
-            <p className="text-text-dim text-xs mt-1">
-              Note: schedule triggers are a forward-compat stub — pair with the Jobs app's cron for now.
-            </p>
+            <div className="col-span-2">
+              <label className="block text-xs uppercase tracking-wide text-text-dim mb-1">
+                Filter before run <span className="normal-case">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={when}
+                onChange={(e) => setWhen(e.target.value)}
+                placeholder="input.data.table == 'ventes'"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono focus:outline-none focus:border-accent"
+              />
+              <p className="text-text-dim text-xs mt-1">
+                Non-matching events are ignored before a run or step is created.
+              </p>
+            </div>
           </div>
         )}
 
@@ -690,8 +798,6 @@ function triggerHint(k: TriggerKind): string {
       return "POST /api/apps/workflows/wf/<name> from anywhere.";
     case "event":
       return "Fires on every matching app-event in this project.";
-    case "schedule":
-      return "Cron expression (UTC).";
   }
 }
 
@@ -700,7 +806,7 @@ function starterYAML(
   kind: TriggerKind,
   source: string,
   topic: string,
-  cron: string,
+  when: string,
 ): string {
   const trigger =
     kind === "manual"
@@ -708,8 +814,9 @@ function starterYAML(
       : kind === "http"
       ? "  kind: http\n"
       : kind === "event"
-      ? `  kind: event\n  source: ${source || "tables"}\n  topic: ${topic || "row.inserted"}\n`
-      : `  kind: schedule\n  cron: "${cron}"\n`;
+      ? `  kind: event\n  source: ${source || "tables"}\n  topic: ${topic || "row.inserted"}\n` +
+        (when.trim() ? `  when: ${JSON.stringify(when.trim())}\n` : "")
+      : "  kind: manual\n";
   return (
     `name: ${name}\n\n` +
     `trigger:\n${trigger}\n` +

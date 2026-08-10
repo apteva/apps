@@ -170,9 +170,14 @@ func (a *App) toolPaymentMethodDetach(ctx *sdk.AppCtx, args map[string]any) (any
 	if pm == nil {
 		return nil, fmt.Errorf("payment method %d not found", id)
 	}
-	if stripeDirectConfigured(ctx) && pm.Provider == "stripe" && pm.ProviderPaymentMethodID != "" {
-		if err := executeStripeDirect(ctx, http.MethodPost,
-			"/payment_methods/"+pm.ProviderPaymentMethodID+"/detach", map[string]any{}, nil); err != nil {
+	if pm.Provider == "stripe" && pm.ProviderPaymentMethodID != "" {
+		bound, err := requireProcessor(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if err := executeStripe(ctx, bound, "detach_payment_method", map[string]any{
+			"payment_method_id": pm.ProviderPaymentMethodID,
+		}, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -366,6 +371,28 @@ func dbPaymentMethodsList(db *sql.DB, pid string, f paymentMethodFilters) ([]*Pa
 		out = append(out, pm)
 	}
 	return out, rows.Err()
+}
+
+func dbDefaultPaymentMethod(db *sql.DB, pid string, customerID int64) (*PaymentMethod, error) {
+	methods, err := dbPaymentMethodsList(db, pid, paymentMethodFilters{
+		customerID: customerID,
+		status:     "active",
+		limit:      100,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, pm := range methods {
+		if pm.IsDefault && pm.Reusable {
+			return pm, nil
+		}
+	}
+	for _, pm := range methods {
+		if pm.Reusable {
+			return pm, nil
+		}
+	}
+	return nil, nil
 }
 
 func dbPaymentMethodGet(db *sql.DB, pid string, id int64) (*PaymentMethod, error) {

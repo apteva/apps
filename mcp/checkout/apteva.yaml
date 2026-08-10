@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.3
+version: 0.3.0
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
   manual-payment path (creates a draft → open invoice in billing for
-  wire / card-by-portal recording). Stripe Checkout Session and the
-  webhook-driven auto-paid flow land in v0.2.0 alongside billing's
-  Stripe integration.
+  wire / card-by-portal recording). v0.2.0 adds hosted and custom
+  Stripe Checkout Sessions through Billing, with retry-safe invoice
+  reuse and webhook-driven payment completion.
 
   Storefront blocks (add-to-cart, cart-summary, checkout-page) are
   added to the content app separately — checkout exposes the REST +
@@ -17,6 +17,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/checkout
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [checkout, cart, commerce, ecommerce, storefront]
 
 scopes: [project, global]
@@ -50,11 +52,19 @@ provides:
       description: Lock a cart and create a checkout_session. Cart becomes immutable until session terminates.
     - name: checkout_update
       description: Capture or update email / name / addresses on a started session.
+    - name: checkout_bootstrap
+      description: Restore durable checkout and cart state by session, cart, or recovery token.
+    - name: checkout_advance
+      description: Validate and persist transitions across information, shipping, and payment.
+    - name: checkout_restart
+      description: Replace an unfinished checkout with a fresh session for the same cart.
+    - name: checkout_set_adjustments
+      description: Replace frozen shipping, discount, tax, and adjustment metadata before payment.
     - name: checkout_pay
       description: |
-        Submit the session for payment. v0.1.0 creates a draft → finalized invoice in
-        billing and returns it for manual payment recording. v0.2.0 will additionally
-        return a Stripe Checkout Session redirect URL when provider='stripe'.
+        Submit the session for payment. Manual mode returns a finalized Billing
+        invoice. Stripe mode returns either a hosted redirect URL or browser-safe
+        Elements configuration and reuses the same invoice on retries.
     - name: checkout_get
       description: Fetch a checkout_session by id, including the linked invoice_id when paid.
     - name: checkout_cancel
@@ -64,6 +74,16 @@ provides:
       label: Checkout
       icon: shopping-cart
       entry: /ui/CheckoutPanel.mjs
+  publishes:
+    - name: checkout.step_changed
+      description: A durable checkout moved to another step.
+    - name: checkout.restarted
+      description: An unfinished checkout was replaced with a fresh session.
+    - name: checkout.expired
+      description: A checkout session expired and its cart was released.
+  workers:
+    - name: checkout-expiration
+      schedule: "@every 1m"
   skills:
     - name: how-to-use-checkout
       command: /checkout
@@ -80,7 +100,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: checkout/v0.3.0
     entry: mcp/checkout
   port: 8080
   health_check: /health
@@ -101,7 +121,7 @@ config_schema:
       set) never expire.
   - name: session_ttl_minutes
     type: text
-    default: "30"
+    default: "60"
     label: Checkout session TTL (minutes)
     description: |
       An awaiting-payment session that doesn't complete within this

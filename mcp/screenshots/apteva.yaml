@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: screenshots
 display_name: Screenshots
-version: 0.1.4
+version: 0.1.5
 description: |
   Capture browser screenshots from a URL, save them to storage, and
   browse them in a gallery. Built entirely on the `computer` app for
@@ -16,6 +16,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/screenshots
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [browser, observability, productivity]
 
 scopes: [project, global]

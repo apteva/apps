@@ -29,6 +29,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -663,6 +664,15 @@ func (c *Computer) OpenSession(opts computer.OpenOptions) error {
 	if err := c.relaunchIfContextChanged(opts.ContextID); err != nil {
 		return err
 	}
+	if opts.ExternalProxy != nil {
+		proxyURL, err := authenticatedProxyURL(opts.ExternalProxy)
+		if err != nil {
+			return err
+		}
+		c.opts.ProxyURL = proxyURL
+		enabled := true
+		opts.Proxy = &enabled
+	}
 	if err := c.relaunchIfProxyChanged(opts.Proxy); err != nil {
 		return err
 	}
@@ -671,6 +681,20 @@ func (c *Computer) OpenSession(opts computer.OpenOptions) error {
 		return err
 	}
 	return nil
+}
+
+func authenticatedProxyURL(proxy *computer.ExternalProxy) (string, error) {
+	if proxy == nil || strings.TrimSpace(proxy.Server) == "" {
+		return "", fmt.Errorf("local chrome: external proxy server is required")
+	}
+	u, err := url.Parse(strings.TrimSpace(proxy.Server))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("local chrome: invalid external proxy server")
+	}
+	if proxy.Username != "" {
+		u.User = url.UserPassword(proxy.Username, proxy.Password)
+	}
+	return u.String(), nil
 }
 
 func (c *Computer) Execute(action computer.Action) ([]byte, error) {
@@ -692,7 +716,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
@@ -726,6 +750,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		chromedp.Run(c.ctx, chromedp.Location(&urlBefore))
 		fmt.Fprintf(os.Stderr, "[BROWSER] click (%d,%d) on %s (display=%dx%d)%s\n",
 			x, y, urlBefore, c.display.Width, c.display.Height, labelNote)
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing click: %v\n", err)
+		}
 		if err := chromedp.Run(c.ctx,
 			chromedp.MouseClickXY(float64(x), float64(y)),
 		); err != nil {
@@ -753,7 +780,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		// Wait for potential navigation to complete
 		chromedp.Run(c.ctx, chromedp.WaitReady("body", chromedp.ByQuery))
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		var urlAfter string
 		chromedp.Run(c.ctx, chromedp.Location(&urlAfter))
 		if urlAfter != urlBefore {
@@ -775,33 +802,37 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 				x, y = e.Center()
 			}
 		}
+		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
+			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing double click: %v\n", err)
+		}
 		if err := chromedp.Run(c.ctx,
 			chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(2)),
 		); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "type":
-		if err := textinput.Type(c.ctx, action.Text, "[BROWSER]"); err != nil {
+		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
+		if err := textinput.TypeWithDelay(c.ctx, action.Text, "[BROWSER]", delay); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
 		if err := c.dispatchKey(action.Key); err != nil {
 			return nil, fmt.Errorf("key %q: %w", action.Key, err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "wait":
@@ -815,38 +846,61 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "upload_file":
-		if err := c.uploadFile(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.uploadFile(action)
+		if err != nil {
 			return nil, fmt.Errorf("upload_file: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		cueSelector := action.Selector
+		if cueSelector == "" {
+			cueSelector = res.Selector
+		}
+		c.cueTarget(action, cueSelector, "File uploaded")
+		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
 		return c.Screenshot()
 
 	case "select_option":
-		if _, err := c.selectOption(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.selectOption(action)
+		if err != nil {
 			return nil, fmt.Errorf("select_option: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
+		c.cueTarget(action, res.Selector, "Option selected")
+		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_checked":
-		if _, err := c.setChecked(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.setChecked(action)
+		if err != nil {
 			return nil, fmt.Errorf("set_checked: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		caption := "Unchecked"
+		if res.Checked {
+			caption = "Checked"
+		}
+		c.cueTarget(action, res.Selector, caption)
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_temporal":
-		if _, err := c.setTemporal(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.setTemporal(action)
+		if err != nil {
 			return nil, fmt.Errorf("set_temporal: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		c.cueTarget(action, res.Selector, "Date/time set")
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	case "set_text":
-		if _, err := c.setText(action); err != nil {
+		c.moveToTarget(action)
+		res, err := c.setText(action)
+		if err != nil {
 			return nil, fmt.Errorf("set_text: %w", err)
 		}
-		time.Sleep(150 * time.Millisecond)
+		c.cueTarget(action, res.Selector, "Text updated")
+		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
 		return c.Screenshot()
 
 	default:
@@ -1031,7 +1085,7 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	return &clone
 }
 
-func (c *Computer) uploadFile(action computer.Action) error {
+func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
 	target := fileupload.Target{Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
@@ -1043,8 +1097,56 @@ func (c *Computer) uploadFile(action computer.Action) error {
 		target.X, target.Y = action.X, action.Y
 		target.HasPoint = true
 	}
-	_, err := fileupload.SetFiles(c.ctx, target, action.Files)
-	return err
+	return fileupload.SetFiles(c.ctx, target, action.Files)
+}
+
+func (c *Computer) cueTarget(action computer.Action, selector, caption string) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.CueTarget(
+		c.ctx,
+		selector,
+		x,
+		y,
+		hasPoint,
+		caption,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER] presentation cue unavailable, continuing action: %v\n", err)
+	}
+}
+
+func (c *Computer) moveToTarget(action computer.Action) {
+	if !action.Presentation.Enabled() {
+		return
+	}
+	x, y := action.X, action.Y
+	hasPoint := x != 0 && y != 0
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+			hasPoint = true
+		}
+	}
+	if err := presentation.MoveToTarget(
+		c.ctx,
+		action.Selector,
+		x,
+		y,
+		hasPoint,
+		action.Presentation,
+	); err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER] presentation move unavailable, continuing action: %v\n", err)
+	}
 }
 
 // scroll dispatches a real CDP mouseWheel event at (x, y). This scrolls

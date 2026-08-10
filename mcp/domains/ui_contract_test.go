@@ -19,6 +19,9 @@ func TestDomainsPanelSafetyContracts(t *testing.T) {
 		`editableRecordValue(record)`,
 		`role="dialog"`,
 		`flex flex-col md:flex-row`,
+		`connection.dns_bound`,
+		`Connected DNS providers`,
+		`Connected registrar providers`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("DomainsPanel.tsx is missing safety contract %q", required)

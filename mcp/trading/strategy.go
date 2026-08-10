@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1067,8 +1068,11 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return nil, err
 	}
-	startAt, endAt := defaultBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(def.Universe, interval, startAt, endAt)
+	startAt, endAt, err := resolveBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1103,6 +1107,7 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 			"portfolio_name": pf.Name,
 			"strategy_name":  strategy.Name,
 			"market_source":  marketSource,
+			"market_data":    summarizeBacktestMarketCapture(marketBars, def.Universe, startAt, endAt),
 		},
 	})
 	if err != nil {
@@ -1152,8 +1157,11 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 	if err != nil {
 		return nil, err
 	}
-	startAt, endAt := defaultBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
-	marketBars, steps, marketSource, err := captureBacktestMarketBars(def.Universe, interval, startAt, endAt)
+	startAt, endAt, err := resolveBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
+	if err != nil {
+		return nil, err
+	}
+	marketBars, steps, marketSource, err := captureBacktestMarketBars(context.Background(), def.Universe, interval, startAt, endAt)
 	if err != nil {
 		return nil, err
 	}

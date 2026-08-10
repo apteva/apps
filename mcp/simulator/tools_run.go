@@ -27,6 +27,7 @@ func (a *App) toolSimsRun() sdk.Tool {
 			"ios_scheme":     map[string]any{"type": "string", "description": "iOS only. Empty = first scheme from xcodebuild -list."},
 			"android_module": map[string]any{"type": "string", "description": "Android only. Gradle module producing the APK. Empty = app."},
 			"build_cmd":      map[string]any{"type": "string", "description": "Shell override for the build step. Wins over scheme/module."},
+			"host_id":        map[string]any{"type": "integer", "description": "Optional Instances host override. 0 runs locally."},
 		}, []string{"framework", "source_tgz_b64"}),
 		HandlerCtx: a.handleSimsRun,
 	}
@@ -37,7 +38,8 @@ func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if framework != "android" && framework != "ios" {
 		return nil, fmt.Errorf("framework must be android or ios, got %q", framework)
 	}
-	if err := capabilityCheckForNeeds(ctx, framework, true, true); err != nil {
+	hostID := resolvedHostID(ctx, args, framework)
+	if err := a.capabilityCheckForHost(ctx, framework, hostID, true, true); err != nil {
 		return nil, err
 	}
 	proj, err := projectIDFor(ctx, args)
@@ -46,7 +48,7 @@ func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	}
 
 	// 1. Boot-if-needed.
-	sim, err := a.ensureBootedSim(ctx, framework)
+	sim, err := a.ensureBootedSimOnHost(ctx, framework, hostID)
 	if err != nil {
 		return nil, fmt.Errorf("boot: %w", err)
 	}
@@ -63,26 +65,28 @@ func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 		sourceApp = "manual"
 	}
 	run, err := dbInsertSimRun(ctx.AppDB(), SimRun{
-		SimID:     sim.ID,
-		ProjectID: proj,
-		SourceApp: sourceApp,
-		SourceRef: strArg(args, "source_ref"),
-		Framework: framework,
-		Status:    "building",
-		StartedAt: time.Now().UTC().Format(time.RFC3339),
+		SimID:      sim.ID,
+		ProjectID:  proj,
+		SourceApp:  sourceApp,
+		SourceRef:  strArg(args, "source_ref"),
+		Framework:  framework,
+		Status:     "building",
+		RunnerKind: sim.RunnerKind,
+		InstanceID: sim.InstanceID,
+		StartedAt:  time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	// 3. Build.
-	br, err := a.runBuild(callCtx, ctx, buildParams{
+	br, artifactID, err := a.buildForSim(callCtx, ctx, sim, buildParams{
 		Framework:    framework,
 		SourceTGZB64: strArg(args, "source_tgz_b64"),
 		Module:       strArg(args, "android_module"),
 		Scheme:       strArg(args, "ios_scheme"),
 		BuildCmd:     strArg(args, "build_cmd"),
-		SimUDID:      sim.ID,
+		SimUDID:      sim.NativeID(),
 		SimRunID:     run.ID,
 	})
 	if err != nil {
@@ -93,11 +97,12 @@ func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 		"status":        "installing",
 		"bundle_id":     br.BundleID,
 		"artifact_path": br.ArtifactPath,
+		"artifact_id":   artifactID,
 		"log_path":      fmt.Sprintf("%d.log", run.ID),
 	})
 
 	// 4. Install + launch.
-	if err := a.installAndLaunch(sim, br); err != nil {
+	if err := a.installAndLaunchForSim(ctx, sim, br, artifactID); err != nil {
 		a.failRun(ctx, run.ID, "install/launch: "+err.Error())
 		return nil, err
 	}
@@ -111,12 +116,15 @@ func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	}
 
 	return map[string]any{
-		"sim_id":     sim.ID,
-		"sim_run_id": run.ID,
-		"platform":   sim.Platform,
-		"bundle_id":  br.BundleID,
-		"stream_url": a.streamURL(ctx, sim.ID, stream.WSToken),
-		"status":     "running",
+		"sim_id":      sim.ID,
+		"sim_run_id":  run.ID,
+		"platform":    sim.Platform,
+		"bundle_id":   br.BundleID,
+		"artifact_id": artifactID,
+		"runner":      sim.RunnerKind,
+		"instance_id": sim.InstanceID,
+		"stream_url":  a.streamURL(ctx, sim.ID, stream.WSToken),
+		"status":      "running",
 	}, nil
 }
 
@@ -141,10 +149,12 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			"ios_scheme":     map[string]any{"type": "string", "description": "iOS only."},
 			"android_module": map[string]any{"type": "string", "description": "Android only."},
 			"build_cmd":      map[string]any{"type": "string", "description": "Shell override."},
+			"host_id":        map[string]any{"type": "integer", "description": "Optional Instances host override. 0 runs locally."},
 		}, []string{"framework", "source_tgz_b64"}),
 		HandlerCtx: func(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			framework := strArg(args, "framework")
-			if err := capabilityCheckForNeeds(ctx, framework, true, false); err != nil {
+			hostID := resolvedHostID(ctx, args, framework)
+			if err := a.capabilityCheckForHost(ctx, framework, hostID, true, false); err != nil {
 				return nil, err
 			}
 			// Resolve a destination sim. A specific sim_id wins; else
@@ -157,12 +167,12 @@ func (a *App) toolSimsBuild() sdk.Tool {
 				if err != nil {
 					return nil, err
 				}
-				if s == nil || s.Status != "booted" {
+				if s == nil || s.Status != "booted" || s.InstanceID != hostID {
 					return nil, fmt.Errorf("sim %q not booted", id)
 				}
 				sim = s
 			} else {
-				s, err := a.ensureBootedSim(ctx, framework)
+				s, err := a.ensureBootedSimOnHost(ctx, framework, hostID)
 				if err != nil {
 					return nil, err
 				}
@@ -176,15 +186,16 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			run, err := dbInsertSimRun(ctx.AppDB(), SimRun{
 				SimID: sim.ID, ProjectID: ctx.CurrentProject(),
 				SourceApp: "manual", Framework: framework, Status: "building",
-				StartedAt: time.Now().UTC().Format(time.RFC3339),
+				StartedAt:  time.Now().UTC().Format(time.RFC3339),
+				RunnerKind: sim.RunnerKind, InstanceID: sim.InstanceID,
 			})
 			if err != nil {
 				return nil, err
 			}
-			br, err := a.runBuild(callCtx, ctx, buildParams{
+			br, artifactID, err := a.buildForSim(callCtx, ctx, sim, buildParams{
 				Framework: framework, SourceTGZB64: strArg(args, "source_tgz_b64"),
 				Module: strArg(args, "android_module"), Scheme: strArg(args, "ios_scheme"),
-				BuildCmd: strArg(args, "build_cmd"), SimUDID: sim.ID, SimRunID: run.ID,
+				BuildCmd: strArg(args, "build_cmd"), SimUDID: sim.NativeID(), SimRunID: run.ID,
 			})
 			if err != nil {
 				a.failRun(ctx, run.ID, err.Error())
@@ -192,7 +203,8 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			}
 			_ = dbUpdateSimRun(ctx.AppDB(), run.ID, map[string]any{
 				"status": "stopped", "bundle_id": br.BundleID, "artifact_path": br.ArtifactPath,
-				"log_path": fmt.Sprintf("%d.log", run.ID), "stopped_at": time.Now().UTC().Format(time.RFC3339),
+				"artifact_id": artifactID,
+				"log_path":    fmt.Sprintf("%d.log", run.ID), "stopped_at": time.Now().UTC().Format(time.RFC3339),
 			})
 			_ = a.cleanupStorage(ctx.AppDB())
 			return map[string]any{
@@ -200,6 +212,9 @@ func (a *App) toolSimsBuild() sdk.Tool {
 				"sim_run_id":    run.ID,
 				"bundle_id":     br.BundleID,
 				"artifact_path": br.ArtifactPath,
+				"artifact_id":   artifactID,
+				"runner":        sim.RunnerKind,
+				"instance_id":   sim.InstanceID,
 			}, nil
 		},
 	}
@@ -210,16 +225,18 @@ func (a *App) toolSimsBuild() sdk.Tool {
 func (a *App) toolSimsInstall() sdk.Tool {
 	return sdk.Tool{
 		Name:        "sims_install",
-		Description: "Install a previously-built artifact onto a booted sim. Provide the artifact_path from a sims_build result.",
+		Description: "Install a previously-built artifact onto a booted sim. Local sims accept artifact_path; remote sims require artifact_id.",
 		InputSchema: schemaObject(map[string]any{
 			"sim_id":        map[string]any{"type": "string", "description": "Required. Target sim."},
 			"artifact_path": map[string]any{"type": "string", "description": "Required. Path from sims_build."},
-		}, []string{"sim_id", "artifact_path"}),
+			"artifact_id":   map[string]any{"type": "string", "description": "Opaque artifact id from sims_build; required for remote sims."},
+		}, []string{"sim_id"}),
 		Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			simID := strArg(args, "sim_id")
 			artifact := strArg(args, "artifact_path")
-			if simID == "" || artifact == "" {
-				return nil, errors.New("sim_id and artifact_path required")
+			artifactID := strArg(args, "artifact_id")
+			if simID == "" {
+				return nil, errors.New("sim_id required")
 			}
 			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
@@ -228,19 +245,8 @@ func (a *App) toolSimsInstall() sdk.Tool {
 			if sim == nil || sim.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted", simID)
 			}
-			artifact, err = a.validateArtifactPath(artifact, sim.Platform)
-			if err != nil {
+			if err := a.installArtifactForSim(ctx, sim, artifact, artifactID); err != nil {
 				return nil, err
-			}
-			switch sim.Platform {
-			case "android":
-				if err := installAndroidAPK(sim.Serial, artifact); err != nil {
-					return nil, err
-				}
-			case "ios":
-				if err := installIOSApp(sim.ID, artifact); err != nil {
-					return nil, err
-				}
 			}
 			return map[string]any{"ok": true}, nil
 		},
@@ -270,15 +276,8 @@ func (a *App) toolSimsLaunch() sdk.Tool {
 			if sim == nil || sim.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted", simID)
 			}
-			switch sim.Platform {
-			case "android":
-				if err := launchAndroid(sim.Serial, bundleID, ""); err != nil {
-					return nil, err
-				}
-			case "ios":
-				if err := launchIOS(sim.ID, bundleID); err != nil {
-					return nil, err
-				}
+			if err := a.launchBundleForSim(ctx, sim, bundleID); err != nil {
+				return nil, err
 			}
 			return map[string]any{"ok": true}, nil
 		},

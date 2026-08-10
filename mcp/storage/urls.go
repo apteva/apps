@@ -33,6 +33,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -80,16 +81,45 @@ func envPublicURL() string {
 func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 	rel := buildContentURL(f) // "/files/<id>/content"
 	if f != nil && f.Visibility == "public" {
+		rel = withContentVersion(rel, f)
 		if u := cdnURLFor(ctx, rel, f.ProjectID); u != "" {
 			return u
 		}
-		rel = buildPublicContentURL(f)
+		rel = withContentVersion(buildPublicContentURL(f), f)
 	}
 	base := publicBase(ctx)
 	if base == "" {
 		return "/api/apps/storage" + rel
 	}
 	return base + "/api/apps/storage" + rel
+}
+
+func withContentVersion(rel string, f *File) string {
+	version := contentVersion(f)
+	if version == "" {
+		return rel
+	}
+	separator := "?"
+	if strings.Contains(rel, "?") {
+		separator = "&"
+	}
+	return rel + separator + "v=" + url.QueryEscape(version)
+}
+
+func contentVersion(f *File) string {
+	if f == nil {
+		return ""
+	}
+	hash := strings.ToLower(strings.TrimSpace(f.SHA256))
+	if len(hash) > 16 {
+		hash = hash[:16]
+	}
+	for _, r := range hash {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return ""
+		}
+	}
+	return hash
 }
 
 // cdnURLFor asks the cdn app to mint a URL on the install's linked
@@ -200,10 +230,20 @@ func cdnZoneForInstall(ctx *sdk.AppCtx) int64 {
 // has no auth context to disambiguate by, only what the URL
 // itself carries.
 func signedAbsoluteURL(ctx *sdk.AppCtx, f *File, sig string, exp int64) string {
-	rel := buildPublicContentURL(f) // includes filename when present
-	q := fmt.Sprintf("?sig=%s&exp=%d", sig, exp)
+	return signedAbsoluteURLWithDisposition(ctx, f, sig, exp, DispositionInline)
+}
+
+func signedAbsoluteURLWithDisposition(ctx *sdk.AppCtx, f *File, sig string, exp int64, disposition ContentDisposition) string {
+	rel := buildPublicContentURL(f)
+	if disposition == DispositionAttachment {
+		rel = buildPublicDownloadURL(f)
+	}
+	q := fmt.Sprintf("?sig=%s&exp=%d", url.QueryEscape(sig), exp)
+	if version := contentVersion(f); version != "" {
+		q += "&v=" + url.QueryEscape(version)
+	}
 	if f != nil && f.ProjectID != "" {
-		q += "&project_id=" + f.ProjectID
+		q += "&project_id=" + url.QueryEscape(f.ProjectID)
 	}
 	base := publicBase(ctx)
 	if base == "" {

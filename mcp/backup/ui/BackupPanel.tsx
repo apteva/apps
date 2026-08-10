@@ -15,7 +15,7 @@
 // the class names. The bundled .mjs is produced by
 // `bun run scripts/build-panels.ts` from the apps repo root.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -131,6 +131,7 @@ interface Run {
   started_at: string;
   finished_at?: string;
   status: "running" | "success" | "failed";
+  stage?: string;
   bytes_compressed: number;
   sha256?: string;
   remote_key?: string;
@@ -174,7 +175,8 @@ function formatBytes(n: number): string {
 
 function formatTime(s: string | undefined): string {
   if (!s) return "—";
-  try { return new Date(s).toLocaleString(); } catch { return s; }
+  const date = new Date(s);
+  return Number.isNaN(date.getTime()) ? s : date.toLocaleString();
 }
 
 function durationOf(r: Run): string {
@@ -183,9 +185,11 @@ function durationOf(r: Run): string {
     const start = new Date(r.started_at).getTime();
     const end = new Date(r.finished_at).getTime();
     const ms = end - start;
+    if (!Number.isFinite(ms) || ms < 0) return "—";
     if (ms < 1000) return `${ms} ms`;
     if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-    return `${Math.round(ms / 1000)} s`;
+    if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`;
+    return `${(ms / 3_600_000).toFixed(1)} h`;
   } catch { return "—"; }
 }
 
@@ -209,6 +213,10 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const [selectedScope, setSelectedScope] = useState("platform");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [runLimit, setRunLimit] = useState(50);
+  const [hasMoreRuns, setHasMoreRuns] = useState(false);
+  const [showAllScopes, setShowAllScopes] = useState(false);
+  const reloadSeq = useRef(0);
 
   const withParams = useCallback((extra: Record<string, string> = {}) => {
     const u = new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra });
@@ -216,7 +224,8 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   }, [projectId, installId]);
 
   const api = useCallback(async <T,>(method: string, path: string, body?: unknown): Promise<T> => {
-    const res = await fetch(`${API}${path}?${withParams()}`, {
+    const separator = path.includes("?") ? "&" : "?";
+    const res = await fetch(`${API}${path}${separator}${withParams()}`, {
       method,
       credentials: "same-origin",
       headers: body ? { "Content-Type": "application/json" } : {},
@@ -235,27 +244,45 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   }, [withParams]);
 
   const reload = useCallback(async () => {
+    const seq = ++reloadSeq.current;
     try {
       const [d, p, r, s] = await Promise.all([
         api<{ destinations: Destination[] }>("GET", "/destinations"),
         api<{ policies: Policy[] }>("GET", "/policies"),
-        api<{ runs: Run[] }>("GET", "/runs"),
+        api<{ runs: Run[]; has_more?: boolean }>("GET", `/runs?limit=${runLimit}`),
         api<ScopesResponse>("GET", "/scopes"),
       ]);
+      if (seq !== reloadSeq.current) return;
       setDestinations(d.destinations || []);
       setPolicies(p.policies || []);
       setRuns(r.runs || []);
+      setHasMoreRuns(Boolean(r.has_more));
       setScopes(s);
       setStatus("");
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
-  }, [api]);
+  }, [api, runLimit]);
+
+  const reloadRuns = useCallback(async () => {
+    try {
+      const result = await api<{ runs: Run[]; has_more?: boolean }>("GET", `/runs?limit=${runLimit}`);
+      setRuns(result.runs || []);
+      setHasMoreRuns(Boolean(result.has_more));
+    } catch (e) {
+      setStatus("Error refreshing backup history: " + (e as Error).message);
+    }
+  }, [api, runLimit]);
 
   useEffect(() => { reload(); }, [reload]);
-  useAppEvents("backup", projectId, () => reload());
+  useAppEvents("backup", projectId, () => reloadRuns());
   useEffect(() => {
-    const timer = window.setInterval(reload, 15_000);
+    const timer = window.setInterval(reloadRuns, 15_000);
+    return () => window.clearInterval(timer);
+  }, [reloadRuns]);
+
+  useEffect(() => {
+    const timer = window.setInterval(reload, 5 * 60_000);
     return () => window.clearInterval(timer);
   }, [reload]);
 
@@ -288,6 +315,11 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   );
   const lastSuccess = liveRuns.find(r => r.status === "success");
   const lastRun = liveRuns[0];
+  const historyRuns = showAllScopes ? runs : runs.filter((r) =>
+    r.scope?.kind === selectedScopeValue.kind &&
+    (selectedScopeValue.kind === "platform" || r.scope?.id === selectedScopeValue.id),
+  );
+  const operationBusy = busy?.startsWith("run-") || busy?.startsWith("restore-");
 
   // ─── modals (themed; replace window.confirm / window.alert) ────
 
@@ -319,13 +351,20 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const doRestore = async (runID: number) => {
     setBusy(`restore-${runID}`);
     try {
-      const out = await api<{ report: { restart_required?: boolean } }>("POST", "/restore", { run_id: runID });
+      const out = await api<{ report: {
+        restart_required?: boolean;
+        partial_failure?: boolean;
+        failures?: string[];
+        failure_count?: number;
+      } }>("POST", "/restore", { run_id: runID });
       const restart = out?.report?.restart_required;
       const run = runs.find((item) => item.id === runID);
       const fleetTenant = run?.scope?.kind === "fleet_tenant";
       setNotice({
-        title: "Restore complete",
-        body: fleetTenant
+        title: out?.report?.partial_failure ? "Restore partially completed" : "Restore complete",
+        body: out?.report?.partial_failure
+          ? `${out.report.failure_count || out.report.failures?.length || 0} item(s) could not be restored: ${(out.report.failures || []).join("; ")}`
+          : fleetTenant
           ? `${scopeLabel(run?.scope, scopes)} was restored and restarted if it was previously running.`
           : restart
           ? "App databases were swapped live. Restart apteva-server to activate the platform DB swap."
@@ -335,6 +374,19 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     } catch (e) {
       setStatus("Restore failed: " + (e as Error).message);
     } finally { setBusy(null); }
+  };
+
+  const testDestination = async (id: number) => {
+    setBusy(`test-${id}`);
+    setStatus("");
+    try {
+      await api("POST", `/destinations/${id}/test`);
+      setNotice({ title: "Destination healthy", body: "The destination is reachable and passed its access check." });
+    } catch (e) {
+      setStatus("Destination check failed: " + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
   };
 
   const doDeleteDestination = async (id: number) => {
@@ -395,6 +447,12 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         </div>
       )}
 
+      {destinations.some((destination) => destination.kind === "local") && (
+        <div className="text-warn text-xs border border-warn/40 bg-warn/10 rounded px-3 py-2">
+          Local destinations stay on this host. Keep an off-host destination for disaster recovery.
+        </div>
+      )}
+
       {status && (
         <div className="text-error text-xs border border-error/40 bg-error/10 rounded px-3 py-2">
           {status}
@@ -443,13 +501,21 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => runNow(d.id)}
-                disabled={busy === `run-${d.id}`}
+                disabled={Boolean(operationBusy || busy?.startsWith("test-"))}
                 className="px-3 py-1 text-xs bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
               >
                 {busy === `run-${d.id}` ? "Running…" : "Run now"}
               </button>
               <button
+                onClick={() => testDestination(d.id)}
+                disabled={Boolean(busy)}
+                className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text disabled:opacity-50"
+              >
+                {busy === `test-${d.id}` ? "Testing…" : "Test"}
+              </button>
+              <button
                 onClick={() => setPending({ kind: "delete-destination", id: d.id, name: d.name })}
+                disabled={Boolean(busy)}
                 className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text"
               >
                 Delete
@@ -484,6 +550,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             </div>
             <button
               onClick={() => setPending({ kind: "delete-policy", id: p.id, name: p.name || `policy ${p.id}` })}
+              disabled={Boolean(busy)}
               className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text shrink-0"
             >
               Delete
@@ -495,11 +562,21 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
 
       {/* History */}
       <section className="pb-4 space-y-2">
-        <h3 className="text-text text-sm font-bold">History</h3>
-        {runs.length === 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-text text-sm font-bold">History</h3>
+          <label className="text-text-muted text-xs flex items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={showAllScopes}
+              onChange={(event) => setShowAllScopes(event.target.checked)}
+            />
+            Show all scopes
+          </label>
+        </div>
+        {historyRuns.length === 0 && (
           <div className="text-text-muted text-sm italic">No backup runs yet.</div>
         )}
-        {runs.map(r => (
+        {historyRuns.map(r => (
           <Row key={r.id}>
             <div className="min-w-0 flex-1 flex items-start gap-2">
               <span className={`inline-block w-2 h-2 rounded-full mt-1.5 shrink-0 ${statusColor(r.status)}`} />
@@ -511,6 +588,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
                   {" · "}{durationOf(r)}
                   {" · "}<span className="text-text">{scopeLabel(r.scope, scopes)}</span>
                   {r.encrypted ? " · encrypted" : ""}
+                  {r.status === "running" && r.stage ? ` · ${r.stage}` : ""}
                 </div>
                 {r.error && (
                   <div className="text-error text-xs mt-0.5 break-words">{r.error}</div>
@@ -520,7 +598,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             {r.status === "success" && r.remote_key && (
               <button
                 onClick={() => setPending({ kind: "restore", runID: r.id, destName: r.destination_name, scope: r.scope, encrypted: r.encrypted })}
-                disabled={busy === `restore-${r.id}`}
+                disabled={Boolean(operationBusy || busy?.startsWith("test-"))}
                 className="px-2 py-1 text-xs border border-border text-text-muted rounded hover:bg-bg-hover hover:text-text disabled:opacity-50 shrink-0"
               >
                 {busy === `restore-${r.id}` ? "Restoring…" : "Restore"}
@@ -528,6 +606,15 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             )}
           </Row>
         ))}
+        {hasMoreRuns && runLimit < 500 && (
+          <button
+            type="button"
+            onClick={() => setRunLimit((value) => Math.min(500, value + 50))}
+            className="text-accent text-xs hover:underline"
+          >
+            Load 50 more
+          </button>
+        )}
       </section>
 
       {/* Themed modals — replace window.confirm/alert which look
@@ -656,10 +743,36 @@ function NoticeModal({
 function ModalShell({
   title, children, onClose,
 }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const focusableSelector = "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]";
+    const focusable = () => Array.from(panelRef.current?.querySelectorAll<HTMLElement>(focusableSelector) || []);
+    focusable()[0]?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const elements = focusable();
+      if (elements.length === 0) return;
+      const first = elements[0];
+      const last = elements[elements.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus();
+    };
   }, [onClose]);
   return (
     <div
@@ -667,10 +780,14 @@ function ModalShell({
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="bg-bg-card border border-border rounded-lg shadow-popover w-full max-w-md p-5 space-y-3"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-text text-base font-bold">{title}</h3>
+        <h3 id={titleId} className="text-text text-base font-bold">{title}</h3>
         {children}
       </div>
     </div>
@@ -725,6 +842,7 @@ function DestinationForm({
   const [connections, setConnections] = useState<Connection[] | null>(null);
   const [connID, setConnID] = useState<number | "">("");
   const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const existingCloudConnection = destinations.find(
     (destination) => destination.kind === "s3" && destination.connection_id,
   )?.connection_id;
@@ -768,12 +886,16 @@ function DestinationForm({
 
   const submit = async () => {
     setErr("");
+    if (submitting) return;
     if (kind === "s3") {
       if (!connID) { setErr("Pick a cloud storage connection"); return; }
-      // Bind the chosen connection to the cloud_storage role on this
-      // install. Idempotent — same body on every save just refreshes
-      // the binding to the picked value.
-      try {
+    }
+    setSubmitting(true);
+    try {
+      if (kind === "s3") {
+        // Bind the chosen connection to the cloud_storage role on this
+        // install. Idempotent — same body on every save just refreshes
+        // the binding to the picked value.
         const r = await fetch(`/api/apps/installs/${installId}/bindings`, {
           method: "PUT",
           credentials: "same-origin",
@@ -781,36 +903,39 @@ function DestinationForm({
           body: JSON.stringify({ cloud_storage: connID }),
         });
         if (!r.ok) throw new Error(`bind failed: ${r.status} ${await r.text().catch(() => "")}`);
-      } catch (e) { setErr((e as Error).message); return; }
-    }
-    const config = kind === "local"
-      ? { path }
-      : { bucket, key_prefix: keyPrefix };
-    try {
+      }
+      const config = kind === "local"
+        ? { path }
+        : { bucket, key_prefix: keyPrefix };
       await api("POST", "/destinations", {
         name, kind, config, connection_id: kind === "s3" ? connID : undefined, enabled: true,
       });
-      setOpen(false); setName(""); setBucket(""); setKeyPrefix("");
+      setOpen(false); setName(""); setPath(""); setBucket(""); setKeyPrefix("");
       onCreated();
-    } catch (e) { setErr((e as Error).message); }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="mt-2 pt-3 border-t border-border space-y-2">
       <div className="text-text font-bold text-sm">New destination</div>
       <FormGrid>
-        <Label>Name</Label>
-        <Input value={name} onChange={setName} placeholder="nightly-r2" />
+        <Label htmlFor="backup-destination-name">Name</Label>
+        <Input id="backup-destination-name" value={name} onChange={setName} placeholder="nightly-r2" />
 
-        <Label>Kind</Label>
-        <Select value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
+        <Label htmlFor="backup-destination-kind">Kind</Label>
+        <Select id="backup-destination-kind" value={kind} onChange={(v) => setKind(v as "local" | "s3")}>
           <option value="local">local — host directory</option>
           <option value="s3">Cloudflare R2 or AWS S3</option>
         </Select>
 
         {kind === "local" && <>
-          <Label>Path</Label>
+          <Label htmlFor="backup-destination-path">Path</Label>
           <Input
+            id="backup-destination-path"
             value={path}
             onChange={setPath}
             placeholder="leave blank to use the install's data dir"
@@ -818,7 +943,7 @@ function DestinationForm({
         </>}
 
         {kind === "s3" && <>
-          <Label>Connection</Label>
+          <Label htmlFor="backup-destination-connection">Connection</Label>
           {connections === null ? (
             <div className="text-text-muted text-xs italic py-1.5">Loading your connections…</div>
           ) : availableConnections?.length === 0 ? (
@@ -831,6 +956,7 @@ function DestinationForm({
             </div>
           ) : (
             <Select
+              id="backup-destination-connection"
               value={connID === "" ? "" : String(connID)}
               onChange={(v) => setConnID(Number(v))}
             >
@@ -842,10 +968,10 @@ function DestinationForm({
               ))}
             </Select>
           )}
-          <Label>Bucket</Label>
-          <Input value={bucket} onChange={setBucket} placeholder="apteva-backups" />
-          <Label>Key prefix</Label>
-          <Input value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
+          <Label htmlFor="backup-destination-bucket">Bucket</Label>
+          <Input id="backup-destination-bucket" value={bucket} onChange={setBucket} placeholder="apteva-backups" />
+          <Label htmlFor="backup-destination-prefix">Key prefix</Label>
+          <Input id="backup-destination-prefix" value={keyPrefix} onChange={setKeyPrefix} placeholder="prod/" />
         </>}
       </FormGrid>
       {kind === "s3" && availableConnections && availableConnections.length > 0 && (
@@ -867,12 +993,13 @@ function DestinationForm({
         <button
           onClick={submit}
           disabled={
+            submitting ||
             !name ||
             (kind === "s3" && (!connID || !bucket))
           }
           className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
         >
-          Create
+          {submitting ? "Checking…" : "Create"}
         </button>
       </div>
     </div>
@@ -894,6 +1021,7 @@ function PolicyForm({
   const [keep, setKeep] = useState("");
   const [scopeKey, setScopeKey] = useState("platform");
   const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   // The form is mounted alongside the parent; if destinations was empty
   // at first render and the user added one before opening the form,
@@ -922,42 +1050,50 @@ function PolicyForm({
 
   const submit = async () => {
     setErr("");
+    if (submitting) return;
+    if (!name.trim()) { setErr("Name is required"); return; }
+    if (!schedule.trim()) { setErr("Schedule is required"); return; }
     if (!destID) { setErr("Pick a destination"); return; }
     const retention = Number(keep);
     if (!Number.isInteger(retention) || retention < 0) { setErr("Retention must be a whole number of 0 or greater"); return; }
     const scope: Scope = scopeKey.startsWith("fleet:")
       ? { kind: "fleet_tenant", id: scopeKey.slice(6), source_app: "fleet" }
       : { kind: "platform" };
+    setSubmitting(true);
     try {
       await api("POST", "/policies", {
-        name, schedule, destination_id: destID, retention_keep: retention, scope,
+        name: name.trim(), schedule: schedule.trim(), destination_id: destID, retention_keep: retention, scope,
       });
       setOpen(false);
       onCreated();
-    } catch (e) { setErr((e as Error).message); }
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
     <div className="mt-2 pt-3 border-t border-border space-y-2">
       <div className="text-text font-bold text-sm">New policy</div>
       <FormGrid>
-        <Label>Name</Label>
-        <Input value={name} onChange={setName} />
-        <Label>Schedule (cron)</Label>
-        <Input value={schedule} onChange={setSchedule} placeholder="0 3 * * *" />
-        <Label>Destination</Label>
-        <Select value={String(destID)} onChange={(v) => setDestID(Number(v))}>
+        <Label htmlFor="backup-policy-name">Name</Label>
+        <Input id="backup-policy-name" value={name} onChange={setName} />
+        <Label htmlFor="backup-policy-schedule">Schedule (cron)</Label>
+        <Input id="backup-policy-schedule" value={schedule} onChange={setSchedule} placeholder="0 3 * * *" />
+        <Label htmlFor="backup-policy-destination">Destination</Label>
+        <Select id="backup-policy-destination" value={String(destID)} onChange={(v) => setDestID(Number(v))}>
           {destinations.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
         </Select>
-        <Label>Scope</Label>
-        <Select value={scopeKey} onChange={setScopeKey}>
+        <Label htmlFor="backup-policy-scope">Scope</Label>
+        <Select id="backup-policy-scope" value={scopeKey} onChange={setScopeKey}>
           <option value="platform">Platform databases</option>
           {(scopes?.fleet_tenants || []).filter((tenant) => tenant.restorable).map((tenant) => (
             <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
           ))}
         </Select>
-        <Label>Retention (last N)</Label>
-        <Input value={keep} onChange={setKeep} placeholder="0 keeps all backups" />
+        <Label htmlFor="backup-policy-retention">Retention (last N)</Label>
+        <Input id="backup-policy-retention" value={keep} onChange={setKeep} placeholder="0 keeps all backups" />
       </FormGrid>
       {err && <div className="text-error text-xs">{err}</div>}
       <div className="flex justify-end gap-2 pt-1">
@@ -969,9 +1105,10 @@ function PolicyForm({
         </button>
         <button
           onClick={submit}
+          disabled={submitting || !name.trim() || !schedule.trim()}
           className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold hover:bg-accent-hover"
         >
-          Create
+          {submitting ? "Creating…" : "Create"}
         </button>
       </div>
     </div>
@@ -986,15 +1123,16 @@ function FormGrid({ children }: { children: React.ReactNode }) {
   );
 }
 
-function Label({ children }: { children: React.ReactNode }) {
-  return <label className="text-text-muted text-xs">{children}</label>;
+function Label({ children, htmlFor }: { children: React.ReactNode; htmlFor?: string }) {
+  return <label htmlFor={htmlFor} className="text-text-muted text-xs">{children}</label>;
 }
 
 function Input({
-  value, onChange, placeholder,
-}: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  id, value, onChange, placeholder,
+}: { id?: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
   return (
     <input
+      id={id}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       placeholder={placeholder}
@@ -1004,10 +1142,11 @@ function Input({
 }
 
 function Select({
-  value, onChange, children,
-}: { value: string; onChange: (v: string) => void; children: React.ReactNode }) {
+  id, value, onChange, children,
+}: { id?: string; value: string; onChange: (v: string) => void; children: React.ReactNode }) {
   return (
     <select
+      id={id}
       value={value}
       onChange={(e) => onChange(e.target.value)}
       className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text w-full min-w-0"

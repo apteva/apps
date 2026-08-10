@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.7.3
+version: 0.8.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -122,6 +122,26 @@ provides:
       description: Force-logout one user (requires org).
     - name: auth_users_set_password
       description: Set a new password for one user (requires org).
+    - name: auth_roles_list
+      description: List roles and their effective permissions (requires org).
+    - name: auth_roles_create
+      description: Create an organization-scoped role.
+    - name: auth_roles_update
+      description: Update a role's display data.
+    - name: auth_roles_delete
+      description: Delete a role and remove its user assignments.
+    - name: auth_permissions_list
+      description: List the organization's permission catalog.
+    - name: auth_permissions_create
+      description: Create a namespaced permission.
+    - name: auth_permissions_update
+      description: Update a permission's display data.
+    - name: auth_permissions_delete
+      description: Delete a permission and remove it from roles.
+    - name: auth_role_permissions_set
+      description: Replace a role's permission set atomically.
+    - name: auth_user_roles_set
+      description: Replace a user's role assignments atomically.
     - name: auth_audit_search
       description: Filter the audit log; org-scoped or project-wide.
     - name: auth_stats
@@ -243,6 +263,16 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "POST", Pattern: "/admin/users/{id}/revoke_sessions", Handler: a.handleAdminUsersRevokeSessions},
 		{Method: "POST", Pattern: "/admin/users/{id}/send_password_reset", Handler: a.handleAdminUsersSendPasswordReset},
 		{Method: "POST", Pattern: "/admin/users/{id}/set_password", Handler: a.handleAdminUsersSetPassword},
+		{Method: "PUT", Pattern: "/admin/users/{id}/roles", Handler: a.handleAdminUserRolesSet},
+		{Method: "GET", Pattern: "/admin/roles", Handler: a.handleAdminRolesList},
+		{Method: "POST", Pattern: "/admin/roles", Handler: a.handleAdminRolesCreate},
+		{Method: "PATCH", Pattern: "/admin/roles/{id}", Handler: a.handleAdminRolesUpdate},
+		{Method: "DELETE", Pattern: "/admin/roles/{id}", Handler: a.handleAdminRolesDelete},
+		{Method: "PUT", Pattern: "/admin/roles/{id}/permissions", Handler: a.handleAdminRolePermissionsSet},
+		{Method: "GET", Pattern: "/admin/permissions", Handler: a.handleAdminPermissionsList},
+		{Method: "POST", Pattern: "/admin/permissions", Handler: a.handleAdminPermissionsCreate},
+		{Method: "PATCH", Pattern: "/admin/permissions/{id}", Handler: a.handleAdminPermissionsUpdate},
+		{Method: "DELETE", Pattern: "/admin/permissions/{id}", Handler: a.handleAdminPermissionsDelete},
 		{Method: "GET", Pattern: "/admin/clients", Handler: a.handleAdminClientsList},
 		{Method: "POST", Pattern: "/admin/clients", Handler: a.handleAdminClientsCreate},
 		{Method: "POST", Pattern: "/admin/clients/{client_id}/rotate", Handler: a.handleAdminClientsRotate},
@@ -412,6 +442,100 @@ func (a *App) MCPTools() []sdk.Tool {
 				"user_id": map[string]any{"type": "integer"},
 			}), []string{"user_id"}),
 			Handler: a.toolUsersEnable,
+		},
+
+		// ─── Roles and permissions ────────────────────────────────
+		{
+			Name:        "auth_roles_list",
+			Description: "List organization-scoped roles and their effective permission keys. Requires organization_id/slug.",
+			InputSchema: schemaObject(orgSelector, nil),
+			Handler:     a.toolRolesList,
+		},
+		{
+			Name:        "auth_roles_create",
+			Description: "Create a role. Requires organization_id/slug, key, and optional name/description. The key is immutable.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"key":         map[string]any{"type": "string"},
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+			}), []string{"key"}),
+			Handler: a.toolRolesCreate,
+		},
+		{
+			Name:        "auth_roles_update",
+			Description: "Update a role's display name or description. Requires organization_id/slug + role_id.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"role_id":     map[string]any{"type": "integer"},
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+			}), []string{"role_id"}),
+			Handler: a.toolRolesUpdate,
+		},
+		{
+			Name:        "auth_roles_delete",
+			Description: "Delete a role and remove all of its user assignments. Affected users receive a new authorization_version.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"role_id": map[string]any{"type": "integer"},
+			}), []string{"role_id"}),
+			Handler: a.toolRolesDelete,
+		},
+		{
+			Name:        "auth_permissions_list",
+			Description: "List the organization's permission catalog. Requires organization_id/slug.",
+			InputSchema: schemaObject(orgSelector, nil),
+			Handler:     a.toolPermissionsList,
+		},
+		{
+			Name:        "auth_permissions_create",
+			Description: "Create a namespaced permission (for example resources:read). Requires organization_id/slug + key.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"key":         map[string]any{"type": "string"},
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+			}), []string{"key"}),
+			Handler: a.toolPermissionsCreate,
+		},
+		{
+			Name:        "auth_permissions_update",
+			Description: "Update a permission's display name or description. Its machine key is immutable.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"permission_id": map[string]any{"type": "integer"},
+				"name":          map[string]any{"type": "string"},
+				"description":   map[string]any{"type": "string"},
+			}), []string{"permission_id"}),
+			Handler: a.toolPermissionsUpdate,
+		},
+		{
+			Name:        "auth_permissions_delete",
+			Description: "Delete a permission and remove it from every role. Affected users receive a new authorization_version.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"permission_id": map[string]any{"type": "integer"},
+			}), []string{"permission_id"}),
+			Handler: a.toolPermissionsDelete,
+		},
+		{
+			Name:        "auth_role_permissions_set",
+			Description: "Atomically replace a role's complete permission set. Requires role_id and permission_ids.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"role_id": map[string]any{"type": "integer"},
+				"permission_ids": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "integer"},
+				},
+			}), []string{"role_id", "permission_ids"}),
+			Handler: a.toolRolePermissionsSet,
+		},
+		{
+			Name:        "auth_user_roles_set",
+			Description: "Atomically replace a user's complete role set and advance authorization_version when it changes.",
+			InputSchema: schemaObject(merge(map[string]any{
+				"user_id": map[string]any{"type": "integer"},
+				"role_ids": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "integer"},
+				},
+			}), []string{"user_id", "role_ids"}),
+			Handler: a.toolUserRolesSet,
 		},
 
 		// ─── Audit + stats ─────────────────────────────────────────

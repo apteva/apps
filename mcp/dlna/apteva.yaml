@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: dlna
 display_name: DLNA Server
-version: 0.1.19
+version: 0.2.1
 description: |
   Publishes a UPnP/DLNA MediaServer on the LAN. Smart TVs, game
   consoles, Sonos, VLC, and other AV clients discover this app via
@@ -10,22 +10,22 @@ description: |
   bytes + folder structure, and the `media` app for duration / codec
   / resolution metadata.
 
-  This sidecar holds almost no state of its own — the only owned
-  tables are an allowlist of which storage folders to expose
-  (`published_folders`) and a rolling 24h client-access log
-  (`client_log`). Every Browse SOAP call is computed live from
-  storage queries.
+  This sidecar holds almost no state of its own: a published-folder
+  allowlist, persistent device settings, and a rolling client-access
+  log. Browse results use a short event-invalidated cache to avoid
+  repeatedly walking a large library.
 
-  No transcoding in v0.1: clients that can't decode the source codec
+  No transcoding: clients that can't decode the source codec
   see the file in the listing but won't play it. Add ffmpeg + an
-  on-demand transcoder pipeline for v0.2 if needed.
+  on-demand transcoder pipeline if needed.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/dlna
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/dlna/icon.png
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [dlna, upnp, media, lan, tv, streaming]
 
-scopes: [project, global]
+scopes: [project]
 min_apteva_version: "0.10.0"
 
 requires:
@@ -37,8 +37,9 @@ requires:
   apps:
     - name: storage
       reason: "Folder listing, file metadata, signed byte URLs."
+      events: [file.added, file.updated, file.deleted]
     - name: media
-      reason: "Duration / codec / resolution enrichment for video & audio."
+      reason: "Duration and resolution enrichment for video & audio."
       optional: true
 
 provides:
@@ -46,7 +47,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: dlna_status,             description: "Status of the DLNA broadcaster: friendly_name, uuid, port, broadcasting flag, published-folder count, recent-client count." }
-    - { name: dlna_set_friendly_name,  description: "Rename the device. The new name shows on TV input pickers after the next SSDP NOTIFY (≤30s). Args: name." }
+    - { name: dlna_set_friendly_name,  description: "Persistently rename the device and announce the new name immediately. Args: name." }
     - { name: dlna_publish_folder,     description: "Add a storage folder to the published library. Args: folder (path in storage), label?." }
     - { name: dlna_unpublish_folder,   description: "Stop exposing a storage folder. Args: folder." }
     - { name: dlna_clients_recent,     description: "List clients that browsed in the last 24h: ip, user_agent, last_action_at, browse_count. Args: limit?." }
@@ -86,7 +87,7 @@ config_schema:
     type: text
     default: ""
     label: Device UUID
-    description: Auto-generated on first start. Rotating this resets pairing on every TV that has bookmarked the server.
+    description: Optional fixed UUID. When empty, DLNA generates one once and persists it in its app database.
   - name: lan_ip
     type: text
     default: ""
@@ -113,6 +114,11 @@ config_schema:
     type: text
     default: "60"
     label: Signed URL TTL (seconds)
-    description: Lifetime of the storage-signed URLs returned in the 302 from /media/{id}. Short is fine; clients re-request whenever they reseek.
+    description: Lifetime of the storage-signed URL used internally while proxying a media request through the LAN endpoint.
+  - name: catalog_cache_seconds
+    type: text
+    default: "30"
+    label: Catalog cache (seconds)
+    description: Cache lifetime for the published media catalog. Storage events invalidate it immediately.
 
 upgrade_policy: auto-patch

@@ -37,20 +37,24 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.18
+version: 0.12.2
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
-  Checkout links are created only when explicitly requested.
+  Checkout links are created only when explicitly requested. Product apps
+  can request durable, idempotent off-session invoice collection.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/billing
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [billing, invoices, payments, finance]
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
-    - net.egress
     - platform.apps.call
     - platform.connections.execute
-    - platform.connections.read_credentials
+    - platform.connections.read_public_config
   apps:
     - name: catalog
       optional: true
@@ -58,13 +62,17 @@ requires:
     - role: payment_processor
       kind: integration
       compatible_slugs: [stripe]
-      capabilities: [customers.create, checkout_sessions.create, refunds.create, webhooks.receive]
+      capabilities: [customers.create, checkout_sessions.create, checkout_sessions.get, payment_intents.create, payment_intents.get, refunds.create, payment_methods.get, payment_methods.detach, webhooks.receive]
       tools:
         customers.create: create_customer
         customers.search: search_customers
         checkout_sessions.create: create_checkout_session
+        checkout_sessions.get: get_checkout_session
+        payment_intents.create: create_payment_intent
+        payment_intents.get: get_payment_intent
         refunds.create: create_refund
-        webhooks.process: process_webhook
+        payment_methods.get: get_payment_method
+        payment_methods.detach: detach_payment_method
       required: false
       label: "Payment processor (Stripe)"
 provides:
@@ -76,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: billing/v0.12.2
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -105,19 +113,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// passing AppCtx — can reach it. (Same pattern as crm.)
 	globalCtx = ctx
 
-	if stripeDirectConfigured(ctx) {
-		ctx.Logger().Info("billing: stripe_secret_key configured — direct Stripe payment links enabled")
-		if err := ensureStripeWebhook(ctx); err != nil {
-			ctx.Logger().Warn("billing: Stripe webhook auto-registration pending", "err", err.Error())
+	if bound := ctx.IntegrationFor("payment_processor"); bound != nil {
+		ctx.Logger().Info("billing: payment_processor integration bound — on-demand Stripe payment links enabled")
+		if err := ensureStripeWebhook(ctx, bound); err != nil {
+			ctx.Logger().Warn("billing: platform-managed Stripe webhook reconciliation pending", "err", err.Error())
 		}
-	} else if ctx.IntegrationFor("payment_processor") != nil {
-		ctx.Logger().Info("billing: payment_processor integration bound — Stripe payment links enabled")
 	} else {
 		ctx.Logger().Info("billing: no payment_processor bound — manual-payment mode only")
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.18",
+		"version", "0.11.0",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -144,9 +150,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/payment-methods/", Handler: a.handleHTTPPaymentMethodItem},
 		{Pattern: "/setup-sessions", Handler: a.handleHTTPSetupSessionsCollection},
 		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
-		// Stripe webhook receiver. Public POST endpoint configured
-		// automatically when stripe_secret_key is set, or manually
-		// when using the legacy payment_processor integration path.
+		// Stripe webhook receiver. The platform automatically registers
+		// this URL and verifies events through the bound connection.
 		{Pattern: "/webhooks/stripe", Handler: a.handleStripeWebhook},
 	}
 }
@@ -423,6 +428,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolPaymentsRecord,
 		},
 		{
+			Name:        "invoices_refund",
+			Description: "Request a partial or full Stripe refund for a paid invoice. Billing selects and validates the original Stripe payment, records an idempotent request, calls the bound processor, and waits for the verified refund webhook to update invoice balances. Args: invoice_id, amount_cents?, reason?, idempotency_key.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":      map[string]any{"type": "integer"},
+				"amount_cents":    map[string]any{"type": "integer"},
+				"reason":          map[string]any{"type": "string", "enum": []string{"duplicate", "fraudulent", "requested_by_customer"}},
+				"idempotency_key": map[string]any{"type": "string"},
+			}, []string{"invoice_id", "idempotency_key"}),
+			Handler: a.toolInvoicesRefund,
+		},
+		{
 			Name:        "invoices_render_pdf",
 			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes}. With save_to_storage=true, writes the PDF to the storage app (must be installed) and returns {file_id, url, filename, size_bytes} so the agent can attach it to chat / email. Args: invoice_id, save_to_storage (default false), folder (storage path, default '/invoices/').",
 			InputSchema: schemaObject(map[string]any{
@@ -433,14 +449,43 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolInvoicesRenderPDF,
 		},
 		{
-			Name:        "invoices_send_payment_link",
-			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is configured, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses stripe_secret_key config when present, otherwise falls back to the bound payment_processor integration (Stripe). The URL is valid for 24h. On payment success, the verified webhook records the payment and transitions the invoice to 'paid' automatically. Args: invoice_id (required), success_url, cancel_url.",
+			Name:        "invoices_create_payment_session",
+			Description: "Create or recover a Stripe payment session for an open invoice. Product-app API: presentation='elements' returns publishable_key + client_secret; presentation='hosted' returns url. Requires a stable idempotency_key for retry-safe use. Billing owns amount/currency validation and webhook reconciliation. Args: invoice_id, presentation, idempotency_key, return_url, success_url, cancel_url, expires_at, payment_method_types, save_payment_method, set_default_payment_method.",
 			InputSchema: schemaObject(map[string]any{
-				"invoice_id":  map[string]any{"type": "integer"},
-				"success_url": map[string]any{"type": "string"},
-				"cancel_url":  map[string]any{"type": "string"},
+				"invoice_id":                 map[string]any{"type": "integer"},
+				"presentation":               map[string]any{"type": "string", "enum": []string{"elements", "hosted"}},
+				"idempotency_key":            map[string]any{"type": "string"},
+				"return_url":                 map[string]any{"type": "string"},
+				"success_url":                map[string]any{"type": "string"},
+				"cancel_url":                 map[string]any{"type": "string"},
+				"expires_at":                 map[string]any{"type": "integer"},
+				"payment_method_types":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"save_payment_method":        map[string]any{"type": "boolean"},
+				"set_default_payment_method": map[string]any{"type": "boolean"},
+			}, []string{"invoice_id", "presentation", "idempotency_key"}),
+			Handler: a.toolInvoicesCreatePaymentSession,
+		},
+		{
+			Name:        "invoices_send_payment_link",
+			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is connected, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses only the bound payment_processor integration; Billing never receives Stripe credentials. The URL is valid for 24h. On payment success, the platform-verified webhook records the payment and transitions the invoice to 'paid' automatically. Product apps may set save_payment_method=true to collect consent during the first checkout for later recurring charges. Args: invoice_id (required), success_url, cancel_url, save_payment_method, set_default_payment_method.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":                 map[string]any{"type": "integer"},
+				"success_url":                map[string]any{"type": "string"},
+				"cancel_url":                 map[string]any{"type": "string"},
+				"save_payment_method":        map[string]any{"type": "boolean"},
+				"set_default_payment_method": map[string]any{"type": "boolean"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesSendPaymentLink,
+		},
+		{
+			Name:        "invoices_collect",
+			Description: "Collect an open invoice automatically with an active reusable saved payment method. Billing owns the off-session processor call, durable attempt state, webhook reconciliation, and invoice payment record. Product apps must supply a stable idempotency_key. Args: invoice_id, idempotency_key, optional payment_method_id.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":        map[string]any{"type": "integer"},
+				"idempotency_key":   map[string]any{"type": "string"},
+				"payment_method_id": map[string]any{"type": "integer"},
+			}, []string{"invoice_id", "idempotency_key"}),
+			Handler: a.toolInvoicesCollect,
 		},
 		// ── Payment methods ──────────────────────────────────────────
 		{
@@ -477,7 +522,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "payment_method_detach",
-			Description: "Detach a stored payment method. With direct Stripe config, detaches it at Stripe too; otherwise marks it detached locally after the provider webhook or operator action. Args: id.",
+			Description: "Detach a stored payment method. For Stripe methods, detaches it through the bound payment_processor integration before updating Billing locally. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),

@@ -26,13 +26,13 @@ import (
 )
 
 type haConfigPayload struct {
-	Name             string         `json:"name"`
-	UniqueID         string         `json:"unique_id"`
-	StateTopic       string         `json:"state_topic"`
-	CommandTopic     string         `json:"command_topic"`
-	AvailabilityTopic string        `json:"availability_topic"`
-	JSONAttrTopic    string         `json:"json_attributes_topic"`
-	Device           *struct {
+	Name              string `json:"name"`
+	UniqueID          string `json:"unique_id"`
+	StateTopic        string `json:"state_topic"`
+	CommandTopic      string `json:"command_topic"`
+	AvailabilityTopic string `json:"availability_topic"`
+	JSONAttrTopic     string `json:"json_attributes_topic"`
+	Device            *struct {
 		Manufacturer string   `json:"manufacturer"`
 		Model        string   `json:"model"`
 		Name         string   `json:"name"`
@@ -70,7 +70,7 @@ func (a *App) handleHAConfig(topic string, payload []byte) {
 		// Empty payload = HA convention for "remove this device".
 		_, _ = a.ctx.AppDB().Exec(
 			`DELETE FROM mqtt_devices WHERE project_id = ? AND slug = ?`,
-			projectScope(), topicWithoutSuffix(topic))
+			projectScope(a.ctx), topicWithoutSuffix(topic))
 		return
 	}
 	var hp haConfigPayload
@@ -101,14 +101,15 @@ func (a *App) handleHAConfig(topic string, payload []byte) {
 		   command_topic = excluded.command_topic,
 		   ha_config_json = excluded.ha_config_json,
 		   last_seen = CURRENT_TIMESTAMP`,
-		projectScope(), slug, component, objectID, display,
+		projectScope(a.ctx), slug, component, objectID, display,
 		manuf, model, hp.StateTopic, hp.CommandTopic, string(payload),
 	)
 }
 
 // parseHATopic returns (component, object_id, ok) for either form:
-//   homeassistant/<component>/<object_id>/config
-//   homeassistant/<component>/<node_id>/<object_id>/config
+//
+//	homeassistant/<component>/<object_id>/config
+//	homeassistant/<component>/<node_id>/<object_id>/config
 func parseHATopic(topic string) (string, string, bool) {
 	parts := strings.Split(topic, "/")
 	if len(parts) < 4 || parts[0] != "homeassistant" || parts[len(parts)-1] != "config" {

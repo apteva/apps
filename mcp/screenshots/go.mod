@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/screenshots
 go 1.26
 
 require (
-	github.com/apteva/app-sdk v0.25.0
+	github.com/apteva/app-sdk v0.43.0
 	modernc.org/sqlite v1.50.0
 )
 

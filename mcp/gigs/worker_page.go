@@ -202,7 +202,7 @@ func workerPageHTML(token string) string {
   <main id="app">Loading...</main>
   <script>
 	    const TOKEN = ` + jsString(token) + `;
-	    const API = "/api/apps/gigs/worker/" + TOKEN;
+	    const API = window.location.pathname.replace(/\/+$/, "");
 	    const result = {};
 	    const instructionResponses = {};
 	    const allAttachmentIDs = new Set();
@@ -1041,8 +1041,12 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		return
 	}
 	ctx := globalCtx
-	assignID, gigID, pid, status, gigStatus, mode, _, err := loadAssignmentState(ctx.AppDB(), token)
+	assignID, gigID, pid, status, gigStatus, mode, revoked, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
+		httpErr(w, http.StatusNotFound, "invalid token")
+		return
+	}
+	if revoked {
 		httpErr(w, http.StatusNotFound, "invalid token")
 		return
 	}
@@ -1660,11 +1664,15 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	if !ok {
 		// Schema needs structured fields we couldn't extract — nudge
 		// the worker to open the link.
-		var token string
+		var token, publicBaseURL string
 		_ = ctx.AppDB().QueryRow(
-			`SELECT magic_token FROM gig_assignments WHERE id=?`, assignID,
-		).Scan(&token)
-		nudge := "Thanks — to submit this, please open: " + buildWorkerURL(ctx, token)
+			`SELECT magic_token, COALESCE(public_base_url,'') FROM gig_assignments WHERE id=?`, assignID,
+		).Scan(&token, &publicBaseURL)
+		workerURL, err := buildWorkerURL(ctx, token, publicBaseURL)
+		if err != nil {
+			return err
+		}
+		nudge := "Thanks — to submit this, please open: " + workerURL
 		_, _ = crmSendMessage(ctx, pid, contactID, nudge, "", "")
 		return nil
 	}

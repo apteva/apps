@@ -22,10 +22,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +40,8 @@ import (
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/anacrolix/torrent/storage"
 	"github.com/anacrolix/torrent/types"
+	"golang.org/x/sys/unix"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -45,33 +51,110 @@ const (
 // Engine is the user-facing surface. All methods are safe to call
 // from any goroutine; the bittorrent client serialises internally.
 type Engine struct {
-	cli         *torrent.Client
-	cfg         EngineConfig
-	mu          sync.Mutex
-	torrents    map[string]*managedTorrent
-	logFn       func(string, string)
+	cli          *torrent.Client
+	cfg          EngineConfig
+	mu           sync.Mutex
+	torrents     map[string]*managedTorrent
+	logFn        func(string, string)
 	onTransition func(infohash string, prev, next string, snap TorrentSnapshot)
 }
 
 type EngineConfig struct {
-	WorkingDir       string
-	ListenPort       int
-	BindInterface    string
-	DHTEnabled       bool
-	EncryptionForced bool
-	GlobalDownKiBps  int
-	GlobalUpKiBps    int
+	WorkingDir            string
+	ListenPort            int
+	BindInterface         string
+	DHTEnabled            bool
+	EncryptionForced      bool
+	GlobalDownKiBps       int
+	GlobalUpKiBps         int
+	MaxConcurrent         int
+	FreeDiskSafetyPercent int
+	SeedRatioTarget       float64
+	SeedTimeTarget        time.Duration
 }
 
 type managedTorrent struct {
-	t            *torrent.Torrent
-	infohash     string
-	prevState    string
-	paused       bool
-	addedAt      time.Time
-	completedAt  time.Time
-	lastErr      string
-	priorityHint map[int]types.PiecePriority // file_index → priority, used for restore-on-resume
+	t             *torrent.Torrent
+	infohash      string
+	prevState     string
+	paused        bool
+	addedAt       time.Time
+	completedAt   time.Time
+	lastErr       string
+	queued        bool
+	seedStopped   bool
+	priorityHint  map[int]types.PiecePriority // file_index → priority, used for restore-on-resume
+	lastSampleAt  time.Time
+	lastReadData  int64
+	lastWriteData int64
+	downRateBPS   int64
+	upRateBPS     int64
+}
+
+type interfaceBinding struct {
+	ipv4 net.IP
+	ipv6 net.IP
+}
+
+func resolveInterfaceBinding(name string) (*interfaceBinding, error) {
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("bind_interface %q: %w", name, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return nil, fmt.Errorf("bind_interface %q addresses: %w", name, err)
+	}
+	b := &interfaceBinding{}
+	for _, addr := range addrs {
+		ip, _, err := net.ParseCIDR(addr.String())
+		if err != nil {
+			continue
+		}
+		if ip4 := ip.To4(); ip4 != nil && b.ipv4 == nil {
+			b.ipv4 = ip4
+		} else if ip.To16() != nil && b.ipv6 == nil {
+			b.ipv6 = ip
+		}
+	}
+	if b.ipv4 == nil && b.ipv6 == nil {
+		return nil, fmt.Errorf("bind_interface %q has no usable IP address", name)
+	}
+	return b, nil
+}
+
+func (b *interfaceBinding) ipForNetwork(network string) net.IP {
+	if strings.HasSuffix(network, "6") {
+		return b.ipv6
+	}
+	if strings.HasSuffix(network, "4") {
+		return b.ipv4
+	}
+	if b.ipv4 != nil {
+		return b.ipv4
+	}
+	return b.ipv6
+}
+
+func (b *interfaceBinding) listenHost(network string) string {
+	if ip := b.ipForNetwork(network); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func (b *interfaceBinding) dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	ip := b.ipForNetwork(network)
+	if ip == nil {
+		return nil, fmt.Errorf("bound interface has no address for %s", network)
+	}
+	d := net.Dialer{}
+	if strings.HasPrefix(network, "udp") {
+		d.LocalAddr = &net.UDPAddr{IP: ip}
+	} else {
+		d.LocalAddr = &net.TCPAddr{IP: ip}
+	}
+	return d.DialContext(ctx, network, addr)
 }
 
 // TorrentSnapshot is the read-only view we hand back to callers.
@@ -87,6 +170,7 @@ type TorrentSnapshot struct {
 	Progress        float64 `json:"progress"` // 0..1
 	DownloadRateBPS int64   `json:"download_rate_bps"`
 	UploadRateBPS   int64   `json:"upload_rate_bps"`
+	UploadedBytes   int64   `json:"uploaded_bytes"`
 	Peers           int     `json:"peers"`
 	Seeds           int     `json:"seeds"`
 	ETASeconds      int64   `json:"eta_seconds"` // -1 if unknown
@@ -111,6 +195,21 @@ func NewEngine(cfg EngineConfig, log func(string, string)) (*Engine, error) {
 	if log == nil {
 		log = func(string, string) {}
 	}
+	if cfg.ListenPort < 0 || cfg.ListenPort > 65535 {
+		return nil, fmt.Errorf("listen_port must be between 0 and 65535")
+	}
+	if cfg.GlobalDownKiBps < 0 || cfg.GlobalUpKiBps < 0 {
+		return nil, errors.New("global rate limits must be zero or positive")
+	}
+	if cfg.MaxConcurrent < 0 {
+		return nil, errors.New("max_concurrent_downloads must be zero or positive")
+	}
+	if cfg.FreeDiskSafetyPercent < 0 || cfg.FreeDiskSafetyPercent >= 100 {
+		return nil, errors.New("free_disk_safety_pct must be between 0 and 99")
+	}
+	if cfg.SeedRatioTarget < 0 || cfg.SeedTimeTarget < 0 {
+		return nil, errors.New("seed targets must be zero or positive")
+	}
 	if err := os.MkdirAll(cfg.WorkingDir, 0o755); err != nil {
 		return nil, fmt.Errorf("working dir: %w", err)
 	}
@@ -121,21 +220,33 @@ func NewEngine(cfg EngineConfig, log func(string, string)) (*Engine, error) {
 	tcfg.ListenPort = cfg.ListenPort
 	tcfg.NoDHT = !cfg.DHTEnabled
 	tcfg.DisableAcceptRateLimiting = true
+	if cfg.GlobalDownKiBps > 0 {
+		bps := cfg.GlobalDownKiBps * 1024
+		tcfg.DownloadRateLimiter = rate.NewLimiter(rate.Limit(bps), max(64<<10, min(bps, 1<<20)))
+	}
+	if cfg.GlobalUpKiBps > 0 {
+		bps := cfg.GlobalUpKiBps * 1024
+		tcfg.UploadRateLimiter = rate.NewLimiter(rate.Limit(bps), max(64<<10, min(bps, 1<<20)))
+	}
 	if cfg.EncryptionForced {
 		tcfg.HeaderObfuscationPolicy.RequirePreferred = true
 		tcfg.HeaderObfuscationPolicy.Preferred = true
 	}
 	if cfg.BindInterface != "" {
-		// anacrolix's client config doesn't expose an "interface" field
-		// directly; binding is via SetTransport. Out of scope for v0.1
-		// — log and continue. Documenting is enough; users on
-		// dual-homed hosts can fall back to OS routing rules.
-		log("engine", fmt.Sprintf("bind_interface=%s requested but not yet implemented", cfg.BindInterface))
+		binding, err := resolveInterfaceBinding(cfg.BindInterface)
+		if err != nil {
+			return nil, err
+		}
+		tcfg.ListenHost = binding.listenHost
+		tcfg.DisableIPv4 = binding.ipv4 == nil
+		tcfg.DisableIPv6 = binding.ipv6 == nil
+		tcfg.TrackerDialContext = binding.dialContext
+		tcfg.HTTPDialContext = binding.dialContext
+		log("engine", fmt.Sprintf("network pinned to interface %s", cfg.BindInterface))
 	}
 
-	// Custom storage so we can put the engine's session metadata in a
-	// distinct subdirectory ("engine/") and the actual download bytes
-	// alongside. Helps the resume-on-boot path locate orphaned files.
+	// File storage resumes completed pieces from the bytes already in
+	// working_dir after the DB-backed torrent definitions are re-added.
 	tcfg.DefaultStorage = storage.NewFile(cfg.WorkingDir)
 
 	cli, err := torrent.NewClient(tcfg)
@@ -187,19 +298,6 @@ func (e *Engine) Run(ctx context.Context) error {
 
 func (e *Engine) Close() { e.cli.Close() }
 
-// MarkError stamps an error on the in-memory torrent so the next
-// snapshot computes state="error". Without this the post-completion
-// upload-failure path could persist state=error to the DB while the
-// engine kept reporting "queued" or "completed", and the panel would
-// show the wrong bucket. Idempotent — calling with msg="" clears.
-func (e *Engine) MarkError(infohash, msg string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if mt, ok := e.torrents[infohash]; ok {
-		mt.lastErr = msg
-	}
-}
-
 // AddMagnet starts a new torrent from a magnet URI. Idempotent on
 // infohash — re-adding an existing torrent returns the existing
 // handle and snapshot.
@@ -215,15 +313,22 @@ func (e *Engine) AddMagnet(magnet string) (*TorrentSnapshot, error) {
 // Useful when search results have an infohash but no magnet (some
 // indexers split them).
 func (e *Engine) AddInfohash(hex string) (*TorrentSnapshot, error) {
-	hash := metainfo.NewHashFromHex(hex)
+	var hash metainfo.Hash
+	if err := hash.FromHexString(strings.TrimSpace(hex)); err != nil {
+		return nil, fmt.Errorf("invalid infohash: %w", err)
+	}
 	t, _ := e.cli.AddTorrentInfoHash(hash)
 	return e.track(t), nil
 }
 
 // AddTorrentURL fetches a .torrent file and starts it.
-func (e *Engine) AddTorrentURL(url string) (*TorrentSnapshot, error) {
+func (e *Engine) AddTorrentURL(rawURL string) (*TorrentSnapshot, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, errors.New("torrent_url must be an absolute http(s) URL")
+	}
 	httpc := &http.Client{Timeout: 15 * time.Second}
-	resp, err := httpc.Get(url)
+	resp, err := httpc.Get(u.String())
 	if err != nil {
 		return nil, err
 	}
@@ -231,7 +336,14 @@ func (e *Engine) AddTorrentURL(url string) (*TorrentSnapshot, error) {
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf(".torrent fetch: HTTP %d", resp.StatusCode)
 	}
-	mi, err := metainfo.Load(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > 10<<20 {
+		return nil, errors.New(".torrent response exceeds 10 MiB")
+	}
+	mi, err := metainfo.Load(bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -260,13 +372,16 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 		e.torrents[hash] = mt
 	}
 	e.mu.Unlock()
+	if ok {
+		return e.Snapshot(hash)
+	}
 
 	// Kick off DownloadAll once we have info. Fire-and-forget; the
 	// poll loop picks up state changes either way.
 	go func() {
 		select {
 		case <-t.GotInfo():
-			t.DownloadAll()
+			e.onMetadataReady(hash)
 		case <-time.After(60 * time.Second):
 			// Magnet didn't resolve in time. Engine keeps trying;
 			// surface the wait as an error in snapshots.
@@ -275,12 +390,137 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 				mt.lastErr = "info not received yet (peers / DHT may be cold)"
 			}
 			e.mu.Unlock()
+			// Keep listening after surfacing the warning. A cold magnet
+			// can receive metadata later and should recover without an
+			// app restart.
+			select {
+			case <-t.GotInfo():
+				e.onMetadataReady(hash)
+			case <-t.Closed():
+			}
 		case <-t.Closed():
 			return
 		}
 	}()
 
-	return e.snapshot(mt)
+	return e.Snapshot(hash)
+}
+
+func (e *Engine) onMetadataReady(infohash string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	mt, ok := e.torrents[infohash]
+	if !ok {
+		return
+	}
+	mt.lastErr = ""
+	if mt.paused {
+		return
+	}
+	if !e.hasDiskCapacityLocked(mt) {
+		mt.lastErr = "insufficient free disk for torrent and configured safety margin"
+		mt.t.SetMaxEstablishedConns(0)
+		return
+	}
+	if e.downloadSlotAvailableLocked(mt) {
+		e.startDownloadLocked(mt)
+	} else {
+		mt.queued = true
+		mt.t.SetMaxEstablishedConns(0)
+	}
+}
+
+func (e *Engine) downloadSlotAvailableLocked(candidate *managedTorrent) bool {
+	if e.cfg.MaxConcurrent <= 0 {
+		return true
+	}
+	active := 0
+	for _, mt := range e.torrents {
+		if mt == candidate || mt.paused || mt.queued || mt.seedStopped || mt.t.Info() == nil {
+			continue
+		}
+		if mt.t.BytesMissing() > 0 {
+			active++
+		}
+	}
+	return active < e.cfg.MaxConcurrent
+}
+
+func (e *Engine) startDownloadLocked(mt *managedTorrent) {
+	mt.queued = false
+	mt.t.SetMaxEstablishedConns(80)
+	files := mt.t.Files()
+	for i, f := range files {
+		if p, ok := mt.priorityHint[i]; ok {
+			f.SetPriority(p)
+		}
+	}
+	mt.t.DownloadAll()
+	for i, f := range files {
+		if p, ok := mt.priorityHint[i]; ok {
+			f.SetPriority(p)
+		}
+	}
+}
+
+func (e *Engine) startQueuedLocked() {
+	for _, mt := range e.torrents {
+		if !mt.queued || mt.paused || mt.lastErr != "" || mt.t.Info() == nil {
+			continue
+		}
+		if !e.downloadSlotAvailableLocked(mt) {
+			return
+		}
+		e.startDownloadLocked(mt)
+	}
+}
+
+func (e *Engine) hasDiskCapacityLocked(mt *managedTorrent) bool {
+	pct := e.cfg.FreeDiskSafetyPercent
+	if pct <= 0 || mt.t.Info() == nil {
+		return true
+	}
+	if pct >= 100 {
+		return false
+	}
+	free, err := availableDiskBytes(e.cfg.WorkingDir)
+	if err != nil {
+		return false
+	}
+	missing := mt.t.BytesMissing()
+	return missing <= free*int64(100-pct)/100
+}
+
+// RestoreState reapplies persisted user intent after the torrent is
+// re-added on boot. It is safe before metadata arrives.
+func (e *Engine) RestoreState(infohash string, paused bool, priorities map[int]string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	mt, ok := e.torrents[infohash]
+	if !ok {
+		return
+	}
+	for i, value := range priorities {
+		if p, err := parsePriority(value); err == nil {
+			mt.priorityHint[i] = p
+		}
+	}
+	mt.paused = paused
+	if paused {
+		mt.queued = false
+		mt.t.SetMaxEstablishedConns(0)
+		if mt.t.Info() != nil {
+			for _, f := range mt.t.Files() {
+				f.SetPriority(types.PiecePriorityNone)
+			}
+		}
+	} else if mt.t.Info() != nil {
+		if e.downloadSlotAvailableLocked(mt) {
+			e.startDownloadLocked(mt)
+		} else {
+			mt.queued = true
+		}
+	}
 }
 
 // Pause — set every piece's priority to None and cap connections.
@@ -295,12 +535,15 @@ func (e *Engine) Pause(infohash string) error {
 	if mt.paused {
 		return nil
 	}
-	for i, f := range mt.t.Files() {
-		mt.priorityHint[i] = piecePriorityFromFile(f)
-		f.SetPriority(types.PiecePriorityNone)
+	if mt.t.Info() != nil {
+		for _, f := range mt.t.Files() {
+			f.SetPriority(types.PiecePriorityNone)
+		}
 	}
 	mt.t.SetMaxEstablishedConns(0)
 	mt.paused = true
+	mt.queued = false
+	e.startQueuedLocked()
 	return nil
 }
 
@@ -316,15 +559,16 @@ func (e *Engine) Resume(infohash string) error {
 	if !mt.paused {
 		return nil
 	}
-	for i, f := range mt.t.Files() {
-		if hint, ok := mt.priorityHint[i]; ok {
-			f.SetPriority(hint)
-		} else {
-			f.SetPriority(types.PiecePriorityNormal)
-		}
-	}
-	mt.t.SetMaxEstablishedConns(80) // anacrolix default
 	mt.paused = false
+	if mt.t.Info() == nil {
+		mt.t.SetMaxEstablishedConns(80)
+		return nil
+	}
+	if e.downloadSlotAvailableLocked(mt) {
+		e.startDownloadLocked(mt)
+	} else {
+		mt.queued = true
+	}
 	return nil
 }
 
@@ -340,13 +584,17 @@ func (e *Engine) Remove(infohash string, deleteData bool) error {
 	}
 	delete(e.torrents, infohash)
 	t := mt.t
+	e.startQueuedLocked()
 	e.mu.Unlock()
 
 	t.Drop()
 	if deleteData {
-		dataPath := filepath.Join(e.cfg.WorkingDir, t.Name())
-		if dataPath != e.cfg.WorkingDir { // refuse to nuke the engine root
-			_ = os.RemoveAll(dataPath)
+		dataPath, err := safeChildPath(e.cfg.WorkingDir, t.Name())
+		if err != nil {
+			return err
+		}
+		if err := os.RemoveAll(dataPath); err != nil {
+			return fmt.Errorf("delete torrent data: %w", err)
 		}
 	}
 	return nil
@@ -360,19 +608,20 @@ func (e *Engine) SetFilePriority(infohash string, fileIndex int, priority string
 		return err
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	mt, ok := e.torrents[infohash]
-	e.mu.Unlock()
 	if !ok {
 		return errNotFound
+	}
+	if mt.t.Info() == nil {
+		return errors.New("torrent metadata not available yet")
 	}
 	files := mt.t.Files()
 	if fileIndex < 0 || fileIndex >= len(files) {
 		return fmt.Errorf("file_index %d out of range (0..%d)", fileIndex, len(files)-1)
 	}
 	files[fileIndex].SetPriority(prio)
-	e.mu.Lock()
 	mt.priorityHint[fileIndex] = prio
-	e.mu.Unlock()
 	return nil
 }
 
@@ -406,40 +655,24 @@ func priorityToString(p types.PiecePriority) string {
 	}
 }
 
-// piecePriorityFromFile reads back the current priority of a file by
-// inspecting the priority of any one of its pieces. Anacrolix's File
-// type doesn't expose a getter directly; we approximate by checking
-// the first piece. Good enough for the pause/resume save-restore path.
-func piecePriorityFromFile(f *torrent.File) types.PiecePriority {
-	// Without direct getter access we default to Normal — the only
-	// case where the hint diverges from reality is when an external
-	// caller has changed priorities behind our back, which v0.1
-	// doesn't expose anyway.
-	return types.PiecePriorityNormal
-}
-
 // Snapshot reads one torrent's state. nil if the infohash isn't known.
 func (e *Engine) Snapshot(infohash string) *TorrentSnapshot {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	mt, ok := e.torrents[infohash]
-	e.mu.Unlock()
 	if !ok {
 		return nil
 	}
-	return e.snapshot(mt)
+	return e.snapshotLocked(mt, time.Now())
 }
 
 // SnapshotAll returns a copy of every managed torrent's state.
 func (e *Engine) SnapshotAll() []TorrentSnapshot {
 	e.mu.Lock()
-	mts := make([]*managedTorrent, 0, len(e.torrents))
+	defer e.mu.Unlock()
+	out := make([]TorrentSnapshot, 0, len(e.torrents))
 	for _, mt := range e.torrents {
-		mts = append(mts, mt)
-	}
-	e.mu.Unlock()
-	out := make([]TorrentSnapshot, 0, len(mts))
-	for _, mt := range mts {
-		s := e.snapshot(mt)
+		s := e.snapshotLocked(mt, time.Now())
 		if s != nil {
 			out = append(out, *s)
 		}
@@ -451,8 +684,8 @@ func (e *Engine) SnapshotAll() []TorrentSnapshot {
 // Empty for magnets that haven't fetched info yet.
 func (e *Engine) FileSnapshots(infohash string) ([]FileSnapshot, error) {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	mt, ok := e.torrents[infohash]
-	e.mu.Unlock()
 	if !ok {
 		return nil, errNotFound
 	}
@@ -479,7 +712,7 @@ func (e *Engine) FileSnapshots(infohash string) ([]FileSnapshot, error) {
 
 // snapshot — single-source-of-truth for state derivation. Consult
 // this rather than reading torrent fields ad-hoc elsewhere.
-func (e *Engine) snapshot(mt *managedTorrent) *TorrentSnapshot {
+func (e *Engine) snapshotLocked(mt *managedTorrent, now time.Time) *TorrentSnapshot {
 	if mt == nil || mt.t == nil {
 		return nil
 	}
@@ -498,35 +731,45 @@ func (e *Engine) snapshot(mt *managedTorrent) *TorrentSnapshot {
 			progress = float64(completed) / float64(length)
 		}
 	}
+	readData := stats.BytesReadUsefulData.Int64()
+	writtenData := stats.BytesWrittenData.Int64()
+	if !mt.lastSampleAt.IsZero() {
+		seconds := now.Sub(mt.lastSampleAt).Seconds()
+		if seconds >= 0.5 {
+			mt.downRateBPS = int64(float64(max(int64(0), readData-mt.lastReadData)) / seconds)
+			mt.upRateBPS = int64(float64(max(int64(0), writtenData-mt.lastWriteData)) / seconds)
+			mt.lastSampleAt = now
+			mt.lastReadData = readData
+			mt.lastWriteData = writtenData
+		}
+	} else {
+		mt.lastSampleAt = now
+		mt.lastReadData = readData
+		mt.lastWriteData = writtenData
+	}
 
 	state := "downloading"
 	switch {
-	case mt.lastErr != "":
-		state = "error"
 	case mt.paused:
 		state = "paused"
+	case mt.lastErr != "":
+		state = "error"
 	case !hasInfo:
 		state = "queued"
+	case mt.queued:
+		state = "queued"
 	case missing == 0 && length > 0:
-		// Done. Differentiate completed vs seeding by upload activity:
-		// if the engine still has peers and we're uploading, "seeding";
-		// if we've stopped (e.g. seed_ratio reached), "completed".
-		if t.Seeding() && stats.ActivePeers > 0 {
-			state = "seeding"
-		} else {
+		if mt.seedStopped {
 			state = "completed"
+		} else {
+			state = "seeding"
 		}
 	}
 
 	eta := int64(-1)
-	rate := int64(0)
-	// anacrolix doesn't expose instantaneous rates directly on Torrent;
-	// we'd have to diff Stats over time. v0.1 leaves rate at 0 and ETA
-	// at -1; the panel polls often enough to show progress visibly,
-	// and torrent_stats does its own diffing for the aggregate.
-	_ = stats
-	_ = rate
-	_ = eta
+	if missing > 0 && mt.downRateBPS > 0 {
+		eta = missing / mt.downRateBPS
+	}
 
 	return &TorrentSnapshot{
 		Infohash:        mt.infohash,
@@ -536,8 +779,9 @@ func (e *Engine) snapshot(mt *managedTorrent) *TorrentSnapshot {
 		BytesCompleted:  completed,
 		BytesMissing:    missing,
 		Progress:        progress,
-		DownloadRateBPS: 0,
-		UploadRateBPS:   0,
+		DownloadRateBPS: mt.downRateBPS,
+		UploadRateBPS:   mt.upRateBPS,
+		UploadedBytes:   writtenData,
 		Peers:           stats.ActivePeers,
 		Seeds:           stats.ConnectedSeeders,
 		ETASeconds:      eta,
@@ -552,15 +796,33 @@ func (e *Engine) snapshot(mt *managedTorrent) *TorrentSnapshot {
 // interval is 2s by default, and a transition is "field changed".
 func (e *Engine) pollTransitions() {
 	e.mu.Lock()
-	mts := make([]*managedTorrent, 0, len(e.torrents))
-	for _, mt := range e.torrents {
-		mts = append(mts, mt)
-	}
 	handler := e.onTransition
-	e.mu.Unlock()
-
-	for _, mt := range mts {
-		s := e.snapshot(mt)
+	type transition struct {
+		infohash, prev, next string
+		snap                 TorrentSnapshot
+	}
+	var transitions []transition
+	now := time.Now()
+	for _, mt := range e.torrents {
+		if mt.lastErr == "insufficient free disk for torrent and configured safety margin" && e.hasDiskCapacityLocked(mt) {
+			mt.lastErr = ""
+			mt.queued = true
+		}
+		if mt.t.Info() != nil && mt.t.BytesMissing() == 0 {
+			if mt.completedAt.IsZero() {
+				mt.completedAt = now.UTC()
+			}
+			stats := mt.t.Stats()
+			ratioReached := e.cfg.SeedRatioTarget <= 0 ||
+				(mt.t.Length() > 0 && float64(stats.BytesWrittenData.Int64())/float64(mt.t.Length()) >= e.cfg.SeedRatioTarget)
+			timeReached := e.cfg.SeedTimeTarget > 0 && now.Sub(mt.completedAt) >= e.cfg.SeedTimeTarget
+			if !mt.seedStopped && (ratioReached || timeReached) {
+				mt.t.DisallowDataUpload()
+				mt.t.SetMaxEstablishedConns(0)
+				mt.seedStopped = true
+			}
+		}
+		s := e.snapshotLocked(mt, now)
 		if s == nil {
 			continue
 		}
@@ -570,13 +832,13 @@ func (e *Engine) pollTransitions() {
 			continue
 		}
 		mt.prevState = next
-		if next == "completed" || next == "seeding" {
-			if mt.completedAt.IsZero() {
-				mt.completedAt = time.Now().UTC()
-			}
-		}
-		if handler != nil {
-			handler(mt.infohash, prev, next, *s)
+		transitions = append(transitions, transition{mt.infohash, prev, next, *s})
+	}
+	e.startQueuedLocked()
+	e.mu.Unlock()
+	if handler != nil {
+		for _, tr := range transitions {
+			handler(tr.infohash, tr.prev, tr.next, tr.snap)
 		}
 	}
 }
@@ -585,34 +847,44 @@ func (e *Engine) pollTransitions() {
 // counters and pulls global byte rates from the client. Used by
 // torrent_stats and the panel header.
 type AggregateStats struct {
-	ActiveCount        int
-	DownloadingCount   int
-	SeedingCount       int
-	PausedCount        int
-	CompletedCount     int
-	ErrorCount         int
-	TotalBytesQueued   int64
-	TotalBytesComplete int64
-	GlobalDownBPS      int64
-	GlobalUpBPS        int64
+	ActiveCount        int   `json:"active_count"`
+	DownloadingCount   int   `json:"downloading_count"`
+	SeedingCount       int   `json:"seeding_count"`
+	PausedCount        int   `json:"paused_count"`
+	CompletedCount     int   `json:"completed_count"`
+	ErrorCount         int   `json:"error_count"`
+	QueuedCount        int   `json:"queued_count"`
+	TotalBytesQueued   int64 `json:"total_bytes_queued"`
+	TotalBytesComplete int64 `json:"total_bytes_complete"`
+	GlobalDownBPS      int64 `json:"global_down_bps"`
+	GlobalUpBPS        int64 `json:"global_up_bps"`
 }
 
 func (e *Engine) AggregateStats() AggregateStats {
+	return e.AggregateStatsFor(nil)
+}
+
+// AggregateStatsFor limits counters to a project's registered
+// infohashes. A nil filter returns the physical engine-wide view.
+func (e *Engine) AggregateStatsFor(infohashes map[string]struct{}) AggregateStats {
 	out := AggregateStats{}
 	e.mu.Lock()
-	mts := make([]*managedTorrent, 0, len(e.torrents))
+	defer e.mu.Unlock()
+	now := time.Now()
 	for _, mt := range e.torrents {
-		mts = append(mts, mt)
-	}
-	e.mu.Unlock()
-
-	for _, mt := range mts {
-		s := e.snapshot(mt)
+		if infohashes != nil {
+			if _, ok := infohashes[mt.infohash]; !ok {
+				continue
+			}
+		}
+		s := e.snapshotLocked(mt, now)
 		if s == nil {
 			continue
 		}
 		out.TotalBytesQueued += s.Length
 		out.TotalBytesComplete += s.BytesCompleted
+		out.GlobalDownBPS += s.DownloadRateBPS
+		out.GlobalUpBPS += s.UploadRateBPS
 		switch s.State {
 		case "downloading":
 			out.DownloadingCount++
@@ -626,9 +898,35 @@ func (e *Engine) AggregateStats() AggregateStats {
 			out.CompletedCount++
 		case "error":
 			out.ErrorCount++
+		case "queued":
+			out.QueuedCount++
 		}
 	}
 	return out
+}
+
+func availableDiskBytes(path string) (int64, error) {
+	var stat unix.Statfs_t
+	if err := unix.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	return int64(stat.Bavail) * int64(stat.Bsize), nil
+}
+
+func safeChildPath(root, child string) (string, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	candidate, err := filepath.Abs(filepath.Join(rootAbs, child))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(rootAbs, candidate)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("unsafe torrent data path %q", child)
+	}
+	return candidate, nil
 }
 
 var errNotFound = errors.New("torrent: infohash not tracked")

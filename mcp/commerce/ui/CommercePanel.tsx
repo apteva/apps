@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ExternalLink, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 
 const API = "/api/apps/commerce";
 
@@ -23,6 +24,8 @@ interface Store {
   default_currency: string;
   default_locale: string;
   timezone: string;
+  payment_provider: string;
+  payment_presentation: string;
 }
 
 interface Variant {
@@ -103,11 +106,140 @@ interface Sale {
   created_at: string;
 }
 
-type View = "products" | "collections" | "stores" | "carts" | "sales";
+interface ProviderPolicy {
+  store_id: number;
+  connection_id: number;
+  provider_slug: string;
+  enabled: boolean;
+  fulfillment_mode: "review" | "automatic";
+  margin_bps: number;
+  settings?: Record<string, unknown>;
+  connected: boolean;
+  is_default?: boolean;
+}
+
+interface ProviderVariant {
+  id: string;
+  sku: string;
+  title: string;
+  cost_cents: number;
+  suggested_price_cents?: number;
+  currency: string;
+  available: boolean;
+  available_quantity?: number;
+}
+
+interface ProviderProduct {
+  id: string;
+  title: string;
+  vendor?: string;
+  image_url?: string;
+  variants?: ProviderVariant[];
+}
+
+interface VariantSource {
+  id: number;
+  store_id: number;
+  variant_id: number;
+  provider_slug: string;
+  provider_sku: string;
+  unit_cost_cents: number;
+  currency: string;
+  availability: string;
+  available_quantity?: number;
+  last_synced_at?: string;
+}
+
+interface DispatchJob {
+  id: number;
+  store_id: number;
+  sale_id: number;
+  provider_slug: string;
+  status: string;
+  external_order_id?: string;
+  error?: string;
+  updated_at: string;
+}
+
+interface StorefrontStatus {
+  store_id: number;
+  configured: boolean;
+  content_ready: boolean;
+  site_id?: number;
+  site_slug?: string;
+  hostname?: string;
+  extension_key?: string;
+  version?: string;
+  preview_url?: string;
+  error?: string;
+}
+
+interface ShippingMethod {
+  id: string;
+  name: string;
+  amount_cents: number;
+  currency: string;
+  estimated_days_min?: number;
+  estimated_days_max?: number;
+  minimum_subtotal_cents?: number;
+}
+
+interface ShippingZone {
+  id: string;
+  name: string;
+  countries: string[];
+  methods: ShippingMethod[];
+}
+
+interface StoreSettings {
+  shipping: { zones: ShippingZone[] };
+  tax: { default_rate_bps: number; country_rates: Record<string, number>; prices_include_tax: boolean; shipping_taxable: boolean };
+  markets: { enabled: string[] };
+  payments: { payment_method_types?: string[]; save_payment_method?: boolean; set_default_payment_method?: boolean };
+}
+
+interface MarketingResource {
+  id: number;
+  name?: string;
+  display_name?: string;
+  status: string;
+}
+
+interface MetaAccountOption {
+  id: number;
+  display_name: string;
+  currency?: string;
+  resources?: MarketingResource[];
+  resource_error?: string;
+}
+
+interface MarketingChannel {
+  id: number;
+  status: string;
+  ad_account_id: number;
+  tracking_source_resource_id: number;
+  tracking_source_name: string;
+  data_sharing_mode: string;
+  site_tracking_status: string;
+  site_tracking_error?: string;
+}
+
+interface MarketingChannelOptions {
+  ads_available: boolean;
+  accounts: MetaAccountOption[];
+  error?: string;
+}
+
+interface MarketingChannelResponse {
+  channel: MarketingChannel | null;
+  options: MarketingChannelOptions;
+}
+
+type View = "products" | "collections" | "providers" | "channels" | "storefront" | "stores" | "settings" | "carts" | "sales";
 type Notice = { tone: "success" | "error"; message: string } | null;
 
 const emptyProduct = { store_id: "", title: "", handle: "", description_html: "", vendor: "", product_type: "", price: "", currency: "USD", sku: "" };
-const emptyStore = { name: "", slug: "", default_currency: "USD", default_locale: "en", timezone: "UTC" };
+const emptyStore = { name: "", slug: "", default_currency: "USD", default_locale: "en", timezone: "UTC", payment_provider: "manual", payment_presentation: "elements" };
 const emptyCollection = { store_id: "", title: "", handle: "", description_html: "" };
 
 export default function CommercePanel({ projectId, installId }: NativePanelProps) {
@@ -118,6 +250,21 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
   const [collections, setCollections] = useState<Collection[]>([]);
   const [carts, setCarts] = useState<Cart[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
+  const [providers, setProviders] = useState<ProviderPolicy[]>([]);
+  const [sources, setSources] = useState<VariantSource[]>([]);
+  const [dispatches, setDispatches] = useState<DispatchJob[]>([]);
+  const [storefront, setStorefront] = useState<StorefrontStatus | null>(null);
+  const [storeSettings, setStoreSettings] = useState<StoreSettings | null>(null);
+  const [marketingChannel, setMarketingChannel] = useState<MarketingChannel | null>(null);
+  const [marketingOptions, setMarketingOptions] = useState<MarketingChannelOptions>({ ads_available: false, accounts: [] });
+  const [marketingDraft, setMarketingDraft] = useState({ adAccountId: "", resourceId: "", pixelName: "" });
+  const [providerDrafts, setProviderDrafts] = useState<Record<number, ProviderPolicy>>({});
+  const [catalogProvider, setCatalogProvider] = useState<ProviderPolicy | null>(null);
+  const [providerProducts, setProviderProducts] = useState<ProviderProduct[]>([]);
+  const [selectedProviderProduct, setSelectedProviderProduct] = useState<ProviderProduct | null>(null);
+  const [prodigiImport, setProdigiImport] = useState({
+    retailPrice: "", artworkUrl: "", printArea: "default", sizing: "fitPrintArea", designKey: "",
+  });
   const [selectedStore, setSelectedStore] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [selectedCollection, setSelectedCollection] = useState<Collection | null>(null);
@@ -162,13 +309,18 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setLoading(true);
     const filter = selectedStore ? `?store_id=${encodeURIComponent(selectedStore)}` : "";
     try {
-      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales] = await Promise.all([
+      const [nextSummary, nextStores, nextProducts, nextCollections, nextCarts, nextSales, nextProviders, nextSources, nextDispatches, nextStorefront, nextSettings] = await Promise.all([
         api<Summary>("/admin/summary"),
         api<Store[]>("/admin/stores"),
         api<Product[]>(`/admin/products${filter}`),
         api<Collection[]>(`/admin/collections${filter}`),
         api<Cart[]>(`/admin/carts${filter}`),
         api<Sale[]>(`/admin/sales${filter ? `${filter}&limit=50` : "?limit=50"}`),
+        api<ProviderPolicy[]>(`/admin/providers${filter}`),
+        api<VariantSource[]>(`/admin/variant-sources${filter}`),
+        api<DispatchJob[]>(`/admin/dispatches${filter ? `${filter}&limit=100` : "?limit=100"}`),
+        selectedStore ? api<StorefrontStatus>(`/admin/storefront?store_id=${encodeURIComponent(selectedStore)}`) : Promise.resolve(null),
+        selectedStore ? api<{ settings: StoreSettings }>(`/admin/store-settings?store_id=${encodeURIComponent(selectedStore)}`) : Promise.resolve(null),
       ]);
       if (sequence !== loadSequence.current) return;
       setSummary(nextSummary);
@@ -177,6 +329,14 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
       setCollections(nextCollections || []);
       setCarts(nextCarts || []);
       setSales(nextSales || []);
+      setProviders(nextProviders || []);
+      setSources(nextSources || []);
+      setDispatches(nextDispatches || []);
+      setStorefront(nextStorefront);
+      setStoreSettings(nextSettings?.settings || null);
+      setProviderDrafts(Object.fromEntries((nextProviders || []).map((provider) => [provider.connection_id, {
+        ...provider, settings: { ...(provider.settings || {}) },
+      }])));
     } catch (error) {
       if (sequence === loadSequence.current) setNotice({ tone: "error", message: errorMessage(error) });
     } finally {
@@ -188,13 +348,40 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     void load();
   }, [load]);
 
+  const loadMarketing = useCallback(async () => {
+    if (!selectedStore) {
+      setMarketingChannel(null);
+      setMarketingOptions({ ads_available: false, accounts: [] });
+      return;
+    }
+    try {
+      const result = await api<MarketingChannelResponse>(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`);
+      setMarketingChannel(result.channel || null);
+      setMarketingOptions(result.options || { ads_available: false, accounts: [] });
+    } catch (error) {
+      setNotice({ tone: "error", message: errorMessage(error) });
+    }
+  }, [api, selectedStore]);
+
+  useEffect(() => {
+    if (view === "channels") void loadMarketing();
+  }, [view, loadMarketing]);
+
   useEffect(() => {
     if (!productForm.store_id && stores.length === 1) setProductForm((current) => ({ ...current, store_id: String(stores[0].id), currency: stores[0].default_currency }));
     if (!collectionForm.store_id && stores.length === 1) setCollectionForm((current) => ({ ...current, store_id: String(stores[0].id) }));
   }, [stores, productForm.store_id, collectionForm.store_id]);
 
+  useEffect(() => {
+    const accountId = marketingChannel?.ad_account_id || marketingOptions.accounts[0]?.id;
+    const account = marketingOptions.accounts.find((row) => row.id === accountId);
+    const resourceId = marketingChannel?.tracking_source_resource_id || account?.resources?.[0]?.id;
+    setMarketingDraft({ adAccountId: accountId ? String(accountId) : "", resourceId: resourceId ? String(resourceId) : "", pixelName: "" });
+  }, [selectedStore, marketingChannel?.id, marketingOptions]);
+
   const totals = summary || { stores: stores.length, products: products.length, open_carts: 0, sales: sales.length };
   const currentStore = useMemo(() => stores.find((store) => String(store.id) === selectedStore), [stores, selectedStore]);
+  const selectedMetaAccount = useMemo(() => marketingOptions.accounts.find((account) => String(account.id) === marketingDraft.adAccountId), [marketingOptions.accounts, marketingDraft.adAccountId]);
 
   async function run(action: () => Promise<void>, success: string) {
     setBusy(true);
@@ -297,9 +484,179 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
     setSelectedSale(refreshed);
   }
 
+  function updateProviderDraft(connectionId: number, patch: Partial<ProviderPolicy>) {
+    setProviderDrafts((current) => ({
+      ...current,
+      [connectionId]: { ...(current[connectionId] || providers.find((row) => row.connection_id === connectionId)!), ...patch },
+    }));
+  }
+
+  function updateProviderSetting(connectionId: number, key: string, value: unknown) {
+    const current = providerDrafts[connectionId] || providers.find((row) => row.connection_id === connectionId);
+    if (!current) return;
+    updateProviderDraft(connectionId, { settings: { ...(current.settings || {}), [key]: value } });
+  }
+
+  async function saveProvider(provider: ProviderPolicy) {
+    if (!selectedStore) throw new Error("Select a store before changing provider policy");
+    const draft = providerDrafts[provider.connection_id] || provider;
+    await api("/admin/providers", {
+      method: "PATCH",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: provider.connection_id, enabled: draft.enabled,
+        fulfillment_mode: draft.fulfillment_mode, margin_bps: draft.margin_bps, settings: draft.settings || {},
+      }),
+    });
+  }
+
+  async function browseProvider(provider: ProviderPolicy) {
+    if (!selectedStore) throw new Error("Select a store before browsing a provider");
+    const draft = providerDrafts[provider.connection_id] || provider;
+    const providerInput = provider.provider_slug === "prodigi"
+      ? { skus: String(draft.settings?.catalog_skus || "") }
+      : undefined;
+    const result = await api<{ products: ProviderProduct[] }>("/admin/provider-catalog", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: provider.connection_id,
+        provider_input: providerInput,
+      }),
+    });
+    setCatalogProvider(provider);
+    setProviderProducts(result.products || []);
+    setSelectedProviderProduct(null);
+  }
+
+  async function openProviderProduct(product: ProviderProduct) {
+    if (!catalogProvider || !selectedStore) return;
+    const result = await api<{ product: ProviderProduct }>("/admin/provider-products", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
+        external_product_id: product.id,
+      }),
+    });
+    setSelectedProviderProduct(result.product);
+    setProdigiImport({ retailPrice: "", artworkUrl: "", printArea: "default", sizing: "fitPrintArea", designKey: "" });
+  }
+
+  async function importProviderProduct() {
+    if (!catalogProvider || !selectedProviderProduct || !selectedStore) return;
+    const payload: Record<string, unknown> = {
+      store_id: Number(selectedStore), connection_id: catalogProvider.connection_id,
+      product: selectedProviderProduct,
+    };
+    if (catalogProvider.provider_slug === "prodigi") {
+      if (!prodigiImport.retailPrice) throw new Error("Retail price is required for a Prodigi import");
+      if (!prodigiImport.artworkUrl.trim()) throw new Error("A public artwork URL is required for a Prodigi import");
+      const priceCents = moneyToCents(prodigiImport.retailPrice);
+      payload.price_cents_by_variant = Object.fromEntries(
+        (selectedProviderProduct.variants || []).map((variant) => [variant.id, priceCents]),
+      );
+      payload.provider_input = {
+        assets: [{ printArea: prodigiImport.printArea.trim(), url: prodigiImport.artworkUrl.trim() }],
+        sizing: prodigiImport.sizing,
+        design_key: prodigiImport.designKey.trim() || undefined,
+      };
+    }
+    await api("/admin/provider-products/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    setSelectedProviderProduct(null);
+  }
+
+  async function syncSources() {
+    await api("/admin/variant-sources", {
+      method: "POST",
+      body: JSON.stringify({ store_id: selectedStore ? Number(selectedStore) : undefined, limit: 100 }),
+    });
+  }
+
+  async function submitDispatch(id: number) {
+    await api(`/admin/dispatches/${id}/submit`, { method: "POST" });
+  }
+
+  async function configureStorefront() {
+    if (!selectedStore) throw new Error("Select a store before configuring its storefront");
+    const status = await api<StorefrontStatus>("/admin/storefront", {
+      method: "POST",
+      body: JSON.stringify({ store_id: Number(selectedStore) }),
+    });
+    setStorefront(status);
+  }
+
+  async function configureMarketingChannel() {
+    if (!selectedStore) throw new Error("Select a store before configuring Meta");
+    if (!marketingDraft.adAccountId) throw new Error("Select a Meta ad account");
+    if (!marketingDraft.resourceId && !marketingDraft.pixelName.trim()) throw new Error("Select a Pixel or enter a name for a new one");
+    await api("/admin/marketing-channel", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: Number(selectedStore),
+        ad_account_id: Number(marketingDraft.adAccountId),
+        tracking_source_resource_id: marketingDraft.resourceId ? Number(marketingDraft.resourceId) : undefined,
+        pixel_name: marketingDraft.resourceId ? undefined : marketingDraft.pixelName.trim(),
+        set_default: true,
+      }),
+    });
+    await loadMarketing();
+  }
+
+  async function disconnectMarketingChannel() {
+    if (!selectedStore) throw new Error("Select a store before disconnecting Meta");
+    await api(`/admin/marketing-channel?store_id=${encodeURIComponent(selectedStore)}`, { method: "DELETE" });
+    await loadMarketing();
+  }
+
+  function updateShippingMethod(zoneIndex: number, methodIndex: number, patch: Partial<ShippingMethod>) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone,
+        methods: zone.methods.map((method, currentMethod) => currentMethod === methodIndex ? { ...method, ...patch } : method),
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  function addShippingMethod(zoneIndex: number) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone,
+        methods: [...zone.methods, {
+          id: `method-${Date.now()}`, name: "New shipping method", amount_cents: 0,
+          currency: currentStore?.default_currency || "USD", estimated_days_min: 3, estimated_days_max: 7,
+        }],
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  function removeShippingMethod(zoneIndex: number, methodIndex: number) {
+    setStoreSettings((current) => {
+      if (!current) return current;
+      const zones = current.shipping.zones.map((zone, currentZone) => currentZone !== zoneIndex ? zone : {
+        ...zone, methods: zone.methods.filter((_, currentMethod) => currentMethod !== methodIndex),
+      });
+      return { ...current, shipping: { zones } };
+    });
+  }
+
+  async function saveStoreSettings() {
+    if (!selectedStore || !storeSettings) throw new Error("Select a store before changing settings");
+    await api(`/admin/store-settings?store_id=${encodeURIComponent(selectedStore)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ patch: storeSettings }),
+    });
+  }
+
   const tabs: Array<{ id: View; label: string }> = [
     { id: "products", label: "Products" }, { id: "collections", label: "Collections" },
-    { id: "stores", label: "Stores" }, { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
+    { id: "providers", label: "Providers" }, { id: "channels", label: "Sales channels" }, { id: "storefront", label: "Storefront" },
+    { id: "stores", label: "Stores" }, { id: "settings", label: "Settings" },
+    { id: "carts", label: "Carts" }, { id: "sales", label: "Sales" },
   ];
 
   return (
@@ -311,7 +668,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
             <option value="">All stores</option>
             {stores.map((store) => <option key={store.id} value={store.id}>{store.name}</option>)}
           </select>
-          <button type="button" onClick={() => void load()} disabled={loading} className="h-8 px-3 rounded-md border border-border text-sm hover:bg-bg-input disabled:opacity-50">Refresh</button>
+          <button type="button" onClick={() => void load()} disabled={loading} title="Refresh" aria-label="Refresh" className="grid h-8 w-8 place-items-center rounded-md border border-border hover:bg-bg-input disabled:opacity-50"><RefreshCw size={15} className={loading ? "animate-spin" : ""} /></button>
         </div>
         <nav className="basis-full flex overflow-x-auto border-t border-border -mx-4 md:-mx-5 px-4 md:px-5 pt-2 gap-1" aria-label="Commerce sections">
           {tabs.map((tab) => (
@@ -394,10 +751,94 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
           </section>
         )}
 
+        {view === "providers" && (
+          <div className="space-y-6">
+            {!selectedStore && <div className="border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">Select a store to configure providers and import products.</div>}
+            <section className="grid xl:grid-cols-[minmax(0,1fr)_420px] gap-5">
+              <div className="min-w-0 space-y-3">
+                <h2 className="text-sm font-semibold">Supplier connections</h2>
+                <div className="border border-border rounded-md divide-y divide-border">
+                  {providers.map((provider) => {
+                    const draft = providerDrafts[provider.connection_id] || provider;
+                    const settings = draft.settings || {};
+                    return (
+                      <div key={provider.connection_id} className="p-3 space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div><div className="font-medium capitalize">{provider.provider_slug}</div><div className="text-xs text-text-muted">Connection #{provider.connection_id}{provider.is_default ? " · Default" : ""}</div></div>
+                          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={draft.enabled} onChange={(event) => updateProviderDraft(provider.connection_id, { enabled: event.target.checked })} />Enabled</label>
+                        </div>
+                        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                          <Field label="Fulfillment"><select value={draft.fulfillment_mode} onChange={(event) => updateProviderDraft(provider.connection_id, { fulfillment_mode: event.target.value as ProviderPolicy["fulfillment_mode"] })} className={inputClass}><option value="review">Review first</option><option value="automatic">Automatic</option></select></Field>
+                          <Field label="Target margin %"><input type="number" min="0" max="94.99" step="0.01" value={(draft.margin_bps / 100).toString()} onChange={(event) => updateProviderDraft(provider.connection_id, { margin_bps: Math.round(Number(event.target.value) * 100) })} className={inputClass} /></Field>
+                          <Field label="Flat shipping"><input type="number" min="0" step="0.01" value={(Number(settings.flat_shipping_cents || 0) / 100).toString()} onChange={(event) => updateProviderSetting(provider.connection_id, "flat_shipping_cents", Math.round(Number(event.target.value) * 100))} className={inputClass} /></Field>
+                          {provider.provider_slug === "printify" ? <Field label="Printify shop ID"><input value={String(settings.shop_id || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "shop_id", event.target.value)} className={inputClass} /></Field> : <div />}
+                        </div>
+                        {provider.provider_slug === "prodigi" && (
+                          <div className="grid sm:grid-cols-2 gap-3">
+                            <Field label="Catalog SKUs"><textarea rows={3} value={String(settings.catalog_skus || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "catalog_skus", event.target.value)} placeholder="One Prodigi SKU per line" className={inputClass} /></Field>
+                            <div className="grid grid-cols-2 gap-3">
+                              <Field label="Shipping method"><select value={String(settings.shipping_method || "Budget")} onChange={(event) => updateProviderSetting(provider.connection_id, "shipping_method", event.target.value)} className={inputClass}><option>Budget</option><option>Standard</option><option>StandardPlus</option><option>Express</option><option>Overnight</option></select></Field>
+                              <Field label="Callback URL"><input type="url" value={String(settings.callback_url || "")} onChange={(event) => updateProviderSetting(provider.connection_id, "callback_url", event.target.value)} placeholder="Optional" className={inputClass} /></Field>
+                            </div>
+                          </div>
+                        )}
+                        <div className="flex justify-end gap-2">
+                          <button type="button" disabled={!selectedStore || busy || !draft.enabled} onClick={() => void run(() => browseProvider(provider), `${provider.provider_slug} catalog loaded`)} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Browse catalog</button>
+                          <button type="button" disabled={!selectedStore || busy} onClick={() => void run(() => saveProvider(provider), "Provider policy saved")} className="h-8 rounded-md bg-accent px-3 text-sm font-medium text-bg disabled:opacity-50">Save</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {providers.length === 0 && <div className="px-3 py-10 text-center text-sm text-text-muted">No Printful, Printify, Prodigi, BigBuy, or CJ Dropshipping connection is bound to Commerce.</div>}
+                </div>
+              </div>
+              <aside className="xl:border-l xl:border-border xl:pl-5 space-y-3 min-w-0">
+                <div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">{catalogProvider ? `${catalogProvider.provider_slug} catalog` : "Provider catalog"}</h2>{catalogProvider && <button type="button" onClick={() => { setCatalogProvider(null); setProviderProducts([]); setSelectedProviderProduct(null); }} className="text-sm text-text-muted hover:text-text">Close</button>}</div>
+                {selectedProviderProduct ? (
+                  <div className="space-y-3">
+                    <div className="flex gap-3">{selectedProviderProduct.image_url && <img src={selectedProviderProduct.image_url} alt="" className="h-16 w-16 rounded object-cover bg-bg-input" />}<div className="min-w-0"><div className="font-medium">{selectedProviderProduct.title}</div><div className="text-xs text-text-muted">{selectedProviderProduct.variants?.length || 0} variants</div></div></div>
+                    <div className="max-h-64 overflow-auto border-y border-border divide-y divide-border">{(selectedProviderProduct.variants || []).map((variant) => <div key={variant.id} className="flex items-center justify-between gap-3 py-2 text-sm"><span className="min-w-0"><span className="block truncate">{variant.title}</span><span className="text-xs text-text-muted">{variant.sku || variant.id}</span></span><span className="text-right whitespace-nowrap"><span className="block">{catalogProvider?.provider_slug === "prodigi" ? "Price set on import" : fmtMoney(variant.cost_cents, variant.currency)}</span><span className="text-xs text-text-muted">{variant.available ? "Available" : "Unavailable"}</span></span></div>)}</div>
+                    {catalogProvider?.provider_slug === "prodigi" && (
+                      <div className="space-y-3 border border-border rounded-md p-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <Field label={`Retail price (${currentStore?.default_currency || "USD"})`}><input type="number" min="0.01" step="0.01" value={prodigiImport.retailPrice} onChange={(event) => setProdigiImport({ ...prodigiImport, retailPrice: event.target.value })} className={inputClass} /></Field>
+                          <Field label="Print area"><input value={prodigiImport.printArea} onChange={(event) => setProdigiImport({ ...prodigiImport, printArea: event.target.value })} className={inputClass} /></Field>
+                        </div>
+                        <Field label="Public artwork URL"><input type="url" value={prodigiImport.artworkUrl} onChange={(event) => setProdigiImport({ ...prodigiImport, artworkUrl: event.target.value })} placeholder="https://..." className={inputClass} /></Field>
+                        <div className="grid grid-cols-2 gap-3">
+                          <Field label="Artwork sizing"><select value={prodigiImport.sizing} onChange={(event) => setProdigiImport({ ...prodigiImport, sizing: event.target.value })} className={inputClass}><option value="fitPrintArea">Fit print area</option><option value="fillPrintArea">Fill print area</option><option value="stretchToPrintArea">Stretch to print area</option></select></Field>
+                          <Field label="Design key"><input value={prodigiImport.designKey} onChange={(event) => setProdigiImport({ ...prodigiImport, designKey: event.target.value })} placeholder="Optional" className={inputClass} /></Field>
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex gap-2"><button type="button" onClick={() => setSelectedProviderProduct(null)} className="flex-1 h-9 rounded-md border border-border text-sm">Back</button><button type="button" disabled={busy || !(selectedProviderProduct.variants?.length)} onClick={() => void run(importProviderProduct, "Product imported as draft")} className="flex-1 h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">Import product</button></div>
+                  </div>
+                ) : catalogProvider ? (
+                  <div className="max-h-[520px] overflow-auto border-y border-border divide-y divide-border">{providerProducts.map((product) => <button type="button" key={product.id} onClick={() => void openProviderProduct(product)} className="w-full flex items-center gap-3 py-2 text-left hover:bg-bg-input"><span className="h-10 w-10 shrink-0 bg-bg-input rounded overflow-hidden">{product.image_url && <img src={product.image_url} alt="" className="h-full w-full object-cover" />}</span><span className="min-w-0"><span className="block truncate text-sm font-medium">{product.title}</span><span className="text-xs text-text-muted">{product.vendor || `ID ${product.id}`}</span></span></button>)}{providerProducts.length === 0 && <p className="py-10 text-center text-sm text-text-muted">No products returned</p>}</div>
+                ) : <p className="text-sm text-text-muted">Choose a connected provider to browse its live catalog.</p>}
+              </aside>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Imported sources</h2><button type="button" disabled={busy || sources.length === 0} onClick={() => void run(syncSources, "Provider sources synchronized")} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">Sync now</button></div>
+              <DataTable headers={["Variant", "Provider", "Supplier SKU", "Availability", "Cost", "Last sync"]} empty={sources.length === 0} emptyLabel="No provider-sourced variants">
+                {sources.map((source) => <tr key={source.id} className="border-t border-border"><td className="px-3 py-2.5">#{source.variant_id}</td><td className="px-3 py-2.5 capitalize">{source.provider_slug}</td><td className="px-3 py-2.5">{source.provider_sku || "-"}</td><td className="px-3 py-2.5"><Status value={source.availability} /></td><td className="px-3 py-2.5">{fmtMoney(source.unit_cost_cents, source.currency)}</td><td className="px-3 py-2.5 text-text-muted">{fmtDate(source.last_synced_at || "")}</td></tr>)}
+              </DataTable>
+            </section>
+
+            <section className="space-y-3">
+              <h2 className="text-sm font-semibold">Fulfillment dispatches</h2>
+              <DataTable headers={["Dispatch", "Sale", "Provider", "Provider order", "Status", "Action"]} empty={dispatches.length === 0} emptyLabel="No provider dispatches">
+                {dispatches.map((dispatch) => <tr key={dispatch.id} className="border-t border-border"><td className="px-3 py-2.5">#{dispatch.id}</td><td className="px-3 py-2.5">#{dispatch.sale_id}</td><td className="px-3 py-2.5 capitalize">{dispatch.provider_slug}</td><td className="px-3 py-2.5">{dispatch.external_order_id || "-"}</td><td className="px-3 py-2.5"><Status value={dispatch.status} />{dispatch.error && <div className="mt-1 max-w-xs text-xs text-red-600 truncate" title={dispatch.error}>{dispatch.error}</div>}</td><td className="px-3 py-2.5 text-right">{(dispatch.status === "review" || dispatch.status === "failed") && <button type="button" disabled={busy} onClick={() => void run(() => submitDispatch(dispatch.id), dispatch.status === "review" ? "Dispatch submitted" : "Dispatch retried")} className="h-8 rounded-md border border-border px-3 text-sm disabled:opacity-50">{dispatch.status === "review" ? "Approve" : "Retry"}</button>}</td></tr>)}
+              </DataTable>
+            </section>
+          </div>
+        )}
+
         {view === "stores" && (
           <section className="grid xl:grid-cols-[minmax(0,1fr)_360px] gap-5">
             <DataTable headers={["Store", "Currency", "Locale", "Timezone", "Status"]} empty={stores.length === 0} emptyLabel="No stores">
-              {stores.map((store) => <tr key={store.id} onClick={() => { setEditingStore(store); setStoreForm({ name: store.name, slug: store.slug, default_currency: store.default_currency, default_locale: store.default_locale, timezone: store.timezone }); }} className="border-t border-border cursor-pointer hover:bg-bg-input/50"><td className="px-3 py-2.5"><div className="font-medium">{store.name}</div><div className="text-xs text-text-muted">/{store.slug}</div></td><td className="px-3 py-2.5">{store.default_currency}</td><td className="px-3 py-2.5">{store.default_locale}</td><td className="px-3 py-2.5">{store.timezone}</td><td className="px-3 py-2.5"><Status value={store.status} /></td></tr>)}
+              {stores.map((store) => <tr key={store.id} onClick={() => { setEditingStore(store); setStoreForm({ name: store.name, slug: store.slug, default_currency: store.default_currency, default_locale: store.default_locale, timezone: store.timezone, payment_provider: store.payment_provider, payment_presentation: store.payment_presentation }); }} className="border-t border-border cursor-pointer hover:bg-bg-input/50"><td className="px-3 py-2.5"><div className="font-medium">{store.name}</div><div className="text-xs text-text-muted">/{store.slug}</div></td><td className="px-3 py-2.5">{store.default_currency}</td><td className="px-3 py-2.5">{store.default_locale}</td><td className="px-3 py-2.5">{store.timezone}</td><td className="px-3 py-2.5"><Status value={store.status} /></td></tr>)}
             </DataTable>
             <form onSubmit={(event) => { event.preventDefault(); void run(async () => { if (!storeForm.name.trim()) throw new Error("Store name is required"); if (editingStore) await api(`/admin/stores/${editingStore.id}`, { method: "PATCH", body: JSON.stringify(storeForm) }); else await api("/admin/stores", { method: "POST", body: JSON.stringify(storeForm) }); setEditingStore(null); setStoreForm(emptyStore); }, editingStore ? "Store updated" : "Store created"); }} className="xl:border-l xl:border-border xl:pl-5 space-y-3">
               <div className="flex items-center justify-between"><h2 className="text-sm font-semibold">{editingStore ? "Edit store" : "New store"}</h2>{editingStore && <button type="button" onClick={() => { setEditingStore(null); setStoreForm(emptyStore); }} className="text-sm text-text-muted hover:text-text">Cancel</button>}</div>
@@ -405,9 +846,158 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
               <Field label="Slug"><input value={storeForm.slug} disabled={Boolean(editingStore)} onChange={(event) => setStoreForm({ ...storeForm, slug: event.target.value })} className={inputClass} /></Field>
               <div className="grid grid-cols-2 gap-3"><Field label="Currency"><input value={storeForm.default_currency} maxLength={3} onChange={(event) => setStoreForm({ ...storeForm, default_currency: event.target.value.toUpperCase() })} className={inputClass} /></Field><Field label="Locale"><input value={storeForm.default_locale} onChange={(event) => setStoreForm({ ...storeForm, default_locale: event.target.value })} className={inputClass} /></Field></div>
               <Field label="Timezone"><input value={storeForm.timezone} onChange={(event) => setStoreForm({ ...storeForm, timezone: event.target.value })} className={inputClass} /></Field>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Payment provider"><select value={storeForm.payment_provider} onChange={(event) => setStoreForm({ ...storeForm, payment_provider: event.target.value })} className={inputClass}><option value="manual">Manual</option><option value="stripe">Stripe</option></select></Field>
+                <Field label="Checkout UI"><select value={storeForm.payment_presentation} disabled={storeForm.payment_provider !== "stripe"} onChange={(event) => setStoreForm({ ...storeForm, payment_presentation: event.target.value })} className={inputClass}><option value="elements">Embedded form</option><option value="hosted">Stripe hosted</option></select></Field>
+              </div>
               <button type="submit" disabled={busy} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">{editingStore ? "Save store" : "Create store"}</button>
-              {editingStore && <a href={`${API}/s/${editingStore.slug}/?${qs()}`} target="_blank" rel="noreferrer" className="block text-center text-sm text-accent hover:underline">Open storefront</a>}
             </form>
+          </section>
+        )}
+
+        {view === "settings" && (
+          <section className="max-w-5xl space-y-6">
+            <div className="flex items-center justify-between gap-3 border-b border-border pb-4">
+              <div><h2 className="text-base font-semibold">Store settings</h2><p className="mt-1 text-sm text-text-muted">{currentStore?.name || "Select a store"}</p></div>
+              <button type="button" disabled={!storeSettings || busy} onClick={() => void run(saveStoreSettings, "Store settings saved")} className="inline-flex h-9 items-center gap-2 rounded-md bg-accent px-3 text-sm font-medium text-bg disabled:opacity-50"><Save size={15} />Save</button>
+            </div>
+            {!selectedStore || !storeSettings ? (
+              <div className="border-y border-border px-4 py-12 text-center text-sm text-text-muted">Select a store to configure checkout settings.</div>
+            ) : (
+              <>
+                <div className="space-y-4">
+                  <div><h3 className="text-sm font-semibold">Shipping profiles</h3><p className="mt-1 text-xs text-text-muted">Rates are evaluated by destination and combined with supplier rates.</p></div>
+                  {storeSettings.shipping.zones.map((zone, zoneIndex) => (
+                    <section key={zone.id} className="border-y border-border">
+                      <div className="grid gap-3 border-b border-border bg-bg-subtle px-3 py-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,1fr)_auto]">
+                        <Field label="Zone name"><input value={zone.name} onChange={(event) => setStoreSettings((current) => current ? { ...current, shipping: { zones: current.shipping.zones.map((row, index) => index === zoneIndex ? { ...row, name: event.target.value } : row) } } : current)} className={inputClass} /></Field>
+                        <Field label="Countries"><input value={zone.countries.join(", ")} onChange={(event) => setStoreSettings((current) => current ? { ...current, shipping: { zones: current.shipping.zones.map((row, index) => index === zoneIndex ? { ...row, countries: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) } : row) } } : current)} placeholder="US, CA or *" className={inputClass} /></Field>
+                        <button type="button" onClick={() => addShippingMethod(zoneIndex)} className="mt-auto inline-flex h-9 items-center justify-center gap-2 rounded-md border border-border px-3 text-sm hover:bg-bg-input"><Plus size={15} />Method</button>
+                      </div>
+                      <div className="divide-y divide-border">
+                        {zone.methods.map((method, methodIndex) => (
+                          <div key={method.id} className="grid gap-3 px-3 py-3 md:grid-cols-[minmax(180px,1fr)_110px_90px_90px_40px]">
+                            <Field label="Method"><input value={method.name} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { name: event.target.value })} className={inputClass} /></Field>
+                            <Field label={`Price (${method.currency})`}><input type="number" min="0" step="0.01" value={(method.amount_cents / 100).toString()} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { amount_cents: Math.max(0, Math.round(Number(event.target.value) * 100)) })} className={inputClass} /></Field>
+                            <Field label="Min days"><input type="number" min="0" value={method.estimated_days_min || 0} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { estimated_days_min: Math.max(0, Number(event.target.value)) })} className={inputClass} /></Field>
+                            <Field label="Max days"><input type="number" min="0" value={method.estimated_days_max || 0} onChange={(event) => updateShippingMethod(zoneIndex, methodIndex, { estimated_days_max: Math.max(0, Number(event.target.value)) })} className={inputClass} /></Field>
+                            <button type="button" title="Remove shipping method" aria-label="Remove shipping method" disabled={zone.methods.length === 1} onClick={() => removeShippingMethod(zoneIndex, methodIndex)} className="mt-auto grid h-9 w-9 place-items-center rounded-md text-red-600 hover:bg-red-500/10 disabled:opacity-30"><Trash2 size={15} /></button>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+
+                <div className="grid gap-8 border-t border-border pt-6 lg:grid-cols-2">
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-semibold">Transactional tax</h3>
+                    <Field label="Default rate (%)"><input type="number" min="0" max="100" step="0.01" value={(storeSettings.tax.default_rate_bps / 100).toString()} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, default_rate_bps: Math.max(0, Math.min(10000, Math.round(Number(event.target.value) * 100))) } })} className={inputClass} /></Field>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={storeSettings.tax.prices_include_tax} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, prices_include_tax: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Product prices include tax</span></label>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={storeSettings.tax.shipping_taxable} onChange={(event) => setStoreSettings({ ...storeSettings, tax: { ...storeSettings.tax, shipping_taxable: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Apply tax to shipping</span></label>
+                  </section>
+                  <section className="space-y-4">
+                    <h3 className="text-sm font-semibold">Markets</h3>
+                    <Field label="Enabled countries"><input value={(storeSettings.markets.enabled || []).join(", ")} onChange={(event) => setStoreSettings({ ...storeSettings, markets: { enabled: event.target.value.split(",").map((value) => value.trim().toUpperCase()).filter(Boolean) } })} placeholder="US, CA, GB" className={inputClass} /></Field>
+                    <h3 className="pt-3 text-sm font-semibold">Stripe methods</h3>
+                    <div className="grid grid-cols-2 gap-x-4">
+                      {["card", "link", "paypal", "cashapp"].map((method) => {
+                        const methods = storeSettings.payments.payment_method_types || [];
+                        return <label key={method} className="flex items-center gap-3 border-b border-border py-3 text-sm capitalize"><input type="checkbox" checked={methods.includes(method)} onChange={(event) => setStoreSettings({ ...storeSettings, payments: { ...storeSettings.payments, payment_method_types: event.target.checked ? [...methods, method] : methods.filter((value) => value !== method) } })} className="h-4 w-4 accent-accent" />{method}</label>;
+                      })}
+                    </div>
+                    <label className="flex items-center gap-3 border-b border-border py-3 text-sm"><input type="checkbox" checked={Boolean(storeSettings.payments.save_payment_method)} onChange={(event) => setStoreSettings({ ...storeSettings, payments: { ...storeSettings.payments, save_payment_method: event.target.checked } })} className="h-4 w-4 accent-accent" /><span>Save payment method with consent</span></label>
+                  </section>
+                </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {view === "channels" && (
+          <section className="max-w-4xl space-y-5">
+            <div>
+              <h2 className="text-sm font-semibold">Sales channels</h2>
+              <p className="mt-1 text-sm text-text-muted">Connect Commerce to Ads for storefront measurement. Campaign creation and bid management remain in Ads.</p>
+            </div>
+            {!selectedStore ? (
+              <div className="rounded-md border border-border px-4 py-10 text-center text-sm text-text-muted">Select a store to configure its channels.</div>
+            ) : !marketingOptions.ads_available ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm">
+                <h3 className="font-semibold">Facebook &amp; Instagram</h3>
+                <p className="mt-2 text-text-muted">Install or upgrade Ads, then connect a Meta account there first.</p>
+                {marketingOptions.error && <p className="mt-2 text-xs text-amber-800 dark:text-amber-200">{marketingOptions.error}</p>}
+              </div>
+            ) : (
+              <div className="grid gap-5 md:grid-cols-[minmax(0,1fr)_260px]">
+                <div className="rounded-md border border-border p-4 space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div><h3 className="font-semibold">Facebook &amp; Instagram</h3><p className="mt-1 text-xs leading-5 text-text-muted">Meta Pixel browser events with an explicit visitor consent prompt.</p></div>
+                    <Status value={marketingChannel?.status === "active" ? "active" : "not configured"} />
+                  </div>
+                  <Field label="Meta ad account">
+                    <select value={marketingDraft.adAccountId} onChange={(event) => { const account = marketingOptions.accounts.find((row) => String(row.id) === event.target.value); setMarketingDraft({ adAccountId: event.target.value, resourceId: account?.resources?.[0] ? String(account.resources[0].id) : "", pixelName: "" }); }} className={inputClass}>
+                      <option value="">Select account</option>
+                      {marketingOptions.accounts.map((account) => <option key={account.id} value={account.id}>{account.display_name || `Account #${account.id}`}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Meta Pixel">
+                    <select value={marketingDraft.resourceId} onChange={(event) => setMarketingDraft({ ...marketingDraft, resourceId: event.target.value })} disabled={!marketingDraft.adAccountId} className={inputClass}>
+                      <option value="">Create a new Pixel</option>
+                      {(selectedMetaAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.name || resource.display_name || `Pixel #${resource.id}`}</option>)}
+                    </select>
+                  </Field>
+                  {!marketingDraft.resourceId && <Field label="New Pixel name"><input value={marketingDraft.pixelName} onChange={(event) => setMarketingDraft({ ...marketingDraft, pixelName: event.target.value })} placeholder={`${currentStore?.name || "Store"} Pixel`} className={inputClass} /></Field>}
+                  {selectedMetaAccount?.resource_error && <p className="text-xs text-amber-700 dark:text-amber-300">Could not refresh Pixels: {selectedMetaAccount.resource_error}</p>}
+                  <button type="button" disabled={busy || !marketingDraft.adAccountId || (!marketingDraft.resourceId && !marketingDraft.pixelName.trim())} onClick={() => void run(configureMarketingChannel, marketingChannel?.status === "active" ? "Meta Pixel updated" : "Meta Pixel connected")} className="h-9 rounded-md bg-accent px-4 text-sm font-medium text-bg disabled:opacity-50">{marketingChannel?.status === "active" ? "Update Meta Pixel" : "Connect Meta Pixel"}</button>
+                </div>
+                <aside className="space-y-3">
+                  <div className="rounded-md border border-border divide-y divide-border">
+                    <StorefrontRow label="Pixel" value={marketingChannel?.tracking_source_name || "Not selected"} />
+                    <StorefrontRow label="Data sharing" value="Browser only" />
+                    <StorefrontRow label="Storefront" value={marketingChannel?.site_tracking_status === "installed" ? "Installed" : storefront?.configured ? "Pending refresh" : "Configure Content first"} />
+                  </div>
+                  {marketingChannel?.site_tracking_error && <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">{marketingChannel.site_tracking_error}</p>}
+                  {marketingChannel?.status === "active" && <button type="button" disabled={busy} onClick={() => void run(disconnectMarketingChannel, "Meta Pixel disconnected")} className="w-full h-9 rounded-md border border-red-500/40 text-sm text-red-600 disabled:opacity-50">Disconnect</button>}
+                  <p className="text-xs leading-5 text-text-muted">Tracks PageView, product views, search, add-to-cart, and checkout after consent. Catalog sync and server-side Conversions API are not included yet.</p>
+                </aside>
+              </div>
+            )}
+          </section>
+        )}
+
+        {view === "storefront" && (
+          <section className="max-w-4xl space-y-5">
+            <div>
+              <h2 className="text-sm font-semibold">Customer storefront</h2>
+              <p className="mt-1 text-sm text-text-muted">Content owns the public site, theme, domains, and publishing. Commerce supplies live products, collections, carts, and checkout actions.</p>
+            </div>
+            {!selectedStore ? (
+              <div className="rounded-md border border-border px-4 py-10 text-center text-sm text-text-muted">Select a store to manage its storefront.</div>
+            ) : (
+              <div className="grid gap-5 md:grid-cols-3">
+                <div className="border border-border rounded-md divide-y divide-border md:col-span-2">
+                  <StorefrontRow label="Store" value={currentStore?.name || `Store #${selectedStore}`} />
+                  <StorefrontRow label="Content site" value={storefront?.site_slug || "Not configured"} />
+                  <StorefrontRow label="Extension" value={storefront?.extension_key || "Not installed"} />
+                  <StorefrontRow label="Theme version" value={storefront?.version || "-"} />
+                  <StorefrontRow label="Domain" value={storefront?.hostname || "Configure in Content"} />
+                  <div className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
+                    <span className="text-text-muted">Status</span>
+                    <Status value={storefront?.content_ready ? "active" : storefront?.configured ? "unavailable" : "not configured"} />
+                  </div>
+                </div>
+                <aside className="space-y-3">
+                  {storefront?.error && <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">{storefront.error}</div>}
+                  <button type="button" disabled={busy} onClick={() => void run(configureStorefront, storefront?.configured ? "Storefront refreshed" : "Storefront configured")} className="w-full h-9 rounded-md bg-accent text-bg text-sm font-medium disabled:opacity-50">
+                    {storefront?.configured ? "Refresh configuration" : "Configure with Content"}
+                  </button>
+                  {storefront?.preview_url && <a href={storefront.preview_url} target="_blank" rel="noreferrer" className="flex h-9 items-center justify-center gap-2 rounded-md border border-border text-sm hover:bg-bg-input">Open storefront<ExternalLink size={14} /></a>}
+                  {storefront?.configured && <a href="/apps/content/page" className="flex h-9 items-center justify-center rounded-md border border-border text-sm hover:bg-bg-input">Customize in Content</a>}
+                  <p className="text-xs leading-5 text-text-muted">Without Content installed, Commerce remains available for merchant operations but exposes no public storefront.</p>
+                </aside>
+              </div>
+            )}
           </section>
         )}
 
@@ -453,6 +1043,10 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Metric({ label, value }: { label: string; value: number }) {
   return <div className="px-3 py-2.5 border-r border-b lg:border-b-0 border-border last:border-r-0"><div className="text-xs text-text-muted">{label}</div><div className="text-lg font-semibold tabular-nums">{value}</div></div>;
+}
+
+function StorefrontRow({ label, value }: { label: string; value: string }) {
+  return <div className="grid grid-cols-[120px_minmax(0,1fr)] gap-3 px-3 py-3 text-sm"><span className="text-text-muted">{label}</span><span className="truncate text-right font-medium" title={value}>{value}</span></div>;
 }
 
 function DataTable({ headers, children, empty, emptyLabel }: { headers: string[]; children: ReactNode; empty: boolean; emptyLabel: string }) {

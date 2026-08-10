@@ -81,6 +81,44 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 	if !sameStringSlices(yamlEvents, embedEvents) {
 		t.Errorf("publish-event drift: yaml=%v embed=%v", yamlEvents, embedEvents)
 	}
+
+	var browserView, browserCard *sdk.UIComponent
+	for i := range fromFile.Provides.UIComponents {
+		switch fromFile.Provides.UIComponents[i].Name {
+		case "browser-view":
+			browserView = &fromFile.Provides.UIComponents[i]
+		case "browser-card":
+			browserCard = &fromFile.Provides.UIComponents[i]
+		}
+	}
+	if browserView == nil {
+		t.Fatal("browser-view component missing")
+	}
+	required, ok := browserView.PropsSchema["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "session_id" {
+		t.Fatalf("browser-view must require only session_id, got %#v", browserView.PropsSchema["required"])
+	}
+	if browserCard == nil {
+		t.Fatal("browser-card compatibility alias missing")
+	}
+	if browserCard.Entry != browserView.Entry {
+		t.Fatalf("browser-card must resolve to browser-view renderer: alias=%q canonical=%q", browserCard.Entry, browserView.Entry)
+	}
+	required, ok = browserCard.PropsSchema["required"].([]any)
+	if !ok || len(required) != 1 || required[0] != "instance_id" {
+		t.Fatalf("browser-card compatibility alias must require only instance_id, got %#v", browserCard.PropsSchema["required"])
+	}
+
+	var embeddedBrowserCard *sdk.UIComponent
+	for i := range fromEmbed.Provides.UIComponents {
+		if fromEmbed.Provides.UIComponents[i].Name == "browser-card" {
+			embeddedBrowserCard = &fromEmbed.Provides.UIComponents[i]
+			break
+		}
+	}
+	if embeddedBrowserCard == nil || embeddedBrowserCard.Entry != browserView.Entry {
+		t.Fatalf("embedded browser-card must resolve to browser-view renderer, got %#v", embeddedBrowserCard)
+	}
 }
 
 // TestRegistry covers the registry's contract: put adds, get refreshes
@@ -172,6 +210,7 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if got := openMap["width"]; got != 1024 {
 		t.Errorf("open width: want 1024, got %v", got)
 	}
+	assertBrowserViewReference(t, openMap["view"], sessionID)
 	if fake.openSessionURL != "https://example.com" {
 		t.Errorf("OpenSession URL: want example.com, got %q", fake.openSessionURL)
 	}
@@ -281,6 +320,7 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if closeOut.(map[string]any)["closed"] != true {
 		t.Errorf("close closed=true expected; got %v", closeOut)
 	}
+	assertBrowserViewReference(t, closeOut.(map[string]any)["view"], sessionID)
 	if fake.closeCalls != 1 {
 		t.Errorf("Close calls: want 1, got %d", fake.closeCalls)
 	}
@@ -300,10 +340,121 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if closeOut2.(map[string]any)["closed"] != false {
 		t.Errorf("2nd close: closed=false expected; got %v", closeOut2)
 	}
+	assertBrowserViewReference(t, closeOut2.(map[string]any)["view"], sessionID)
 
 	// screenshot after close — error, not panic
 	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
+	}
+}
+
+func assertBrowserViewReference(t *testing.T, value any, sessionID string) {
+	t.Helper()
+	view, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("view = %T, want map", value)
+	}
+	if view["app"] != "computer" || view["name"] != "browser-view" {
+		t.Fatalf("view identity = %#v", view)
+	}
+	props, ok := view["props"].(map[string]any)
+	if !ok || len(props) != 1 || props["session_id"] != sessionID {
+		t.Fatalf("view props = %#v, want only session_id=%q", view["props"], sessionID)
+	}
+}
+
+func TestBrowserSessionDemoPresentationPropagatesToActions(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":            "open",
+		"backend":           "browserbase",
+		"url":               "https://example.com",
+		"presentation_mode": "demo",
+	})
+	if err != nil {
+		t.Fatalf("browser_session demo open: %v", err)
+	}
+	openMap := openOut.(map[string]any)
+	if openMap["presentation_mode"] != "demo" || openMap["presentation_cursor_supported"] != true {
+		t.Fatalf("demo presentation metadata: %#v", openMap)
+	}
+	sessionID := openMap["session_id"].(string)
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "type",
+		"text":       "demo",
+	}); err != nil {
+		t.Fatalf("computer_use demo type: %v", err)
+	}
+	got := fake.lastAction.Presentation
+	if !got.Enabled() || !got.ShowCursor || got.TypingDelayMS <= 0 ||
+		got.PointerDurationMS <= 0 || got.ClickEffectMS <= 0 || got.PostActionDelayMS <= 0 {
+		t.Fatalf("demo presentation not propagated: %+v", got)
+	}
+
+	if _, err := app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID}); err != nil {
+		t.Fatalf("close demo session: %v", err)
+	}
+}
+
+func TestBrowserSessionPresentationDefaultsToFastAndRejectsUnknown(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 800, Height: 600},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "open",
+		"backend": "local",
+	})
+	if err != nil {
+		t.Fatalf("browser_session fast open: %v", err)
+	}
+	openMap := openOut.(map[string]any)
+	if openMap["presentation_mode"] != "fast" {
+		t.Fatalf("default presentation mode: %#v", openMap)
+	}
+	sessionID := openMap["session_id"].(string)
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "type",
+		"text":       "fast",
+	}); err != nil {
+		t.Fatalf("computer_use fast type: %v", err)
+	}
+	if fake.lastAction.Presentation.Enabled() || fake.lastAction.Presentation.TypingDelayMS != 0 {
+		t.Fatalf("default action behavior changed: %+v", fake.lastAction.Presentation)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": sessionID})
+
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":            "open",
+		"backend":           "local",
+		"presentation_mode": "cinematic",
+	}); err == nil || !strings.Contains(err.Error(), "presentation_mode") {
+		t.Fatalf("unknown presentation mode should fail validation: %v", err)
 	}
 }
 
@@ -701,6 +852,14 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	}
 	if _, ok := props["backend_session_id"]; ok {
 		t.Fatal("browser_session must not advertise provider-session attachment")
+	}
+	presentationMode, ok := props["presentation_mode"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session presentation_mode schema missing: %#v", props["presentation_mode"])
+	}
+	modes, ok := presentationMode["enum"].([]string)
+	if !ok || len(modes) != 2 || modes[0] != "fast" || modes[1] != "demo" {
+		t.Fatalf("browser_session presentation_mode enum: %#v", presentationMode["enum"])
 	}
 	action, ok := props["action"].(map[string]any)
 	if !ok {
@@ -1691,6 +1850,42 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionPassesResolvedExternalProxyAndReturnsSafeState(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1200, Height: 700}}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	platform := &proxyPlatformStub{connectionID: 77}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+	profile, err := dbCreateProxyProfile(appDB(ctx), ProxyProfile{
+		Name: "US browser", ProviderSlug: "dataimpulse", ConnectionID: 77,
+		ExternalRef: "321", Protocol: "http", DefaultCountry: "US", StickyScope: "session", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "local", "proxy_mode": "profile", "proxy_profile": profile.ID,
+	})
+	if err != nil {
+		t.Fatalf("open with external proxy: %v", err)
+	}
+	if fake.openExternalProxy == nil || fake.openExternalProxy.Server != "http://gw.dataimpulse.com:823" {
+		t.Fatalf("external proxy = %#v", fake.openExternalProxy)
+	}
+	encoded, _ := json.Marshal(out)
+	if strings.Contains(string(encoded), "super-secret") || strings.Contains(string(encoded), "base-user") || strings.Contains(string(encoded), "gw.dataimpulse.com") {
+		t.Fatalf("session output leaked proxy secret or endpoint: %s", encoded)
+	}
+	proxyState, ok := out.(map[string]any)["proxy"].(SessionProxyState)
+	if !ok || proxyState.ProfileID != profile.ID || proxyState.Country != "US" {
+		t.Fatalf("session proxy state = %#v", out.(map[string]any)["proxy"])
+	}
+}
+
 func TestHTTPHandlersEmitIntoRequestProject(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -2369,36 +2564,37 @@ func TestAppBusEventForProviderExpiredSession(t *testing.T) {
 // DOMExtractor
 // for handler tests. Mutation is unguarded — tests are single-goroutine.
 type fakeComp struct {
-	display          backends.DisplaySize
-	png              []byte
-	url              string
-	executeErr       error
-	screenshotErr    error
-	executeActionErr error
-	executeHook      func(backends.Action) error
-	openSessionURL   string
-	openSessionID    string
-	openContextID    string
-	openPersist      bool
-	openTimeout      int
-	openProxy        *bool
-	openErr          error
-	lastAction       backends.Action
-	screenshotCalls  int
-	annotateCalls    []bool
-	somTargets       []backends.SetOfMarkTarget
-	closeCalls       int
-	tabs             []backends.TabInfo
-	activeTabID      string
-	switchCalls      []string
-	closeTabCalls    []string
-	addTabOnClick    *backends.TabInfo
-	actionOnlyCalls  []backends.Action
-	lastRecovery     *backends.ScreenshotRecoveryInfo
-	extractResult    backends.ExtractResult
-	extractErr       error
-	extractOptions   backends.ExtractOptions
-	mu               sync.Mutex // for the unlikely concurrent test
+	display           backends.DisplaySize
+	png               []byte
+	url               string
+	executeErr        error
+	screenshotErr     error
+	executeActionErr  error
+	executeHook       func(backends.Action) error
+	openSessionURL    string
+	openSessionID     string
+	openContextID     string
+	openPersist       bool
+	openTimeout       int
+	openProxy         *bool
+	openExternalProxy *backends.ExternalProxy
+	openErr           error
+	lastAction        backends.Action
+	screenshotCalls   int
+	annotateCalls     []bool
+	somTargets        []backends.SetOfMarkTarget
+	closeCalls        int
+	tabs              []backends.TabInfo
+	activeTabID       string
+	switchCalls       []string
+	closeTabCalls     []string
+	addTabOnClick     *backends.TabInfo
+	actionOnlyCalls   []backends.Action
+	lastRecovery      *backends.ScreenshotRecoveryInfo
+	extractResult     backends.ExtractResult
+	extractErr        error
+	extractOptions    backends.ExtractOptions
+	mu                sync.Mutex // for the unlikely concurrent test
 }
 
 func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
@@ -2548,6 +2744,7 @@ func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openPersist = opts.Persist
 	f.openTimeout = opts.Timeout
 	f.openProxy = opts.Proxy
+	f.openExternalProxy = opts.ExternalProxy
 	return f.openErr
 }
 

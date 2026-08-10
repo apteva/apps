@@ -11,6 +11,7 @@ package main
 // Run with:  go test -tags integration ./...
 
 import (
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -253,6 +254,88 @@ func TestSidecar_ProjectScopeIsolation(t *testing.T) {
 	out2 := b.MCP("repos_list", nil)
 	if out2["count"].(float64) != 0 {
 		t.Errorf("project B should see 0 repos, got %v", out2["count"])
+	}
+}
+
+func TestSidecar_ChatComponentDataEndpoints(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".",
+		tk.WithProjectID("component-project"),
+		tk.WithEnv("CODE_REPOS_DIR", t.TempDir()),
+	)
+	sc.MCP("repos_create", map[string]any{"name": "Component Repo", "framework": "go"})
+	sc.MCP("code_write_file", map[string]any{
+		"slug":    "component-repo",
+		"path":    "main.go",
+		"content": "package main\n\nfunc main() {}\n",
+	})
+	sc.MCP("repos_set_deploy_hints", map[string]any{
+		"slug":     "component-repo",
+		"env_json": `{"SECRET":"must-not-leak"}`,
+	})
+	created := sc.MCP("issues_create", map[string]any{
+		"slug":  "component-repo",
+		"title": "Card issue",
+		"body":  "Current issue body",
+	})
+	issue := created["issue"].(map[string]any)
+
+	var summary map[string]any
+	resp := sc.GET("/api/repos/component-repo/summary", &summary)
+	if resp.Status != http.StatusOK {
+		t.Fatalf("summary status=%d body=%s", resp.Status, resp.Body)
+	}
+	repository := summary["repository"].(map[string]any)
+	if repository["slug"] != "component-repo" || repository["file_count"].(float64) < 1 {
+		t.Fatalf("unexpected repository summary: %+v", repository)
+	}
+	if _, leaked := repository["env_json"]; leaked {
+		t.Fatalf("repository card leaked env_json: %+v", repository)
+	}
+
+	var excerpt map[string]any
+	resp = sc.GET("/api/repos/component-repo/files/main.go?annotated=1&offset=2&limit=1", &excerpt)
+	if resp.Status != http.StatusOK {
+		t.Fatalf("excerpt status=%d body=%s", resp.Status, resp.Body)
+	}
+	if excerpt["start_line"].(float64) != 2 || excerpt["end_line"].(float64) != 2 {
+		t.Fatalf("excerpt was not bounded to one line: %+v", excerpt)
+	}
+	if excerpt["sha256"] == "" || excerpt["total_lines"].(float64) != 3 {
+		t.Fatalf("excerpt metadata incomplete: %+v", excerpt)
+	}
+
+	var issueSummary map[string]any
+	issueNumber := int(issue["number"].(float64))
+	resp = sc.GET("/api/repos/component-repo/issues/"+strconv.Itoa(issueNumber)+"?summary=1", &issueSummary)
+	if resp.Status != http.StatusOK {
+		t.Fatalf("issue summary status=%d body=%s", resp.Status, resp.Body)
+	}
+	if _, included := issueSummary["comments"]; included {
+		t.Fatalf("summary response unexpectedly included comments: %+v", issueSummary)
+	}
+	gotIssue := issueSummary["issue"].(map[string]any)
+	if gotIssue["title"] != "Card issue" || gotIssue["repo_slug"] != "component-repo" {
+		t.Fatalf("unexpected issue summary: %+v", gotIssue)
+	}
+}
+
+func TestSidecar_ChatComponentEndpointsAreProjectScoped(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".",
+		tk.WithEnv("CODE_REPOS_DIR", t.TempDir()),
+	)
+	sc.MCP("repos_create", map[string]any{
+		"_project_id": "project-a",
+		"name":        "Private Repo",
+	})
+
+	var own map[string]any
+	resp := sc.GET("/api/repos/private-repo/summary?project_id=project-a", &own)
+	if resp.Status != http.StatusOK {
+		t.Fatalf("own-project summary status=%d body=%s", resp.Status, resp.Body)
+	}
+	resp = sc.GET("/api/repos/private-repo/summary?project_id=project-b", nil)
+	if resp.Status != http.StatusNotFound {
+		t.Fatalf("cross-project summary status=%d, want 404; body=%s", resp.Status, resp.Body)
 	}
 }
 

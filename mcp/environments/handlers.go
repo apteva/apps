@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -186,6 +188,45 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.svc.decorateRun(run)
+	if len(parts) >= 2 && parts[1] == "voice-calls" {
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			calls, err := a.svc.db.listVoiceCalls(run.ID)
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, calls)
+			return
+		}
+		if len(parts) == 2 && r.Method == http.MethodPost {
+			var spec VoiceFixtureSpec
+			if !decodeBody(w, r, &spec) {
+				return
+			}
+			call, err := a.svc.runVoiceCall(r.Context(), run, spec)
+			if err != nil {
+				httpError(w, http.StatusBadGateway, err)
+				return
+			}
+			writeJSON(w, http.StatusCreated, call)
+			return
+		}
+		if len(parts) == 3 && r.Method == http.MethodGet {
+			call, err := a.svc.db.getVoiceCall(parts[2])
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if call == nil || call.RunID != run.ID {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, http.StatusOK, call)
+			return
+		}
+		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported voice call operation"))
+		return
+	}
 	if len(parts) >= 2 && parts[1] == "fixtures" {
 		if len(parts) == 2 && r.Method == http.MethodGet {
 			writeJSON(w, http.StatusOK, run.WebFixtures)
@@ -214,6 +255,32 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported fixture operation"))
+		return
+	}
+	if len(parts) >= 2 && parts[1] == "protocol-fixtures" {
+		if len(parts) == 2 && r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, run.ProtocolFixtures)
+			return
+		}
+		if len(parts) == 3 && r.Method == http.MethodGet {
+			fixture, err := a.svc.db.getProtocolFixture(run.ID, parts[2])
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if fixture == nil {
+				http.NotFound(w, r)
+				return
+			}
+			events, err := a.svc.db.listProtocolEvents(run.ID, parts[2], "")
+			if err != nil {
+				httpError(w, http.StatusInternalServerError, err)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"fixture": fixture, "events": events})
+			return
+		}
+		httpError(w, http.StatusMethodNotAllowed, errors.New("unsupported protocol fixture operation"))
 		return
 	}
 	if len(parts) == 2 && parts[1] == "inspect" {
@@ -262,6 +329,36 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	httpError(w, 405, errors.New("unsupported method"))
 }
 
+func (a *App) handleVoiceRecording(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, http.StatusMethodNotAllowed, errors.New("GET only"))
+		return
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/voice-recordings/"), "/"), "/")
+	if len(parts) != 2 {
+		http.NotFound(w, r)
+		return
+	}
+	path, err := a.svc.voiceRecordingPath(parts[0], strings.TrimSuffix(parts[1], ".wav"))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	http.ServeContent(w, r, filepath.Base(path), stat.ModTime(), file)
+}
+
 func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpError(w, 405, errors.New("GET only"))
@@ -282,6 +379,11 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 502, err)
 		return
 	}
+	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
+	if err != nil {
+		httpError(w, 502, err)
+		return
+	}
 	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
 	if err != nil {
 		httpError(w, 502, err)
@@ -292,7 +394,8 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 502, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog()})
+	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
+	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders})
 }
 func (a *App) handleCatalogItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

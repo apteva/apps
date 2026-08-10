@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: live-link
 display_name: Live Link
-version: 0.5.0
+version: 0.6.5
 description: |
-  Publish a locally-installed Apteva instance through one of three HTTPS
+  Publish a locally-installed Apteva instance through one of four HTTPS
   tunnel providers selected explicitly in the Live Link panel:
 
   - quick (default): Cloudflare Quick Tunnel. Anonymous, free, fresh
@@ -23,10 +23,17 @@ description: |
     an ngrok connection once; credentials are injected only into the child
     process environment and are never stored in the app database.
 
+  - zrok: a stable, free public URL backed by a reserved zrok v2 name.
+    Bind a zrok connection using its one-time environment enable token,
+    reserve a name in the panel, then go live. The token is never placed
+    in process arguments or the app database; zrok's private native
+    environment files are isolated inside this app install.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/live-link
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/live-link/icon.svg
-tags: [tunnel, expose, public-url, cloudflared, ngrok, infrastructure, dev]
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [tunnel, expose, public-url, cloudflared, ngrok, zrok, infrastructure, dev]
 
 scopes: [global]
 min_apteva_version: "0.18.0"
@@ -36,7 +43,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute            # cloudflare-named: call cfd_tunnel + DNS tools via integration runner
-    - platform.connections.read_credentials   # ngrok: read the operator's authtoken to pass to the local agent (no REST tool available)
+    - platform.connections.read_credentials   # ngrok/zrok: read bound agent credentials just in time
   integrations:
     # Cloudflare integration — used in named mode to list zones, manage
     # cfd_tunnels, and upsert/delete the CNAME. Optional at install
@@ -78,6 +85,18 @@ requires:
       required: false
       label: "ngrok (alternative provider)"
       hint: "Bind your ngrok authtoken, then select ngrok in the Live Link panel. Binding alone does not silently switch providers."
+    # zrok integration — stores the one-time environment enable token.
+    # Live Link enables an isolated zrok2 environment in-process over HTTPS,
+    # reserves/deletes names through the zrok API, and runs the local zrok2
+    # agent without ever putting the token in argv.
+    - role: zrok
+      kind: integration
+      compatible_slugs: [zrok]
+      capabilities: []
+      tools: {}
+      required: false
+      label: "zrok (stable free URL)"
+      hint: "Create a zrok connection with an environment enable token, bind it here, then reserve a stable public name in the Live Link panel."
 
 provides:
   http_routes:
@@ -90,7 +109,7 @@ provides:
     - name: expose_status
       description: Report whether a tunnel is currently running, its public URL, and which mode is configured.
     - name: expose_destroy
-      description: Tear down the named tunnel on Cloudflare (delete CNAME + tunnel). Refuses while running.
+      description: Destroy a provider's persistent resource (Cloudflare named tunnel or zrok reserved name). Refuses while running.
   ui_panels:
     - slot: project.page
       label: Live Link
@@ -151,6 +170,14 @@ config_schema:
       pin the public URL across "Go live" cycles; leave empty to let
       ngrok assign a fresh random *.ngrok-free.app per start (free
       tier default).
+  - name: zrok2_path
+    type: text
+    default: ""
+    label: zrok2 binary (override)
+    description: |
+      Optional path to a zrok2 binary you already manage. Leave empty to use
+      $PATH, a previously installed app-local copy, or a pinned,
+      SHA-256-verified zrok 2.0.4 download. Only used by the zrok provider.
   - name: auto_restart_on_boot
     type: toggle
     default: "true"

@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/computer
 go 1.26
 
 require (
-	github.com/apteva/app-sdk v0.36.4
+	github.com/apteva/app-sdk v0.47.2
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
 	golang.org/x/image v0.39.0

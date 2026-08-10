@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -240,6 +241,29 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	if run == nil {
 		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "recordings" && r.Method == http.MethodGet {
+		if run.VoiceCall == nil || (parts[2] != "receptionist" && parts[2] != "caller" && parts[2] != "caller-delivered") {
+			http.NotFound(w, r)
+			return
+		}
+		var recording struct {
+			Data string `json:"data"`
+		}
+		if err := a.svc.ctx.PlatformAPI().CallAppResult("environments", "environment_voice_recording_get", map[string]any{"id": run.VoiceCall.ID, "speaker": parts[2]}, &recording); err != nil {
+			httpError(w, http.StatusBadGateway, err)
+			return
+		}
+		raw, err := base64.StdEncoding.DecodeString(recording.Data)
+		if err != nil {
+			httpError(w, http.StatusBadGateway, errors.New("invalid environment recording"))
+			return
+		}
+		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Cache-Control", "private, max-age=300")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {

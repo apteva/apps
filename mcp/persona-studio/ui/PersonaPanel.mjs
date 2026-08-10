@@ -134,13 +134,32 @@ export default function PersonaPanel({ projectId }) {
     () => items.filter((it) => generation.item_ids.includes(it.id)),
     [items, generation.item_ids]
   );
-  const imageReferenceCount = useMemo(() => imageSourceOptions(refs, selectedItems).length, [refs, selectedItems]);
+  const visualReferences = useMemo(() => visualSourceOptions(refs, selectedItems), [refs, selectedItems]);
+  const imageReferenceCount = visualReferences.length;
+  const videoReferenceCount = visualReferences.length;
   const requiresImageEditModel = generation.asset_type === "image" && imageReferenceCount > 0;
+  const requiresVideoReferenceModel = generation.asset_type === "video";
   const modelOptions = useMemo(() => {
-    if (!requiresImageEditModel) return mediaModels;
-    return mediaModels.filter((model) => modelSupportsImageEdit(model, mediaProvider));
-  }, [mediaModels, mediaProvider, requiresImageEditModel]);
+    if (requiresImageEditModel) {
+      return mediaModels.filter((model) => modelSupportsImageEdit(model, mediaProvider));
+    }
+    if (requiresVideoReferenceModel) {
+      return mediaModels
+        .filter(modelSupportsVideoReferences)
+        .sort((a, b) => videoModelReferenceLimit(b) - videoModelReferenceLimit(a));
+    }
+    return mediaModels;
+  }, [mediaModels, mediaProvider, requiresImageEditModel, requiresVideoReferenceModel]);
   const selectedModel = modelOptions.find((m) => m.id === generation.model);
+  const selectedVideoReferenceLimit = requiresVideoReferenceModel
+    ? videoModelReferenceLimit(selectedModel || { id: generation.model })
+    : 0;
+  const selectedVideoReferences = selectedVideoReferenceLimit > 0
+    ? visualReferences.slice(0, selectedVideoReferenceLimit)
+    : [];
+  const videoReferencesMissing = requiresVideoReferenceModel && videoReferenceCount === 0;
+  const videoModelsUnavailable = requiresVideoReferenceModel && !modelsLoading && modelOptions.length === 0;
+  const videoGenerationBlocked = requiresVideoReferenceModel && (videoReferencesMissing || modelsLoading || modelOptions.length === 0);
 
   useEffect(() => {
     setMediaIdentity({
@@ -257,10 +276,10 @@ export default function PersonaPanel({ projectId }) {
       setGeneration((cur) => ({ ...cur, model: modelOptions[0].id }));
       return;
     }
-    if (requiresImageEditModel && modelOptions.length === 0 && generation.model) {
+    if ((requiresImageEditModel || requiresVideoReferenceModel) && modelOptions.length === 0 && generation.model) {
       setGeneration((cur) => ({ ...cur, model: "" }));
     }
-  }, [generation.asset_type, generation.model, modelOptions, requiresImageEditModel]);
+  }, [generation.asset_type, generation.model, modelOptions, requiresImageEditModel, requiresVideoReferenceModel]);
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
@@ -432,6 +451,9 @@ export default function PersonaPanel({ projectId }) {
     } else {
       if ((generation.asset_type === "video" || generation.asset_type === "avatar") && generation.aspect) {
         settings.aspect = generation.aspect;
+      }
+      if (generation.asset_type === "video" && selectedVideoReferenceLimit > 0) {
+        settings.source_image_limit = selectedVideoReferenceLimit;
       }
       if ((generation.asset_type === "video" || generation.asset_type === "audio_sfx" || generation.asset_type === "music") && generation.duration) {
         settings.duration = Number(generation.duration);
@@ -763,6 +785,7 @@ export default function PersonaPanel({ projectId }) {
                     provider: mediaProvider,
                     loading: modelsLoading,
                     editRequired: requiresImageEditModel,
+                    referenceRequired: requiresVideoReferenceModel,
                     value: generation.model,
                     onChange: (model) => setGeneration({ ...generation, model }),
                   })
@@ -802,15 +825,29 @@ export default function PersonaPanel({ projectId }) {
                     )
                     )
                   : (generation.asset_type === "video" || generation.asset_type === "avatar")
-                    ? h("div", { className: "grid grid-cols-2 gap-2" },
-                      h("select", { value: generation.aspect, onChange: (e) => setGeneration({ ...generation, aspect: e.target.value }), className: fieldClass(), title: "Aspect ratio" },
-                        (modelAspects.length ? modelAspects : VIDEO_ASPECTS).map((a) => h("option", { key: a, value: a }, a))
+                    ? h("div", { className: "grid gap-2" },
+                      h("div", { className: "grid grid-cols-2 gap-2" },
+                        h("select", { value: generation.aspect, onChange: (e) => setGeneration({ ...generation, aspect: e.target.value }), className: fieldClass(), title: "Aspect ratio" },
+                          (modelAspects.length ? modelAspects : VIDEO_ASPECTS).map((a) => h("option", { key: a, value: a }, a))
+                        ),
+                        modelDurations.length > 0
+                          ? h("select", { value: generation.duration ? `${generation.duration}s` : modelDurations[0], onChange: (e) => setGeneration({ ...generation, duration: e.target.value.replace(/[^0-9]/g, "") }), className: fieldClass(), title: "Duration" },
+                              modelDurations.map((d) => h("option", { key: d, value: d }, d))
+                            )
+                          : h("input", { value: generation.duration, onChange: (e) => setGeneration({ ...generation, duration: e.target.value }), placeholder: "Duration seconds", className: fieldClass() })
                       ),
-                      modelDurations.length > 0
-                        ? h("select", { value: generation.duration ? `${generation.duration}s` : modelDurations[0], onChange: (e) => setGeneration({ ...generation, duration: e.target.value.replace(/[^0-9]/g, "") }), className: fieldClass(), title: "Duration" },
-                            modelDurations.map((d) => h("option", { key: d, value: d }, d))
-                          )
-                        : h("input", { value: generation.duration, onChange: (e) => setGeneration({ ...generation, duration: e.target.value }), placeholder: "Duration seconds", className: fieldClass() })
+                      generation.asset_type === "video" && h("div", { className: "border border-border rounded p-2 bg-bg-input" },
+                        videoReferencesMissing
+                          ? h("div", { className: "text-xs text-red-400" }, "Add at least one face or visual reference image to generate a persona video.")
+                          : modelsLoading
+                          ? h("div", { className: "text-xs text-text-dim" }, "Loading reference-capable video models...")
+                          : videoModelsUnavailable
+                          ? h("div", { className: "text-xs text-red-400" }, "No connected reference-to-video model is available.")
+                          : h("div", { className: "text-xs text-text-muted mb-2" },
+                              `${selectedVideoReferences.length} of ${videoReferenceCount} linked visual reference${videoReferenceCount === 1 ? "" : "s"} will be sent automatically${selectedModel ? ` to ${selectedModel.id}` : ""}.`
+                            ),
+                        selectedVideoReferences.length > 0 && h(ReferenceSourcePreview, { sources: selectedVideoReferences })
+                      )
                     )
                     : (generation.asset_type === "audio_sfx" || generation.asset_type === "music")
                       ? h("div", { className: "grid grid-cols-1 gap-2" },
@@ -838,7 +875,7 @@ export default function PersonaPanel({ projectId }) {
                 h("textarea", { value: generation.prompt, onChange: (e) => setGeneration({ ...generation, prompt: e.target.value }), placeholder: "Prompt for this persona...", className: `${fieldClass()} min-h-[86px]` }),
                 h("button", {
                   className: buttonClass(),
-                  disabled: generating || !generation.prompt.trim(),
+                  disabled: generating || videoGenerationBlocked || !generation.prompt.trim(),
                 }, generating ? "Generating..." : "Generate")
               )),
               panel("Compositions", h("div", { className: "grid gap-3" },
@@ -972,24 +1009,29 @@ function parseIDs(value) {
     .filter((x) => Number.isFinite(x) && x > 0);
 }
 
-function imageSourceOptions(refs, items) {
+function visualSourceOptions(refs, items) {
   const out = [];
   const seen = new Set();
-  const refPriority = { face: 0, style: 1, pose: 2, outfit: 3, product: 4, location: 5, brand: 6 };
+  const refPriority = { face: 0, outfit: 10, pose: 20, style: 30, product: 40, location: 50, brand: 60 };
   const sortedRefs = [...(refs || [])].sort((a, b) => {
     const ap = refPriority[a.kind] ?? 99;
     const bp = refPriority[b.kind] ?? 99;
-    return ap - bp || Number(a.id || 0) - Number(b.id || 0);
+    return ap - bp || Number(b.weight || 0) - Number(a.weight || 0) || Number(a.id || 0) - Number(b.id || 0);
   });
-  for (const ref of sortedRefs) {
-    if (ref.kind === "voice" || ref.kind === "avatar") continue;
+  const addReference = (ref) => {
+    if (ref.kind === "voice" || ref.kind === "avatar") return;
     const id = Number(ref.storage_file_id);
-    if (!id || seen.has(id)) continue;
+    if (!id || seen.has(id)) return;
     seen.add(id);
     out.push({
       value: `storage:${id}`,
+      storageId: id,
+      kind: ref.kind,
       label: `Reference: ${ref.kind}${ref.label ? ` - ${ref.label}` : ""} - storage:${id}`,
     });
+  };
+  for (const ref of sortedRefs.filter((candidate) => candidate.kind === "face")) {
+    addReference(ref);
   }
   for (const item of items || []) {
     for (const raw of item.storage_file_ids || []) {
@@ -998,9 +1040,14 @@ function imageSourceOptions(refs, items) {
       seen.add(id);
       out.push({
         value: `storage:${id}`,
+        storageId: id,
+        kind: "item",
         label: `Item: ${item.name || item.kind} - storage:${id}`,
       });
     }
+  }
+  for (const ref of sortedRefs.filter((candidate) => candidate.kind !== "face")) {
+    addReference(ref);
   }
   return out;
 }
@@ -1019,6 +1066,36 @@ function modelSupportsImageEdit(model, provider) {
     id.includes("image-edit");
 }
 
+function videoModelReferenceLimit(model) {
+  if (!model) return 0;
+  const id = String(model.id || "").toLowerCase().split(":").pop();
+  const modelType = String(model.model_type || "").toLowerCase();
+  if (!id.includes("reference-to-video") && modelType !== "reference-to-video") return 0;
+  const published = Number(model.max_source_images || 0);
+  if (published > 0) return published;
+  return 9;
+}
+
+function modelSupportsVideoReferences(model) {
+  return videoModelReferenceLimit(model) > 0;
+}
+
+function ReferenceSourcePreview({ sources }) {
+  return h("div", { className: "flex gap-2 overflow-x-auto pb-1", "aria-label": "Video reference images" },
+    sources.map((source) => h("a", {
+      key: source.value,
+      href: `/api/apps/storage/files/${source.storageId}/content`,
+      target: "_blank",
+      rel: "noopener",
+      className: "shrink-0 grid gap-1 justify-items-center",
+      title: source.label,
+    },
+      h(StorageThumb, { id: source.storageId, size: 52 }),
+      h("span", { className: "text-[10px] text-text-dim max-w-[72px] truncate" }, source.kind)
+    ))
+  );
+}
+
 function fieldClass() {
   return "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text min-w-0";
 }
@@ -1035,7 +1112,8 @@ function dangerButtonClass() {
   return "border border-border rounded px-2 py-1.5 text-xs text-text-muted hover:text-text hover:bg-bg-input";
 }
 
-function ModelSelect({ models, provider, loading, editRequired, value, onChange }) {
+function ModelSelect({ models, provider, loading, editRequired, referenceRequired, value, onChange }) {
+  const requirement = editRequired ? "Edit" : referenceRequired ? "Reference video" : "";
   if (loading && models.length === 0) {
     return h("div", { className: `${fieldClass()} text-text-dim` }, provider ? `Loading ${provider} models...` : "Loading models...");
   }
@@ -1043,18 +1121,25 @@ function ModelSelect({ models, provider, loading, editRequired, value, onChange 
     return h("input", {
       value,
       onChange: (e) => onChange(e.target.value),
-      placeholder: editRequired ? "Edit model (provider default if empty)" : "Model (provider default if empty)",
+      placeholder: editRequired
+        ? "Edit model (provider default if empty)"
+        : referenceRequired
+          ? "Reference video model unavailable"
+          : "Model (provider default if empty)",
       className: fieldClass(),
       title: editRequired
         ? "No edit-capable model list returned by Media Studio. Leave empty for the provider's edit default or type an edit model id."
+        : referenceRequired
+          ? "No reference-capable video model was returned by Media Studio."
         : "No model list returned by Media Studio. Leave empty for provider default or type a model id.",
+      disabled: !!referenceRequired,
     });
   }
   return h("select", {
     value,
     onChange: (e) => onChange(e.target.value),
     className: fieldClass(),
-    title: provider ? `${editRequired ? "Edit models" : "Models"} from ${provider}` : "Media Studio models",
+    title: provider ? `${requirement ? `${requirement} models` : "Models"} from ${provider}` : "Media Studio models",
   },
     models.map((m) => h("option", { key: m.id, value: m.id },
       `${m.id}${m.max_source_images ? ` - ${m.max_source_images} refs` : ""}${m.price_usd ? ` - ${formatCost(m.price_usd)}` : ""}${m.model_type ? ` - ${m.model_type}` : ""}`

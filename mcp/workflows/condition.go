@@ -6,11 +6,14 @@ import (
 	"strings"
 )
 
-// EvalCondition evaluates a branch.when expression. Three forms:
+// EvalCondition evaluates a branch.when expression. Atomic forms:
 //
-//   "input.x"                   — single token: truthiness check.
-//   "input.x == 5"              — three tokens: comparison.
-//   "steps.lookup.found != true" — same, with a literal RHS.
+//	"input.x"                   — single token: truthiness check.
+//	"input.x == 5"              — three tokens: comparison.
+//	"steps.lookup.found != true" — same, with a literal RHS.
+//
+// Atoms can be joined with `and` and `or`; `and` binds more tightly
+// and both operators short-circuit.
 //
 // Operands are either dot-paths (resolved against ctx) or JSON
 // literals (strings in single OR double quotes, numbers, true,
@@ -27,17 +30,169 @@ func EvalCondition(when string, ctx TemplateContext) (bool, error) {
 		return false, fmt.Errorf("empty condition")
 	}
 	tokens := splitConditionTokens(trimmed)
-	switch len(tokens) {
-	case 1:
-		v, _ := resolveOperand(tokens[0], ctx)
-		return truthy(v), nil
-	case 3:
-		lhs, _ := resolveOperand(tokens[0], ctx)
-		rhs, _ := resolveOperand(tokens[2], ctx)
-		return compareOp(tokens[1], lhs, rhs)
-	default:
-		return false, fmt.Errorf("expected 1 or 3 tokens, got %d (%q)", len(tokens), when)
+	atoms, ops, err := parseConditionExpression(tokens)
+	if err != nil {
+		return false, fmt.Errorf("%w (%q)", err, when)
 	}
+	for _, atom := range atoms {
+		if err := validateConditionAtom(atom, false); err != nil {
+			return false, err
+		}
+	}
+	return evalConditionExpression(atoms, ops, ctx)
+}
+
+// ValidateTriggerCondition applies a strict grammar to event trigger
+// predicates. Branch conditions intentionally accept forgiving bare-string
+// operands for backwards compatibility, but trigger predicates guard whether
+// a workflow runs at all and must fail closed on typos.
+func ValidateTriggerCondition(when string) error {
+	trimmed := strings.TrimSpace(when)
+	if trimmed == "" {
+		return fmt.Errorf("empty condition")
+	}
+	tokens := splitConditionTokens(trimmed)
+	atoms, _, err := parseConditionExpression(tokens)
+	if err != nil {
+		return fmt.Errorf("%w (%q)", err, when)
+	}
+	for i, atom := range atoms {
+		if err := validateConditionAtom(atom, true); err != nil {
+			return fmt.Errorf("condition %d: %w", i+1, err)
+		}
+	}
+	return nil
+}
+
+// EvalTriggerCondition validates before delegating to the shared evaluator.
+// Keeping validation here as well as at workflow create/update time protects
+// imported or legacy database rows from accidentally matching every event.
+func EvalTriggerCondition(when string, ctx TemplateContext) (bool, error) {
+	if err := ValidateTriggerCondition(when); err != nil {
+		return false, err
+	}
+	return EvalCondition(when, ctx)
+}
+
+func parseConditionExpression(tokens []string) ([][]string, []string, error) {
+	if len(tokens) == 0 {
+		return nil, nil, fmt.Errorf("empty condition")
+	}
+	atoms := make([][]string, 0, 1)
+	ops := make([]string, 0, 1)
+	for i := 0; i < len(tokens); {
+		size := 1
+		if i+1 < len(tokens) && tokens[i+1] != "and" && tokens[i+1] != "or" {
+			if i+2 >= len(tokens) {
+				return nil, nil, fmt.Errorf("comparison is missing a right operand")
+			}
+			size = 3
+		}
+		atoms = append(atoms, tokens[i:i+size])
+		i += size
+		if i == len(tokens) {
+			break
+		}
+		if tokens[i] != "and" && tokens[i] != "or" {
+			return nil, nil, fmt.Errorf("expected and/or, got %q", tokens[i])
+		}
+		ops = append(ops, tokens[i])
+		i++
+		if i == len(tokens) {
+			return nil, nil, fmt.Errorf("%s is missing a following condition", ops[len(ops)-1])
+		}
+	}
+	return atoms, ops, nil
+}
+
+func validateConditionAtom(atom []string, strict bool) error {
+	switch len(atom) {
+	case 1:
+		if !strict || isPathLike(atom[0]) {
+			return nil
+		}
+		value, err := parseStrictConditionLiteral(atom[0])
+		if err != nil {
+			return err
+		}
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("single-token trigger condition must be a path or boolean literal")
+		}
+		return nil
+	case 3:
+		switch atom[1] {
+		case "==", "!=", ">", "<", ">=", "<=":
+		default:
+			return fmt.Errorf("unknown operator %q", atom[1])
+		}
+		if !strict {
+			return nil
+		}
+		if err := validateStrictConditionOperand(atom[0]); err != nil {
+			return fmt.Errorf("left operand: %w", err)
+		}
+		if err := validateStrictConditionOperand(atom[2]); err != nil {
+			return fmt.Errorf("right operand: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("expected a truthiness check or comparison")
+	}
+}
+
+func evalConditionExpression(atoms [][]string, ops []string, ctx TemplateContext) (bool, error) {
+	for start := 0; start < len(atoms); {
+		end := start
+		for end < len(ops) && ops[end] == "and" {
+			end++
+		}
+		groupMatched := true
+		for i := start; i <= end; i++ {
+			if !groupMatched {
+				continue
+			}
+			matched, err := evalConditionAtom(atoms[i], ctx)
+			if err != nil {
+				return false, err
+			}
+			groupMatched = matched
+		}
+		if groupMatched {
+			return true, nil
+		}
+		start = end + 1
+	}
+	return false, nil
+}
+
+func evalConditionAtom(atom []string, ctx TemplateContext) (bool, error) {
+	if len(atom) == 1 {
+		value, _ := resolveOperand(atom[0], ctx)
+		return truthy(value), nil
+	}
+	lhs, _ := resolveOperand(atom[0], ctx)
+	rhs, _ := resolveOperand(atom[2], ctx)
+	return compareOp(atom[1], lhs, rhs)
+}
+
+func validateStrictConditionOperand(tok string) error {
+	if isPathLike(tok) {
+		return nil
+	}
+	_, err := parseStrictConditionLiteral(tok)
+	return err
+}
+
+func parseStrictConditionLiteral(tok string) (any, error) {
+	tok = strings.TrimSpace(tok)
+	if len(tok) >= 2 && tok[0] == '\'' && tok[len(tok)-1] == '\'' {
+		tok = `"` + tok[1:len(tok)-1] + `"`
+	}
+	var value any
+	if err := json.Unmarshal([]byte(tok), &value); err != nil {
+		return nil, fmt.Errorf("%q must be a path or quoted/JSON literal", tok)
+	}
+	return value, nil
 }
 
 // splitConditionTokens splits the expression on whitespace, but

@@ -17,14 +17,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: testimonials
 display_name: Testimonials
-version: 0.1.4
+version: 0.1.5
 description: |
   Lightweight customer proof store for Apteva. Keep text testimonials,
   reviews, ratings, attribution, consent, publication status, and an
   optional media reference for later video/audio/image testimonials.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 homepage: https://github.com/apteva/apps/tree/main/mcp/testimonials
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/testimonials/icon.svg
 tags: [testimonials, reviews, social-proof, marketing]
 scopes: [project, global]
 min_apteva_version: "0.11.0"

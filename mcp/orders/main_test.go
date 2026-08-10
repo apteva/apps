@@ -1,7 +1,10 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -49,6 +52,123 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 }
 
 var _ sdk.PlatformClient = (*platformStub)(nil)
+
+func TestEnsureGenericFulfillmentSchemaIsIdempotent(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	baseSchema, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatalf("read base migration: %v", err)
+	}
+	if _, err := db.Exec(string(baseSchema)); err != nil {
+		t.Fatalf("apply base migration: %v", err)
+	}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		if err := ensureGenericFulfillmentSchema(db); err != nil {
+			t.Fatalf("ensure schema attempt %d: %v", attempt, err)
+		}
+	}
+
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			t.Fatalf("inspect %s.%s: %v", column.table, column.name, err)
+		}
+		if !exists {
+			t.Errorf("missing column %s.%s", column.table, column.name)
+		}
+	}
+
+	for _, index := range []string{
+		"ix_orders_type",
+		"ix_order_items_fulfillment",
+		"ix_fulfillments_app",
+		"ux_fulfillments_idempotency",
+	} {
+		var found string
+		if err := db.QueryRow("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?", index).Scan(&found); err != nil {
+			t.Errorf("missing index %s: %v", index, err)
+		}
+	}
+}
+
+func TestFulfillmentItemsMigrationReconcilesDuplicateProviderShipments(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders-upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	base, _ := os.ReadFile("migrations/001_init.sql")
+	if _, err := db.Exec(string(base)); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := db.Exec(`INSERT INTO shipments
+			(project_id, order_id, provider, provider_shipment_id)
+			VALUES ('upgrade', 1, 'printful', 'duplicate-shipment')`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	migration, _ := os.ReadFile("migrations/003_fulfillment_items.sql")
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatalf("apply migration: %v", err)
+	}
+	var preserved, cleared int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shipments WHERE provider_shipment_id='duplicate-shipment'`).Scan(&preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM shipments WHERE provider_shipment_id IS NULL`).Scan(&cleared); err != nil {
+		t.Fatal(err)
+	}
+	if preserved != 1 || cleared != 1 {
+		t.Fatalf("duplicate reconciliation preserved=%d cleared=%d", preserved, cleared)
+	}
+}
+
+func TestEnsureGenericFulfillmentSchemaAddsMissingColumns(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "orders-legacy.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	legacySchema := `
+		CREATE TABLE orders (
+			id INTEGER PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE TABLE order_items (
+			id INTEGER PRIMARY KEY
+		);
+		CREATE TABLE fulfillments (
+			id INTEGER PRIMARY KEY,
+			project_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'queued'
+		);
+	`
+	if _, err := db.Exec(legacySchema); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := ensureGenericFulfillmentSchema(db); err != nil {
+		t.Fatalf("ensure legacy schema: %v", err)
+	}
+
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			t.Fatalf("inspect %s.%s: %v", column.table, column.name, err)
+		}
+		if !exists {
+			t.Errorf("missing repaired column %s.%s", column.table, column.name)
+		}
+	}
+}
 
 func TestOrderLifecycle(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
@@ -108,6 +228,66 @@ func TestOrderLifecycle(t *testing.T) {
 	}
 	if cancelled.OrderStatus != "cancelled" || cancelled.FulfillmentStatus != "cancelled" {
 		t.Fatalf("unexpected cancelled statuses: %+v", cancelled)
+	}
+}
+
+func TestSplitFulfillmentMembershipAndShipmentUpsert(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-split"))
+	order, err := dbOrderCreate(ctx, "proj-split", map[string]any{
+		"source": "commerce", "source_ref": "sale:split", "currency": "EUR", "payment_status": "paid",
+		"items": []any{
+			map[string]any{"title": "POD shirt", "sku": "POD-1", "quantity": 1, "unit_amount_cents": 2500},
+			map[string]any{"title": "Dropship lamp", "sku": "DROP-1", "quantity": 2, "unit_amount_cents": 4000},
+		},
+	}, "order.created")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := dbFulfillmentCreate(ctx, "proj-split", map[string]any{
+		"order_id": order.ID, "provider": "printful", "idempotency_key": "sale:split:printful",
+		"items": []any{map[string]any{"order_item_id": order.Items[0].ID, "quantity": 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := dbFulfillmentCreate(ctx, "proj-split", map[string]any{
+		"order_id": order.ID, "provider": "bigbuy", "idempotency_key": "sale:split:bigbuy",
+		"items": []any{map[string]any{"order_item_id": order.Items[1].ID, "quantity": 2}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 1 || len(second.Items) != 1 {
+		t.Fatalf("fulfillment membership missing: first=%+v second=%+v", first.Items, second.Items)
+	}
+	shipment, _, err := dbShipmentUpsert(ctx.AppDB(), "proj-split", map[string]any{
+		"order_id": order.ID, "fulfillment_id": first.ID, "provider": "printful",
+		"provider_shipment_id": "pf-ship-1", "carrier": "DHL", "tracking_number": "TRACK-1", "status": "shipped",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, partiallyFulfilled, err := dbShipmentUpsert(ctx.AppDB(), "proj-split", map[string]any{
+		"order_id": order.ID, "fulfillment_id": first.ID, "provider": "printful",
+		"provider_shipment_id": "pf-ship-1", "tracking_number": "TRACK-1", "status": "delivered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shipment.ID != updated.ID || updated.Status != "delivered" || updated.Carrier != "DHL" {
+		t.Fatalf("shipment upsert was not idempotent: before=%+v after=%+v", shipment, updated)
+	}
+	if partiallyFulfilled.FulfillmentStatus != "partially_fulfilled" {
+		t.Fatalf("split order status=%q, want partially_fulfilled", partiallyFulfilled.FulfillmentStatus)
+	}
+	_, fullyFulfilled, err := dbFulfillmentUpdate(ctx.AppDB(), "proj-split", map[string]any{
+		"id": second.ID, "status": "delivered",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fullyFulfilled.FulfillmentStatus != "delivered" || fullyFulfilled.OrderStatus != "fulfilled" {
+		t.Fatalf("completed split order has unexpected state: %+v", fullyFulfilled)
 	}
 }
 

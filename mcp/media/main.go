@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.72
+version: 0.13.88
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -43,7 +43,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.10.20"
+      version: ">=0.10.23"
       reason: reads source bytes; writes destination-preserving thumbnails, waveforms, and render outputs back to storage
     - name: jobs
       version: ">=0.1.0"
@@ -113,7 +113,7 @@ provides:
     - { name: media_delete,          description: "Delete a media file and its backing storage file. Hard-deletes storage plus media's catalog data and derivations. Args - file_id." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
-    - { name: media_reindex,         description: "Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated." }
+    - { name: media_reindex,         description: "Queue one atomic re-probe + re-derive for a file_id, or requeue all failed rows. Exact file IDs are fetched directly from Storage, so reindexing does not depend on catalog position or inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes. Do not submit a second force request merely because keyframes are still being generated." }
     - { name: media_index_status,    description: "Counts of pending / ok / failed / unsupported / skipped_size." }
     - name: media_trim
       description: "Cut a clip from a video/audio source. Returns render_id."
@@ -548,7 +548,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "media_reindex",
-			Description: "Queue one atomic re-probe + re-derive. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes instead of submitting a second force request while keyframes are still being generated. Pass file_id to re-index one row, " +
+			Description: "Queue one atomic re-probe + re-derive. Exact file IDs are fetched directly from Storage, so reindexing is independent of catalog position and inventory size. A queued response is asynchronous; wait for media.derived or poll media_get/media_get_keyframes instead of submitting a second force request while keyframes are still being generated. Pass file_id to re-index one row, " +
 				"or failed_only=true to retry every failed/unsupported row in the project. " +
 				"force=true (with file_id) bypasses the max_probe_size_mb cap for that one file " +
 				"— useful for genuinely huge sources where you accept the temp-disk hit.",
@@ -1642,11 +1642,7 @@ func (a *App) handleMediaItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, m)
 	case tail == "reindex" && r.Method == http.MethodPost:
-		_, err := globalCtx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='' WHERE project_id=? AND file_id=?`,
-			pid, fid,
-		)
-		if err != nil {
+		if err := queueMediaReindex(globalCtx.AppDB(), pid, fid, false); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1801,11 +1797,7 @@ func (a *App) handleReindex(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	if fid := q.Get("file_id"); fid != "" {
-		_, err := globalCtx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='' WHERE project_id=? AND file_id=?`,
-			pid, fid,
-		)
-		if err != nil {
+		if err := queueMediaReindex(globalCtx.AppDB(), pid, fid, false); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1922,18 +1914,14 @@ func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if fid, _ := args["file_id"].(string); fid != "" {
-		force := 0
+		force := false
 		if v, _ := args["force"].(bool); v {
-			force = 1
+			force = true
 		}
-		_, err := ctx.AppDB().Exec(
-			`UPDATE media SET probe_status='pending', probe_error='', source_sha256='', force_probe=? WHERE project_id=? AND file_id=?`,
-			force, pid, fid,
-		)
-		if err != nil {
+		if err := queueMediaReindex(ctx.AppDB(), pid, fid, force); err != nil {
 			return nil, err
 		}
-		return map[string]any{"queued": 1, "file_id": fid, "force": force == 1}, nil
+		return map[string]any{"queued": 1, "file_id": fid, "force": force}, nil
 	}
 	if v, _ := args["failed_only"].(bool); v {
 		res, err := ctx.AppDB().Exec(

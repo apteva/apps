@@ -7,6 +7,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -169,8 +171,283 @@ func TestScope_FilesGet_InScope_Allowed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.(*File).ID != in_scope.ID {
+	result := got.(map[string]any)
+	if result["found"] != true {
+		t.Fatalf("found=%v, want true", result["found"])
+	}
+	if result["file"].(*File).ID != in_scope.ID {
 		t.Fatal("returned wrong file")
+	}
+}
+
+func TestScope_FilesGet_MissingStableContract(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	contexts := []struct {
+		name string
+		ctx  context.Context
+	}{
+		{name: "no caller", ctx: context.Background()},
+		{name: "restricted caller", ctx: withCaller()},
+	}
+	for _, tc := range contexts {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := app.toolGetCtx(tc.ctx, ctx, map[string]any{"id": int64(999999)})
+			if err != nil {
+				t.Fatalf("toolGetCtx: %v", err)
+			}
+			raw, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(raw) != `{"file":null,"found":false}` {
+				t.Fatalf("missing-file JSON=%s, want stable result object", raw)
+			}
+		})
+	}
+}
+
+func TestScope_FilesGet_SoftDeletedStableContract(t *testing.T) {
+	ctx := newTestCtx(t)
+	f := mustUpload(t, ctx, "gone.txt", "/invoices/", "gone")
+	if err := dbSoftDelete(ctx.AppDB(), "test-proj", f.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (&App{}).toolGetCtx(withCaller(), ctx, map[string]any{"id": f.ID})
+	if err != nil {
+		t.Fatalf("soft-deleted get: %v", err)
+	}
+	result := got.(map[string]any)
+	if result["found"] != false || result["file"] != nil {
+		t.Fatalf("soft-deleted result=%#v", result)
+	}
+}
+
+func TestScope_MissingIDToolsNeverReturnNullOrPanic(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	callCtx := withCaller()
+	tests := []struct {
+		name string
+		call func() (any, error)
+	}{
+		{"get_url", func() (any, error) {
+			return app.toolGetURLCtx(callCtx, ctx, map[string]any{"id": int64(999999)})
+		}},
+		{"get_content", func() (any, error) {
+			return app.toolGetContentCtx(callCtx, ctx, map[string]any{"id": int64(999999)})
+		}},
+		{"set_tags", func() (any, error) {
+			return app.toolSetTagsCtx(callCtx, ctx, map[string]any{"id": int64(999999), "tags": []any{"x"}})
+		}},
+		{"set_visibility", func() (any, error) {
+			return app.toolSetVisibilityCtx(callCtx, ctx, map[string]any{"id": int64(999999), "visibility": "private"})
+		}},
+		{"move", func() (any, error) {
+			return app.toolMoveCtx(callCtx, ctx, map[string]any{"id": int64(999999), "name": "x.txt"})
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := tc.call()
+			if err == nil || !strings.Contains(err.Error(), "not found") {
+				t.Fatalf("out=%#v err=%v, want not-found error", out, err)
+			}
+			if out != nil {
+				t.Fatalf("out=%#v, want nil on error", out)
+			}
+		})
+	}
+}
+
+func TestScope_DeleteMissingRemainsIdempotent(t *testing.T) {
+	ctx := newTestCtx(t)
+	out, err := (&App{}).toolDeleteCtx(
+		withCaller(), ctx, map[string]any{"id": int64(999999)},
+	)
+	if err != nil {
+		t.Fatalf("delete missing: %v", err)
+	}
+	result := out.(map[string]any)
+	if result["deleted"] != true || result["hard"] != false {
+		t.Fatalf("delete missing result=%#v", result)
+	}
+}
+
+func TestScope_MoveChecksSourceAndDestination(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	t.Run("source denied", func(t *testing.T) {
+		f := mustUpload(t, ctx, "source-denied.txt", "/source/", "x")
+		callCtx := withCaller(sdk.Grant{
+			Effect: "allow", Permission: "files.write", Resource: "folder/destination/**",
+		})
+		_, err := app.toolMoveCtx(callCtx, ctx, map[string]any{
+			"id": f.ID, "folder": "/destination/",
+		})
+		if err == nil || !sdk.IsForbidden(err) {
+			t.Fatalf("err=%v, want source Forbidden", err)
+		}
+	})
+
+	t.Run("destination denied", func(t *testing.T) {
+		f := mustUpload(t, ctx, "destination-denied.txt", "/source/", "x")
+		callCtx := withCaller(sdk.Grant{
+			Effect: "allow", Permission: "files.write", Resource: "folder/source/**",
+		})
+		_, err := app.toolMoveCtx(callCtx, ctx, map[string]any{
+			"id": f.ID, "folder": "/destination/",
+		})
+		if err == nil || !sdk.IsForbidden(err) {
+			t.Fatalf("err=%v, want destination Forbidden", err)
+		}
+	})
+
+	t.Run("rename in place needs no root grant", func(t *testing.T) {
+		f := mustUpload(t, ctx, "before.txt", "/source/", "x")
+		callCtx := withCaller(sdk.Grant{
+			Effect: "allow", Permission: "files.write", Resource: "folder/source/**",
+		})
+		out, err := app.toolMoveCtx(callCtx, ctx, map[string]any{
+			"id": f.ID, "name": "after.txt",
+		})
+		if err != nil {
+			t.Fatalf("rename in place: %v", err)
+		}
+		if out.(map[string]any)["file"].(*File).Name != "after.txt" {
+			t.Fatalf("rename result=%#v", out)
+		}
+	})
+
+	t.Run("both allowed", func(t *testing.T) {
+		f := mustUpload(t, ctx, "allowed.txt", "/source/", "x")
+		callCtx := withCaller(
+			sdk.Grant{Effect: "allow", Permission: "files.write", Resource: "folder/source/**"},
+			sdk.Grant{Effect: "allow", Permission: "files.write", Resource: "folder/destination/**"},
+		)
+		out, err := app.toolMoveCtx(callCtx, ctx, map[string]any{
+			"id": f.ID, "folder": "/destination/",
+		})
+		if err != nil {
+			t.Fatalf("move: %v", err)
+		}
+		if out.(map[string]any)["file"].(*File).Folder != "/destination/" {
+			t.Fatalf("move result=%#v", out)
+		}
+	})
+}
+
+func TestScope_DedupeDoesNotLeakUnauthorizedFile(t *testing.T) {
+	ctx := newTestCtx(t)
+	f := mustUpload(t, ctx, "secret.txt", "/salaries/", "secret")
+	app := &App{}
+
+	denied, err := app.toolDedupeCtx(withCaller(sdk.Grant{
+		Effect: "allow", Permission: "files.read", Resource: "folder/invoices/**",
+	}), ctx, map[string]any{"sha256": f.SHA256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.(map[string]any)["found"] != false {
+		t.Fatalf("unauthorized dedupe leaked file: %#v", denied)
+	}
+
+	allowed, err := app.toolDedupeCtx(withCaller(sdk.Grant{
+		Effect: "allow", Permission: "files.read", Resource: "folder/salaries/**",
+	}), ctx, map[string]any{"sha256": f.SHA256})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed.(map[string]any)["found"] != true ||
+		allowed.(map[string]any)["file"].(*File).ID != f.ID {
+		t.Fatalf("authorized dedupe result=%#v", allowed)
+	}
+}
+
+func TestScope_AbortUploadRequiresDestinationWriteAccess(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	initOut, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"name":       "large.bin",
+		"size_bytes": int64(10),
+		"folder":     "/salaries/",
+	})
+	if err != nil {
+		t.Fatalf("init upload: %v", err)
+	}
+	id := initOut.(map[string]any)["upload_id"].(string)
+
+	deniedCtx := withCaller(sdk.Grant{
+		Effect: "allow", Permission: "files.write", Resource: "folder/invoices/**",
+	})
+	if _, err := app.toolAbortUploadCtx(deniedCtx, ctx, map[string]any{"id": id}); err == nil || !sdk.IsForbidden(err) {
+		t.Fatalf("abort outside scope err=%v, want Forbidden", err)
+	}
+	// Denied abort must leave the session intact.
+	if _, err := app.toolUploadStatusCtx(context.Background(), ctx, map[string]any{"upload_id": id}); err != nil {
+		t.Fatalf("denied abort removed session: %v", err)
+	}
+
+	allowedCtx := withCaller(sdk.Grant{
+		Effect: "allow", Permission: "files.write", Resource: "folder/salaries/**",
+	})
+	out, err := app.toolAbortUploadCtx(allowedCtx, ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatalf("allowed abort: %v", err)
+	}
+	if out.(map[string]any)["found"] != true {
+		t.Fatalf("allowed abort result=%#v", out)
+	}
+
+	// Repeating the same authorized operation preserves the documented
+	// idempotent found=false contract.
+	out, err = app.toolAbortUploadCtx(allowedCtx, ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatalf("repeat abort: %v", err)
+	}
+	if out.(map[string]any)["found"] != false {
+		t.Fatalf("repeat abort result=%#v", out)
+	}
+}
+
+func TestScope_UploadSessionToolsEnforceGlobalProject(t *testing.T) {
+	ctx := newTestCtx(t)
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	app := &App{}
+	initOut, err := app.toolUploadInitCtx(context.Background(), ctx, map[string]any{
+		"_project_id": "project-a",
+		"name":        "global.bin",
+		"size_bytes":  int64(10),
+		"folder":      "/private/",
+	})
+	if err != nil {
+		t.Fatalf("init upload: %v", err)
+	}
+	id := initOut.(map[string]any)["upload_id"].(string)
+
+	if _, err := app.toolUploadStatusCtx(context.Background(), ctx, map[string]any{
+		"_project_id": "project-b", "upload_id": id,
+	}); err == nil || !strings.Contains(err.Error(), "different project") {
+		t.Fatalf("cross-project status err=%v", err)
+	}
+	if _, err := app.toolAbortUploadCtx(context.Background(), ctx, map[string]any{
+		"_project_id": "project-b", "id": id,
+	}); err == nil || !strings.Contains(err.Error(), "different project") {
+		t.Fatalf("cross-project abort err=%v", err)
+	}
+
+	// The owning project can still see and abort the session after the
+	// rejected cross-project calls.
+	if _, err := app.toolUploadStatusCtx(context.Background(), ctx, map[string]any{
+		"_project_id": "project-a", "upload_id": id,
+	}); err != nil {
+		t.Fatalf("owner status: %v", err)
+	}
+	if _, err := app.toolAbortUploadCtx(context.Background(), ctx, map[string]any{
+		"_project_id": "project-a", "id": id,
+	}); err != nil {
+		t.Fatalf("owner abort: %v", err)
 	}
 }
 

@@ -23,6 +23,7 @@ type Member struct {
 	ID          string  `json:"id"`
 	CommunityID string  `json:"community_id"`
 	ContactID   *string `json:"contact_id,omitempty"`
+	AuthUserID  *string `json:"auth_user_id,omitempty"`
 	Handle      string  `json:"handle"`
 	DisplayName string  `json:"display_name"`
 	Bio         string  `json:"bio"`
@@ -42,6 +43,7 @@ func membersTools() []sdk.Tool {
 				"display_name": map[string]any{"type": "string"},
 				"bio":          map[string]any{"type": "string"},
 				"contact_id":   map[string]any{"type": "string"},
+				"auth_user_id": map[string]any{"type": "string"},
 			}, []string{"community_id", "handle"}),
 			Handler: toolMembersCreate,
 		},
@@ -66,6 +68,14 @@ func membersTools() []sdk.Tool {
 			Handler: toolMembersGet,
 		},
 		{
+			Name:        "members_me",
+			Description: "Return the member linked to the verified Auth user. Delegated-user calls only. Args: community_id?.",
+			InputSchema: schemaObject(map[string]any{
+				"community_id": map[string]any{"type": "string"},
+			}, nil),
+			Handler: toolMembersMe,
+		},
+		{
 			Name:        "members_update",
 			Description: "Update a member's display_name, bio, status, or contact_id. Args: id (required), display_name?, bio?, status? (active|suspended|left), contact_id? (empty string clears).",
 			InputSchema: schemaObject(map[string]any{
@@ -74,10 +84,15 @@ func membersTools() []sdk.Tool {
 				"bio":          map[string]any{"type": "string"},
 				"status":       map[string]any{"type": "string"},
 				"contact_id":   map[string]any{"type": "string"},
+				"auth_user_id": map[string]any{"type": "string"},
 			}, []string{"id"}),
 			Handler: toolMembersUpdate,
 		},
 	}
+}
+
+func toolMembersMe(*sdk.AppCtx, map[string]any) (any, error) {
+	return nil, errors.New("members_me requires a delegated Auth user")
 }
 
 var memberStatuses = map[string]bool{"active": true, "suspended": true, "left": true}
@@ -121,6 +136,14 @@ func toolMembersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			sets = append(sets, "contact_id = NULL")
 		} else {
 			sets = append(sets, "contact_id = ?")
+			vals = append(vals, v)
+		}
+	}
+	if v, ok := args["auth_user_id"].(string); ok {
+		if v == "" {
+			sets = append(sets, "auth_user_id = NULL")
+		} else {
+			sets = append(sets, "auth_user_id = ?")
 			vals = append(vals, v)
 		}
 	}
@@ -169,6 +192,7 @@ func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	displayName := strArg(args, "display_name", "")
 	bio := strArg(args, "bio", "")
 	contactID := strArg(args, "contact_id", "")
+	authUserID := strArg(args, "auth_user_id", "")
 
 	db := ctx.AppDB()
 	if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
@@ -179,10 +203,14 @@ func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if contactID != "" {
 		contactArg = contactID
 	}
+	var authUserArg any
+	if authUserID != "" {
+		authUserArg = authUserID
+	}
 	_, err = db.Exec(
-		`INSERT INTO members (id, community_id, contact_id, handle, display_name, bio)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, communityID, contactArg, handle, displayName, bio,
+		`INSERT INTO members (id, community_id, contact_id, auth_user_id, handle, display_name, bio)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, communityID, contactArg, authUserArg, handle, displayName, bio,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create member: %w", err)
@@ -208,10 +236,7 @@ func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	status := strArg(args, "status", "active")
-	limit := 200
-	if v, ok := intArg(args, "limit"); ok && v > 0 {
-		limit = int(v)
-	}
+	limit := boundedLimit(args, "limit", 200, 500)
 	rows, err := ctx.AppDB().Query(
 		`SELECT `+memberCols+` FROM members
 		 WHERE community_id = ? AND status = ?
@@ -229,6 +254,9 @@ func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"members": out}, nil
 }
@@ -259,13 +287,17 @@ func toolMembersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── DB helpers ──────────────────────────────────────────────────
 
-const memberCols = `id, community_id, contact_id, handle, display_name, bio, status, joined_at, last_seen_at`
+const memberCols = `id, community_id, contact_id, auth_user_id, handle, display_name, bio, status, joined_at, last_seen_at`
 
 func scanMember(scan func(...any) error) (Member, error) {
 	var m Member
-	var contact, last sql.NullString
-	if err := scan(&m.ID, &m.CommunityID, &contact, &m.Handle, &m.DisplayName, &m.Bio, &m.Status, &m.JoinedAt, &last); err != nil {
+	var contact, authUser, last sql.NullString
+	if err := scan(&m.ID, &m.CommunityID, &contact, &authUser, &m.Handle, &m.DisplayName, &m.Bio, &m.Status, &m.JoinedAt, &last); err != nil {
 		return m, err
+	}
+	if authUser.Valid {
+		v := authUser.String
+		m.AuthUserID = &v
 	}
 	if contact.Valid {
 		v := contact.String
@@ -316,7 +348,7 @@ func (a *App) httpMembers(w http.ResponseWriter, r *http.Request) {
 		"status":       r.URL.Query().Get("status"),
 	})
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, out)

@@ -62,6 +62,12 @@ func generateSSHKeypair() (privPEM, pubAuth string, err error) {
 // dialSSH opens an SSH session to an instance. Used by both the
 // readiness probe and the run/upload paths. Caller must Close().
 func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
+	if inst == nil {
+		return nil, errors.New("instance is required")
+	}
+	if !inst.IsLocal() && !isCompatibleProvider(normalizeProvider(inst.Provider)) {
+		return nil, fmt.Errorf("instance provider %q is not a managed VPS provider", inst.Provider)
+	}
 	if inst.SSHPrivateKey == "" {
 		return nil, errors.New("instance has no SSH private key")
 	}

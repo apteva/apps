@@ -2,17 +2,25 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.2.0
+version: 0.8.7
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
   operations while delegating price truth to Catalog, stock to Inventory,
   cart/session primitives to Checkout, payments to Billing, and fulfillment
-  to Orders.
+  to Orders. Commerce also adapts provider-specific Printful, Printify,
+  Prodigi, BigBuy, and CJ Dropshipping catalogs, quotes, orders, and tracking.
+  Each store can select manual, Stripe-hosted, or native Stripe Elements
+  checkout while Content remains the sole owner of public storefront UI.
+  Commerce can optionally bind Ads to install a selected Meta Pixel on its
+  Content storefront with consent-gated browser events. Version 0.8.7 keeps
+  canonical Ads resource names when configuring and displaying Meta Pixels.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
-tags: [commerce, ecommerce, stores, storefront, shop, catalog, checkout]
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [commerce, ecommerce, stores, storefront, shop, catalog, checkout, dropshipping, print-on-demand]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -21,6 +29,7 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
   apps:
     - name: catalog
       optional: false
@@ -32,6 +41,20 @@ requires:
       optional: true
     - name: billing
       optional: false
+    - name: content
+      optional: true
+    - name: ads
+      version: ">=0.1.42"
+      optional: true
+      reason: "Resolve Meta tracking sources and browser-public installation configuration."
+  integrations:
+    - role: supplier_provider
+      kind: integration
+      mode: multiple
+      compatible_slugs: [printful, printify, prodigi, bigbuy, cjdropshipping]
+      required: false
+      label: "Product and fulfillment providers"
+      hint: "Bind one or more Printful, Printify, Prodigi, BigBuy, or CJ Dropshipping connections."
 
 provides:
   http_routes:
@@ -41,32 +64,53 @@ provides:
     - { name: commerce_stores_list, description: "List stores." }
     - { name: commerce_stores_get, description: "Fetch one store by id or slug." }
     - { name: commerce_stores_update, description: "Patch a store. Args: id, patch." }
+    - { name: commerce_store_settings_get, description: "Return Commerce-owned shipping, transactional tax, market, and payment settings." }
+    - { name: commerce_store_settings_update, description: "Patch Commerce-owned store settings without replacing unrelated metadata." }
     - { name: commerce_products_create, description: "Create a storefront listing and optional first variant. Can create Catalog product/price when catalog ids are omitted." }
     - { name: commerce_products_list, description: "List storefront listings. Args: store_id?, status?, q?, limit?." }
-    - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?." }
+    - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?, status?." }
     - { name: commerce_products_update, description: "Patch a storefront listing. Args: id, patch." }
     - { name: commerce_products_publish, description: "Publish a listing. Args: id." }
     - { name: commerce_products_archive, description: "Archive a listing. Args: id." }
     - { name: commerce_variants_create, description: "Create a listing variant. Args: listing_id, sku, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?." }
     - { name: commerce_variants_update, description: "Patch a variant. Args: id, patch." }
     - { name: commerce_collections_create, description: "Create a collection. Args: store_id, handle?, title, description_html?." }
-    - { name: commerce_collections_list, description: "List collections. Args: store_id?." }
-    - { name: commerce_collections_get, description: "Fetch a collection and its products. Args: id." }
+    - { name: commerce_collections_list, description: "List collections. Args: store_id?, status?." }
+    - { name: commerce_collections_get, description: "Fetch a collection and its products. Args: id? or handle? plus store_id?, status?." }
     - { name: commerce_collections_update, description: "Patch a collection. Args: id, patch." }
     - { name: commerce_collections_add_product, description: "Add a listing to a collection. Args: collection_id, listing_id." }
     - { name: commerce_collections_remove_product, description: "Remove a listing from a collection. Args: collection_id, listing_id." }
     - { name: commerce_cart_create, description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?." }
-    - { name: commerce_carts_list, description: "List Commerce carts. Args: store_id?, status?, limit?." }
+    - { name: commerce_carts_list, description: "List Commerce carts, including inactive abandonment candidates. Args: store_id?, status?, updated_before? (RFC3339), updated_after? (RFC3339), inactive_for_minutes?, has_items?, abandoned_only? (nonempty open/checkout carts; defaults to 24h inactivity), sort? (updated_desc|updated_asc), limit?." }
     - { name: commerce_cart_get, description: "Fetch a Commerce cart with items. Args: cart_id? or session_token?." }
     - { name: commerce_cart_add_item, description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?." }
     - { name: commerce_cart_set_quantity, description: "Set a Commerce cart item's quantity in the Commerce cart. Args: cart_id, item_id, quantity." }
     - { name: commerce_checkout_start, description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id." }
+    - { name: commerce_checkout_bootstrap, description: "Return durable cart, quote, checkout, sale, and optional resumed payment state." }
+    - { name: commerce_checkout_quote, description: "Calculate and persist unified shipping, Catalog discount, and transactional tax totals." }
     - { name: commerce_checkout_update, description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch." }
     - { name: commerce_checkout_cancel, description: "Cancel a checkout and release its active inventory reservations. Args: checkout_id." }
     - { name: commerce_checkout_pay, description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id." }
+    - { name: commerce_checkout_status, description: "Return the browser-safe checkout status for a storefront session. Args: store_id, session_token." }
     - { name: commerce_checkout_mark_paid, description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id." }
     - { name: commerce_sales_list, description: "List sales. Args: store_id?, status?, payment_status?, limit?." }
     - { name: commerce_sales_get, description: "Fetch one sale. Args: id." }
+    - { name: commerce_providers_list, description: "List bound supplier providers and store policies." }
+    - { name: commerce_provider_policy_set, description: "Set store-level provider automation and margin policy." }
+    - { name: commerce_provider_catalog, description: "Browse one bound provider using provider-specific input. Prodigi accepts provider_input.skus or store policy settings.catalog_skus." }
+    - { name: commerce_provider_product_get, description: "Fetch and adapt one provider product." }
+    - { name: commerce_provider_product_import, description: "Import provider variants into Catalog and a draft Commerce listing. Prodigi requires provider_input.assets and explicit retail prices." }
+    - { name: commerce_variant_sources_list, description: "List local-to-provider variant mappings." }
+    - { name: commerce_variant_source_update, description: "Patch an imported provider variant mapping." }
+    - { name: commerce_shipping_quote, description: "Quote provider shipping and freeze the selected total on a Commerce cart." }
+    - { name: commerce_dispatches_list, description: "List provider fulfillment dispatch jobs." }
+    - { name: commerce_dispatch_submit, description: "Approve or retry one provider dispatch job." }
+    - { name: commerce_sources_sync, description: "Synchronize imported provider variant cost and availability." }
+    - { name: commerce_marketing_channel_options, description: "List Meta ad accounts and Pixels available through the optional Ads app. Args: store_id." }
+    - { name: commerce_marketing_channel_get, description: "Return the configured marketing channel for a store. Args: store_id." }
+    - { name: commerce_marketing_channel_configure, description: "Select or create a Meta Pixel and install consent-gated browser tracking on the Content storefront. Args: store_id, ad_account_id, tracking_source_resource_id? or pixel_name?." }
+    - { name: commerce_marketing_channel_disconnect, description: "Disable a store marketing channel and remove it from the published storefront. Args: store_id." }
+    - { name: commerce_marketing_channel_public_get, description: "Return browser-public tracking configuration for a store. Args: store_id." }
   ui_panels:
     - slot: project.page
       label: Commerce
@@ -81,18 +125,35 @@ provides:
       description: A storefront listing was published.
     - name: commerce.checkout.started
       description: A Commerce checkout was started.
+    - name: commerce.checkout.quoted
+      description: Shipping, discount, tax, and total amounts were recalculated.
+    - name: commerce.checkout.expired
+      description: A Commerce checkout expired and its Inventory and Catalog reservations were released.
+    - name: commerce.store.settings_updated
+      description: Commerce-owned store settings changed.
     - name: commerce.sale.created
       description: A Commerce sale was created.
     - name: commerce.sale.paid
       description: A Commerce sale was marked paid.
     - name: commerce.sale.processing_failed
       description: Paid-sale inventory or order processing needs a retry.
+    - name: commerce.provider_product.imported
+      description: A provider product was imported into Catalog and Commerce.
+    - name: commerce.fulfillment.submitted
+      description: A provider fulfillment order was submitted.
+    - name: commerce.marketing_channel.updated
+      description: A store marketing channel was configured or disabled.
+  workers:
+    - name: provider-dispatch-reconcile
+      schedule: "@every 30s"
+    - name: provider-source-sync
+      schedule: "@every 15m"
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: commerce/v0.8.7
     entry: mcp/commerce
   port: 8080
   health_check: /health

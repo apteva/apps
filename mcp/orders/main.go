@@ -35,6 +35,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("orders requires a db block")
 	}
+	if err := ensureGenericFulfillmentSchema(ctx.AppDB()); err != nil {
+		return fmt.Errorf("ensure generic fulfillment schema: %w", err)
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("orders mounted",
 		"version", a.Manifest().Version,
@@ -42,14 +45,93 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
+type schemaColumn struct {
+	table      string
+	name       string
+	definition string
+}
+
+var genericFulfillmentColumns = []schemaColumn{
+	{table: "orders", name: "order_type", definition: "TEXT NOT NULL DEFAULT 'physical'"},
+	{table: "order_items", name: "fulfillment_type", definition: "TEXT NOT NULL DEFAULT 'warehouse_shipment'"},
+	{table: "order_items", name: "fulfillment_app", definition: "TEXT NOT NULL DEFAULT 'orders'"},
+	{table: "fulfillments", name: "fulfillment_type", definition: "TEXT NOT NULL DEFAULT 'warehouse_shipment'"},
+	{table: "fulfillments", name: "fulfillment_app", definition: "TEXT NOT NULL DEFAULT 'orders'"},
+	{table: "fulfillments", name: "external_ref", definition: "TEXT"},
+	{table: "fulfillments", name: "idempotency_key", definition: "TEXT"},
+	{table: "fulfillments", name: "attempt_count", definition: "INTEGER NOT NULL DEFAULT 0"},
+}
+
+var genericFulfillmentIndexes = []string{
+	"CREATE INDEX IF NOT EXISTS ix_orders_type ON orders(project_id, order_type, updated_at DESC)",
+	"CREATE INDEX IF NOT EXISTS ix_order_items_fulfillment ON order_items(fulfillment_app, fulfillment_type)",
+	"CREATE INDEX IF NOT EXISTS ix_fulfillments_app ON fulfillments(project_id, fulfillment_app, fulfillment_type, status)",
+	"CREATE UNIQUE INDEX IF NOT EXISTS ux_fulfillments_idempotency ON fulfillments(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''",
+}
+
+func ensureGenericFulfillmentSchema(db *sql.DB) error {
+	for _, column := range genericFulfillmentColumns {
+		exists, err := tableHasColumn(db, column.table, column.name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			continue
+		}
+		statement := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", column.table, column.name, column.definition)
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("add %s.%s: %w", column.table, column.name, err)
+		}
+	}
+	for _, statement := range genericFulfillmentIndexes {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("create generic fulfillment index: %w", err)
+		}
+	}
+	return nil
+}
+
+func tableHasColumn(db *sql.DB, table, column string) (bool, error) {
+	switch table {
+	case "orders", "order_items", "fulfillments":
+	default:
+		return false, fmt.Errorf("unsupported schema table %q", table)
+	}
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return false, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid          int
+			name         string
+			columnType   string
+			notNull      int
+			defaultValue sql.NullString
+			primaryKey   int
+		)
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, fmt.Errorf("scan %s schema: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("inspect %s schema: %w", table, err)
+	}
+	return false, nil
+}
+
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker          { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
-	return []sdk.EventHandler{{
-		Topic:   "invoice.paid",
-		Handler: a.handleInvoicePaidEvent,
-	}}
+	return []sdk.EventHandler{
+		{Topic: "invoice.paid", Handler: a.handleInvoicePaidEvent},
+		{Topic: "invoice.refunded", Handler: a.handleInvoiceRefundedEvent},
+	}
 }
 
 // HTTP routes.
@@ -271,7 +353,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "fulfillments_create",
-			Description: "Create or submit a fulfillment. Physical orders use provider/warehouse fields; generic orders can set fulfillment_type, fulfillment_app, idempotency_key, external_ref. Args: order_id, provider, fulfillment_type, fulfillment_app, idempotency_key, warehouse_id, service, submit, payload.",
+			Description: "Create or submit a fulfillment. Physical orders can assign items as [{order_item_id, quantity}]. Generic orders can set fulfillment_type, fulfillment_app, idempotency_key, external_ref. Args: order_id, provider, items?, fulfillment_type, fulfillment_app, idempotency_key, warehouse_id, service, submit, payload.",
 			InputSchema: schemaObject(map[string]any{
 				"order_id":         map[string]any{"type": "integer"},
 				"provider":         map[string]any{"type": "string"},
@@ -283,6 +365,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"warehouse_id":     map[string]any{"type": "string"},
 				"service":          map[string]any{"type": "string"},
 				"submit":           map[string]any{"type": "boolean"},
+				"items":            map[string]any{"type": "array"},
 				"payload":          map[string]any{"type": "object"},
 				"metadata":         map[string]any{"type": "object"},
 			}, []string{"order_id"}),
@@ -328,14 +411,34 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolShipmentsSyncTracking,
 		},
 		{
-			Name:        "returns_create",
-			Description: "Create a return record. Args: order_id, provider, reason, payload, metadata.",
+			Name:        "shipments_upsert",
+			Description: "Idempotently record a provider shipment and tracking update. Args: order_id, fulfillment_id?, provider, provider_shipment_id?, carrier?, service?, tracking_number?, tracking_url?, status?, raw_payload?.",
 			InputSchema: schemaObject(map[string]any{
-				"order_id": map[string]any{"type": "integer"},
-				"provider": map[string]any{"type": "string"},
-				"reason":   map[string]any{"type": "string"},
-				"payload":  map[string]any{"type": "object"},
-				"metadata": map[string]any{"type": "object"},
+				"order_id":             map[string]any{"type": "integer"},
+				"fulfillment_id":       map[string]any{"type": "integer"},
+				"provider":             map[string]any{"type": "string"},
+				"provider_shipment_id": map[string]any{"type": "string"},
+				"carrier":              map[string]any{"type": "string"},
+				"service":              map[string]any{"type": "string"},
+				"tracking_number":      map[string]any{"type": "string"},
+				"tracking_url":         map[string]any{"type": "string"},
+				"status":               map[string]any{"type": "string"},
+				"raw_payload":          map[string]any{"type": "object"},
+			}, []string{"order_id", "provider"}),
+			Handler: a.toolShipmentsUpsert,
+		},
+		{
+			Name:        "returns_create",
+			Description: "Create an idempotent full or partial return request. Args: order_id, items? [{order_item_id, quantity, inventory_item_id?}], provider?, reason?, idempotency_key?, restock_location_id?, payload?, metadata?.",
+			InputSchema: schemaObject(map[string]any{
+				"order_id":            map[string]any{"type": "integer"},
+				"provider":            map[string]any{"type": "string"},
+				"reason":              map[string]any{"type": "string"},
+				"idempotency_key":     map[string]any{"type": "string"},
+				"restock_location_id": map[string]any{"type": "integer"},
+				"items":               map[string]any{"type": "array"},
+				"payload":             map[string]any{"type": "object"},
+				"metadata":            map[string]any{"type": "object"},
 			}, []string{"order_id"}),
 			Handler: a.toolReturnsCreate,
 		},
@@ -346,6 +449,27 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolReturnsGet,
+		},
+		{
+			Name:        "returns_update",
+			Description: "Move a return through requested, approved, in_transit, received, rejected, or cancelled. Args: id, status, provider_return_id?, response_payload?, actor?, note?.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"},
+				"provider_return_id": map[string]any{"type": "string"}, "response_payload": map[string]any{"type": "object"},
+				"actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
+			}, []string{"id", "status"}),
+			Handler: a.toolReturnsUpdate,
+		},
+		{
+			Name:        "returns_complete",
+			Description: "Complete a received return, optionally restock Inventory and request a Billing refund. Args: id, refund?, refund_amount_cents?, refund_reason?, restock?, restock_location_id?, exchange_order_id?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "refund": map[string]any{"type": "boolean"},
+				"refund_amount_cents": map[string]any{"type": "integer"}, "refund_reason": map[string]any{"type": "string"},
+				"restock": map[string]any{"type": "boolean"}, "restock_location_id": map[string]any{"type": "integer"},
+				"exchange_order_id": map[string]any{"type": "integer"}, "actor": map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: a.toolReturnsComplete,
 		},
 		{
 			Name:        "order_events_list",
@@ -410,6 +534,42 @@ func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 			return nil
 		}
 		return err
+	}
+	return nil
+}
+
+func (a *App) handleInvoiceRefundedEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := firstNonEmpty(event.ProjectID, strArg(event.Data, "_project_id"))
+	invoiceID := firstNonZero(int64Arg(event.Data, "id"), int64Arg(event.Data, "invoice_id"))
+	if pid == "" || invoiceID == 0 || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	var response struct {
+		Invoice map[string]any `json:"invoice"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{
+		"_project_id": pid, "id": invoiceID,
+	}, &response); err != nil {
+		return fmt.Errorf("reconcile refunded invoice %d: %w", invoiceID, err)
+	}
+	if response.Invoice == nil {
+		return nil
+	}
+	paymentStatus := "partially_refunded"
+	if int64Arg(response.Invoice, "amount_paid_cents") <= 0 {
+		paymentStatus = "refunded"
+	}
+	result, err := ctx.AppDB().Exec(
+		`UPDATE orders SET payment_status=?, updated_at=CURRENT_TIMESTAMP
+		  WHERE project_id=? AND invoice_id=? AND payment_status IN ('paid','refund_pending','partially_refunded')`,
+		paymentStatus, pid, invoiceID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed > 0 {
+		ctx.EmitWithProject("order.payment_updated", pid, map[string]any{
+			"invoice_id": invoiceID, "payment_status": paymentStatus,
+		})
 	}
 	return nil
 }
@@ -754,6 +914,19 @@ func (a *App) toolShipmentsSyncTracking(ctx *sdk.AppCtx, args map[string]any) (a
 	return map[string]any{"shipments": shipments, "count": len(shipments)}, nil
 }
 
+func (a *App) toolShipmentsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	shipment, order, err := dbShipmentUpsert(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	emitOrder(ctx, "shipment.updated", order)
+	return map[string]any{"shipment": shipment, "order": order}, nil
+}
+
 func (a *App) toolReturnsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1086,28 +1259,35 @@ type OrderItem struct {
 }
 
 type Fulfillment struct {
-	ID              int64           `json:"id"`
-	ProjectID       string          `json:"project_id"`
-	OrderID         int64           `json:"order_id"`
-	Provider        string          `json:"provider"`
-	FulfillmentType string          `json:"fulfillment_type"`
-	FulfillmentApp  string          `json:"fulfillment_app"`
-	ProviderOrderID string          `json:"provider_order_id,omitempty"`
-	ExternalRef     string          `json:"external_ref,omitempty"`
-	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
-	WarehouseID     string          `json:"warehouse_id,omitempty"`
-	Service         string          `json:"service,omitempty"`
-	Status          string          `json:"status"`
-	AttemptCount    int64           `json:"attempt_count"`
-	RequestPayload  json.RawMessage `json:"request_payload,omitempty"`
-	ResponsePayload json.RawMessage `json:"response_payload,omitempty"`
-	Error           string          `json:"error,omitempty"`
-	Metadata        json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt       string          `json:"created_at"`
-	UpdatedAt       string          `json:"updated_at"`
-	SubmittedAt     string          `json:"submitted_at,omitempty"`
-	AcceptedAt      string          `json:"accepted_at,omitempty"`
-	CancelledAt     string          `json:"cancelled_at,omitempty"`
+	ID              int64              `json:"id"`
+	ProjectID       string             `json:"project_id"`
+	OrderID         int64              `json:"order_id"`
+	Provider        string             `json:"provider"`
+	FulfillmentType string             `json:"fulfillment_type"`
+	FulfillmentApp  string             `json:"fulfillment_app"`
+	ProviderOrderID string             `json:"provider_order_id,omitempty"`
+	ExternalRef     string             `json:"external_ref,omitempty"`
+	IdempotencyKey  string             `json:"idempotency_key,omitempty"`
+	WarehouseID     string             `json:"warehouse_id,omitempty"`
+	Service         string             `json:"service,omitempty"`
+	Status          string             `json:"status"`
+	AttemptCount    int64              `json:"attempt_count"`
+	RequestPayload  json.RawMessage    `json:"request_payload,omitempty"`
+	ResponsePayload json.RawMessage    `json:"response_payload,omitempty"`
+	Error           string             `json:"error,omitempty"`
+	Metadata        json.RawMessage    `json:"metadata,omitempty"`
+	CreatedAt       string             `json:"created_at"`
+	UpdatedAt       string             `json:"updated_at"`
+	SubmittedAt     string             `json:"submitted_at,omitempty"`
+	AcceptedAt      string             `json:"accepted_at,omitempty"`
+	CancelledAt     string             `json:"cancelled_at,omitempty"`
+	Items           []*FulfillmentItem `json:"items,omitempty"`
+}
+
+type FulfillmentItem struct {
+	FulfillmentID int64   `json:"fulfillment_id"`
+	OrderItemID   int64   `json:"order_item_id"`
+	Quantity      float64 `json:"quantity"`
 }
 
 type Shipment struct {
@@ -1130,20 +1310,35 @@ type Shipment struct {
 }
 
 type Return struct {
-	ID               int64           `json:"id"`
-	ProjectID        string          `json:"project_id"`
-	OrderID          int64           `json:"order_id"`
-	Provider         string          `json:"provider,omitempty"`
-	ProviderReturnID string          `json:"provider_return_id,omitempty"`
-	Status           string          `json:"status"`
-	Reason           string          `json:"reason,omitempty"`
-	RequestPayload   json.RawMessage `json:"request_payload,omitempty"`
-	ResponsePayload  json.RawMessage `json:"response_payload,omitempty"`
-	Metadata         json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt        string          `json:"created_at"`
-	UpdatedAt        string          `json:"updated_at"`
-	ReceivedAt       string          `json:"received_at,omitempty"`
-	CompletedAt      string          `json:"completed_at,omitempty"`
+	ID                int64           `json:"id"`
+	ProjectID         string          `json:"project_id"`
+	OrderID           int64           `json:"order_id"`
+	Provider          string          `json:"provider,omitempty"`
+	ProviderReturnID  string          `json:"provider_return_id,omitempty"`
+	Status            string          `json:"status"`
+	Reason            string          `json:"reason,omitempty"`
+	RequestPayload    json.RawMessage `json:"request_payload,omitempty"`
+	ResponsePayload   json.RawMessage `json:"response_payload,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
+	IdempotencyKey    string          `json:"idempotency_key,omitempty"`
+	RefundRequestID   *int64          `json:"refund_request_id,omitempty"`
+	RefundAmountCents int64           `json:"refund_amount_cents,omitempty"`
+	ExchangeOrderID   *int64          `json:"exchange_order_id,omitempty"`
+	RestockLocationID *int64          `json:"restock_location_id,omitempty"`
+	ProcessingError   string          `json:"processing_error,omitempty"`
+	Items             []*ReturnItem   `json:"items,omitempty"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+	ReceivedAt        string          `json:"received_at,omitempty"`
+	CompletedAt       string          `json:"completed_at,omitempty"`
+}
+
+type ReturnItem struct {
+	ReturnID        int64   `json:"return_id"`
+	OrderItemID     int64   `json:"order_item_id"`
+	Quantity        float64 `json:"quantity"`
+	InventoryItemID *int64  `json:"inventory_item_id,omitempty"`
+	RestockedAt     string  `json:"restocked_at,omitempty"`
 }
 
 type OrderEvent struct {
@@ -1535,13 +1730,10 @@ func dbFulfillmentCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Ful
 		}
 		return nil, nil, err
 	}
-	nextFulfillmentStatus := orderFulfillmentStatusFromFulfillment(status)
-	if _, err := tx.Exec(
-		`UPDATE orders SET fulfillment_status = ?, order_status = CASE
-		    WHEN order_status IN ('paid', 'ready_to_fulfill') THEN 'fulfilling'
-		    ELSE order_status END,
-		    updated_at = CURRENT_TIMESTAMP
-		  WHERE id = ? AND project_id = ?`, nextFulfillmentStatus, orderID, pid); err != nil {
+	if err := insertFulfillmentItemsTx(tx, pid, id, orderID, arrayArg(args, "items")); err != nil {
+		return nil, nil, err
+	}
+	if err := updateOrderFulfillmentAggregateTx(tx, pid, orderID); err != nil {
 		return nil, nil, err
 	}
 	if err := writeEventTx(tx, pid, orderID, "system", "fulfillment.created", map[string]any{
@@ -1603,16 +1795,7 @@ func dbFulfillmentUpdate(db *sql.DB, pid string, args map[string]any) (*Fulfillm
 		status, status, status, id, pid); err != nil {
 		return nil, nil, err
 	}
-	orderStatus := orderStatusFromFulfillment(status)
-	fulfillmentStatus := orderFulfillmentStatusFromFulfillment(status)
-	if _, err := tx.Exec(
-		`UPDATE orders
-		    SET fulfillment_status = ?,
-		        order_status = CASE WHEN ? != '' THEN ? ELSE order_status END,
-		        fulfilled_at = CASE WHEN ? IN ('succeeded','active','completed') AND fulfilled_at IS NULL THEN CURRENT_TIMESTAMP ELSE fulfilled_at END,
-		        updated_at = CURRENT_TIMESTAMP
-		  WHERE id = ? AND project_id = ?`,
-		fulfillmentStatus, orderStatus, orderStatus, status, f.OrderID, pid); err != nil {
+	if err := updateOrderFulfillmentAggregateTx(tx, pid, f.OrderID); err != nil {
 		return nil, nil, err
 	}
 	if err := writeEventTx(tx, pid, f.OrderID, actorOrSystem(strArg(args, "actor")), "fulfillment.updated", map[string]any{
@@ -1651,6 +1834,146 @@ func dbTrackingSync(ctx *sdk.AppCtx, pid string, orderID, fulfillmentID int64) (
 	return dbShipmentsList(ctx.AppDB(), pid, orderID)
 }
 
+func insertFulfillmentItemsTx(tx *sql.Tx, pid string, fulfillmentID, orderID int64, raw []any) error {
+	for i, value := range raw {
+		item, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("items[%d] must be an object", i)
+		}
+		itemID := int64Arg(item, "order_item_id")
+		quantity := float64Arg(item, "quantity", 0)
+		if itemID == 0 || quantity <= 0 {
+			return fmt.Errorf("items[%d] requires positive order_item_id and quantity", i)
+		}
+		var ordered float64
+		if err := tx.QueryRow(
+			`SELECT quantity FROM order_items WHERE id=? AND order_id=?`, itemID, orderID).Scan(&ordered); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("order item %d does not belong to order %d", itemID, orderID)
+			}
+			return err
+		}
+		var assigned float64
+		if err := tx.QueryRow(
+			`SELECT COALESCE(SUM(fi.quantity), 0)
+			   FROM fulfillment_items fi
+			   JOIN fulfillments f ON f.id=fi.fulfillment_id
+			  WHERE fi.order_item_id=? AND f.project_id=? AND f.status!='cancelled'`,
+			itemID, pid).Scan(&assigned); err != nil {
+			return err
+		}
+		if assigned+quantity > ordered+1e-9 {
+			return fmt.Errorf("order item %d fulfillment quantity exceeds ordered quantity", itemID)
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO fulfillment_items (fulfillment_id, order_item_id, quantity) VALUES (?, ?, ?)`,
+			fulfillmentID, itemID, quantity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func dbShipmentUpsert(db *sql.DB, pid string, args map[string]any) (*Shipment, *Order, error) {
+	orderID := int64Arg(args, "order_id")
+	fulfillmentID := int64Arg(args, "fulfillment_id")
+	provider := strings.TrimSpace(strArg(args, "provider"))
+	if orderID == 0 || provider == "" {
+		return nil, nil, errors.New("order_id and provider required")
+	}
+	order, err := dbOrderGet(db, pid, orderID, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	if order == nil {
+		return nil, nil, errors.New("order not found")
+	}
+	if fulfillmentID != 0 {
+		var linkedOrderID int64
+		if err := db.QueryRow(`SELECT order_id FROM fulfillments WHERE id=? AND project_id=?`, fulfillmentID, pid).Scan(&linkedOrderID); err != nil {
+			return nil, nil, errors.New("fulfillment not found")
+		}
+		if linkedOrderID != orderID {
+			return nil, nil, errors.New("fulfillment does not belong to order")
+		}
+	}
+	providerRef := strings.TrimSpace(strArg(args, "provider_shipment_id"))
+	tracking := strings.TrimSpace(strArg(args, "tracking_number"))
+	var existingID int64
+	if providerRef != "" {
+		_ = db.QueryRow(
+			`SELECT id FROM shipments WHERE project_id=? AND provider=? AND provider_shipment_id=?`,
+			pid, provider, providerRef).Scan(&existingID)
+	} else if tracking != "" {
+		_ = db.QueryRow(
+			`SELECT id FROM shipments WHERE project_id=? AND order_id=? AND provider=? AND tracking_number=?`,
+			pid, orderID, provider, tracking).Scan(&existingID)
+	}
+	status := firstNonEmpty(strArg(args, "status"), "pending")
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	if existingID == 0 {
+		err = tx.QueryRow(
+			`INSERT INTO shipments
+			   (project_id, order_id, fulfillment_id, provider, provider_shipment_id, carrier,
+			    service, tracking_number, tracking_url, status, raw_payload, shipped_at, delivered_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 RETURNING id`,
+			pid, orderID, nullableInt64(fulfillmentID), provider, nullStr(providerRef),
+			nullStr(strArg(args, "carrier")), nullStr(strArg(args, "service")), nullStr(tracking),
+			nullStr(strArg(args, "tracking_url")), status, jsonOrEmpty(args["raw_payload"], "{}"),
+			nullableTime(status == "shipped" || status == "in_transit" || status == "delivered", time.Now().UTC().Format(time.RFC3339)),
+			nullableTime(status == "delivered", time.Now().UTC().Format(time.RFC3339)),
+		).Scan(&existingID)
+	} else {
+		_, err = tx.Exec(
+			`UPDATE shipments
+			    SET fulfillment_id=COALESCE(?, fulfillment_id), carrier=COALESCE(?, carrier),
+			        service=COALESCE(?, service), tracking_number=COALESCE(?, tracking_number),
+			        tracking_url=COALESCE(?, tracking_url), status=?, raw_payload=?,
+			        shipped_at=CASE WHEN ? IN ('shipped','in_transit','delivered') AND shipped_at IS NULL THEN CURRENT_TIMESTAMP ELSE shipped_at END,
+			        delivered_at=CASE WHEN ?='delivered' AND delivered_at IS NULL THEN CURRENT_TIMESTAMP ELSE delivered_at END,
+			        updated_at=CURRENT_TIMESTAMP
+			  WHERE id=? AND project_id=?`,
+			nullableInt64(fulfillmentID), nullStr(strArg(args, "carrier")), nullStr(strArg(args, "service")),
+			nullStr(tracking), nullStr(strArg(args, "tracking_url")), status, jsonOrEmpty(args["raw_payload"], "{}"),
+			status, status, existingID, pid)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if fulfillmentID != 0 && (status == "shipped" || status == "in_transit" || status == "delivered") {
+		fulfillmentStatus := "shipped"
+		if status == "delivered" {
+			fulfillmentStatus = "delivered"
+		}
+		if _, err := tx.Exec(`UPDATE fulfillments SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`,
+			fulfillmentStatus, fulfillmentID, pid); err != nil {
+			return nil, nil, err
+		}
+		if err := updateOrderFulfillmentAggregateTx(tx, pid, orderID); err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := writeEventTx(tx, pid, orderID, "system", "shipment.updated", map[string]any{
+		"shipment_id": existingID, "fulfillment_id": fulfillmentID, "provider": provider, "status": status,
+	}); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	shipment, err := dbShipmentGet(db, pid, existingID)
+	if err != nil {
+		return nil, nil, err
+	}
+	order, err = dbOrderGet(db, pid, orderID, true)
+	return shipment, order, err
+}
+
 func dbReturnCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Return, *Order, error) {
 	orderID := int64Arg(args, "order_id")
 	if orderID == 0 {
@@ -1663,6 +1986,22 @@ func dbReturnCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Return, 
 	if order == nil {
 		return nil, nil, errors.New("order not found")
 	}
+	if key := strArg(args, "idempotency_key"); key != "" {
+		var existingID int64
+		err := ctx.AppDB().QueryRow(
+			`SELECT id FROM returns WHERE project_id=? AND idempotency_key=?`, pid, key).Scan(&existingID)
+		if err == nil {
+			ret, getErr := dbReturnGet(ctx.AppDB(), pid, existingID)
+			return ret, order, getErr
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, err
+		}
+	}
+	items, err := normalizeReturnItems(ctx.AppDB(), order, arrayArg(args, "items"))
+	if err != nil {
+		return nil, nil, err
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, nil, err
@@ -1671,17 +2010,26 @@ func dbReturnCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Return, 
 	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO returns
-		   (project_id, order_id, provider, status, reason, request_payload, metadata)
-		 VALUES (?, ?, ?, 'requested', ?, ?, ?)
+		   (project_id, order_id, provider, status, reason, request_payload, metadata, idempotency_key, restock_location_id)
+		 VALUES (?, ?, ?, 'requested', ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, orderID, nullStr(strArg(args, "provider")), nullStr(strArg(args, "reason")),
 		jsonOrEmpty(args["payload"], "{}"), jsonOrEmpty(args["metadata"], "{}"),
+		nullStr(strArg(args, "idempotency_key")), nullableInt64(int64Arg(args, "restock_location_id")),
 	).Scan(&id)
 	if err != nil {
 		return nil, nil, err
 	}
+	for _, item := range items {
+		if _, err := tx.Exec(
+			`INSERT INTO return_items(return_id, order_item_id, quantity, inventory_item_id)
+			 VALUES (?, ?, ?, ?)`,
+			id, item.OrderItemID, item.Quantity, nullablePtr(item.InventoryItemID)); err != nil {
+			return nil, nil, err
+		}
+	}
 	if _, err := tx.Exec(
-		`UPDATE orders SET order_status = 'returned', fulfillment_status = 'returned', updated_at = CURRENT_TIMESTAMP
+		`UPDATE orders SET order_status = 'return_requested', updated_at = CURRENT_TIMESTAMP
 		  WHERE id = ? AND project_id = ?`, orderID, pid); err != nil {
 		return nil, nil, err
 	}
@@ -1830,6 +2178,9 @@ func dbFulfillmentGet(db *sql.DB, pid string, id int64) (*Fulfillment, error) {
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err == nil {
+		err = loadFulfillmentItems(db, f)
+	}
 	return f, err
 }
 
@@ -1845,6 +2196,9 @@ func dbFulfillmentGetByIdempotency(db *sql.DB, pid, key string) (*Fulfillment, e
 		   FROM fulfillments WHERE project_id = ? AND idempotency_key = ?`, pid, key))
 	if err == sql.ErrNoRows {
 		return nil, nil
+	}
+	if err == nil {
+		err = loadFulfillmentItems(db, f)
 	}
 	return f, err
 }
@@ -1868,7 +2222,39 @@ func dbFulfillmentsList(db *sql.DB, pid string, orderID int64) ([]*Fulfillment, 
 		}
 		out = append(out, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, f := range out {
+		if err := loadFulfillmentItems(db, f); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func loadFulfillmentItems(db *sql.DB, f *Fulfillment) error {
+	if f == nil {
+		return nil
+	}
+	rows, err := db.Query(
+		`SELECT fulfillment_id, order_item_id, quantity
+		   FROM fulfillment_items WHERE fulfillment_id=? ORDER BY order_item_id`, f.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item FulfillmentItem
+		if err := rows.Scan(&item.FulfillmentID, &item.OrderItemID, &item.Quantity); err != nil {
+			return err
+		}
+		f.Items = append(f.Items, &item)
+	}
+	return rows.Err()
 }
 
 func scanFulfillment(row rowScanner) (*Fulfillment, error) {
@@ -1940,6 +2326,36 @@ func dbShipmentsList(db *sql.DB, pid string, orderID int64) ([]*Shipment, error)
 	return out, rows.Err()
 }
 
+func dbShipmentGet(db *sql.DB, pid string, id int64) (*Shipment, error) {
+	var s Shipment
+	var fulfillmentID sql.NullInt64
+	var shippedAt, deliveredAt sql.NullString
+	var rawPayload string
+	err := db.QueryRow(
+		`SELECT id, project_id, order_id, fulfillment_id, COALESCE(provider,''), COALESCE(provider_shipment_id,''),
+		        COALESCE(carrier,''), COALESCE(service,''), COALESCE(tracking_number,''), COALESCE(tracking_url,''),
+		        status, raw_payload, created_at, updated_at, shipped_at, delivered_at
+		   FROM shipments WHERE id=? AND project_id=?`, id, pid).Scan(
+		&s.ID, &s.ProjectID, &s.OrderID, &fulfillmentID, &s.Provider, &s.ProviderShipmentID,
+		&s.Carrier, &s.Service, &s.TrackingNumber, &s.TrackingURL, &s.Status, &rawPayload,
+		&s.CreatedAt, &s.UpdatedAt, &shippedAt, &deliveredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.FulfillmentID = ptrIfValid(fulfillmentID)
+	s.RawPayload = json.RawMessage(rawPayload)
+	if shippedAt.Valid {
+		s.ShippedAt = shippedAt.String
+	}
+	if deliveredAt.Valid {
+		s.DeliveredAt = deliveredAt.String
+	}
+	return &s, nil
+}
+
 func dbReturnGet(db *sql.DB, pid string, id int64) (*Return, error) {
 	if id == 0 {
 		return nil, nil
@@ -1947,11 +2363,17 @@ func dbReturnGet(db *sql.DB, pid string, id int64) (*Return, error) {
 	ret, err := scanReturn(db.QueryRow(
 		`SELECT id, project_id, order_id, COALESCE(provider,''), COALESCE(provider_return_id,''),
 		        status, COALESCE(reason,''), request_payload, response_payload, metadata,
+		        COALESCE(idempotency_key,''), refund_request_id, refund_amount_cents,
+		        exchange_order_id, restock_location_id, processing_error,
 		        created_at, updated_at, received_at, completed_at
 		   FROM returns WHERE id = ? AND project_id = ?`, id, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err != nil || ret == nil {
+		return ret, err
+	}
+	ret.Items, err = dbReturnItems(db, ret.ID)
 	return ret, err
 }
 
@@ -1959,6 +2381,8 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, order_id, COALESCE(provider,''), COALESCE(provider_return_id,''),
 		        status, COALESCE(reason,''), request_payload, response_payload, metadata,
+		        COALESCE(idempotency_key,''), refund_request_id, refund_amount_cents,
+		        exchange_order_id, restock_location_id, processing_error,
 		        created_at, updated_at, received_at, completed_at
 		   FROM returns WHERE order_id = ? AND project_id = ? ORDER BY updated_at DESC`, orderID, pid)
 	if err != nil {
@@ -1971,6 +2395,10 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 		if err != nil {
 			return nil, err
 		}
+		ret.Items, err = dbReturnItems(db, ret.ID)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, ret)
 	}
 	return out, rows.Err()
@@ -1979,9 +2407,12 @@ func dbReturnsList(db *sql.DB, pid string, orderID int64) ([]*Return, error) {
 func scanReturn(row rowScanner) (*Return, error) {
 	var ret Return
 	var receivedAt, completedAt sql.NullString
+	var refundRequestID, exchangeOrderID, restockLocationID sql.NullInt64
 	var requestPayload, responsePayload, metadata string
 	err := row.Scan(&ret.ID, &ret.ProjectID, &ret.OrderID, &ret.Provider, &ret.ProviderReturnID,
 		&ret.Status, &ret.Reason, &requestPayload, &responsePayload, &metadata,
+		&ret.IdempotencyKey, &refundRequestID, &ret.RefundAmountCents,
+		&exchangeOrderID, &restockLocationID, &ret.ProcessingError,
 		&ret.CreatedAt, &ret.UpdatedAt, &receivedAt, &completedAt)
 	if err != nil {
 		return nil, err
@@ -1989,6 +2420,9 @@ func scanReturn(row rowScanner) (*Return, error) {
 	ret.RequestPayload = json.RawMessage(requestPayload)
 	ret.ResponsePayload = json.RawMessage(responsePayload)
 	ret.Metadata = json.RawMessage(metadata)
+	ret.RefundRequestID = ptrIfValid(refundRequestID)
+	ret.ExchangeOrderID = ptrIfValid(exchangeOrderID)
+	ret.RestockLocationID = ptrIfValid(restockLocationID)
 	if receivedAt.Valid {
 		ret.ReceivedAt = receivedAt.String
 	}
@@ -2253,19 +2687,21 @@ func validateStatuses(orderStatus, paymentStatus, fulfillmentStatus string) erro
 var validOrderStatuses = map[string]bool{
 	"draft": true, "pending_payment": true, "paid": true, "ready_to_fulfill": true,
 	"fulfilling": true, "partially_fulfilled": true, "fulfilled": true, "delivered": true,
-	"active": true, "completed": true, "cancelled": true, "returned": true, "error": true, "failed": true,
+	"active": true, "completed": true, "cancelled": true, "returned": true, "partially_returned": true,
+	"return_requested": true, "return_approved": true, "return_in_transit": true, "return_received": true,
+	"error": true, "failed": true,
 }
 
 var validPaymentStatuses = map[string]bool{
 	"unpaid": true, "authorized": true, "paid": true, "partially_refunded": true,
-	"refunded": true, "failed": true,
+	"refund_pending": true, "refunded": true, "failed": true,
 }
 
 var validFulfillmentStatuses = map[string]bool{
 	"unsubmitted": true, "queued": true, "submitted": true, "accepted": true,
 	"picking": true, "packed": true, "shipped": true, "delivered": true,
 	"provisioning": true, "running": true, "succeeded": true, "active": true, "completed": true,
-	"cancelled": true, "failed": true, "returned": true,
+	"fulfilled": true, "partially_fulfilled": true, "cancelled": true, "failed": true, "returned": true,
 }
 
 func normalizeOrderType(v string) string {
@@ -2285,6 +2721,10 @@ func orderFulfillmentStatusFromFulfillment(status string) string {
 	switch status {
 	case "submitted", "accepted":
 		return "submitted"
+	case "picking", "packed":
+		return status
+	case "shipped", "delivered":
+		return status
 	case "running", "provisioning":
 		return "provisioning"
 	case "succeeded", "active":
@@ -2302,11 +2742,11 @@ func orderFulfillmentStatusFromFulfillment(status string) string {
 
 func orderStatusFromFulfillment(status string) string {
 	switch status {
-	case "running", "provisioning", "submitted", "accepted":
+	case "running", "provisioning", "submitted", "accepted", "picking", "packed", "shipped", "partially_fulfilled":
 		return "fulfilling"
 	case "succeeded", "active":
 		return "active"
-	case "completed", "fulfilled":
+	case "completed", "fulfilled", "delivered":
 		return "fulfilled"
 	case "failed":
 		return "failed"
@@ -2315,6 +2755,80 @@ func orderStatusFromFulfillment(status string) string {
 	default:
 		return ""
 	}
+}
+
+func updateOrderFulfillmentAggregateTx(tx *sql.Tx, pid string, orderID int64) error {
+	rows, err := tx.Query(
+		`SELECT status, COUNT(*) FROM fulfillments
+		  WHERE project_id=? AND order_id=? GROUP BY status`, pid, orderID)
+	if err != nil {
+		return err
+	}
+	counts := map[string]int{}
+	total := 0
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			rows.Close()
+			return err
+		}
+		counts[status] = count
+		total += count
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if total == 0 {
+		return nil
+	}
+	fulfillmentStatus := aggregateFulfillmentStatus(counts, total)
+	orderStatus := orderStatusFromFulfillment(fulfillmentStatus)
+	terminal := fulfillmentStatus == "delivered" || fulfillmentStatus == "fulfilled" || fulfillmentStatus == "active"
+	_, err = tx.Exec(
+		`UPDATE orders
+		    SET fulfillment_status=?,
+		        order_status=CASE
+		          WHEN ? != '' THEN ?
+		          WHEN order_status IN ('paid','ready_to_fulfill') THEN 'fulfilling'
+		          ELSE order_status
+		        END,
+		        fulfilled_at=CASE WHEN ? AND fulfilled_at IS NULL THEN CURRENT_TIMESTAMP ELSE fulfilled_at END,
+		        updated_at=CURRENT_TIMESTAMP
+		  WHERE id=? AND project_id=?`,
+		fulfillmentStatus, orderStatus, orderStatus, terminal, orderID, pid)
+	return err
+}
+
+func aggregateFulfillmentStatus(counts map[string]int, total int) string {
+	if total <= 0 {
+		return "unsubmitted"
+	}
+	success := counts["delivered"] + counts["completed"] + counts["fulfilled"] + counts["succeeded"] + counts["active"]
+	if success == total {
+		if counts["delivered"] > 0 {
+			return "delivered"
+		}
+		if counts["active"]+counts["succeeded"] == total {
+			return "active"
+		}
+		return "fulfilled"
+	}
+	if success > 0 || counts["shipped"] > 0 {
+		return "partially_fulfilled"
+	}
+	if counts["failed"] > 0 {
+		return "failed"
+	}
+	if counts["cancelled"] == total {
+		return "cancelled"
+	}
+	for _, status := range []string{"provisioning", "running", "accepted", "submitted", "packed", "picking"} {
+		if counts[status] > 0 {
+			return orderFulfillmentStatusFromFulfillment(status)
+		}
+	}
+	return "queued"
 }
 
 func defaultOrderStatus(payment string) string {

@@ -8,6 +8,8 @@ import (
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+
+	"github.com/apteva/apps/mcp/computer/internal/browser/domselector"
 )
 
 type Target struct {
@@ -50,17 +52,7 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
   if (req.NewlineMode !== 'preserve' && req.NewlineMode !== 'compact') return {error:'set_text: newline_mode must be preserve or compact'};
   function norm(s) { return String(s || '').replace(/\s+/g, ' ').trim(); }
   function compactNewlines(s) { return String(s).replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{2,}/g, '\n'); }
-  function cssPath(el) {
-    if (!el || !el.tagName) return '';
-    if (el.id) return '#' + CSS.escape(el.id);
-    var parts = [];
-    for (var cur = el; cur && cur.nodeType === 1 && parts.length < 4; cur = cur.parentElement) {
-      var part = cur.tagName.toLowerCase();
-      if (cur.classList && cur.classList.length) part += '.' + CSS.escape(cur.classList[0]);
-      parts.unshift(part);
-    }
-    return parts.join(' > ');
-  }
+%s
   function labelFor(el) {
     if (!el) return '';
     var aria = norm(el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title')));
@@ -133,7 +125,7 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
     mode: req.Mode,
     newline_mode: req.NewlineMode
   };
-})(%s, %s)`, string(targetJSON), string(reqJSON))
+})(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
 	var out struct {
 		SetResult

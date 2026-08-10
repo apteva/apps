@@ -17,6 +17,15 @@ const (
 	statusCompleted = "completed"
 	statusFailed    = "failed"
 	statusCanceled  = "canceled"
+
+	stageQueued         = "queued"
+	stageDownloading    = "downloading"
+	stagePostprocessing = "postprocessing"
+	stagePreparing      = "preparing"
+	stageUploading      = "uploading"
+	stageCompleted      = "completed"
+	stageFailed         = "failed"
+	stageCanceled       = "canceled"
 )
 
 func schemaObj(props map[string]any, required []string) map[string]any {

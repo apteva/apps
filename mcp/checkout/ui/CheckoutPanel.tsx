@@ -127,6 +127,8 @@ interface CheckoutSession {
     | "expired";
   invoice_id?: number;
   subtotal_cents: number;
+  shipping_cents: number;
+  discount_cents: number;
   tax_cents: number;
   total_cents: number;
   currency: string;
@@ -422,6 +424,16 @@ function CartDetail({ cart }: { cart: Cart }) {
           {cart.expires_at ? ` · expires ${fmtRelative(cart.expires_at)}` : ""}
         </p>
       </header>
+
+      <section className="border-y border-border py-3">
+        <div className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-1 text-sm">
+          <div className="text-text-muted">Subtotal</div><div className="text-right tabular-nums">{fmtMoney(session.subtotal_cents, session.currency)}</div>
+          {session.shipping_cents > 0 && <><div className="text-text-muted">Shipping</div><div className="text-right tabular-nums">{fmtMoney(session.shipping_cents, session.currency)}</div></>}
+          {session.tax_cents > 0 && <><div className="text-text-muted">Tax</div><div className="text-right tabular-nums">{fmtMoney(session.tax_cents, session.currency)}</div></>}
+          {session.discount_cents > 0 && <><div className="text-text-muted">Discount</div><div className="text-right tabular-nums">-{fmtMoney(session.discount_cents, session.currency)}</div></>}
+          <div className="font-medium pt-1 border-t border-border">Total</div><div className="text-right font-medium tabular-nums pt-1 border-t border-border">{fmtMoney(session.total_cents, session.currency)}</div>
+        </div>
+      </section>
 
       <section>
         <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">

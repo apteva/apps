@@ -20,6 +20,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,102 +40,8 @@ import (
 
 // ─── Embedded manifest ─────────────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: deploy
-display_name: Deploy
-version: 0.16.0
-description: Build and release services, Android apps, and iOS apps.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.ingress.write
-    - platform.connections.execute
-    - platform.connections.read_credentials
-  integrations:
-    - role: code
-      kind: app
-      required: true
-      compatible_app_names: [code]
-      label: Code app
-      hint: Install the Code app to host repositories the Deploy app builds.
-    - role: domains
-      kind: app
-      required: false
-      compatible_app_names: [domains]
-      label: Domains app
-      hint: Install the Domains app to attach a custom domain to a deployment.
-    - role: play_store
-      kind: integration
-      required: false
-      compatible_slugs: [google-play-developer]
-      label: Google Play Developer
-      hint: Required to publish Android App Bundles to Google Play.
-    - role: android_signing
-      kind: integration
-      required: false
-      compatible_slugs: [android-upload-signing]
-      label: Android Upload Signing
-      hint: Required only when Deploy must sign an Android App Bundle that Gradle did not sign.
-    - role: app_store
-      kind: integration
-      required: false
-      compatible_slugs: [app-store-connect]
-      label: App Store Connect
-      hint: Required to sign, upload, and publish iOS apps.
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: deploy_init,    description: "Bind a source to a new deployment." }
-    - { name: deploy_list,    description: "List deployments in this project." }
-    - { name: deploy_get,     description: "Full deployment detail + builds + current release." }
-    - { name: deploy_env_list, description: "List environments for a deployment." }
-    - { name: deploy_env_create, description: "Create a staging/dev environment for a deployment." }
-    - { name: deploy_env_update, description: "Update one environment's source, env vars, build config, or domain." }
-    - { name: deploy_env_destroy, description: "Archive a non-production environment." }
-    - { name: deploy_build,   description: "Fetch source, run the framework build; returns build_id." }
-    - { name: deploy_release, description: "Promote a build to live." }
-    - { name: deploy_promote, description: "Promote a tested build from one environment to another." }
-    - { name: deploy_rollout, description: "Change a Google Play production rollout fraction." }
-    - { name: deploy_halt, description: "Halt a mobile rollout or expire a TestFlight build." }
-    - { name: deploy_status,  description: "Current build + release state, URL, last 10 builds." }
-    - { name: deploy_logs,    description: "Tail build or runtime logs." }
-    - { name: deploy_stop,    description: "Stop the live release." }
-    - { name: deploy_destroy, description: "Stop, drop, delete artifacts." }
-    - { name: deploy_attach_domain, description: "Attach an FQDN to a deployment via the Domains app." }
-    - { name: deploy_detach_domain, description: "Clear a deployment's domain link." }
-    - { name: deploy_list_routes, description: "Server-side: live deployments as a route table for the host-based proxy. Polled by apteva-server's host-router; not for agents." }
-    - { name: deploy_health, description: "Deployment health and artifact retention status." }
-    - { name: deploy_update, description: "Update deployment or environment configuration." }
-    - { name: deploy_restart, description: "Restart a service release without rebuilding." }
-    - { name: deploy_set_env, description: "Merge environment variables into a deployment environment." }
-  ui_panels:
-    - { slot: project.page, label: "Deploy", icon: rocket, entry: /ui/DeployPanel.mjs }
-  workers:
-    - { name: mobile_release_sync, schedule: "@every 1m" }
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/deploy
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/deploy.db
-  migrations: migrations/
-config_schema:
-  - name: retain_rollback_builds
-    type: text
-    default: "3"
-    label: Retained rollback builds
-    description: Number of most recent successful builds to keep per deployment in addition to live/current builds. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 
@@ -150,8 +57,14 @@ type App struct {
 	maxBuilds       int
 	retainRollbacks int
 
-	buildSem     chan struct{} // throttle concurrent builds
-	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
+	buildSem        chan struct{} // throttle concurrent builds
+	watchdogStop    chan struct{} // closed on unmount; pid-owns-port poller
+	cloudBuildMu    sync.Mutex
+	mobileSigningMu sync.Mutex
+	mobileVersionMu sync.Mutex
+
+	sourceCapsuleKeyMu sync.Mutex
+	sourceCapsuleKey   []byte
 
 	// Auto-restart bookkeeping. In-memory: a sidecar restart resets
 	// the counter, which is fine — reconcileReleases will re-adopt
@@ -199,10 +112,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	} else {
 		a.dataDir = "/data"
 	}
-	for _, sub := range []string{"builds", "releases"} {
+	for _, sub := range []string{"builds", "releases", "store-assets"} {
 		if err := os.MkdirAll(filepath.Join(a.dataDir, sub), 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", sub, err)
 		}
+	}
+	if _, err := a.sourceCapsuleSigningKey(); err != nil {
+		return err
 	}
 	pathsRebased, err := rebaseLegacyPaths(ctx.AppDB(), a.dataDir)
 	if err != nil {
@@ -272,6 +188,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			"bytes", pruned.BytesPruned,
 		)
 	}
+	if builds, err := dbListAllBuilds(ctx.AppDB()); err == nil {
+		if count, bytes := a.cleanupSourceCapsules(builds, time.Now()); count > 0 {
+			ctx.Logger().Info("removed stale source capsules", "capsules", count, "bytes", bytes)
+		}
+	}
 
 	// Watchdog promotes slow-bind "starting" releases and demotes
 	// "live" releases whose port owner changed (cross-instance port
@@ -299,10 +220,16 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
-		Name: "mobile_release_sync", Schedule: "@every 1m",
-		Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
-	}}
+	return []sdk.Worker{
+		{
+			Name: "mobile_release_sync", Schedule: "@every 1m",
+			Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
+		},
+		{
+			Name: "cloud_build_sync", Schedule: "@every 15s",
+			Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingCloudBuilds(ctx) },
+		},
+	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -444,6 +371,7 @@ func (a *App) recordBootRecoveryFailure(rel *Release, cause error) {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: http.MethodGet, Pattern: "/source-capsules/", Handler: a.handleSourceCapsule, NoAuth: true},
 		{Pattern: "/api/deployments", Handler: a.handleDeploymentsCollection},
 		{Pattern: "/api/deployments/", Handler: a.handleDeploymentItem},
 		{Pattern: "/api/builds/", Handler: a.handleBuildItem},
@@ -539,6 +467,13 @@ func main() {
 		runStaticServer(os.Args[2:])
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "--capsule-runner" {
+		if err := runCapsuleRunner(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "capsule runner:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	app := &App{}
 	wrapped := wrapApp{app: app}
 	sdk.Run(&wrapped)
@@ -590,6 +525,17 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // failure). The caller decides whether to release immediately.
 
 func (a *App) runBuild(d *Deployment) (*Build, error) {
+	return a.runBuildWithOptions(d, nil)
+}
+
+func (a *App) runBuildWithOptions(d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
+	if normalizeBuildBackend(d.BuildBackend) != buildBackendLocal {
+		return a.submitCloudBuildWithOptions(context.Background(), d, releaseOpts)
+	}
+	return a.runLocalBuild(d)
+}
+
+func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	// Pick framework.
 	fw := d.Framework
 
@@ -598,6 +544,10 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	build, err := dbCreateBuildForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, fw, d.BuildCmd)
 	if err != nil {
 		return nil, err
+	}
+	d, err = a.prepareMobileBuildTarget(d, build)
+	if err != nil {
+		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
 	}
 
 	// Concurrency throttle.
@@ -644,6 +594,15 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	if err := fetchSource(globalCtx, d, srcDir, cfg); err != nil {
 		fmt.Fprintf(logF, "fetch source failed: %v\n", err)
 		return a.failBuild(build, "fetch source: "+err.Error()), nil
+	}
+	var localBuildCfg cloudBuildConfig
+	_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &localBuildCfg)
+	if localBuildCfg.Preflight != "off" && isMobileDeployment(d, build) {
+		localBuildCfg.SourceMode = "bundle"
+		localBuildCfg.ArtifactMode = "file"
+		if err := validateMobileSource(srcDir, d, localBuildCfg); err != nil {
+			return a.failBuild(build, "mobile source preflight: "+err.Error()), nil
+		}
 	}
 	sha, err := hashTree(srcDir)
 	if err != nil {
@@ -698,6 +657,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 		// the default case and fails with "no default start command".
 		"framework": fw,
 	})
+	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	// Stash entrypoint via the build's (framework-chosen) BuildCmd
 	// metadata is not enough — the runtime needs entrypoint at
 	// release time. Fastest path: re-derive at release time from
@@ -711,6 +671,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 }
 
 func (a *App) failBuild(b *Build, msg string) *Build {
+	dbSetMobileVersionStatus(globalCtx.AppDB(), b.ID, "failed")
 	_ = dbUpdateBuild(globalCtx.AppDB(), b.ID, map[string]any{
 		"status":      "failed",
 		"finished_at": nowUTC(),
@@ -719,6 +680,7 @@ func (a *App) failBuild(b *Build, msg string) *Build {
 	emit("deploy.build.failed", map[string]any{
 		"deployment_id": b.DeploymentID, "environment_id": b.EnvironmentID, "build_id": b.ID, "error": msg,
 	})
+	a.removeSourceCapsule(b.ID)
 	out, _ := dbGetBuild(globalCtx.AppDB(), b.ID)
 	return out
 }

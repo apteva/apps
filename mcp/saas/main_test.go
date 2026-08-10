@@ -26,6 +26,7 @@ type platformStub struct {
 	priceTrialDays              int64
 	priceMetadata               map[string]any
 	failures                    map[string]int
+	failureMessages             map[string]string
 	grants                      map[string]bool
 	failGrantFeature            string
 	failGrantOnce               bool
@@ -104,6 +105,9 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	if p.failures[key] > 0 {
 		p.failures[key]--
 		return fmt.Errorf("injected failure for %s", key)
+	}
+	if message := p.failureMessages[key]; message != "" {
+		return errors.New(message)
 	}
 	var body map[string]any
 	switch tool {
@@ -218,6 +222,8 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"payment": map[string]any{"id": 901, "method": input["method"], "amount_cents": input["amount_cents"]}, "invoice": map[string]any{"id": input["invoice_id"], "status": "paid", "total_cents": input["amount_cents"], "amount_paid_cents": input["amount_cents"]}}
 	case "invoices_send_payment_link":
 		body = map[string]any{"url": "https://pay.example/session", "stripe_session_id": "cs_test_123", "expires_at": 123}
+	case "invoices_collect":
+		body = map[string]any{"collection_attempt": map[string]any{"id": 1101, "invoice_id": input["invoice_id"], "status": "succeeded", "idempotency_key": input["idempotency_key"]}}
 	case "payment_method_setup_create":
 		body = map[string]any{"setup_session": map[string]any{"id": 1001, "provider_session_id": "cs_setup_123", "customer_id": input["customer_id"], "status": "pending", "url": "https://pay.example/setup", "expires_at": 1785000000, "metadata": input["metadata"]}, "url": "https://pay.example/setup"}
 	case "containers_create":
@@ -228,6 +234,12 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "running"}}
 	case "containers_destroy":
 		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "deleted"}}
+	case "credentials_create":
+		body = map[string]any{
+			"token":    "customer-secret-token",
+			"token_id": "tok_123",
+			"session":  map[string]any{"exchange_code": "custom-secret-code", "expires_at": "2026-08-01T00:00:00Z"},
+		}
 	case "crm_saas_usage_snapshot":
 		if p.emptyUsage {
 			body = map[string]any{"usage": []map[string]any{}}
@@ -280,8 +292,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.7.0" {
-		t.Errorf("manifest.Version=%q, want 0.7.0", m.Version)
+	if m.Version != "0.8.2" {
+		t.Errorf("manifest.Version=%q, want 0.8.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -295,7 +307,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
-	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.6.0" || versions["entitlements"] != ">=0.2.0" {
+	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.10.0" || versions["subscriptions"] != ">=0.7.0" || versions["entitlements"] != ">=0.2.0" {
 		t.Fatalf("dependency versions not enforced: %+v", versions)
 	}
 	permissions := map[string]bool{}
@@ -331,8 +343,10 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if !containsString(subscriptionEvents, "subscription.cycle_due") || !containsString(subscriptionEvents, "subscription.change.applied") {
 		t.Fatalf("manifest is missing subscription orchestration events: %v", subscriptionEvents)
 	}
-	if !containsString(billingEvents, "invoice.paid") {
-		t.Fatal("manifest should subscribe to invoice.paid")
+	if !containsString(billingEvents, "invoice.paid") ||
+		!containsString(billingEvents, "invoice.payment_failed") ||
+		!containsString(billingEvents, "invoice.payment_action_required") {
+		t.Fatalf("manifest should subscribe to billing collection events: %v", billingEvents)
 	}
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Entry != "/ui/SaaSPanel.mjs" {
 		t.Fatalf("manifest should expose SaaS UI panel, got %+v", m.Provides.UIPanels)
@@ -388,6 +402,40 @@ func TestPlanList_ProjectsCatalogProductIdentity(t *testing.T) {
 	}
 	if catalogCalls != 1 {
 		t.Fatalf("plan list should hydrate products with one Catalog call: %+v", platform.calls)
+	}
+}
+
+func TestPlanUpsert_DefaultsNewPaidPlansAndPreservesExplicitManualCollection(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+
+	createdOut, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "automatic", "name": "Automatic", "billing_mode": "paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := createdOut.(map[string]any)["plan"].(*Plan)
+	if got := strArg(mapFromAny(created.Metadata), "collection_method"); got != "charge_automatically" {
+		t.Fatalf("new paid plan collection_method=%q, want charge_automatically", got)
+	}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "manual", "name": "Manual", "billing_mode": "paid",
+		"metadata": map[string]any{"collection_method": "send_invoice"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	updatedOut, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "manual", "name": "Manual renamed", "billing_mode": "paid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := updatedOut.(map[string]any)["plan"].(*Plan)
+	if got := strArg(mapFromAny(updated.Metadata), "collection_method"); got != "send_invoice" {
+		t.Fatalf("existing manual plan collection_method=%q, want send_invoice", got)
 	}
 }
 
@@ -489,6 +537,124 @@ func TestReliabilityMigration_PreservesExistingRows(t *testing.T) {
 	}
 }
 
+func TestFulfillmentPersistenceMigration_ScrubsExistingRowsOnMount(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	matches, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range matches {
+		if strings.HasSuffix(path, "010_fulfillment_persistence.sql") {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO saas_plans (project_id,key,name) VALUES ('proj-test','legacy','Legacy')`); err != nil {
+		t.Fatal(err)
+	}
+	result, err := db.Exec(`
+		INSERT INTO saas_plan_actions (project_id,plan_key,event,app_name,tool_name)
+		VALUES ('proj-test','legacy','account_active','credentials','credentials_create')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actionID, _ := result.LastInsertId()
+	if _, err := db.Exec(`
+		INSERT INTO saas_fulfillment_runs
+			(project_id,account_id,plan_action_id,transition_id,event,app_name,tool_name,status,input_json,output_json)
+		VALUES ('proj-test','legacy-account',?,'legacy-transition','account_active','credentials','credentials_create','succeeded',
+		        '{"api_key":"legacy-input-secret"}','{"token":"legacy-output-secret","token_id":"tok_legacy"}')`, actionID); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("migrations/010_fulfillment_persistence.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	manifest := app.Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, &platformStub{}, nil).WithProject("proj-test")
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json,output_json FROM saas_fulfillment_runs WHERE account_id='legacy-account'`).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(inputJSON, "legacy-input-secret") || strings.Contains(outputJSON, "legacy-output-secret") {
+		t.Fatalf("upgrade retained historical secrets: input=%s output=%s", inputJSON, outputJSON)
+	}
+	if !strings.Contains(outputJSON, `"token_id":"tok_legacy"`) {
+		t.Fatalf("upgrade removed safe fulfillment output: %s", outputJSON)
+	}
+}
+
+func TestAutomaticCollectionDefaultMigration_PreservesExistingPaidPlans(t *testing.T) {
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	matches, err := filepath.Glob("migrations/*.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range matches {
+		if strings.HasSuffix(path, "011_automatic_collection_default.sql") {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO saas_plans (project_id,key,name,billing_mode,metadata_json)
+		VALUES
+		  ('proj-test','legacy','Legacy','paid','{"note":"keep"}'),
+		  ('proj-test','explicit-auto','Explicit Auto','paid','{"collection_method":"charge_automatically"}'),
+		  ('proj-test','free','Free','free','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("migrations/011_automatic_collection_default.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"legacy":        "send_invoice",
+		"explicit-auto": "charge_automatically",
+		"free":          "",
+	} {
+		var metadata string
+		if err := db.QueryRow(`SELECT metadata_json FROM saas_plans WHERE project_id='proj-test' AND key=?`, key).Scan(&metadata); err != nil {
+			t.Fatal(err)
+		}
+		if got := strArg(mapFromAny(json.RawMessage(metadata)), "collection_method"); got != want {
+			t.Fatalf("%s collection_method=%q, want %q (metadata=%s)", key, got, want, metadata)
+		}
+	}
+}
+
 func TestPlanActionUpdate_PartialPatch(t *testing.T) {
 	ctx, db := newTestCtx(t, &platformStub{})
 	defer db.Close()
@@ -536,6 +702,9 @@ func TestPlanActionUpdate_PartialPatch(t *testing.T) {
 	if got.FailureMode != "mark_degraded" {
 		t.Fatalf("failure_mode=%q", got.FailureMode)
 	}
+	if got.PersistInput != persistenceRedacted || got.PersistOutput != persistenceRedacted {
+		t.Fatalf("persistence defaults changed: input=%q output=%q", got.PersistInput, got.PersistOutput)
+	}
 	args := mapFromAny(got.Args)
 	if args["name"] != "new" || args["image"] != "ghcr.io/apteva/apteva:latest" {
 		t.Fatalf("args not updated: %+v", args)
@@ -575,6 +744,187 @@ func TestPlanActionUpdate_RejectsUnknownAndBadFailureMode(t *testing.T) {
 	action := created.(map[string]any)["action"].(*PlanAction)
 	if _, err := app.toolPlanActionUpdate(ctx, map[string]any{"id": action.ID, "failure_mode": "explode"}); err == nil || !strings.Contains(err.Error(), "unsupported failure_mode") {
 		t.Fatalf("expected unsupported failure mode, got %v", err)
+	}
+}
+
+func TestFulfillmentPersistence_RedactsSecretsByDefault(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args":                   map[string]any{"provider_api_key": "provider-secret-value"},
+		"sensitive_output_paths": []any{"session.exchange_code"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "secure", "plan_key": "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json, output_json FROM saas_fulfillment_runs WHERE account_id=?`, acct.ID).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"provider-secret-value", "customer-secret-token", "custom-secret-code"} {
+		if strings.Contains(inputJSON, secret) || strings.Contains(outputJSON, secret) {
+			t.Fatalf("persisted fulfillment leaked %q: input=%s output=%s", secret, inputJSON, outputJSON)
+		}
+	}
+	var input, output map[string]any
+	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		t.Fatal(err)
+	}
+	if input["provider_api_key"] != redactedValue || output["token"] != redactedValue || output["token_id"] != "tok_123" {
+		t.Fatalf("unexpected persisted values: input=%+v output=%+v", input, output)
+	}
+	if mapFromAny(output["session"])["exchange_code"] != redactedValue {
+		t.Fatalf("configured path was not redacted: %+v", output)
+	}
+	var provisioningJSON string
+	if err := db.QueryRow(`SELECT output_json FROM saas_provisioning_steps WHERE account_id=? AND step='fulfillment'`, acct.ID).Scan(&provisioningJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(provisioningJSON, "customer-secret-token") || strings.Contains(provisioningJSON, "custom-secret-code") {
+		t.Fatalf("provisioning output leaked fulfillment secret: %s", provisioningJSON)
+	}
+}
+
+func TestFulfillmentPersistence_NoneStoresNoPayload(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args": map[string]any{"api_key": "input-secret"}, "persist_input": "none", "persist_output": "none",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "no-payload", "plan_key": "api"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	var inputJSON, outputJSON string
+	if err := db.QueryRow(`SELECT input_json, output_json FROM saas_fulfillment_runs WHERE account_id=?`, acct.ID).Scan(&inputJSON, &outputJSON); err != nil {
+		t.Fatal(err)
+	}
+	if inputJSON != "{}" || outputJSON != "{}" {
+		t.Fatalf("none persistence stored payloads: input=%s output=%s", inputJSON, outputJSON)
+	}
+}
+
+func TestFulfillmentPersistence_RedactsErrorsAndHistoricalRuns(t *testing.T) {
+	pf := &platformStub{failureMessages: map[string]string{
+		"credentials:credentials_create": "upstream rejected api_key=provider-secret-value",
+	}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	added, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"args": map[string]any{"api_key": "provider-secret-value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := added.(map[string]any)["action"].(*PlanAction)
+	if _, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "failed-secret", "plan_key": "api"}); err == nil || strings.Contains(err.Error(), "provider-secret-value") {
+		t.Fatalf("caller received an unredacted fulfillment error: %v", err)
+	}
+	var storedError string
+	if err := db.QueryRow(`SELECT error FROM saas_fulfillment_runs WHERE plan_action_id=?`, action.ID).Scan(&storedError); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(storedError, "provider-secret-value") || !strings.Contains(storedError, redactedValue) {
+		t.Fatalf("stored error was not redacted: %q", storedError)
+	}
+
+	if _, err := db.Exec(`
+		INSERT INTO saas_fulfillment_runs
+			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error)
+		VALUES ('proj-test', 'legacy', ?, 'legacy-secret', 'account_active', 'credentials', 'credentials_create', 'succeeded',
+		        '{"api_key":"old-input-secret","safe":"kept"}',
+		        '{"token":"old-output-secret","token_id":"tok_old"}',
+		        'provider rejected token=old-output-secret')`, action.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := scrubFulfillmentHistory(db); err != nil {
+		t.Fatal(err)
+	}
+	var inputJSON, outputJSON, errorText string
+	if err := db.QueryRow(`SELECT input_json, output_json, error FROM saas_fulfillment_runs WHERE account_id='legacy'`).Scan(&inputJSON, &outputJSON, &errorText); err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"old-input-secret", "old-output-secret"} {
+		if strings.Contains(inputJSON, secret) || strings.Contains(outputJSON, secret) || strings.Contains(errorText, secret) {
+			t.Fatalf("historical scrub retained %q: input=%s output=%s error=%s", secret, inputJSON, outputJSON, errorText)
+		}
+	}
+	if !strings.Contains(inputJSON, `"safe":"kept"`) || !strings.Contains(outputJSON, `"token_id":"tok_old"`) {
+		t.Fatalf("historical scrub removed safe fields: input=%s output=%s", inputJSON, outputJSON)
+	}
+}
+
+func TestFulfillmentPersistence_RejectsSensitiveStoreMapping(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "api", "name": "API"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "api", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"store": map[string]any{"metadata.customer_token": "token"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "unsafe-store", "plan_key": "api"}); err == nil || !strings.Contains(err.Error(), "contains sensitive data") {
+		t.Fatalf("expected sensitive store rejection, got %v", err)
+	}
+	acct, err := dbAccountBySlug(db, "proj-test", "unsafe-store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(acct.Metadata), "customer-secret-token") {
+		t.Fatalf("account metadata leaked token: %s", acct.Metadata)
+	}
+}
+
+func TestPlanActionPersistence_ValidatesConfiguration(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"persist_output": "none", "store": map[string]any{"metadata.token_id": "token_id"},
+	}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("expected none/store validation error, got %v", err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"persist_output": "sometimes",
+	}); err == nil || !strings.Contains(err.Error(), "unsupported persistence mode") {
+		t.Fatalf("expected persistence mode validation error, got %v", err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key": "free", "event": "account_active", "app_name": "credentials", "tool_name": "credentials_create",
+		"sensitive_output_paths": "token",
+	}); err == nil || !strings.Contains(err.Error(), "array") {
+		t.Fatalf("expected sensitive path validation error, got %v", err)
 	}
 }
 
@@ -1353,8 +1703,11 @@ func TestTrialCycleDue_UpdatesCheckoutAndPaidEventActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkout, _ = dbCheckoutGet(db, "proj-test", checkout.ID)
-	if checkout.Status != "awaiting_payment" || checkout.PaymentURL != "https://pay.example/session" || int64PtrValue(checkout.InvoiceID) != 702 {
-		t.Fatalf("trial checkout not updated with payment link: %+v", checkout)
+	if checkout.Status != "awaiting_payment" || checkout.PaymentURL != "" || int64PtrValue(checkout.InvoiceID) != 702 {
+		t.Fatalf("trial checkout not updated for automatic collection: %+v", checkout)
+	}
+	if !hasCall(pf.calls, "billing:invoices_collect") || hasCall(pf.calls, "billing:invoices_send_payment_link") {
+		t.Fatalf("default paid plan should collect automatically: %+v", pf.calls)
 	}
 	if err := app.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: "proj-test", Data: map[string]any{"id": 702, "status": "paid"}}); err != nil {
 		t.Fatal(err)
@@ -2425,6 +2778,76 @@ func TestSubscriptionCycleDue_RetryReusesInvoiceAndDuplicateIsIgnored(t *testing
 	if op == nil || op.Status != "awaiting_payment" || op.Stage != "payment_link_created" || op.AttemptCount != 2 {
 		t.Fatalf("unexpected commerce operation: %+v", op)
 	}
+}
+
+func TestAutomaticCollectionCheckoutSavesMethodAndRenewalCollects(t *testing.T) {
+	t.Run("initial checkout", func(t *testing.T) {
+		pf := &platformStub{}
+		ctx, db := newTestCtx(t, pf)
+		defer db.Close()
+		app := &App{}
+		setupPaidCRMPlan(t, app, ctx)
+		if _, err := app.toolPlanUpsert(ctx, map[string]any{
+			"key": "crm-pro", "name": "CRM Pro", "billing_mode": "paid",
+			"catalog_product_id": 7001, "catalog_price_id": 8001,
+			"subscription_required": true,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.toolCheckoutCreate(ctx, map[string]any{
+			"owner_email": "auto@example.com", "slug": "auto", "plan_key": "crm-pro",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		subCall := findCall(pf.calls, "subscriptions", "subscriptions_create")
+		if subCall == nil || strArg(mapFromAny(subCall.Input["metadata"]), "collection_method") != "charge_automatically" {
+			t.Fatalf("subscription collection policy missing: %+v", subCall)
+		}
+		linkCall := findCall(pf.calls, "billing", "invoices_send_payment_link")
+		if linkCall == nil ||
+			linkCall.Input["save_payment_method"] != true ||
+			linkCall.Input["set_default_payment_method"] != true {
+			t.Fatalf("initial checkout must collect recurring consent: %+v", linkCall)
+		}
+		if hasCall(pf.calls, "billing:invoices_collect") {
+			t.Fatal("first checkout cannot collect before the customer enters a payment method")
+		}
+	})
+
+	t.Run("renewal", func(t *testing.T) {
+		pf := &platformStub{}
+		ctx, db := newTestCtx(t, pf)
+		defer db.Close()
+		app := &App{}
+		setupPaidCRMPlan(t, app, ctx)
+		acct, _, err := app.createAccount(ctx, map[string]any{
+			"owner_email": "renewal@example.com", "slug": "renewal",
+			"plan_key": "crm-pro", "subscription_id": 77,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		event := sdk.Event{Event: "subscription.cycle_due", ProjectID: "proj-test", Data: map[string]any{
+			"subscription_id": 77, "cycle_id": 88, "currency": "USD",
+			"period_start": "2026-08-01T00:00:00Z", "period_end": "2026-09-01T00:00:00Z",
+			"metadata": map[string]any{"collection_method": "charge_automatically"},
+		}}
+		if err := app.handleSubscriptionCycleDue(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+		collectCall := findCall(pf.calls, "billing", "invoices_collect")
+		if collectCall == nil ||
+			collectCall.Input["idempotency_key"] != "subscription:77:cycle:88:collect" {
+			t.Fatalf("automatic collection call=%+v", collectCall)
+		}
+		if hasCall(pf.calls, "billing:invoices_send_payment_link") {
+			t.Fatal("renewal with automatic collection must not create a payment link")
+		}
+		op, err := dbCommerceOperationByInvoice(db, "proj-test", 702)
+		if err != nil || op == nil || op.AccountID != acct.ID {
+			t.Fatalf("commerce operation=%+v err=%v", op, err)
+		}
+	})
 }
 
 func TestInvoicePaid_MarksCycleAndSubscriptionActiveOnce(t *testing.T) {

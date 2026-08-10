@@ -26,9 +26,11 @@ enables clicks.
 | Android | Linux (KVM recommended) or macOS | `adb`, `emulator`, `avdmanager`, `aapt`, `gradle` (or a repo `./gradlew`), a JDK 17 |
 | iOS | **macOS only** | `xcrun`, `xcodebuild`, `simctl`; optional `idb` (`pipx install fb-idb`) + `idb_companion` (`brew install idb-companion`) for faster raw-frame live view and input |
 
-The Linux production host can run the Android backend; iOS requires
-running apteva on a Mac. A Mac runner pool is future work — v0.1 runs
-sims on the install's own host.
+The Linux production host can run the Android backend; iOS requires macOS.
+Simulator runs locally by default and can optionally use a host managed by the
+**Instances** app. Provider-provisioned macOS compute, such as a Scaleway Apple
+silicon Mac mini, can be an iOS runner while the Simulator panel and public API
+remain on the primary Apteva installation.
 
 System images / runtimes are **not** auto-installed (they're large and
 slow). Install them once:
@@ -40,16 +42,43 @@ sdkmanager --install "system-images;android-34;google_apis;x86_64"
 xcodebuild -downloadPlatform iOS
 ```
 
+## Optional remote runners
+
+Install and bind the Instances app, then provision compute with
+`instance_create`. Simulator accepts provider-managed Instances only: Linux or
+macOS VPS/bare-metal resources created through a configured provider adapter.
+For iOS, select a ready `platform=macos` instance such as Scaleway Apple
+silicon. Arbitrary externally registered SSH hosts are not supported.
+
+Choose that instance in Simulator's optional `ios_host_id` or
+`android_host_id` setting. A single operation can override the configured host
+with `host_id`; omit it to use the platform setting, and leave both unset for
+the original local behavior.
+
+Simulator bootstraps an authenticated, loopback-only worker on the selected
+host and reaches it through an Instances SSH tunnel. Device control, builds,
+artifacts, screenshots, logs, and live WebSockets stay on that runner. Public
+stream URLs still terminate at the Simulator app, which proxies the selected
+worker without exposing it publicly.
+
+By default the bootstrap resolves the immutable `simulator/v0.1.26` app release
+tag and uses the remote Go toolchain to install that exact commit. Set
+`remote_worker_binary_path` when the matching worker binary is already
+installed, or change `remote_worker_module_ref` to a Go revision for
+development. Remote iOS hosts still need
+Xcode and an installed Simulator runtime; remote Android hosts need the Android
+SDK/emulator and an appropriate system image.
+
 ## MCP tools
 
 | Tool | Purpose |
 |---|---|
 | `sims_capabilities` | Per-platform availability + missing-dep hints |
 | `sims_list` | Sims known to the project |
-| `sims_boot` | Boot an emulator/Simulator (auto-creates a device) |
+| `sims_boot` | Boot an emulator/Simulator locally or on optional `host_id` (auto-creates a device) |
 | `sims_shutdown` | Shut a sim down (idempotent) |
-| `sims_build` | Build source → APK/.app (no launch) |
-| `sims_install` | Install a built artifact onto a booted sim |
+| `sims_build` | Build source → APK/.app locally or on optional `host_id` (no launch) |
+| `sims_install` | Install a local artifact path or remote opaque artifact ID onto a booted sim |
 | `sims_launch` | Launch an installed bundle |
 | `sims_run` | **Composite**: boot + build + install + launch + stream URL |
 | `sims_input` | tap / swipe / key / text (normalized 0..1 coords) |
@@ -111,6 +140,10 @@ artifacts/<sha>.app/            built .app bundles
 sim-logs/<sim_run_id>.log       per-run build/install log
 boot-logs/<sim_id>.log          per-sim emulator boot log
 ```
+
+Remote equivalents live under the configured worker data directory on each
+runner. The control-plane database stores opaque artifact and device IDs, not
+remote filesystem paths.
 
 Inactive run history, unreferenced artifacts, and logs are retained for 30
 days and cleaned at mount and periodically after builds.

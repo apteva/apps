@@ -23,9 +23,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: events
 display_name: Events
-version: 0.1.2
+version: 0.1.3
 description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
 author: Apteva
+icon: /ui/icon.svg
+icon_style: monochrome
 scopes: [project]
 requires:
   permissions: [db.write.app]

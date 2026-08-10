@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.11.1
+version: 2.14.3
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -12,12 +12,15 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/content
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [content, cms, blog, website]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
 
 requires:
+  dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.instances.read
@@ -90,6 +93,8 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /public/
+      no_auth: true
     - prefix: /
   mcp_tools:
     # Sites (multi-site v2.0)
@@ -202,6 +207,15 @@ provides:
       description: List installed themes (always includes the embedded default).
     - name: themes_set_active
       description: Switch the active theme by slug.
+    # Generic app-provided public surfaces
+    - name: extensions_upsert
+      description: Install or update a generic provider extension with routes, templates, assets, data sources, actions, and editor schemas.
+    - name: extensions_remove
+      description: Remove a generic provider extension from a Content site.
+    - name: extensions_update_settings
+      description: Update validated extension settings as a draft or publish them immediately.
+    - name: extensions_invalidate
+      description: Invalidate a site's rendered provider output after source data changes.
     # Forms (core/form block)
     - name: forms_list
       description: List every core/form block across the project, with submission counts.
@@ -214,12 +228,15 @@ provides:
       label: Content
       icon: edit-3
       entry: /ui/ContentPanel.mjs
+  publishes:
+    - name: content.extension.updated
+      description: A generic provider extension was installed or updated.
 
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: content/v2.14.3
     entry: mcp/content
   port: 8080
   health_check: /health

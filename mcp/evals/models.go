@@ -29,6 +29,8 @@ type Case struct {
 	SuiteID        string      `json:"suite_id"`
 	Name           string      `json:"name"`
 	Prompt         string      `json:"prompt"`
+	Mode           string      `json:"mode,omitempty"`
+	Voice          *VoiceCase  `json:"voice,omitempty"`
 	Goals          []string    `json:"goals"`
 	Assertions     []Assertion `json:"assertions"`
 	EnvironmentID  string      `json:"environment_id,omitempty"`
@@ -41,10 +43,35 @@ type Case struct {
 	UpdatedAt      time.Time   `json:"updated_at"`
 }
 
+type VoiceCase struct {
+	CallerName           string                `json:"caller_name,omitempty"`
+	CallerPersona        string                `json:"caller_persona,omitempty"`
+	CallerGoal           string                `json:"caller_goal"`
+	CallerBehavior       string                `json:"caller_behavior,omitempty"`
+	Provider             string                `json:"provider,omitempty"`
+	Voice                string                `json:"voice,omitempty"`
+	CallerProvider       string                `json:"caller_provider,omitempty"`
+	CallerVoice          string                `json:"caller_voice,omitempty"`
+	Greeting             string                `json:"greeting,omitempty"`
+	MaxFirstResponseMS   int64                 `json:"max_first_response_ms,omitempty"`
+	MaxAverageResponseMS int64                 `json:"max_average_response_ms,omitempty"`
+	Transport            string                `json:"transport,omitempty"`
+	ProtocolFixture      string                `json:"protocol_fixture,omitempty"`
+	AudioConditions      *VoiceAudioConditions `json:"audio_conditions,omitempty"`
+}
+
+type VoiceAudioConditions struct {
+	Preset    string `json:"preset,omitempty"`
+	Intensity string `json:"intensity,omitempty"`
+	Codec     string `json:"codec,omitempty"`
+	Seed      int64  `json:"seed,omitempty"`
+}
+
 type Assertion struct {
 	Name       string         `json:"name"`
 	Type       string         `json:"type"`
 	App        string         `json:"app,omitempty"`
+	MCP        string         `json:"mcp,omitempty"`
 	Tool       string         `json:"tool,omitempty"`
 	Input      map[string]any `json:"input,omitempty"`
 	Path       string         `json:"path,omitempty"`
@@ -62,6 +89,7 @@ type AssertionResult struct {
 	Passed  bool   `json:"passed"`
 	Actual  any    `json:"actual,omitempty"`
 	Message string `json:"message,omitempty"`
+	Gating  bool   `json:"gating,omitempty"`
 }
 
 type Target struct {
@@ -93,27 +121,83 @@ type Experiment struct {
 }
 
 type Run struct {
-	ID               string                     `json:"id"`
-	ExperimentID     string                     `json:"experiment_id"`
-	CaseID           string                     `json:"case_id"`
-	CaseRevision     int                        `json:"case_revision"`
-	TargetIndex      int                        `json:"target_index"`
-	Repetition       int                        `json:"repetition"`
-	Status           string                     `json:"status"`
-	CaseSnapshot     Case                       `json:"case"`
-	TargetSnapshot   Target                     `json:"target"`
-	EnvironmentRunID string                     `json:"environment_run_id,omitempty"`
-	Execution        *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
-	Assertions       []AssertionResult          `json:"assertions"`
-	Judge            *JudgeVerdict              `json:"judge,omitempty"`
-	CorrectnessScore *float64                   `json:"correctness_score,omitempty"`
-	JudgeScore       *float64                   `json:"judge_score,omitempty"`
-	OverallScore     *float64                   `json:"overall_score,omitempty"`
-	StartedAt        *time.Time                 `json:"started_at,omitempty"`
-	FinishedAt       *time.Time                 `json:"finished_at,omitempty"`
-	Error            string                     `json:"error,omitempty"`
-	CreatedAt        time.Time                  `json:"created_at"`
-	Suggestions      []Suggestion               `json:"suggestions,omitempty"`
+	ID                string                     `json:"id"`
+	ExperimentID      string                     `json:"experiment_id"`
+	CaseID            string                     `json:"case_id"`
+	CaseRevision      int                        `json:"case_revision"`
+	TargetIndex       int                        `json:"target_index"`
+	Repetition        int                        `json:"repetition"`
+	SimulationAttempt int                        `json:"simulation_attempt"`
+	Status            string                     `json:"status"`
+	Stage             string                     `json:"stage,omitempty"`
+	CaseSnapshot      Case                       `json:"case"`
+	TargetSnapshot    Target                     `json:"target"`
+	EnvironmentRunID  string                     `json:"environment_run_id,omitempty"`
+	Execution         *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	VoiceCall         *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
+	Assertions        []AssertionResult          `json:"assertions"`
+	Judge             *JudgeVerdict              `json:"judge,omitempty"`
+	CorrectnessScore  *float64                   `json:"correctness_score,omitempty"`
+	JudgeScore        *float64                   `json:"judge_score,omitempty"`
+	OverallScore      *float64                   `json:"overall_score,omitempty"`
+	StartedAt         *time.Time                 `json:"started_at,omitempty"`
+	FinishedAt        *time.Time                 `json:"finished_at,omitempty"`
+	Error             string                     `json:"error,omitempty"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	Suggestions       []Suggestion               `json:"suggestions,omitempty"`
+}
+
+type EnvironmentVoiceCall struct {
+	ID                       string                     `json:"id"`
+	Status                   string                     `json:"status"`
+	Error                    string                     `json:"error,omitempty"`
+	Validity                 VoiceCallValidity          `json:"validity"`
+	Transcript               []VoiceTranscriptTurn      `json:"transcript"`
+	Metrics                  VoiceCallMetrics           `json:"metrics"`
+	TargetRecording          string                     `json:"target_recording,omitempty"`
+	CallerRecording          string                     `json:"caller_recording,omitempty"`
+	DeliveredCallerRecording string                     `json:"delivered_caller_recording,omitempty"`
+	Execution                *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	ProtocolEvents           []map[string]any           `json:"protocol_events,omitempty"`
+}
+
+type VoiceCallValidity struct {
+	Status  string   `json:"status"`
+	Reasons []string `json:"reasons,omitempty"`
+}
+
+type VoiceTranscriptTurn struct {
+	Speaker string    `json:"speaker"`
+	Text    string    `json:"text"`
+	Time    time.Time `json:"time"`
+	AtMS    int64     `json:"at_ms"`
+}
+
+type VoiceCallMetrics struct {
+	DurationMS                 int64                       `json:"duration_ms"`
+	FirstResponseMS            int64                       `json:"first_response_ms,omitempty"`
+	AverageResponseMS          int64                       `json:"average_response_ms,omitempty"`
+	ReceptionistAudioS         float64                     `json:"receptionist_audio_seconds"`
+	CallerAudioS               float64                     `json:"caller_audio_seconds"`
+	DeliveredCallerAudioS      float64                     `json:"delivered_caller_audio_seconds,omitempty"`
+	Interruptions              int                         `json:"interruptions"`
+	ToolCalls                  int                         `json:"tool_calls"`
+	RealtimeErrors             int                         `json:"realtime_errors"`
+	ReceptionistRealtimeErrors int                         `json:"receptionist_realtime_errors"`
+	CallerRealtimeErrors       int                         `json:"caller_realtime_errors"`
+	DroppedAudioEvents         int                         `json:"dropped_audio_events"`
+	EndedBy                    string                      `json:"ended_by"`
+	AudioConditions            *VoiceAudioConditionMetrics `json:"audio_conditions,omitempty"`
+}
+
+type VoiceAudioConditionMetrics struct {
+	Preset          string  `json:"preset"`
+	Intensity       string  `json:"intensity"`
+	Codec           string  `json:"codec"`
+	Seed            int64   `json:"seed"`
+	TargetSNRDB     float64 `json:"target_snr_db,omitempty"`
+	ProcessedFrames int64   `json:"processed_frames"`
+	ClippedSamples  int64   `json:"clipped_samples"`
 }
 
 type JudgeVerdict struct {
@@ -127,9 +211,10 @@ type JudgeVerdict struct {
 }
 
 type GoalVerdict struct {
-	Goal   string `json:"goal"`
-	Passed bool   `json:"passed"`
-	Why    string `json:"why"`
+	Goal   string   `json:"goal"`
+	Score  *float64 `json:"score,omitempty"`
+	Passed bool     `json:"passed"`
+	Why    string   `json:"why"`
 }
 
 type DirectiveSuggestion struct {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
@@ -27,6 +28,40 @@ func TestMain(m *testing.M) {
 		return
 	}
 	os.Exit(m.Run())
+}
+
+func TestEmbeddedManifestMatchesSource(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedded := (&App{}).Manifest()
+	if embedded.Name != source.Name || embedded.Version != source.Version {
+		t.Fatalf("embedded manifest %s@%s != source %s@%s",
+			embedded.Name, embedded.Version, source.Name, source.Version)
+	}
+	var signedRoute bool
+	for _, route := range embedded.Provides.HTTPRoutes {
+		if route.Prefix == "/source-capsules/" && route.Method == http.MethodGet && route.NoAuth {
+			signedRoute = true
+		}
+	}
+	if !signedRoute {
+		t.Fatal("source capsule route must be declared GET + no_auth")
+	}
+	declaredTools := map[string]bool{}
+	for _, tool := range embedded.Provides.MCPTools {
+		declaredTools[tool.Name] = true
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if !declaredTools[tool.Name] {
+			t.Errorf("MCPTools exposes %q but the manifest does not declare it", tool.Name)
+		}
+	}
 }
 
 // Smoke test: bring up the schema in an in-memory DB, run the
@@ -463,10 +498,25 @@ func itoa(n int) string {
 	return string(buf[i:])
 }
 
-// openSchemaDB opens an in-memory SQLite and applies the v1 migration
-// inline. Simpler than wiring the SDK's migration runner for unit
-// tests; just keep them in sync.
+var testMigrationFiles = []string{
+	"migrations/001_init.sql",
+	"migrations/002_domain_link.sql",
+	"migrations/003_environments.sql",
+	"migrations/004_mobile_targets.sql",
+	"migrations/005_build_backends.sql",
+	"migrations/006_mobile_signing.sql",
+	"migrations/007_mobile_requirements.sql",
+	"migrations/008_mobile_store_configs.sql",
+	"migrations/009_mobile_version_allocations.sql",
+	"migrations/010_mobile_store_partial_status.sql",
+}
+
+// openSchemaDB opens an in-memory SQLite and applies every app migration.
 func openSchemaDB(t *testing.T) *sql.DB {
+	return openSchemaDBThrough(t, len(testMigrationFiles))
+}
+
+func openSchemaDBThrough(t *testing.T, count int) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -475,23 +525,28 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql", "migrations/003_environments.sql", "migrations/004_mobile_targets.sql"} {
-		body, err := os.ReadFile(mig)
-		if err != nil {
-			t.Fatal(err)
-		}
-		cleaned := stripSQLComments(string(body))
-		for _, stmt := range strings.Split(cleaned, ";") {
-			s := strings.TrimSpace(stmt)
-			if s == "" {
-				continue
-			}
-			if _, err := db.Exec(s); err != nil {
-				t.Fatalf("%s: %v\n%s", mig, err, s)
-			}
-		}
+	for _, migration := range testMigrationFiles[:count] {
+		applyTestMigration(t, db, migration)
 	}
 	return db
+}
+
+func applyTestMigration(t *testing.T, db *sql.DB, migration string) {
+	t.Helper()
+	body, err := os.ReadFile(migration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned := stripSQLComments(string(body))
+	for _, stmt := range strings.Split(cleaned, ";") {
+		s := strings.TrimSpace(stmt)
+		if s == "" {
+			continue
+		}
+		if _, err := db.Exec(s); err != nil {
+			t.Fatalf("%s: %v\n%s", migration, err, s)
+		}
+	}
 }
 
 // TestDetectStaticOutput pins the priority chain for the runtime's
