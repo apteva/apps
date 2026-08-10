@@ -814,17 +814,31 @@ func TestInternalSessionExtractErrorsAndBounds(t *testing.T) {
 	})
 }
 
-func TestBrowserExtractRemainsInternalOnly(t *testing.T) {
+func TestBrowserExtractIsAppOnly(t *testing.T) {
 	app := &App{}
+	foundRuntime := false
 	for _, tool := range app.MCPTools() {
 		if tool.Name == "browser_extract" {
-			t.Fatal("browser_extract must not be exposed through MCPTools")
+			foundRuntime = true
+			if tool.Exposure != sdk.ToolExposureAppOnly {
+				t.Fatalf("runtime exposure=%q, want app_only", tool.Exposure)
+			}
 		}
 	}
+	if !foundRuntime {
+		t.Fatal("browser_extract runtime handler is not registered")
+	}
+	foundSpec := false
 	for _, tool := range app.Manifest().Provides.MCPTools {
 		if tool.Name == "browser_extract" {
-			t.Fatal("browser_extract must not be declared in the manifest")
+			foundSpec = true
+			if tool.Exposure != sdk.ToolExposureAppOnly {
+				t.Fatalf("manifest exposure=%q, want app_only", tool.Exposure)
+			}
 		}
+	}
+	if !foundSpec {
+		t.Fatal("browser_extract manifest spec is not registered")
 	}
 	foundRoute := false
 	for _, route := range app.HTTPRoutes() {

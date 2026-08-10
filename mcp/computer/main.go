@@ -53,10 +53,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.62
+version: 0.7.63
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.62 adds generic,
-  agent-selectable proxy profiles and country-aware managed proxy routing.
+  Watch, steer, and replay hosted browser sessions. v0.7.63 restores rendered
+  DOM extraction as an app-only capability without exposing it to agents.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -108,6 +108,9 @@ provides:
       description: "Compatibility alias for browser_session(action=open). Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
+    - name: browser_extract
+      exposure: app_only
+      description: "Extract structured rendered DOM content from an app-owned browser session. Intended for bound apps such as Web; never agent-visible. Args: session_id, formats?, max_chars?, readability?, wait_ms?."
     - name: browser_recording
       description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
@@ -262,7 +265,7 @@ const idleTTL = 30 * time.Minute
 const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
 const recordingProcessingWindow = 15 * time.Minute
-const internalAppCallerHeader = "X-Apteva-Internal-App-Caller-ID"
+const internalAppCallerHeader = sdk.HeaderBoundCallerInstallID
 const maxExtractChars = 200000
 const defaultExtractChars = 50000
 const maxExtractWaitMS = 10000
@@ -720,6 +723,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_som": map[string]any{"type": "boolean", "description": "Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
+		},
+		{
+			Name:        "browser_extract",
+			Description: "Extract structured rendered DOM content from an app-owned browser session. Intended for bound apps such as Web; never agent-visible. Args: session_id, formats?, max_chars?, readability?, wait_ms? (maximum 10000).",
+			Exposure:    sdk.ToolExposureAppOnly,
+			InputSchema: schemaObject(map[string]any{
+				"session_id":  map[string]any{"type": "string"},
+				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
+				"max_chars":   map[string]any{"type": "integer", "description": "Maximum aggregate response characters. Default 50000; maximum 200000."},
+				"readability": map[string]any{"type": "boolean", "description": "Prefer the primary article/content region. Defaults true."},
+				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before extraction for client-rendered pages; maximum 10000."},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserExtract,
 		},
 		{
 			Name:        "browser_recording",
@@ -1652,6 +1668,30 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 		res["som"] = som
 	}
 	return res, nil
+}
+
+func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	sessionID := strings.TrimSpace(stringArg(args, "session_id"))
+	if sessionID == "" {
+		return nil, errors.New("session_id required")
+	}
+	body := extractRequest{Formats: stringSliceArg(args, "formats")}
+	if rawArgPresent(args, "max_chars") {
+		value := intArg(args, "max_chars")
+		body.MaxChars = &value
+	}
+	if value, ok := boolArg(args, "readability"); ok {
+		body.Readability = &value
+	}
+	if rawArgPresent(args, "wait_ms") {
+		value := intArg(args, "wait_ms")
+		body.WaitMS = &value
+	}
+	opts, err := normalizeExtractOptions(body)
+	if err != nil {
+		return nil, err
+	}
+	return a.extractSessionDOM(sessionID, opts)
 }
 
 func (a *App) extractSessionDOM(sessionID string, opts extractOptions) (map[string]any, error) {

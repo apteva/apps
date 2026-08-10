@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.62
+version: 0.7.63
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.62 adds generic,
-  agent-selectable proxy profiles and country-aware managed proxy routing.
+  Watch, steer, and replay hosted browser sessions. v0.7.63 restores rendered
+  DOM extraction as an app-only capability without exposing it to agents.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -175,6 +175,12 @@ provides:
         include_som? (default false; returns structured SoM targets only when
         true). Returns screenshot_url, a stable app-owned URL that continues
         serving the clean final frame after the browser closes.
+    - name: browser_extract
+      exposure: app_only
+      description: |
+        Extract structured rendered DOM content from an app-owned browser
+        session. Intended for bound apps such as Web; never agent-visible.
+        Args: session_id, formats?, max_chars?, readability?, wait_ms?.
     - name: browser_recording
       description: |
         Retrieve provider-neutral playback metadata for an active or historical
