@@ -64,6 +64,27 @@ func TestSidecar_ScheduleListCancelFlow(t *testing.T) {
 	}
 }
 
+func TestSidecar_RandomPreview(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	var out map[string]any
+	resp := sc.POST("/preview", map[string]any{
+		"timezone": "Europe/Paris",
+		"schedule": map[string]any{
+			"kind": "random", "period": "day", "runs_per_period": 5,
+			"window_start": "08:00", "window_end": "22:00", "min_spacing_minutes": 60,
+		},
+	}, &out)
+	if resp.Status != 200 {
+		t.Fatalf("preview status=%d body=%s", resp.Status, resp.Body)
+	}
+	if runs, ok := out["runs"].([]any); !ok || len(runs) != 5 {
+		t.Fatalf("preview runs=%#v, want five", out["runs"])
+	}
+	if seed, _ := out["schedule_seed"].(string); len(seed) != 64 {
+		t.Fatalf("preview seed=%q, want 64 hex characters", seed)
+	}
+}
+
 func TestSidecar_GlobalScope_RequiresProjectIDPerCall(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".") // no project_id = global scope
 	_, err := sc.MCPRaw("tools/call", map[string]any{

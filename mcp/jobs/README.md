@@ -5,18 +5,20 @@ app uses to schedule work without reimplementing a scheduler.
 
 ## Capabilities
 
-- **Three schedule kinds:** `once` (run at a specific time), `every`
-  (interval in seconds), `cron` (5-field expression in a chosen tz).
+- **Four schedule kinds:** `once` (run at a specific time), `every`
+  (interval in seconds), `cron` (5-field expression in a chosen tz), and
+  `random` (a deterministic number of runs in a local daily window).
 - **Three target kinds:** `app_tool` (platform-authorized sibling app
   call), `http` (absolute external URL gated by `net.egress`), and
   `event` (`PlatformAPI.SendEvent` to an agent).
-- **6 MCP tools:** `jobs_schedule`, `jobs_cancel`, `jobs_list`,
-  `jobs_get`, `jobs_runs`, `jobs_run_now`.
+- **7 MCP tools:** `jobs_schedule`, `jobs_cancel`, `jobs_list`,
+  `jobs_get`, `jobs_runs`, `jobs_run_now`, `jobs_preview`.
 - **REST surface** at `/api/apps/jobs/*` for the dashboard panel and
   for other apps to enqueue without going through MCP.
 - **Native React Jobs panel** in the `project.page` slot.
 - **At-least-once delivery** with idempotency keys forwarded to HTTP
-  targets, exponential backoff, configurable `max_retries`.
+  targets, exponential backoff, configurable `max_retries`, and stable
+  logical occurrence metadata across retries.
 - **Configurable HTTP dispatch deadlines**: default `180s` via
   `http_dispatch_timeout_seconds`, with per-job `target.timeout_seconds`
   or `target.timeout_ms` overrides, capped at 300 seconds.
@@ -27,6 +29,30 @@ app uses to schedule work without reimplementing a scheduler.
   or `global` (one install across projects, isolated by `project_id`).
 
 ## How other apps use it
+
+```bash
+# Run five times at deterministic random times in each Paris local day.
+POST /api/apps/jobs/jobs?project_id=proj-1
+{
+  "name": "randomized extraction",
+  "timezone": "Europe/Paris",
+  "schedule": {
+    "kind": "random",
+    "period": "day",
+    "runs_per_period": 5,
+    "window_start": "08:00",
+    "window_end": "22:00",
+    "min_spacing_minutes": 60
+  },
+  "target": {
+    "kind": "app_tool",
+    "app": "web",
+    "tool": "web_extractor_run",
+    "input": { "extractor_id": 42, "schedule_key": "daily-products" }
+  },
+  "idempotency_key": "daily-products"
+}
+```
 
 ```bash
 # CRM schedules a follow-up email in 3 days.

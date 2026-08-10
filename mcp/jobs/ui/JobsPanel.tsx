@@ -89,7 +89,7 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-type ScheduleKind = "once" | "every" | "cron";
+type ScheduleKind = "once" | "every" | "cron" | "random";
 type Status = "pending" | "running" | "done" | "failed" | "cancelled";
 
 interface Job {
@@ -100,6 +100,15 @@ interface Job {
   cron_expr?: string;
   run_at?: string;
   next_run_at?: string;
+  scheduled_for?: string;
+  timezone: string;
+  random?: {
+    period: "day";
+    runs_per_period: number;
+    window_start: string;
+    window_end: string;
+    min_spacing_minutes: number;
+  };
   status: Status;
   target: unknown;
   owner_app?: string;
@@ -113,6 +122,7 @@ interface JobRun {
   status: "ok" | "error" | "timeout";
   http_status?: number;
   error?: string;
+  scheduled_for?: string;
 }
 
 const API = "/api/apps/jobs";
@@ -126,6 +136,9 @@ function humaniseSchedule(j: Job): string {
     return `every ${s}s`;
   }
   if (j.schedule_kind === "cron") return `cron: ${j.cron_expr}`;
+  if (j.schedule_kind === "random" && j.random) {
+    return `${j.random.runs_per_period} random/day · ${j.random.window_start}-${j.random.window_end}`;
+  }
   return j.schedule_kind;
 }
 
@@ -484,7 +497,7 @@ function DetailDialog({
             <table className="w-full text-sm">
               <thead className="text-text-dim text-xs uppercase tracking-wide bg-bg-input/50">
                 <tr>
-                  <th className="text-left px-3 py-2 font-normal">Started</th>
+                  <th className="text-left px-3 py-2 font-normal">Scheduled</th>
                   <th className="text-left px-3 py-2 font-normal w-20">Duration</th>
                   <th className="text-left px-3 py-2 font-normal w-24">Status</th>
                   <th className="text-left px-3 py-2 font-normal w-16">HTTP</th>
@@ -494,7 +507,7 @@ function DetailDialog({
               <tbody>
                 {runs.map((r) => (
                   <tr key={r.id} className="border-t border-border">
-                    <td className="px-3 py-2 text-text-muted">{relTime(r.started_at)}</td>
+                    <td className="px-3 py-2 text-text-muted" title={`Started ${r.started_at}`}>{relTime(r.scheduled_for || r.started_at)}</td>
                     <td className="px-3 py-2 text-text-muted">{r.duration_ms} ms</td>
                     <td className="px-3 py-2">
                       <span className={`text-[10px] px-1.5 py-0.5 rounded ${
@@ -521,8 +534,8 @@ function DetailDialog({
 // ─── Create-job dialog ────────────────────────────────────────────────
 // Inline modal modeled on TasksPanel.Dialog. Posts to /jobs with the
 // schema dbScheduleJob expects: { name, schedule:{kind,...}, target:{kind,...} }.
-// Kept deliberately small — advanced fields (timezone, max_retries) are
-// omitted; defaults on the backend are sane.
+// Random previews are calculated by the backend so creation and dispatch use
+// the same seed, timezone database, and schedule algorithm.
 
 type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
 
@@ -547,6 +560,15 @@ function CreateJobDialog({
   const [everyAmount, setEveryAmount] = useState("5");
   const [everyUnit, setEveryUnit] = useState<"s" | "m" | "h">("m");
   const [cronExpr, setCronExpr] = useState("*/5 * * * *");
+  const [timezone, setTimezone] = useState("UTC");
+  const [randomRuns, setRandomRuns] = useState("5");
+  const [randomWindowStart, setRandomWindowStart] = useState("08:00");
+  const [randomWindowEnd, setRandomWindowEnd] = useState("22:00");
+  const [randomMinSpacing, setRandomMinSpacing] = useState("60");
+  const [scheduleSeed, setScheduleSeed] = useState("");
+  const [previewRuns, setPreviewRuns] = useState<string[]>([]);
+  const [previewError, setPreviewError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
 
   const [targetKind, setTargetKind] = useState<"event" | "http" | "app_tool">("event");
   const [agentId, setAgentId] = useState("");
@@ -560,6 +582,55 @@ function CreateJobDialog({
 
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
+
+  useEffect(() => {
+    if (scheduleKind !== "random") {
+      setPreviewRuns([]);
+      setPreviewError("");
+      setPreviewing(false);
+      return;
+    }
+    const runs = Number(randomRuns);
+    const spacing = Number(randomMinSpacing);
+    if (!Number.isInteger(runs) || runs < 1 || !Number.isInteger(spacing) || spacing < 0 || !timezone.trim()) {
+      setPreviewRuns([]);
+      setPreviewing(false);
+      return;
+    }
+    setPreviewing(true);
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await api<{ runs: string[]; schedule_seed: string }>("POST", "/preview", {
+          schedule: {
+            kind: "random",
+            period: "day",
+            runs_per_period: runs,
+            window_start: randomWindowStart,
+            window_end: randomWindowEnd,
+            min_spacing_minutes: spacing,
+          },
+          timezone: timezone.trim(),
+          schedule_seed: scheduleSeed || undefined,
+          limit: 5,
+        });
+        if (cancelled) return;
+        setScheduleSeed(result.schedule_seed);
+        setPreviewRuns(result.runs || []);
+        setPreviewError("");
+        setPreviewing(false);
+      } catch (e) {
+        if (cancelled) return;
+        setPreviewRuns([]);
+        setPreviewError((e as Error).message);
+        setPreviewing(false);
+      }
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, scheduleKind, timezone, randomRuns, randomWindowStart, randomWindowEnd, randomMinSpacing, scheduleSeed]);
 
   const submit = async () => {
     setErr("");
@@ -575,9 +646,19 @@ function CreateJobDialog({
       if (!Number.isFinite(n) || n <= 0) { setErr("Interval must be > 0."); return; }
       const mult = everyUnit === "h" ? 3600 : everyUnit === "m" ? 60 : 1;
       schedule.every_seconds = Math.round(n * mult);
-    } else {
+    } else if (scheduleKind === "cron") {
       if (!cronExpr.trim()) { setErr("Cron expression required."); return; }
       schedule.cron = cronExpr.trim();
+    } else {
+      const runs = Number(randomRuns);
+      const spacing = Number(randomMinSpacing);
+      if (!Number.isInteger(runs) || runs < 1) { setErr("Runs per day must be a positive integer."); return; }
+      if (!Number.isInteger(spacing) || spacing < 0) { setErr("Minimum spacing must be zero or more minutes."); return; }
+      schedule.period = "day";
+      schedule.runs_per_period = runs;
+      schedule.window_start = randomWindowStart;
+      schedule.window_end = randomWindowEnd;
+      schedule.min_spacing_minutes = spacing;
     }
 
     const target: Record<string, unknown> = { kind: targetKind };
@@ -615,7 +696,13 @@ function CreateJobDialog({
 
     setSubmitting(true);
     try {
-      await api("POST", "/jobs", { name: name.trim(), schedule, target });
+      await api("POST", "/jobs", {
+        name: name.trim(),
+        schedule,
+        target,
+        timezone: timezone.trim() || "UTC",
+        schedule_seed: scheduleKind === "random" ? scheduleSeed : undefined,
+      });
       onCreated();
     } catch (e) {
       setErr((e as Error).message);
@@ -653,8 +740,8 @@ function CreateJobDialog({
 
         <div className="flex flex-col gap-1">
           <label className={labelCls}>Schedule</label>
-          <div className="flex gap-1">
-            {(["once", "every", "cron"] as ScheduleKind[]).map((k) => (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
+            {(["once", "every", "cron", "random"] as ScheduleKind[]).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -703,6 +790,67 @@ function CreateJobDialog({
               placeholder="M H DOM MON DOW (e.g. */5 * * * *)"
               className={inputCls + " mt-1 font-mono"}
             />
+          )}
+          {scheduleKind === "random" && (
+            <div className="grid grid-cols-2 gap-2 mt-1">
+              <label className="flex flex-col gap-1 text-xs text-text-dim">
+                Runs per day
+                <input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={randomRuns}
+                  onChange={(e) => setRandomRuns(e.target.value)}
+                  className={inputCls}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-text-dim">
+                Minimum spacing
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="0"
+                    max="1440"
+                    value={randomMinSpacing}
+                    onChange={(e) => setRandomMinSpacing(e.target.value)}
+                    className={inputCls}
+                  />
+                  <span className="text-text-muted">min</span>
+                </div>
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-text-dim">
+                Daily start
+                <input type="time" value={randomWindowStart} onChange={(e) => setRandomWindowStart(e.target.value)} className={inputCls} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-text-dim">
+                Daily end
+                <input type="time" value={randomWindowEnd} onChange={(e) => setRandomWindowEnd(e.target.value)} className={inputCls} />
+              </label>
+            </div>
+          )}
+          <label className="flex flex-col gap-1 mt-1 text-xs text-text-dim">
+            Timezone
+            <input
+              type="text"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              placeholder="Europe/Paris"
+              className={inputCls}
+            />
+          </label>
+          {scheduleKind === "random" && (
+            <div className="border-t border-border pt-2 mt-1">
+              <div className="text-xs uppercase tracking-wide text-text-dim mb-1">Next five runs</div>
+              {previewing ? (
+                <div className="text-text-dim text-xs">Calculating...</div>
+              ) : previewError ? (
+                <div className="text-red text-xs">{previewError}</div>
+              ) : previewRuns.length ? (
+                <ol className="grid gap-1 text-xs text-text-muted">
+                  {previewRuns.map((run) => <li key={run}>{run}</li>)}
+                </ol>
+              ) : null}
+            </div>
           )}
         </div>
 
@@ -794,7 +942,7 @@ function CreateJobDialog({
           <button
             type="button"
             onClick={submit}
-            disabled={submitting || !name.trim()}
+            disabled={submitting || !name.trim() || (scheduleKind === "random" && (previewing || !scheduleSeed || !!previewError))}
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
           >{submitting ? "Creating…" : "Create"}</button>
         </div>

@@ -104,6 +104,61 @@ func TestSchedule_Cron_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSchedule_Random_PersistsSeedConfigAndOccurrence(t *testing.T) {
+	ctx := newTestCtx(t)
+	seed := "2222222222222222222222222222222222222222222222222222222222222222"
+	j := mustSchedule(t, ctx, map[string]any{
+		"name": "random-five",
+		"schedule": map[string]any{
+			"kind": "random", "period": "day", "runs_per_period": float64(5),
+			"window_start": "08:00", "window_end": "22:00", "min_spacing_minutes": float64(60),
+		},
+		"timezone":      "Europe/Paris",
+		"schedule_seed": seed,
+		"target":        map[string]any{"kind": "event", "instance_id": float64(7), "message": "random"},
+	})
+	if j.Random == nil || j.Random.RunsPerPeriod != 5 || j.Random.Period != "day" {
+		t.Fatalf("random config did not round-trip: %+v", j.Random)
+	}
+	if j.ScheduleSeed != seed {
+		t.Fatalf("schedule seed=%q, want persisted seed", j.ScheduleSeed)
+	}
+	if j.ScheduledFor == "" || j.ScheduledFor != j.NextRunAt {
+		t.Fatalf("scheduled_for=%q next_run_at=%q, want same initial occurrence", j.ScheduledFor, j.NextRunAt)
+	}
+	reloaded, err := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.ScheduleSeed != seed || reloaded.ScheduledFor != j.ScheduledFor {
+		t.Fatalf("reloaded random state changed: seed=%q scheduled_for=%q", reloaded.ScheduleSeed, reloaded.ScheduledFor)
+	}
+}
+
+func TestPreview_RandomSeedReproducesTimes(t *testing.T) {
+	args := map[string]any{
+		"schedule": map[string]any{
+			"kind": "random", "period": "day", "runs_per_period": float64(5),
+			"window_start": "08:00", "window_end": "22:00", "min_spacing_minutes": float64(60),
+		},
+		"timezone": "Europe/Paris",
+		"limit":    float64(5),
+	}
+	now := time.Date(2026, 8, 11, 0, 0, 0, 0, time.UTC)
+	first, err := buildSchedulePreview(args, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args["schedule_seed"] = first["schedule_seed"]
+	second, err := buildSchedulePreview(args, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(first["runs"].([]string), ",") != strings.Join(second["runs"].([]string), ",") {
+		t.Fatalf("preview changed when its seed was reused: first=%v second=%v", first["runs"], second["runs"])
+	}
+}
+
 func TestSchedule_RejectsBadCron(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
@@ -343,6 +398,13 @@ func TestDispatcher_HTTPTarget_OK_ReschedulesEvery(t *testing.T) {
 	if j.Attempt != 0 {
 		t.Errorf("attempt=%d, want reset to 0 after success", j.Attempt)
 	}
+	next, err := time.Parse(time.RFC3339Nano, j.NextRunAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := time.Until(next); remaining < 55*time.Second || remaining > 65*time.Second {
+		t.Errorf("existing every schedule cadence changed: next run is %s away, want about 60s after completion", remaining)
+	}
 }
 
 func TestDispatcher_HTTPTarget_Error_RetriesThenFails(t *testing.T) {
@@ -387,6 +449,54 @@ func TestDispatcher_HTTPTarget_Error_RetriesThenFails(t *testing.T) {
 	runs := out.(map[string]any)["runs"].([]*JobRun)
 	if len(runs) < 3 {
 		t.Errorf("expected at least 3 run rows, got %d", len(runs))
+	}
+}
+
+func TestDispatcher_RetryPreservesOccurrenceAndIdempotencyKey(t *testing.T) {
+	ctx := newTestCtx(t)
+	var mu sync.Mutex
+	var keys, scheduled []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		scheduled = append(scheduled, r.Header.Get("X-Apteva-Job-Scheduled-For"))
+		mu.Unlock()
+		http.Error(w, "retry", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":            "retry-identity",
+		"schedule":        map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":          map[string]any{"kind": "http", "url": srv.URL, "headers": map[string]any{"Idempotency-Key": "caller-override"}},
+		"idempotency_key": "delivery",
+		"max_retries":     float64(1),
+		"backoff_seconds": float64(1),
+	})
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := ctx.AppDB().Exec(`UPDATE jobs SET next_run_at=? WHERE id=?`, time.Now().Add(-time.Second).UTC().Format(time.RFC3339), j.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := dispatchTick(context.Background(), ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(keys) != 2 {
+		t.Fatalf("dispatches=%d, want 2", len(keys))
+	}
+	wantKey := "delivery:" + j.ScheduledFor
+	if keys[0] != wantKey || keys[1] != wantKey {
+		t.Fatalf("retry keys=%v, want both %q", keys, wantKey)
+	}
+	if scheduled[0] != j.ScheduledFor || scheduled[1] != j.ScheduledFor {
+		t.Fatalf("retry scheduled_for headers=%v, want both %q", scheduled, j.ScheduledFor)
+	}
+	runs, err := dbJobRuns(ctx.AppDB(), "test-proj", j.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[0].ScheduledFor != j.ScheduledFor || runs[1].ScheduledFor != j.ScheduledFor {
+		t.Fatalf("run occurrences changed across retry: %+v", runs)
 	}
 }
 
@@ -509,6 +619,52 @@ func TestDispatcher_EventTarget_NoPlatformClient_TestModeOK(t *testing.T) {
 	}
 }
 
+func TestDispatcher_RandomAdvancesFromLogicalOccurrence(t *testing.T) {
+	ctx := newTestCtx(t)
+	seed := "3333333333333333333333333333333333333333333333333333333333333333"
+	j := mustSchedule(t, ctx, map[string]any{
+		"name": "random-catch-up",
+		"schedule": map[string]any{
+			"kind": "random", "period": "day", "runs_per_period": float64(5),
+			"window_start": "08:00", "window_end": "22:00", "min_spacing_minutes": float64(60),
+		},
+		"timezone":        "Europe/Paris",
+		"schedule_seed":   seed,
+		"idempotency_key": "random-delivery",
+		"target":          map[string]any{"kind": "event", "instance_id": float64(7), "message": "go"},
+	})
+	loc, _ := time.LoadLocation("Europe/Paris")
+	yesterday := time.Now().In(loc).AddDate(0, 0, -1)
+	occurrences, err := randomRunsForDate(*j.Random, seed, yesterday, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := occurrences[0].Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(`UPDATE jobs SET next_run_at=?, scheduled_for=? WHERE id=?`, first, first, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	afterFirst, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
+	if afterFirst.ScheduledFor != occurrences[1].Format(time.RFC3339) {
+		t.Fatalf("next occurrence=%q, want next deterministic slot %q", afterFirst.ScheduledFor, occurrences[1].Format(time.RFC3339))
+	}
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := dbJobRuns(ctx.AppDB(), "test-proj", j.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("runs=%d, want 2", len(runs))
+	}
+	if runs[0].ScheduledFor == runs[1].ScheduledFor || runs[0].IdempotencyKey == runs[1].IdempotencyKey {
+		t.Fatalf("separate random occurrences reused identity: newest=%+v older=%+v", runs[0], runs[1])
+	}
+}
+
 func TestRunNow_QueuesImmediateExecution(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
@@ -567,16 +723,32 @@ func TestDispatcher_AppToolUsesPlatformBroker(t *testing.T) {
 	platform := &recordingAppPlatform{out: map[string]any{"status": "ok", "response": "done"}}
 	ctx := newTestCtx(t, tk.WithPlatform(platform))
 	j := mustSchedule(t, ctx, map[string]any{
-		"name":        "daily-function",
-		"schedule":    map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
-		"target":      map[string]any{"kind": "app_tool", "app": "functions", "tool": "functions_invoke", "input": map[string]any{"name": "daily", "event": map[string]any{"x": 1}}},
-		"max_retries": float64(0),
+		"name":            "daily-function",
+		"schedule":        map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":          map[string]any{"kind": "app_tool", "app": "functions", "tool": "functions_invoke", "input": map[string]any{"name": "daily", "event": map[string]any{"x": 1}}},
+		"idempotency_key": "daily-function",
+		"max_retries":     float64(0),
 	})
 	if err := dispatchTick(context.Background(), ctx); err != nil {
 		t.Fatal(err)
 	}
 	if platform.app != "functions" || platform.tool != "functions_invoke" || platform.input["name"] != "daily" {
 		t.Fatalf("unexpected app call: app=%q tool=%q input=%v", platform.app, platform.tool, platform.input)
+	}
+	metadata, ok := platform.input["_job"].(map[string]any)
+	if !ok {
+		t.Fatalf("app call is missing _job metadata: %v", platform.input)
+	}
+	if metadata["id"] != j.ID || metadata["attempt"] != 1 || metadata["scheduled_for"] != j.ScheduledFor {
+		t.Fatalf("unexpected _job metadata: %v", metadata)
+	}
+	wantKey := "daily-function:" + j.ScheduledFor
+	if metadata["idempotency_key"] != wantKey {
+		t.Fatalf("_job.idempotency_key=%v, want %q", metadata["idempotency_key"], wantKey)
+	}
+	storedInput := j.Target["input"].(map[string]any)
+	if _, mutated := storedInput["_job"]; mutated {
+		t.Fatalf("dispatch mutated persisted app input: %v", storedInput)
 	}
 	got, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
 	if got.Status != "done" {

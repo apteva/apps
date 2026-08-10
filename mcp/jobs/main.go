@@ -1,7 +1,8 @@
 // Jobs v0.1 — scheduled-job runner.
 //
 // Other apps and agents enqueue work to be delivered later: at a fixed
-// time, on an interval, or on a cron expression. Targets are sibling
+// time, on an interval, on a cron expression, or at deterministic
+// randomized times within a local-day window. Targets are sibling
 // app tools, external HTTP endpoints, or instance events. Jobs never
 // knows what the work is; it only knows how to deliver the payload.
 //
@@ -41,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.12
+version: 0.1.13
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
   delivers it later via platform-mediated app tools, external HTTP,
@@ -74,6 +75,8 @@ provides:
       description: Fetch recent runs for a job.
     - name: jobs_run_now
       description: Trigger an immediate ad-hoc run of a scheduled job.
+    - name: jobs_preview
+      description: Preview deterministic randomized schedule occurrences.
   ui_panels:
     - slot: project.page
       label: Jobs
@@ -166,6 +169,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/jobs", Handler: a.handleHTTPJobsCollection},
 		{Pattern: "/jobs/", Handler: a.handleHTTPJobItem},
+		{Pattern: "/preview", Handler: a.handleHTTPPreview},
 		{Pattern: "/runs", Handler: a.handleHTTPRunsCollection},
 	}
 }
@@ -252,6 +256,24 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	emitJob(ctx, "job.scheduled", job)
 	httpJSON(w, map[string]any{"job": job})
+}
+
+func (a *App) handleHTTPPreview(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	out, err := buildSchedulePreview(body, time.Now().UTC())
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 func (a *App) handleHTTPList(w http.ResponseWriter, r *http.Request) {
@@ -371,16 +393,21 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "jobs_schedule",
-			Description: "Schedule a job to run later (once, on an interval, or on a cron expression). Use target.kind=event to wake an agent, target.kind=app_tool with {app, tool, input?} to invoke a sibling app through the platform, or target.kind=http with url=<absolute> for an external webhook. Functions use app_tool with app=functions, tool=functions_invoke, input={name,event}.",
+			Description: "Schedule a job to run later (once, on an interval, on a cron expression, or at deterministic random times in a daily window). Use target.kind=event to wake an agent, target.kind=app_tool with {app, tool, input?} to invoke a sibling app through the platform, or target.kind=http with url=<absolute> for an external webhook. Functions use app_tool with app=functions, tool=functions_invoke, input={name,event}.",
 			InputSchema: schemaObject(map[string]any{
 				"name": map[string]any{"type": "string", "description": "Human-readable job name."},
 				"schedule": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"kind":          map[string]any{"type": "string", "enum": []any{"once", "every", "cron"}},
-						"run_at":        map[string]any{"type": "string", "description": "RFC3339 timestamp; required when kind=once."},
-						"every_seconds": map[string]any{"type": "integer", "description": "Interval in seconds; required when kind=every."},
-						"cron":          map[string]any{"type": "string", "description": "5-field cron 'M H DOM MON DOW'; required when kind=cron."},
+						"kind":                map[string]any{"type": "string", "enum": []any{"once", "every", "cron", "random"}},
+						"run_at":              map[string]any{"type": "string", "description": "RFC3339 timestamp; required when kind=once."},
+						"every_seconds":       map[string]any{"type": "integer", "description": "Interval in seconds; required when kind=every."},
+						"cron":                map[string]any{"type": "string", "description": "5-field cron 'M H DOM MON DOW'; required when kind=cron."},
+						"period":              map[string]any{"type": "string", "enum": []any{"day"}, "description": "Calendar period for kind=random. Currently day."},
+						"runs_per_period":     map[string]any{"type": "integer", "description": "Number of randomized runs in each period."},
+						"window_start":        map[string]any{"type": "string", "description": "Inclusive local-time window start in HH:MM."},
+						"window_end":          map[string]any{"type": "string", "description": "Inclusive local-time window end in HH:MM."},
+						"min_spacing_minutes": map[string]any{"type": "integer", "description": "Minimum minutes between randomized runs."},
 					},
 					"required": []any{"kind"},
 				},
@@ -413,6 +440,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"backoff_seconds": map[string]any{"type": "integer"},
 				"timezone":        map[string]any{"type": "string", "description": "IANA tz name; cron is evaluated in this tz. Default UTC."},
 				"owner_app":       map[string]any{"type": "string"},
+				"schedule_seed":   map[string]any{"type": "string", "description": "Optional seed returned by jobs_preview so creation matches the preview."},
 			}, []string{"name", "schedule", "target"}),
 			Handler: a.toolSchedule,
 		},
@@ -460,6 +488,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"id"}),
 			Handler: a.toolRunNow,
 		},
+		{
+			Name:        "jobs_preview",
+			Description: "Preview the next randomized schedule occurrences. Returns runs and schedule_seed; pass the seed to jobs_schedule to preserve the preview.",
+			InputSchema: schemaObject(map[string]any{
+				"schedule":      map[string]any{"type": "object"},
+				"timezone":      map[string]any{"type": "string"},
+				"schedule_seed": map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer"},
+			}, []string{"schedule"}),
+			Handler: a.toolPreview,
+		},
 	}
 }
 
@@ -500,43 +539,48 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Job struct {
-	ID             int64          `json:"id"`
-	ProjectID      string         `json:"project_id,omitempty"`
-	Name           string         `json:"name"`
-	OwnerApp       string         `json:"owner_app,omitempty"`
-	OwnerInstance  *int64         `json:"owner_instance,omitempty"`
-	ScheduleKind   string         `json:"schedule_kind"`
-	CronExpr       string         `json:"cron_expr,omitempty"`
-	EverySeconds   *int64         `json:"every_seconds,omitempty"`
-	RunAt          string         `json:"run_at,omitempty"`
-	Timezone       string         `json:"timezone"`
-	Target         map[string]any `json:"target"`
-	IdempotencyKey string         `json:"idempotency_key,omitempty"`
-	MaxRetries     int            `json:"max_retries"`
-	BackoffSeconds int            `json:"backoff_seconds"`
-	Status         string         `json:"status"`
-	NextRunAt      string         `json:"next_run_at,omitempty"`
-	LastRunAt      string         `json:"last_run_at,omitempty"`
-	LastStatus     string         `json:"last_status,omitempty"`
-	LastError      string         `json:"last_error,omitempty"`
-	Attempt        int            `json:"attempt"`
-	CreatedAt      string         `json:"created_at,omitempty"`
-	UpdatedAt      string         `json:"updated_at,omitempty"`
-	CancelledAt    string         `json:"cancelled_at,omitempty"`
-	LeaseToken     string         `json:"-"`
+	ID             int64           `json:"id"`
+	ProjectID      string          `json:"project_id,omitempty"`
+	Name           string          `json:"name"`
+	OwnerApp       string          `json:"owner_app,omitempty"`
+	OwnerInstance  *int64          `json:"owner_instance,omitempty"`
+	ScheduleKind   string          `json:"schedule_kind"`
+	CronExpr       string          `json:"cron_expr,omitempty"`
+	EverySeconds   *int64          `json:"every_seconds,omitempty"`
+	RunAt          string          `json:"run_at,omitempty"`
+	Timezone       string          `json:"timezone"`
+	Random         *RandomSchedule `json:"random,omitempty"`
+	Target         map[string]any  `json:"target"`
+	IdempotencyKey string          `json:"idempotency_key,omitempty"`
+	MaxRetries     int             `json:"max_retries"`
+	BackoffSeconds int             `json:"backoff_seconds"`
+	Status         string          `json:"status"`
+	NextRunAt      string          `json:"next_run_at,omitempty"`
+	ScheduledFor   string          `json:"scheduled_for,omitempty"`
+	LastRunAt      string          `json:"last_run_at,omitempty"`
+	LastStatus     string          `json:"last_status,omitempty"`
+	LastError      string          `json:"last_error,omitempty"`
+	Attempt        int             `json:"attempt"`
+	CreatedAt      string          `json:"created_at,omitempty"`
+	UpdatedAt      string          `json:"updated_at,omitempty"`
+	CancelledAt    string          `json:"cancelled_at,omitempty"`
+	LeaseToken     string          `json:"-"`
+	ScheduleSeed   string          `json:"-"`
 }
 
 type JobRun struct {
-	ID           int64  `json:"id"`
-	JobID        int64  `json:"job_id"`
-	StartedAt    string `json:"started_at"`
-	FinishedAt   string `json:"finished_at,omitempty"`
-	DurationMS   int64  `json:"duration_ms"`
-	Status       string `json:"status"`
-	HTTPStatus   int    `json:"http_status,omitempty"`
-	ResponseBody string `json:"response_body,omitempty"`
-	Error        string `json:"error,omitempty"`
-	Attempt      int    `json:"attempt"`
+	ID             int64  `json:"id"`
+	JobID          int64  `json:"job_id"`
+	StartedAt      string `json:"started_at"`
+	FinishedAt     string `json:"finished_at,omitempty"`
+	DurationMS     int64  `json:"duration_ms"`
+	Status         string `json:"status"`
+	HTTPStatus     int    `json:"http_status,omitempty"`
+	ResponseBody   string `json:"response_body,omitempty"`
+	Error          string `json:"error,omitempty"`
+	Attempt        int    `json:"attempt"`
+	ScheduledFor   string `json:"scheduled_for,omitempty"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
 type JobFilter struct {
@@ -710,6 +754,29 @@ func (a *App) toolRunNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"queued": true, "id": id}, nil
 }
 
+func (a *App) toolPreview(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	return buildSchedulePreview(args, time.Now().UTC())
+}
+
+func buildSchedulePreview(args map[string]any, now time.Time) (map[string]any, error) {
+	schedule, _ := args["schedule"].(map[string]any)
+	if schedule == nil {
+		return nil, errors.New("schedule required")
+	}
+	if kind := strings.ToLower(strArg(schedule, "kind")); kind != "random" {
+		return nil, fmt.Errorf("schedule.kind %q cannot be previewed; use random", kind)
+	}
+	tz := strArg(args, "timezone")
+	if tz == "" {
+		tz = "UTC"
+	}
+	runs, seed, err := previewRandomSchedule(schedule, tz, strArg(args, "schedule_seed"), now, intArg(args, "limit", 5))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"runs": runs, "schedule_seed": seed, "timezone": tz}, nil
+}
+
 // ─── DB helpers ────────────────────────────────────────────────────
 
 func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
@@ -741,6 +808,8 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 		cronExpr     string
 		everySeconds *int64
 		runAt        time.Time
+		randomConfig *RandomSchedule
+		scheduleSeed string
 	)
 
 	switch kind {
@@ -780,8 +849,24 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 			return nil, fmt.Errorf("schedule.cron: %w", err)
 		}
 
+	case "random":
+		cfg, err := parseRandomSchedule(schedule)
+		if err != nil {
+			return nil, err
+		}
+		randomConfig = &cfg
+		scheduleSeed = strings.TrimSpace(strArg(args, "schedule_seed"))
+		if scheduleSeed == "" {
+			scheduleSeed, err = newRandomScheduleSeed()
+			if err != nil {
+				return nil, fmt.Errorf("generate schedule seed: %w", err)
+			}
+		} else if err := validateRandomScheduleSeed(scheduleSeed); err != nil {
+			return nil, err
+		}
+
 	default:
-		return nil, fmt.Errorf("schedule.kind %q must be once|every|cron", kind)
+		return nil, fmt.Errorf("schedule.kind %q must be once|every|cron|random", kind)
 	}
 
 	if err := validateTarget(target); err != nil {
@@ -802,23 +887,38 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 		backoff = 30
 	}
 
-	// First fire-time.
+	// First fire-time. Existing schedule kinds retain their established
+	// arithmetic; random schedules advance through logical occurrences.
 	next := computeNextRun(kind, runAt, everySeconds, cronExpr, loc, now)
+	if randomConfig != nil {
+		next, err = nextRandomRunAfter(*randomConfig, scheduleSeed, loc, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var randomConfigJSON string
+	if randomConfig != nil {
+		encoded, err := json.Marshal(randomConfig)
+		if err != nil {
+			return nil, err
+		}
+		randomConfigJSON = string(encoded)
+	}
 
 	res, err := db.Exec(
 		`INSERT INTO jobs (
 			project_id, name, owner_app, owner_instance,
-			schedule_kind, cron_expr, every_seconds, run_at, timezone,
+			schedule_kind, cron_expr, every_seconds, run_at, timezone, random_config_json, schedule_seed,
 			target_kind, target_json,
 			idempotency_key, max_retries, backoff_seconds,
-			status, next_run_at,
+			status, next_run_at, scheduled_for,
 			created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
 		pid, name, strArg(args, "owner_app"), nullableInt64(int64Arg(args, "owner_instance")),
-		kind, nullStr(cronExpr), nullableInt64Ptr(everySeconds), nullableTime(runAt), tz,
+		kind, nullStr(cronExpr), nullableInt64Ptr(everySeconds), nullableTime(runAt), tz, nullStr(randomConfigJSON), nullStr(scheduleSeed),
 		targetKind, string(targetJSON),
 		nullStr(strArg(args, "idempotency_key")), maxRetries, backoff,
-		nullableTime(next), now.Format(time.RFC3339), now.Format(time.RFC3339))
+		nullableTime(next), nullableTime(next), now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return nil, err
 	}
@@ -830,9 +930,10 @@ func dbGetJob(db *sql.DB, pid string, id int64) (*Job, error) {
 	row := db.QueryRow(
 		`SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
 			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
+			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
 			target_json,
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
-			status, next_run_at, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
+			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
 			attempt, created_at, updated_at, cancelled_at
 		 FROM jobs WHERE id = ? AND project_id = ?`,
 		id, pid)
@@ -853,14 +954,15 @@ func scanJob(row scanRow) (*Job, error) {
 	j := &Job{}
 	var ownerInst sql.NullInt64
 	var everySecs sql.NullInt64
-	var runAt, nextRun, lastRun, cancelledAt sql.NullString
-	var targetJSON string
+	var runAt, nextRun, scheduledFor, lastRun, cancelledAt sql.NullString
+	var targetJSON, randomConfigJSON string
 	err := row.Scan(
 		&j.ID, &j.ProjectID, &j.Name, &j.OwnerApp, &ownerInst,
 		&j.ScheduleKind, &j.CronExpr, &everySecs, &runAt, &j.Timezone,
+		&randomConfigJSON, &j.ScheduleSeed,
 		&targetJSON,
 		&j.IdempotencyKey, &j.MaxRetries, &j.BackoffSeconds,
-		&j.Status, &nextRun, &lastRun, &j.LastStatus, &j.LastError,
+		&j.Status, &nextRun, &scheduledFor, &lastRun, &j.LastStatus, &j.LastError,
 		&j.Attempt, &j.CreatedAt, &j.UpdatedAt, &cancelledAt)
 	if err != nil {
 		return nil, err
@@ -875,10 +977,17 @@ func scanJob(row scanRow) (*Job, error) {
 	}
 	j.RunAt = runAt.String
 	j.NextRunAt = nextRun.String
+	j.ScheduledFor = scheduledFor.String
 	j.LastRunAt = lastRun.String
 	j.CancelledAt = cancelledAt.String
 	if targetJSON != "" {
 		_ = json.Unmarshal([]byte(targetJSON), &j.Target)
+	}
+	if randomConfigJSON != "" {
+		j.Random = &RandomSchedule{}
+		if err := json.Unmarshal([]byte(randomConfigJSON), j.Random); err != nil {
+			return nil, fmt.Errorf("decode random schedule for job %d: %w", j.ID, err)
+		}
 	}
 	return j, nil
 }
@@ -904,9 +1013,10 @@ func dbListJobs(db *sql.DB, pid string, f JobFilter) ([]*Job, error) {
 	}
 	q := `SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
 			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
+			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
 			target_json,
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
-			status, next_run_at, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
+			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
 			attempt, created_at, updated_at, cancelled_at
 		 FROM jobs WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY COALESCE(next_run_at, '9999') ASC, id DESC LIMIT ?`
@@ -966,7 +1076,8 @@ func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int) ([]*JobRun, error
 	rows, err := db.Query(
 		`SELECT id, job_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(http_status,0),
-			COALESCE(response_body,''), COALESCE(error,''), attempt
+			COALESCE(response_body,''), COALESCE(error,''), attempt,
+			COALESCE(scheduled_for,''), COALESCE(idempotency_key,'')
 		 FROM job_runs WHERE project_id = ? AND job_id = ?
 		 ORDER BY started_at DESC LIMIT ?`,
 		pid, jobID, limit)
@@ -978,7 +1089,8 @@ func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int) ([]*JobRun, error
 	for rows.Next() {
 		r := &JobRun{}
 		if err := rows.Scan(&r.ID, &r.JobID, &r.StartedAt, &r.FinishedAt,
-			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt); err == nil {
+			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt,
+			&r.ScheduledFor, &r.IdempotencyKey); err == nil {
 			out = append(out, r)
 		}
 	}
@@ -989,7 +1101,8 @@ func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
 	rows, err := db.Query(
 		`SELECT id, job_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(http_status,0),
-			COALESCE(response_body,''), COALESCE(error,''), attempt
+			COALESCE(response_body,''), COALESCE(error,''), attempt,
+			COALESCE(scheduled_for,''), COALESCE(idempotency_key,'')
 		 FROM job_runs WHERE project_id = ?
 		 ORDER BY started_at DESC LIMIT ?`,
 		pid, limit)
@@ -1001,7 +1114,8 @@ func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
 	for rows.Next() {
 		r := &JobRun{}
 		if err := rows.Scan(&r.ID, &r.JobID, &r.StartedAt, &r.FinishedAt,
-			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt); err == nil {
+			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt,
+			&r.ScheduledFor, &r.IdempotencyKey); err == nil {
 			out = append(out, r)
 		}
 	}
@@ -1089,9 +1203,10 @@ func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := db.Query(
 		`SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
 			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
+			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
 			target_json,
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
-			status, next_run_at, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
+			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
 			attempt, created_at, updated_at, cancelled_at
 		 FROM jobs WHERE project_id = ? AND status = 'running' AND lease_token = ?`,
 		pid, leaseToken)
@@ -1137,6 +1252,9 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	db := app.AppDB()
 	attempt := j.Attempt + 1
 	started := time.Now().UTC()
+	scheduledTime := jobScheduledTime(j, started)
+	j.ScheduledFor = scheduledTime.Format(time.RFC3339)
+	effectiveIdempotencyKey := occurrenceIdempotencyKey(j)
 
 	status, httpCode, body, dispatchErr := runTarget(ctx, app, j)
 
@@ -1154,13 +1272,25 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	}
 	nextStatus := "pending"
 	nextRun := time.Time{}
+	nextScheduled := scheduledTime
 	nextAttempt := 0
 	lastStatus := "error"
 	if status == "ok" {
 		lastStatus = "ok"
-		nextRun = computeNextRunAfter(j, loc, finished)
+		if j.ScheduleKind == "random" {
+			nextRun, dispatchErr = computeNextRandomOccurrence(j, loc, scheduledTime)
+		} else {
+			// Preserve the established once/every/cron cadence semantics.
+			nextRun = computeNextRunAfter(j, loc, finished)
+		}
 		if nextRun.IsZero() {
-			nextStatus = "done"
+			if dispatchErr != nil {
+				nextStatus = "failed"
+			} else {
+				nextStatus = "done"
+			}
+		} else {
+			nextScheduled = nextRun
 		}
 	} else if attempt <= j.MaxRetries {
 		delay := time.Duration(j.BackoffSeconds) * time.Second
@@ -1172,10 +1302,19 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	} else if j.ScheduleKind == "once" {
 		nextStatus = "failed"
 	} else {
-		nextRun = computeNextRunAfter(j, loc, finished)
+		if j.ScheduleKind == "random" {
+			nextRun, dispatchErr = computeNextRandomOccurrence(j, loc, scheduledTime)
+		} else {
+			nextRun = computeNextRunAfter(j, loc, finished)
+		}
 		if nextRun.IsZero() {
 			nextStatus = "failed"
+		} else {
+			nextScheduled = nextRun
 		}
+	}
+	if dispatchErr != nil && errStr == "" {
+		errStr = truncate(dispatchErr.Error(), 1024)
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -1186,11 +1325,11 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`INSERT INTO job_runs (project_id, job_id, started_at, finished_at, duration_ms,
-			status, http_status, response_body, error, attempt)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			status, http_status, response_body, error, attempt, scheduled_for, idempotency_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ProjectID, j.ID,
 		started.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), duration,
-		status, httpCode, respBody, errStr, attempt); err != nil {
+		status, httpCode, respBody, errStr, attempt, j.ScheduledFor, nullStr(effectiveIdempotencyKey)); err != nil {
 		app.Logger().Warn("record run", "job_id", j.ID, "err", err)
 		return
 	}
@@ -1205,10 +1344,10 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	res, err := tx.Exec(
 		`UPDATE jobs SET status = ?, last_run_at = ?, last_status = ?,
 			last_error = ?, attempt = ?, lease_until = NULL, lease_token = NULL,
-			next_run_at = ?, updated_at = ?
+			next_run_at = ?, scheduled_for = ?, updated_at = ?
 		 WHERE id = ? AND project_id = ? AND status = 'running' AND lease_token = ?`,
 		nextStatus, finished.Format(time.RFC3339Nano), lastStatus,
-		lastError, nextAttempt, nextValue, finished.Format(time.RFC3339Nano),
+		lastError, nextAttempt, nextValue, nextScheduled.Format(time.RFC3339), finished.Format(time.RFC3339Nano),
 		j.ID, j.ProjectID, j.LeaseToken)
 	if err != nil {
 		app.Logger().Warn("finalize run", "job_id", j.ID, "err", err)
@@ -1221,6 +1360,29 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	if n, _ := res.RowsAffected(); n > 0 {
 		app.Emit("job.updated", map[string]any{"id": j.ID, "status": nextStatus, "last_status": lastStatus})
 	}
+}
+
+func jobScheduledTime(j *Job, fallback time.Time) time.Time {
+	for _, raw := range []string{j.ScheduledFor, j.NextRunAt} {
+		if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func computeNextRandomOccurrence(j *Job, loc *time.Location, after time.Time) (time.Time, error) {
+	if j.Random == nil {
+		return time.Time{}, errors.New("random job is missing its schedule configuration")
+	}
+	return nextRandomRunAfter(*j.Random, j.ScheduleSeed, loc, after)
+}
+
+func occurrenceIdempotencyKey(j *Job) string {
+	if j == nil || j.IdempotencyKey == "" || j.ScheduledFor == "" {
+		return ""
+	}
+	return j.IdempotencyKey + ":" + j.ScheduledFor
 }
 
 func newLeaseToken() (string, error) {
@@ -1272,11 +1434,11 @@ func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, strin
 	switch strings.ToLower(strKey(j.Target, "kind")) {
 	case "http":
 		if target, ok := legacyFunctionsTarget(j.Target); ok {
-			return runAppToolTarget(app, target)
+			return runAppToolTarget(app, j, target)
 		}
 		return runHTTPTarget(ctx, j, app.Config())
 	case "app_tool":
-		return runAppToolTarget(app, j.Target)
+		return runAppToolTarget(app, j, j.Target)
 	case "event":
 		return runEventTarget(app, j)
 	default:
@@ -1314,17 +1476,20 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 		return "error", 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if j.IdempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", j.IdempotencyKey)
-	}
-	req.Header.Set("X-Apteva-Job-ID", strconv.FormatInt(j.ID, 10))
-	req.Header.Set("X-Apteva-Job-Attempt", strconv.Itoa(j.Attempt+1))
 	if hdrs, ok := j.Target["headers"].(map[string]any); ok {
 		for k, v := range hdrs {
 			if s, ok := v.(string); ok {
 				req.Header.Set(k, s)
 			}
 		}
+	}
+	if key := occurrenceIdempotencyKey(j); key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	req.Header.Set("X-Apteva-Job-ID", strconv.FormatInt(j.ID, 10))
+	req.Header.Set("X-Apteva-Job-Attempt", strconv.Itoa(j.Attempt+1))
+	if j.ScheduledFor != "" {
+		req.Header.Set("X-Apteva-Job-Scheduled-For", j.ScheduledFor)
 	}
 
 	resp, err := getDispatchClient().Do(req)
@@ -1343,13 +1508,23 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 	return "ok", resp.StatusCode, string(respBytes), nil
 }
 
-func runAppToolTarget(app *sdk.AppCtx, target map[string]any) (string, int, string, error) {
+func runAppToolTarget(app *sdk.AppCtx, job *Job, target map[string]any) (string, int, string, error) {
 	appName := strKey(target, "app")
 	tool := strKey(target, "tool")
-	input, _ := target["input"].(map[string]any)
-	if input == nil {
-		input = map[string]any{}
+	storedInput, _ := target["input"].(map[string]any)
+	input := make(map[string]any, len(storedInput)+1)
+	for key, value := range storedInput {
+		input[key] = value
 	}
+	metadata := map[string]any{
+		"id":            job.ID,
+		"scheduled_for": job.ScheduledFor,
+		"attempt":       job.Attempt + 1,
+	}
+	if key := occurrenceIdempotencyKey(job); key != "" {
+		metadata["idempotency_key"] = key
+	}
+	input["_job"] = metadata
 	if app == nil || app.PlatformAPI() == nil {
 		return "error", 0, "", errors.New("app_tool target requires platform API")
 	}

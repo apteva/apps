@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -95,6 +96,120 @@ func TestComputeNextRun_Once(t *testing.T) {
 	got := computeNextRun("once", runAt, nil, "", time.UTC, time.Now())
 	if !got.Equal(runAt) {
 		t.Errorf("once should return run_at unchanged; got %v", got)
+	}
+}
+
+func testRandomSchedule(t *testing.T) RandomSchedule {
+	t.Helper()
+	cfg, err := parseRandomSchedule(map[string]any{
+		"kind":                "random",
+		"period":              "day",
+		"runs_per_period":     float64(5),
+		"window_start":        "08:00",
+		"window_end":          "22:00",
+		"min_spacing_minutes": float64(60),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+func TestRandomSchedule_ExactlyFiveInsideWindowWithSpacing(t *testing.T) {
+	loc, err := time.LoadLocation("Europe/Paris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := testRandomSchedule(t)
+	seed := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	runs, err := randomRunsForDate(cfg, seed, time.Date(2026, 8, 11, 0, 0, 0, 0, loc), loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 5 {
+		t.Fatalf("runs=%d, want 5", len(runs))
+	}
+	for i, run := range runs {
+		local := run.In(loc)
+		minute := local.Hour()*60 + local.Minute()
+		if minute < 8*60 || minute > 22*60 {
+			t.Errorf("run %s is outside 08:00-22:00", run)
+		}
+		if i > 0 && run.Sub(runs[i-1]) < time.Hour {
+			t.Errorf("runs %s and %s are less than 60 minutes apart", runs[i-1], run)
+		}
+	}
+}
+
+func TestRandomSchedule_IsStableForDateAndChangesNextDay(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Paris")
+	cfg := testRandomSchedule(t)
+	seed := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	date := time.Date(2026, 8, 11, 0, 0, 0, 0, loc)
+	first, err := randomRunsForDate(cfg, seed, date, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := randomRunsForDate(cfg, seed, date, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(first, restarted) {
+		t.Fatalf("same seed/date changed across calculations:\n%v\n%v", first, restarted)
+	}
+	nextDay, err := randomRunsForDate(cfg, seed, date.AddDate(0, 0, 1), loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sameWallTimes := true
+	for i := range first {
+		if first[i].Hour() != nextDay[i].Hour() || first[i].Minute() != nextDay[i].Minute() {
+			sameWallTimes = false
+			break
+		}
+	}
+	if sameWallTimes {
+		t.Fatal("next local date generated the same five wall-clock times")
+	}
+}
+
+func TestRandomSchedule_EuropeParisDSTKeepsLocalDayAndOffsets(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Paris")
+	cfg := testRandomSchedule(t)
+	seed := "1111111111111111111111111111111111111111111111111111111111111111"
+	cases := []struct {
+		date       time.Time
+		wantOffset int
+	}{
+		{time.Date(2026, 3, 28, 0, 0, 0, 0, loc), 3600},
+		{time.Date(2026, 3, 29, 0, 0, 0, 0, loc), 7200},
+		{time.Date(2026, 10, 25, 0, 0, 0, 0, loc), 3600},
+	}
+	for _, tc := range cases {
+		runs, err := randomRunsForDate(cfg, seed, tc.date, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(runs) != 5 {
+			t.Fatalf("date %s: runs=%d", tc.date, len(runs))
+		}
+		for _, run := range runs {
+			local := run.In(loc)
+			_, offset := local.Zone()
+			if local.YearDay() != tc.date.YearDay() || offset != tc.wantOffset {
+				t.Errorf("date %s: run=%s offset=%d, want local day and offset %d", tc.date, run, offset, tc.wantOffset)
+			}
+		}
+	}
+}
+
+func TestRandomSchedule_RejectsImpossibleWindow(t *testing.T) {
+	_, err := parseRandomSchedule(map[string]any{
+		"period": "day", "runs_per_period": float64(5),
+		"window_start": "08:00", "window_end": "10:00", "min_spacing_minutes": float64(60),
+	})
+	if err == nil {
+		t.Fatal("expected impossible random window to fail validation")
 	}
 }
 

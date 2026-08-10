@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: jobs
 display_name: Jobs
-version: 0.1.12
+version: 0.1.13
 description: |
   Scheduled-job runner. Other apps (and agents) enqueue work to be
-  delivered later — once at a future time, on an interval, or on a
-  cron expression. Targets are platform-mediated tools on other apps,
+  delivered later — once at a future time, on an interval, on a cron
+  expression, or at deterministic random times in a daily window.
+  Targets are platform-mediated tools on other apps,
   external HTTP endpoints, or instance events; jobs is the connective
   tissue that lets every other app
   schedule without reimplementing a scheduler. At-least-once delivery
@@ -35,7 +36,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: jobs_schedule
-      description: Schedule a job (once / every / cron) with an app-tool, external HTTP, or event target.
+      description: Schedule a job (once / every / cron / random) with an app-tool, external HTTP, or event target.
     - name: jobs_cancel
       description: Cancel a scheduled job. Idempotent.
     - name: jobs_list
@@ -46,6 +47,8 @@ provides:
       description: Fetch recent runs for a job (timestamp, status, duration, error).
     - name: jobs_run_now
       description: Trigger an immediate ad-hoc run of a scheduled job.
+    - name: jobs_preview
+      description: Preview deterministic randomized schedule occurrences.
   ui_panels:
     - slot: project.page
       label: Jobs

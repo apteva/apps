@@ -1,7 +1,7 @@
 github.com/andybalholm/cascadia v1.3.3 h1:AG2YHrzJIm4BZ19iwJ/DAua6Btl3IwJX+VI4kktS1LM=
 github.com/andybalholm/cascadia v1.3.3/go.mod h1:xNd9bqTn98Ln4DwST8/nG+H0yuB8Hmgu1YHNnWw0GeA=
-github.com/apteva/app-sdk v0.53.0 h1:F/4VLn/ujqafaMzWJig2Ie07vv9rmdDFXGeDC4APRqQ=
-github.com/apteva/app-sdk v0.53.0/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
+github.com/apteva/app-sdk v0.54.0 h1:tsl+sNtvcS89Oo0HsFZx8ne+BMr4AnXnKeLV0HnX0Qc=
+github.com/apteva/app-sdk v0.54.0/go.mod h1:Im4hJoe7MLxQD8epNJXVMGzqM3mpKPe3ioow6P6YYw0=
 github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 github.com/dustin/go-humanize v1.0.1/go.mod h1:Mu1zIs6XwVuF/gI1OepvI0qD18qycQx+mFykh5fBlto=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
