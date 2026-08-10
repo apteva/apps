@@ -156,7 +156,7 @@ func (a *App) extractorTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolWebRunRetry,
 		},
 		{
-			Name: "web_extractor_schedule", Description: "Create a Jobs-owned schedule that queues this extractor. Supports once, every, cron, and deterministic random daily schedules.",
+			Name: "web_extractor_schedule", Description: "Create a Jobs-owned schedule that queues this extractor. Supports once, every, and cron schedules.",
 			InputSchema: schemaObject(map[string]any{
 				"extractor_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
 				"preset": map[string]any{"type": "string"}, "schedule": map[string]any{"type": "object"},

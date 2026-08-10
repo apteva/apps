@@ -2,13 +2,11 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.2
+version: 0.2.1
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
-
-  v0.2.2 pins Jobs with deterministic random schedules and occurrence metadata.
 
   v0.2.1 sends selector locators directly to Computer, adds redirect URL
   assertions, adopts Computer's provider-neutral proxy modes and profiles with
@@ -78,7 +76,6 @@ requires:
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
     - name: jobs
-      version: ">=0.1.13"
       reason: "Owns extractor schedules, trigger delivery, retries, and delivery history."
 
 provides:
