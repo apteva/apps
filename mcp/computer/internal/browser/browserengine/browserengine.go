@@ -24,6 +24,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/input"
@@ -783,7 +784,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 
 	case "click":
 		x, y := action.X, action.Y
-		if action.Label != 0 {
+		if action.Selector != "" {
+			point, err := selectorclick.Resolve(c.ctx, action.Selector)
+			if err != nil {
+				return nil, fmt.Errorf("click: %w", err)
+			}
+			x, y = point.X, point.Y
+		} else if action.Label != 0 {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
 			}

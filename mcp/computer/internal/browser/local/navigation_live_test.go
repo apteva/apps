@@ -85,6 +85,50 @@ func TestLocalNavigationLive(t *testing.T) {
 	t.Logf("url=%s bytes=%d som=%d", c.CurrentURL(), len(shot), len(targets))
 }
 
+func TestLocalSelectorClickOffscreenDigiloLink(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_SELECTOR_CLICK_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_SELECTOR_CLICK_TESTS=1")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/clicked" {
+			_, _ = w.Write([]byte(`<html><body>Digilo click received</body></html>`))
+			return
+		}
+		_, _ = w.Write([]byte(`<html><body style="margin:0">
+<div style="height:2200px">Digilo review content</div>
+<a href="https://go.marcoschwartz.com/digilo" target="_blank">Visit Digilo</a>
+<script>
+document.querySelector('a[href="https://go.marcoschwartz.com/digilo"]').addEventListener('click', function(event) {
+  event.preventDefault();
+  window.location.href = '/clicked';
+});
+</script></body></html>`))
+	}))
+	defer server.Close()
+
+	c, err := New(computer.DisplaySize{Width: 1280, Height: 720})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OpenSession(computer.OpenOptions{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.Execute(computer.Action{Type: "click", Selector: `a[`}); err == nil || !strings.Contains(err.Error(), "invalid click selector") {
+		t.Fatalf("invalid selector error=%v", err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "click", Selector: `.missing-digilo-link`}); err == nil || !strings.Contains(err.Error(), "matched no element") {
+		t.Fatalf("unmatched selector error=%v", err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "click", Selector: `a[href="https://go.marcoschwartz.com/digilo"]`}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(c.CurrentURL(), "/clicked") {
+		t.Fatalf("off-screen selector click did not navigate: %s", c.CurrentURL())
+	}
+}
+
 func TestLocalExplicitNavigationActionsLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_NAVIGATION_TESTS=1")

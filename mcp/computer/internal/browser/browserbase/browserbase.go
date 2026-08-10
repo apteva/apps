@@ -27,6 +27,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -578,7 +579,13 @@ func (c *Computer) scroll(ctx context.Context, a computer.Action) error {
 
 func (c *Computer) executeClick(ctx context.Context, action computer.Action, clickCount int, focusAfter bool) error {
 	x, y := action.X, action.Y
-	if action.Label != 0 {
+	if action.Selector != "" {
+		point, err := selectorclick.Resolve(ctx, action.Selector)
+		if err != nil {
+			return err
+		}
+		x, y = point.X, point.Y
+	} else if action.Label != 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			x, y = e.Center()
 		}

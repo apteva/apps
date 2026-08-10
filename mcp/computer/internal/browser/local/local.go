@@ -31,6 +31,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -728,8 +729,8 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		// Surface as a visible error so the agent retries with a
 		// real target. Mirrors the empty-key error we ship for the
 		// same anti-pattern on action=key.
-		if action.Label == 0 && action.X == 0 && action.Y == 0 {
-			return nil, fmt.Errorf("click: no target — provide label=N from the latest screenshot, or X,Y coordinates")
+		if action.Selector == "" && action.Label == 0 && action.X == 0 && action.Y == 0 {
+			return nil, fmt.Errorf("click: no target — provide label=N from the latest screenshot, a CSS selector, or X,Y coordinates")
 		}
 		// SoM: resolve label to bbox center if the action carries
 		// a label= (takes precedence over X/Y). Falls back to raw
@@ -737,7 +738,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		// use X,Y for custom rendered targets with no badge.
 		x, y := action.X, action.Y
 		labelNote := ""
-		if action.Label != 0 {
+		if action.Selector != "" {
+			point, err := selectorclick.Resolve(c.ctx, action.Selector)
+			if err != nil {
+				return nil, err
+			}
+			x, y = point.X, point.Y
+		} else if action.Label != 0 {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				cx, cy := e.Center()
 				labelNote = fmt.Sprintf(" [label=%d %s '%.20s' → center %d,%d]", action.Label, e.Tag, e.Text, cx, cy)

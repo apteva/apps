@@ -293,15 +293,28 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if fake.lastAction.Type != "click" || fake.lastAction.Label != 3 {
 		t.Errorf("click action: want label 3, got %+v", fake.lastAction)
 	}
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"selector":   `a[href="https://go.marcoschwartz.com/digilo"]`,
+		"label":      1, // compatibility selectors beat serializer defaults
+	})
+	if err != nil {
+		t.Fatalf("computer_use selector click: %v", err)
+	}
+	if fake.lastAction.Type != "click" || fake.lastAction.Selector != `a[href="https://go.marcoschwartz.com/digilo"]` || fake.lastAction.Label != 0 {
+		t.Fatalf("selector click action: got %+v", fake.lastAction)
+	}
 	if _, err := app.toolComputerUse(ctx, map[string]any{
 		"session_id": sessionID,
 		"action":     "click",
 		"label":      1,
+		"selector":   `a[href="https://go.marcoschwartz.com/digilo"]`,
 		"coordinate": "113,746",
 	}); err != nil {
 		t.Fatalf("computer_use coordinate with populated label: %v", err)
 	}
-	if fake.lastAction.Label != 0 || fake.lastAction.X != 113 || fake.lastAction.Y != 746 {
+	if fake.lastAction.Label != 0 || fake.lastAction.Selector != "" || fake.lastAction.X != 113 || fake.lastAction.Y != 746 {
 		t.Errorf("explicit coordinate should override populated label: got %+v", fake.lastAction)
 	}
 	if _, err := app.toolComputerUse(ctx, map[string]any{

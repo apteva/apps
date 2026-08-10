@@ -13,7 +13,7 @@ type Action struct {
 	Type         string              `json:"type"`                   // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "select_option", "set_checked", "set_temporal", "set_text"
 	X            int                 `json:"x,omitempty"`            // click/scroll coordinate
 	Y            int                 `json:"y,omitempty"`            // click/scroll coordinate
-	Selector     string              `json:"selector,omitempty"`     // CSS selector for DOM-targeted actions like upload_file
+	Selector     string              `json:"selector,omitempty"`     // CSS selector for click and DOM-targeted form actions
 	Files        []string            `json:"files,omitempty"`        // local or provider-session file paths for upload_file
 	Text         string              `json:"text,omitempty"`         // for "type" action
 	Value        string              `json:"value,omitempty"`        // for "select_option": option value; for "set_temporal": full field value

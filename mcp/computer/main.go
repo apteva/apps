@@ -53,10 +53,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.63
+version: 0.7.64
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.63 restores rendered
-  DOM extraction as an app-only capability without exposing it to agents.
+  Watch, steer, and replay hosted browser sessions. v0.7.64 adds compatible
+  selector-targeted real mouse clicks while preserving agent label behavior.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -91,7 +91,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, presentation_mode?. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -577,7 +577,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
@@ -595,7 +595,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"tab_id":       map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate":   map[string]any{"type": "string"},
 				"label":        map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
-				"selector":     map[string]any{"type": "string", "description": "For action=upload_file, select_option, set_checked, set_text, or set_temporal. CSS selector for the target input/select/combobox/dropzone/textbox, e.g. input#mainMedia or button[role=combobox]."},
+				"selector":     map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
 				"checked":      map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
 				"source_url":   map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
 				"base64":       map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
@@ -1994,8 +1994,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// synthetic label value.
 	if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(args, "coordinate")) != "" {
 		act.Label = 0
+		act.Selector = ""
+	} else if action == "click" && strings.TrimSpace(act.Selector) != "" {
+		// A selector is an explicit compatibility target and must beat optional
+		// integer defaults synthesized by tool serializers. Label-only behavior
+		// remains unchanged when selector is absent.
+		act.Label = 0
 	}
-	if (action == "click" || action == "double_click") && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
+	if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			fmt.Sprintf("Set-of-Mark label %d is not present in the latest annotated screenshot", act.Label),
 			"Take a fresh screenshot with annotate=true, then use one of its current labels.",
@@ -2032,6 +2038,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, computerUseFailure("backend_not_supported", id, sess, action,
 			fmt.Sprintf("backend %q does not support %s yet", sess.backend, action),
 			"Use local or Browserbase for this DOM-targeted action, or use screenshot plus click/key/type fallback.",
+			nil)
+	}
+	if action == "click" && act.Selector != "" && sess.backend != "local" && sess.backend != "browserbase" && sess.backend != "steel" && sess.backend != "browser-engine" {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not support selector-targeted click", sess.backend),
+			"Use local, Browserbase, Steel, or browser-engine for selector click; otherwise use a screenshot label or coordinate.",
 			nil)
 	}
 
@@ -2705,6 +2717,9 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 	payload["action"] = act.Type
 	switch act.Type {
 	case "click", "double_click":
+		if act.Selector != "" {
+			payload["selector"] = act.Selector
+		}
 		if act.Label > 0 {
 			payload["label"] = act.Label
 		}
@@ -3361,6 +3376,9 @@ func coordinateArg(args map[string]any) (int, int) {
 }
 
 func hasClickTargetArg(args map[string]any) bool {
+	if strings.TrimSpace(stringArg(args, "selector")) != "" {
+		return true
+	}
 	if intArg(args, "label") > 0 {
 		return true
 	}
@@ -3371,11 +3389,14 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 	if action != "click" && action != "double_click" {
 		return nil
 	}
-	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
+	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 && !(action == "click" && strings.TrimSpace(stringArg(args, "selector")) != "") {
 		return fmt.Errorf("label=%d is not clickable; label must be a positive label from the latest screenshot", intArg(args, "label"))
 	}
 	if !hasClickTargetArg(args) {
-		return fmt.Errorf("%s requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge", action)
+		if action == "click" {
+			return fmt.Errorf("click requires label=N from the latest screenshot, selector, or coordinate=\"x,y\" for targets without a badge")
+		}
+		return fmt.Errorf("double_click requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge")
 	}
 	return nil
 }
