@@ -769,7 +769,10 @@ func (codemagicBuildBackend) Submit(_ context.Context, bound *sdk.BoundIntegrati
 	for key, value := range contract {
 		variables[key] = value
 	}
-	environment := map[string]any{"variables": variables, "groups": cfg.Groups}
+	environment := map[string]any{"variables": variables}
+	if len(cfg.Groups) > 0 {
+		environment["groups"] = cfg.Groups
+	}
 	if len(cfg.SoftwareVersions) > 0 {
 		environment["softwareVersions"] = cfg.SoftwareVersions
 	}

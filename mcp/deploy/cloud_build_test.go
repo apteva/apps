@@ -660,6 +660,9 @@ func TestAndroidCloudBuildAdoptsStoreUpload(t *testing.T) {
 	}
 	startEnvironment := platform.calls[0].Input["environment"].(map[string]any)
 	startVariables := startEnvironment["variables"].(map[string]string)
+	if _, exists := startEnvironment["groups"]; exists {
+		t.Fatalf("unset Codemagic groups must be omitted, got %#v", startEnvironment["groups"])
+	}
 	if startVariables["APTEVA_TARGET_KIND"] != "android" ||
 		startVariables["APTEVA_STORE_CHANNEL"] != "internal" {
 		t.Fatalf("contract variables=%#v", startVariables)
@@ -689,6 +692,32 @@ func TestAndroidCloudBuildAdoptsStoreUpload(t *testing.T) {
 	}
 	if meta.VersionCode != "123" || meta.PackageName != "com.example.app" {
 		t.Fatalf("meta=%+v", meta)
+	}
+}
+
+func TestCodemagicSubmissionIncludesConfiguredGroups(t *testing.T) {
+	platform := &cloudBuildPlatform{provider: "codemagic"}
+	withCloudBuildContext(t, platform)
+	cfg, err := parseCloudBuildConfig("codemagic", `{
+		"app_id":"cm-app","workflow_id":"ios","branch":"main",
+		"groups":["appstore-signing"]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (codemagicBuildBackend{}).Submit(
+		context.Background(),
+		&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "codemagic"},
+		cfg, &Deployment{TargetKind: "ios", TargetConfigJSON: `{}`},
+		&Build{ID: 1}, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	environment := platform.calls[0].Input["environment"].(map[string]any)
+	groups, ok := environment["groups"].([]string)
+	if !ok || len(groups) != 1 || groups[0] != "appstore-signing" {
+		t.Fatalf("groups=%#v", environment["groups"])
 	}
 }
 
