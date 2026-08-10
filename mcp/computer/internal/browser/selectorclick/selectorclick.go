@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -31,7 +32,7 @@ func Resolve(ctx context.Context, selector string) (Point, error) {
 		return Point{}, fmt.Errorf("click selector is empty")
 	}
 	selectorJSON, _ := json.Marshal(selector)
-	script := `(function(selector) {
+	scrollScript := `(function(selector) {
   var el;
   try {
     el = document.querySelector(selector);
@@ -39,7 +40,38 @@ func Resolve(ctx context.Context, selector string) (Point, error) {
     return {status:'invalid', detail:String(error && error.message || error)};
   }
   if (!el) return {status:'unmatched'};
-  try { el.scrollIntoView({block:'center', inline:'nearest'}); } catch (_) {}
+  // Explicitly override a page's scroll-behavior:smooth. Measuring the box
+  // while a smooth scroll is still moving can send the real mouse event to
+  // the element's old viewport position.
+  try { el.scrollIntoView({behavior:'instant', block:'center', inline:'nearest'}); } catch (_) {}
+  return {status:'scrolled'};
+})(` + string(selectorJSON) + `)`
+
+	var out result
+	if err := chromedp.Run(ctx, chromedp.Evaluate(scrollScript, &out)); err != nil {
+		return Point{}, fmt.Errorf("resolve click selector %q: %w", selector, err)
+	}
+	switch out.Status {
+	case "invalid":
+		return Point{}, fmt.Errorf("invalid click selector %q: %s", selector, strings.TrimSpace(out.Detail))
+	case "unmatched":
+		return Point{}, fmt.Errorf("click selector %q matched no element", selector)
+	case "scrolled":
+		// Let layout and any scroll-linked rendering settle before measuring.
+	case "":
+		return Point{}, fmt.Errorf("resolve click selector %q returned no result", selector)
+	default:
+		return Point{}, fmt.Errorf("resolve click selector %q returned unexpected status %q", selector, out.Status)
+	}
+
+	measureScript := `(function(selector) {
+  var el;
+  try {
+    el = document.querySelector(selector);
+  } catch (error) {
+    return {status:'invalid', detail:String(error && error.message || error)};
+  }
+  if (!el) return {status:'unmatched'};
   if (!el.getBoundingClientRect) return {status:'not_visible'};
   var rect = el.getBoundingClientRect();
   var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
@@ -50,8 +82,11 @@ func Resolve(ctx context.Context, selector string) (Point, error) {
   return {status:'ok', x:rect.left + rect.width / 2, y:rect.top + rect.height / 2};
 })(` + string(selectorJSON) + `)`
 
-	var out result
-	if err := chromedp.Run(ctx, chromedp.Evaluate(script, &out)); err != nil {
+	out = result{}
+	if err := chromedp.Run(ctx,
+		chromedp.Sleep(50*time.Millisecond),
+		chromedp.Evaluate(measureScript, &out),
+	); err != nil {
 		return Point{}, fmt.Errorf("resolve click selector %q: %w", selector, err)
 	}
 	switch out.Status {

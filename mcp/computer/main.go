@@ -53,10 +53,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.64
+version: 0.7.65
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.64 adds compatible
-  selector-targeted real mouse clicks while preserving agent label behavior.
+  Watch, steer, and replay hosted browser sessions. v0.7.65 stabilizes
+  selector-targeted real mouse clicks on pages with smooth scrolling while
+  preserving agent label behavior.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]

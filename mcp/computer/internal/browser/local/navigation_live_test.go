@@ -94,7 +94,7 @@ func TestLocalSelectorClickOffscreenDigiloLink(t *testing.T) {
 			_, _ = w.Write([]byte(`<html><body>Digilo click received</body></html>`))
 			return
 		}
-		_, _ = w.Write([]byte(`<html><body style="margin:0">
+		_, _ = w.Write([]byte(`<html><style>html { scroll-behavior: smooth; }</style><body style="margin:0">
 <div style="height:2200px">Digilo review content</div>
 <a href="https://go.marcoschwartz.com/digilo" target="_blank">Visit Digilo</a>
 <script>
