@@ -200,7 +200,8 @@ interface StoreSettings {
 
 interface MarketingResource {
   id: number;
-  display_name: string;
+  name?: string;
+  display_name?: string;
   status: string;
 }
 
@@ -943,7 +944,7 @@ export default function CommercePanel({ projectId, installId }: NativePanelProps
                   <Field label="Meta Pixel">
                     <select value={marketingDraft.resourceId} onChange={(event) => setMarketingDraft({ ...marketingDraft, resourceId: event.target.value })} disabled={!marketingDraft.adAccountId} className={inputClass}>
                       <option value="">Create a new Pixel</option>
-                      {(selectedMetaAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.display_name || `Pixel #${resource.id}`}</option>)}
+                      {(selectedMetaAccount?.resources || []).map((resource) => <option key={resource.id} value={resource.id}>{resource.name || resource.display_name || `Pixel #${resource.id}`}</option>)}
                     </select>
                   </Field>
                   {!marketingDraft.resourceId && <Field label="New Pixel name"><input value={marketingDraft.pixelName} onChange={(event) => setMarketingDraft({ ...marketingDraft, pixelName: event.target.value })} placeholder={`${currentStore?.name || "Store"} Pixel`} className={inputClass} /></Field>}

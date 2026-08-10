@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.8.6
+version: 0.8.7
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -13,7 +13,8 @@ description: |
   Each store can select manual, Stripe-hosted, or native Stripe Elements
   checkout while Content remains the sole owner of public storefront UI.
   Commerce can optionally bind Ads to install a selected Meta Pixel on its
-  Content storefront with consent-gated browser events.
+  Content storefront with consent-gated browser events. Version 0.8.7 keeps
+  canonical Ads resource names when configuring and displaying Meta Pixels.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
@@ -152,7 +153,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.8.6
+    ref: commerce/v0.8.7
     entry: mcp/commerce
   port: 8080
   health_check: /health

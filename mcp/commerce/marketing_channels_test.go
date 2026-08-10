@@ -11,7 +11,7 @@ func TestConfigureMarketingChannelUsesAdsAndExposesOnlyPublicConfig(t *testing.T
 	platform := newCommercePlatformStub()
 	platform.responses["ads:resource_set_default"] = map[string]any{"ok": true}
 	platform.responses["ads:tracking_source_installation_get"] = map[string]any{
-		"resource": map[string]any{"id": 31, "display_name": "Feliqo Pixel", "provider_type": "meta_pixel"},
+		"resource": map[string]any{"id": 31, "name": "Feliqo Pixel", "provider_type": "meta_pixel"},
 		"installation": map[string]any{
 			"provider": "meta", "public_id": "987654321", "script_url": "https://connect.facebook.net/en_US/fbevents.js",
 			"script_origins":  []any{"https://connect.facebook.net"},

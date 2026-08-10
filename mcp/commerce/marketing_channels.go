@@ -258,7 +258,7 @@ func (a *App) toolMarketingChannelConfigure(ctx *sdk.AppCtx, args map[string]any
 		}
 		resource := unwrap(created, "resource")
 		resourceID = intArg(resource, "id")
-		name = firstNonEmpty(strArg(resource, "display_name"), name)
+		name = firstNonEmpty(strArg(resource, "name"), strArg(resource, "display_name"), name)
 		if resourceID == 0 {
 			return nil, errors.New("Ads did not return the created Pixel resource")
 		}
@@ -280,7 +280,7 @@ func (a *App) toolMarketingChannelConfigure(ctx *sdk.AppCtx, args map[string]any
 	if publicID := strArg(installation, "public_id"); publicID == "" {
 		return nil, errors.New("Ads returned no browser-public Meta Pixel id")
 	}
-	name = firstNonEmpty(strArg(resource, "display_name"), name)
+	name = firstNonEmpty(strArg(resource, "name"), strArg(resource, "display_name"), name)
 	publicConfig := map[string]any{
 		"public_id": strArg(installation, "public_id"), "script_url": strArg(installation, "script_url"),
 		"script_origins": installation["script_origins"], "connect_origins": installation["connect_origins"],
