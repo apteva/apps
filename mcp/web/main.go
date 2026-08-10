@@ -1,4 +1,4 @@
-// Web v0.1.15 - browser-backed web intelligence.
+// Web v0.2.0 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -23,7 +24,9 @@ import (
 	"image/png"
 	"io"
 	"math"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"sort"
@@ -36,85 +39,60 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	"golang.org/x/net/html"
+	"golang.org/x/net/publicsuffix"
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: web
-display_name: Web
-version: 0.1.15
-description: Browser-native web intelligence for agents.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.apps.call
-  apps:
-    - name: computer
-    - name: storage
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - name: web_search
-      description: "Browser-backed web search. Args: query, limit?, engine?, backend?, viewport?, visit_top?, cache?, max_age?, cache_ttl?."
-    - name: web_extract
-      description: "Open a URL in a browser session and extract readable text, metadata, links, and cache metadata."
-    - name: web_crawl
-      description: "Browser-backed bounded crawl from seed URLs with optional response caching."
-    - name: web_map
-      description: "Fast site map discovery from seed URLs with optional response caching."
-    - name: web_research
-      description: "Multi-step browser-backed research with citations, artifacts, and optional response caching."
-    - name: web_snapshot
-      description: "Capture visual evidence for a URL or existing computer session, with optional smart query-matched region crops. Snapshot cache is only used when max_age is set."
-  ui_panels:
-    - slot: project.page
-      label: Web
-      icon: globe
-      entry: /ui/WebPanel.mjs
-  ui_components:
-    - name: web-result-card
-      entry: /ui/WebResultCard.mjs
-      slots: [chat.message_attachment]
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/web
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/web.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML []byte
 
 const (
-	defaultHTTPTimeout    = 20 * time.Second
-	defaultMaxChars       = 20000
-	maxFetchBytes         = 5 * 1024 * 1024
-	maxCrawlPages         = 50
-	defaultSearchLimit    = 10
-	maxSearchLimit        = 25
-	defaultSearchMaxAge   = 15 * time.Minute
-	defaultSearchTTL      = time.Hour
-	defaultExtractMaxAge  = 24 * time.Hour
-	defaultExtractTTL     = 24 * time.Hour
-	defaultResearchMaxAge = time.Hour
-	defaultResearchTTL    = time.Hour
+	defaultHTTPTimeout      = 20 * time.Second
+	defaultMaxChars         = 20000
+	maxFetchBytes           = 5 * 1024 * 1024
+	maxCachedResponseBytes  = 4 * 1024 * 1024
+	maxCrawlPages           = 50
+	defaultSearchLimit      = 10
+	maxSearchLimit          = 25
+	maxResearchQueries      = 8
+	defaultHistoryRetention = 90
+	defaultSearchMaxAge     = 15 * time.Minute
+	defaultSearchTTL        = time.Hour
+	defaultExtractMaxAge    = 24 * time.Hour
+	defaultExtractTTL       = 24 * time.Hour
+	defaultResearchMaxAge   = time.Hour
+	defaultResearchTTL      = time.Hour
 )
+
+var blockedNetworkPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("::/128"),
+	netip.MustParsePrefix("::1/128"),
+	netip.MustParsePrefix("fc00::/7"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
 
 type App struct{}
 
 var globalCtx *sdk.AppCtx
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -126,26 +104,49 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("web requires a db block")
 	}
 	globalCtx = ctx
+	if err := recoverInterruptedRuns(ctx); err != nil {
+		ctx.Logger().Warn("web interrupted-run recovery failed", "err", err.Error())
+	}
 	if err := pruneCache(ctx); err != nil {
 		ctx.Logger().Warn("web cache prune failed", "err", err.Error())
+	}
+	if err := pruneHistory(ctx); err != nil {
+		ctx.Logger().Warn("web history prune failed", "err", err.Error())
 	}
 	ctx.Logger().Info("web mounted", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "extractor-runner",
+		Schedule: "@every 2s",
+		Run:      a.runExtractorWorker,
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/runs", Handler: a.handleRuns},
+		{Method: http.MethodGet, Pattern: "/runs/{id}", Handler: a.handleRunItem},
+		{Method: http.MethodPost, Pattern: "/runs/{id}/cancel", Handler: a.handleRunCancel},
+		{Method: http.MethodPost, Pattern: "/runs/{id}/retry", Handler: a.handleRunRetry},
+		{Method: http.MethodGet, Pattern: "/extractors", Handler: a.handleExtractors},
+		{Method: http.MethodPost, Pattern: "/extractors", Handler: a.handleExtractorSave},
+		{Method: http.MethodDelete, Pattern: "/extractors/{id}", Handler: a.handleExtractorDelete},
+		{Method: http.MethodPost, Pattern: "/extractors/run", Handler: a.handleExtractorRun},
+		{Method: http.MethodGet, Pattern: "/schedules", Handler: a.handleExtractorSchedules},
+		{Method: http.MethodPost, Pattern: "/schedules", Handler: a.handleExtractorSchedule},
+		{Method: http.MethodPost, Pattern: "/schedules/{id}/run", Handler: a.handleExtractorScheduleRunNow},
+		{Method: http.MethodPost, Pattern: "/schedules/{id}/cancel", Handler: a.handleExtractorUnschedule},
 	}
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name:        "web_search",
 			Description: "Browser-backed web search. Args: query, limit?, engine? (google|duckduckgo, default google), backend?, viewport?, visit_top? bool. Returns normalized JSON results.",
@@ -222,7 +223,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Multi-step browser-backed research. Args: question, queries?, max_results?, max_sources?, backend?, snapshots?, store?. Returns extractive report JSON with citations and artifacts.",
 			InputSchema: schemaObject(map[string]any{
 				"question":    map[string]any{"type": "string"},
-				"queries":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"queries":     map[string]any{"type": "array", "maxItems": maxResearchQueries, "items": map[string]any{"type": "string"}},
 				"max_results": map[string]any{"type": "integer"},
 				"max_sources": map[string]any{"type": "integer"},
 				"backend":     map[string]any{"type": "string"},
@@ -257,6 +258,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolSnapshot,
 		},
 	}
+	return append(tools, a.extractorTools()...)
 }
 
 type browserSession struct {
@@ -429,9 +431,13 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if engine != "google" && engine != "duckduckgo" {
 		return nil, fmt.Errorf("unsupported engine %q", engine)
 	}
-	runID, err := startRun(ctx, "search", args)
-	if err != nil {
-		return nil, fmt.Errorf("start search run: %w", err)
+	var runID int64
+	if !boolArg(args, "_internal") {
+		var err error
+		runID, err = startRun(ctx, "search", args)
+		if err != nil {
+			return nil, fmt.Errorf("start search run: %w", err)
+		}
 	}
 	defer failRunOnPanic(ctx, runID)
 
@@ -541,7 +547,10 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	doc := a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{"store": false, "snapshot": false}), true)
+	doc := a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{
+		"store":           false,
+		"_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
+	}), true)
 	out := map[string]any{"page": doc}
 	applyCacheAfterFetch(ctx, policy, out)
 	if doc.Error != "" {
@@ -695,7 +704,7 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	queries := stringSliceArg(args, "queries")
+	queries := dedupeStrings(stringSliceArg(args, "queries"), maxResearchQueries)
 	if len(queries) == 0 {
 		queries = []string{question}
 	}
@@ -703,28 +712,41 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	maxSources := boundedInt(intArg(args, "max_sources"), 5, 1, 12)
 
 	searchBatches := make([][]searchResult, len(queries))
-	searchSem := make(chan struct{}, 3)
+	searchJobs := make(chan int, len(queries))
 	var searchWG sync.WaitGroup
-	for i, q := range queries {
+	workerCount := minInt(3, len(queries))
+	for range workerCount {
 		searchWG.Add(1)
-		go func(i int, q string) {
+		go func() {
 			defer searchWG.Done()
-			searchSem <- struct{}{}
-			defer func() { <-searchSem }()
-			searchOut, searchErr := a.toolSearch(ctx, mapMerge(args, map[string]any{
-				"query":     q,
-				"limit":     maxResults,
-				"store":     false,
-				"cache":     "bypass",
-				"visit_top": false,
-			}))
-			if searchErr != nil {
-				ctx.Logger().Warn("research search failed", "query", q, "err", searchErr.Error())
-				return
+			for i := range searchJobs {
+				q := queries[i]
+				searchArgs := map[string]any{
+					"query":     q,
+					"limit":     maxResults,
+					"store":     false,
+					"cache":     nestedSearchCacheMode(args),
+					"visit_top": false,
+					"_internal": true,
+				}
+				for _, key := range []string{"engine", "backend", "viewport", "context_id", "persist", "timeout", "proxy", "proxy_country"} {
+					if value, ok := args[key]; ok {
+						searchArgs[key] = value
+					}
+				}
+				searchOut, searchErr := a.toolSearch(ctx, searchArgs)
+				if searchErr != nil {
+					ctx.Logger().Warn("research search failed", "query", q, "err", searchErr.Error())
+					continue
+				}
+				searchBatches[i] = searchResultsFromOutput(searchOut)
 			}
-			searchBatches[i] = searchResultsFromOutput(searchOut)
-		}(i, q)
+		}()
 	}
+	for i := range queries {
+		searchJobs <- i
+	}
+	close(searchJobs)
 	searchWG.Wait()
 
 	allResults := make([]searchResult, 0, len(queries)*maxResults)
@@ -751,9 +773,10 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			sourceSem <- struct{}{}
 			defer func() { <-sourceSem }()
 			extractArgs := mapMerge(args, map[string]any{
-				"store":    false,
-				"snapshot": boolArg(args, "snapshots"),
-				"label":    r.Title,
+				"store":           false,
+				"_snapshot_store": boolArgDefault(args, "store", storeDefault(ctx)),
+				"snapshot":        boolArg(args, "snapshots"),
+				"label":           r.Title,
 			})
 			sources[i] = a.extractURL(ctx, runID, r.URL, extractArgs, true)
 		}(i, r)
@@ -849,9 +872,9 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 		doc.ContentType = "text/html"
 		doc.ExtractionBackend = firstNonEmpty(extracted.ExtractionBackend, "browser_dom")
 		doc.Bytes = len(extracted.Text) + len(extracted.Markdown) + len(extracted.HTML)
-		doc.Truncated = false
 		if includeText {
 			maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
+			doc.Truncated = len(extracted.Text) > maxChars || len(extracted.Markdown) > maxChars || len(extracted.HTML) > maxChars
 			doc.Text = truncateString(extracted.Text, maxChars)
 			doc.Markdown = truncateString(extracted.Markdown, maxChars)
 			doc.HTML = truncateString(extracted.HTML, maxChars)
@@ -867,7 +890,7 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 			shot, err := a.snapshot(ctx, runID, mapMerge(args, map[string]any{
 				"session_id": browser.SessionID,
 				"label":      firstNonEmpty(doc.Title, target),
-				"store":      true,
+				"store":      snapshotStore(ctx, args),
 			}))
 			if err == nil {
 				doc.Snapshot = shot
@@ -913,7 +936,7 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 		shot, err := a.snapshot(ctx, runID, mapMerge(args, map[string]any{
 			"session_id": browser.SessionID,
 			"label":      firstNonEmpty(doc.Title, target),
-			"store":      true,
+			"store":      snapshotStore(ctx, args),
 		}))
 		if err == nil {
 			doc.Snapshot = shot
@@ -1031,7 +1054,12 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
-	art, _ := insertArtifact(ctx, runID, "snapshot", shot.CurrentURL, stringArg(args, "label"), up.ID, up.URL, "image/png", 0, compactArtifactMetadata("snapshot", shot.CurrentURL, stringArg(args, "label"), "image/png", 0))
+	size := encodedBase64Size(shot.PNGB64)
+	art, err := insertArtifact(ctx, runID, "snapshot", shot.CurrentURL, stringArg(args, "label"), up.ID, up.URL, "image/png", size, compactArtifactMetadata("snapshot", shot.CurrentURL, stringArg(args, "label"), "image/png", size))
+	if err != nil {
+		rollbackStoredFile(ctx, up.ID)
+		return nil, fmt.Errorf("record snapshot artifact: %w", err)
+	}
 	out["stored"] = true
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
@@ -1441,6 +1469,7 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 	crop := boolArgDefault(args, "crop", true)
 	for i, ranked := range candidates {
 		region := ranked.Region
+		positionErr := ""
 		targetScroll := math.Max(0, region.Rect.Y-120)
 		if diff := targetScroll - currentScroll; math.Abs(diff) >= 20 {
 			direction := "down"
@@ -1459,6 +1488,12 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 				return nil, fmt.Errorf("computer.computer_use scroll: %w", err)
 			}
 			currentScroll = targetScroll
+			if refreshed, actualScroll, err := a.locateRegionAfterScroll(ctx, sessionID, args, region); err == nil {
+				region = refreshed
+				currentScroll = actualScroll
+			} else {
+				positionErr = err.Error()
+			}
 		}
 		shot, err := a.captureBrowserScreenshot(ctx, sessionID)
 		if err != nil {
@@ -1499,6 +1534,9 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 		if cropErr != "" {
 			item["crop_error"] = cropErr
 		}
+		if positionErr != "" {
+			item["position_warning"] = positionErr
+		}
 		if store {
 			label := safeFilename(firstNonEmpty(stringArg(args, "label"), region.Heading, "smart-snapshot"))
 			if err := a.storeSnapshotImage(ctx, runID, item, contentB64, "smart", label, 0); err != nil {
@@ -1524,6 +1562,46 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 	return out, nil
 }
 
+func (a *App) locateRegionAfterScroll(ctx *sdk.AppCtx, sessionID string, args map[string]any, original browserRegion) (browserRegion, float64, error) {
+	extracted, err := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
+		"formats":   []string{"regions"},
+		"max_chars": 5000,
+	}), false)
+	if err != nil {
+		return original, 0, err
+	}
+	bestIndex := -1
+	bestDistance := math.MaxFloat64
+	for i, candidate := range extracted.Regions {
+		if original.Selector != "" && candidate.Selector == original.Selector {
+			bestIndex = i
+			break
+		}
+		if original.ID != "" && candidate.ID == original.ID {
+			bestIndex = i
+			bestDistance = 0
+			continue
+		}
+		if original.Tag != candidate.Tag || normalizeRegionText(original.Heading) != normalizeRegionText(candidate.Heading) {
+			continue
+		}
+		distance := math.Abs(original.Rect.X-candidate.Rect.X) + math.Abs(original.Rect.Y-candidate.Rect.Y)
+		if distance < bestDistance {
+			bestIndex = i
+			bestDistance = distance
+		}
+	}
+	if bestIndex < 0 {
+		return original, 0, errors.New("rendered region could not be relocated after scrolling")
+	}
+	region := extracted.Regions[bestIndex]
+	scrollY := region.Rect.Y - region.ViewportRect.Y
+	if scrollY < 0 {
+		scrollY = 0
+	}
+	return region, scrollY, nil
+}
+
 func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]any, pngB64, prefix, label string, size int) error {
 	folder := "/.web/snapshots/" + time.Now().UTC().Format("2006-01")
 	var up struct {
@@ -1544,7 +1622,14 @@ func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]an
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return fmt.Errorf("storage.files_upload: %w", err)
 	}
-	art, _ := insertArtifact(ctx, runID, "snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), up.ID, up.URL, "image/png", size, compactArtifactMetadata("snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), "image/png", size))
+	if size <= 0 {
+		size = encodedBase64Size(pngB64)
+	}
+	art, err := insertArtifact(ctx, runID, "snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), up.ID, up.URL, "image/png", size, compactArtifactMetadata("snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), "image/png", size))
+	if err != nil {
+		rollbackStoredFile(ctx, up.ID)
+		return fmt.Errorf("record snapshot artifact: %w", err)
+	}
 	out["stored"] = true
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
@@ -1883,6 +1968,9 @@ func clampInt(v, min, max int) int {
 }
 
 func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (*browserSession, error) {
+	if err := validateBrowserTarget(ctx, target); err != nil {
+		return nil, err
+	}
 	openArgs := map[string]any{"url": target}
 	if b := firstNonEmpty(stringArg(args, "backend"), configString(ctx, "default_backend")); b != "" {
 		openArgs["backend"] = b
@@ -1999,12 +2087,20 @@ func newCachePolicy(kind string, args map[string]any) (cachePolicy, error) {
 			p.Reason = "snapshot cache requires max_age"
 		}
 	}
+	if kind == "snapshot" && !boolArgDefault(args, "store", true) {
+		p.Read = false
+		p.Write = false
+		p.Reason = "snapshot cache requires stored output"
+	}
 	if kind == "extract" && boolArg(args, "snapshot") && !explicitMaxAge {
 		p.Read = false
 		p.Write = false
 		if p.Reason == "" {
 			p.Reason = "snapshot requested"
 		}
+	}
+	if p.ForceOnly && !p.Read {
+		return cachePolicy{}, fmt.Errorf("cache force is unavailable for this %s request", kind)
 	}
 	return p, nil
 }
@@ -2093,6 +2189,9 @@ func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) err
 	if err != nil {
 		return err
 	}
+	if len(b) > maxCachedResponseBytes {
+		return fmt.Errorf("cache response too large: %d bytes exceeds %d", len(b), maxCachedResponseBytes)
+	}
 	cacheURL, title := cacheResponseURLTitle(out)
 	now := time.Now().UTC()
 	var expires any
@@ -2123,6 +2222,9 @@ func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) err
 func cacheKey(kind string, args map[string]any) (string, string, error) {
 	cleaned := map[string]any{"kind": kind}
 	for k, v := range args {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
 		switch k {
 		case "cache", "max_age", "cache_ttl":
 			continue
@@ -2132,6 +2234,9 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 			}
 		}
 		cleaned[k] = normalizeCacheValue(k, v)
+	}
+	if kind == "snapshot" {
+		cleaned["store"] = boolArgDefault(args, "store", true)
 	}
 	b, err := json.Marshal(cleaned)
 	if err != nil {
@@ -2145,13 +2250,13 @@ func normalizeCacheValue(key string, v any) any {
 	switch x := v.(type) {
 	case []string:
 		cp := append([]string(nil), x...)
-		if key == "formats" || key == "urls" {
+		if key == "formats" {
 			sort.Strings(cp)
 		}
 		return cp
 	case []any:
 		cp := append([]any(nil), x...)
-		if key == "formats" || key == "urls" {
+		if key == "formats" {
 			ss := make([]string, 0, len(cp))
 			for _, item := range cp {
 				ss = append(ss, fmt.Sprint(item))
@@ -2193,6 +2298,7 @@ func stripCachedTransientFields(v any) {
 		delete(x, "snapshot")
 		delete(x, "session_id")
 		delete(x, "opened_session")
+		delete(x, "png_b64")
 		for key, child := range x {
 			if key == "metadata" || key == "structured_data" {
 				continue
@@ -2244,12 +2350,12 @@ func (a *App) applyResponseEffects(ctx *sdk.AppCtx, runID int64, kind string, ar
 		if err != nil {
 			return err
 		}
-		if boolArg(args, "snapshot") && doc.Error == "" {
+		if boolArg(args, "snapshot") && doc.Error == "" && doc.Snapshot == nil {
 			shotArgs := mapMerge(args, map[string]any{
 				"url":        firstNonEmpty(doc.FinalURL, doc.URL),
 				"session_id": "",
 				"label":      firstNonEmpty(doc.Title, doc.URL),
-				"store":      true,
+				"store":      boolArgDefault(args, "store", storeDefault(ctx)),
 			})
 			shot, shotErr := a.snapshot(ctx, runID, shotArgs)
 			if shotErr != nil {
@@ -2281,7 +2387,7 @@ func (a *App) applyResponseEffects(ctx *sdk.AppCtx, runID int64, kind string, ar
 					"url":        firstNonEmpty(docs[i].FinalURL, docs[i].URL),
 					"session_id": "",
 					"label":      firstNonEmpty(docs[i].Title, docs[i].URL),
-					"store":      true,
+					"store":      boolArgDefault(args, "store", storeDefault(ctx)),
 				})
 				shot, shotErr := a.snapshot(ctx, runID, shotArgs)
 				if shotErr != nil {
@@ -2438,7 +2544,7 @@ func cacheDurationArg(args map[string]any, key string, fallback time.Duration) (
 type fetchInfo map[string]any
 
 func fetchURL(ctx *sdk.AppCtx, target string) ([]byte, fetchInfo, error) {
-	if err := validateHTTPURL(target); err != nil {
+	if err := validateBrowserTarget(ctx, target); err != nil {
 		return nil, nil, err
 	}
 	reqCtx, cancel := context.WithTimeout(context.Background(), defaultHTTPTimeout)
@@ -2450,7 +2556,9 @@ func fetchURL(ctx *sdk.AppCtx, target string) ([]byte, fetchInfo, error) {
 	req.Header.Set("User-Agent", "Apteva-Web/0.1 (+https://github.com/apteva/apps)")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5")
 	start := time.Now()
-	resp, err := http.DefaultClient.Do(req)
+	client := outboundHTTPClient(ctx)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fetchInfo{"duration_ms": time.Since(start).Milliseconds()}, err
 	}
@@ -2742,6 +2850,32 @@ func searchResultsFromOutput(out any) []searchResult {
 
 // ─── Storage and DB ───────────────────────────────────────────────
 
+func recoverInterruptedRuns(ctx *sdk.AppCtx) error {
+	_, err := ctx.AppDB().Exec(
+		`UPDATE web_runs
+		    SET status='failed', error='interrupted by app restart', completed_at=?
+		  WHERE status='running'`,
+		time.Now().UTC(),
+	)
+	return err
+}
+
+func pruneHistory(ctx *sdk.AppCtx) error {
+	days := defaultHistoryRetention
+	if raw := configString(ctx, "history_retention_days"); raw != "" {
+		days = configInt(ctx, "history_retention_days")
+	}
+	if days <= 0 {
+		return nil
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)
+	if _, err := ctx.AppDB().Exec(`DELETE FROM web_artifacts WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	_, err := ctx.AppDB().Exec(`DELETE FROM web_runs WHERE created_at < ?`, cutoff)
+	return err
+}
+
 func startRun(ctx *sdk.AppCtx, kind string, input any) (int64, error) {
 	b, _ := json.Marshal(input)
 	res, err := ctx.AppDB().Exec(
@@ -2824,7 +2958,22 @@ func storeArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title, conte
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", args, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
-	return insertArtifact(ctx, runID, kind, artifactURL, title, up.ID, up.URL, contentType, len(b), compactArtifactMetadata(kind, artifactURL, title, contentType, len(b)))
+	art, err := insertArtifact(ctx, runID, kind, artifactURL, title, up.ID, up.URL, contentType, len(b), compactArtifactMetadata(kind, artifactURL, title, contentType, len(b)))
+	if err != nil {
+		rollbackStoredFile(ctx, up.ID)
+		return nil, fmt.Errorf("record %s artifact: %w", kind, err)
+	}
+	return art, nil
+}
+
+func rollbackStoredFile(ctx *sdk.AppCtx, storageID int64) {
+	if ctx == nil || storageID <= 0 {
+		return
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_delete", withProjectID(ctx, map[string]any{"id": storageID}), &out); err != nil {
+		ctx.Logger().Warn("rollback uploaded Web artifact failed", "storage_id", storageID, "err", err.Error())
+	}
 }
 
 func compactArtifactMetadata(kind, artifactURL, title, contentType string, size int) map[string]any {
@@ -2851,14 +3000,16 @@ func insertArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title strin
 	return &artifactSummary{ID: id, StorageID: storageID, URL: storageURL}, nil
 }
 
-func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
+func listRuns(ctx *sdk.AppCtx, limit, offset int) ([]map[string]any, error) {
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, kind, status, COALESCE(error,''), COALESCE(summary,''), created_at
+		`SELECT id, kind, status, COALESCE(error,''), COALESCE(summary,''),
+		        created_at, completed_at, output_json, COALESCE(extractor_id,0),
+		        COALESCE(extractor_revision,0), cancel_requested_at
 		 FROM web_runs
 		 WHERE project_id = ?
 		 ORDER BY created_at DESC
-		 LIMIT ?`,
-		projectID(ctx), limit,
+		 LIMIT ? OFFSET ?`,
+		projectID(ctx), limit, offset,
 	)
 	if err != nil {
 		return nil, err
@@ -2869,19 +3020,47 @@ func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
 		var id int64
 		var kind, status, errText, summary string
 		var created time.Time
-		if err := rows.Scan(&id, &kind, &status, &errText, &summary, &created); err != nil {
+		var completed sql.NullTime
+		var outputJSON sql.NullString
+		var extractorID, extractorRevision int64
+		var cancelRequested sql.NullTime
+		if err := rows.Scan(&id, &kind, &status, &errText, &summary, &created, &completed, &outputJSON, &extractorID, &extractorRevision, &cancelRequested); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{
+		run := map[string]any{
 			"id":         id,
 			"kind":       kind,
 			"status":     status,
 			"error":      errText,
 			"summary":    summary,
 			"created_at": created.Format(time.RFC3339),
-		})
+		}
+		if completed.Valid {
+			run["completed_at"] = completed.Time.UTC().Format(time.RFC3339)
+			run["duration_ms"] = maxInt64(0, completed.Time.Sub(created).Milliseconds())
+		}
+		if extractorID > 0 {
+			run["extractor_id"] = extractorID
+			run["extractor_revision"] = extractorRevision
+		}
+		if cancelRequested.Valid {
+			run["cancel_requested_at"] = cancelRequested.Time.UTC().Format(time.RFC3339)
+		}
+		if outputJSON.Valid && outputJSON.String != "" {
+			var details map[string]any
+			if json.Unmarshal([]byte(outputJSON.String), &details) == nil {
+				run["details"] = details
+			}
+		}
+		out = append(out, run)
 	}
 	return out, rows.Err()
+}
+
+func countRuns(ctx *sdk.AppCtx) (int, error) {
+	var count int
+	err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM web_runs WHERE project_id=?`, projectID(ctx)).Scan(&count)
+	return count, err
 }
 
 // ─── HTTP handlers ────────────────────────────────────────────────
@@ -2897,12 +3076,23 @@ func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
 	ctx := globalCtx
 	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
 		ctx = globalCtx.WithProject(pid)
 	}
-	runs, err := listRuns(ctx, limit)
-	writeJSON(w, map[string]any{"runs": runs}, err)
+	runs, err := listRuns(ctx, limit, offset)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	total, err := countRuns(ctx)
+	writeJSON(w, map[string]any{"runs": runs, "total": total, "limit": limit, "offset": offset}, err)
 }
 
 // ─── Utility ──────────────────────────────────────────────────────
@@ -2969,11 +3159,8 @@ func decodeDuckURL(href string) string {
 	if err != nil {
 		return ""
 	}
-	if strings.Contains(u.Hostname(), "duckduckgo.com") {
+	if hostIsOrSubdomain(u.Hostname(), "duckduckgo.com") {
 		if uddg := u.Query().Get("uddg"); uddg != "" {
-			if parsed, err := url.QueryUnescape(uddg); err == nil {
-				return parsed
-			}
 			return uddg
 		}
 		return ""
@@ -2999,12 +3186,9 @@ func decodeGoogleURL(href string) string {
 		return ""
 	}
 	host := strings.ToLower(u.Hostname())
-	if strings.Contains(host, "google.") {
+	if isGoogleOwnedHost(host) {
 		for _, key := range []string{"q", "url"} {
 			if raw := u.Query().Get(key); raw != "" {
-				if parsed, err := url.QueryUnescape(raw); err == nil {
-					return parsed
-				}
 				return raw
 			}
 		}
@@ -3019,7 +3203,7 @@ func isLikelyResultURL(raw string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return host != "" && !strings.Contains(host, "duckduckgo.com")
+	return host != "" && !hostIsOrSubdomain(host, "duckduckgo.com")
 }
 
 func isLikelyGoogleResultURL(raw string) bool {
@@ -3031,16 +3215,28 @@ func isLikelyGoogleResultURL(raw string) bool {
 	if host == "" {
 		return false
 	}
-	blockedHosts := []string{
-		"google.", "gstatic.", "googleusercontent.", "accounts.google.", "support.google.",
-		"policies.google.", "maps.google.", "webcache.googleusercontent.",
+	return !isGoogleOwnedHost(host)
+}
+
+func hostIsOrSubdomain(host, domain string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	domain = strings.TrimSuffix(strings.ToLower(domain), ".")
+	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+func isGoogleOwnedHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	root, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return false
 	}
-	for _, blocked := range blockedHosts {
-		if strings.Contains(host, blocked) {
-			return false
-		}
+	label := strings.SplitN(root, ".", 2)[0]
+	switch label {
+	case "google", "gstatic", "googleusercontent":
+		return true
+	default:
+		return false
 	}
-	return true
 }
 
 func cleanGoogleResultTitle(text, href string) string {
@@ -3082,7 +3278,114 @@ func validateHTTPURL(raw string) error {
 	if u.Host == "" {
 		return errors.New("url host required")
 	}
+	if u.User != nil {
+		return errors.New("url credentials are not allowed")
+	}
 	return nil
+}
+
+func validateBrowserTarget(ctx *sdk.AppCtx, raw string) error {
+	if err := validateHTTPURL(raw); err != nil {
+		return err
+	}
+	if allowPrivateNetworks(ctx) {
+		return nil
+	}
+	u, _ := url.Parse(raw)
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return fmt.Errorf("private network URL blocked: %s", host)
+	}
+	if addr, err := netip.ParseAddr(host); err == nil && isBlockedAddress(addr) {
+		return fmt.Errorf("private network URL blocked: %s", host)
+	}
+	return nil
+}
+
+func allowPrivateNetworks(ctx *sdk.AppCtx) bool {
+	return boolArgDefault(map[string]any{"enabled": configString(ctx, "allow_private_networks")}, "enabled", false)
+}
+
+func isBlockedAddress(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	addr = addr.WithZone("").Unmap()
+	if !addr.IsGlobalUnicast() {
+		return true
+	}
+	for _, prefix := range blockedNetworkPrefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+func publicAddresses(ctx context.Context, host string) ([]netip.Addr, error) {
+	if addr, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		if isBlockedAddress(addr) {
+			return nil, fmt.Errorf("private network address blocked: %s", host)
+		}
+		return []netip.Addr{addr.Unmap()}, nil
+	}
+	addresses, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", host, err)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("resolve %s: no addresses", host)
+	}
+	for _, addr := range addresses {
+		if isBlockedAddress(addr) {
+			return nil, fmt.Errorf("private network address blocked for %s: %s", host, addr)
+		}
+	}
+	return addresses, nil
+}
+
+func outboundHTTPClient(appCtx *sdk.AppCtx) *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	dialer := &net.Dialer{Timeout: defaultHTTPTimeout, KeepAlive: 30 * time.Second}
+	if allowPrivateNetworks(appCtx) {
+		transport.DialContext = dialer.DialContext
+	} else {
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, err
+			}
+			addresses, err := publicAddresses(ctx, host)
+			if err != nil {
+				return nil, err
+			}
+			var dialErrs []error
+			for _, addr := range addresses {
+				if strings.HasSuffix(network, "4") && !addr.Is4() || strings.HasSuffix(network, "6") && !addr.Is6() {
+					continue
+				}
+				conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(addr.String(), port))
+				if dialErr == nil {
+					return conn, nil
+				}
+				dialErrs = append(dialErrs, dialErr)
+			}
+			if len(dialErrs) == 0 {
+				return nil, fmt.Errorf("no %s addresses available for %s", network, host)
+			}
+			return nil, errors.Join(dialErrs...)
+		}
+	}
+	return &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return validateBrowserTarget(appCtx, req.URL.String())
+		},
+	}
 }
 
 func absoluteURL(base, href string) string {
@@ -3352,6 +3655,20 @@ func boundedInt(got, def, min, max int) int {
 	return got
 }
 
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -3494,6 +3811,42 @@ func storeDefault(ctx *sdk.AppCtx) bool {
 	return boolArgDefault(map[string]any{"v": v}, "v", true)
 }
 
+func snapshotStore(ctx *sdk.AppCtx, args map[string]any) bool {
+	if _, ok := args["_snapshot_store"]; ok {
+		return boolArgDefault(args, "_snapshot_store", false)
+	}
+	return boolArgDefault(args, "store", storeDefault(ctx))
+}
+
+func nestedSearchCacheMode(args map[string]any) string {
+	switch strings.ToLower(strings.TrimSpace(stringArg(args, "cache"))) {
+	case "bypass":
+		return "bypass"
+	case "refresh":
+		return "refresh"
+	default:
+		return "auto"
+	}
+}
+
+func encodedBase64Size(value string) int {
+	size := len(value) * 3 / 4
+	if strings.HasSuffix(value, "==") {
+		return maxInt(0, size-2)
+	}
+	if strings.HasSuffix(value, "=") {
+		return maxInt(0, size-1)
+	}
+	return size
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil
@@ -3586,7 +3939,11 @@ func runSummaryFromOutput(output any) string {
 func compactRunOutput(output any) map[string]any {
 	m := mapFromAny(output)
 	out := make(map[string]any)
-	for _, key := range []string{"query", "question", "count", "current_url", "mode", "blocked", "extraction_backend", "fallback"} {
+	for _, key := range []string{
+		"query", "question", "count", "current_url", "mode", "blocked",
+		"extraction_backend", "fallback", "url", "storage_id", "artifact_id",
+		"width", "height", "stored",
+	} {
 		if v, ok := m[key]; ok {
 			out[key] = v
 		}

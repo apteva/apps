@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -406,7 +407,7 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 		t.Fatalf("shot wrong: %#v", shots[0])
 	}
 	calls := plat.callLog()
-	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_extract", "computer.computer_use", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_extract", "computer.computer_use", "computer.browser_extract", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
 		t.Fatalf("calls=%v want prefix %v", calls, want)
 	}
@@ -765,6 +766,178 @@ func TestCropScreenshotAcceptsJPEGInput(t *testing.T) {
 	}
 }
 
+func TestExtractSnapshotHonorsStoreFalseAndReusesSession(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolExtract(ctx, map[string]any{
+		"url":      "https://example.com/private-evidence",
+		"snapshot": true,
+		"store":    false,
+		"cache":    "bypass",
+	})
+	if err != nil {
+		t.Fatalf("extract snapshot: %v", err)
+	}
+	page := outAny.(map[string]any)["page"].(pageDoc)
+	shot, ok := page.Snapshot.(map[string]any)
+	if !ok || stringFromAny(shot["png_b64"]) == "" || boolFromMap(shot, "stored") {
+		t.Fatalf("snapshot should be returned inline and not stored: %#v", page.Snapshot)
+	}
+	if got := countCalls(plat, "storage", "files_upload"); got != 0 {
+		t.Fatalf("store=false uploaded %d files", got)
+	}
+	if got := countCalls(plat, "computer", "browser_open"); got != 1 {
+		t.Fatalf("extract+snapshot opened %d sessions, want 1", got)
+	}
+}
+
+func TestSnapshotArtifactInsertFailureReturnsErrorAndRollsBackUpload(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	if err := ctx.AppDB().Close(); err != nil {
+		t.Fatalf("close app db: %v", err)
+	}
+	out := map[string]any{"current_url": "https://example.com", "heading": "Example"}
+	if err := app.storeSnapshotImage(ctx, 0, out, testPNGB64(), "snapshot", "Example", 0); err == nil {
+		t.Fatal("expected artifact insert error")
+	}
+	if got := countCalls(plat, "storage", "files_delete"); got != 1 {
+		t.Fatalf("rollback delete calls=%d, want 1", got)
+	}
+}
+
+func TestCacheKeyPreservesCrawlSeedOrder(t *testing.T) {
+	_, first, err := cacheKey("crawl", map[string]any{"urls": []string{"https://a.example", "https://b.example"}, "max_pages": 1})
+	if err != nil {
+		t.Fatalf("first cache key: %v", err)
+	}
+	_, second, err := cacheKey("crawl", map[string]any{"urls": []string{"https://b.example", "https://a.example"}, "max_pages": 1})
+	if err != nil {
+		t.Fatalf("second cache key: %v", err)
+	}
+	if first == second {
+		t.Fatal("ordered crawl seeds produced the same cache key")
+	}
+}
+
+func TestSearchRedirectDecodingPreservesEscapedPath(t *testing.T) {
+	want := "https://example.com/a%2Fb"
+	google := decodeGoogleURL("https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Fa%252Fb")
+	if google != want {
+		t.Fatalf("google redirect=%q, want %q", google, want)
+	}
+	duck := decodeDuckURL("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa%252Fb")
+	if duck != want {
+		t.Fatalf("duck redirect=%q, want %q", duck, want)
+	}
+	if isGoogleOwnedHost("notgoogle.com") {
+		t.Fatal("lookalike domain classified as Google-owned")
+	}
+}
+
+func TestResearchBoundsQueriesAndDoesNotCreateNestedRuns(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	queries := make([]string, 12)
+	for i := range queries {
+		queries[i] = fmt.Sprintf("bounded research query %d", i)
+	}
+	outAny, err := app.toolResearch(ctx, map[string]any{
+		"question":    "What is bounded research?",
+		"queries":     queries,
+		"max_results": 1,
+		"max_sources": 1,
+		"store":       false,
+		"cache":       "bypass",
+	})
+	if err != nil {
+		t.Fatalf("research: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if got := len(out["queries"].([]string)); got != maxResearchQueries {
+		t.Fatalf("queries=%d, want cap %d", got, maxResearchQueries)
+	}
+	var total, research, search int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*), SUM(kind='research'), SUM(kind='search') FROM web_runs`).Scan(&total, &research, &search); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if total != 1 || research != 1 || search != 0 {
+		t.Fatalf("run counts total=%d research=%d search=%d", total, research, search)
+	}
+}
+
+func TestPrivateNetworkTargetsAreBlockedByDefault(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, _ := newTestCtx(t, plat, tk.WithConfig(map[string]string{"allow_private_networks": "false"}))
+	for _, target := range []string{
+		"http://127.0.0.1/admin",
+		"http://169.254.169.254/latest/meta-data",
+		"http://[::1]/",
+		"http://service.localhost/",
+	} {
+		if err := validateBrowserTarget(ctx, target); err == nil {
+			t.Errorf("target %s was not blocked", target)
+		}
+	}
+}
+
+func TestSnapshotCacheRejectsInlineImagePayloads(t *testing.T) {
+	policy, err := newCachePolicy("snapshot", map[string]any{"store": false, "max_age": 60})
+	if err != nil {
+		t.Fatalf("cache policy: %v", err)
+	}
+	if policy.Read || policy.Write {
+		t.Fatalf("inline snapshot cache enabled: %#v", policy)
+	}
+	cached, err := cloneResponseForCache(map[string]any{"png_b64": "secret-image", "shots": []any{map[string]any{"png_b64": "nested-image"}}})
+	if err != nil {
+		t.Fatalf("clone cache response: %v", err)
+	}
+	if _, ok := cached["png_b64"]; ok {
+		t.Fatal("top-level image remained in cache payload")
+	}
+	shots := cached["shots"].([]any)
+	if _, ok := shots[0].(map[string]any)["png_b64"]; ok {
+		t.Fatal("nested image remained in cache payload")
+	}
+}
+
+func TestInterruptedRunsRecoveredAndOldHistoryPruned(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, _ := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"allow_private_networks": "true",
+		"history_retention_days": "1",
+	}))
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	if _, err := ctx.AppDB().Exec(`INSERT INTO web_runs(project_id,kind,input_json,status,created_at) VALUES('global','extract','{}','running',?)`, old); err != nil {
+		t.Fatalf("insert old run: %v", err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO web_runs(project_id,kind,input_json,status) VALUES('global','extract','{}','running')`); err != nil {
+		t.Fatalf("insert current run: %v", err)
+	}
+	if err := recoverInterruptedRuns(ctx); err != nil {
+		t.Fatalf("recover runs: %v", err)
+	}
+	var running int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM web_runs WHERE status='running'`).Scan(&running); err != nil {
+		t.Fatalf("count running: %v", err)
+	}
+	if running != 0 {
+		t.Fatalf("running rows=%d, want 0", running)
+	}
+	if err := pruneHistory(ctx); err != nil {
+		t.Fatalf("prune history: %v", err)
+	}
+	var remaining int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM web_runs`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining rows=%d, want 1", remaining)
+	}
+}
+
 type fakeCall struct {
 	app, tool string
 	args      map[string]any
@@ -784,6 +957,9 @@ type fakePlatform struct {
 	cookiePolicyText    bool
 	cookieDismissed     bool
 	duplicateCrawlLinks bool
+	extractorPagination bool
+	extractorPage       int
+	scrollY             int
 }
 
 func newFakePlatform() *fakePlatform {
@@ -793,8 +969,8 @@ func newFakePlatform() *fakePlatform {
 func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out any) error {
 	p.mu.Lock()
 	p.calls = append(p.calls, fakeCall{app: app, tool: tool, args: copyArgs(in)})
-	p.mu.Unlock()
 	resp := p.respond(app, tool, in)
+	p.mu.Unlock()
 	b, err := json.Marshal(resp)
 	if err != nil {
 		return err
@@ -807,6 +983,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	case "computer.browser_open":
 		if u, ok := in["url"].(string); ok {
 			p.openURL = u
+		}
+		if p.extractorPagination {
+			p.extractorPage = 1
 		}
 		return map[string]any{
 			"session_id":  "sess_1",
@@ -876,6 +1055,13 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 				"extraction_backend": "browser_dom",
 			}
 		}
+		if p.extractorPagination {
+			regions := []map[string]any{}
+			if p.extractorPage < 2 {
+				regions = append(regions, map[string]any{"id": "next", "tag": "a", "role": "link", "text": "Next", "selector": ".next", "visible": true, "viewport_rect": map[string]any{"x": 100, "y": 200, "width": 80, "height": 30}, "rect": map[string]any{"x": 100, "y": 200, "width": 80, "height": 30}})
+			}
+			return map[string]any{"session_id": in["session_id"], "backend": "local", "current_url": p.openURL, "url": p.openURL, "title": "Products", "html": fmt.Sprintf(`<html><body><article><h1>Page %d</h1></article><a class="next">Next</a></body></html>`, p.extractorPage), "regions": regions, "rendered": true, "extraction_backend": "browser_dom", "width": 1280, "height": 720}
+		}
 		links := []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}}
 		if p.duplicateCrawlLinks {
 			if strings.HasSuffix(p.openURL, "/start") {
@@ -902,7 +1088,7 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			},
 			"viewport_rect": map[string]any{
 				"x":      80,
-				"y":      1100,
+				"y":      1100 - p.scrollY,
 				"width":  520,
 				"height": 180,
 			},
@@ -964,8 +1150,18 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	case "computer.browser_close":
 		return map[string]any{"closed": true}
 	case "computer.computer_use":
+		if in["action"] == "scroll" {
+			amount := intFromAny(in["amount"])
+			if stringFromAny(in["direction"]) == "up" {
+				amount = -amount
+			}
+			p.scrollY = maxInt(0, p.scrollY+amount)
+		}
 		if in["action"] == "click" && stringFromAny(in["coordinate"]) != "" && p.cookieBanner {
 			p.cookieDismissed = true
+		}
+		if in["action"] == "click" && stringFromAny(in["coordinate"]) != "" && p.extractorPagination && p.extractorPage < 2 {
+			p.extractorPage++
 		}
 		if in["action"] == "click" && in["label"] != nil && p.cookieTextBanner {
 			p.cookieDismissed = true
@@ -1002,6 +1198,16 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 	case "storage.files_upload":
 		return map[string]any{"id": p.storageID, "url": p.storageURL}
+	case "jobs.jobs_schedule":
+		return map[string]any{"job": map[string]any{"id": 77, "name": in["name"], "owner_app": "web", "status": "pending", "target": in["target"]}}
+	case "jobs.jobs_list":
+		return map[string]any{"jobs": []map[string]any{{"id": 77, "name": "Products", "owner_app": "web", "status": "pending", "target": map[string]any{"app": "web", "tool": "web_extractor_run"}}}, "count": 1}
+	case "jobs.jobs_runs":
+		return map[string]any{"runs": []any{}}
+	case "jobs.jobs_cancel":
+		return map[string]any{"cancelled": true, "id": in["id"]}
+	case "jobs.jobs_run_now":
+		return map[string]any{"queued": true, "id": in["id"]}
 	default:
 		return map[string]any{}
 	}
@@ -1057,7 +1263,10 @@ func countCalls(p *fakePlatform, app, tool string) int {
 
 func newTestCtx(t *testing.T, plat *fakePlatform, extra ...tk.Option) (*sdk.AppCtx, *App) {
 	t.Helper()
-	opts := append([]tk.Option{tk.WithPlatform(plat)}, extra...)
+	opts := append([]tk.Option{
+		tk.WithPlatform(plat),
+		tk.WithConfig(map[string]string{"allow_private_networks": "true"}),
+	}, extra...)
 	return tk.NewAppCtx(t, "apteva.yaml", opts...), &App{}
 }
 

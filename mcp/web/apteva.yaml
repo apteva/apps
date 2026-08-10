@@ -2,11 +2,23 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.15
+version: 0.2.0
 description: |
-  Browser-native web intelligence for agents. Provides JSON-first search,
-  extraction, crawl, map, research, and snapshot tools using the computer app
-  as the required browser/session backend, with storage for durable artifacts.
+  Browser-native web intelligence and reusable Apify-style extractors for
+  agents. Provides JSON-first search, extraction, crawl, map, research,
+  snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.0 adds revisioned extractor definitions, immutable run snapshots, a
+  durable worker queue, cancellation and retry, JSONL/CSV datasets, bounded
+  traces, semantic browser steps, Jobs scheduling wrappers, and Extractors,
+  Runs, and Schedules UI views.
+
+  v0.1.17 hardens outbound URL handling, fixes snapshot persistence opt-outs,
+  bounds research and cache growth, reconciles interrupted runs, improves
+  smart snapshot positioning, and expands the Web activity UI.
+
+  v0.1.16 adds Web's adaptive themed icon and updates the app to the current
+  Apteva app SDK.
 
   v0.1.15 hardens cache and storage semantics, bounds SQLite payloads, honors
   visit_top and configured crawl limits, improves crawl dedupe and Unicode
@@ -40,6 +52,8 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/web
+icon: /ui/icon.svg
+icon_style: monochrome
 tags: [browser, search, research, crawl, observability]
 
 scopes: [project, global]
@@ -55,6 +69,8 @@ requires:
       reason: "Browser session lifecycle, rendered navigation, and screenshots."
     - name: storage
       reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
+    - name: jobs
+      reason: "Owns extractor schedules, trigger delivery, retries, and delivery history."
 
 provides:
   http_routes:
@@ -98,6 +114,28 @@ provides:
         query, auto-dismisses common cookie banners, and returns cropped shots. Snapshot cache is disabled unless
         max_age is set. Returns screenshot metadata, storage_id/url when stored,
         shots for smart mode, and session metadata.
+    - name: web_extractor_save
+      description: Create or update a reusable extractor definition and revision.
+    - name: web_extractor_get
+      description: Get an extractor by id or name.
+    - name: web_extractor_list
+      description: List extractor definitions.
+    - name: web_extractor_delete
+      description: Delete a definition while preserving historical run snapshots.
+    - name: web_extractor_run
+      description: Queue an extractor run and return immediately.
+    - name: web_run_get
+      description: Get a run with bounded output, immutable definition snapshot, and artifacts.
+    - name: web_run_cancel
+      description: Cancel a queued or running extractor run.
+    - name: web_run_retry
+      description: Retry an extractor run from its immutable snapshot.
+    - name: web_extractor_schedule
+      description: Create or replace a Jobs-owned extractor schedule.
+    - name: web_extractor_schedules
+      description: List Web extractor schedules or one schedule's delivery runs.
+    - name: web_extractor_unschedule
+      description: Cancel a Jobs-owned extractor schedule.
 
   ui_panels:
     - slot: project.page
@@ -134,11 +172,15 @@ provides:
       metadata:
         category: browsing
 
+  workers:
+    - name: extractor-runner
+      schedule: "@every 2s"
+
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: web/v0.2.0
     entry: mcp/web
   port: 8080
   health_check: /health
@@ -165,5 +207,15 @@ config_schema:
     type: bool
     default: true
     label: Store artifacts by default
+  - name: allow_private_networks
+    type: bool
+    default: false
+    label: Allow private network URLs
+    description: "Permit localhost, private, link-local, and other non-public destinations. Keep disabled for untrusted agent inputs."
+  - name: history_retention_days
+    type: number
+    default: 90
+    label: Activity history retention
+    description: "Days to retain Web run and artifact metadata. Set to 0 to keep metadata indefinitely. Stored files are not deleted."
 
 upgrade_policy: auto-patch

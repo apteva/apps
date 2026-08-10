@@ -23,10 +23,20 @@ export default function WebResultCard(props) {
         rel: "noopener noreferrer",
         className: "min-w-0 flex-1 text-sm font-semibold text-text hover:text-accent break-words"
       }, title) : React.createElement("div", { className: "min-w-0 flex-1 text-sm font-semibold break-words" }, title),
-      source && React.createElement("span", { className: "shrink-0 rounded border border-border bg-bg-input px-1.5 py-0.5 text-[11px] text-text-muted" }, source)
+      source && React.createElement("span", {
+        className: "max-w-32 shrink truncate rounded border border-border bg-bg-input px-1.5 py-0.5 text-[11px] text-text-muted",
+        title: source
+      }, source)
     ),
     props.snippet && React.createElement("p", { className: "mt-1.5 text-sm text-text-muted break-words" }, String(props.snippet)),
-    parsedURL ? React.createElement("div", { className: "mt-2 truncate text-xs text-text-dim", title: parsedURL.href }, `${parsedURL.hostname}${parsedURL.pathname}`) :
+    parsedURL ? React.createElement("a", {
+      href: parsedURL.href,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      className: "mt-2 block truncate text-xs text-text-dim hover:text-accent",
+      title: parsedURL.href,
+      "aria-label": `Open ${parsedURL.hostname}`
+    }, `${parsedURL.hostname}${parsedURL.pathname}${parsedURL.search}`) :
       React.createElement("div", { className: "mt-2 text-xs text-red" }, "Invalid or missing web URL")
   );
 }

@@ -7,6 +7,8 @@ triggers:
   - web_map
   - web_research
   - web_snapshot
+  - web_extractor_run
+  - web_extractor_schedule
   - search
   - research
   - crawl
@@ -15,7 +17,8 @@ triggers:
 # Web
 
 Use this app when the user asks for browser-backed search, page extraction,
-crawling, site mapping, research, or visual proof.
+crawling, site mapping, research, visual proof, or a reusable scheduled web
+extraction workflow.
 
 ## Tool choice
 
@@ -25,6 +28,25 @@ crawling, site mapping, research, or visual proof.
 - `web_map`: discover a site's URL structure without full research synthesis.
 - `web_research`: answer a research question with sources and citations.
 - `web_snapshot`: capture visual evidence for a URL or active session.
+- `web_extractor_save/get/list/delete`: manage reusable, revisioned browser
+  extractors. Save updates increment the revision.
+- `web_extractor_run`: queue a run and return immediately. Poll with
+  `web_run_get`; use `web_run_cancel` or `web_run_retry` for lifecycle control.
+- `web_extractor_schedule/schedules/unschedule`: manage Jobs-owned extractor
+  schedules without constructing Jobs targets manually.
+
+## Extractors
+
+Use an extractor when the same structured browser workflow will run more than
+once, needs pagination or interaction, or should be scheduled. Definitions use
+`schema_version: 1`, an explicit `allowed_hosts` list, bounded `limits`, and
+steps such as `goto`, `click`, `extract`, `paginate`, `wait`, and `screenshot`.
+
+Values resolve in this order: extractor defaults, named preset, schedule
+overrides, explicit run input. A run snapshots the complete definition, so a
+retry remains reproducible after later edits. Complete datasets are stored as
+JSONL and CSV artifacts; `web_run_get` returns bounded preview items and signed
+artifact links.
 
 ## Defaults
 
