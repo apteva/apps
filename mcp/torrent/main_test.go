@@ -98,6 +98,46 @@ func TestListIndexers_NullLastOkAt(t *testing.T) {
 	}
 }
 
+func TestEnsureDefaultIndexer(t *testing.T) {
+	db := openTestDB(t)
+	created, err := ensureDefaultIndexer(db, "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Fatal("fresh project did not initialize ApiBay")
+	}
+	rows, err := listIndexers(db, "project-a", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Kind != "apibay" || rows[0].BaseURL != "https://apibay.org" {
+		t.Fatalf("unexpected default indexer: %+v", rows)
+	}
+	created, err = ensureDefaultIndexer(db, "project-a")
+	if err != nil || created {
+		t.Fatalf("initializer is not idempotent: created=%v err=%v", created, err)
+	}
+}
+
+func TestEnsureDefaultIndexerPreservesConfiguredSources(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := addIndexer(db, "project-b", "private", "jackett", "http://jackett.local", "", nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	created, err := ensureDefaultIndexer(db, "project-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created {
+		t.Fatal("default indexer was added over an existing project configuration")
+	}
+	rows, err := listIndexers(db, "project-b", false)
+	if err != nil || len(rows) != 1 || rows[0].Name != "private" {
+		t.Fatalf("configured indexer changed: %+v err=%v", rows, err)
+	}
+}
+
 // TestApibayParser — feed queryApibay the raw shape apibay.org
 // returns and assert the SearchResult has the fields the panel
 // expects. Catches:

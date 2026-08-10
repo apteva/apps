@@ -1,11 +1,13 @@
 // Apteva torrent app — local BitTorrent client + indexer search
 // frontend, with completed files handed off to storage.
 //
-// Three workers:
-//  1. engine        — the bittorrent client (Engine.Run loop)
-//  2. scheduler     — runs saved searches on their cadence
+// Five workers:
+//  1. indexer-init   — seeds the zero-configuration ApiBay source per project
+//  2. engine         — the bittorrent client (Engine.Run loop)
 //  3. boot-reconcile — one-shot on startup: re-add tracked torrents
 //     to the engine and run any deferred completion.
+//  4. scheduler      — runs saved searches on their cadence
+//  5. completion-retry — resumes interrupted storage handoffs
 //
 // State source-of-truth split:
 //   - The torrent engine's session state lives in working_dir, owned
@@ -95,6 +97,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.ctx = ctx
 	globalApp = a
 	a.runCtx, a.cancel = context.WithCancel(context.Background())
+	if pid := projectScope(ctx); pid != "" {
+		if _, err := ensureDefaultIndexer(ctx.AppDB(), pid); err != nil {
+			a.cancel()
+			return fmt.Errorf("initialize default indexer: %w", err)
+		}
+	}
 
 	cfg := EngineConfig{
 		WorkingDir:            resolveWorkingDir(ctx),
@@ -138,6 +146,20 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{
+			Name: "indexer-init",
+			Run: func(_ context.Context, appCtx *sdk.AppCtx) error {
+				pid := projectScope(appCtx)
+				if pid == "" {
+					return nil
+				}
+				created, err := ensureDefaultIndexer(a.ctx.AppDB(), pid)
+				if created {
+					a.ctx.Logger().Info("default indexer initialized", "project_id", pid, "indexer", "apibay")
+				}
+				return err
+			},
+		},
 		{
 			Name: "engine",
 			Run: func(ctx context.Context, _ *sdk.AppCtx) error {
@@ -417,6 +439,10 @@ func (a *App) handleIndexers(w http.ResponseWriter, r *http.Request) {
 	pid := projectScope(appCtx)
 	switch r.Method {
 	case http.MethodGet:
+		if _, err := ensureDefaultIndexer(a.ctx.AppDB(), pid); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		out, err := listIndexers(a.ctx.AppDB(), pid, false)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
@@ -1522,6 +1548,28 @@ func addIndexer(db *sql.DB, pid, name, kind, baseURL, apiKey string, categories 
 		Priority: priority, Enabled: true,
 	}
 	return out, nil
+}
+
+// ensureDefaultIndexer gives a fresh project a working search source
+// without overwriting any indexer choices the user has already made.
+// The unique(project_id, name) constraint makes concurrent mount and
+// first-search initialization safe.
+func ensureDefaultIndexer(db *sql.DB, pid string) (bool, error) {
+	pid = strings.TrimSpace(pid)
+	if pid == "" {
+		return false, errors.New("torrent: missing project context")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM indexers WHERE project_id = ?`, pid).Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, nil
+	}
+	if _, err := addIndexer(db, pid, "apibay", "apibay", "https://apibay.org", "", nil, 50); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // ─── secret crypto (AES-GCM, plaintext fallback) ───────────────────

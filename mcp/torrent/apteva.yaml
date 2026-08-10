@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: torrent
 display_name: Torrent
-version: 0.2.1
+version: 0.2.2
 description: |
   BitTorrent client + indexer-search frontend. Search across
   configured Jackett / Prowlarr / RSS sources, add downloads by
@@ -10,9 +10,10 @@ description: |
   uploaded to the `storage` app. Optional media indexing consumes the
   storage events independently.
 
-  This is a generic BitTorrent client. The user supplies search
-  sources and is responsible for what they download. The app ships
-  with no indexers preconfigured.
+  This is a generic BitTorrent client. ApiBay is initialized as the
+  zero-configuration public search source; users can replace or add
+  Jackett, Prowlarr, and RSS sources. Users are responsible for what
+  they search for and download.
 
   Downloads are concurrency- and rate-limited, restart-safe, and use
   resumable chunked handoff for large completed files.

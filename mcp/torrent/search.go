@@ -78,6 +78,12 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 	if pid == "" {
 		return nil, errors.New("torrent: missing project context")
 	}
+	// A project created after a global app process started may not have
+	// passed through the one-shot initializer yet. Repair that first-use
+	// race lazily so search remains zero-configuration.
+	if _, err := ensureDefaultIndexer(a.ctx.AppDB(), pid); err != nil {
+		return nil, fmt.Errorf("initialize default indexer: %w", err)
+	}
 	indexers, err := listIndexers(a.ctx.AppDB(), pid, true)
 	if err != nil {
 		return nil, err

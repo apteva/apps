@@ -751,7 +751,7 @@ function IndexersTab({ projectId, installId }: { projectId: string; installId: n
       </div>
       <Section title={`Configured (${rows.length})`}>
 				{rows.length === 0 ? (
-          <Empty hint="No indexers configured. Add a Jackett / Prowlarr / RSS source so torrent_search has somewhere to ask." />
+			<Empty hint="No indexers are available yet. ApiBay is normally initialized automatically; refresh or add a Jackett / Prowlarr / RSS source." />
 				) : rows.map((ix) => {
 					const probe = probes.find((p) => p.id === ix.id);
 					return (

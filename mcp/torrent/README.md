@@ -2,10 +2,11 @@
 
 Local BitTorrent client + indexer-search frontend for Apteva.
 Powered by [anacrolix/torrent](https://github.com/anacrolix/torrent).
-Search comes from user-supplied Jackett / Prowlarr / Torznab RSS or
-explicitly enabled ApiBay sources. Finished downloads are streamed to
-the `storage` app with a restart-safe chunked handoff. If installed,
-`media` indexes the resulting storage events independently.
+Search works immediately through a project-scoped ApiBay default and
+can be extended with Jackett / Prowlarr / Torznab RSS sources.
+Finished downloads are streamed to the `storage` app with a
+restart-safe chunked handoff. If installed, `media` indexes the
+resulting storage events independently.
 
 ## What this app does and doesn't ship
 
@@ -13,8 +14,8 @@ the `storage` app with a restart-safe chunked handoff. If installed,
 - ✅ An aggregator over Jackett-compatible search APIs.
 - ✅ Chunked, resumable cross-app handoff to `storage` on completion.
 - ✅ Project-scoped rows, searches, indexers, events, and API calls.
-- ❌ No indexers preconfigured. The user supplies them.
-- ❌ No recommended sources, lists, or curation. None.
+- ✅ ApiBay initialized per project for zero-configuration search.
+- ❌ No curated lists or download recommendations.
 
 This is a generic BitTorrent client. What you search for and what
 you download is entirely up to you, and entirely your responsibility.
@@ -24,13 +25,12 @@ you download is entirely up to you, and entirely your responsibility.
 1. Install `storage` (required). Optionally install `media` so
    completed video/audio files get duration + codec metadata.
 
-2. Configure at least one indexer. The most common path is to run
+2. ApiBay is configured automatically. For private or additional
+   sources, the most common path is to run
    [Jackett](https://github.com/Jackett/Jackett) on the same LAN and
    point this app at `https://<host>:9117/api/v2.0/indexers/all`
    with the Jackett API key. Each indexer is a row in the `indexers`
-   table; add it from the panel's *Indexers* tab. A public ApiBay
-   source is available as an explicit opt-in and is never seeded by
-   the app.
+   table; add it from the panel's *Indexers* tab.
 
 3. Set `default_target_folder` (default `/downloads`) — that's where
    completed torrents go in `storage`.
