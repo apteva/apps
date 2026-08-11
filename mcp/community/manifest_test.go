@@ -22,6 +22,14 @@ func TestManifestParses(t *testing.T) {
 	if m.Version == "" {
 		t.Fatal("version missing")
 	}
+	wantSourceRef := "community/v" + m.Version
+	gotSourceRef := ""
+	if m.Runtime.Source != nil {
+		gotSourceRef = m.Runtime.Source.Ref
+	}
+	if gotSourceRef != wantSourceRef {
+		t.Fatalf("runtime source ref = %q, want %q", gotSourceRef, wantSourceRef)
+	}
 	if m.Runtime.Kind != "source" {
 		t.Fatalf("runtime.kind = %q", m.Runtime.Kind)
 	}
