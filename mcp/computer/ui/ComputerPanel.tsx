@@ -101,6 +101,7 @@ interface SessionRow {
   width?: number;
   height?: number;
   proxy?: SessionProxyState;
+  usage?: SessionUsageState;
 }
 
 interface SessionProxyState {
@@ -110,6 +111,12 @@ interface SessionProxyState {
   profile_name?: string;
   country?: string;
   sticky_scope?: "rotating" | "session" | "context" | string;
+}
+
+interface SessionUsageState {
+	status: "ready" | "unsupported" | "unavailable" | string;
+	proxy_bytes?: number;
+	measured_at?: string;
 }
 
 interface RecordingStream {
@@ -389,6 +396,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
           ...active,
           status: body.status ?? "closed",
           recording_status: body.recording_status ?? (active.recording_supported ? "processing" : "unsupported"),
+          usage: body.usage ?? active.usage,
           closed_at: new Date().toISOString(),
         });
         setSelected(id);
@@ -1486,6 +1494,7 @@ function RecordingSessionDetail({
             { label: "App session", value: session.session_id },
             { label: "Backend session", value: session.backend_session_id || "-" },
             { label: "Recording", value: recordingStatusLabel(status) },
+            { label: "Proxy traffic", value: sessionUsageLabel(session.usage) },
             { label: "Current URL", value: session.current_url || "-" },
             { label: "Opened", value: formatTime(session.opened_at) },
             { label: "Closed", value: session.closed_at ? formatTime(session.closed_at) : "-" },
@@ -2370,6 +2379,28 @@ function sessionProxyLabel(proxy?: SessionProxyState): string {
   }
   if (proxy.mode === "managed" && proxy.country) return `managed · ${proxy.country}`;
   return proxyModeLabel(proxy.mode);
+}
+
+function sessionUsageLabel(usage?: SessionUsageState): string {
+  if (!usage?.status) return "-";
+  if (usage.status === "unsupported") return "Unsupported";
+  if (usage.status === "unavailable") return "Unavailable";
+  if (usage.status !== "ready" || usage.proxy_bytes == null) return usage.status;
+  return formatProxyBytes(usage.proxy_bytes);
+}
+
+function formatProxyBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "-";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  if (unit === 0) return `${Math.round(value)} ${units[unit]}`;
+  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unit]}`;
 }
 
 function relativeUntil(iso: string | undefined, now: number): string {

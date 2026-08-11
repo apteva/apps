@@ -22,6 +22,15 @@ type TabController = api.TabController
 type ScreenshotWithOptions = api.ScreenshotWithOptions
 type ScreenshotRecoveryReporter = api.ScreenshotRecoveryReporter
 type SetOfMarkReporter = api.SetOfMarkReporter
+type SessionUsage = api.SessionUsage
+type SessionUsageReporter = api.SessionUsageReporter
+
+const (
+	SessionUsageReady       = api.SessionUsageReady
+	SessionUsageUnsupported = api.SessionUsageUnsupported
+	SessionUsageUnavailable = api.SessionUsageUnavailable
+)
+
 type OpenOptions = api.OpenOptions
 type ExternalProxy = api.ExternalProxy
 type EnvironmentOptions = api.EnvironmentOptions

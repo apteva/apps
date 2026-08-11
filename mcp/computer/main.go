@@ -54,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.66
+version: 0.7.67
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.66 adds opt-in browser
-  identity and device environments for newly-created sessions while preserving
-  existing agent defaults when omitted.
+  Watch, steer, and replay hosted browser sessions. v0.7.67 persists generic
+  closed-session proxy usage and reports final Browserbase proxy bytes without
+  coupling downstream apps to provider APIs.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -1487,6 +1487,13 @@ type sessionInfo struct {
 	CloseReason        string                       `json:"close_reason,omitempty"`
 	Proxy              SessionProxyState            `json:"proxy"`
 	Environment        *backends.EnvironmentOptions `json:"environment,omitempty"`
+	Usage              *sessionUsageInfo            `json:"usage,omitempty"`
+}
+
+type sessionUsageInfo struct {
+	Status     string `json:"status"`
+	ProxyBytes *int64 `json:"proxy_bytes,omitempty"`
+	MeasuredAt string `json:"measured_at,omitempty"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1585,6 +1592,7 @@ func historicalSessionInfo(row *ComputerSession) sessionInfo {
 			StickyScope: row.ProxyStickyScope,
 		},
 		Environment: environmentPointer(row.Environment),
+		Usage:       sessionUsageFromRow(row),
 	}
 }
 
@@ -2251,11 +2259,26 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	sess, ok := a.reg.remove(id)
 	if !ok {
-		return map[string]any{
+		out := map[string]any{
 			"closed":     false,
 			"session_id": id,
 			"view":       browserViewReference(id),
-		}, nil
+		}
+		if ctx != nil && ctx.AppDB() != nil {
+			row, err := dbGetSession(ctx.AppDB(), id)
+			switch {
+			case err == nil && row.Status != "active":
+				out["already_closed"] = true
+				out["status"] = row.Status
+				out["recording_status"] = row.RecordingStatus
+				if usage := sessionUsageFromRow(row); usage != nil {
+					out["usage"] = usage
+				}
+			case err != nil && !errors.Is(err, sql.ErrNoRows):
+				return nil, err
+			}
+		}
+		return out, nil
 	}
 	sess.actionMu.Lock()
 	defer sess.actionMu.Unlock()
@@ -2263,13 +2286,17 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	out := map[string]any{
 		"closed":           true,
 		"session_id":       id,
 		"status":           row.Status,
 		"recording_status": row.RecordingStatus,
 		"view":             browserViewReference(id),
-	}, nil
+	}
+	if usage := sessionUsageFromRow(row); usage != nil {
+		out["usage"] = usage
+	}
+	return out, nil
 }
 
 type tabFollowResult struct {
@@ -2667,6 +2694,57 @@ func sessionRecord(id string, s *session, status, closeReason string, closedAt *
 	return row
 }
 
+var sessionUsageLookupTimeout = 4 * time.Second
+
+func collectSessionUsage(comp backends.Computer) (backends.SessionUsage, error) {
+	reporter, ok := comp.(backends.SessionUsageReporter)
+	if !ok {
+		return backends.SessionUsage{Status: backends.SessionUsageUnsupported}, nil
+	}
+	usageCtx, cancel := context.WithTimeout(context.Background(), sessionUsageLookupTimeout)
+	defer cancel()
+	usage, err := reporter.SessionUsage(usageCtx)
+	if err != nil {
+		return backends.SessionUsage{Status: backends.SessionUsageUnavailable}, err
+	}
+	if usage.Status == "" {
+		usage.Status = backends.SessionUsageReady
+	}
+	if usage.Status == backends.SessionUsageReady {
+		if usage.ProxyBytes == nil {
+			return backends.SessionUsage{Status: backends.SessionUsageUnavailable}, errors.New("session usage reporter returned ready without proxy bytes")
+		}
+		if usage.MeasuredAt.IsZero() {
+			usage.MeasuredAt = time.Now().UTC()
+		}
+	}
+	return usage, nil
+}
+
+func applySessionUsage(row *ComputerSession, usage backends.SessionUsage) {
+	if row == nil {
+		return
+	}
+	row.UsageStatus = usage.Status
+	row.ProxyBytes = usage.ProxyBytes
+	row.UsageMeasuredAt = nil
+	if !usage.MeasuredAt.IsZero() {
+		value := usage.MeasuredAt.UTC().Format(time.RFC3339Nano)
+		row.UsageMeasuredAt = &value
+	}
+}
+
+func sessionUsageFromRow(row *ComputerSession) *sessionUsageInfo {
+	if row == nil || row.UsageStatus == "" {
+		return nil
+	}
+	out := &sessionUsageInfo{Status: row.UsageStatus, ProxyBytes: row.ProxyBytes}
+	if row.UsageMeasuredAt != nil {
+		out.MeasuredAt = *row.UsageMeasuredAt
+	}
+	return out
+}
+
 func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, closeReason, event string, extras ...map[string]any) (*ComputerSession, error) {
 	if s == nil {
 		return nil, fmt.Errorf("session %s is unavailable", id)
@@ -2688,6 +2766,10 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	if err := s.comp.Close(); err != nil && ctx != nil {
 		ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
 	}
+	usage, usageErr := collectSessionUsage(s.comp)
+	if usageErr != nil && ctx != nil {
+		ctx.Logger().Warn("browser session usage unavailable", "session_id", id, "backend", s.backend, "err", usageErr.Error())
+	}
 	closedAt := time.Now().UTC()
 	row := *active
 	row.Status = status
@@ -2700,6 +2782,7 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	} else {
 		row.RecordingStatus = "unsupported"
 	}
+	applySessionUsage(&row, usage)
 	if ctx != nil && ctx.AppDB() != nil {
 		if err := dbPutSession(ctx.AppDB(), &row); err != nil {
 			persistErr = errors.Join(persistErr, err)
@@ -2710,6 +2793,9 @@ func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, cl
 	payload["recording_supported"] = recordingSupported(row.Backend)
 	payload["recording_status"] = row.RecordingStatus
 	payload["closed_at"] = closedValue
+	if usageInfo := sessionUsageFromRow(&row); usageInfo != nil {
+		payload["usage"] = usageInfo
+	}
 	for _, extra := range extras {
 		for key, value := range extra {
 			payload[key] = value

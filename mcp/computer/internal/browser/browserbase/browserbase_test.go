@@ -217,3 +217,114 @@ func TestUploadSessionFileUsesBrowserbaseUploadsAPI(t *testing.T) {
 		t.Fatalf("multipart file: filename=%q body=%q", sawFilename, sawBody)
 	}
 }
+
+func TestCloseReleasesThenReportsFinalProxyUsage(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Method {
+		case http.MethodPost:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode release: %v", err)
+			}
+			if body["status"] != "REQUEST_RELEASE" {
+				t.Fatalf("release status = %#v", body["status"])
+			}
+			_, _ = io.WriteString(w, `{"id":"bb_usage","status":"PENDING","proxyBytes":10}`)
+		case http.MethodGet:
+			_, _ = io.WriteString(w, `{"id":"bb_usage","status":"COMPLETED","proxyBytes":4213920}`)
+		}
+	}))
+	defer srv.Close()
+	previousAPIBase := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = previousAPIBase })
+
+	c := &Computer{apiKey: "bb_key", projectID: "bb_project", sessionID: "bb_usage", http: srv.Client()}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.sessionID != "" || c.closedSessionID != "bb_usage" {
+		t.Fatalf("session ids after close: active=%q closed=%q", c.sessionID, c.closedSessionID)
+	}
+	usage, err := c.SessionUsage(context.Background())
+	if err != nil {
+		t.Fatalf("SessionUsage: %v", err)
+	}
+	if usage.Status != computer.SessionUsageReady || usage.ProxyBytes == nil || *usage.ProxyBytes != 4213920 || usage.MeasuredAt.IsZero() {
+		t.Fatalf("usage = %+v", usage)
+	}
+	want := []string{"POST /sessions/bb_usage", "GET /sessions/bb_usage"}
+	if len(requests) != len(want) || requests[0] != want[0] || requests[1] != want[1] {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
+func TestSessionUsageRetriesUntilProviderSessionIsTerminal(t *testing.T) {
+	getCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			_, _ = io.WriteString(w, `{"status":"PENDING","proxyBytes":1}`)
+			return
+		}
+		getCalls++
+		if getCalls < 3 {
+			_, _ = io.WriteString(w, `{"status":"RUNNING","proxyBytes":123}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"status":"COMPLETED","proxyBytes":456}`)
+	}))
+	defer srv.Close()
+	previousAPIBase := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = previousAPIBase })
+
+	c := &Computer{apiKey: "bb_key", sessionID: "bb_delayed", http: srv.Client()}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	usage, err := c.SessionUsage(ctx)
+	if err != nil {
+		t.Fatalf("SessionUsage: %v", err)
+	}
+	if getCalls != 3 || usage.ProxyBytes == nil || *usage.ProxyBytes != 456 {
+		t.Fatalf("calls=%d usage=%+v", getCalls, usage)
+	}
+	// Ready usage is cached; repeated readers do not hit Browserbase again.
+	if _, err := c.SessionUsage(context.Background()); err != nil || getCalls != 3 {
+		t.Fatalf("cached usage: calls=%d err=%v", getCalls, err)
+	}
+}
+
+func TestUsageFailureNeverPreventsProviderClose(t *testing.T) {
+	postCalls, getCalls := 0, 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			postCalls++
+			http.Error(w, "release unavailable", http.StatusBadGateway)
+			return
+		}
+		getCalls++
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	previousAPIBase := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = previousAPIBase })
+
+	c := &Computer{apiKey: "bb_key", sessionID: "bb_failure", http: srv.Client()}
+	if err := c.Close(); err != nil {
+		t.Fatalf("telemetry/release failure made Close fail: %v", err)
+	}
+	if c.sessionID != "" || c.closedSessionID != "bb_failure" || postCalls != 1 {
+		t.Fatalf("close state: active=%q closed=%q posts=%d", c.sessionID, c.closedSessionID, postCalls)
+	}
+	if _, err := c.SessionUsage(context.Background()); err == nil || getCalls != 1 {
+		t.Fatalf("usage failure: calls=%d err=%v", getCalls, err)
+	}
+}
