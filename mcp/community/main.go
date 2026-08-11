@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.10.3
+version: 0.10.4
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -52,6 +52,8 @@ description: |
   after verified authentication into either a
   one-time course purchase or a recurring Subscriptions lifecycle. It does
   not depend on Commerce or SaaS.
+  The storefront discloses account fields progressively: email first, then
+  signup or sign-in password, while profile details stay out of checkout.
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
@@ -234,7 +236,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.10.3
+    ref: community/v0.10.4
     entry: mcp/community
   port: 8080
   health_check: /health

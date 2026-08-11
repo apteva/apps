@@ -138,7 +138,7 @@ function friendlyError(error: unknown): string {
   if (message.includes("active course enrollment required")) return "Enroll in this course to open its lessons.";
   if (message.includes("lesson is not available yet")) return "This lesson is scheduled for a later date.";
   if (message.includes("email_unverified")) return "Please verify your email before signing in.";
-  if (message.includes("invalid_credentials") || message.includes("invalid credentials")) return "The email or password is incorrect.";
+  if (message.includes("invalid_grant") || message.includes("invalid_credentials") || message.includes("invalid credentials")) return "The email or password is incorrect.";
   if (message.includes("origin_not_allowed")) return "This course portal is not configured for this address. Please contact support.";
   const json = message.match(/\{"error":"([^"]+)"\}/);
   if (json?.[1]) return json[1];
@@ -714,13 +714,19 @@ export default function App() {
             organization_slug: portal.auth.organization_slug,
             email: authForm.email.trim(),
             password: authForm.password,
-            display_name: authForm.display_name.trim() || authForm.email.trim(),
+            display_name: authForm.display_name.trim() || authForm.email.trim().split("@", 1)[0],
             continue_url: window.location.href.split("#", 1)[0],
           });
       } catch (caught) {
         if (authMode === "login" && String(caught).includes("email_unverified")) {
           setAuthMode("verify_pending");
           setNotice("Please verify your email to continue. You can request a new link below.");
+          return;
+        }
+        if (authMode === "signup" && String(caught).includes("email already registered")) {
+          setAuthMode("login");
+          setAuthForm((current) => ({ ...current, password: "" }));
+          setNotice("You already have an account. Enter your password to sign in.");
           return;
         }
         throw caught;
@@ -944,6 +950,9 @@ export default function App() {
     url.searchParams.set("auth", mode);
     window.history.replaceState({}, "", url);
     setAuthMode(mode);
+    setAuthForm((current) => ({ ...current, password: "" }));
+    setError("");
+    setNotice("");
     setStorefrontAuthRequested(true);
   }
 
@@ -1037,6 +1046,7 @@ export default function App() {
           onSubmit={authenticate}
           onModeChange={chooseStorefrontAuthMode}
           onForgot={() => setAuthMode("forgot")}
+          onClearError={() => setError("")}
         />
       ) : !auth && storefrontAuthRequested && authMode === "forgot" ? (
         <CheckoutPasswordResetRequest
@@ -1539,7 +1549,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
   );
 }
 
-function CheckoutAccountForm({ mode, form, busy, error, notice, signupEnabled, brandName, onChange, onSubmit, onModeChange, onForgot }: {
+function CheckoutAccountForm({ mode, form, busy, error, notice, signupEnabled, brandName, onChange, onSubmit, onModeChange, onForgot, onClearError }: {
   mode: "login" | "signup";
   form: ReturnType<typeof initialAuthForm>;
   busy: boolean;
@@ -1551,19 +1561,48 @@ function CheckoutAccountForm({ mode, form, busy, error, notice, signupEnabled, b
   onSubmit: (event: FormEvent) => void;
   onModeChange: (mode: "login" | "signup") => void;
   onForgot: () => void;
+  onClearError: () => void;
 }) {
+  const [step, setStep] = useState<"email" | "credentials">("email");
+
+  function submit(event: FormEvent) {
+    if (step === "email") {
+      event.preventDefault();
+      onClearError();
+      setStep("credentials");
+      return;
+    }
+    onSubmit(event);
+  }
+
+  function editEmail() {
+    onChange({ ...form, password: "" });
+    onClearError();
+    setStep("email");
+  }
+
+  function switchMode() {
+    onModeChange(mode === "login" ? "signup" : "login");
+    if (step === "email" && form.email.trim()) setStep("credentials");
+  }
+
   return <section className="checkout-account">
-    <div className="checkout-section-title"><UserRound size={18} /><div><strong>{mode === "signup" ? `Create your ${brandName} account` : "Sign in to continue"}</strong><small>Your purchase will be connected to this account.</small></div></div>
+    <div className="checkout-section-title"><UserRound size={18} /><div><strong>Your account</strong><small>{step === "email" ? "Enter your email to continue." : "Your purchase will be connected to this account."}</small></div></div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {notice && <div className="alert success" role="status">{notice}</div>}
-    <form className="checkout-form" onSubmit={onSubmit}>
-      {mode === "signup" && <Field label="Name" id="checkout-name"><input id="checkout-name" value={form.display_name} onChange={(event) => onChange({ ...form, display_name: event.target.value })} autoComplete="name" placeholder="Your name" /></Field>}
-      <Field label="Email address" id="checkout-email"><input id="checkout-email" type="email" value={form.email} onChange={(event) => onChange({ ...form, email: event.target.value })} autoComplete="email" placeholder="you@example.com" required /></Field>
-      <Field label="Password" id="checkout-password"><input id="checkout-password" type="password" value={form.password} onChange={(event) => onChange({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required /></Field>
-      <button className="checkout-account-action" disabled={busy}>{busy ? "Preparing your account…" : mode === "login" ? "Sign in" : "Create account"}</button>
+    <form className="checkout-form" onSubmit={submit}>
+      {step === "email" ? <>
+        <Field label="Email address" id="checkout-email"><input id="checkout-email" type="email" value={form.email} onChange={(event) => onChange({ ...form, email: event.target.value, password: "" })} autoComplete="email" placeholder="you@example.com" required autoFocus /></Field>
+        <button className="checkout-account-action" disabled={busy}>Continue</button>
+      </> : <>
+        <div className="checkout-account-email"><span>{form.email.trim()}</span><button type="button" onClick={editEmail}>Change</button></div>
+        <div className="checkout-credential-title"><strong>{mode === "signup" ? `Join ${brandName}` : `Sign in to ${brandName}`}</strong><small>{mode === "signup" ? `Create a password to securely create your ${brandName} account.` : "Enter your password to continue."}</small></div>
+        <Field label="Password" id="checkout-password"><input id="checkout-password" type="password" value={form.password} onChange={(event) => onChange({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required autoFocus /></Field>
+        <button className="checkout-account-action" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in" : "Create account"}</button>
+      </>}
     </form>
-    {mode === "login" && <button className="checkout-link" onClick={onForgot}>Forgot your password?</button>}
-    {signupEnabled && <button className="checkout-switch" onClick={() => onModeChange(mode === "login" ? "signup" : "login")}>{mode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button>}
+    {step === "credentials" && mode === "login" && <button className="checkout-link" onClick={onForgot}>Forgot your password?</button>}
+    {signupEnabled && <button className="checkout-switch" onClick={switchMode}>{mode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button>}
   </section>;
 }
 

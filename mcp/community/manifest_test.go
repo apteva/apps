@@ -151,6 +151,14 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 	if strings.Contains(text, "Enter a valid email above to load Stripe") {
 		t.Error("payment fields must not be gated on an email address")
 	}
+	for _, required := range []string{`useState<"email" | "credentials">("email")`, `Enter your email to continue.`, `setStep("credentials")`, `Create a password to securely create your`} {
+		if !strings.Contains(text, required) {
+			t.Errorf("progressive account disclosure missing %q", required)
+		}
+	}
+	if strings.Contains(text, `label="Name" id="checkout-name"`) {
+		t.Error("storefront checkout must not request profile name before account creation")
+	}
 }
 
 // TestToolSetMatchesManifest catches forgetting to wire a manifest-
