@@ -63,7 +63,7 @@ func TestCommunityDomainAttachAndDetachUseNativeIngressAndAuthOrigin(t *testing.
 
 	result, err := toolCommunityDomainAttach(ctx, map[string]any{
 		"community_id": community.ID, "apex_domain": "makecademy.localhost", "subdomain": "",
-		"dns_target": "127.0.0.1", "auto_dns": false, "allow_http": true,
+		"dns_target": "127.0.0.1", "auto_dns": false, "allow_http": true, "http_port": float64(5280),
 	})
 	if err != nil {
 		t.Fatal(err)

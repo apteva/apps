@@ -59,6 +59,7 @@ func communityDomainTools() []sdk.Tool {
 				"dns_target":   map[string]any{"type": "string"},
 				"auto_dns":     map[string]any{"type": "boolean"},
 				"allow_http":   map[string]any{"type": "boolean"},
+				"http_port":    map[string]any{"type": "integer", "minimum": 1, "maximum": 65535},
 			}, []string{"community_id", "apex_domain"}),
 			Handler: toolCommunityDomainAttach,
 		},
@@ -167,6 +168,15 @@ func toolCommunityDomainAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 		autoDNS = value
 	}
 	allowHTTP, _ := args["allow_http"].(bool)
+	httpPort := 0
+	if raw, ok := args["http_port"].(float64); ok {
+		httpPort = int(raw)
+	} else if raw, ok := args["http_port"].(int); ok {
+		httpPort = raw
+	}
+	if httpPort < 0 || httpPort > 65535 || (httpPort > 0 && !allowHTTP) {
+		return nil, errors.New("http_port must be between 1 and 65535 and is allowed only with allow_http")
+	}
 	dnsTarget := strings.TrimSpace(strArg(args, "dns_target", ""))
 	if dnsTarget == "" {
 		dnsTarget, err = suggestedCommunityDNSTarget(ctx)
@@ -199,7 +209,7 @@ func toolCommunityDomainAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 	}
 
-	portalURL, err := communityPortalOrigin(ctx, hostname, allowHTTP)
+	portalURL, err := communityPortalOrigin(ctx, hostname, allowHTTP, httpPort)
 	if err != nil {
 		if dnsManaged {
 			_ = removeCommunityDNSRecord(ctx, community.ProjectID, apex, dnsName, recordType, dnsTarget)
@@ -238,6 +248,9 @@ func toolCommunityDomainAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 		WHERE id=?`, portalURL, boolInt(dnsManaged), apex, dnsName, recordType, dnsTarget, community.ID); err != nil {
 		_ = updateCommunityAuthOrigin(ctx, community, portalURL, false)
 		return nil, err
+	}
+	if previous := strings.TrimRight(strings.TrimSpace(community.PortalHost), "/"); previous != "" && previous != strings.TrimRight(portalURL, "/") {
+		_ = updateCommunityAuthOrigin(ctx, community, previous, false)
 	}
 	rollback = false
 	community, err = loadCommunity(ctx.AppDB(), community.ID)
@@ -332,12 +345,14 @@ func communityIngressTarget(projectID string) string {
 	return (&url.URL{Scheme: "app", Host: appName, RawQuery: query.Encode()}).String()
 }
 
-func communityPortalOrigin(ctx *sdk.AppCtx, hostname string, allowHTTP bool) (string, error) {
+func communityPortalOrigin(ctx *sdk.AppCtx, hostname string, allowHTTP bool, explicitHTTPPort int) (string, error) {
 	scheme := "https"
 	port := ""
 	if allowHTTP {
 		scheme = "http"
-		if info, err := ctx.PlatformInfo(); err == nil && info != nil {
+		if explicitHTTPPort > 0 {
+			port = fmt.Sprint(explicitHTTPPort)
+		} else if info, err := ctx.PlatformInfo(); err == nil && info != nil {
 			if parsed, parseErr := url.Parse(info.PublicURL); parseErr == nil {
 				port = parsed.Port()
 			}
