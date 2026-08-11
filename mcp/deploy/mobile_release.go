@@ -46,6 +46,11 @@ type mobileReleaseMeta struct {
 	RolloutFraction     float64                               `json:"rollout_fraction,omitempty"`
 	ReleaseNotes        map[string]string                     `json:"release_notes,omitempty"`
 	SubmitForReview     bool                                  `json:"submit_for_review,omitempty"`
+	TesterAccess        string                                `json:"tester_access,omitempty"`
+	TesterCount         int                                   `json:"tester_count,omitempty"`
+	TesterGroups        []string                              `json:"tester_groups,omitempty"`
+	InstallURL          string                                `json:"install_url,omitempty"`
+	TesterSyncedAt      string                                `json:"tester_synced_at,omitempty"`
 	Prepared            bool                                  `json:"prepared,omitempty"`
 	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
 }
@@ -235,12 +240,12 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if err != nil {
 		return nil, err
 	}
-	if platform == "android" && channel == "production" && opts.RolloutFraction == 0 {
+	if platform == "android" && isProductionMobileChannel(platform, channel) && opts.RolloutFraction == 0 {
 		if _, storeDoc, storeErr := a.mobileStoreConfig(d); storeErr == nil && storeDoc.ReleaseMode == "staged" {
 			opts.RolloutFraction = storeDoc.Distribution.RolloutFraction
 		}
 	}
-	if platform == "android" && channel == "production" && (opts.RolloutFraction < 0 || opts.RolloutFraction > 1) {
+	if platform == "android" && isProductionMobileChannel(platform, channel) && (opts.RolloutFraction < 0 || opts.RolloutFraction > 1) {
 		return nil, errors.New("Android rollout_fraction must be between 0 and 1")
 	}
 	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
@@ -275,7 +280,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 		}
 		meta.ReleaseType = cfg.ReleaseType
 	}
-	if channel == "production" {
+	if isProductionMobileChannel(platform, channel) {
 		storeCfg, _, storeErr := a.mobileStoreConfig(d)
 		if storeErr != nil {
 			err = storeErr
@@ -336,6 +341,13 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 			externalID = meta.VersionCode
 			externalStatus = defaultStr(externalStatus, "completed")
 			releaseStatus = "live"
+			testerState, testerErr := a.reconcileConfiguredGoogleTesting(d, meta.PackageName, channel)
+			if testerErr != nil {
+				meta.TesterAccess = "sync_error"
+				fmt.Fprintf(logFile, "Google Play tester access reconciliation failed: %v\n", testerErr)
+			} else {
+				setReleaseTesterAccess(&meta, testerState)
+			}
 		} else {
 			if externalID == "" {
 				externalID = strconv.FormatInt(b.ID, 10)
@@ -446,7 +458,7 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 	fmt.Fprintf(logW, "uploaded AAB versionCode=%s\n", meta.VersionCode)
 	status := "completed"
 	release := map[string]any{"versionCodes": []string{meta.VersionCode}, "status": status}
-	if channel == "production" && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
+	if isProductionMobileChannel("android", channel) && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
 		status = "inProgress"
 		release["status"] = status
 		release["userFraction"] = meta.RolloutFraction
@@ -460,6 +472,11 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 	}); err != nil {
 		return fmt.Errorf("update Play track: %w", err)
 	}
+	testerState, err := a.applyConfiguredGoogleTestingToEdit(bound, d, meta.PackageName, editID, channel)
+	if err != nil {
+		return err
+	}
+	setReleaseTesterAccess(meta, testerState)
 	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
 		return fmt.Errorf("validate Play edit: %w", err)
 	}
@@ -467,6 +484,13 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 		return fmt.Errorf("commit Play edit: %w", err)
 	}
 	committed = true
+	if verified, verifyErr := a.verifyConfiguredGoogleTesting(d, meta.PackageName, channel, testerState); verifyErr != nil {
+		meta.TesterAccess = "sync_error"
+		_ = a.persistDistributionFailure(d, channel, verifyErr)
+		fmt.Fprintf(logW, "Google Play tester access verification failed: %v\n", verifyErr)
+	} else {
+		setReleaseTesterAccess(meta, verified)
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status": "live", "external_id": meta.VersionCode, "external_status": status,
 		"release_meta_json": mustJSON(meta),
@@ -1029,7 +1053,7 @@ func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release,
 		if meta.VersionCode == "" {
 			meta.VersionCode = source.ExternalID
 		}
-		if err := a.publishAndroidVersionToTrack(rel.ID, channel, &meta, logFile); err != nil {
+		if err := a.publishAndroidVersionToTrack(rel.ID, d, channel, &meta, logFile); err != nil {
 			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "error": err.Error(), "external_status": "failed"})
 			return nil, fmt.Errorf("mobile promotion %d failed: %w", rel.ID, err)
 		}
@@ -1044,7 +1068,7 @@ func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release,
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
 
-func (a *App) publishAndroidVersionToTrack(releaseID int64, channel string, meta *mobileReleaseMeta, logW io.Writer) error {
+func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, channel string, meta *mobileReleaseMeta, logW io.Writer) error {
 	if meta.PackageName == "" || meta.VersionCode == "" {
 		return errors.New("Android promotion requires package_name and version_code from a prior release")
 	}
@@ -1068,7 +1092,7 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, channel string, meta
 	}()
 	status := "completed"
 	release := map[string]any{"versionCodes": []string{meta.VersionCode}, "status": status}
-	if channel == "production" && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
+	if isProductionMobileChannel("android", channel) && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
 		status = "inProgress"
 		release["status"] = status
 		release["userFraction"] = meta.RolloutFraction
@@ -1081,10 +1105,25 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, channel string, meta
 	}); err != nil {
 		return err
 	}
+	testerState, err := a.applyConfiguredGoogleTestingToEdit(bound, d, meta.PackageName, editID, channel)
+	if err != nil {
+		return err
+	}
+	setReleaseTesterAccess(meta, testerState)
+	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
+		return err
+	}
 	if _, err := executeIntegration(bound, "commit_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
 		return err
 	}
 	committed = true
+	if verified, verifyErr := a.verifyConfiguredGoogleTesting(d, meta.PackageName, channel, testerState); verifyErr != nil {
+		meta.TesterAccess = "sync_error"
+		_ = a.persistDistributionFailure(d, channel, verifyErr)
+		fmt.Fprintf(logW, "Google Play tester access verification failed: %v\n", verifyErr)
+	} else {
+		setReleaseTesterAccess(meta, verified)
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
 		"status": "live", "external_id": meta.VersionCode, "external_status": status, "release_meta_json": mustJSON(meta),
 	})
@@ -1119,7 +1158,11 @@ func (a *App) toolRollout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer logW.Close()
-	if err := a.publishAndroidVersionToTrack(rel.ID, "production", &meta, logW); err != nil {
+	d, err := a.deploymentForRelease(rel)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.publishAndroidVersionToTrack(rel.ID, d, "production", &meta, logW); err != nil {
 		return nil, err
 	}
 	fresh, _ := dbGetRelease(ctx.AppDB(), rel.ID)
@@ -1243,14 +1286,27 @@ func normalizeMobileChannel(platform, channel string) (string, error) {
 	if channel == "" {
 		channel = "internal"
 	}
-	allowed := map[string]map[string]bool{
-		"android": {"internal": true, "alpha": true, "beta": true, "production": true},
-		"ios":     {"internal": true, "external": true, "production": true},
+	if platform == "android" {
+		if len(channel) > 100 {
+			return "", errors.New("Android track name must be 100 characters or fewer")
+		}
+		for _, char := range channel {
+			if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.' || char == ':' {
+				continue
+			}
+			return "", fmt.Errorf("Android track %q contains unsupported characters", channel)
+		}
+		return channel, nil
 	}
-	if !allowed[platform][channel] {
+	if platform != "ios" || (channel != "internal" && channel != "external" && channel != "production") {
 		return "", fmt.Errorf("channel %q is not supported for %s", channel, platform)
 	}
 	return channel, nil
+}
+
+func isProductionMobileChannel(platform, channel string) bool {
+	channel = strings.ToLower(strings.TrimSpace(channel))
+	return channel == "production" || (platform == "android" && strings.HasSuffix(channel, ":production"))
 }
 
 func releaseOptionsFromArgs(args map[string]any) releaseOptions {

@@ -4,8 +4,10 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Action represents a normalized computer use action.
@@ -260,6 +262,28 @@ type ScreenshotRecoveryReporter interface {
 // returning this payload because it can be large.
 type SetOfMarkReporter interface {
 	LastSetOfMark() []SetOfMarkTarget
+}
+
+const (
+	SessionUsageReady       = "ready"
+	SessionUsageUnsupported = "unsupported"
+	SessionUsageUnavailable = "unavailable"
+)
+
+// SessionUsage is provider-neutral usage measured for a closed browser
+// session. ProxyBytes is a pointer so a measured zero remains distinct from
+// usage that could not be measured. MeasuredAt is set only for ready usage.
+type SessionUsage struct {
+	Status     string    `json:"status"`
+	ProxyBytes *int64    `json:"proxy_bytes,omitempty"`
+	MeasuredAt time.Time `json:"measured_at,omitempty"`
+}
+
+// SessionUsageReporter is implemented by providers that can retrieve final
+// usage after Close. Callers provide a hard deadline; telemetry errors must
+// never prevent the browser session itself from closing.
+type SessionUsageReporter interface {
+	SessionUsage(context.Context) (SessionUsage, error)
 }
 
 // OpenOptions describes a session-open intent: which url to land on,

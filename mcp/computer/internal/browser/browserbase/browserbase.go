@@ -92,20 +92,23 @@ type Options struct {
 }
 
 type Computer struct {
-	apiKey         string
-	projectID      string
-	opts           Options
-	sessionID      string
-	contextID      string
-	contextPersist bool
-	debugURL       string
-	display        computer.DisplaySize
-	allocCtx       context.Context
-	ctx            context.Context
-	cancel         context.CancelFunc
-	allocCancel    context.CancelFunc
-	http           *http.Client
-	environment    computer.EnvironmentOptions
+	apiKey          string
+	projectID       string
+	opts            Options
+	sessionID       string
+	contextID       string
+	contextPersist  bool
+	debugURL        string
+	display         computer.DisplaySize
+	allocCtx        context.Context
+	ctx             context.Context
+	cancel          context.CancelFunc
+	allocCancel     context.CancelFunc
+	http            *http.Client
+	environment     computer.EnvironmentOptions
+	usageMu         sync.Mutex
+	closedSessionID string
+	lastUsage       *computer.SessionUsage
 
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu    sync.RWMutex
@@ -1276,6 +1279,10 @@ func (c *Computer) OpenSession(o computer.OpenOptions) error {
 		c.contextPersist = false
 		c.debugURL = ""
 	}
+	c.usageMu.Lock()
+	c.closedSessionID = ""
+	c.lastUsage = nil
+	c.usageMu.Unlock()
 
 	var connectURL string
 	if o.SessionID != "" {
@@ -1504,6 +1511,13 @@ func (c *Computer) Close() error {
 	// and has a clean close point for persisting context state. Keep the
 	// CDP connection open until after the release request so the session
 	// is still active when Browserbase receives REQUEST_RELEASE.
+	closingSessionID := c.sessionID
+	if closingSessionID != "" {
+		c.usageMu.Lock()
+		c.closedSessionID = closingSessionID
+		c.lastUsage = nil
+		c.usageMu.Unlock()
+	}
 	if err := c.requestRelease(); err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] release failed id=%s: %v\n", c.sessionID, err)
 	} else if c.sessionID != "" {
@@ -1529,4 +1543,99 @@ func (c *Computer) Close() error {
 	c.contextID = ""
 	c.contextPersist = false
 	return nil
+}
+
+const (
+	usageInitialBackoff = 100 * time.Millisecond
+	usageMaxBackoff     = 750 * time.Millisecond
+)
+
+// SessionUsage retrieves final Browserbase proxy usage after Close. Close
+// preserves the released provider id separately from the active session id so
+// it can clear all live browser state without losing the telemetry lookup key.
+// Only a terminal provider session is considered final: Browserbase also
+// returns proxyBytes while a session is still RUNNING.
+func (c *Computer) SessionUsage(ctx context.Context) (computer.SessionUsage, error) {
+	c.usageMu.Lock()
+	defer c.usageMu.Unlock()
+	if c.lastUsage != nil {
+		return *c.lastUsage, nil
+	}
+	sessionID := c.closedSessionID
+	if sessionID == "" {
+		return computer.SessionUsage{}, fmt.Errorf("browserbase: no closed session is available for usage lookup")
+	}
+
+	backoff := usageInitialBackoff
+	for {
+		usage, terminal, transient, err := c.fetchSessionUsage(ctx, sessionID)
+		if err == nil && terminal {
+			c.lastUsage = &usage
+			return usage, nil
+		}
+		if err != nil && !transient {
+			return computer.SessionUsage{}, err
+		}
+		if err := waitUsageRetry(ctx, backoff); err != nil {
+			if err != context.Canceled && err != context.DeadlineExceeded {
+				return computer.SessionUsage{}, err
+			}
+			return computer.SessionUsage{}, fmt.Errorf("browserbase: final usage unavailable before deadline: %w", err)
+		}
+		backoff *= 2
+		if backoff > usageMaxBackoff {
+			backoff = usageMaxBackoff
+		}
+	}
+}
+
+func (c *Computer) fetchSessionUsage(ctx context.Context, sessionID string) (computer.SessionUsage, bool, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/sessions/%s", apiBase, sessionID), nil)
+	if err != nil {
+		return computer.SessionUsage{}, false, false, err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return computer.SessionUsage{}, false, true, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		err := fmt.Errorf("browserbase usage: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		transient := resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooEarly ||
+			resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+		return computer.SessionUsage{}, false, transient, err
+	}
+	var result struct {
+		Status     string `json:"status"`
+		ProxyBytes *int64 `json:"proxyBytes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return computer.SessionUsage{}, false, true, fmt.Errorf("browserbase usage decode: %w", err)
+	}
+	status := strings.ToUpper(strings.TrimSpace(result.Status))
+	terminal := status == "COMPLETED" || status == "ERROR" || status == "TIMED_OUT"
+	if !terminal {
+		return computer.SessionUsage{}, false, true, nil
+	}
+	if result.ProxyBytes == nil {
+		return computer.SessionUsage{}, false, true, fmt.Errorf("browserbase usage: terminal session omitted proxyBytes")
+	}
+	return computer.SessionUsage{
+		Status:     computer.SessionUsageReady,
+		ProxyBytes: result.ProxyBytes,
+		MeasuredAt: time.Now().UTC(),
+	}, true, false, nil
+}
+
+func waitUsageRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }

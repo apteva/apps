@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.66
+version: 0.7.67
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.66 adds opt-in browser
-  identity and device environments for newly-created sessions while preserving
-  existing agent defaults when omitted.
+  Watch, steer, and replay hosted browser sessions. v0.7.67 persists generic
+  closed-session proxy usage and reports final Browserbase proxy bytes without
+  coupling downstream apps to provider APIs.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer

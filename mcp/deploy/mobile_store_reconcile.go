@@ -7,7 +7,7 @@ import (
 )
 
 var storeScopeOrder = []string{
-	"version", "localizations", "media", "review", "classification", "privacy", "distribution", "compliance",
+	"version", "localizations", "media", "review", "classification", "privacy", "distribution", "testing", "compliance",
 }
 
 type storeScopeSet map[string]bool
@@ -65,6 +65,8 @@ func normalizeStoreScope(scope string) string {
 		return "compliance"
 	case "distribution":
 		return "distribution"
+	case "testing", "testers", "test_access":
+		return "testing"
 	default:
 		return ""
 	}
@@ -152,13 +154,17 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		}
 		one := storeScopeSet{scope: true}
 		var applyErr error
-		switch d.TargetKind {
-		case "ios":
-			_, applyErr = a.applyAppleStoreConfigScopes(d, doc, one)
-		case "android":
-			_, applyErr = a.applyGoogleStoreConfigScopes(d, doc, one)
-		default:
-			applyErr = fmt.Errorf("unsupported store platform %q", d.TargetKind)
+		if scope == "testing" {
+			applyErr = a.applyDesiredTesting(d, doc)
+		} else {
+			switch d.TargetKind {
+			case "ios":
+				_, applyErr = a.applyAppleStoreConfigScopes(d, doc, one)
+			case "android":
+				_, applyErr = a.applyGoogleStoreConfigScopes(d, doc, one)
+			default:
+				applyErr = fmt.Errorf("unsupported store platform %q", d.TargetKind)
+			}
 		}
 		if applyErr != nil {
 			result.Failed = append(result.Failed, StoreApplyIssue{Scope: scope, Message: applyErr.Error()})
@@ -188,6 +194,16 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 	}()
 	if observed == nil {
 		observed = map[string]any{}
+	}
+	if len(doc.Testing.Channels) > 0 {
+		testing, testingErr := a.observeDesiredTesting(d, doc)
+		if testingErr != nil {
+			if observeErr == nil {
+				observeErr = testingErr
+			}
+		} else {
+			observed["testing"] = testing
+		}
 	}
 	observed["last_apply"] = result
 	observed["applied_at"] = nowUTC()

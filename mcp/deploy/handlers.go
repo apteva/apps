@@ -288,7 +288,7 @@ func (a *App) httpDeploymentDistribution(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		httpJSON(w, state)
-	case http.MethodPost:
+	case http.MethodPost, http.MethodPut:
 		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
@@ -300,7 +300,7 @@ func (a *App) httpDeploymentDistribution(w http.ResponseWriter, r *http.Request,
 		}
 		httpJSON(w, state)
 	default:
-		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+		httpErr(w, http.StatusMethodNotAllowed, "GET, POST or PUT")
 	}
 }
 

@@ -36,6 +36,9 @@ type ComputerSession struct {
 	ProxyCountry        string                      `json:"proxy_country,omitempty"`
 	ProxyStickyScope    string                      `json:"proxy_sticky_scope,omitempty"`
 	Environment         backends.EnvironmentOptions `json:"environment,omitempty"`
+	ProxyBytes          *int64                      `json:"proxy_bytes,omitempty"`
+	UsageStatus         string                      `json:"usage_status,omitempty"`
+	UsageMeasuredAt     *string                     `json:"usage_measured_at,omitempty"`
 }
 
 type NavigationStep struct {
@@ -55,8 +58,8 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			recording_status, opened_at, closed_at, updated_at,
 			final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
 			proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-			environment_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			environment_json, proxy_bytes, usage_status, usage_measured_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			backend=excluded.backend,
 			backend_session_id=excluded.backend_session_id,
@@ -79,6 +82,9 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 			proxy_country=excluded.proxy_country,
 			proxy_sticky_scope=excluded.proxy_sticky_scope,
 			environment_json=excluded.environment_json,
+			proxy_bytes=CASE WHEN excluded.usage_status <> '' THEN excluded.proxy_bytes ELSE computer_sessions.proxy_bytes END,
+			usage_status=CASE WHEN excluded.usage_status <> '' THEN excluded.usage_status ELSE computer_sessions.usage_status END,
+			usage_measured_at=CASE WHEN excluded.usage_status <> '' THEN excluded.usage_measured_at ELSE computer_sessions.usage_measured_at END,
 			final_screenshot=COALESCE(excluded.final_screenshot, computer_sessions.final_screenshot),
 			final_screenshot_mime=CASE
 				WHEN excluded.final_screenshot IS NOT NULL THEN excluded.final_screenshot_mime
@@ -89,7 +95,7 @@ func dbPutSession(db *sql.DB, row *ComputerSession) error {
 		nullableText(row.CloseReason), row.RecordingStatus, row.OpenedAt, row.ClosedAt, row.UpdatedAt,
 		nullableBytes(row.FinalScreenshot), row.FinalScreenshotMIME, row.ProxyMode, row.ProxyProvider,
 		row.ProxyProfileID, row.ProxyProfileName, row.ProxyCountry, row.ProxyStickyScope,
-		encodeEnvironment(row.Environment),
+		encodeEnvironment(row.Environment), nullableInt64(row.ProxyBytes), row.UsageStatus, nullableStringPointer(row.UsageMeasuredAt),
 	)
 	if err != nil {
 		return fmt.Errorf("persist computer session %s: %w", row.ID, err)
@@ -107,7 +113,7 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 		       recording_status, opened_at, closed_at, updated_at,
 		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-		       environment_json
+		       environment_json, proxy_bytes, usage_status, usage_measured_at
 		FROM computer_sessions WHERE id=?`, id))
 }
 
@@ -124,7 +130,7 @@ func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
 		       recording_status, opened_at, closed_at, updated_at,
 		       final_screenshot, final_screenshot_mime, proxy_mode, proxy_provider,
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
-		       environment_json
+		       environment_json, proxy_bytes, usage_status, usage_measured_at
 		FROM computer_sessions
 		ORDER BY opened_at DESC
 		LIMIT ?`, limit)
@@ -150,7 +156,8 @@ type computerSessionScanner interface {
 
 func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, error) {
 	row := &ComputerSession{}
-	var appContextID, contextName, initialURL, currentURL, closeReason, environmentJSON sql.NullString
+	var appContextID, contextName, initialURL, currentURL, closeReason, environmentJSON, usageMeasuredAt sql.NullString
+	var proxyBytes sql.NullInt64
 	var closedAt sql.NullString
 	err := scanner.Scan(
 		&row.ID, &row.Backend, &row.BackendSessionID, &appContextID, &contextName,
@@ -159,6 +166,7 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		&row.FinalScreenshot, &row.FinalScreenshotMIME,
 		&row.ProxyMode, &row.ProxyProvider, &row.ProxyProfileID, &row.ProxyProfileName,
 		&row.ProxyCountry, &row.ProxyStickyScope, &environmentJSON,
+		&proxyBytes, &row.UsageStatus, &usageMeasuredAt,
 	)
 	if err != nil {
 		return nil, err
@@ -176,6 +184,14 @@ func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, erro
 		if err := json.Unmarshal([]byte(environmentJSON.String), &row.Environment); err != nil {
 			return nil, fmt.Errorf("decode computer session environment: %w", err)
 		}
+	}
+	if proxyBytes.Valid {
+		value := proxyBytes.Int64
+		row.ProxyBytes = &value
+	}
+	if usageMeasuredAt.Valid {
+		value := usageMeasuredAt.String
+		row.UsageMeasuredAt = &value
 	}
 	return row, nil
 }
@@ -282,4 +298,18 @@ func nullableBytes(value []byte) any {
 		return nil
 	}
 	return value
+}
+
+func nullableInt64(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return *value
+}
+
+func nullableStringPointer(value *string) any {
+	if value == nil || *value == "" {
+		return nil
+	}
+	return *value
 }

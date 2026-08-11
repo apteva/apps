@@ -227,11 +227,15 @@ func TestAndroidPromotionReusesVersionCode(t *testing.T) {
 	}
 	meta := mobileReleaseMeta{Platform: "android", PackageName: "com.example.app", VersionCode: "88", RolloutFraction: 0.1}
 	app := &App{dataDir: t.TempDir()}
-	if err := app.publishAndroidVersionToTrack(rel.ID, "production", &meta, io.Discard); err != nil {
+	effective := effectiveDeploymentForEnvironment(d, env)
+	if err := app.publishAndroidVersionToTrack(rel.ID, effective, "production", &meta, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if len(platform.calls) != 3 || platform.calls[0].Tool != "create_edit" || platform.calls[1].Tool != "update_track" || platform.calls[2].Tool != "commit_edit" {
+	if len(platform.calls) != 4 || platform.calls[0].Tool != "create_edit" || platform.calls[1].Tool != "update_track" || platform.calls[2].Tool != "validate_edit" || platform.calls[3].Tool != "commit_edit" {
 		t.Fatalf("calls=%+v", platform.calls)
+	}
+	if meta.TesterAccess != "not_configured" || meta.TesterCount != 0 {
+		t.Fatalf("tester metadata=%+v", meta)
 	}
 	releases, ok := platform.calls[1].Input["releases"].([]map[string]any)
 	if !ok || len(releases) != 1 {

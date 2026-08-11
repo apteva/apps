@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.24.2
+version: 0.24.3
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -117,7 +117,7 @@ provides:
     - name: deploy_distribution_status
       description: Read the provider-backed TestFlight or Google Play test audience for a mobile channel.
     - name: deploy_distribution_update
-      description: Idempotently add individual TestFlight testers or Google Groups to a mobile test channel.
+      description: Persist and reconcile a desired mobile test audience. Android uses exact Google Group replacement; iOS safely adds individual testers.
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote

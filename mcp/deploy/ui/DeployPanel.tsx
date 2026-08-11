@@ -232,6 +232,15 @@ interface MobileDistributionState {
   configured: boolean;
   audience: DistributionAudienceMember[];
   count: number;
+  desired_configured: boolean;
+  desired_audience: DistributionAudienceMember[];
+  desired_count: number;
+  synced: boolean;
+  tester_access: "configured" | "not_configured" | "sync_required" | "sync_error";
+  install_url?: string;
+  install_url_source?: string;
+  console_url?: string;
+  last_synced_at?: string;
 }
 
 interface StoreFinding {
@@ -347,6 +356,12 @@ interface StoreDocument {
     phased_release?: boolean;
     rollout_fraction?: number;
     provider?: Record<string, unknown>;
+  };
+  testing?: {
+    channels?: Record<string, {
+      audience?: { kind: "individual" | "group"; identifier: string; first_name?: string; last_name?: string }[];
+      install_url?: string;
+    }>;
   };
   privacy: {
     policy_url?: string;
@@ -508,6 +523,24 @@ function releaseRolloutFraction(release: Release): number {
   }
 }
 
+function releaseTesterAccess(release: Release): { status: string; count: number; installURL: string } {
+  try {
+    const meta = JSON.parse(release.release_meta_json || "{}");
+    return {
+      status: String(meta.tester_access || "not_configured"),
+      count: Number(meta.tester_count || 0),
+      installURL: String(meta.install_url || ""),
+    };
+  } catch {
+    return { status: "not_configured", count: 0, installURL: "" };
+  }
+}
+
+function isProductionMobileChannel(platform: Deployment["target_kind"], channel: string): boolean {
+  const normalized = channel.trim().toLowerCase();
+  return normalized === "production" || (platform === "android" && normalized.endsWith(":production"));
+}
+
 function mobileBuildVersion(build: Build): string {
   for (const raw of [build.artifact_manifest_json, build.target_config_json]) {
     try {
@@ -561,6 +594,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [distribution, setDistribution] = useState<MobileDistributionState | null>(null);
   const [distributionError, setDistributionError] = useState("");
   const [audienceEmail, setAudienceEmail] = useState("");
+  const [audienceDraft, setAudienceDraft] = useState<DistributionAudienceMember[]>([]);
+  const [installURLDraft, setInstallURLDraft] = useState("");
   const [audienceBusy, setAudienceBusy] = useState(false);
   const [storeState, setStoreState] = useState<StoreConfigState | null>(null);
   const [showStoreListing, setShowStoreListing] = useState(false);
@@ -656,7 +691,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 
   useEffect(() => {
     const deployment = detail?.deployment;
-    if (!deployment || deployment.target_kind === "service" || mobileChannel === "production") {
+    if (!deployment || deployment.target_kind === "service" || isProductionMobileChannel(deployment.target_kind, mobileChannel)) {
       setDistribution(null);
       setDistributionError("");
       return;
@@ -664,23 +699,30 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     let cancelled = false;
     setDistribution(null);
     setDistributionError("");
-    api<MobileDistributionState>(
-      "GET",
-      `/deployments/${deployment.id}/distribution`,
-      undefined,
-      { channel: mobileChannel },
-    ).then((state) => {
-      if (!cancelled) {
-        setDistribution(state);
-        setDistributionError("");
-      }
-    }).catch((e) => {
-      if (!cancelled) {
-        setDistribution(null);
-        setDistributionError((e as Error).message);
-      }
-    });
-    return () => { cancelled = true; };
+    const timer = window.setTimeout(() => {
+      api<MobileDistributionState>(
+        "GET",
+        `/deployments/${deployment.id}/distribution`,
+        undefined,
+        { channel: mobileChannel },
+      ).then((state) => {
+        if (!cancelled) {
+          setDistribution(state);
+          setAudienceDraft(state.desired_configured ? state.desired_audience : state.audience);
+          setInstallURLDraft(state.install_url || "");
+          setDistributionError("");
+        }
+      }).catch((e) => {
+        if (!cancelled) {
+          setDistribution(null);
+          setDistributionError((e as Error).message);
+        }
+      });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [api, detail?.deployment.id, detail?.deployment.target_kind, mobileChannel]);
 
   // Capabilities: whether the optional Domains app is installed +
@@ -965,24 +1007,33 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 		URL.revokeObjectURL(url);
 	};
 
-  const handleAddAudience = async () => {
-    if (!detail || !audienceEmail.trim() || mobileChannel === "production") return;
+  const handleAddAudience = () => {
+    if (!detail || !audienceEmail.trim() || isProductionMobileChannel(detail.deployment.target_kind, mobileChannel)) return;
+		const email = audienceEmail.trim().toLowerCase();
+		const kind = detail.deployment.target_kind === "android" ? "group" : "individual";
+		if (!audienceDraft.some((member) => member.kind === kind && member.email.toLowerCase() === email)) {
+			setAudienceDraft((current) => [...current, { kind, email }]);
+		}
+		setAudienceEmail("");
+	};
+
+	const handleSyncAudience = async () => {
+		if (!detail || isProductionMobileChannel(detail.deployment.target_kind, mobileChannel)) return;
     setAudienceBusy(true);
     try {
       const state = await api<MobileDistributionState>(
-        "POST",
+        "PUT",
         `/deployments/${detail.deployment.id}/distribution`,
         {
           channel: mobileChannel,
-          audience: [{
-            kind: detail.deployment.target_kind === "android" ? "group" : "individual",
-            email: audienceEmail.trim(),
-          }],
+			audience: audienceDraft,
+			install_url: installURLDraft.trim(),
         },
       );
       setDistribution(state);
+		setAudienceDraft(state.desired_audience);
+		setInstallURLDraft(state.install_url || "");
       setDistributionError("");
-      setAudienceEmail("");
     } catch (e) {
       setDistributionError((e as Error).message);
     } finally {
@@ -1216,30 +1267,39 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 >+ Attach domain</button>
               ))}
               {mobile && (
-                <select
-                  value={mobileChannel}
-                  onChange={(e) => {
-                    setMobileChannel(e.target.value);
-                    if (e.target.value !== "production") setSubmitForReview(false);
-                  }}
-                  className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
-                  title="Store release channel"
-                >
-                  {detail.deployment.target_kind === "android" ? (
-                    <>
-                      <option value="internal">Internal</option>
-                      <option value="alpha">Alpha</option>
-                      <option value="beta">Beta</option>
-                      <option value="production">Production</option>
-                    </>
-                  ) : (
+                detail.deployment.target_kind === "android" ? (
+                  <>
+                    <input
+                      list="deploy-android-tracks"
+                      value={mobileChannel}
+                      onChange={(event) => setMobileChannel(event.target.value.toLowerCase())}
+                      className="w-28 bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                      title="Google Play track"
+                    />
+                    <datalist id="deploy-android-tracks">
+                      <option value="internal" />
+                      <option value="alpha" />
+                      <option value="beta" />
+                      <option value="production" />
+                    </datalist>
+                  </>
+                ) : (
+                  <select
+                    value={mobileChannel}
+                    onChange={(e) => {
+                      setMobileChannel(e.target.value);
+                      if (e.target.value !== "production") setSubmitForReview(false);
+                    }}
+                    className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                    title="Store release channel"
+                  >
                     <>
                       <option value="internal">TestFlight internal</option>
                       <option value="external">TestFlight external</option>
                       <option value="production">App Store</option>
                     </>
-                  )}
-                </select>
+                  </select>
+                )
               )}
               {mobile && (
                 <button
@@ -1416,18 +1476,23 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 								)}
               </section>
             )}
-            {mobile && mobileChannel !== "production" && (
+            {mobile && !isProductionMobileChannel(detail.deployment.target_kind, mobileChannel) && (
               <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
                 <span className="text-text-dim uppercase">Test audience</span>
                 <span className="text-text-muted">
                   {distribution
-                    ? `${distribution.count} ${detail.deployment.target_kind === "android" ? "Google group" : "tester"}${distribution.count === 1 ? "" : "s"}`
+					? `${distribution.count} provider ${detail.deployment.target_kind === "android" ? "Google group" : "tester"}${distribution.count === 1 ? "" : "s"}`
                     : "loading"}
                 </span>
+				{distribution && (
+					<span className={distribution.synced ? "text-green" : distribution.tester_access === "sync_error" ? "text-red" : "text-yellow/80"}>
+						{distribution.tester_access.replaceAll("_", " ")}
+					</span>
+				)}
                 {distribution?.group_name && (
                   <span className="text-text-dim truncate">{distribution.group_name}</span>
                 )}
-                <div className="flex items-center gap-2 ml-auto min-w-0">
+				<div className="flex items-center gap-2 ml-auto min-w-0">
                   <input
                     type="email"
                     value={audienceEmail}
@@ -1435,7 +1500,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     onKeyDown={(e) => {
                       if (e.key === "Enter") {
                         e.preventDefault();
-                        void handleAddAudience();
+									handleAddAudience();
                       }
                     }}
                     placeholder={detail.deployment.target_kind === "android"
@@ -1445,27 +1510,63 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   />
                   <button
                     type="button"
-                    onClick={handleAddAudience}
-                    disabled={audienceBusy || !audienceEmail.trim()}
+					onClick={handleAddAudience}
+					disabled={!audienceEmail.trim()}
                     className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40"
                   >
-                    {audienceBusy ? "Adding..." : "Add"}
+					Add
                   </button>
+					<button
+						type="button"
+						onClick={handleSyncAudience}
+						disabled={audienceBusy}
+						className="px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
+					>
+						{audienceBusy ? "Syncing..." : "Sync testers"}
+					</button>
                 </div>
                 {distributionError && (
                   <span className="basis-full text-red truncate" title={distributionError}>
                     {distributionError}
                   </span>
                 )}
-                {distribution && distribution.audience.length > 0 && (
-                  <div className="basis-full flex items-center gap-2 overflow-x-auto text-text-dim">
-                    {distribution.audience.map((member) => (
-                      <span key={`${member.kind}:${member.email}`} className="whitespace-nowrap">
-                        {member.email}{member.state ? ` (${member.state})` : ""}
-                      </span>
-                    ))}
-                  </div>
-                )}
+				<div className="basis-full flex items-center gap-2 overflow-x-auto text-text-dim min-h-6">
+					<span className="uppercase shrink-0">Desired</span>
+					{audienceDraft.map((member) => (
+						<span key={`${member.kind}:${member.email}`} className="whitespace-nowrap inline-flex items-center gap-1 border border-border rounded px-1.5 py-0.5">
+							{member.email}
+							{detail.deployment.target_kind === "android" && (
+								<button type="button" onClick={() => setAudienceDraft((current) => current.filter((item) => item.email !== member.email || item.kind !== member.kind))} className="text-red" title="Remove Google Group">x</button>
+							)}
+						</span>
+					))}
+					{audienceDraft.length === 0 && <span>No desired testers</span>}
+				</div>
+				{distribution && distribution.audience.length > 0 && (
+					<div className="basis-full flex items-center gap-2 overflow-x-auto text-text-dim min-h-6">
+						<span className="uppercase shrink-0">Provider</span>
+						{distribution.audience.map((member) => (
+							<span key={`${member.kind}:${member.email}`} className="whitespace-nowrap">
+								{member.email}{member.state ? ` (${member.state})` : ""}
+							</span>
+						))}
+					</div>
+				)}
+				<div className="basis-full flex items-center gap-2">
+					<input
+						type="url"
+						value={installURLDraft}
+						onChange={(event) => setInstallURLDraft(event.target.value)}
+						placeholder="Tester opt-in URL"
+						className="flex-1 min-w-52 bg-bg-input border border-border rounded px-2 py-1 text-xs"
+					/>
+					<button type="button" disabled={!installURLDraft} onClick={() => void navigator.clipboard.writeText(installURLDraft)} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">Copy link</button>
+					{distribution?.console_url && <a href={distribution.console_url} target="_blank" rel="noreferrer" className="px-2 py-1 border border-border rounded hover:bg-bg-input">Open console</a>}
+				</div>
+				{detail.deployment.target_kind === "android" && (
+					<span className="basis-full text-text-dim">Google Play supports Google Groups only. Individual email tester lists remain managed in Play Console.</span>
+				)}
+				{distribution?.last_synced_at && <span className="basis-full text-text-dim">Last synced {distribution.last_synced_at}</span>}
               </section>
             )}
 
@@ -1599,6 +1700,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                       <th className="text-left font-normal">Channel</th>
                       <th className="text-left font-normal">Status</th>
                       <th className="text-left font-normal">Store state</th>
+					  <th className="text-left font-normal">Test access</th>
                       <th className="text-left font-normal">Build</th>
                       <th className="text-right font-normal">Actions</th>
                     </tr>
@@ -1610,6 +1712,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         <td>{rel.channel || "-"}</td>
                         <td className={statusColor(rel.status)}>{rel.status}</td>
                         <td className="text-text-dim">{rel.external_status || "-"}</td>
+						<td className="text-text-dim">
+							{isProductionMobileChannel(detail.deployment.target_kind, rel.channel) ? "-" : (() => {
+								const access = releaseTesterAccess(rel);
+								return access.installURL
+									? <a href={access.installURL} target="_blank" rel="noreferrer" className="text-accent hover:underline">{access.count} · install</a>
+									: `${access.count} · ${access.status.replaceAll("_", " ")}`;
+							})()}
+						</td>
                         <td>{rel.build_id}</td>
                         <td className="text-right space-x-2">
                           <button type="button" onClick={() => { setLogKind("release"); setLogTargetId(rel.id); }} className="text-text-dim hover:text-text">log</button>
@@ -2453,7 +2563,7 @@ function StoreListingDialog({
     try {
       const saved = await save();
       const result = await api<StoreApplyResult>("POST", `/deployments/${deployment.id}/store-apply`, {
-        scopes: ["version", "localizations", "media", "review", "classification", "privacy", "distribution", "compliance"],
+        scopes: ["version", "localizations", "media", "review", "classification", "privacy", "distribution", "testing", "compliance"],
         allow_partial: true,
         review_demo_password: reviewPassword || undefined,
       });
