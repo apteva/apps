@@ -55,6 +55,21 @@ func TestManifestParses(t *testing.T) {
 	if !foundPublicPortal {
 		t.Fatal("member portal assets must be exposed as an anonymous GET /ui/ route")
 	}
+	wantStorefrontRoutes := map[string]bool{
+		"/portal/products":  false,
+		"/portal/products/": false,
+		"/store/":           false,
+	}
+	for _, route := range m.Provides.HTTPRoutes {
+		if _, ok := wantStorefrontRoutes[route.Prefix]; ok && route.Method == "GET" && route.NoAuth {
+			wantStorefrontRoutes[route.Prefix] = true
+		}
+	}
+	for route, found := range wantStorefrontRoutes {
+		if !found {
+			t.Errorf("public storefront route %q missing from manifest", route)
+		}
+	}
 	if !strings.Contains(m.Description, "/api/apps/community/_install/{install_id}/ui/portal/dist/index.html") {
 		t.Fatal("manifest must document the install-scoped portal URL so relative assets resolve anonymously")
 	}
