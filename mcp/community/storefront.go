@@ -145,6 +145,9 @@ func (a *App) httpStorefrontRoute(w http.ResponseWriter, r *http.Request) {
 			query.Set(key, value)
 		}
 	}
+	if query.Get("project_id") == "" && globalCtx != nil {
+		query.Set("project_id", scopeProject(globalCtx))
+	}
 	uiPath := "/ui/portal/dist/index.html"
 	if installID := strings.TrimSpace(r.Header.Get("X-Apteva-App-Install-ID")); installID != "" {
 		if _, err := strconv.ParseInt(installID, 10, 64); err == nil {

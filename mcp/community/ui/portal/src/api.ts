@@ -96,16 +96,24 @@ function projectScopedPath(path: string): string {
   return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
 }
 
+function communityPublicPath(path: string): string {
+  if (typeof window === "undefined") return `/api/apps/${encodeURIComponent(COMMUNITY_APP)}${path}`;
+  const escaped = COMMUNITY_APP.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = window.location.pathname.match(new RegExp(`/api/apps/${escaped}/_install/(\\d+)(?:/|$)`));
+  const selector = match?.[1] ? `/_install/${encodeURIComponent(match[1])}` : "";
+  return `/api/apps/${encodeURIComponent(COMMUNITY_APP)}${selector}${path}`;
+}
+
 const self = "self";
 
 export const api = {
   portal: {
     bootstrap: (community: string) =>
-      apteva.get<PortalBootstrap>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/bootstrap?community=${encodeURIComponent(community)}`)),
+      apteva.get<PortalBootstrap>(projectScopedPath(`${communityPublicPath("/portal/bootstrap")}?community=${encodeURIComponent(community)}`)),
     products: (community: string) =>
-      apteva.get<{ products: PublicProduct[]; count: number }>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/products?community=${encodeURIComponent(community)}`)),
+      apteva.get<{ products: PublicProduct[]; count: number }>(projectScopedPath(`${communityPublicPath("/portal/products")}?community=${encodeURIComponent(community)}`)),
     product: (community: string, slug: string) =>
-      apteva.get<{ product: PublicProduct }>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/products/${encodeURIComponent(slug)}?community=${encodeURIComponent(community)}`)),
+      apteva.get<{ product: PublicProduct }>(projectScopedPath(`${communityPublicPath(`/portal/products/${encodeURIComponent(slug)}`)}?community=${encodeURIComponent(community)}`)),
   },
   auth: {
     login: (body: { client_id: string; email: string; password: string; organization_slug?: string }) =>

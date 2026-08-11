@@ -98,7 +98,8 @@ func TestStorefrontCheckoutMapsPriceServerSide(t *testing.T) {
 }
 
 func TestStorefrontRouteRedirectsGenericSlugs(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/store/makecademy/checkout/all-courses?offer=92&project_id=p1", nil)
+	_, _ = newTestCtx(t)
+	req := httptest.NewRequest(http.MethodGet, "/store/makecademy/checkout/all-courses?offer=92", nil)
 	req.Header.Set("X-Apteva-App-Install-ID", "233")
 	rec := httptest.NewRecorder()
 	(&App{}).httpStorefrontRoute(rec, req)
@@ -109,7 +110,7 @@ func TestStorefrontRouteRedirectsGenericSlugs(t *testing.T) {
 	if !strings.HasPrefix(location, "/api/apps/community/_install/233/ui/portal/dist/index.html?") {
 		t.Fatalf("redirect lost app gateway prefix: %s", location)
 	}
-	for _, want := range []string{"community=makecademy", "product=all-courses", "intent=buy", "offer=92", "project_id=p1"} {
+	for _, want := range []string{"community=makecademy", "product=all-courses", "intent=buy", "offer=92", "project_id=test-proj"} {
 		if !strings.Contains(location, want) {
 			t.Fatalf("redirect missing %s: %s", want, location)
 		}
