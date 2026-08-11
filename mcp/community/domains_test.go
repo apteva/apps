@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -77,6 +78,16 @@ func TestCommunityDomainAttachAndDetachUseNativeIngressAndAuthOrigin(t *testing.
 	}
 	if len(platform.authCalls) != 1 || platform.authCalls[0]["client_id"] != "akc_makecademy" {
 		t.Fatalf("Auth origin add calls=%+v", platform.authCalls)
+	}
+	reconciled := make(chan struct{})
+	go func() {
+		reconcileCommunityDomains(ctx)
+		close(reconciled)
+	}()
+	select {
+	case <-reconciled:
+	case <-time.After(time.Second):
+		t.Fatal("domain reconciliation deadlocked while updating a configured community")
 	}
 
 	if _, err := toolCommunityDomainDetach(ctx, map[string]any{"community_id": community.ID}); err != nil {

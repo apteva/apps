@@ -374,12 +374,21 @@ func reconcileCommunityDomains(ctx *sdk.AppCtx) {
 		ctx.Logger().Warn("community domain reconciliation query failed", "err", err.Error())
 		return
 	}
-	defer rows.Close()
+	communities := []Community{}
 	for rows.Next() {
 		community, scanErr := scanCommunity(rows.Scan)
 		if scanErr != nil {
 			continue
 		}
+		communities = append(communities, community)
+	}
+	rowsErr := rows.Err()
+	_ = rows.Close()
+	if rowsErr != nil {
+		ctx.Logger().Warn("community domain reconciliation scan failed", "err", rowsErr.Error())
+		return
+	}
+	for _, community := range communities {
 		hostname := portalHostname(community.PortalHost)
 		if hostname == "" {
 			continue
