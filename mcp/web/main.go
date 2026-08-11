@@ -1,4 +1,4 @@
-// Web v0.2.5 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.6 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -149,7 +149,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools := []sdk.Tool{
 		{
 			Name:        "web_search",
-			Description: "Browser-backed web search. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: query, limit?, engine? (google|duckduckgo, default google), backend?, viewport?, visit_top? bool. Returns normalized JSON results.",
+			Description: "Browser-backed web search. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: query, limit?, engine? (google|duckduckgo, default google), backend?, viewport?, visit_top? bool. Returns normalized JSON results and browser requested_backend/effective_backend audit fields.",
 			InputSchema: schemaObject(map[string]any{
 				"query":     map[string]any{"type": "string"},
 				"limit":     map[string]any{"type": "integer"},
@@ -166,7 +166,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private).",
+			Description: "Open a URL in a browser session and extract rendered content. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
 				"url":        map[string]any{"type": "string"},
 				"formats":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
@@ -184,7 +184,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_crawl",
-			Description: "Browser-backed bounded crawl from one or more seed URLs. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url or urls, max_pages?, max_depth?, same_host?, backend?, store?.",
+			Description: "Browser-backed bounded crawl from one or more seed URLs. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url or urls, max_pages?, max_depth?, same_host?, backend?, store?. Page browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
 				"url":       map[string]any{"type": "string"},
 				"urls":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -203,7 +203,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_map",
-			Description: "Fast site map discovery from one or more seed URLs. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url or urls, max_pages?, max_depth?, same_host?, backend?, store?.",
+			Description: "Fast site map discovery from one or more seed URLs. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url or urls, max_pages?, max_depth?, same_host?, backend?, store?. Page browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
 				"url":       map[string]any{"type": "string"},
 				"urls":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -221,7 +221,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_research",
-			Description: "Multi-step browser-backed research. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: question, queries?, max_results?, max_sources?, backend?, snapshots?, store?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Returns extractive report JSON with citations and artifacts.",
+			Description: "Multi-step browser-backed research. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: question, queries?, max_results?, max_sources?, backend?, snapshots?, store?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Returns extractive report JSON with citations, artifacts, and per-source browser requested_backend/effective_backend audit fields.",
 			InputSchema: schemaObject(map[string]any{
 				"question":    map[string]any{"type": "string"},
 				"queries":     map[string]any{"type": "array", "maxItems": maxResearchQueries, "items": map[string]any{"type": "string"}},
@@ -240,7 +240,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_snapshot",
-			Description: "Capture visual evidence for a URL or existing computer session. Omit backend to use Web's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url? or session_id?, backend?, viewport?, label?, store?, visibility? (private|signed|public; default private), mode? (viewport|smart), query?, max_shots?, crop?, cookie_handling? (auto|off).",
+			Description: "Capture visual evidence for a URL or existing computer session. Omit backend to use Computer's configured default; otherwise use local, browserbase, steel, browser-engine, or service. Args: url? or session_id?, backend?, viewport?, label?, store?, visibility? (private|signed|public; default private), mode? (viewport|smart), query?, max_shots?, crop?, cookie_handling? (auto|off). Newly opened browser metadata returns requested_backend and effective_backend.",
 			InputSchema: schemaObject(map[string]any{
 				"url":             map[string]any{"type": "string"},
 				"session_id":      map[string]any{"type": "string"},
@@ -265,14 +265,16 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 
 type browserSession struct {
-	SessionID  string            `json:"session_id"`
-	Backend    string            `json:"backend"`
-	CurrentURL string            `json:"current_url"`
-	DebugURL   string            `json:"debug_url,omitempty"`
-	StreamURL  string            `json:"stream_url,omitempty"`
-	Width      int               `json:"width"`
-	Height     int               `json:"height"`
-	Proxy      browserProxyState `json:"proxy"`
+	SessionID        string            `json:"session_id"`
+	Backend          string            `json:"backend"`
+	RequestedBackend *string           `json:"requested_backend"`
+	EffectiveBackend string            `json:"effective_backend"`
+	CurrentURL       string            `json:"current_url"`
+	DebugURL         string            `json:"debug_url,omitempty"`
+	StreamURL        string            `json:"stream_url,omitempty"`
+	Width            int               `json:"width"`
+	Height           int               `json:"height"`
+	Proxy            browserProxyState `json:"proxy"`
 }
 
 type browserProxyState struct {
@@ -2010,11 +2012,13 @@ func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (
 		return nil, err
 	}
 	openArgs := map[string]any{"url": target}
-	if rawBackend := firstNonEmpty(stringArg(args, "backend"), configString(ctx, "default_backend")); rawBackend != "" {
+	requestedBackend := ""
+	if rawBackend := stringArg(args, "backend"); rawBackend != "" {
 		b := strings.ToLower(strings.TrimSpace(rawBackend))
 		if !validBrowserBackend(b) {
-			return nil, fmt.Errorf("unsupported browser backend %q; omit backend to use Web's configured default, or choose one of: local, browserbase, steel, browser-engine, service", rawBackend)
+			return nil, fmt.Errorf("unsupported browser backend %q; omit backend to use Computer's configured default, or choose one of: local, browserbase, steel, browser-engine, service", rawBackend)
 		}
+		requestedBackend = b
 		openArgs["backend"] = b
 	}
 	for _, key := range []string{"viewport", "environment", "context_id", "persist", "timeout", "proxy", "proxy_mode", "proxy_profile", "proxy_country", "proxy_sticky"} {
@@ -2024,11 +2028,23 @@ func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (
 	}
 	var out browserSession
 	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_open", withProjectID(ctx, openArgs), &out); err != nil {
+		if requestedBackend == "" {
+			return nil, fmt.Errorf("computer.browser_open using Computer's configured default failed: %w; configure Computer's default backend and provider binding", err)
+		}
 		return nil, fmt.Errorf("computer.browser_open: %w", err)
 	}
 	if out.SessionID == "" {
 		return nil, errors.New("computer.browser_open returned empty session_id")
 	}
+	out.Backend = strings.ToLower(strings.TrimSpace(out.Backend))
+	if out.Backend == "" {
+		a.closeBrowser(ctx, out.SessionID)
+		return nil, errors.New("computer.browser_open returned no effective backend; configure Computer's default backend and provider binding")
+	}
+	if requestedBackend != "" {
+		out.RequestedBackend = &requestedBackend
+	}
+	out.EffectiveBackend = out.Backend
 	return &out, nil
 }
 
@@ -2262,7 +2278,9 @@ func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) err
 }
 
 func cacheKey(kind string, args map[string]any) (string, string, error) {
-	cleaned := map[string]any{"kind": kind}
+	// Keep cached responses aligned with the browser audit schema and backend
+	// ownership rules introduced in Web v0.2.6.
+	cleaned := map[string]any{"kind": kind, "response_schema": "web-v0.2.6"}
 	for k, v := range args {
 		if strings.HasPrefix(k, "_") {
 			continue
@@ -3172,7 +3190,7 @@ func browserBackendSchema() map[string]any {
 	return map[string]any{
 		"type":        "string",
 		"enum":        []string{"local", "browserbase", "steel", "browser-engine", "service"},
-		"description": "Optional Computer backend override. Usually omit this field to use Web's configured default. Do not use auto, default, browser, computer, http, playwright, or camoufox.",
+		"description": "Optional Computer backend override. Usually omit this field so Computer selects its configured default. Do not use auto, default, browser, computer, http, playwright, or camoufox.",
 	}
 }
 

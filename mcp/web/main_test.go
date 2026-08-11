@@ -45,6 +45,9 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 	if !sameStrings(toolNames(fromFile.Provides.MCPTools), toolNames(fromEmbed.Provides.MCPTools)) {
 		t.Fatalf("tool drift: file=%v embed=%v", toolNames(fromFile.Provides.MCPTools), toolNames(fromEmbed.Provides.MCPTools))
 	}
+	if bytes.Contains(yamlBytes, []byte("name: default_backend")) {
+		t.Fatal("Web manifest must not expose a default backend; Computer owns the default")
+	}
 }
 
 func TestBrowserBackendsAreExplicitInEveryBrowserToolSchema(t *testing.T) {
@@ -71,7 +74,7 @@ func TestBrowserBackendsAreExplicitInEveryBrowserToolSchema(t *testing.T) {
 			t.Fatalf("%s backend enum=%v, want %v", tool.Name, got, wantBackends)
 		}
 		description := strings.ToLower(stringFromAny(backend["description"]))
-		if !strings.Contains(description, "omit") || !strings.Contains(description, "configured default") {
+		if !strings.Contains(description, "omit") || !strings.Contains(description, "computer") || !strings.Contains(description, "configured default") {
 			t.Fatalf("%s backend description is not actionable: %q", tool.Name, description)
 		}
 	}
@@ -103,14 +106,55 @@ func TestInventedBackendFailsBeforeComputerCall(t *testing.T) {
 func TestExplicitBackendIsNormalizedBeforeComputerCall(t *testing.T) {
 	plat := newFakePlatform()
 	ctx, app := newTestCtx(t, plat)
-	if _, err := app.toolExtract(ctx, map[string]any{
+	outAny, err := app.toolExtract(ctx, map[string]any{
 		"url": "https://example.com", "backend": "BrowserBase", "store": false, "cache": "bypass",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
 	open := plat.lastCall("computer", "browser_open")
 	if open["backend"] != "browserbase" {
 		t.Fatalf("backend=%v, want browserbase", open["backend"])
+	}
+	page := outAny.(map[string]any)["page"].(pageDoc)
+	if page.Browser.RequestedBackend == nil || *page.Browser.RequestedBackend != "browserbase" {
+		t.Fatalf("requested_backend=%v, want browserbase", page.Browser.RequestedBackend)
+	}
+	if page.Browser.EffectiveBackend != "browserbase" {
+		t.Fatalf("effective_backend=%q, want browserbase", page.Browser.EffectiveBackend)
+	}
+}
+
+func TestOmittedBackendAlwaysDefersToComputerDefault(t *testing.T) {
+	plat := newFakePlatform()
+	plat.openBackendOverride = "browserbase"
+	ctx, app := newTestCtx(t, plat, tk.WithConfig(map[string]string{
+		"allow_private_networks": "true",
+		"default_backend":        "steel",
+	}))
+	outAny, err := app.toolExtract(ctx, map[string]any{
+		"url": "https://example.com", "store": false, "cache": "bypass",
+	})
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	open := plat.lastCall("computer", "browser_open")
+	if backend, ok := open["backend"]; ok {
+		t.Fatalf("Web forwarded backend=%v; omission must defer to Computer", backend)
+	}
+	page := outAny.(map[string]any)["page"].(pageDoc)
+	if page.Browser.RequestedBackend != nil {
+		t.Fatalf("requested_backend=%v, want null", *page.Browser.RequestedBackend)
+	}
+	if page.Browser.EffectiveBackend != "browserbase" {
+		t.Fatalf("effective_backend=%q, want browserbase", page.Browser.EffectiveBackend)
+	}
+	encoded, err := json.Marshal(page.Browser)
+	if err != nil {
+		t.Fatalf("marshal browser metadata: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"requested_backend":null`)) || !bytes.Contains(encoded, []byte(`"effective_backend":"browserbase"`)) {
+		t.Fatalf("browser audit JSON=%s", encoded)
 	}
 }
 

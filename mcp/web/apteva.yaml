@@ -2,11 +2,15 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.5
+version: 0.2.6
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.6 makes Computer the sole default-backend authority. Web only forwards
+  explicit per-call overrides, reports requested and effective backends for
+  auditing, and no longer exposes a competing default_backend setting.
 
   v0.2.5 makes Computer backend selection explicit across every browser-backed
   tool. Agents are instructed to omit backend for the configured default, tool
@@ -105,9 +109,10 @@ provides:
       description: |
         Browser-backed web search. Args: query, limit?, engine? (google|duckduckgo, default google),
         backend?, viewport?, visit_top? bool, cache?, max_age?, cache_ttl?.
-        Omit backend to use Web's configured default. Valid explicit overrides
+        Omit backend to use Computer's configured default. Valid explicit overrides
         are local, browserbase, steel, browser-engine, and service.
-        Returns normalized JSON results with cache metadata.
+        Returns normalized JSON results with cache metadata and browser
+        requested_backend/effective_backend audit fields.
     - name: web_extract
       description: |
         Open a URL in a browser session, extract readable text, markdown,
@@ -115,30 +120,34 @@ provides:
         artifact. Args: url, formats?, backend?, viewport?, max_chars?,
         store? bool, snapshot? bool, visibility? (private|signed|public;
         defaults to private for snapshots), cache?, max_age?, cache_ttl?.
-        Omit backend to use Web's configured default; explicit overrides are
+        Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
+        Browser metadata reports requested_backend and effective_backend.
     - name: web_crawl
       description: |
         Browser-backed bounded crawl from one or more seed URLs. Args: url or
         urls, max_pages?, max_depth?, same_host?, backend?, store? bool,
         cache?, max_age?, cache_ttl?.
-        Omit backend to use Web's configured default; explicit overrides are
+        Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
+        Page browser metadata reports requested_backend and effective_backend.
     - name: web_map
       description: |
         Fast site map discovery from one or more seed URLs. Args: url or urls,
         max_pages?, max_depth?, same_host?, backend?, store? bool, cache?,
         max_age?, cache_ttl?.
-        Omit backend to use Web's configured default; explicit overrides are
+        Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
+        Page browser metadata reports requested_backend and effective_backend.
     - name: web_research
       description: |
         Multi-step browser-backed research. Args: question, queries?,
         max_results?, max_sources?, backend?, snapshots? bool, store? bool,
         visibility? (private|signed|public; defaults to private for snapshots),
         cache?, max_age?, cache_ttl?.
-        Omit backend to use Web's configured default; explicit overrides are
+        Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
+        Source browser metadata reports requested_backend and effective_backend.
         Returns an extractive report JSON with citations, sources, gaps, and
         artifacts.
     - name: web_snapshot
@@ -151,8 +160,9 @@ provides:
         query, auto-dismisses common cookie banners, and returns cropped shots. Snapshot cache is disabled unless
         max_age is set. Returns screenshot metadata, storage_id/url when stored,
         effective visibility, shots for smart mode, and session metadata.
-        Omit backend to use Web's configured default; explicit overrides are
+        Omit backend to use Computer's configured default; explicit overrides are
         limited to local, browserbase, steel, browser-engine, and service.
+        Newly opened browser metadata reports requested_backend and effective_backend.
     - name: web_extractor_save
       description: Create or update a reusable extractor definition and revision.
     - name: web_extractor_get
@@ -219,7 +229,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: web/v0.2.5
+    ref: web/v0.2.6
     entry: mcp/web
   port: 8080
   health_check: /health
@@ -234,10 +244,6 @@ config_schema:
     type: text
     default: google
     label: Default search engine
-  - name: default_backend
-    type: text
-    label: Default browser backend
-    description: "Optional computer backend override: local, browserbase, steel, browser-engine, or service."
   - name: max_pages
     type: number
     default: 25

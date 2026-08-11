@@ -88,12 +88,16 @@ images. It falls back to HTTP retrieval when the active Computer backend cannot
 expose DOM content. Check `extraction_backend` in tool responses when precision
 matters.
 
-Usually omit `backend`; Web then uses its configured Computer default. Only set
-it when the user explicitly needs a provider override. Valid values are
+Usually omit `backend`; Web then sends no provider choice and Computer selects
+its configured default. Web has no separate default-backend setting. Only set
+`backend` when the user explicitly needs a provider override. Valid values are
 `local`, `browserbase`, `steel`, `browser-engine`, and `service`. Values such as
 `auto`, `default`, `browser`, `computer`, `http`, `playwright`, and `camoufox`
 are not backends. If an explicit backend is unavailable, report that binding
 problem instead of guessing another name; retry once with the field omitted.
+Browser metadata includes `requested_backend` (`null` when omitted) and
+`effective_backend`, so use the effective value when auditing which provider
+actually ran the request.
 
 Prefer `store: true` for durable research, crawls, and snapshots. Use
 `snapshots: true` in `web_research` when the user needs visual proof.
