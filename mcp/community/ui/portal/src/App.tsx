@@ -16,7 +16,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
+import { loadStripe, type StripeCheckout, type StripePaymentElement } from "@stripe/stripe-js";
 import { type CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
@@ -750,6 +750,8 @@ export default function App() {
     setMemberships([]);
     setMembers([]);
     setSpaces([]);
+    setStorefrontCheckout(null);
+    automaticCheckoutStarted.current = false;
     setError("");
     setNotice("Signed out.");
     if (refreshToken) void api.auth.logout(refreshToken).catch(() => undefined);
@@ -963,23 +965,44 @@ export default function App() {
   }
 
   if (portal && publicProduct && !hasPaymentResult()) {
-    const accountPanel = !auth && storefrontAuthRequested && (authMode === "login" || authMode === "signup") ? (
-      <CheckoutAccountForm
-        mode={authMode}
-        form={authForm}
-        busy={busy}
-        error={error}
-        notice={notice}
-        signupEnabled={portal.signup.enabled}
-        brandName={brandName}
-        onChange={setAuthForm}
-        onSubmit={authenticate}
-        onModeChange={chooseStorefrontAuthMode}
-        onForgot={() => setAuthMode("forgot")}
-      />
-    ) : undefined;
-    const paymentPanel = auth && wantsCourseCheckout() && selectedStorefrontOffer ? (
-      storefrontCheckout?.client_secret && storefrontCheckout.publishable_key ? (
+    const accountPanel = auth && wantsCourseCheckout() ? (
+      <CheckoutAccountSummary auth={auth} onSignOut={logout} />
+    ) : !auth && storefrontAuthRequested && (authMode === "login" || authMode === "signup") ? (
+        <CheckoutAccountForm
+          mode={authMode}
+          form={authForm}
+          busy={busy}
+          error={error}
+          notice={notice}
+          signupEnabled={portal.signup.enabled}
+          brandName={brandName}
+          onChange={setAuthForm}
+          onSubmit={authenticate}
+          onModeChange={chooseStorefrontAuthMode}
+          onForgot={() => setAuthMode("forgot")}
+        />
+      ) : !auth && storefrontAuthRequested && authMode === "forgot" ? (
+        <CheckoutPasswordResetRequest
+          email={authForm.email}
+          busy={busy}
+          error={error}
+          notice={notice}
+          onEmailChange={(email) => setAuthForm((current) => ({ ...current, email }))}
+          onSubmit={requestPasswordReset}
+          onBack={() => chooseStorefrontAuthMode("login")}
+        />
+      ) : !auth && storefrontAuthRequested && authMode === "verify_pending" ? (
+        <CheckoutVerificationPending
+          email={authForm.email}
+          busy={busy}
+          error={error}
+          notice={notice}
+          onResend={resendVerification}
+          onBack={() => chooseStorefrontAuthMode("login")}
+        />
+      ) : undefined;
+    const paymentPanel = wantsCourseCheckout() && selectedStorefrontOffer ? (
+      !auth ? <CheckoutPaymentPending /> : storefrontCheckout?.client_secret && storefrontCheckout.publishable_key ? (
         <StripePaymentForm
           session={storefrontCheckout}
           returnURL={(() => {
@@ -1394,7 +1417,6 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
   const imageURL = storagePublicURL(product.image_file_id);
   const headline = product.storefront?.headline || product.name;
   const eyebrow = product.storefront?.eyebrow || product.category || (offers.some((offer) => offer.kind === "recurring") ? "Membership" : "Online course");
-  const stage = paymentPanel ? "payment" : accountPanel ? "account" : "offer";
   return (
     <main className="storefront-shell">
       <header className="storefront-header">
@@ -1432,10 +1454,10 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
         </div>
         <aside className="storefront-checkout" aria-label="Checkout">
           <div className="checkout-heading">
-            <p>{stage === "payment" ? "Payment details" : stage === "account" ? "Your account" : checkout ? "Complete your enrollment" : "Choose your access"}</p>
+            <p>{checkout ? "Complete your enrollment" : "Choose your access"}</p>
             {activeOffer && <strong>{formatPublicOffer(activeOffer)}</strong>}
           </div>
-          {stage !== "payment" && <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
+          <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
             {offers.map((offer) => {
               const selected = activeOffer?.catalog_price_id === offer.catalog_price_id;
               const saving = annualSaving(product, offer);
@@ -1446,8 +1468,8 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
               </button>;
             })}
             {offers.length === 0 && <div className="checkout-unavailable">This product is not currently available for purchase.</div>}
-          </div>}
-          {stage === "offer" && activeOffer && <button className="checkout-continue" onClick={() => onChoose(activeOffer)}>Continue <ArrowRight size={18} /></button>}
+          </div>
+          {!checkout && activeOffer && <button className="checkout-continue" onClick={() => onChoose(activeOffer)}>Enroll now <ArrowRight size={18} /></button>}
           {accountPanel}
           {paymentPanel}
           <div className="checkout-trust"><LockKeyhole size={15} /><span><strong>Secure checkout</strong><small>Payments are encrypted and processed by Stripe.</small></span></div>
@@ -1480,10 +1502,62 @@ function CheckoutAccountForm({ mode, form, busy, error, notice, signupEnabled, b
       {mode === "signup" && <Field label="Name" id="checkout-name"><input id="checkout-name" value={form.display_name} onChange={(event) => onChange({ ...form, display_name: event.target.value })} autoComplete="name" placeholder="Your name" /></Field>}
       <Field label="Email address" id="checkout-email"><input id="checkout-email" type="email" value={form.email} onChange={(event) => onChange({ ...form, email: event.target.value })} autoComplete="email" placeholder="you@example.com" required /></Field>
       <Field label="Password" id="checkout-password"><input id="checkout-password" type="password" value={form.password} onChange={(event) => onChange({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required /></Field>
-      <button className="checkout-continue" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in and continue" : "Create account and continue"}<ArrowRight size={18} /></button>
+      <button className="checkout-account-action" disabled={busy}>{busy ? "Preparing your account…" : mode === "login" ? "Sign in" : "Create account"}</button>
     </form>
     {mode === "login" && <button className="checkout-link" onClick={onForgot}>Forgot your password?</button>}
     {signupEnabled && <button className="checkout-switch" onClick={() => onModeChange(mode === "login" ? "signup" : "login")}>{mode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button>}
+  </section>;
+}
+
+function CheckoutAccountSummary({ auth, onSignOut }: { auth: AuthResponse; onSignOut: () => void }) {
+  return <section className="checkout-account checkout-account-ready">
+    <div className="checkout-section-title"><CheckCircle2 size={18} /><div><strong>Account ready</strong><small>{auth.user.email}</small></div></div>
+    <button type="button" className="checkout-link" onClick={onSignOut}>Use a different account</button>
+  </section>;
+}
+
+function CheckoutPasswordResetRequest({ email, busy, error, notice, onEmailChange, onSubmit, onBack }: {
+  email: string;
+  busy: boolean;
+  error: string;
+  notice: string;
+  onEmailChange: (email: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onBack: () => void;
+}) {
+  return <section className="checkout-account">
+    <div className="checkout-section-title"><UserRound size={18} /><div><strong>Reset your password</strong><small>We’ll email you a secure reset link.</small></div></div>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {notice && <div className="alert success" role="status">{notice}</div>}
+    <form className="checkout-form" onSubmit={onSubmit}>
+      <Field label="Email address" id="checkout-reset-email"><input id="checkout-reset-email" type="email" value={email} onChange={(event) => onEmailChange(event.target.value)} autoComplete="email" placeholder="you@example.com" required /></Field>
+      <button className="checkout-account-action" disabled={busy}>{busy ? "Sending…" : "Send reset link"}</button>
+    </form>
+    <button type="button" className="checkout-link" onClick={onBack}>Back to sign in</button>
+  </section>;
+}
+
+function CheckoutVerificationPending({ email, busy, error, notice, onResend, onBack }: {
+  email: string;
+  busy: boolean;
+  error: string;
+  notice: string;
+  onResend: () => void;
+  onBack: () => void;
+}) {
+  return <section className="checkout-account">
+    <div className="checkout-section-title"><UserRound size={18} /><div><strong>Check your email</strong><small>Open the verification link sent to {email}. This checkout will stay here for you.</small></div></div>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {notice && <div className="alert success" role="status">{notice}</div>}
+    <button type="button" className="checkout-account-action" disabled={busy} onClick={onResend}>{busy ? "Sending…" : "Send another link"}</button>
+    <button type="button" className="checkout-link" onClick={onBack}>Back to sign in</button>
+  </section>;
+}
+
+function CheckoutPaymentPending() {
+  return <section className="stripe-payment checkout-payment-pending" aria-label="Payment details">
+    <div className="checkout-section-title"><CreditCard size={18} /><div><strong>Payment details</strong><small>Your secure Stripe payment form will load here as soon as your account is ready.</small></div></div>
+    <div className="checkout-payment-skeleton" aria-hidden="true"><span /><span /><span /></div>
   </section>;
 }
 
@@ -1499,43 +1573,43 @@ function StripePaymentForm({ session, returnURL, busy, error, onError }: {
   onError: (message: string) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
-  const stripeRef = useRef<Stripe | null>(null);
-  const elementsRef = useRef<StripeElements | null>(null);
+  const checkoutRef = useRef<StripeCheckout | null>(null);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     let paymentElement: StripePaymentElement | undefined;
-    void loadStripe(session.publishable_key || "").then((stripe) => {
+    setReady(false);
+    void loadStripe(session.publishable_key || "").then(async (stripe) => {
       if (cancelled || !stripe || !mountRef.current || !session.client_secret) return;
-      const elements = stripe.elements({
-        clientSecret: session.client_secret,
-        appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
+      const checkout = await stripe.initCheckout({
+        fetchClientSecret: async () => session.client_secret || "",
+        elementsOptions: {
+          appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
+        },
       });
-      paymentElement = elements.create("payment", { layout: "tabs" });
-      paymentElement.on("ready", () => setReady(true));
+      if (cancelled) return;
+      checkout.on("change", (state) => setReady(state.canConfirm));
+      paymentElement = checkout.createPaymentElement({ layout: "tabs" });
       paymentElement.mount(mountRef.current);
-      stripeRef.current = stripe;
-      elementsRef.current = elements;
+      checkoutRef.current = checkout;
+      setReady(checkout.session().canConfirm);
     }).catch(() => onError("Secure payment could not be loaded. Please refresh and try again."));
     return () => {
       cancelled = true;
+      checkoutRef.current = null;
       paymentElement?.destroy();
     };
   }, [onError, session.client_secret, session.publishable_key]);
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();
-    if (!stripeRef.current || !elementsRef.current) return;
+    if (!checkoutRef.current) return;
     setSubmitting(true);
     onError("");
-    const result = await stripeRef.current.confirmPayment({
-      elements: elementsRef.current,
-      confirmParams: { return_url: returnURL },
-      redirect: "if_required",
-    });
-    if (result.error) {
+    const result = await checkoutRef.current.confirm({ returnUrl: returnURL, redirect: "if_required" });
+    if (result.type === "error") {
       onError(result.error.message || "Payment could not be completed. Please check your details and try again.");
       setSubmitting(false);
       return;
@@ -1548,7 +1622,7 @@ function StripePaymentForm({ session, returnURL, busy, error, onError }: {
     <div ref={mountRef} className="stripe-element" />
     {error && <div className="alert error" role="alert">{error}</div>}
     {!ready && <div className="stripe-loading"><RefreshCcw className="spin" size={16} /> Loading secure payment…</div>}
-    <button className="checkout-pay" disabled={!ready || submitting || busy}>{submitting ? "Processing…" : "Complete secure payment"}<LockKeyhole size={17} /></button>
+    <button className="checkout-pay" disabled={!ready || submitting || busy}>{submitting ? "Processing…" : "Pay securely"}<LockKeyhole size={17} /></button>
   </form>;
 }
 

@@ -121,6 +121,30 @@ func TestPortalAuthRoutesAreProjectScoped(t *testing.T) {
 	}
 }
 
+func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
+	source, err := os.ReadFile("ui/portal/src/App.tsx")
+	if err != nil {
+		t.Fatalf("read portal source: %v", err)
+	}
+	text := string(source)
+	for _, required := range []string{
+		"CheckoutAccountSummary",
+		"CheckoutPaymentPending",
+		"stripe.initCheckout",
+		"checkout.createPaymentElement",
+		"checkoutRef.current.confirm",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("inline storefront checkout missing %q", required)
+		}
+	}
+	for _, stagedCopy := range []string{"Create account and continue", "Sign in and continue"} {
+		if strings.Contains(text, stagedCopy) {
+			t.Errorf("storefront must not present staged checkout copy %q", stagedCopy)
+		}
+	}
+}
+
 // TestToolSetMatchesManifest catches forgetting to wire a manifest-
 // declared MCP tool into MCPTools(). The platform displays manifest
 // tools to operators; missing handlers manifest as "tool not found"
