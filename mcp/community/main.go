@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.11.3
+version: 0.12.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -49,6 +49,12 @@ description: |
   Its public storefront projects only Catalog products actively offered by
   each community, groups one-time and recurring prices under generic product
   routes, and shows published course entitlements before authentication.
+  Operators can explicitly mark published lessons as public samples; the
+  storefront exposes a safe lesson projection and short-lived Storage video
+  URLs without comments, progress, assessments, resources, or member data.
+  Reusable instructor profiles support ordered multi-instructor courses,
+  primary instructors, Storage avatars, public biographies, credentials,
+  links, accomplishments, and live teaching statistics.
   Community uses Checkout for durable guest carts and immediate deferred
   Stripe Elements rendering, then creates and claims the Billing invoice only
   after verified authentication into either a
@@ -131,6 +137,7 @@ provides:
     - { prefix: /portal/bootstrap, method: GET, no_auth: true }
     - { prefix: /portal/products, method: GET, no_auth: true }
     - { prefix: /portal/products/, method: GET, no_auth: true }
+    - { prefix: /portal/previews/, method: GET, no_auth: true }
     - { prefix: /portal/checkout/prepare, method: POST, no_auth: true }
     - { prefix: /store/, method: GET, no_auth: true }
   mcp_tools:
@@ -174,13 +181,20 @@ provides:
     - { name: sections_delete,     description: "Delete a course section and its lessons." }
     - { name: sections_reorder,    description: "Reorder sections within a course." }
     - { name: lessons_create,      description: "Create a lesson inside a section." }
-    - { name: lessons_update,      description: "Update a lesson's title or body." }
+    - { name: lessons_update,      description: "Update a lesson's title, body, or public preview state." }
     - { name: lessons_delete,      description: "Delete a lesson." }
     - { name: lessons_publish,     description: "Set or clear a lesson's published_at timestamp." }
     - { name: lessons_reorder,     description: "Reorder lessons within a section." }
     - { name: lessons_list,        description: "List lessons in a course." }
     - { name: lessons_get,         description: "Fetch one lesson with full body + caller progress." }
     - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video." }
+    - { name: instructor_profiles_create, description: "Create a reusable instructor profile in a community." }
+    - { name: instructor_profiles_update, description: "Update an instructor profile." }
+    - { name: instructor_profiles_get, description: "Fetch an instructor profile with calculated teaching statistics." }
+    - { name: instructor_profiles_list, description: "List instructor profiles in a community." }
+    - { name: instructor_profiles_archive, description: "Archive an instructor profile, optionally removing course assignments." }
+    - { name: course_instructors_set, description: "Set a course's ordered instructor profiles and primary instructor." }
+    - { name: course_instructors_get, description: "Get a course's instructor profiles and calculated statistics." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
     - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
@@ -342,6 +356,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/portal/bootstrap", Handler: a.httpPortalBootstrap, NoAuth: true},
 		{Method: "GET", Pattern: "/portal/products", Handler: a.httpPortalProducts, NoAuth: true},
 		{Method: "GET", Pattern: "/portal/products/", Handler: a.httpPortalProduct, NoAuth: true},
+		{Method: "GET", Pattern: "/portal/previews/", Handler: a.httpPortalLessonPreview, NoAuth: true},
 		{Method: "POST", Pattern: "/portal/checkout/prepare", Handler: a.httpPortalCheckoutPrepare, NoAuth: true},
 		{Method: "GET", Pattern: "/store/", Handler: a.httpStorefrontRoute, NoAuth: true},
 		{Pattern: "/api/", Handler: a.httpPortalGatewayBridge},
@@ -369,6 +384,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, postsTools()...)
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
+	tools = append(tools, instructorTools()...)
 	tools = append(tools, courseSalesTools()...)
 	tools = append(tools, membershipTools()...)
 	tools = append(tools, storefrontTools()...)

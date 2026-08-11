@@ -167,6 +167,7 @@ interface Lesson {
   body: string;
   video_storage_key?: string;
   video_duration_seconds?: number;
+  preview_enabled: boolean;
   position: number;
   published_at?: string;
   progress?: LessonProgress;
@@ -191,6 +192,41 @@ interface CoursePurchase {
   unit_amount_cents: number;
   currency: string;
   created_at: string;
+}
+
+interface InstructorStatistics {
+  courses_taught: number;
+  published_lessons: number;
+  active_students: number;
+  completed_students: number;
+}
+
+interface InstructorLink {
+  label: string;
+  url: string;
+}
+
+interface InstructorProfile {
+  id: string;
+  community_id: string;
+  member_id?: string;
+  display_name: string;
+  avatar_storage_file_id?: string;
+  professional_title: string;
+  sales_bio: string;
+  credentials: string[];
+  links: InstructorLink[];
+  accomplishments: string[];
+  public_visible: boolean;
+  statistics?: InstructorStatistics;
+}
+
+interface CourseInstructorsResult {
+  space_id: string;
+  instructors: InstructorProfile[];
+  instructor_ids: string[];
+  primary_instructor_id?: string;
+  legacy_instructor_name?: string;
 }
 
 interface MembershipPlan {
@@ -248,6 +284,9 @@ type DialogKind =
   | "community"
   | "portal"
   | "member"
+  | "instructor"
+  | "edit_instructor"
+  | "course_instructors"
   | "space"
   | "course"
   | "thread"
@@ -355,6 +394,8 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   const [communityId, setCommunityId] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [memberId, setMemberId] = useState<string>("");
+  const [instructors, setInstructors] = useState<InstructorProfile[]>([]);
+  const [instructorId, setInstructorId] = useState<string | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [spaceId, setSpaceId] = useState<string | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -364,6 +405,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   const [lessons, setLessons] = useState<Lesson[]>([]);
   const [courseOffer, setCourseOffer] = useState<CourseOffer | null>(null);
   const [coursePurchases, setCoursePurchases] = useState<CoursePurchase[]>([]);
+  const [courseInstructors, setCourseInstructors] = useState<CourseInstructorsResult | null>(null);
   const [membershipPlans, setMembershipPlans] = useState<MembershipPlan[]>([]);
   const [memberSubscriptions, setMemberSubscriptions] = useState<MemberSubscription[]>([]);
   const [lessonId, setLessonId] = useState<string | null>(null);
@@ -410,6 +452,21 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
     return d.spaces || [];
   }, [projectId]);
 
+  const refreshInstructors = useCallback(async (cid: string) => {
+    const d = await callTool<{ instructors: InstructorProfile[] }>(
+      "instructor_profiles_list",
+      { community_id: cid },
+      projectId,
+    );
+    setInstructors(d.instructors || []);
+    setInstructorId((prev) =>
+      prev && d.instructors.some((profile) => profile.id === prev)
+        ? prev
+        : d.instructors[0]?.id ?? null,
+    );
+    return d.instructors || [];
+  }, [projectId]);
+
   const refreshMemberships = useCallback(async (cid: string) => {
     const [plansOut, subscriptionsOut] = await Promise.all([
       callTool<{ plans: MembershipPlan[] }>("membership_plans_list", { community_id: cid }, projectId),
@@ -432,7 +489,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   }, [projectId]);
 
   const refreshCourse = useCallback(async (sid: string) => {
-    const [s, l, offerOut, purchasesOut] = await Promise.all([
+    const [s, l, offerOut, purchasesOut, instructorsOut] = await Promise.all([
       getJSON<{ sections: Section[] }>(
         `/sections?space_id=${encodeURIComponent(sid)}`,
         projectId,
@@ -443,11 +500,13 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
       ),
       callTool<{ offer: CourseOffer | null }>("course_offer_get", { space_id: sid }, projectId),
       callTool<{ purchases: CoursePurchase[] }>("course_purchases_list", { space_id: sid, limit: 100 }, projectId),
+      callTool<CourseInstructorsResult>("course_instructors_get", { space_id: sid }, projectId),
     ]);
     setSections(s.sections || []);
     setLessons(l.lessons || []);
     setCourseOffer(offerOut.offer || null);
     setCoursePurchases(purchasesOut.purchases || []);
+    setCourseInstructors(instructorsOut);
     setLessonId((prev) =>
       prev && l.lessons.some((x) => x.id === prev) ? prev : l.lessons[0]?.id ?? null,
     );
@@ -471,15 +530,22 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
     if (!communityId) {
       setMembers([]);
       setSpaces([]);
+      setInstructors([]);
+      setInstructorId(null);
       setMembershipPlans([]);
       setMemberSubscriptions([]);
       setSpaceId(null);
       return;
     }
-    Promise.all([refreshMembers(communityId), refreshSpaces(communityId), refreshMemberships(communityId)]).catch((e) =>
+    Promise.all([
+      refreshMembers(communityId),
+      refreshInstructors(communityId),
+      refreshSpaces(communityId),
+      refreshMemberships(communityId),
+    ]).catch((e) =>
       fail("Load community", e),
     );
-  }, [communityId, refreshMembers, refreshSpaces, refreshMemberships, fail]);
+  }, [communityId, refreshMembers, refreshInstructors, refreshSpaces, refreshMemberships, fail]);
 
   const activeCommunity = useMemo(
     () => communities.find((c) => c.id === communityId) ?? null,
@@ -506,6 +572,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
       setLessons([]);
       setCourseOffer(null);
       setCoursePurchases([]);
+      setCourseInstructors(null);
       setLessonId(null);
       return;
     }
@@ -538,6 +605,9 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
       if (t.startsWith("community.member.")) {
         refreshMembers(communityId).catch(() => {});
       }
+      if (t.startsWith("community.instructor.")) {
+        refreshInstructors(communityId).catch(() => {});
+      }
       if (t.startsWith("community.membership.")) {
         refreshMemberships(communityId).catch(() => {});
       }
@@ -568,6 +638,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           t.startsWith("community.course.offer") ||
           t.startsWith("community.course.purchase") ||
           t.startsWith("community.course.refund") ||
+          t === "community.course.instructors_updated" ||
           t.startsWith("community.course.access"))
       ) {
         refreshCourse(spaceId).catch(() => {});
@@ -582,6 +653,10 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   const activeLesson = useMemo(
     () => lessons.find((l) => l.id === lessonId) ?? null,
     [lessons, lessonId],
+  );
+  const activeInstructor = useMemo(
+    () => instructors.find((profile) => profile.id === instructorId) ?? null,
+    [instructors, instructorId],
   );
   const lessonsBySection = useMemo(() => {
     const m: Record<string, Lesson[]> = {};
@@ -684,6 +759,43 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
 
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center justify-between gap-2">
+            <div className="text-text-muted text-xs uppercase tracking-wide">Instructors</div>
+            <button
+              className={buttonClass("ghost")}
+              disabled={!communityId}
+              onClick={() => setDialog("instructor")}
+            >
+              + Instructor
+            </button>
+          </div>
+          {instructors.length === 0 ? (
+            <div className="text-xs text-text-muted">No instructor profiles.</div>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex gap-1">
+                <select
+                  className="min-w-0 flex-1 bg-bg-secondary border border-border rounded px-2 py-1.5 text-sm"
+                  value={instructorId || ""}
+                  onChange={(event) => setInstructorId(event.target.value || null)}
+                >
+                  {instructors.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.display_name}</option>
+                  ))}
+                </select>
+                <button className={buttonClass()} disabled={!activeInstructor} onClick={() => setDialog("edit_instructor")}>Edit</button>
+              </div>
+              {activeInstructor ? (
+                <div className="truncate text-xs text-text-muted">
+                  {activeInstructor.professional_title || "Instructor"} · {activeInstructor.statistics?.courses_taught || 0} courses
+                  {!activeInstructor.public_visible ? " · private" : ""}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="p-3 border-b border-border space-y-2">
+          <div className="flex items-center justify-between gap-2">
             <div>
               <div className="text-text-muted text-xs uppercase tracking-wide">Memberships</div>
               <div className="text-xs text-text-muted">{memberSubscriptions.filter((s) => s.status === "active" || s.status === "trialing").length} active</div>
@@ -763,7 +875,10 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
             </div>
           </div>
           {isCourseSpace ? (
-            <div className="flex gap-2">
+            <div className="flex flex-wrap justify-end gap-2">
+              <button className={buttonClass()} onClick={() => setDialog("course_instructors")}>
+                Instructors{courseInstructors?.instructor_ids.length ? ` (${courseInstructors.instructor_ids.length})` : ""}
+              </button>
               <button className={buttonClass()} onClick={() => setDialog("offer")}>
                 {courseOffer?.active ? "Edit sale" : "Configure sale"}
               </button>
@@ -822,6 +937,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
                             />
                             <span className="text-sm truncate flex-1">{l.title}</span>
                             {!l.published_at ? <span className="text-xs text-text-muted">draft</span> : null}
+                            {l.preview_enabled ? <span className="text-xs text-accent">sample</span> : null}
                             {l.video_duration_seconds ? (
                               <span className="text-xs text-text-muted">{formatDuration(l.video_duration_seconds)}</span>
                             ) : null}
@@ -942,6 +1058,11 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
                   <span className="px-2 py-1 rounded border border-border text-text-muted">
                     {activeLesson.published_at ? "Published" : "Draft"}
                   </span>
+                  {activeLesson.preview_enabled ? (
+                    <span className="px-2 py-1 rounded border border-accent text-accent">
+                      Public sample{activeLesson.published_at ? "" : " when published"}
+                    </span>
+                  ) : null}
                   {activeLesson.video_storage_key ? (
                     <span className="px-2 py-1 rounded border border-border text-text-muted">
                       Video {activeLesson.video_duration_seconds ? formatDuration(activeLesson.video_duration_seconds) : "attached"}
@@ -1021,6 +1142,10 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           space={activeSpace}
           sections={sections}
           spaces={spaces}
+          members={members}
+          instructors={instructors}
+          instructor={activeInstructor}
+          courseInstructors={courseInstructors}
           lesson={activeLesson}
           offer={courseOffer}
           initialSectionId={newLessonSectionId}
@@ -1031,11 +1156,17 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
             setDialog(null);
             if (target.communityId) setCommunityId(target.communityId);
             if (target.memberId) setMemberId(target.memberId);
+            if (target.instructorId) setInstructorId(target.instructorId);
             if (target.spaceId) setSpaceId(target.spaceId);
             if (target.threadId) setThreadId(target.threadId);
             if (target.lessonId) setLessonId(target.lessonId);
             if (communityId) {
-              await Promise.all([refreshMembers(communityId), refreshSpaces(communityId), refreshMemberships(communityId)]);
+              await Promise.all([
+                refreshMembers(communityId),
+                refreshInstructors(communityId),
+                refreshSpaces(communityId),
+                refreshMemberships(communityId),
+              ]);
             } else {
               await refreshCommunities();
             }
@@ -1046,7 +1177,10 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
               dialog === "lesson" ||
               dialog === "edit_lesson" ||
               dialog === "video" ||
-              dialog === "offer";
+              dialog === "offer" ||
+              dialog === "instructor" ||
+              dialog === "edit_instructor" ||
+              dialog === "course_instructors";
             if (createdCourseContent && (target.spaceId || spaceId)) {
               await refreshCourse(target.spaceId || spaceId!);
             } else if (target.spaceId || spaceId) {
@@ -1054,6 +1188,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
             }
             if (target.communityId) setCommunityId(target.communityId);
             if (target.memberId) setMemberId(target.memberId);
+            if (target.instructorId) setInstructorId(target.instructorId);
             if (target.spaceId) setSpaceId(target.spaceId);
             if (target.threadId) setThreadId(target.threadId);
             if (target.lessonId) setLessonId(target.lessonId);
@@ -1134,7 +1269,7 @@ function DialogShell({
         aria-labelledby="community-dialog-title"
         tabIndex={-1}
         onKeyDown={handleKeyDown}
-        className="w-full max-w-xl bg-bg border border-border rounded shadow-xl outline-none"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col bg-bg border border-border rounded shadow-xl outline-none"
       >
         <header className="px-4 py-3 border-b border-border flex items-center justify-between">
           <div id="community-dialog-title" className="font-medium">{title}</div>
@@ -1142,7 +1277,7 @@ function DialogShell({
             Close
           </button>
         </header>
-        <div className="p-4">{children}</div>
+        <div className="overflow-y-auto p-4">{children}</div>
       </div>
     </div>
   );
@@ -1171,6 +1306,10 @@ function CommunityDialog({
   space,
   sections,
   spaces,
+  members,
+  instructors,
+  instructor,
+  courseInstructors,
   lesson,
   offer,
   initialSectionId,
@@ -1185,6 +1324,10 @@ function CommunityDialog({
   space: Space | null;
   sections: Section[];
   spaces: Space[];
+  members: Member[];
+  instructors: InstructorProfile[];
+  instructor: InstructorProfile | null;
+  courseInstructors: CourseInstructorsResult | null;
   lesson: Lesson | null;
   offer: CourseOffer | null;
   initialSectionId: string;
@@ -1192,11 +1335,19 @@ function CommunityDialog({
   projectId: string;
   runTool: <T,>(label: string, tool: string, args: Record<string, unknown>) => Promise<T>;
   onClose: () => void;
-  onCreated: (target: { communityId?: string; memberId?: string; spaceId?: string; threadId?: string; lessonId?: string }) => Promise<void>;
+  onCreated: (target: { communityId?: string; memberId?: string; instructorId?: string; spaceId?: string; threadId?: string; lessonId?: string }) => Promise<void>;
 }) {
-  const [name, setName] = useState(kind === "edit_lesson" ? lesson?.title || "" : "");
+  const [name, setName] = useState(
+    kind === "edit_lesson"
+      ? lesson?.title || ""
+      : kind === "edit_instructor"
+      ? instructor?.display_name || ""
+      : "",
+  );
   const [slug, setSlug] = useState("");
-  const [description, setDescription] = useState("");
+  const [description, setDescription] = useState(
+    kind === "edit_instructor" ? instructor?.sales_bio || "" : "",
+  );
   const [authClientId, setAuthClientId] = useState(community?.auth_client_id || "");
   const [authOrganizationId, setAuthOrganizationId] = useState(community?.auth_organization_id || "");
   const [authOrganizationSlug, setAuthOrganizationSlug] = useState(community?.auth_organization_slug || "");
@@ -1209,11 +1360,27 @@ function CommunityDialog({
   const [signupMode, setSignupMode] = useState<"open" | "closed">(community?.signup_mode || "open");
   const [autoCreateMembers, setAutoCreateMembers] = useState(community?.auto_create_members ?? true);
   const [authUserId, setAuthUserId] = useState("");
+  const [linkedMemberId, setLinkedMemberId] = useState(instructor?.member_id || "");
+  const [avatarStorageFileId, setAvatarStorageFileId] = useState(instructor?.avatar_storage_file_id || "");
+  const [professionalTitle, setProfessionalTitle] = useState(instructor?.professional_title || "");
+  const [credentialsText, setCredentialsText] = useState((instructor?.credentials || []).join("\n"));
+  const [accomplishmentsText, setAccomplishmentsText] = useState((instructor?.accomplishments || []).join("\n"));
+  const [linksText, setLinksText] = useState(
+    (instructor?.links || []).map((link) => `${link.label || "Link"} | ${link.url}`).join("\n"),
+  );
+  const [publicVisible, setPublicVisible] = useState(instructor?.public_visible ?? true);
+  const [selectedInstructorIds, setSelectedInstructorIds] = useState<string[]>(
+    courseInstructors?.instructor_ids || [],
+  );
+  const [primaryInstructorId, setPrimaryInstructorId] = useState(
+    courseInstructors?.primary_instructor_id || courseInstructors?.instructor_ids[0] || "",
+  );
   const [visibility, setVisibility] = useState<"members" | "public">("members");
   const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
   const [sectionId, setSectionId] = useState(initialSectionId || sections[0]?.id || "");
   const [body, setBody] = useState(kind === "edit_lesson" ? lesson?.body || "" : "");
   const [published, setPublished] = useState(Boolean(lesson?.published_at));
+  const [previewEnabled, setPreviewEnabled] = useState(Boolean(lesson?.preview_enabled));
   const [storageKey, setStorageKey] = useState("");
   const [duration, setDuration] = useState("");
   const [catalogPriceId, setCatalogPriceId] = useState(offer?.catalog_price_id ? String(offer.catalog_price_id) : "");
@@ -1284,6 +1451,27 @@ function CommunityDialog({
     }
   };
 
+  const archiveInstructor = async () => {
+    if (kind !== "edit_instructor" || !instructor) return;
+    const confirmed = window.confirm(
+      `Archive ${instructor.display_name}? This hides the profile and removes it from every assigned course.`,
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    setError("");
+    try {
+      await runTool("Archive instructor", "instructor_profiles_archive", {
+        id: instructor.id,
+        force: true,
+      });
+      await onCreated({});
+    } catch (archiveError) {
+      setError((archiveError as Error).message || String(archiveError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const title =
     kind === "community"
       ? "New community"
@@ -1291,6 +1479,12 @@ function CommunityDialog({
       ? "Client portal settings"
       : kind === "member"
       ? "New member"
+      : kind === "instructor"
+      ? "New instructor profile"
+      : kind === "edit_instructor"
+      ? "Edit instructor profile"
+      : kind === "course_instructors"
+      ? "Course instructors"
       : kind === "course"
       ? "New course"
       : kind === "space"
@@ -1351,6 +1545,51 @@ function CommunityDialog({
           auth_user_id: authUserId.trim() || undefined,
         });
         await onCreated({ memberId: out.id });
+      } else if (kind === "instructor" || kind === "edit_instructor") {
+        if (!community) throw new Error("Choose a community first");
+        const links = linksText
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line, index) => {
+            const separator = line.indexOf("|");
+            const label = separator >= 0 ? line.slice(0, separator).trim() : "Link";
+            const url = (separator >= 0 ? line.slice(separator + 1) : line).trim();
+            if (!url) throw new Error(`Link ${index + 1} needs a URL`);
+            return { label: label || "Link", url };
+          });
+        const profileArgs = {
+          display_name: name.trim(),
+          member_id: linkedMemberId,
+          avatar_storage_file_id: avatarStorageFileId.trim(),
+          professional_title: professionalTitle.trim(),
+          sales_bio: description.trim(),
+          credentials: credentialsText.split("\n").map((value) => value.trim()).filter(Boolean),
+          accomplishments: accomplishmentsText.split("\n").map((value) => value.trim()).filter(Boolean),
+          links,
+          public_visible: publicVisible,
+        };
+        const out = kind === "instructor"
+          ? await runTool<InstructorProfile>("Create instructor", "instructor_profiles_create", {
+              community_id: community.id,
+              ...profileArgs,
+            })
+          : await runTool<InstructorProfile>("Update instructor", "instructor_profiles_update", {
+              id: instructor?.id,
+              ...profileArgs,
+            });
+        await onCreated({ instructorId: out.id });
+      } else if (kind === "course_instructors") {
+        if (!space) throw new Error("Choose a course first");
+        const primary = selectedInstructorIds.includes(primaryInstructorId)
+          ? primaryInstructorId
+          : selectedInstructorIds[0] || "";
+        await runTool<CourseInstructorsResult>("Save course instructors", "course_instructors_set", {
+          space_id: space.id,
+          instructor_ids: selectedInstructorIds,
+          primary_instructor_id: primary,
+        });
+        await onCreated({ spaceId: space.id });
       } else if (kind === "space" || kind === "course") {
         const tool = kind === "course" ? "courses_create" : "spaces_create";
         const out = await runTool<Space>(kind === "course" ? "Create course" : "Create space", tool, {
@@ -1372,6 +1611,7 @@ function CommunityDialog({
           section_id: sectionId,
           title: name,
           body,
+          preview_enabled: previewEnabled,
         });
         if (published) {
           await runTool<Lesson>("Publish lesson", "lessons_publish", {
@@ -1385,6 +1625,7 @@ function CommunityDialog({
           id: lesson.id,
           title: name,
           body,
+          preview_enabled: previewEnabled,
         });
         if (published !== Boolean(lesson.published_at)) {
           await runTool<Lesson>("Update publish state", "lessons_publish", {
@@ -1452,6 +1693,8 @@ function CommunityDialog({
       ? Number.isInteger(Number(catalogPriceId)) && Number(catalogPriceId) > 0
       : kind === "video"
       ? Boolean(storageKey.trim())
+      : kind === "course_instructors"
+      ? true
       : kind === "lesson"
       ? Boolean(name.trim() && sectionId)
       : kind === "edit_lesson"
@@ -1473,8 +1716,8 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind !== "video" && kind !== "offer" && kind !== "portal" ? (
-          <Field label={kind === "member" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
+        {kind !== "video" && kind !== "offer" && kind !== "portal" && kind !== "course_instructors" ? (
+          <Field label={kind === "member" || kind === "instructor" || kind === "edit_instructor" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
             <input
               className={inputClass}
               value={name}
@@ -1514,10 +1757,125 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind === "community" || kind === "member" || kind === "membership_plan" ? (
-          <Field label={kind === "community" ? "Description" : "Bio"}>
+        {kind === "community" || kind === "member" || kind === "membership_plan" || kind === "instructor" || kind === "edit_instructor" ? (
+          <Field label={kind === "community" ? "Description" : kind === "instructor" || kind === "edit_instructor" ? "Short sales biography" : "Bio"}>
             <textarea className={`${inputClass} min-h-[92px]`} value={description} onChange={(e) => setDescription(e.target.value)} />
           </Field>
+        ) : null}
+
+        {kind === "instructor" || kind === "edit_instructor" ? (
+          <>
+            <Field label="Professional title">
+              <input className={inputClass} value={professionalTitle} onChange={(e) => setProfessionalTitle(e.target.value)} placeholder="Embedded systems educator" />
+            </Field>
+            <Field label="Avatar Storage file ID">
+              <input className={inputClass} value={avatarStorageFileId} onChange={(e) => setAvatarStorageFileId(e.target.value)} placeholder="Optional Storage file ID" />
+            </Field>
+            <Field label="Linked Community member">
+              <select className={inputClass} value={linkedMemberId} onChange={(e) => setLinkedMemberId(e.target.value)}>
+                <option value="">No linked member</option>
+                {members.map((member) => (
+                  <option key={member.id} value={member.id}>{member.display_name || member.handle}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Credentials (one per line)">
+              <textarea className={`${inputClass} min-h-[88px]`} value={credentialsText} onChange={(e) => setCredentialsText(e.target.value)} />
+            </Field>
+            <Field label="Accomplishments (one per line)">
+              <textarea className={`${inputClass} min-h-[88px]`} value={accomplishmentsText} onChange={(e) => setAccomplishmentsText(e.target.value)} />
+            </Field>
+            <Field label="External links (Label | https://url, one per line)">
+              <textarea className={`${inputClass} min-h-[88px]`} value={linksText} onChange={(e) => setLinksText(e.target.value)} placeholder="Website | https://example.com" />
+            </Field>
+            <label className="flex items-start gap-2 rounded border border-border p-3 text-sm text-text-muted">
+              <input className="mt-0.5" type="checkbox" checked={publicVisible} onChange={(e) => setPublicVisible(e.target.checked)} />
+              <span><strong className="block text-text">Visible on public course pages</strong><span className="text-xs">Private profiles remain available to operators and MCP but are omitted from the storefront.</span></span>
+            </label>
+            {instructor?.statistics ? (
+              <div className="grid grid-cols-2 gap-2 rounded border border-border bg-bg-secondary p-3 text-xs text-text-muted">
+                <span>{instructor.statistics.courses_taught} courses taught</span>
+                <span>{instructor.statistics.published_lessons} published lessons</span>
+                <span>{instructor.statistics.active_students} active students</span>
+                <span>{instructor.statistics.completed_students} completions</span>
+              </div>
+            ) : null}
+          </>
+        ) : null}
+
+        {kind === "course_instructors" ? (
+          <div className="space-y-4">
+            <div className="text-sm text-text-muted">
+              Select reusable profiles for {space?.name || "this course"}. The order below is the storefront order; one instructor is primary.
+            </div>
+            {instructors.length === 0 ? (
+              <div className="rounded border border-border p-3 text-sm text-text-muted">
+                Create an instructor profile from the Community sidebar first.
+              </div>
+            ) : (
+              <Field label="Available profiles">
+                <div className="space-y-2 rounded border border-border p-3">
+                  {instructors.map((profile) => {
+                    const selected = selectedInstructorIds.includes(profile.id);
+                    return (
+                      <label key={profile.id} className="flex items-start gap-2 text-sm">
+                        <input
+                          className="mt-0.5"
+                          type="checkbox"
+                          checked={selected}
+                          onChange={(event) => {
+                            if (event.target.checked) {
+                              setSelectedInstructorIds((current) => [...current, profile.id]);
+                              if (!primaryInstructorId) setPrimaryInstructorId(profile.id);
+                            } else {
+                              setSelectedInstructorIds((current) => {
+                                const next = current.filter((id) => id !== profile.id);
+                                if (primaryInstructorId === profile.id) setPrimaryInstructorId(next[0] || "");
+                                return next;
+                              });
+                            }
+                          }}
+                        />
+                        <span><strong className="block">{profile.display_name}</strong><span className="text-xs text-text-muted">{profile.professional_title || "Instructor"}{!profile.public_visible ? " · private" : ""}</span></span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </Field>
+            )}
+            {selectedInstructorIds.length > 0 ? (
+              <Field label="Display order and primary instructor">
+                <div className="space-y-2 rounded border border-border p-3">
+                  {selectedInstructorIds.map((id, index) => {
+                    const profile = instructors.find((item) => item.id === id);
+                    if (!profile) return null;
+                    const move = (offset: number) => {
+                      setSelectedInstructorIds((current) => {
+                        const next = [...current];
+                        const target = index + offset;
+                        if (target < 0 || target >= next.length) return current;
+                        [next[index], next[target]] = [next[target], next[index]];
+                        return next;
+                      });
+                    };
+                    return (
+                      <div key={id} className="flex items-center gap-2 rounded bg-bg-secondary px-2 py-2">
+                        <input type="radio" name="primary-instructor" checked={primaryInstructorId === id} onChange={() => setPrimaryInstructorId(id)} aria-label={`Make ${profile.display_name} primary`} />
+                        <span className="min-w-0 flex-1 truncate text-sm">{index + 1}. {profile.display_name}{primaryInstructorId === id ? " · primary" : ""}</span>
+                        <button type="button" className={buttonClass("ghost")} disabled={index === 0} onClick={() => move(-1)} aria-label={`Move ${profile.display_name} up`}>↑</button>
+                        <button type="button" className={buttonClass("ghost")} disabled={index === selectedInstructorIds.length - 1} onClick={() => move(1)} aria-label={`Move ${profile.display_name} down`}>↓</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Field>
+            ) : null}
+            {courseInstructors?.legacy_instructor_name ? (
+              <div className="rounded border border-border bg-bg-secondary p-3 text-xs text-text-muted">
+                Existing fallback: {courseInstructors.legacy_instructor_name}. It remains in place for compatibility and is used only when no public profile is assigned.
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
         {kind === "portal" ? (
@@ -1598,10 +1956,16 @@ function CommunityDialog({
         ) : null}
 
         {kind === "lesson" || kind === "edit_lesson" ? (
-          <label className="flex items-center gap-2 text-sm text-text-muted">
-            <input type="checkbox" checked={published} onChange={(e) => setPublished(e.target.checked)} />
-            Published
-          </label>
+          <div className="space-y-2 rounded border border-border p-3">
+            <label className="flex items-center gap-2 text-sm text-text-muted">
+              <input type="checkbox" checked={published} onChange={(e) => setPublished(e.target.checked)} />
+              Published
+            </label>
+            <label className="flex items-start gap-2 text-sm text-text-muted">
+              <input className="mt-0.5" type="checkbox" checked={previewEnabled} onChange={(e) => setPreviewEnabled(e.target.checked)} />
+              <span><strong className="block text-text">Public sample lesson</strong><span className="text-xs">Show the lesson body and a short-lived video link on public product pages. Drafts remain private.</span></span>
+            </label>
+          </div>
         ) : null}
 
         {kind === "video" ? (
@@ -1687,13 +2051,20 @@ function CommunityDialog({
         ) : null}
         {error ? <div className="text-sm text-warn">{error}</div> : null}
 
-        <div className="flex justify-end gap-2">
+        <div className="flex items-center justify-between gap-2">
+          {kind === "edit_instructor" ? (
+            <button type="button" className={buttonClass("ghost")} disabled={busy} onClick={archiveInstructor}>
+              Archive profile
+            </button>
+          ) : <span />}
+          <div className="flex gap-2">
           <button type="button" className={buttonClass()} onClick={onClose}>
             Cancel
           </button>
           <button type="submit" className={buttonClass("primary")} disabled={busy || !canSubmit}>
             {busy ? "Saving..." : "Save"}
           </button>
+          </div>
         </div>
       </form>
     </DialogShell>

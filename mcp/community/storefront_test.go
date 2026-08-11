@@ -55,6 +55,87 @@ func TestPublicStorefrontProjectsOnlyBoundCatalogProducts(t *testing.T) {
 	_ = community
 }
 
+func TestPublicLessonPreviewRequiresExplicitPublishedFlagAndReturnsSafeProjection(t *testing.T) {
+	platform := newSalesPlatformStub()
+	ctx, _, _, course := salesFixture(t, platform)
+	sectionOut, err := toolSectionsCreate(ctx, map[string]any{"space_id": course.ID, "title": "Foundations"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lessonOut, err := toolLessonsCreate(ctx, map[string]any{
+		"section_id": sectionOut.(Section).ID, "title": "A public sample", "body": "Build the first working circuit.",
+		"preview_enabled": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lesson := lessonOut.(Lesson)
+	if !lesson.PreviewEnabled {
+		t.Fatal("new lesson did not retain preview_enabled")
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE lessons SET video_storage_key='456',video_duration_seconds=420 WHERE id=?`, lesson.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	requestPreview := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/portal/previews/"+lesson.ID+"?community=main", nil)
+		rec := httptest.NewRecorder()
+		(&App{}).httpPortalLessonPreview(rec, req)
+		return rec
+	}
+	if rec := requestPreview(); rec.Code != http.StatusNotFound {
+		t.Fatalf("draft preview status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := toolLessonsPublish(ctx, map[string]any{"id": lesson.ID, "published": true}); err != nil {
+		t.Fatal(err)
+	}
+
+	productReq := httptest.NewRequest(http.MethodGet, "/portal/products/community-course?community=main", nil)
+	productRec := httptest.NewRecorder()
+	(&App{}).httpPortalProduct(productRec, productReq)
+	if productRec.Code != http.StatusOK {
+		t.Fatalf("product status=%d body=%s", productRec.Code, productRec.Body.String())
+	}
+	productBody := productRec.Body.String()
+	for _, want := range []string{`"preview_lessons"`, `"title":"A public sample"`, `"video_duration_seconds":420`} {
+		if !strings.Contains(productBody, want) {
+			t.Fatalf("public product missing %s: %s", want, productBody)
+		}
+	}
+	if strings.Contains(productBody, "Build the first working circuit.") {
+		t.Fatalf("public product index leaked preview body: %s", productBody)
+	}
+
+	rec := requestPreview()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"title":"A public sample"`, `"body":"Build the first working circuit."`, `"section_title":"Foundations"`, `"url":"https://files.example.test/signed-preview.mp4?sig=short-lived"`, `"duration_seconds":420`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("preview missing %s: %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"video_storage_key", "resources", "quizzes", "assignments", "comments", "progress", "member_id"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("preview leaked %q: %s", forbidden, body)
+		}
+	}
+	if platform.signedURLCalls != 1 || platform.signedURLTTL <= 0 || platform.signedURLTTL > 3600 || platform.signedURLDelivery != "apteva" {
+		t.Fatalf("unexpected signed URL request: calls=%d ttl=%d delivery=%q", platform.signedURLCalls, platform.signedURLTTL, platform.signedURLDelivery)
+	}
+	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("preview cache policy=%q", got)
+	}
+
+	if _, err := toolLessonsPublish(ctx, map[string]any{"id": lesson.ID, "published": false}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := requestPreview(); rec.Code != http.StatusNotFound {
+		t.Fatalf("unpublished preview status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestPublicStorefrontGroupsRecurringPricesByCatalogProduct(t *testing.T) {
 	ctx, _, community, _, _, _, _ := membershipFixture(t)
 	if _, err := toolMembershipPlansUpsert(ctx, map[string]any{

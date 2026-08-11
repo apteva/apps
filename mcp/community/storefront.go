@@ -65,8 +65,10 @@ type PublicOffer struct {
 }
 
 type PublicCourse struct {
-	Slug string `json:"slug"`
-	Name string `json:"name"`
+	Slug           string                       `json:"slug"`
+	Name           string                       `json:"name"`
+	PreviewLessons []PublicLessonPreviewSummary `json:"preview_lessons"`
+	Instructors    []PublicInstructorProfile    `json:"instructors"`
 }
 
 type publicCourseOfferBinding struct {
@@ -366,10 +368,20 @@ func publicCourseOfferBindings(db *sql.DB, communityID string) ([]publicCourseOf
 }
 
 func loadPublicCourse(db *sql.DB, spaceID string) (PublicCourse, error) {
-	var course PublicCourse
+	course := PublicCourse{PreviewLessons: []PublicLessonPreviewSummary{}, Instructors: []PublicInstructorProfile{}}
 	if err := db.QueryRow(`SELECT slug,name FROM spaces WHERE id=? AND kind='course' AND archived_at IS NULL`, spaceID).Scan(&course.Slug, &course.Name); err != nil {
 		return course, err
 	}
+	previews, err := loadPublicLessonPreviewSummaries(db, spaceID)
+	if err != nil {
+		return course, err
+	}
+	course.PreviewLessons = previews
+	instructors, err := publicInstructorsForCourse(db, spaceID)
+	if err != nil {
+		return course, err
+	}
+	course.Instructors = instructors
 	return course, nil
 }
 

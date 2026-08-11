@@ -58,6 +58,7 @@ func TestManifestParses(t *testing.T) {
 	wantStorefrontRoutes := map[string]string{
 		"/portal/products":         "GET",
 		"/portal/products/":        "GET",
+		"/portal/previews/":        "GET",
 		"/portal/checkout/prepare": "POST",
 		"/store/":                  "GET",
 	}

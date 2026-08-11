@@ -14,17 +14,20 @@ import (
 
 type salesPlatformStub struct {
 	tk.BasePlatformClient
-	mu               sync.Mutex
-	price            catalogPrice
-	product          catalogProduct
-	invoice          billingInvoice
-	invoiceCreates   int
-	sessionCreates   int
-	checkoutSession  guestCheckoutSession
-	checkoutCart     guestCheckoutCart
-	checkoutMeta     json.RawMessage
-	checkoutPrepares int
-	checkoutPayments int
+	mu                sync.Mutex
+	price             catalogPrice
+	product           catalogProduct
+	invoice           billingInvoice
+	invoiceCreates    int
+	sessionCreates    int
+	checkoutSession   guestCheckoutSession
+	checkoutCart      guestCheckoutCart
+	checkoutMeta      json.RawMessage
+	checkoutPrepares  int
+	checkoutPayments  int
+	signedURLCalls    int
+	signedURLTTL      int
+	signedURLDelivery string
 }
 
 func newSalesPlatformStub() *salesPlatformStub {
@@ -46,6 +49,11 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 		value = map[string]any{"price": s.price}
 	case "catalog:catalog_products_get":
 		value = map[string]any{"product": s.product}
+	case "storage:files_get_url":
+		s.signedURLCalls++
+		s.signedURLTTL, _ = input["ttl_seconds"].(int)
+		s.signedURLDelivery, _ = input["delivery"].(string)
+		value = map[string]any{"url": "https://files.example.test/signed-preview.mp4?sig=short-lived", "expires_at": int64(4102444800)}
 	case "billing:customers_upsert_by_email":
 		value = map[string]any{"customer": map[string]any{"id": int64(501)}, "was_created": true}
 	case "billing:invoices_search":

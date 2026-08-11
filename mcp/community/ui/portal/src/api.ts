@@ -18,6 +18,7 @@ import type {
   MembershipPlan,
   Post,
   PublicProduct,
+  PublicLessonPreview,
   Quiz,
   Section,
   Space,
@@ -150,6 +151,8 @@ export const api = {
       apteva.get<{ products: PublicProduct[]; count: number }>(projectScopedPath(`${communityPublicPath("/portal/products")}?community=${encodeURIComponent(community)}`)),
     product: (community: string, slug: string) =>
       apteva.get<{ product: PublicProduct }>(projectScopedPath(`${communityPublicPath(`/portal/products/${encodeURIComponent(slug)}`)}?community=${encodeURIComponent(community)}`)),
+    preview: (community: string, lessonId: string) =>
+      apteva.get<{ preview: PublicLessonPreview }>(projectScopedPath(`${communityPublicPath(`/portal/previews/${encodeURIComponent(lessonId)}`)}?community=${encodeURIComponent(community)}`)),
     prepareCheckout: (communitySlug: string, body: {
       catalog_price_id: number;
       email?: string;

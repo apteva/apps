@@ -44,6 +44,7 @@ type Lesson struct {
 	Body                 string  `json:"body"`
 	VideoStorageKey      *string `json:"video_storage_key,omitempty"`
 	VideoDurationSeconds *int64  `json:"video_duration_seconds,omitempty"`
+	PreviewEnabled       bool    `json:"preview_enabled"`
 	Position             int64   `json:"position"`
 	PublishedAt          *string `json:"published_at,omitempty"`
 	CreatedAt            string  `json:"created_at"`
@@ -129,22 +130,24 @@ func coursesTools() []sdk.Tool {
 		// Lessons
 		{
 			Name:        "lessons_create",
-			Description: "Create a lesson inside a section. Lessons start as drafts (published_at NULL). Args: section_id (required), title (required), body? (markdown), position? (default end).",
+			Description: "Create a lesson inside a section. Lessons start as drafts (published_at NULL). Args: section_id (required), title (required), body? (markdown), position? (default end), preview_enabled? (default false).",
 			InputSchema: schemaObject(map[string]any{
-				"section_id": map[string]any{"type": "string"},
-				"title":      map[string]any{"type": "string"},
-				"body":       map[string]any{"type": "string"},
-				"position":   map[string]any{"type": "integer"},
+				"section_id":      map[string]any{"type": "string"},
+				"title":           map[string]any{"type": "string"},
+				"body":            map[string]any{"type": "string"},
+				"position":        map[string]any{"type": "integer"},
+				"preview_enabled": map[string]any{"type": "boolean"},
 			}, []string{"section_id", "title"}),
 			Handler: toolLessonsCreate,
 		},
 		{
 			Name:        "lessons_update",
-			Description: "Update a lesson's title or body. Args: id (required), title?, body?.",
+			Description: "Update a lesson's title, body, or public preview state. Args: id (required), title?, body?, preview_enabled?. Only published lessons are exposed publicly.",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "string"},
-				"title": map[string]any{"type": "string"},
-				"body":  map[string]any{"type": "string"},
+				"id":              map[string]any{"type": "string"},
+				"title":           map[string]any{"type": "string"},
+				"body":            map[string]any{"type": "string"},
+				"preview_enabled": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
 			Handler: toolLessonsUpdate,
 		},
@@ -422,6 +425,7 @@ func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	body := strArg(args, "body", "")
+	previewEnabled, _ := args["preview_enabled"].(bool)
 	db := ctx.AppDB()
 	// Resolve community_id via the section's space.
 	var spaceID, communityID string
@@ -452,9 +456,9 @@ func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	id := newID("les")
 	if _, err := db.Exec(
-		`INSERT INTO lessons (id, community_id, section_id, title, body, position)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		id, communityID, sectionID, title, body, pos,
+		`INSERT INTO lessons (id, community_id, section_id, title, body, preview_enabled, position)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, communityID, sectionID, title, body, boolInt(previewEnabled), pos,
 	); err != nil {
 		return nil, fmt.Errorf("create lesson: %w", err)
 	}
@@ -490,6 +494,10 @@ func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := args["body"].(string); ok {
 		sets = append(sets, "body = ?")
 		vals = append(vals, v)
+	}
+	if v, ok := args["preview_enabled"].(bool); ok {
+		sets = append(sets, "preview_enabled = ?")
+		vals = append(vals, boolInt(v))
 	}
 	if len(sets) == 0 {
 		return nil, errors.New("nothing to update")
@@ -1107,18 +1115,20 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 const lessonCols = `l.id, l.community_id, l.section_id, l.title, l.body,
                     l.video_storage_key, l.video_duration_seconds,
-                    l.position, l.published_at, l.created_at, l.updated_at`
+                    l.preview_enabled, l.position, l.published_at, l.created_at, l.updated_at`
 
 func scanLesson(scan func(...any) error) (Lesson, error) {
 	var l Lesson
 	var vk, pub sql.NullString
 	var dur sql.NullInt64
+	var previewEnabled int
 	if err := scan(
 		&l.ID, &l.CommunityID, &l.SectionID, &l.Title, &l.Body,
-		&vk, &dur, &l.Position, &pub, &l.CreatedAt, &l.UpdatedAt,
+		&vk, &dur, &previewEnabled, &l.Position, &pub, &l.CreatedAt, &l.UpdatedAt,
 	); err != nil {
 		return l, err
 	}
+	l.PreviewEnabled = previewEnabled != 0
 	if vk.Valid {
 		v := vk.String
 		l.VideoStorageKey = &v

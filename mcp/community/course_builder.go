@@ -14,19 +14,21 @@ import (
 )
 
 type CourseDetails struct {
-	SpaceID            string   `json:"space_id"`
-	Summary            string   `json:"summary"`
-	Description        string   `json:"description"`
-	InstructorMemberID *string  `json:"instructor_member_id,omitempty"`
-	InstructorName     string   `json:"instructor_name"`
-	Level              string   `json:"level"`
-	Tags               []string `json:"tags"`
-	PriceCents         int64    `json:"price_cents"`
-	Currency           string   `json:"currency"`
-	Prerequisites      []string `json:"prerequisites"`
-	Outcomes           []string `json:"outcomes"`
-	CoverStorageFileID *string  `json:"cover_storage_file_id,omitempty"`
-	UpdatedAt          string   `json:"updated_at"`
+	SpaceID             string   `json:"space_id"`
+	Summary             string   `json:"summary"`
+	Description         string   `json:"description"`
+	InstructorMemberID  *string  `json:"instructor_member_id,omitempty"`
+	InstructorName      string   `json:"instructor_name"`
+	Level               string   `json:"level"`
+	Tags                []string `json:"tags"`
+	PriceCents          int64    `json:"price_cents"`
+	Currency            string   `json:"currency"`
+	Prerequisites       []string `json:"prerequisites"`
+	Outcomes            []string `json:"outcomes"`
+	CoverStorageFileID  *string  `json:"cover_storage_file_id,omitempty"`
+	InstructorIDs       []string `json:"instructor_ids"`
+	PrimaryInstructorID *string  `json:"primary_instructor_id,omitempty"`
+	UpdatedAt           string   `json:"updated_at"`
 }
 
 type LessonResource struct {
@@ -1422,14 +1424,15 @@ func boolToInt(v bool) int {
 }
 
 func loadCourseDetails(db *sql.DB, spaceID string) (CourseDetails, error) {
-	d := CourseDetails{SpaceID: spaceID, Tags: []string{}, Prerequisites: []string{}, Outcomes: []string{}, Currency: "USD"}
-	var instr, cover sql.NullString
-	var tagsJSON, prereqJSON, outcomesJSON string
+	d := CourseDetails{SpaceID: spaceID, Tags: []string{}, Prerequisites: []string{}, Outcomes: []string{}, InstructorIDs: []string{}, Currency: "USD"}
+	var instr, cover, primaryInstructor sql.NullString
+	var tagsJSON, prereqJSON, outcomesJSON, instructorIDsJSON string
 	err := db.QueryRow(
 		`SELECT space_id, summary, description, instructor_member_id, instructor_name, level, tags_json,
-		        price_cents, currency, prerequisites_json, outcomes_json, cover_storage_file_id, updated_at
+		        price_cents, currency, prerequisites_json, outcomes_json, cover_storage_file_id,
+		        instructor_ids_json, primary_instructor_id, updated_at
 		 FROM course_details WHERE space_id = ?`, spaceID,
-	).Scan(&d.SpaceID, &d.Summary, &d.Description, &instr, &d.InstructorName, &d.Level, &tagsJSON, &d.PriceCents, &d.Currency, &prereqJSON, &outcomesJSON, &cover, &d.UpdatedAt)
+	).Scan(&d.SpaceID, &d.Summary, &d.Description, &instr, &d.InstructorName, &d.Level, &tagsJSON, &d.PriceCents, &d.Currency, &prereqJSON, &outcomesJSON, &cover, &instructorIDsJSON, &primaryInstructor, &d.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, nil
 	}
@@ -1442,9 +1445,13 @@ func loadCourseDetails(db *sql.DB, spaceID string) (CourseDetails, error) {
 	if cover.Valid {
 		d.CoverStorageFileID = &cover.String
 	}
+	if primaryInstructor.Valid {
+		d.PrimaryInstructorID = &primaryInstructor.String
+	}
 	_ = json.Unmarshal([]byte(tagsJSON), &d.Tags)
 	_ = json.Unmarshal([]byte(prereqJSON), &d.Prerequisites)
 	_ = json.Unmarshal([]byte(outcomesJSON), &d.Outcomes)
+	_ = json.Unmarshal([]byte(instructorIDsJSON), &d.InstructorIDs)
 	return d, nil
 }
 

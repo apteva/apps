@@ -10,6 +10,7 @@ import {
   Menu,
   MessageCircle,
   MessagesSquare,
+  PlayCircle,
   RefreshCcw,
   Send,
   UserRound,
@@ -32,6 +33,7 @@ import type {
   MembershipPlan,
   Post,
   PublicOffer,
+  PublicLessonPreview,
   PublicProduct,
   Section,
   Space,
@@ -1423,10 +1425,18 @@ export default function App() {
   );
 }
 
-function storagePublicURL(fileID?: number): string {
+function storagePublicURL(fileID?: number | string): string {
   if (!fileID) return "";
   const project = currentProjectId();
-  return `/api/apps/storage/public/files/${fileID}/content${project ? `?project_id=${encodeURIComponent(project)}` : ""}`;
+  return `/api/apps/storage/public/files/${encodeURIComponent(String(fileID))}/content${project ? `?project_id=${encodeURIComponent(project)}` : ""}`;
+}
+
+function formatPreviewDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(total / 60);
+  const remaining = total % 60;
+  if (minutes > 0) return `${minutes}:${remaining.toString().padStart(2, "0")}`;
+  return `0:${remaining.toString().padStart(2, "0")}`;
 }
 
 function offerLabel(offer: PublicOffer): string {
@@ -1483,6 +1493,27 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
   onSignIn: () => void;
 }) {
   const offers = product.offers;
+  const previewLessons = product.courses.flatMap((course) =>
+    (course.preview_lessons || []).map((lesson) => ({ ...lesson, course_name: course.name })),
+  );
+  const instructors = Array.from(new Map(
+    product.courses.flatMap((course) => course.instructors || []).map((instructor) => [instructor.id, instructor]),
+  ).values()).sort((left, right) => Number(right.primary) - Number(left.primary));
+  const [preview, setPreview] = useState<PublicLessonPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState("");
+  const [previewError, setPreviewError] = useState("");
+  const openPreview = async (lessonId: string) => {
+    setPreviewLoading(lessonId);
+    setPreviewError("");
+    try {
+      const result = await api.portal.preview(portal.community.slug, lessonId);
+      setPreview(result.preview);
+    } catch (error) {
+      setPreviewError(friendlyError(error));
+    } finally {
+      setPreviewLoading("");
+    }
+  };
   const activeOffer = selectedOffer || offers.find((offer) => offer.interval === "year") || offers[0];
   const benefits = storefrontBenefits(product);
   const imageURL = storagePublicURL(product.image_file_id);
@@ -1515,6 +1546,44 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
               {benefits.map((benefit) => <article key={benefit.title}><CheckCircle2 aria-hidden="true" /><div><strong>{benefit.title}</strong>{benefit.description && <p>{benefit.description}</p>}</div></article>)}
             </div>
           </section>
+          {previewLessons.length > 0 && <section className="storefront-previews" aria-labelledby="previews-title">
+            <div className="storefront-section-heading"><div><p>Try before you enroll</p><h2 id="previews-title">Sample lessons</h2></div><span>{previewLessons.length} available</span></div>
+            <div className="storefront-preview-list">
+              {previewLessons.map((lesson) => <button type="button" key={lesson.id} onClick={() => void openPreview(lesson.id)} disabled={Boolean(previewLoading)}>
+                <PlayCircle aria-hidden="true" /><span><strong>{lesson.title}</strong><small>{lesson.course_name}{lesson.video_duration_seconds ? ` · ${formatPreviewDuration(lesson.video_duration_seconds)}` : ""}</small></span><span>{previewLoading === lesson.id ? "Loading…" : "Preview"}</span>
+              </button>)}
+            </div>
+            {previewError && <p className="storefront-preview-error" role="alert">{previewError}</p>}
+            {preview && <article className="storefront-preview-detail" aria-live="polite">
+              <header><div><p>{preview.course.name} · {preview.section_title}</p><h3>{preview.title}</h3></div><button type="button" aria-label="Close sample lesson" onClick={() => setPreview(null)}><X /></button></header>
+              {preview.video && <video controls preload="metadata" src={preview.video.url}>Your browser does not support video playback.</video>}
+              <div className="storefront-preview-body">{preview.body}</div>
+            </article>}
+          </section>}
+          {instructors.length > 0 && <section className="storefront-instructors" aria-labelledby="instructors-title">
+            <div className="storefront-section-heading"><div><p>Learn from experience</p><h2 id="instructors-title">Your instructors</h2></div></div>
+            <div className="storefront-instructor-list">
+              {instructors.map((instructor) => <article key={instructor.id}>
+                {instructor.avatar_storage_file_id
+                  ? <img src={storagePublicURL(instructor.avatar_storage_file_id)} alt={instructor.display_name} />
+                  : <span className="storefront-instructor-avatar" aria-hidden="true">{instructor.display_name.slice(0, 1).toUpperCase()}</span>}
+                <div className="storefront-instructor-copy">
+                  <h3>{instructor.display_name}</h3>
+                  {instructor.professional_title && <p className="storefront-instructor-title">{instructor.professional_title}</p>}
+                  {instructor.sales_bio && <p>{instructor.sales_bio}</p>}
+                  <div className="storefront-instructor-stats">
+                    <span><strong>{instructor.statistics.courses_taught}</strong> courses</span>
+                    <span><strong>{instructor.statistics.published_lessons}</strong> lessons</span>
+                    {instructor.statistics.active_students > 0 && <span><strong>{instructor.statistics.active_students}</strong> students</span>}
+                    {instructor.statistics.completed_students > 0 && <span><strong>{instructor.statistics.completed_students}</strong> completions</span>}
+                  </div>
+                  {instructor.credentials.length > 0 && <ul>{instructor.credentials.map((credential) => <li key={credential}>{credential}</li>)}</ul>}
+                  {instructor.accomplishments.length > 0 && <div className="storefront-instructor-accomplishments">{instructor.accomplishments.map((accomplishment) => <span key={accomplishment}><CheckCircle2 aria-hidden="true" />{accomplishment}</span>)}</div>}
+                  {instructor.links.length > 0 && <div className="storefront-instructor-links">{instructor.links.map((link) => <a key={link.url} href={link.url} target="_blank" rel="noreferrer">{link.label || "Profile"}</a>)}</div>}
+                </div>
+              </article>)}
+            </div>
+          </section>}
           {product.storefront?.testimonial && <figure className="storefront-testimonial">
             <blockquote>“{product.storefront.testimonial.quote}”</blockquote>
             <figcaption>

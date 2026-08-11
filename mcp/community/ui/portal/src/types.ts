@@ -115,6 +115,7 @@ export interface Lesson {
   body: string;
   video_storage_key?: string;
   video_duration_seconds?: number;
+  preview_enabled: boolean;
   position: number;
   published_at?: string;
   created_at: string;
@@ -330,6 +331,55 @@ export interface PublicSection {
 export interface PublicCourse {
   slug: string;
   name: string;
+  preview_lessons: PublicLessonPreviewSummary[];
+  instructors: PublicInstructorProfile[];
+}
+
+export interface InstructorStatistics {
+  courses_taught: number;
+  published_lessons: number;
+  active_students: number;
+  completed_students: number;
+}
+
+export interface InstructorLink {
+  label: string;
+  url: string;
+}
+
+export interface PublicInstructorProfile {
+  id: string;
+  display_name: string;
+  avatar_storage_file_id?: string;
+  professional_title?: string;
+  sales_bio?: string;
+  credentials: string[];
+  links: InstructorLink[];
+  accomplishments: string[];
+  statistics: InstructorStatistics;
+  primary: boolean;
+}
+
+export interface PublicLessonPreviewSummary {
+  id: string;
+  title: string;
+  section_title: string;
+  video_duration_seconds?: number;
+}
+
+export interface PublicLessonPreviewVideo {
+  url: string;
+  expires_at: number;
+  duration_seconds?: number;
+}
+
+export interface PublicLessonPreview {
+  id: string;
+  title: string;
+  body: string;
+  section_title: string;
+  course: { slug: string; name: string };
+  video?: PublicLessonPreviewVideo;
 }
 
 export interface PublicBenefit {
