@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -18,16 +19,36 @@ import (
 // source of truth for product presentation; Community owns only the mapping
 // from a price to the access it grants.
 type PublicProduct struct {
-	CatalogProductID int64          `json:"catalog_product_id"`
-	Slug             string         `json:"slug"`
-	Name             string         `json:"name"`
-	Description      string         `json:"description,omitempty"`
-	Type             string         `json:"type"`
-	Category         string         `json:"category,omitempty"`
-	Color            string         `json:"color,omitempty"`
-	ImageFileID      *int64         `json:"image_file_id,omitempty"`
-	Offers           []PublicOffer  `json:"offers"`
-	Courses          []PublicCourse `json:"courses"`
+	CatalogProductID int64                   `json:"catalog_product_id"`
+	Slug             string                  `json:"slug"`
+	Name             string                  `json:"name"`
+	Description      string                  `json:"description,omitempty"`
+	Type             string                  `json:"type"`
+	Category         string                  `json:"category,omitempty"`
+	Color            string                  `json:"color,omitempty"`
+	ImageFileID      *int64                  `json:"image_file_id,omitempty"`
+	Storefront       PublicStorefrontContent `json:"storefront"`
+	Offers           []PublicOffer           `json:"offers"`
+	Courses          []PublicCourse          `json:"courses"`
+}
+
+type PublicStorefrontContent struct {
+	Headline    string             `json:"headline,omitempty"`
+	Eyebrow     string             `json:"eyebrow,omitempty"`
+	Included    []PublicBenefit    `json:"included"`
+	Testimonial *PublicTestimonial `json:"testimonial,omitempty"`
+}
+
+type PublicBenefit struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+}
+
+type PublicTestimonial struct {
+	Quote        string `json:"quote"`
+	Name         string `json:"name,omitempty"`
+	Role         string `json:"role,omitempty"`
+	AvatarFileID *int64 `json:"avatar_file_id,omitempty"`
 }
 
 type PublicOffer struct {
@@ -44,20 +65,8 @@ type PublicOffer struct {
 }
 
 type PublicCourse struct {
-	Slug        string          `json:"slug"`
-	Name        string          `json:"name"`
-	Summary     string          `json:"summary,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Instructor  string          `json:"instructor,omitempty"`
-	Level       string          `json:"level,omitempty"`
-	Outcomes    []string        `json:"outcomes"`
-	CoverFileID *string         `json:"cover_file_id,omitempty"`
-	Curriculum  []PublicSection `json:"curriculum"`
-}
-
-type PublicSection struct {
-	Title   string   `json:"title"`
-	Lessons []string `json:"lessons"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
 }
 
 type publicCourseOfferBinding struct {
@@ -70,6 +79,39 @@ func publicProductSlug(product catalogProduct) string {
 		return slug
 	}
 	return fmt.Sprintf("product-%d", product.ID)
+}
+
+func publicStorefrontContent(product catalogProduct) PublicStorefrontContent {
+	content := PublicStorefrontContent{Included: []PublicBenefit{}}
+	if len(product.Metadata) == 0 {
+		return content
+	}
+	var metadata struct {
+		Storefront PublicStorefrontContent `json:"storefront"`
+	}
+	if json.Unmarshal(product.Metadata, &metadata) != nil {
+		return content
+	}
+	metadata.Storefront.Headline = strings.TrimSpace(metadata.Storefront.Headline)
+	metadata.Storefront.Eyebrow = strings.TrimSpace(metadata.Storefront.Eyebrow)
+	clean := make([]PublicBenefit, 0, len(metadata.Storefront.Included))
+	for _, benefit := range metadata.Storefront.Included {
+		benefit.Title = strings.TrimSpace(benefit.Title)
+		benefit.Description = strings.TrimSpace(benefit.Description)
+		if benefit.Title != "" {
+			clean = append(clean, benefit)
+		}
+	}
+	metadata.Storefront.Included = clean
+	if metadata.Storefront.Testimonial != nil {
+		metadata.Storefront.Testimonial.Quote = strings.TrimSpace(metadata.Storefront.Testimonial.Quote)
+		metadata.Storefront.Testimonial.Name = strings.TrimSpace(metadata.Storefront.Testimonial.Name)
+		metadata.Storefront.Testimonial.Role = strings.TrimSpace(metadata.Storefront.Testimonial.Role)
+		if metadata.Storefront.Testimonial.Quote == "" {
+			metadata.Storefront.Testimonial = nil
+		}
+	}
+	return metadata.Storefront
 }
 
 func (a *App) httpPortalProducts(w http.ResponseWriter, r *http.Request) {
@@ -238,7 +280,7 @@ func buildPublicProducts(ctx *sdk.AppCtx, communityID string) ([]PublicProduct, 
 		created := &PublicProduct{
 			CatalogProductID: id, Slug: publicProductSlug(product), Name: product.Name,
 			Description: product.Description, Type: product.Type, Category: product.Category,
-			Color: product.Color, ImageFileID: product.ImageFileID,
+			Color: product.Color, ImageFileID: product.ImageFileID, Storefront: publicStorefrontContent(product),
 			Offers: []PublicOffer{}, Courses: []PublicCourse{},
 		}
 		products[id] = created
@@ -328,40 +370,6 @@ func loadPublicCourse(db *sql.DB, spaceID string) (PublicCourse, error) {
 	if err := db.QueryRow(`SELECT slug,name FROM spaces WHERE id=? AND kind='course' AND archived_at IS NULL`, spaceID).Scan(&course.Slug, &course.Name); err != nil {
 		return course, err
 	}
-	details, err := loadCourseDetails(db, spaceID)
-	if err != nil {
-		return course, err
-	}
-	course.Summary, course.Description, course.Instructor, course.Level = details.Summary, details.Description, details.InstructorName, details.Level
-	course.Outcomes, course.CoverFileID = details.Outcomes, details.CoverStorageFileID
-	if course.Outcomes == nil {
-		course.Outcomes = []string{}
-	}
-	rows, err := db.Query(`SELECT id,title FROM sections WHERE space_id=? ORDER BY position,id`, spaceID)
-	if err != nil {
-		return course, err
-	}
-	type sectionRow struct{ id, title string }
-	sections := []sectionRow{}
-	for rows.Next() {
-		var section sectionRow
-		if err := rows.Scan(&section.id, &section.title); err != nil {
-			rows.Close()
-			return course, err
-		}
-		sections = append(sections, section)
-	}
-	if err := rows.Close(); err != nil {
-		return course, err
-	}
-	course.Curriculum = make([]PublicSection, 0, len(sections))
-	for _, section := range sections {
-		lessons, err := queryStrings(db, `SELECT title FROM lessons WHERE section_id=? AND published_at IS NOT NULL ORDER BY position,id`, section.id)
-		if err != nil {
-			return course, err
-		}
-		course.Curriculum = append(course.Curriculum, PublicSection{Title: section.title, Lessons: lessons})
-	}
 	return course, nil
 }
 
@@ -412,6 +420,8 @@ func storefrontTools() []sdk.Tool {
 			"member_id":        map[string]any{"type": "string"},
 			"success_url":      map[string]any{"type": "string"},
 			"cancel_url":       map[string]any{"type": "string"},
+			"return_url":       map[string]any{"type": "string"},
+			"presentation":     map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
 		}, []string{"community_id", "catalog_price_id", "member_id"}),
 		Handler: toolStorefrontCheckoutStart,
 	}}
@@ -437,6 +447,8 @@ func toolStorefrontCheckoutStart(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"_viewer_member_id": strArg(args, "_viewer_member_id", ""),
 		"_auth_subject_id":  strArg(args, "_auth_subject_id", ""),
 		"_subject_email":    strArg(args, "_subject_email", ""),
+		"presentation":      strArg(args, "presentation", "hosted"),
+		"return_url":        strArg(args, "return_url", ""),
 	}
 	var spaceID string
 	err = ctx.AppDB().QueryRow(`SELECT s.id FROM course_offers co JOIN spaces s ON s.id=co.space_id

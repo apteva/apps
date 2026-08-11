@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.9.2
+version: 0.10.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -80,7 +80,7 @@ requires:
         - invoice.payment_failed
         - invoice.payment_action_required
         - payment_method.attached
-      reason: Billing owns course customers, invoices, hosted payment sessions, saved payment methods, automatic collection, refunds, and authoritative payment events.
+      reason: Billing owns course customers, invoices, hosted or inline Stripe payment sessions, saved payment methods, automatic collection, refunds, and authoritative payment events.
     - name: subscriptions
       version: ">=0.7.2"
       optional: false

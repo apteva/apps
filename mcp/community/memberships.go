@@ -95,8 +95,9 @@ func membershipTools() []sdk.Tool {
 		{Name: "membership_plans_archive", Description: "Operator: archive a membership plan without affecting existing subscriptions.", InputSchema: schemaObject(map[string]any{"id": s}, []string{"id"}), Handler: toolMembershipPlansArchive},
 		{Name: "membership_plan_courses_set", Description: "Operator: replace the selected-course scope of a membership plan.", InputSchema: schemaObject(map[string]any{"id": s, "space_ids": a}, []string{"id", "space_ids"}), Handler: toolMembershipPlanCoursesSet},
 		{Name: "membership_plan_tags_set", Description: "Operator: replace the course-tag scope of a membership plan.", InputSchema: schemaObject(map[string]any{"id": s, "tags": a}, []string{"id", "tags"}), Handler: toolMembershipPlanTagsSet},
-		{Name: "membership_checkout_start", Description: "Start or resume the verified member's recurring membership checkout.", InputSchema: schemaObject(map[string]any{
+		{Name: "membership_checkout_start", Description: "Start or resume the verified member's recurring membership checkout using hosted Stripe Checkout or inline Stripe Elements.", InputSchema: schemaObject(map[string]any{
 			"plan_id": s, "member_id": s, "customer_email": s, "customer_name": s, "success_url": s, "cancel_url": s,
+			"return_url": s, "presentation": map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
 		}, []string{"plan_id", "member_id"}), Handler: toolMembershipCheckoutStart},
 		{Name: "membership_status", Description: "Return the verified member's current membership.", InputSchema: schemaObject(map[string]any{"community_id": s, "member_id": s}, []string{"community_id", "member_id"}), Handler: toolMembershipStatus},
 		{Name: "membership_cancel", Description: "Cancel a verified member's membership immediately or at period end.", InputSchema: schemaObject(map[string]any{"id": s, "member_id": s, "at_period_end": b, "reason": s}, []string{"id", "member_id"}), Handler: toolMembershipCancel},
@@ -721,6 +722,8 @@ func createMembershipPaymentLink(ctx *sdk.AppCtx, msID string, subID, cycleID, i
 	var payment struct {
 		URL             string `json:"url"`
 		StripeSessionID string `json:"stripe_session_id"`
+		ClientSecret    string `json:"client_secret"`
+		PublishableKey  string `json:"publishable_key"`
 	}
 	successURL := strings.TrimSpace(strArg(urls, "success_url", ""))
 	cancelURL := strings.TrimSpace(strArg(urls, "cancel_url", ""))
@@ -735,10 +738,17 @@ func createMembershipPaymentLink(ctx *sdk.AppCtx, msID string, subID, cycleID, i
 			}
 		}
 	}
-	paymentArgs := map[string]any{"invoice_id": invoiceID, "idempotency_key": key,
+	presentation := strings.ToLower(strings.TrimSpace(strArg(urls, "presentation", "hosted")))
+	if presentation != "hosted" && presentation != "elements" {
+		return nil, failMembership(ctx.AppDB(), msID, errors.New("presentation must be hosted or elements"))
+	}
+	paymentArgs := map[string]any{"invoice_id": invoiceID, "idempotency_key": key, "presentation": presentation,
 		"save_payment_method": true, "set_default_payment_method": true,
 		"success_url": successURL, "cancel_url": cancelURL}
-	if err := callAppResult(ctx, "billing", "invoices_send_payment_link", paymentArgs, &payment); err != nil {
+	if returnURL := strings.TrimSpace(strArg(urls, "return_url", "")); returnURL != "" {
+		paymentArgs["return_url"] = returnURL
+	}
+	if err := callAppResult(ctx, "billing", "invoices_create_payment_session", paymentArgs, &payment); err != nil {
 		return nil, failMembership(ctx.AppDB(), msID, err)
 	}
 	if initial {
@@ -761,6 +771,13 @@ func createMembershipPaymentLink(ctx *sdk.AppCtx, msID string, subID, cycleID, i
 	}
 	out := membershipResponse(ms)
 	out["checkout_url"] = payment.URL
+	out["presentation"] = presentation
+	if payment.ClientSecret != "" {
+		out["client_secret"] = payment.ClientSecret
+	}
+	if payment.PublishableKey != "" {
+		out["publishable_key"] = payment.PublishableKey
+	}
 	out["invoice_id"] = invoiceID
 	out["cycle_id"] = cycleID
 	return out, nil

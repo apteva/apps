@@ -81,15 +81,16 @@ type catalogPrice struct {
 }
 
 type catalogProduct struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Slug        string `json:"slug"`
-	Description string `json:"description"`
-	Type        string `json:"type"`
-	Category    string `json:"category"`
-	ImageFileID *int64 `json:"image_file_id"`
-	Color       string `json:"color"`
-	ArchivedAt  string `json:"archived_at"`
+	ID          int64           `json:"id"`
+	Name        string          `json:"name"`
+	Slug        string          `json:"slug"`
+	Description string          `json:"description"`
+	Type        string          `json:"type"`
+	Category    string          `json:"category"`
+	ImageFileID *int64          `json:"image_file_id"`
+	Color       string          `json:"color"`
+	Metadata    json.RawMessage `json:"metadata"`
+	ArchivedAt  string          `json:"archived_at"`
 }
 
 type billingInvoice struct {
@@ -131,10 +132,11 @@ func courseSalesTools() []sdk.Tool {
 		},
 		{
 			Name:        "course_purchase_start",
-			Description: "Start or resume the verified member's hosted Billing checkout for a paid course. Enrollment is granted only after invoice.paid. Args: space_id, member_id, customer_email, customer_name, success_url, cancel_url.",
+			Description: "Start or resume the verified member's Billing checkout for a paid course. Supports hosted Stripe Checkout or inline Stripe Elements. Enrollment is granted only after invoice.paid.",
 			InputSchema: schemaObject(map[string]any{
 				"space_id": stringSchema, "member_id": stringSchema, "customer_email": stringSchema,
 				"customer_name": stringSchema, "success_url": stringSchema, "cancel_url": stringSchema,
+				"return_url": stringSchema, "presentation": map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
 			}, []string{"space_id", "member_id"}),
 			Handler: toolCoursePurchaseStart,
 		},
@@ -361,11 +363,17 @@ func toolCoursePurchaseStart(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	var payment struct {
 		URL             string `json:"url"`
 		StripeSessionID string `json:"stripe_session_id"`
+		ClientSecret    string `json:"client_secret"`
+		PublishableKey  string `json:"publishable_key"`
+	}
+	presentation := strings.ToLower(strings.TrimSpace(strArg(args, "presentation", "hosted")))
+	if presentation != "hosted" && presentation != "elements" {
+		return nil, errors.New("presentation must be hosted or elements")
 	}
 	input := map[string]any{
 		"_project_id":     scopeProject(ctx),
 		"invoice_id":      *reconciled.BillingInvoiceID,
-		"presentation":    "hosted",
+		"presentation":    presentation,
 		"idempotency_key": "community-purchase:" + reconciled.ID,
 	}
 	if value := strings.TrimSpace(strArg(args, "success_url", "")); value != "" {
@@ -374,11 +382,14 @@ func toolCoursePurchaseStart(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if value := strings.TrimSpace(strArg(args, "cancel_url", "")); value != "" {
 		input["cancel_url"] = value
 	}
+	if value := strings.TrimSpace(strArg(args, "return_url", "")); value != "" {
+		input["return_url"] = value
+	}
 	if err := callAppResult(ctx, "billing", "invoices_create_payment_session", input, &payment); err != nil {
 		recordPurchaseStatusError(ctx.AppDB(), reconciled.ID, "payment_failed", err)
 		return nil, fmt.Errorf("create Billing payment session: %w", err)
 	}
-	if strings.TrimSpace(payment.URL) == "" {
+	if presentation == "hosted" && strings.TrimSpace(payment.URL) == "" {
 		err := errors.New("Billing returned no hosted checkout URL")
 		recordPurchaseStatusError(ctx.AppDB(), reconciled.ID, "payment_failed", err)
 		return nil, err
@@ -396,7 +407,18 @@ func toolCoursePurchaseStart(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err == nil {
 		emit(ctx, "course.purchase_started", purchaseEventPayload(purchase))
 	}
-	return purchaseCheckoutResponse(purchase), err
+	response := purchaseCheckoutResponse(purchase)
+	response["presentation"] = presentation
+	if payment.URL != "" {
+		response["checkout_url"] = payment.URL
+	}
+	if payment.ClientSecret != "" {
+		response["client_secret"] = payment.ClientSecret
+	}
+	if payment.PublishableKey != "" {
+		response["publishable_key"] = payment.PublishableKey
+	}
+	return response, err
 }
 
 func toolCoursePurchaseStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -11,6 +11,7 @@ import (
 func TestPublicStorefrontProjectsOnlyBoundCatalogProducts(t *testing.T) {
 	platform := newSalesPlatformStub()
 	ctx, community, member, course := salesFixture(t, platform)
+	platform.product.Metadata = json.RawMessage(`{"storefront":{"headline":"Build with confidence","eyebrow":"Masterclass","included":[{"title":"Practical projects","description":"Build as you learn."}],"testimonial":{"quote":"Exactly what I needed.","name":"Alex"}}}`)
 	if _, err := toolCoursesUpdateDetails(ctx, map[string]any{
 		"space_id": course.ID, "summary": "A public summary", "description": "Private lesson bodies stay hidden",
 		"outcomes": []any{"Launch confidently"},
@@ -38,12 +39,12 @@ func TestPublicStorefrontProjectsOnlyBoundCatalogProducts(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	for _, want := range []string{`"slug":"community-course"`, `"catalog_price_id":71`, `"slug":"course"`, `"Welcome"`, `"Launch confidently"`} {
+	for _, want := range []string{`"slug":"community-course"`, `"catalog_price_id":71`, `"slug":"course"`, `"name":"Course"`, `"headline":"Build with confidence"`, `"title":"Practical projects"`, `"quote":"Exactly what I needed."`} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("public product missing %s: %s", want, body)
 		}
 	}
-	for _, forbidden := range []string{"This must never be public", member.AuthUserIDOrEmpty(), "auth-alice"} {
+	for _, forbidden := range []string{"This must never be public", "A public summary", "Launch confidently", "Welcome", member.AuthUserIDOrEmpty(), "auth-alice"} {
 		if forbidden != "" && strings.Contains(body, forbidden) {
 			t.Fatalf("public product leaked %q: %s", forbidden, body)
 		}
@@ -94,6 +95,43 @@ func TestStorefrontCheckoutMapsPriceServerSide(t *testing.T) {
 	purchase := result["purchase"].(*CoursePurchase)
 	if purchase.MemberID != member.ID || result["offer_kind"] != "one_time" || result["checkout_url"] == "" {
 		t.Fatalf("unexpected checkout result: %+v", result)
+	}
+}
+
+func TestStorefrontCheckoutSupportsInlineStripeElementsForCourse(t *testing.T) {
+	platform := newSalesPlatformStub()
+	ctx, community, _, _ := salesFixture(t, platform)
+	out, err := delegatedTool(t, "storefront_checkout_start")(
+		userPurchaseContext("auth-alice", "alice@example.test"), ctx,
+		map[string]any{
+			"community_id": community.ID, "catalog_price_id": int64(71), "member_id": "spoofed",
+			"presentation": "elements", "return_url": "https://community.test/return",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["presentation"] != "elements" || result["client_secret"] != "cs_test_secret" || result["publishable_key"] != "pk_test_public" || result["checkout_url"] != "" {
+		t.Fatalf("unexpected Elements checkout result: %+v", result)
+	}
+}
+
+func TestStorefrontCheckoutSupportsInlineStripeElementsForMembership(t *testing.T) {
+	ctx, _, community, _, _, _, _ := membershipFixture(t)
+	out, err := delegatedTool(t, "storefront_checkout_start")(
+		userPurchaseContext("auth-alice", "alice@example.test"), ctx,
+		map[string]any{
+			"community_id": community.ID, "catalog_price_id": int64(91), "member_id": "spoofed",
+			"presentation": "elements", "return_url": "https://community.test/return",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["offer_kind"] != "recurring" || result["presentation"] != "elements" || result["client_secret"] != "cs_membership_secret" || result["publishable_key"] != "pk_test_public" {
+		t.Fatalf("unexpected membership Elements result: %+v", result)
 	}
 }
 

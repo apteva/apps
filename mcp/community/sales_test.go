@@ -62,8 +62,10 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 		value = map[string]any{"invoice": s.invoice}
 	case "billing:invoices_create_payment_session":
 		s.sessionCreates++
-		value = map[string]any{
-			"url": "https://payments.example.test/session", "stripe_session_id": "cs_test_course",
+		if input["presentation"] == "elements" {
+			value = map[string]any{"presentation": "elements", "client_secret": "cs_test_secret", "publishable_key": "pk_test_public", "stripe_session_id": "cs_test_course"}
+		} else {
+			value = map[string]any{"presentation": "hosted", "url": "https://payments.example.test/session", "stripe_session_id": "cs_test_course"}
 		}
 	case "billing:invoices_get":
 		if s.invoice.ID == 0 {

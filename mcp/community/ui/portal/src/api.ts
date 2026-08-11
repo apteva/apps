@@ -72,6 +72,18 @@ export interface MemberSession {
   memberships: Member[];
 }
 
+export interface StorefrontCheckoutSession {
+  offer_kind: "one_time" | "recurring";
+  presentation?: "hosted" | "elements";
+  checkout_url?: string;
+  client_secret?: string;
+  publishable_key?: string;
+  enrolled?: boolean;
+  access_active?: boolean;
+  purchase?: CoursePurchase;
+  subscription?: MemberSubscription;
+}
+
 export interface LessonBundle {
   lesson: Lesson;
   resources: LessonResource[];
@@ -237,16 +249,10 @@ export const api = {
       community.tool<{ subscription: MemberSubscription }>("membership_resume", { id, member_id: self }),
   },
   storefront: {
-    checkout: (community_id: string, catalog_price_id: number, success_url: string, cancel_url: string) =>
-      community.tool<{
-        offer_kind: "one_time" | "recurring";
-        checkout_url?: string;
-        enrolled?: boolean;
-        access_active?: boolean;
-        purchase?: CoursePurchase;
-        subscription?: MemberSubscription;
-      }>("storefront_checkout_start", {
+    checkout: (community_id: string, catalog_price_id: number, success_url: string, cancel_url: string, return_url: string) =>
+      community.tool<StorefrontCheckoutSession>("storefront_checkout_start", {
         community_id, catalog_price_id, member_id: self, success_url, cancel_url,
+        return_url, presentation: "elements",
       }),
   },
   dms: {

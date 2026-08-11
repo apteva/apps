@@ -1,7 +1,11 @@
 import {
+  ArrowRight,
+  BadgeCheck,
   BookOpen,
   CheckCircle2,
+  CreditCard,
   Home,
+  LockKeyhole,
   LogOut,
   Menu,
   MessageCircle,
@@ -12,8 +16,9 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, useDelegatedToken } from "./api";
+import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
+import { type CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
   Community,
   CourseOffer,
@@ -80,6 +85,15 @@ function wantsCourseCheckout(): boolean {
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
   return !params.has("payment") && params.get("intent") === "buy";
+}
+
+function hasPaymentResult(): boolean {
+  return typeof window !== "undefined" && new URLSearchParams(window.location.search).has("payment");
+}
+
+function initialAuthMode(): AuthMode {
+  if (typeof window === "undefined") return "login";
+  return new URLSearchParams(window.location.search).get("auth") === "signup" ? "signup" : "login";
 }
 
 function authSessionKey(): string {
@@ -175,7 +189,7 @@ function formatPublicOffer(offer: PublicOffer): string {
 
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
-  const [authMode, setAuthMode] = useState<AuthMode>("login");
+  const [authMode, setAuthMode] = useState<AuthMode>(initialAuthMode);
   const [authForm, setAuthForm] = useState(initialAuthForm);
   const [portal, setPortal] = useState<PortalBootstrap | null>(null);
   const [portalError, setPortalError] = useState("");
@@ -183,7 +197,8 @@ export default function App() {
   const [publicProductLoading, setPublicProductLoading] = useState(Boolean(requestedProduct()));
   const [publicProductError, setPublicProductError] = useState("");
   const [storefrontPriceId, setStorefrontPriceId] = useState(requestedOffer);
-  const [storefrontAuthRequested, setStorefrontAuthRequested] = useState(() => requestedOffer() > 0);
+  const [storefrontAuthRequested, setStorefrontAuthRequested] = useState(() => requestedOffer() > 0 || wantsCourseCheckout());
+  const [storefrontCheckout, setStorefrontCheckout] = useState<StorefrontCheckoutSession | null>(null);
   const [recoveryToken, setRecoveryToken] = useState("");
   const [view, setView] = useState<View>(initialView);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -286,6 +301,18 @@ export default function App() {
     });
     return () => { cancelled = true; };
   }, [portal]);
+
+  useEffect(() => {
+    if (!publicProduct || !wantsCourseCheckout() || storefrontPriceId > 0 || publicProduct.offers.length === 0) return;
+    const preferred = publicProduct.offers.find((offer) => offer.interval === "year") || publicProduct.offers[0];
+    const url = new URL(window.location.href);
+    url.searchParams.set("offer", String(preferred.catalog_price_id));
+    url.searchParams.set("auth", portal?.signup.enabled ? "signup" : "login");
+    window.history.replaceState({}, "", url);
+    setStorefrontPriceId(preferred.catalog_price_id);
+    setStorefrontAuthRequested(true);
+    if (portal?.signup.enabled) setAuthMode("signup");
+  }, [portal, publicProduct, storefrontPriceId]);
 
   useEffect(() => {
     if (!portal || typeof window === "undefined") return;
@@ -811,12 +838,18 @@ export default function App() {
       success.searchParams.set("payment", offer.kind === "recurring" ? "membership-success" : "success");
       const cancel = new URL(window.location.href);
       cancel.searchParams.set("payment", offer.kind === "recurring" ? "membership-cancelled" : "cancelled");
-      return api.storefront.checkout(portal.community.id, offer.catalog_price_id, success.toString(), cancel.toString());
+      const returnURL = new URL(success);
+      returnURL.searchParams.delete("intent");
+      return api.storefront.checkout(portal.community.id, offer.catalog_price_id, success.toString(), cancel.toString(), returnURL.toString());
     });
     if (!result) return false;
     if ((result.enrolled || result.access_active) && !result.checkout_url) {
       setNotice("Your access is active.");
       await Promise.all([loadCommunity(), loadCourse()]);
+      return true;
+    }
+    if (result.presentation === "elements" && result.client_secret && result.publishable_key) {
+      setStorefrontCheckout(result);
       return true;
     }
     if (!result.checkout_url) {
@@ -827,15 +860,32 @@ export default function App() {
     return true;
   }
 
-  function chooseStorefrontOffer(offer: PublicOffer) {
+  function selectStorefrontOffer(offer: PublicOffer) {
     const url = new URL(window.location.href);
     url.searchParams.set("product", publicProduct?.slug || requestedProduct());
     url.searchParams.set("offer", String(offer.catalog_price_id));
-    url.searchParams.set("intent", "buy");
     window.history.replaceState({}, "", url);
+    automaticCheckoutStarted.current = false;
+    setStorefrontCheckout(null);
     setStorefrontPriceId(offer.catalog_price_id);
+  }
+
+  function chooseStorefrontOffer(offer: PublicOffer) {
+    selectStorefrontOffer(offer);
+    const url = new URL(window.location.href);
+    url.searchParams.set("intent", "buy");
+    url.searchParams.set("auth", portal?.signup.enabled ? "signup" : "login");
+    window.history.replaceState({}, "", url);
     setStorefrontAuthRequested(true);
     if (portal?.signup.enabled) setAuthMode("signup");
+  }
+
+  function chooseStorefrontAuthMode(mode: "login" | "signup") {
+    const url = new URL(window.location.href);
+    url.searchParams.set("auth", mode);
+    window.history.replaceState({}, "", url);
+    setAuthMode(mode);
+    setStorefrontAuthRequested(true);
   }
 
   async function cancelMembership() {
@@ -912,8 +962,63 @@ export default function App() {
     return <main className="auth-shell"><section className="auth-card"><h1>Product unavailable</h1><div className="alert error" role="alert">{publicProductError}</div></section></main>;
   }
 
-  if (!auth && portal && publicProduct && !storefrontAuthRequested) {
-    return <PublicStorefront product={publicProduct} portal={portal} checkout={wantsCourseCheckout()} onChoose={chooseStorefrontOffer} onSignIn={() => { setAuthMode("login"); setStorefrontAuthRequested(true); }} />;
+  if (portal && publicProduct && !hasPaymentResult()) {
+    const accountPanel = !auth && storefrontAuthRequested && (authMode === "login" || authMode === "signup") ? (
+      <CheckoutAccountForm
+        mode={authMode}
+        form={authForm}
+        busy={busy}
+        error={error}
+        notice={notice}
+        signupEnabled={portal.signup.enabled}
+        brandName={brandName}
+        onChange={setAuthForm}
+        onSubmit={authenticate}
+        onModeChange={chooseStorefrontAuthMode}
+        onForgot={() => setAuthMode("forgot")}
+      />
+    ) : undefined;
+    const paymentPanel = auth && wantsCourseCheckout() && selectedStorefrontOffer ? (
+      storefrontCheckout?.client_secret && storefrontCheckout.publishable_key ? (
+        <StripePaymentForm
+          session={storefrontCheckout}
+          returnURL={(() => {
+            const url = new URL(window.location.href);
+            url.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-success" : "success");
+            url.searchParams.delete("intent");
+            url.searchParams.delete("auth");
+            return url.toString();
+          })()}
+          busy={busy}
+          error={error}
+          onError={setError}
+        />
+      ) : <CheckoutPreparing />
+    ) : undefined;
+    if (!auth || wantsCourseCheckout()) {
+      return <PublicStorefront
+        product={publicProduct}
+        portal={portal}
+        checkout={wantsCourseCheckout()}
+        signedIn={Boolean(auth)}
+        selectedOffer={selectedStorefrontOffer}
+        accountPanel={accountPanel}
+        paymentPanel={paymentPanel}
+        onSelect={selectStorefrontOffer}
+        onChoose={chooseStorefrontOffer}
+        onSignIn={() => chooseStorefrontAuthMode("login")}
+      />;
+    }
+    return <PublicStorefront
+      product={publicProduct}
+      portal={portal}
+      checkout={false}
+      signedIn
+      selectedOffer={selectedStorefrontOffer}
+      onSelect={selectStorefrontOffer}
+      onChoose={chooseStorefrontOffer}
+      onSignIn={() => undefined}
+    />;
   }
 
   if (!auth && portal) {
@@ -1224,13 +1329,72 @@ export default function App() {
   );
 }
 
-function PublicStorefront({ product, portal, checkout, onChoose, onSignIn }: {
+function storagePublicURL(fileID?: number): string {
+  if (!fileID) return "";
+  const project = currentProjectId();
+  return `/api/apps/storage/public/files/${fileID}/content${project ? `?project_id=${encodeURIComponent(project)}` : ""}`;
+}
+
+function offerLabel(offer: PublicOffer): string {
+  if (!offer.interval) return "One-time access";
+  const count = offer.interval_count || 1;
+  if (offer.interval === "month" && count === 1) return "Monthly";
+  if (offer.interval === "year" && count === 1) return "Annual";
+  return `Every ${count > 1 ? `${count} ` : ""}${offer.interval}${count > 1 ? "s" : ""}`;
+}
+
+function offerNote(offer: PublicOffer): string {
+  if (!offer.interval) return "Pay once. No recurring charges.";
+  const trial = (offer.trial_days || 0) > 0 ? `${offer.trial_days}-day trial · ` : "";
+  return `${trial}Renews automatically until cancelled.`;
+}
+
+function annualSaving(product: PublicProduct, offer: PublicOffer): number {
+  if (offer.interval !== "year" || (offer.interval_count || 1) !== 1) return 0;
+  const monthly = product.offers.find((candidate) => candidate.currency === offer.currency && candidate.interval === "month" && (candidate.interval_count || 1) === 1);
+  if (!monthly || monthly.unit_amount_cents <= 0) return 0;
+  return Math.max(0, Math.round((1 - offer.unit_amount_cents / (monthly.unit_amount_cents * 12)) * 100));
+}
+
+function storefrontBenefits(product: PublicProduct): Array<{ title: string; description?: string }> {
+  if (product.storefront?.included?.length) return product.storefront.included;
+  const recurring = product.offers.some((offer) => offer.kind === "recurring");
+  if (recurring && product.courses.length > 1) {
+    return product.courses.slice(0, 4).map((course) => ({ title: course.name, description: "Included with your active membership." }));
+  }
+  if (recurring) {
+    return [
+      { title: "Complete learning access", description: "Open every course included in this membership." },
+      { title: "New material as it is published", description: "Your access stays current while your membership is active." },
+      { title: "Progress that stays with you", description: "Pick up each lesson where you left off." },
+    ];
+  }
+  return [
+    { title: "Complete course access", description: "Work through every published lesson at your own pace." },
+    { title: "A clear learning path", description: "Follow the course from the first lesson through completion." },
+    { title: "Progress tracking", description: "Return anytime and continue where you left off." },
+  ];
+}
+
+function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, accountPanel, paymentPanel, onSelect, onChoose, onSignIn }: {
   product: PublicProduct;
   portal: PortalBootstrap;
   checkout: boolean;
+  signedIn: boolean;
+  selectedOffer?: PublicOffer;
+  accountPanel?: ReactNode;
+  paymentPanel?: ReactNode;
+  onSelect: (offer: PublicOffer) => void;
   onChoose: (offer: PublicOffer) => void;
   onSignIn: () => void;
 }) {
+  const offers = product.offers;
+  const activeOffer = selectedOffer || offers.find((offer) => offer.interval === "year") || offers[0];
+  const benefits = storefrontBenefits(product);
+  const imageURL = storagePublicURL(product.image_file_id);
+  const headline = product.storefront?.headline || product.name;
+  const eyebrow = product.storefront?.eyebrow || product.category || (offers.some((offer) => offer.kind === "recurring") ? "Membership" : "Online course");
+  const stage = paymentPanel ? "payment" : accountPanel ? "account" : "offer";
   return (
     <main className="storefront-shell">
       <header className="storefront-header">
@@ -1238,42 +1402,154 @@ function PublicStorefront({ product, portal, checkout, onChoose, onSignIn }: {
           {portal.brand.logo_url ? <img src={portal.brand.logo_url} alt={portal.brand.name} /> : <div className="brand-mark"><BookOpen aria-hidden="true" /></div>}
           <strong>{portal.brand.name}</strong>
         </div>
-        <button className="secondary" onClick={onSignIn}>Sign in</button>
+        {!signedIn && <button className="storefront-signin" onClick={onSignIn}>Already a member? <strong>Sign in</strong></button>}
+        {signedIn && <span className="storefront-secure"><LockKeyhole size={15} /> Secure checkout</span>}
       </header>
-      <section className="storefront-hero">
-        <div>
-          <p className="eyebrow">{product.category || "Courses & community"}</p>
-          <h1>{checkout ? `Choose your ${product.name} plan` : product.name}</h1>
-          <p>{product.description || product.courses[0]?.description || product.courses[0]?.summary || "Learn with practical courses and a supportive community."}</p>
+      <section className="storefront-frame">
+        <div className="storefront-story">
+          <div className="storefront-art" style={{ "--product-color": product.color || portal.brand.primary_color } as CSSProperties}>
+            {imageURL && <img src={imageURL} alt="" onError={(event) => { event.currentTarget.hidden = true; }} />}
+            <div className="storefront-art-copy"><span>{portal.brand.name}</span><strong>{product.name}</strong><BadgeCheck aria-hidden="true" /></div>
+          </div>
+          <div className="storefront-copy">
+            <p className="storefront-eyebrow">{eyebrow}</p>
+            <h1>{headline}</h1>
+            {product.description && <p className="storefront-description">{product.description}</p>}
+          </div>
+          <section className="storefront-included" aria-labelledby="included-title">
+            <h2 id="included-title">What’s included</h2>
+            <div className="storefront-benefits">
+              {benefits.map((benefit) => <article key={benefit.title}><CheckCircle2 aria-hidden="true" /><div><strong>{benefit.title}</strong>{benefit.description && <p>{benefit.description}</p>}</div></article>)}
+            </div>
+          </section>
+          {product.storefront?.testimonial && <figure className="storefront-testimonial">
+            <blockquote>“{product.storefront.testimonial.quote}”</blockquote>
+            <figcaption>
+              {product.storefront.testimonial.avatar_file_id && <img src={storagePublicURL(product.storefront.testimonial.avatar_file_id)} alt="" />}
+              <span><strong>{product.storefront.testimonial.name}</strong>{product.storefront.testimonial.role && <small>{product.storefront.testimonial.role}</small>}</span>
+            </figcaption>
+          </figure>}
         </div>
-        <aside className="storefront-offers" aria-label="Purchase options">
-          {product.offers.map((offer) => (
-            <article key={offer.catalog_price_id}>
-              <div><span>{offer.name}</span><strong>{formatPublicOffer(offer)}</strong></div>
-              {(offer.trial_days || 0) > 0 && <p>{offer.trial_days}-day trial</p>}
-              <button className="primary" onClick={() => onChoose(offer)}>Continue</button>
-            </article>
-          ))}
-          {product.offers.length === 0 && <div className="empty">This product is not currently for sale.</div>}
-          <small>Access activates automatically after payment is confirmed.</small>
+        <aside className="storefront-checkout" aria-label="Checkout">
+          <div className="checkout-heading">
+            <p>{stage === "payment" ? "Payment details" : stage === "account" ? "Your account" : checkout ? "Complete your enrollment" : "Choose your access"}</p>
+            {activeOffer && <strong>{formatPublicOffer(activeOffer)}</strong>}
+          </div>
+          {stage !== "payment" && <div className={`offer-options ${offers.length === 1 ? "single" : ""}`} role={offers.length > 1 ? "radiogroup" : undefined} aria-label="Purchase options">
+            {offers.map((offer) => {
+              const selected = activeOffer?.catalog_price_id === offer.catalog_price_id;
+              const saving = annualSaving(product, offer);
+              return <button type="button" role={offers.length > 1 ? "radio" : undefined} aria-checked={offers.length > 1 ? selected : undefined} className={`offer-option ${selected ? "selected" : ""}`} key={offer.catalog_price_id} onClick={() => onSelect(offer)}>
+                {offers.length > 1 && <span className="offer-radio" aria-hidden="true" />}
+                <span className="offer-copy"><strong>{offerLabel(offer)}</strong><small>{offerNote(offer)}</small></span>
+                <span className="offer-price"><strong>{formatPublicOffer(offer)}</strong>{saving > 0 && <small>Save {saving}%</small>}</span>
+              </button>;
+            })}
+            {offers.length === 0 && <div className="checkout-unavailable">This product is not currently available for purchase.</div>}
+          </div>}
+          {stage === "offer" && activeOffer && <button className="checkout-continue" onClick={() => onChoose(activeOffer)}>Continue <ArrowRight size={18} /></button>}
+          {accountPanel}
+          {paymentPanel}
+          <div className="checkout-trust"><LockKeyhole size={15} /><span><strong>Secure checkout</strong><small>Payments are encrypted and processed by Stripe.</small></span></div>
+          {activeOffer?.kind === "recurring" && <p className="checkout-terms">Your subscription renews automatically. You can cancel future renewals from your account.</p>}
         </aside>
       </section>
-      <section className="storefront-content">
-        {product.courses.map((course) => (
-          <article className="public-course" key={course.slug}>
-            <div className="public-course-copy">
-              <p className="eyebrow">Included course</p>
-              <h2>{course.name}</h2>
-              <p>{course.description || course.summary}</p>
-              {course.instructor && <p className="muted">Taught by {course.instructor}{course.level ? ` · ${course.level}` : ""}</p>}
-              {course.outcomes.length > 0 && <ul className="outcome-list">{course.outcomes.map((outcome) => <li key={outcome}><CheckCircle2 size={17} />{outcome}</li>)}</ul>}
-            </div>
-            {course.curriculum.length > 0 && <div className="public-curriculum"><h3>Course outline</h3>{course.curriculum.map((section) => <details key={section.title}><summary>{section.title}<span>{section.lessons.length} lessons</span></summary><ol>{section.lessons.map((lesson) => <li key={lesson}>{lesson}</li>)}</ol></details>)}</div>}
-          </article>
-        ))}
-      </section>
+      <footer className="storefront-footer"><span>© {new Date().getFullYear()} {portal.brand.name}</span>{portal.brand.support_email && <a href={`mailto:${portal.brand.support_email}`}>Need help?</a>}</footer>
     </main>
   );
+}
+
+function CheckoutAccountForm({ mode, form, busy, error, notice, signupEnabled, brandName, onChange, onSubmit, onModeChange, onForgot }: {
+  mode: "login" | "signup";
+  form: ReturnType<typeof initialAuthForm>;
+  busy: boolean;
+  error: string;
+  notice: string;
+  signupEnabled: boolean;
+  brandName: string;
+  onChange: (form: ReturnType<typeof initialAuthForm>) => void;
+  onSubmit: (event: FormEvent) => void;
+  onModeChange: (mode: "login" | "signup") => void;
+  onForgot: () => void;
+}) {
+  return <section className="checkout-account">
+    <div className="checkout-section-title"><UserRound size={18} /><div><strong>{mode === "signup" ? `Create your ${brandName} account` : "Sign in to continue"}</strong><small>Your purchase will be connected to this account.</small></div></div>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {notice && <div className="alert success" role="status">{notice}</div>}
+    <form className="checkout-form" onSubmit={onSubmit}>
+      {mode === "signup" && <Field label="Name" id="checkout-name"><input id="checkout-name" value={form.display_name} onChange={(event) => onChange({ ...form, display_name: event.target.value })} autoComplete="name" placeholder="Your name" /></Field>}
+      <Field label="Email address" id="checkout-email"><input id="checkout-email" type="email" value={form.email} onChange={(event) => onChange({ ...form, email: event.target.value })} autoComplete="email" placeholder="you@example.com" required /></Field>
+      <Field label="Password" id="checkout-password"><input id="checkout-password" type="password" value={form.password} onChange={(event) => onChange({ ...form, password: event.target.value })} autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required /></Field>
+      <button className="checkout-continue" disabled={busy}>{busy ? "Please wait…" : mode === "login" ? "Sign in and continue" : "Create account and continue"}<ArrowRight size={18} /></button>
+    </form>
+    {mode === "login" && <button className="checkout-link" onClick={onForgot}>Forgot your password?</button>}
+    {signupEnabled && <button className="checkout-switch" onClick={() => onModeChange(mode === "login" ? "signup" : "login")}>{mode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}</button>}
+  </section>;
+}
+
+function CheckoutPreparing() {
+  return <div className="checkout-preparing" role="status"><RefreshCcw className="spin" aria-hidden="true" /><div><strong>Preparing secure payment</strong><small>This usually takes only a moment.</small></div></div>;
+}
+
+function StripePaymentForm({ session, returnURL, busy, error, onError }: {
+  session: StorefrontCheckoutSession;
+  returnURL: string;
+  busy: boolean;
+  error: string;
+  onError: (message: string) => void;
+}) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const stripeRef = useRef<Stripe | null>(null);
+  const elementsRef = useRef<StripeElements | null>(null);
+  const [ready, setReady] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let paymentElement: StripePaymentElement | undefined;
+    void loadStripe(session.publishable_key || "").then((stripe) => {
+      if (cancelled || !stripe || !mountRef.current || !session.client_secret) return;
+      const elements = stripe.elements({
+        clientSecret: session.client_secret,
+        appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
+      });
+      paymentElement = elements.create("payment", { layout: "tabs" });
+      paymentElement.on("ready", () => setReady(true));
+      paymentElement.mount(mountRef.current);
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
+    }).catch(() => onError("Secure payment could not be loaded. Please refresh and try again."));
+    return () => {
+      cancelled = true;
+      paymentElement?.destroy();
+    };
+  }, [onError, session.client_secret, session.publishable_key]);
+
+  async function submitPayment(event: FormEvent) {
+    event.preventDefault();
+    if (!stripeRef.current || !elementsRef.current) return;
+    setSubmitting(true);
+    onError("");
+    const result = await stripeRef.current.confirmPayment({
+      elements: elementsRef.current,
+      confirmParams: { return_url: returnURL },
+      redirect: "if_required",
+    });
+    if (result.error) {
+      onError(result.error.message || "Payment could not be completed. Please check your details and try again.");
+      setSubmitting(false);
+      return;
+    }
+    window.location.assign(returnURL);
+  }
+
+  return <form className="stripe-payment" onSubmit={submitPayment}>
+    <div className="checkout-section-title"><CreditCard size={18} /><div><strong>Card and billing details</strong><small>Processed securely by Stripe.</small></div></div>
+    <div ref={mountRef} className="stripe-element" />
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {!ready && <div className="stripe-loading"><RefreshCcw className="spin" size={16} /> Loading secure payment…</div>}
+    <button className="checkout-pay" disabled={!ready || submitting || busy}>{submitting ? "Processing…" : "Complete secure payment"}<LockKeyhole size={17} /></button>
+  </form>;
 }
 
 function Field({ label, id, children }: { label: string; id: string; children: ReactNode }) {

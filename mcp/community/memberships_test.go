@@ -74,9 +74,13 @@ func (s *membershipPlatformStub) CallAppResult(app, tool string, input map[strin
 			s.cycle.PaymentStatus = status
 		}
 		value = map[string]any{"cycle": s.cycle}
-	case "billing:invoices_send_payment_link":
+	case "billing:invoices_create_payment_session":
 		s.linkCreates++
-		value = map[string]any{"url": "https://payments.example.test/membership", "stripe_session_id": "cs_membership"}
+		if input["presentation"] == "elements" {
+			value = map[string]any{"presentation": "elements", "client_secret": "cs_membership_secret", "publishable_key": "pk_test_public", "stripe_session_id": "cs_membership"}
+		} else {
+			value = map[string]any{"presentation": "hosted", "url": "https://payments.example.test/membership", "stripe_session_id": "cs_membership"}
+		}
 	case "billing:invoices_collect":
 		return errors.New("customer has no reusable payment method")
 	case "subscriptions:subscriptions_update_status":

@@ -330,13 +330,25 @@ export interface PublicSection {
 export interface PublicCourse {
   slug: string;
   name: string;
-  summary?: string;
+}
+
+export interface PublicBenefit {
+  title: string;
   description?: string;
-  instructor?: string;
-  level?: string;
-  outcomes: string[];
-  cover_file_id?: string;
-  curriculum: PublicSection[];
+}
+
+export interface PublicTestimonial {
+  quote: string;
+  name?: string;
+  role?: string;
+  avatar_file_id?: number;
+}
+
+export interface PublicStorefrontContent {
+  headline?: string;
+  eyebrow?: string;
+  included: PublicBenefit[];
+  testimonial?: PublicTestimonial;
 }
 
 export interface PublicOffer {
@@ -361,6 +373,7 @@ export interface PublicProduct {
   category?: string;
   color?: string;
   image_file_id?: number;
+  storefront: PublicStorefrontContent;
   offers: PublicOffer[];
   courses: PublicCourse[];
 }
