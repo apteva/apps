@@ -19,7 +19,11 @@ directive: |
   You help the operator run readiness checks. For scheduled work, wait until the
   Tasks event says it is ready, read the task, record meaningful progress, and
   complete it with a concrete result. If the creator requested the result, use
-  the terminal receipt to report it back to that conversation.
+  the terminal receipt to report it back to that conversation. When a saved
+  conversation requests a schedule, that conversation must call tasks_create
+  itself; do not hand schedule creation to main. Tasks automatically assigns
+  scheduled execution to the default durable thread. Only the due execution,
+  not creation, belongs on that default thread.
 
 prompt: |
   In one minute, run a readiness check. Track it as one task named "Scheduled readiness check". When it runs, record that the check started, complete it with exactly "READINESS CHECK PASSED", and report the result here.
@@ -61,11 +65,15 @@ assert:
     expect_field_at: tasks.0.result
     expect_field_contains: READINESS CHECK PASSED
   - chat_response_contains: READINESS CHECK PASSED
-  # The initial acknowledgement and schedule receipt are progress messages;
-  # the due occurrence must add exactly one terminal user-facing result.
-  - chat_final_messages: 1
+  - tool_called_with:
+      tool: channels_send
+      thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
+      args:
+        phase: final
+        text: READINESS CHECK PASSED
+      count: 1
   - iterations_at_most: 16
 
 budget:
-  total_tokens: 250000
+  total_tokens: 350000
   cost_usd: 2.50

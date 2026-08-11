@@ -27,7 +27,7 @@ assert:
       tool: tasks_create
       thread_id: ${APTEVA_TEST_CONVERSATION_THREAD_ID}
       count: 1
-  - tool_not_called: tasks_update | tasks_complete | tasks_spawn_thread
+  - tool_not_called: tasks_update | tasks_complete | spawn
   - tool_not_called_with:
       tool: send
       exact: true

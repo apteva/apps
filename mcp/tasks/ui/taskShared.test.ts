@@ -7,6 +7,7 @@ import {
   selectTaskQueue,
   taskQueueRank,
   taskRowSummary,
+  taskEventLabel,
   taskStateLabel,
   taskOverviewPreferences,
   type Task,
@@ -222,6 +223,31 @@ describe("Tasks app UI model", () => {
         }),
       ),
     ).toBe("No newly active leads found.");
+  });
+
+  test("shows task progress percentages in the event timeline", () => {
+    expect(
+      taskEventLabel({
+        id: "event-running",
+        task_id: "task-1",
+        event_type: "updated",
+        from_state: "running",
+        to_state: "running",
+        data: { progress: 70, current_step: "Messages classified" },
+        created_at: "2026-08-08T10:01:00Z",
+      }),
+    ).toBe("Running · 70%");
+    expect(
+      taskEventLabel({
+        id: "event-complete",
+        task_id: "task-1",
+        event_type: "state_changed",
+        from_state: "running",
+        to_state: "completed",
+        data: { progress: 100, current_step: "Completed" },
+        created_at: "2026-08-08T10:02:00Z",
+      }),
+    ).toBe("Completed · 100%");
   });
 
   test("normalizes per-instance task overview settings", () => {

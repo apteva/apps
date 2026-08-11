@@ -1,0 +1,84 @@
+name: simultaneous-directive-wake-and-task-event
+description: |
+  A directive-owned Core timer and a Tasks one-time schedule become due at the
+  same timestamp on main. The agent must treat them as two independent units
+  of work even when the timer and task.ready event race at the run-loop edge.
+
+timeout: 2m
+settle_for: 4s
+max_iterations: 10
+runs: 3
+required_pass_rate: 1.0
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  initial_wake:
+    after: 8s
+  seed_mcp_calls:
+    - app: tasks
+      tool: create
+      thread_id: main
+      args:
+        title: Seeded same-time task
+        description: Complete this independently from the directive timer responsibility.
+        idempotency_key: simultaneous-seeded-${APTEVA_TEST_AGENT_ID}
+        assigned_thread_id: main
+        schedule:
+          kind: once
+          at: ${APTEVA_TEST_WAKE_AT}
+
+directive: |
+  You own two independent responsibilities that become due together. Never
+  collapse one into the other, and process every pending wake or event before
+  waiting again.
+
+  At exactly ${APTEVA_TEST_WAKE_AT}, create one immediate task named
+  "Directive wake marker" and complete it with exactly "DIRECTIVE WAKE HANDLED".
+  A durable Core timer has already been set for that timestamp. A
+  wake reason of timer or timer+event means this responsibility is due now:
+  execute it before calling pace, and do not replace or defer that wake.
+
+  Separately, when a task.ready event arrives, read that task with tasks_get
+  and complete it with exactly "SEEDED TASK HANDLED". The ready task already
+  exists: do not recreate it. Do not delegate either responsibility. After
+  both outcomes are complete, list the authoritative task inventory and wait.
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      thread_id: main
+      args:
+        title: Directive wake marker
+      count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: main
+      count: 1
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: DIRECTIVE WAKE HANDLED
+      count: 1
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: SEEDED TASK HANDLED
+      count: 1
+  - tool_called_with:
+      tool: tasks_list
+      thread_id: main
+      count: 1
+  - tool_not_called: spawn
+  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 2
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 200000
+  cost_usd: 2.00

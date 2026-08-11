@@ -25,7 +25,6 @@ type recordingPlatform struct {
 	tk.BasePlatformClient
 	mu     sync.Mutex
 	events []threadEventCall
-	spawns []sdk.ThreadSpawnRequest
 	agents map[int64]*sdk.PlatformInstance
 }
 
@@ -34,13 +33,6 @@ func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) e
 	defer p.mu.Unlock()
 	p.events = append(p.events, threadEventCall{Target: target, Message: message})
 	return nil
-}
-
-func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.spawns = append(p.spawns, req)
-	return &sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}}, nil
 }
 
 func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
@@ -87,20 +79,30 @@ func TestTaskLifecycleUsesOpaqueThreadOwnership(t *testing.T) {
 	}
 
 	running, progress, step := stateRunning, 25, "Reviewing conversations"
-	if _, _, err := app.store.Update(created.ID, "thread-a7f3", UpdateTaskInput{State: &running, Progress: &progress, CurrentStep: &step}); err != nil {
+	updatedRaw, err := app.toolUpdate(creator, appCtx, map[string]any{
+		"task_id": created.ID, "state": running, "progress": progress, "current_step": step,
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	updated := updatedRaw.(*Task)
+	if updated.ExecutionThreadID != "thread-a7f3" {
+		t.Fatalf("running update did not record trusted executor: %+v", updated)
 	}
 	completedRaw, err := app.toolComplete(creator, appCtx, map[string]any{"task_id": created.ID, "result": "CRM is healthy"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	completed := completedRaw.(*Task)
-	if completed.State != stateCompleted || completed.Progress == nil || *completed.Progress != 100 || completed.Result != "CRM is healthy" {
+	if completed.State != stateCompleted || completed.Progress == nil || *completed.Progress != 100 || completed.CurrentStep != "Completed" || completed.Result != "CRM is healthy" {
 		t.Fatalf("unexpected completion: %+v", completed)
 	}
 	events, err := app.store.Events(created.ID)
 	if err != nil || len(events) != 3 {
 		t.Fatalf("events=%+v err=%v", events, err)
+	}
+	if got := events[2].Data["current_step"]; got != "Completed" {
+		t.Fatalf("completion event retained stale step: %+v", events[2])
 	}
 	if got := len(platform.events); got != 0 {
 		t.Fatalf("creator and assignee are identical; got %d duplicate terminal receipts", got)
@@ -138,7 +140,7 @@ func TestEmptyStructuredScheduleRemainsImmediate(t *testing.T) {
 	}
 }
 
-func TestAssignmentSpawnAndSingleCreatorReceipt(t *testing.T) {
+func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	creator := callerContext(7, "thread-origin", "project-a")
 	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Prepare briefing"})
@@ -147,24 +149,31 @@ func TestAssignmentSpawnAndSingleCreatorReceipt(t *testing.T) {
 	}
 	task := raw.(map[string]any)["task"].(*Task)
 
-	spawnedRaw, err := app.toolSpawnThread(creator, appCtx, map[string]any{
-		"task_id": task.ID, "thread_id": "thread-exec-91", "instructions": "Use current CRM data.",
+	assignedRaw, err := app.toolAssign(creator, appCtx, map[string]any{
+		"task_id": task.ID, "thread_id": "thread-exec-91",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	spawned := spawnedRaw.(map[string]any)["task"].(*Task)
-	if spawned.AssignedThreadID != "thread-exec-91" || spawned.ExecutionThreadID != "thread-exec-91" {
-		t.Fatalf("spawn assignment missing: %+v", spawned)
-	}
-	if len(platform.spawns) != 1 || platform.spawns[0].ThreadID != "thread-exec-91" {
-		t.Fatalf("spawn calls=%+v", platform.spawns)
+	assigned := assignedRaw.(*Task)
+	if assigned.AssignedThreadID != "thread-exec-91" || assigned.ExecutionThreadID != "" {
+		t.Fatalf("assignment should not claim execution before work starts: %+v", assigned)
 	}
 	if len(platform.events) != 1 || platform.events[0].Target.ThreadID != "thread-exec-91" {
 		t.Fatalf("assignment receipt=%+v", platform.events)
 	}
 
 	executor := callerContext(7, "thread-exec-91", "project-a")
+	runningRaw, err := app.toolUpdate(executor, appCtx, map[string]any{
+		"task_id": task.ID, "state": stateRunning, "progress": 40,
+		"current_step": "Preparing briefing",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runningRaw.(*Task).ExecutionThreadID != "thread-exec-91" {
+		t.Fatalf("assigned worker was not recorded as executor: %+v", runningRaw)
+	}
 	if _, err := app.toolComplete(executor, appCtx, map[string]any{"task_id": task.ID, "result": "Briefing ready"}); err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +441,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.4" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.5" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -453,7 +462,7 @@ func TestManifestAndToolContract(t *testing.T) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
 		}
 	}
-	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "spawn_thread": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false}
+	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false}
 	for _, tool := range app.MCPTools() {
 		if _, ok := want[tool.Name]; !ok {
 			t.Fatalf("unexpected tool %q", tool.Name)
@@ -488,6 +497,16 @@ func TestManifestAndToolContract(t *testing.T) {
 				}
 			}
 		}
+		if tool.Name == "assign" && !strings.Contains(tool.Description, "existing opaque thread") {
+			t.Fatalf("assign tool must not imply thread creation: %s", tool.Description)
+		}
+		if tool.Name == "update" {
+			for _, required := range []string{"Keep the task running while any executor is actively working", "Use waiting only when no executor can progress", "at least two or three intermediate milestones"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("update tool description missing progress rule %q: %s", required, tool.Description)
+				}
+			}
+		}
 	}
 	for name, found := range want {
 		if !found {
@@ -507,6 +526,10 @@ func TestManifestAndToolContract(t *testing.T) {
 		"even when its calls can run in parallel",
 		"one bounded lookup or action",
 		"does not imply delegation",
+		"Tasks records work but does not create threads",
+		"Keep a task `running` while any executor is actively working",
+		"at least two or three intermediate milestones",
+		"changing threads or entering `waiting` does not by itself increase progress",
 	} {
 		if !strings.Contains(normalizedSkill, required) {
 			t.Fatalf("Tasks skill missing classification rule %q", required)

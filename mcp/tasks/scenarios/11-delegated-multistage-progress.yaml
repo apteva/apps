@@ -1,0 +1,145 @@
+name: delegated-multistage-progress
+description: |
+  A multi-message inbox occurrence records useful per-task progress around
+  delegated work instead of remaining at its initial percentage until
+  completion. Main owns worker creation while Tasks records assignment and
+  execution. The fixture needs no Gmail installation or external network.
+
+timeout: 4m
+settle_for: 5s
+max_iterations: 28
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Run one simulated inbox occurrence using the Tasks app. The inbox snapshot
+  below is authoritative: it contains exactly four unread messages, exactly
+  one of which (from Clima Confort) needs an attention alert.
+
+  Track the occurrence as exactly one task named "Review simulated inbox".
+  This is deliberately multi-stage work: record each of these meaningful
+  milestones on that same task, with the exact state, progress, and current
+  step shown:
+
+  1. running, 10, "Listing unread Gmail messages"
+  2. running, 25, "Found 4 unread messages"
+
+  Main must delegate the remaining work using the platform spawn tool, not a
+  Tasks spawning tool. Spawn a paused worker named "gmail-review-worker" and
+  then assign the existing task to it with tasks_assign. Do not grant Tasks
+  tools to the worker. The worker reports each milestone and the final result
+  to its parent; main remains responsible for calling tasks_update and
+  tasks_complete on the worker's behalf. Do not set the task to waiting: the
+  task remains active while the worker is working.
+
+  The simulated worker must report all three exact milestones and the final
+  result to main in one concise message, in this order. Main must then record
+  each milestone separately on the same task:
+
+  3. running, 40, "Gmail review worker processing 4 messages"
+  4. running, 70, "4 messages classified and marked read"
+  5. running, 85, "Publishing attention alert for Clima Confort"
+
+  The same worker message must end with the concrete result "Processed 4
+  messages; 1 alert published". Main must complete the task exactly once with
+  that result after recording the three milestones. These are phase boundaries,
+  not per-tool-call updates. The inbox and publication are simulated and
+  already specified here: do not search for Gmail or alert tools and do not
+  send an external alert. Do not create another task. After the terminal result
+  is recorded, stop.
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      args:
+        title: Review simulated inbox
+      count: 1
+  - tool_called_with:
+      tool: spawn
+      thread_id: main
+      args:
+        id: gmail-review-worker
+        paused: "true"
+      count: 1
+  - tool_called_with:
+      tool: tasks_assign
+      thread_id: main
+      args:
+        thread_id: gmail-review-worker
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        progress: 10
+        current_step: Listing unread Gmail messages
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        progress: 25
+        current_step: Found 4 unread messages
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        progress: 40
+        current_step: Gmail review worker processing 4 messages
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        progress: 70
+        current_step: 4 messages classified and marked read
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      thread_id: main
+      args:
+        state: running
+        progress: 85
+        current_step: Publishing attention alert for Clima Confort
+      count: 1
+  - tool_called_with:
+      tool: tasks_update
+      count: 5
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: Processed 4 messages; 1 alert published
+      count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.progress
+    expect_field_eq: 100
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.result
+    expect_field_eq: Processed 4 messages; 1 alert published
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.current_step
+    expect_field_eq: Completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.execution_thread_id
+    expect_field_eq: gmail-review-worker
+  - iterations_at_most: 28
+
+budget:
+  total_tokens: 350000
+  cost_usd: 2.00
