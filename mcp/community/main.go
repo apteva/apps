@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.11.0
+version: 0.11.1
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -249,7 +249,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.11.0
+    ref: community/v0.11.1
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -354,7 +354,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/sections", Handler: operatorHTTP(a.httpSections)},
 		{Pattern: "/lessons", Handler: operatorHTTP(a.httpLessons)},
 		{Pattern: "/lesson", Handler: operatorHTTP(a.httpLesson)},
-		{Method: "GET", Pattern: "/", Handler: a.httpPortalHostPage},
+		{Pattern: "/", Handler: a.httpPortalHostPage},
 	}
 }
 

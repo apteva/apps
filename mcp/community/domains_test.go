@@ -148,3 +148,14 @@ func TestCommunityPortalGatewayRestoresVisitorAuthorizationAndIsAllowlisted(t *t
 		t.Fatalf("unallowlisted gateway status=%d", blocked.Code)
 	}
 }
+
+func TestCommunityHTTPRoutesMountWithoutServeMuxConflicts(t *testing.T) {
+	mux := http.NewServeMux()
+	for _, route := range (&App{}).HTTPRoutes() {
+		pattern := route.Pattern
+		if route.Method != "" {
+			pattern = route.Method + " " + pattern
+		}
+		mux.HandleFunc(pattern, route.Handler)
+	}
+}
