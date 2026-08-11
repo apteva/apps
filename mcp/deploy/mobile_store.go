@@ -53,6 +53,7 @@ type StoreDocument struct {
 	Review             StoreReview                  `json:"review,omitempty"`
 	Classification     StoreClassification          `json:"classification,omitempty"`
 	Distribution       StoreDistribution            `json:"distribution,omitempty"`
+	Testing            StoreTesting                 `json:"testing,omitempty"`
 	Privacy            StorePrivacy                 `json:"privacy,omitempty"`
 	ManualRequirements []StoreManualRequirement     `json:"manual_requirements,omitempty"`
 	ProviderExtensions map[string]any               `json:"provider_extensions,omitempty"`
@@ -141,6 +142,22 @@ type StoreDistribution struct {
 	PhasedRelease   bool              `json:"phased_release,omitempty"`
 	RolloutFraction float64           `json:"rollout_fraction,omitempty"`
 	Provider        map[string]any    `json:"provider,omitempty"`
+}
+
+type StoreTesting struct {
+	Channels map[string]StoreTestingChannel `json:"channels,omitempty"`
+}
+
+type StoreTestingChannel struct {
+	Audience   []StoreTestingAudience `json:"audience,omitempty"`
+	InstallURL string                 `json:"install_url,omitempty"`
+}
+
+type StoreTestingAudience struct {
+	Kind       string `json:"kind"`
+	Identifier string `json:"identifier"`
+	FirstName  string `json:"first_name,omitempty"`
+	LastName   string `json:"last_name,omitempty"`
 }
 
 type StoreAvailability struct {
@@ -238,6 +255,7 @@ func defaultStoreDocument(platform string) StoreDocument {
 		Privacy: StorePrivacy{
 			Declarations: map[string]any{}, ManualAttestations: map[string]bool{},
 		},
+		Testing:            StoreTesting{Channels: map[string]StoreTestingChannel{}},
 		ProviderExtensions: map[string]any{},
 	}
 	if platform == "android" {
@@ -293,6 +311,10 @@ func parseStoreDocument(raw string, platform string) (StoreDocument, error) {
 	}
 	if doc.ProviderExtensions == nil {
 		doc.ProviderExtensions = map[string]any{}
+	}
+	doc.Testing, err = normalizeStoreTesting(platform, doc.Testing)
+	if err != nil {
+		return StoreDocument{}, err
 	}
 	return doc, nil
 }
@@ -733,6 +755,9 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 		StorePlanOp{Scope: "privacy", Action: "reconcile"},
 		StorePlanOp{Scope: "distribution", Action: "reconcile"},
 	)
+	if len(doc.Testing.Channels) > 0 {
+		plan.Operations = append(plan.Operations, StorePlanOp{Scope: "testing", Action: "synchronize", Count: len(doc.Testing.Channels)})
+	}
 	complianceAction := "verify"
 	if d.TargetKind == "ios" {
 		complianceAction = "reconcile"
@@ -773,6 +798,14 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 	if err != nil {
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", err.Error())
 		return nil, nil, err
+	}
+	if len(doc.Testing.Channels) > 0 {
+		testing, testingErr := a.observeDesiredTesting(d, doc)
+		if testingErr != nil {
+			_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", "", "", testingErr.Error())
+			return nil, nil, testingErr
+		}
+		observed["testing"] = testing
 	}
 	preserveStoreObservationState(observed, cfg.ObservedJSON)
 	observed["observed_at"] = nowUTC()

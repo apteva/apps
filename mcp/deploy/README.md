@@ -105,14 +105,20 @@ Test audiences are managed through Deploy rather than by calling store
 integrations directly:
 
 - `deploy_distribution_status` reads the current provider-backed audience.
-- `deploy_distribution_update` idempotently adds audience members.
-- iOS channels accept individual tester emails and manage TestFlight groups.
-- Android test tracks accept Google Group email addresses. Google Play's
-  publishing API does not expose the Play Console's individual email lists.
+- `deploy_distribution_update` stores the desired audience and reconciles it.
+- iOS channels accept individual tester emails and safely add them to managed
+  TestFlight groups. Existing tester access is not removed automatically.
+- Android test tracks accept Google Group addresses and use exact replacement,
+  including explicit empty-list removal. Google Play's publishing API does not
+  expose the Play Console's individual email lists.
+- Android release publishing applies the configured Google Groups in the same
+  Play edit as the release, then verifies the committed state. Custom testing
+  tracks are supported.
 
-Deploy does not persist tester PII. App Store Connect and Google Play remain
-the source of truth, while the bound integrations provide credentialed API
-transport.
+Desired tester identifiers and an optional non-secret install/opt-in URL are
+stored in the provider-neutral store document. Provider credentials remain in
+the bound integrations, and App Store Connect or Google Play remains the
+provider state of record.
 
 ## Cloud build backends
 
@@ -318,7 +324,8 @@ document are pruned when it is saved.
 
 The common document includes localized listing text, review details, category,
 a structured content-rating questionnaire, privacy declarations, release mode,
-territories, pricing, and rollout settings. Provider-only request bodies remain
+territories, pricing, rollout settings, and test-channel audiences.
+Provider-only request bodies remain
 available under `provider_extensions`. Images are decoded before apply and
 validated against Apple display targets or Google icon, feature-graphic, and
 screenshot constraints. iPad screenshot requirements are inferred from the

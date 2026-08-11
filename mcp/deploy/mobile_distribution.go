@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -21,24 +22,37 @@ type distributionAudienceMember struct {
 }
 
 type mobileDistributionState struct {
-	Platform    string                       `json:"platform"`
-	Provider    string                       `json:"provider"`
-	Channel     string                       `json:"channel"`
-	AppID       string                       `json:"app_id,omitempty"`
-	PackageName string                       `json:"package_name,omitempty"`
-	GroupID     string                       `json:"group_id,omitempty"`
-	GroupName   string                       `json:"group_name,omitempty"`
-	Configured  bool                         `json:"configured"`
-	Audience    []distributionAudienceMember `json:"audience"`
-	Count       int                          `json:"count"`
+	Platform          string                       `json:"platform"`
+	Provider          string                       `json:"provider"`
+	Channel           string                       `json:"channel"`
+	AppID             string                       `json:"app_id,omitempty"`
+	PackageName       string                       `json:"package_name,omitempty"`
+	GroupID           string                       `json:"group_id,omitempty"`
+	GroupName         string                       `json:"group_name,omitempty"`
+	Configured        bool                         `json:"configured"`
+	Audience          []distributionAudienceMember `json:"audience"`
+	Count             int                          `json:"count"`
+	DesiredConfigured bool                         `json:"desired_configured"`
+	DesiredAudience   []distributionAudienceMember `json:"desired_audience"`
+	DesiredCount      int                          `json:"desired_count"`
+	Synced            bool                         `json:"synced"`
+	TesterAccess      string                       `json:"tester_access"`
+	InstallURL        string                       `json:"install_url,omitempty"`
+	InstallURLSource  string                       `json:"install_url_source,omitempty"`
+	ConsoleURL        string                       `json:"console_url,omitempty"`
+	LastSyncedAt      string                       `json:"last_synced_at,omitempty"`
 }
 
 type distributionTarget struct {
-	Channel       string
-	AppID         string
-	PackageName   string
-	BetaGroupID   string
-	BetaGroupName string
+	Channel           string
+	AppID             string
+	PackageName       string
+	BetaGroupID       string
+	BetaGroupName     string
+	DesiredConfigured bool
+	DesiredAudience   []distributionAudienceMember
+	InstallURL        string
+	LastSyncedAt      string
 }
 
 func (a *App) toolDistributionStatus(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -62,14 +76,22 @@ func (a *App) mobileDistributionStatus(d *Deployment, args map[string]any) (*mob
 	if err != nil {
 		return nil, err
 	}
+	var state *mobileDistributionState
 	switch d.TargetKind {
 	case "ios":
-		return a.iosDistributionStatus(target)
+		state, err = a.iosDistributionStatus(target)
 	case "android":
-		return a.androidDistributionStatus(target)
+		state, err = a.androidDistributionStatus(target)
 	default:
 		return nil, errors.New("distribution audiences apply only to Android and iOS deployments")
 	}
+	if err != nil {
+		return nil, err
+	}
+	if err := a.persistDistributionObservation(d, state, ""); err != nil {
+		return nil, err
+	}
+	return state, nil
 }
 
 func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mobileDistributionState, error) {
@@ -77,13 +99,34 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 	if err != nil {
 		return nil, err
 	}
+	if _, hasAudience := args["audience"]; !hasAudience {
+		if _, hasGroups := args["google_groups"]; !hasGroups {
+			return nil, errors.New("audience or google_groups must be provided as the complete desired tester list")
+		}
+	}
 	audience, err := distributionAudienceFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	if len(audience) == 0 {
-		return nil, errors.New("audience must contain at least one tester or group")
+	if d.TargetKind == "ios" && len(audience) == 0 {
+		return nil, errors.New("an empty TestFlight audience cannot be reconciled safely with the available App Store Connect operations")
 	}
+	installURL := target.InstallURL
+	if raw, ok := args["install_url"]; ok {
+		installURL = strings.TrimSpace(fmt.Sprint(raw))
+	}
+	if err := validateTestingInstallURL(installURL); err != nil {
+		return nil, err
+	}
+	if err := validateDistributionAudienceForPlatform(d.TargetKind, audience); err != nil {
+		return nil, err
+	}
+	if err := a.persistDesiredDistribution(d, target.Channel, audience, installURL); err != nil {
+		return nil, err
+	}
+	target.DesiredConfigured = true
+	target.DesiredAudience = append([]distributionAudienceMember(nil), audience...)
+	target.InstallURL = installURL
 	var state *mobileDistributionState
 	switch d.TargetKind {
 	case "ios":
@@ -94,6 +137,10 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 		err = errors.New("distribution audiences apply only to Android and iOS deployments")
 	}
 	if err != nil {
+		_ = a.persistDistributionFailure(d, target.Channel, err)
+		return nil, err
+	}
+	if err := a.persistDistributionObservation(d, state, ""); err != nil {
 		return nil, err
 	}
 	emit("deploy.distribution.updated", map[string]any{
@@ -135,10 +182,13 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 	if err != nil {
 		return target, err
 	}
-	if channel == "production" {
+	if isProductionMobileChannel(d.TargetKind, channel) {
 		return target, errors.New("production channels do not have a test audience")
 	}
 	target.Channel = channel
+	if err := a.loadDesiredDistribution(d, &target); err != nil {
+		return target, err
+	}
 
 	cfg, err := parseMobileTargetConfig(d.TargetConfigJSON)
 	if err != nil {
@@ -179,9 +229,13 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 func distributionAudienceFromArgs(args map[string]any) ([]distributionAudienceMember, error) {
 	var audience []distributionAudienceMember
 	appendMember := func(raw map[string]any) {
+		email := mapStringValue(raw, "email")
+		if email == "" {
+			email = mapStringValue(raw, "identifier")
+		}
 		audience = append(audience, distributionAudienceMember{
 			Kind:      strings.ToLower(strings.TrimSpace(mapStringValue(raw, "kind"))),
-			Email:     strings.ToLower(strings.TrimSpace(mapStringValue(raw, "email"))),
+			Email:     strings.ToLower(strings.TrimSpace(email)),
 			FirstName: strings.TrimSpace(mapStringValue(raw, "first_name")),
 			LastName:  strings.TrimSpace(mapStringValue(raw, "last_name")),
 		})
@@ -229,6 +283,259 @@ func distributionAudienceFromArgs(args map[string]any) ([]distributionAudienceMe
 	return out, nil
 }
 
+func validateDistributionAudienceForPlatform(platform string, audience []distributionAudienceMember) error {
+	for _, member := range audience {
+		switch platform {
+		case "android":
+			if member.Kind != "group" {
+				return errors.New("Google Play's publishing API supports Google Group addresses only; use kind=group")
+			}
+		case "ios":
+			if member.Kind != "individual" {
+				return errors.New("App Store Connect audiences support individual tester emails; use kind=individual")
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeStoreTesting(platform string, testing StoreTesting) (StoreTesting, error) {
+	out := StoreTesting{Channels: map[string]StoreTestingChannel{}}
+	for rawChannel, config := range testing.Channels {
+		channel, err := normalizeMobileChannel(platform, rawChannel)
+		if err != nil {
+			return StoreTesting{}, err
+		}
+		if isProductionMobileChannel(platform, channel) {
+			return StoreTesting{}, errors.New("production channels do not support tester configuration")
+		}
+		if err := validateTestingInstallURL(config.InstallURL); err != nil {
+			return StoreTesting{}, err
+		}
+		audience := make([]distributionAudienceMember, 0, len(config.Audience))
+		for _, member := range config.Audience {
+			audience = append(audience, distributionAudienceMember{
+				Kind: strings.ToLower(strings.TrimSpace(member.Kind)), Email: strings.ToLower(strings.TrimSpace(member.Identifier)),
+				FirstName: strings.TrimSpace(member.FirstName), LastName: strings.TrimSpace(member.LastName),
+			})
+		}
+		normalized, err := normalizeDistributionAudience(audience)
+		if err != nil {
+			return StoreTesting{}, err
+		}
+		if err := validateDistributionAudienceForPlatform(platform, normalized); err != nil {
+			return StoreTesting{}, err
+		}
+		config.Audience = storeTestingAudience(normalized)
+		config.InstallURL = strings.TrimSpace(config.InstallURL)
+		out.Channels[channel] = config
+	}
+	return out, nil
+}
+
+func normalizeDistributionAudience(audience []distributionAudienceMember) ([]distributionAudienceMember, error) {
+	args := map[string]any{"audience": make([]map[string]any, 0, len(audience))}
+	for _, member := range audience {
+		args["audience"] = append(args["audience"].([]map[string]any), map[string]any{
+			"kind": member.Kind, "email": member.Email, "first_name": member.FirstName, "last_name": member.LastName,
+		})
+	}
+	return distributionAudienceFromArgs(args)
+}
+
+func storeTestingAudience(audience []distributionAudienceMember) []StoreTestingAudience {
+	out := make([]StoreTestingAudience, 0, len(audience))
+	for _, member := range audience {
+		out = append(out, StoreTestingAudience{
+			Kind: member.Kind, Identifier: member.Email, FirstName: member.FirstName, LastName: member.LastName,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Kind != out[j].Kind {
+			return out[i].Kind < out[j].Kind
+		}
+		return out[i].Identifier < out[j].Identifier
+	})
+	return out
+}
+
+func distributionAudienceFromStore(config StoreTestingChannel) []distributionAudienceMember {
+	out := make([]distributionAudienceMember, 0, len(config.Audience))
+	for _, member := range config.Audience {
+		out = append(out, distributionAudienceMember{
+			Kind: member.Kind, Email: member.Identifier, FirstName: member.FirstName, LastName: member.LastName,
+		})
+	}
+	return out
+}
+
+func validateTestingInstallURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+		return errors.New("testing install_url must be an absolute HTTPS URL")
+	}
+	return nil
+}
+
+func (a *App) loadDesiredDistribution(d *Deployment, target *distributionTarget) error {
+	if d == nil || target == nil {
+		return nil
+	}
+	cfg, doc, err := a.mobileStoreConfig(d)
+	if err != nil {
+		return err
+	}
+	if channel, ok := doc.Testing.Channels[target.Channel]; ok {
+		target.DesiredConfigured = true
+		target.DesiredAudience = distributionAudienceFromStore(channel)
+		target.InstallURL = channel.InstallURL
+	}
+	if cfg == nil || strings.TrimSpace(cfg.ObservedJSON) == "" {
+		return nil
+	}
+	var observed struct {
+		Testing struct {
+			Channels map[string]struct {
+				LastSyncedAt string `json:"last_synced_at"`
+			} `json:"channels"`
+		} `json:"testing"`
+	}
+	if json.Unmarshal([]byte(cfg.ObservedJSON), &observed) == nil {
+		target.LastSyncedAt = observed.Testing.Channels[target.Channel].LastSyncedAt
+	}
+	return nil
+}
+
+func (a *App) persistDesiredDistribution(d *Deployment, channel string, audience []distributionAudienceMember, installURL string) error {
+	_, doc, err := a.mobileStoreConfig(d)
+	if err != nil {
+		return err
+	}
+	if doc.Testing.Channels == nil {
+		doc.Testing.Channels = map[string]StoreTestingChannel{}
+	}
+	doc.Testing.Channels[channel] = StoreTestingChannel{
+		Audience: storeTestingAudience(audience), InstallURL: strings.TrimSpace(installURL),
+	}
+	_, err = dbUpsertMobileStoreConfig(globalCtx.AppDB(), d, doc)
+	return err
+}
+
+func (a *App) persistDistributionObservation(d *Deployment, state *mobileDistributionState, lastError string) error {
+	if d == nil || state == nil {
+		return nil
+	}
+	cfg, err := dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil || cfg == nil {
+		return err
+	}
+	observed := map[string]any{}
+	_ = json.Unmarshal([]byte(defaultStr(cfg.ObservedJSON, "{}")), &observed)
+	testing, _ := observed["testing"].(map[string]any)
+	if testing == nil {
+		testing = map[string]any{}
+	}
+	channels, _ := testing["channels"].(map[string]any)
+	if channels == nil {
+		channels = map[string]any{}
+	}
+	now := nowUTC()
+	state.LastSyncedAt = now
+	channels[state.Channel] = map[string]any{
+		"audience": state.Audience, "count": state.Count, "synced": state.Synced,
+		"tester_access": state.TesterAccess, "install_url": state.InstallURL,
+		"last_synced_at": now, "last_error": lastError,
+	}
+	testing["channels"] = channels
+	observed["testing"] = testing
+	return dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), cfg.ValidationJSON, "", cfg.LastError)
+}
+
+func (a *App) persistDistributionFailure(d *Deployment, channel string, syncErr error) error {
+	if d == nil || syncErr == nil {
+		return nil
+	}
+	cfg, err := dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
+	if err != nil || cfg == nil {
+		return err
+	}
+	observed := map[string]any{}
+	_ = json.Unmarshal([]byte(defaultStr(cfg.ObservedJSON, "{}")), &observed)
+	testing, _ := observed["testing"].(map[string]any)
+	if testing == nil {
+		testing = map[string]any{}
+	}
+	channels, _ := testing["channels"].(map[string]any)
+	if channels == nil {
+		channels = map[string]any{}
+	}
+	entry, _ := channels[channel].(map[string]any)
+	if entry == nil {
+		entry = map[string]any{}
+	}
+	entry["synced"] = false
+	entry["tester_access"] = "sync_error"
+	entry["last_error"] = syncErr.Error()
+	channels[channel] = entry
+	testing["channels"] = channels
+	observed["testing"] = testing
+	return dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, mustJSON(observed), cfg.ValidationJSON, "", cfg.LastError)
+}
+
+func finalizeDistributionState(state *mobileDistributionState, target distributionTarget) *mobileDistributionState {
+	if state == nil {
+		return nil
+	}
+	state.DesiredConfigured = target.DesiredConfigured
+	state.DesiredAudience = append([]distributionAudienceMember(nil), target.DesiredAudience...)
+	state.DesiredCount = len(state.DesiredAudience)
+	state.InstallURL = target.InstallURL
+	if state.InstallURL != "" {
+		state.InstallURLSource = "manual"
+	}
+	state.LastSyncedAt = target.LastSyncedAt
+	state.Synced = target.DesiredConfigured && distributionAudienceEqual(state.Audience, target.DesiredAudience)
+	switch {
+	case !target.DesiredConfigured || len(target.DesiredAudience) == 0:
+		state.TesterAccess = "not_configured"
+	case state.Synced:
+		state.TesterAccess = "configured"
+	default:
+		state.TesterAccess = "sync_required"
+	}
+	if state.Platform == "android" {
+		state.ConsoleURL = "https://play.google.com/console/"
+	} else if state.Platform == "ios" {
+		state.ConsoleURL = "https://appstoreconnect.apple.com/apps"
+	}
+	return state
+}
+
+func distributionAudienceEqual(left, right []distributionAudienceMember) bool {
+	normalize := func(values []distributionAudienceMember) []string {
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			out = append(out, strings.ToLower(strings.TrimSpace(value.Kind))+"\x00"+strings.ToLower(strings.TrimSpace(value.Email)))
+		}
+		sort.Strings(out)
+		return out
+	}
+	a, b := normalize(left), normalize(right)
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func mapStringValue(values map[string]any, key string) string {
 	value, ok := values[key]
 	if !ok || value == nil {
@@ -274,7 +581,7 @@ func (a *App) iosDistributionStatus(target distributionTarget) (*mobileDistribut
 		AppID: target.AppID, Audience: []distributionAudienceMember{},
 	}
 	if group.ID == "" {
-		return state, nil
+		return finalizeDistributionState(state, target), nil
 	}
 	state.Configured = true
 	state.GroupID = group.ID
@@ -285,7 +592,7 @@ func (a *App) iosDistributionStatus(target distributionTarget) (*mobileDistribut
 	}
 	state.Audience = parseAppleTesters(testers)
 	state.Count = len(state.Audience)
-	return state, nil
+	return finalizeDistributionState(state, target), nil
 }
 
 func (a *App) updateIOSDistribution(target distributionTarget, audience []distributionAudienceMember) (*mobileDistributionState, error) {
@@ -558,9 +865,13 @@ func (a *App) androidDistributionStatus(target distributionTarget) (*mobileDistr
 	if err != nil {
 		return nil, err
 	}
+	return readAndroidDistribution(bound, target)
+}
+
+func readAndroidDistribution(bound *sdk.BoundIntegration, target distributionTarget) (*mobileDistributionState, error) {
 	edit, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": target.PackageName})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open Google Play edit for %s: %w", target.PackageName, err)
 	}
 	editID := jsonStringAt(edit, "id")
 	if editID == "" {
@@ -573,16 +884,14 @@ func (a *App) androidDistributionStatus(target distributionTarget) (*mobileDistr
 		"packageName": target.PackageName, "editId": editID, "track": target.Channel,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read Google Play testers for track %s: %w", target.Channel, err)
 	}
 	return androidDistributionState(target, parseGoogleGroups(raw)), nil
 }
 
 func (a *App) updateAndroidDistribution(target distributionTarget, audience []distributionAudienceMember) (*mobileDistributionState, error) {
-	for _, member := range audience {
-		if member.Kind != "group" {
-			return nil, errors.New("Google Play's publishing API supports Google Group addresses only; use kind=group")
-		}
+	if err := validateDistributionAudienceForPlatform("android", audience); err != nil {
+		return nil, err
 	}
 	bound, err := boundIntegration("play_store")
 	if err != nil {
@@ -608,33 +917,47 @@ func (a *App) updateAndroidDistribution(target distributionTarget, audience []di
 	if err != nil {
 		return nil, err
 	}
-	groups := parseGoogleGroups(raw)
-	seen := map[string]bool{}
-	for _, group := range groups {
-		seen[strings.ToLower(group)] = true
-	}
-	changed := false
+	current := parseGoogleGroups(raw)
+	groups := make([]string, 0, len(audience))
 	for _, member := range audience {
-		if !seen[member.Email] {
-			groups = append(groups, member.Email)
-			seen[member.Email] = true
-			changed = true
-		}
+		groups = append(groups, member.Email)
 	}
 	sort.Strings(groups)
-	if !changed {
-		return androidDistributionState(target, groups), nil
+	if stringSlicesEqual(current, groups) {
+		return androidDistributionState(target, current), nil
 	}
 	if _, err := executeIntegration(bound, "update_track_testers", map[string]any{
 		"packageName": target.PackageName, "editId": editID, "track": target.Channel, "googleGroups": groups,
 	}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("replace Google Play testers for track %s: %w", target.Channel, err)
+	}
+	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": target.PackageName, "editId": editID}); err != nil {
+		return nil, fmt.Errorf("validate Google Play tester edit: %w", err)
 	}
 	if _, err := executeIntegration(bound, "commit_edit", map[string]any{"packageName": target.PackageName, "editId": editID}); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("commit Google Play tester edit: %w", err)
 	}
 	committed = true
-	return androidDistributionState(target, groups), nil
+	state, err := readAndroidDistribution(bound, target)
+	if err != nil {
+		return nil, fmt.Errorf("verify committed Google Play testers: %w", err)
+	}
+	if !distributionAudienceEqual(state.Audience, audience) {
+		return nil, errors.New("Google Play committed the tester edit but the track audience does not match the desired Google Groups")
+	}
+	return state, nil
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func parseGoogleGroups(raw json.RawMessage) []string {
@@ -654,12 +977,186 @@ func parseGoogleGroups(raw json.RawMessage) []string {
 func androidDistributionState(target distributionTarget, groups []string) *mobileDistributionState {
 	state := &mobileDistributionState{
 		Platform: "android", Provider: "google_play", Channel: target.Channel,
-		PackageName: target.PackageName, Configured: true,
+		PackageName: target.PackageName, Configured: len(groups) > 0,
 		Audience: make([]distributionAudienceMember, 0, len(groups)),
 	}
 	for _, group := range groups {
 		state.Audience = append(state.Audience, distributionAudienceMember{Kind: "group", Email: group})
 	}
 	state.Count = len(state.Audience)
-	return state
+	return finalizeDistributionState(state, target)
+}
+
+func (a *App) applyConfiguredGoogleTestingToEdit(bound *sdk.BoundIntegration, d *Deployment, packageName, editID, channel string) (*mobileDistributionState, error) {
+	target := distributionTarget{Channel: channel, PackageName: packageName}
+	if isProductionMobileChannel("android", channel) {
+		return finalizeDistributionState(&mobileDistributionState{
+			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,
+			Audience: []distributionAudienceMember{},
+		}, target), nil
+	}
+	if err := a.loadDesiredDistribution(d, &target); err != nil {
+		return nil, err
+	}
+	if !target.DesiredConfigured {
+		return finalizeDistributionState(&mobileDistributionState{
+			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,
+			Audience: []distributionAudienceMember{},
+		}, target), nil
+	}
+	if err := validateDistributionAudienceForPlatform("android", target.DesiredAudience); err != nil {
+		return nil, err
+	}
+	raw, err := executeIntegration(bound, "get_track_testers", map[string]any{
+		"packageName": packageName, "editId": editID, "track": channel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read Google Play testers for track %s: %w", channel, err)
+	}
+	current := parseGoogleGroups(raw)
+	desired := make([]string, 0, len(target.DesiredAudience))
+	for _, member := range target.DesiredAudience {
+		desired = append(desired, member.Email)
+	}
+	sort.Strings(desired)
+	if !stringSlicesEqual(current, desired) {
+		if _, err := executeIntegration(bound, "update_track_testers", map[string]any{
+			"packageName": packageName, "editId": editID, "track": channel, "googleGroups": desired,
+		}); err != nil {
+			return nil, fmt.Errorf("replace Google Play testers for track %s: %w", channel, err)
+		}
+	}
+	return androidDistributionState(target, desired), nil
+}
+
+func (a *App) verifyConfiguredGoogleTesting(d *Deployment, packageName, channel string, pending *mobileDistributionState) (*mobileDistributionState, error) {
+	if pending == nil || !pending.DesiredConfigured || isProductionMobileChannel("android", channel) {
+		return pending, nil
+	}
+	bound, err := boundIntegration("play_store")
+	if err != nil {
+		return nil, err
+	}
+	target := distributionTarget{Channel: channel, PackageName: packageName}
+	if err := a.loadDesiredDistribution(d, &target); err != nil {
+		return nil, err
+	}
+	state, err := readAndroidDistribution(bound, target)
+	if err != nil {
+		return nil, err
+	}
+	if !state.Synced {
+		return nil, errors.New("Google Play release committed but tester access does not match the configured Google Groups")
+	}
+	if err := a.persistDistributionObservation(d, state, ""); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func (a *App) reconcileConfiguredGoogleTesting(d *Deployment, packageName, channel string) (*mobileDistributionState, error) {
+	target := distributionTarget{Channel: channel, PackageName: packageName}
+	if isProductionMobileChannel("android", channel) {
+		return finalizeDistributionState(&mobileDistributionState{
+			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,
+			Audience: []distributionAudienceMember{},
+		}, target), nil
+	}
+	if err := a.loadDesiredDistribution(d, &target); err != nil {
+		return nil, err
+	}
+	if !target.DesiredConfigured {
+		return finalizeDistributionState(&mobileDistributionState{
+			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,
+			Audience: []distributionAudienceMember{},
+		}, target), nil
+	}
+	state, err := a.updateAndroidDistribution(target, target.DesiredAudience)
+	if err != nil {
+		_ = a.persistDistributionFailure(d, channel, err)
+		return nil, err
+	}
+	if err := a.persistDistributionObservation(d, state, ""); err != nil {
+		return nil, err
+	}
+	return state, nil
+}
+
+func setReleaseTesterAccess(meta *mobileReleaseMeta, state *mobileDistributionState) {
+	if meta == nil || state == nil {
+		return
+	}
+	meta.TesterAccess = state.TesterAccess
+	meta.TesterCount = state.DesiredCount
+	meta.TesterGroups = make([]string, 0, len(state.DesiredAudience))
+	for _, member := range state.DesiredAudience {
+		meta.TesterGroups = append(meta.TesterGroups, member.Email)
+	}
+	meta.InstallURL = state.InstallURL
+	meta.TesterSyncedAt = state.LastSyncedAt
+}
+
+func (a *App) applyDesiredTesting(d *Deployment, doc StoreDocument) error {
+	channels := make([]string, 0, len(doc.Testing.Channels))
+	for channel := range doc.Testing.Channels {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+	for _, channel := range channels {
+		switch d.TargetKind {
+		case "android":
+			target, err := a.resolveDistributionTarget(d, map[string]any{"channel": channel})
+			if err != nil {
+				return err
+			}
+			if _, err := a.reconcileConfiguredGoogleTesting(d, target.PackageName, channel); err != nil {
+				return err
+			}
+		case "ios":
+			target, err := a.resolveDistributionTarget(d, map[string]any{"channel": channel})
+			if err != nil {
+				return err
+			}
+			if len(target.DesiredAudience) == 0 {
+				return fmt.Errorf("TestFlight channel %s has an empty desired audience, which cannot be removed safely with the configured provider operations", channel)
+			}
+			state, err := a.updateIOSDistribution(target, target.DesiredAudience)
+			if err != nil {
+				return err
+			}
+			if err := a.persistDistributionObservation(d, state, ""); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("testing audiences are unsupported for %s", d.TargetKind)
+		}
+	}
+	return nil
+}
+
+func (a *App) observeDesiredTesting(d *Deployment, doc StoreDocument) (map[string]any, error) {
+	channels := make([]string, 0, len(doc.Testing.Channels))
+	for channel := range doc.Testing.Channels {
+		channels = append(channels, channel)
+	}
+	sort.Strings(channels)
+	states := map[string]any{}
+	for _, channel := range channels {
+		target, err := a.resolveDistributionTarget(d, map[string]any{"channel": channel})
+		if err != nil {
+			return nil, err
+		}
+		var state *mobileDistributionState
+		if d.TargetKind == "android" {
+			state, err = a.androidDistributionStatus(target)
+		} else {
+			state, err = a.iosDistributionStatus(target)
+		}
+		if err != nil {
+			return nil, err
+		}
+		state.LastSyncedAt = nowUTC()
+		states[channel] = state
+	}
+	return map[string]any{"channels": states, "observed_at": nowUTC()}, nil
 }

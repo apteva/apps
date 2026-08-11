@@ -295,7 +295,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_distribution_update", Handler: a.toolDistributionUpdate,
-			Description: "Idempotently add members to a mobile test audience. iOS accepts individual tester emails; Android accepts Google Group addresses because Google Play's API does not support individual email lists. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience.",
+			Description: "Persist and reconcile the desired test audience for a mobile channel. Android uses exact Google Group replacement, including empty-list removal; iOS adds or invites individual testers without removing existing account access. Args: name OR id, environment?, channel?, release_id?, beta_group_id?, group_name?, audience?, google_groups?, install_url?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -306,6 +306,8 @@ func (a *App) MCPTools() []sdk.Tool {
 					"release_id":    map[string]any{"type": "integer"},
 					"beta_group_id": map[string]any{"type": "string"},
 					"group_name":    map[string]any{"type": "string"},
+					"install_url":   map[string]any{"type": "string", "description": "Optional provider install/opt-in URL. Google Play requires this to be copied from Play Console."},
+					"google_groups": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Android shorthand for a complete desired Google Group list."},
 					"audience": map[string]any{
 						"type": "array",
 						"items": map[string]any{
@@ -320,7 +322,10 @@ func (a *App) MCPTools() []sdk.Tool {
 						},
 					},
 				},
-				"required": []string{"audience"},
+				"anyOf": []map[string]any{
+					{"required": []string{"audience"}},
+					{"required": []string{"google_groups"}},
+				},
 			},
 		},
 		{
