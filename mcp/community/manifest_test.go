@@ -138,6 +138,8 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 		"elements.create(\"payment\"",
 		"stripeRef.current.confirmPayment",
 		"elementsRef.current.submit",
+		"themeColor={portal.brand.primary_color}",
+		"colorPrimary: themeColor",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("inline storefront checkout missing %q", required)
@@ -150,6 +152,9 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 	}
 	if strings.Contains(text, "Enter a valid email above to load Stripe") {
 		t.Error("payment fields must not be gated on an email address")
+	}
+	if strings.Contains(text, `colorPrimary: "#176b57"`) {
+		t.Error("Stripe Elements must inherit the community theme instead of using a fixed color")
 	}
 	for _, required := range []string{`useState<"email" | "credentials">("email")`, `Enter your email to continue.`, `setStep("credentials")`, `Create a password to securely create your`} {
 		if !strings.Contains(text, required) {

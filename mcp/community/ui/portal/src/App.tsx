@@ -1072,6 +1072,7 @@ export default function App() {
       storefrontCheckout?.publishable_key && storefrontCheckout.amount_cents && storefrontCheckout.currency ? (
         <StripePaymentForm
           session={storefrontCheckout}
+          themeColor={portal.brand.primary_color}
           returnURL={(() => {
             const url = new URL(window.location.href);
             url.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-success" : "success");
@@ -1661,8 +1662,9 @@ function CheckoutPaymentUnavailable() {
   </section>;
 }
 
-function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }: {
+function StripePaymentForm({ session, themeColor, returnURL, busy, error, enabled, onError }: {
   session: StorefrontCheckoutSession;
+  themeColor: string;
   returnURL: string;
   busy: boolean;
   error: string;
@@ -1688,7 +1690,7 @@ function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }
         amount: session.amount_cents,
         currency: session.currency.toLowerCase(),
         setupFutureUsage: session.offer_kind === "recurring" ? "off_session" : undefined,
-        appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
+        appearance: { theme: "stripe", variables: { colorPrimary: themeColor, borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
       });
       paymentElement = elements.create("payment", { layout: "tabs" });
       paymentElement.on("ready", () => setMounted(true));
@@ -1703,7 +1705,7 @@ function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }
       elementsRef.current = null;
       paymentElement?.destroy();
     };
-  }, [onError, session.amount_cents, session.currency, session.offer_kind, session.publishable_key]);
+  }, [onError, session.amount_cents, session.currency, session.offer_kind, session.publishable_key, themeColor]);
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.10.4
+version: 0.10.5
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -24,6 +24,7 @@ description: |
   Stripe payment fields render immediately from public deferred Elements
   configuration; customer, invoice, and PaymentIntent creation wait until
   the buyer has authenticated with a verified email.
+  Embedded Stripe Elements inherit each community's configured primary color.
   Checkout account creation uses progressive disclosure: email first, then
   the appropriate signup or sign-in password step without requesting profile
   details before purchase.
@@ -234,7 +235,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.10.4
+    ref: community/v0.10.5
     entry: mcp/community
   port: 8080
   health_check: /health
