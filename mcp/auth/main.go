@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.9.0
+version: 0.9.1
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -162,6 +162,8 @@ provides:
       description: List OAuth clients; org-scoped or project-wide.
     - name: auth_clients_create
       description: Register a new OAuth client (requires org).
+    - name: auth_clients_update
+      description: Add or remove allowed browser origins without replacing the client.
     - name: auth_clients_rotate_secret
       description: Rotate a client secret (org derived from client).
     - name: auth_clients_disable
@@ -596,6 +598,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"jwt_audience":        map[string]any{"type": "string"},
 			}), []string{"name", "type"}),
 			Handler: a.toolClientsCreate,
+		},
+		{
+			Name:        "auth_clients_update",
+			Description: "Add or remove allowed browser origins on an existing OAuth client without changing its client ID or invalidating sessions.",
+			InputSchema: schemaObject(map[string]any{
+				"client_id":              map[string]any{"type": "string"},
+				"add_allowed_origins":    map[string]any{"type": "array"},
+				"remove_allowed_origins": map[string]any{"type": "array"},
+			}, []string{"client_id"}),
+			Handler: a.toolClientsUpdate,
 		},
 		{
 			Name:        "auth_clients_rotate_secret",

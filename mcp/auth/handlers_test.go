@@ -69,6 +69,43 @@ func newAuthCtx(t *testing.T) (*sdk.AppCtx, string) {
 	return ctx, clientID
 }
 
+func TestClientsUpdateAddsAndRemovesAllowedOriginsWithoutReplacingClient(t *testing.T) {
+	ctx, clientID := newAuthCtx(t)
+	app := &App{}
+	if _, err := app.toolClientsUpdate(ctx, map[string]any{
+		"client_id":           clientID,
+		"add_allowed_origins": []any{"https://Courses.Example.com/", "http://localhost:5280"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := dbGetClientByClientID(ctx.AppDB(), "test-proj", clientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(client.AllowedOrigins, ","); got != "https://courses.example.com,http://localhost:5280" {
+		t.Fatalf("allowed origins = %q", got)
+	}
+	if _, err := app.toolClientsUpdate(ctx, map[string]any{
+		"client_id":              clientID,
+		"remove_allowed_origins": []string{"https://courses.example.com"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, err = dbGetClientByClientID(ctx.AppDB(), "test-proj", clientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(client.AllowedOrigins, ","); got != "http://localhost:5280" {
+		t.Fatalf("allowed origins after removal = %q", got)
+	}
+	if _, err := app.toolClientsUpdate(ctx, map[string]any{
+		"client_id":           clientID,
+		"add_allowed_origins": []any{"https://example.com/path"},
+	}); err == nil {
+		t.Fatal("origin with a path was accepted")
+	}
+}
+
 func TestGoldenPath_SignupLoginRefreshMeLogout(t *testing.T) {
 	_, clientID := newAuthCtx(t)
 	app := &App{}

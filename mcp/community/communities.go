@@ -35,6 +35,12 @@ type Community struct {
 	AccentColor          string  `json:"accent_color"`
 	SupportEmail         string  `json:"support_email,omitempty"`
 	PortalHost           string  `json:"portal_host,omitempty"`
+	PortalDNSManaged     bool    `json:"portal_dns_managed,omitempty"`
+	PortalDNSDomain      string  `json:"portal_dns_domain,omitempty"`
+	PortalDNSName        string  `json:"portal_dns_name,omitempty"`
+	PortalDNSType        string  `json:"portal_dns_type,omitempty"`
+	PortalDNSValue       string  `json:"portal_dns_value,omitempty"`
+	PortalDomainError    string  `json:"portal_domain_error,omitempty"`
 	SignupMode           string  `json:"signup_mode"`
 	AutoCreateMembers    bool    `json:"auto_create_members"`
 	CreatedAt            string  `json:"created_at"`
@@ -306,7 +312,9 @@ func toolCommunitiesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 const communityCols = `id, project_id, slug, name, description,
        auth_client_id, auth_organization_id, auth_organization_slug,
        brand_name, logo_url, favicon_url, primary_color, accent_color,
-       support_email, portal_host, signup_mode, auto_create_members,
+       support_email, portal_host, portal_dns_managed, portal_dns_domain,
+       portal_dns_name, portal_dns_type, portal_dns_value, portal_domain_error,
+       signup_mode, auto_create_members,
        created_at, archived_at`
 
 func scanCommunity(scan func(...any) error) (Community, error) {
@@ -316,7 +324,9 @@ func scanCommunity(scan func(...any) error) (Community, error) {
 		&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description,
 		&c.AuthClientID, &c.AuthOrganizationID, &c.AuthOrganizationSlug,
 		&c.BrandName, &c.LogoURL, &c.FaviconURL, &c.PrimaryColor, &c.AccentColor,
-		&c.SupportEmail, &c.PortalHost, &c.SignupMode, &c.AutoCreateMembers,
+		&c.SupportEmail, &c.PortalHost, &c.PortalDNSManaged, &c.PortalDNSDomain,
+		&c.PortalDNSName, &c.PortalDNSType, &c.PortalDNSValue, &c.PortalDomainError,
+		&c.SignupMode, &c.AutoCreateMembers,
 		&c.CreatedAt, &arch,
 	); err != nil {
 		return c, err

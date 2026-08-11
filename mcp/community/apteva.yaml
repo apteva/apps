@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.10.5
+version: 0.11.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -13,6 +13,8 @@ description: |
   Each community owns its portal branding and Auth client/organization
   binding; visitors see a branded email/password flow, are linked to a
   member automatically, and continue directly into requested course checkout.
+  An optional Domains binding publishes one custom hostname per community;
+  native Apteva ingress owns routing and automatic TLS.
   Its public storefront projects only Catalog products actively offered by
   each community, groups one-time and recurring prices under generic product
   routes, and shows published course entitlements before authentication.
@@ -48,9 +50,11 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.ingress.read
+    - platform.ingress.write
   apps:
     - name: auth
-      version: ">=0.9.0"
+      version: ">=0.9.1"
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
     - name: catalog
@@ -98,6 +102,12 @@ requires:
       capabilities: [probe]
       required: false
       hint: "When bound, lessons_attach_video auto-fills duration_seconds via ffmpeg_probe."
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.list_records, dns.create_record, dns.delete_records]
+      required: false
+      hint: "Bind Domains to create and safely remove the community subdomain DNS record. Native Apteva ingress owns routing and TLS."
 
 provides:
   http_routes:
@@ -217,6 +227,10 @@ provides:
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
     - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
     - { name: storefront_checkout_claim, description: "Claim a prepared Checkout session for the verified member before payment confirmation." }
+    - { name: community_domain_options, description: "List available Domains-managed apex domains and the suggested DNS target." }
+    - { name: community_domain_attach, description: "Attach one custom hostname using Domains DNS plus native ingress and TLS." }
+    - { name: community_domain_status, description: "Return DNS, native ingress, and certificate status for a community hostname." }
+    - { name: community_domain_detach, description: "Detach a hostname and remove only the exact DNS record Community created." }
   ui_panels:
     # Dashboard operator/admin surface.
     - slot: project.page
@@ -235,7 +249,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.10.5
+    ref: community/v0.11.0
     entry: mcp/community
   port: 8080
   health_check: /health

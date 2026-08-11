@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -407,7 +408,7 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return stats, nil
 }
 
-// ─── auth_clients_list / create / rotate_secret / disable ────────────
+// ─── auth_clients_list / create / update / rotate_secret / disable ───
 
 func (a *App) toolClientsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
@@ -484,6 +485,88 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		out["note"] = "store this secret — it will not be shown again"
 	}
 	return out, nil
+}
+
+func (a *App) toolClientsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	clientID := strings.TrimSpace(stringArg(args, "client_id", ""))
+	if clientID == "" {
+		return nil, errors.New("client_id required")
+	}
+	client, err := dbGetClientByClientID(ctx.AppDB(), pid, clientID)
+	if err != nil {
+		return nil, err
+	}
+	add, err := normalizeClientOrigins(stringArrArg(args, "add_allowed_origins"))
+	if err != nil {
+		return nil, err
+	}
+	remove, err := normalizeClientOrigins(stringArrArg(args, "remove_allowed_origins"))
+	if err != nil {
+		return nil, err
+	}
+	if len(add) == 0 && len(remove) == 0 {
+		return nil, errors.New("add_allowed_origins or remove_allowed_origins required")
+	}
+	origins := make([]string, 0, len(client.AllowedOrigins)+len(add))
+	seen := map[string]bool{}
+	removeSet := map[string]bool{}
+	for _, origin := range remove {
+		removeSet[origin] = true
+	}
+	for _, raw := range append(client.AllowedOrigins, add...) {
+		normalized, normalizeErr := normalizeClientOrigin(raw)
+		if normalizeErr != nil {
+			return nil, normalizeErr
+		}
+		if removeSet[normalized] || seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		origins = append(origins, normalized)
+	}
+	if err := dbSetClientAllowedOrigins(ctx.AppDB(), pid, clientID, origins); err != nil {
+		return nil, err
+	}
+	updated, err := dbGetClientByClientID(ctx.AppDB(), pid, clientID)
+	if err != nil {
+		return nil, err
+	}
+	dbAudit(ctx.AppDB(), pid, updated.OrganizationID, nil, clientID, "client_updated", "", "agent", map[string]any{
+		"allowed_origins": origins,
+	})
+	return map[string]any{"client": updated}, nil
+}
+
+func normalizeClientOrigins(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		normalized, err := normalizeClientOrigin(value)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[normalized] {
+			seen[normalized] = true
+			out = append(out, normalized)
+		}
+	}
+	return out, nil
+}
+
+func normalizeClientOrigin(value string) (string, error) {
+	value = strings.TrimRight(strings.TrimSpace(value), "/")
+	if value == "*" {
+		return value, nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+		return "", fmt.Errorf("allowed origin %q must be an absolute http(s) origin without a path", value)
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + strings.ToLower(parsed.Host), nil
 }
 
 func (a *App) toolClientsRotateSecret(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -747,17 +830,20 @@ func normalizeMetadataValue(raw any) (string, error) {
 }
 
 func stringArrArg(args map[string]any, key string) []string {
-	raw, ok := args[key].([]any)
-	if !ok {
+	switch raw := args[key].(type) {
+	case []string:
+		return append([]string(nil), raw...)
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, v := range raw {
+			if s, ok := v.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
 		return nil
 	}
-	out := make([]string, 0, len(raw))
-	for _, v := range raw {
-		if s, ok := v.(string); ok && s != "" {
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 func defaultedGrants(typ string, requested []string) []string {

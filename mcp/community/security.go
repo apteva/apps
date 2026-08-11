@@ -226,7 +226,9 @@ func communitiesForSubject(ctx *sdk.AppCtx, subjectID string) (any, error) {
 		`SELECT c.id, c.project_id, c.slug, c.name, c.description,
 		        c.auth_client_id, c.auth_organization_id, c.auth_organization_slug,
 		        c.brand_name, c.logo_url, c.favicon_url, c.primary_color, c.accent_color,
-		        c.support_email, c.portal_host, c.signup_mode, c.auto_create_members,
+		        c.support_email, c.portal_host, c.portal_dns_managed, c.portal_dns_domain,
+		        c.portal_dns_name, c.portal_dns_type, c.portal_dns_value, c.portal_domain_error,
+		        c.signup_mode, c.auto_create_members,
 		        c.created_at, c.archived_at,
 		        m.id, m.community_id, m.contact_id, m.auth_user_id, m.handle, m.display_name,
 		        m.bio, m.status, m.joined_at, m.last_seen_at
@@ -262,6 +264,12 @@ func communityForMember(c Community) Community {
 	c.AuthOrganizationID = ""
 	c.AuthOrganizationSlug = ""
 	c.PortalHost = ""
+	c.PortalDNSManaged = false
+	c.PortalDNSDomain = ""
+	c.PortalDNSName = ""
+	c.PortalDNSType = ""
+	c.PortalDNSValue = ""
+	c.PortalDomainError = ""
 	return c
 }
 
@@ -276,7 +284,9 @@ func scanCommunityMember(scan func(...any) error) (Community, Member, error) {
 		&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description,
 		&c.AuthClientID, &c.AuthOrganizationID, &c.AuthOrganizationSlug,
 		&c.BrandName, &c.LogoURL, &c.FaviconURL, &c.PrimaryColor, &c.AccentColor,
-		&c.SupportEmail, &c.PortalHost, &c.SignupMode, &c.AutoCreateMembers,
+		&c.SupportEmail, &c.PortalHost, &c.PortalDNSManaged, &c.PortalDNSDomain,
+		&c.PortalDNSName, &c.PortalDNSType, &c.PortalDNSValue, &c.PortalDomainError,
+		&c.SignupMode, &c.AutoCreateMembers,
 		&c.CreatedAt, &communityArchived,
 		&m.ID, &m.CommunityID, &contact, &authUser, &m.Handle, &m.DisplayName, &m.Bio, &m.Status, &m.JoinedAt, &seen,
 	)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.9.0
+version: 0.9.1
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -142,6 +142,8 @@ provides:
       description: List registered OAuth clients. Org-scoped or project-wide.
     - name: auth_clients_create
       description: Register a new OAuth client (requires org). Returns client_id + (for confidential clients) one-time client_secret.
+    - name: auth_clients_update
+      description: Add or remove allowed browser origins on an existing OAuth client without replacing the client or invalidating its sessions.
     - name: auth_clients_rotate_secret
       description: Rotate a client's secret. Returns the new value once. Org is derived from the client row.
     - name: auth_clients_disable

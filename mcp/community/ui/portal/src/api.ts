@@ -28,6 +28,20 @@ declare const __API_BASE__: string;
 declare const __COMMUNITY_APP__: string;
 declare const __AUTH_APP__: string;
 
+declare global {
+  interface Window {
+    __COMMUNITY_PORTAL__?: {
+      community: string;
+      project_id: string;
+      product?: string;
+      course?: string;
+      offer?: string;
+      intent?: string;
+      auth?: string;
+    };
+  }
+}
+
 export const COMMUNITY_APP = __COMMUNITY_APP__ || "community";
 export const AUTH_APP = __AUTH_APP__ || "auth";
 
@@ -109,7 +123,7 @@ export function useDelegatedToken(token?: string): void {
 export function currentProjectId(): string {
   if (typeof window === "undefined") return "";
   const fromQuery = new URLSearchParams(window.location.search).get("project_id");
-  return fromQuery || window.__APTEVA_APP__?.default_project || "";
+  return fromQuery || window.__COMMUNITY_PORTAL__?.project_id || window.__APTEVA_APP__?.default_project || "";
 }
 
 function projectScopedPath(path: string): string {

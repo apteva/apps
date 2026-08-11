@@ -513,6 +513,21 @@ func dbGetClientByClientID(db *sql.DB, projectID, clientID string) (*Client, err
 	return scanClient(row)
 }
 
+func dbSetClientAllowedOrigins(db *sql.DB, projectID, clientID string, origins []string) error {
+	encoded, err := json.Marshal(origins)
+	if err != nil {
+		return err
+	}
+	res, err := db.Exec(`UPDATE clients SET allowed_origins = ? WHERE project_id = ? AND client_id = ?`, string(encoded), projectID, clientID)
+	if err != nil {
+		return err
+	}
+	if affected, _ := res.RowsAffected(); affected != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func scanClient(row *sql.Row) (*Client, error) {
 	var c Client
 	var redirects, origins, grants string

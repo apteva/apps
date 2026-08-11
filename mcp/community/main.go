@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.10.5
+version: 0.11.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -44,6 +44,8 @@ description: |
   /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
   Each community owns its portal branding and Auth client/organization
   binding, with automatic member linking and course-checkout continuation.
+  An optional Domains binding publishes one custom hostname per community;
+  native Apteva ingress owns routing and automatic TLS.
   Its public storefront projects only Catalog products actively offered by
   each community, groups one-time and recurring prices under generic product
   routes, and shows published course entitlements before authentication.
@@ -65,10 +67,10 @@ tags: [community, courses, membership, forum, dms]
 scopes: [project, global]
 min_apteva_version: "0.11.0"
 requires:
-  permissions: [db.write.app, platform.apps.call]
+  permissions: [db.write.app, platform.apps.call, platform.ingress.read, platform.ingress.write]
   apps:
     - name: auth
-      version: ">=0.9.0"
+      version: ">=0.9.1"
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
     - name: catalog
@@ -116,6 +118,12 @@ requires:
       capabilities: [probe]
       required: false
       hint: "When bound, lessons_attach_video auto-fills duration_seconds via ffmpeg_probe."
+    - role: domains
+      kind: app
+      compatible_app_names: [domains]
+      capabilities: [dns.list_records, dns.create_record, dns.delete_records]
+      required: false
+      hint: "Bind Domains to create and safely remove the community subdomain DNS record. Native Apteva ingress owns routing and TLS."
 provides:
   http_routes:
     - prefix: /
@@ -226,6 +234,10 @@ provides:
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
     - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
     - { name: storefront_checkout_claim, description: "Claim a prepared Checkout session for the verified member before payment confirmation." }
+    - { name: community_domain_options, description: "List available Domains-managed apex domains and the suggested DNS target." }
+    - { name: community_domain_attach, description: "Attach one custom hostname using Domains DNS plus native ingress and TLS." }
+    - { name: community_domain_status, description: "Return DNS, native ingress, and certificate status for a community hostname." }
+    - { name: community_domain_detach, description: "Detach a hostname and remove only the exact DNS record Community created." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -237,7 +249,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.10.5
+    ref: community/v0.11.0
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -282,6 +294,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("community mounted")
+	go reconcileCommunityDomains(ctx)
 	return nil
 }
 
@@ -331,6 +344,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/portal/products/", Handler: a.httpPortalProduct, NoAuth: true},
 		{Method: "POST", Pattern: "/portal/checkout/prepare", Handler: a.httpPortalCheckoutPrepare, NoAuth: true},
 		{Method: "GET", Pattern: "/store/", Handler: a.httpStorefrontRoute, NoAuth: true},
+		{Pattern: "/api/", Handler: a.httpPortalGatewayBridge},
 		{Pattern: "/communities", Handler: operatorHTTP(a.httpCommunities)},
 		{Pattern: "/members", Handler: operatorHTTP(a.httpMembers)},
 		{Pattern: "/spaces", Handler: operatorHTTP(a.httpSpaces)},
@@ -340,6 +354,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/sections", Handler: operatorHTTP(a.httpSections)},
 		{Pattern: "/lessons", Handler: operatorHTTP(a.httpLessons)},
 		{Pattern: "/lesson", Handler: operatorHTTP(a.httpLesson)},
+		{Method: "GET", Pattern: "/", Handler: a.httpPortalHostPage},
 	}
 }
 
@@ -357,6 +372,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, courseSalesTools()...)
 	tools = append(tools, membershipTools()...)
 	tools = append(tools, storefrontTools()...)
+	tools = append(tools, communityDomainTools()...)
 	return secureTools(tools)
 }
 

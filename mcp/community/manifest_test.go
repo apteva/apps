@@ -88,10 +88,28 @@ func TestManifestParses(t *testing.T) {
 			t.Errorf("%s must be a required Community dependency", name)
 		}
 	}
+	permissionSet := map[string]bool{}
+	for _, permission := range m.Requires.Permissions {
+		permissionSet[string(permission)] = true
+	}
+	for _, permission := range []string{"platform.ingress.read", "platform.ingress.write"} {
+		if !permissionSet[permission] {
+			t.Errorf("Community custom domains require %s", permission)
+		}
+	}
+	foundDomainsBinding := false
+	for _, integration := range m.Requires.Integrations {
+		if integration.Role == "domains" && !integration.Required {
+			foundDomainsBinding = true
+		}
+	}
+	if !foundDomainsBinding {
+		t.Error("Community must expose Domains as an optional app binding")
+	}
 	if _, hasSaaS := required["saas"]; hasSaaS {
 		t.Fatal("Community must orchestrate Billing and Subscriptions directly, not depend on SaaS")
 	}
-	if versions["auth"] != ">=0.9.0" || versions["catalog"] != ">=0.3.0" ||
+	if versions["auth"] != ">=0.9.1" || versions["catalog"] != ">=0.3.0" ||
 		versions["checkout"] != ">=0.3.1" || versions["billing"] != ">=0.12.3" || versions["subscriptions"] != ">=0.7.2" {
 		t.Errorf("unexpected dependency versions: auth=%q catalog=%q checkout=%q billing=%q subscriptions=%q",
 			versions["auth"], versions["catalog"], versions["checkout"], versions["billing"], versions["subscriptions"])
@@ -120,6 +138,9 @@ func TestPortalAuthRoutesAreProjectScoped(t *testing.T) {
 	}
 	if !strings.Contains(string(source), "projectId: currentProjectId()") {
 		t.Error("portal AptevaClient must project-scope Community MCP calls")
+	}
+	if !strings.Contains(string(source), "window.__COMMUNITY_PORTAL__?.project_id") {
+		t.Error("custom host portal must accept server-injected project scope")
 	}
 }
 

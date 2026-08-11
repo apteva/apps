@@ -92,10 +92,37 @@ interface Community {
   accent_color?: string;
   support_email?: string;
   portal_host?: string;
+  portal_dns_managed?: boolean;
+  portal_dns_domain?: string;
+  portal_dns_name?: string;
+  portal_dns_type?: string;
+  portal_dns_value?: string;
+  portal_domain_error?: string;
   signup_mode?: "open" | "closed";
   auto_create_members?: boolean;
   created_at: string;
   archived_at?: string;
+}
+
+interface CommunityDomainStatus {
+  configured: boolean;
+  community_id: string;
+  hostname?: string;
+  portal_url?: string;
+  domains_bound: boolean;
+  dns_managed: boolean;
+  dns_domain?: string;
+  dns_name?: string;
+  dns_type?: string;
+  dns_value?: string;
+  error?: string;
+  suggested_dns_target?: string;
+  available_domains?: Array<{ id: number; name: string }>;
+  ingress?: {
+    status: string;
+    tls_mode: string;
+    certificate?: { status: string; error?: string };
+  };
 }
 
 interface Member {
@@ -309,11 +336,12 @@ function slugify(value: string): string {
 
 function clientPortalURL(community: Community, projectId: string, installId: number): string {
   const configured = community.portal_host?.trim();
+  if (configured) return configured;
   const fallback = `/api/apps/community/_install/${installId}/ui/portal/dist/index.html`;
-  const url = new URL(configured || fallback, window.location.origin);
+  const url = new URL(fallback, window.location.origin);
   url.searchParams.set("project_id", projectId);
   url.searchParams.set("community", community.slug);
-  return configured ? url.toString() : `${url.pathname}${url.search}`;
+  return `${url.pathname}${url.search}`;
 }
 
 function buttonClass(tone: "primary" | "secondary" | "ghost" = "secondary") {
@@ -1178,7 +1206,6 @@ function CommunityDialog({
   const [primaryColor, setPrimaryColor] = useState(community?.primary_color || "#147d68");
   const [accentColor, setAccentColor] = useState(community?.accent_color || "#22c55e");
   const [supportEmail, setSupportEmail] = useState(community?.support_email || "");
-  const [portalHost, setPortalHost] = useState(community?.portal_host || "");
   const [signupMode, setSignupMode] = useState<"open" | "closed">(community?.signup_mode || "open");
   const [autoCreateMembers, setAutoCreateMembers] = useState(community?.auto_create_members ?? true);
   const [authUserId, setAuthUserId] = useState("");
@@ -1197,7 +1224,65 @@ function CommunityDialog({
   const [selectedCourseIds, setSelectedCourseIds] = useState<string[]>([]);
   const [planTags, setPlanTags] = useState("");
   const [busy, setBusy] = useState(false);
+  const [domainBusy, setDomainBusy] = useState(false);
+  const [domainStatus, setDomainStatus] = useState<CommunityDomainStatus | null>(null);
+  const [domainApex, setDomainApex] = useState("");
+  const [domainSubdomain, setDomainSubdomain] = useState(community?.slug || "community");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    if (kind !== "portal" || !community) return () => { active = false; };
+    Promise.all([
+      callTool<CommunityDomainStatus>("community_domain_options", { community_id: community.id }, projectId),
+      callTool<CommunityDomainStatus>("community_domain_status", { community_id: community.id }, projectId),
+    ]).then(([options, status]) => {
+      if (!active) return;
+      const merged = { ...options, ...status, available_domains: options.available_domains, suggested_dns_target: options.suggested_dns_target };
+      setDomainStatus(merged);
+      setDomainApex(status.dns_domain || options.available_domains?.[0]?.name || "");
+      setDomainSubdomain(status.dns_name && status.dns_name !== "@" ? status.dns_name : community.slug);
+    }).catch((loadError) => {
+      if (active) setError((loadError as Error).message || String(loadError));
+    });
+    return () => { active = false; };
+  }, [kind, community, projectId]);
+
+  const attachDomain = async () => {
+    if (!community || !domainApex) return;
+    setDomainBusy(true);
+    setError("");
+    try {
+      const status = await runTool<CommunityDomainStatus>("Connect custom domain", "community_domain_attach", {
+        community_id: community.id,
+        apex_domain: domainApex,
+        subdomain: domainSubdomain.trim(),
+        auto_dns: true,
+      });
+      setDomainStatus((current) => ({ ...current, ...status } as CommunityDomainStatus));
+    } catch (attachError) {
+      setError((attachError as Error).message || String(attachError));
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const detachDomain = async () => {
+    if (!community) return;
+    setDomainBusy(true);
+    setError("");
+    try {
+      const status = await runTool<CommunityDomainStatus>("Disconnect custom domain", "community_domain_detach", {
+        community_id: community.id,
+        remove_dns: true,
+      });
+      setDomainStatus(status);
+    } catch (detachError) {
+      setError((detachError as Error).message || String(detachError));
+    } finally {
+      setDomainBusy(false);
+    }
+  };
 
   const title =
     kind === "community"
@@ -1253,7 +1338,6 @@ function CommunityDialog({
           primary_color: primaryColor,
           accent_color: accentColor,
           support_email: supportEmail.trim(),
-          portal_host: portalHost.trim(),
           signup_mode: signupMode,
           auto_create_members: autoCreateMembers,
         });
@@ -1454,7 +1538,39 @@ function CommunityDialog({
               <Field label="Accent color"><input className={inputClass} type="color" value={accentColor} onChange={(e) => setAccentColor(e.target.value)} /></Field>
             </div>
             <Field label="Support email"><input className={inputClass} type="email" value={supportEmail} onChange={(e) => setSupportEmail(e.target.value)} /></Field>
-            <Field label="Portal URL"><input className={inputClass} type="url" value={portalHost} onChange={(e) => setPortalHost(e.target.value)} placeholder="https://courses.example.com" /></Field>
+            <section className="space-y-3 rounded border border-border p-3">
+              <div>
+                <div className="text-sm font-medium">Custom domain</div>
+                <div className="text-xs text-text-muted">Community configures DNS through Domains; Apteva handles the route and HTTPS certificate.</div>
+              </div>
+              {domainStatus?.configured ? (
+                <>
+                  <a className="block break-all text-sm text-accent hover:underline" href={domainStatus.portal_url} target="_blank" rel="noreferrer">{domainStatus.portal_url}</a>
+                  <div className="grid grid-cols-2 gap-2 text-xs text-text-muted">
+                    <span>Route: {domainStatus.ingress?.status || "checking"}</span>
+                    <span>HTTPS: {domainStatus.ingress?.certificate?.status || (domainStatus.ingress?.tls_mode === "off" ? "off" : "pending")}</span>
+                    {domainStatus.dns_managed ? <span className="col-span-2">DNS: {domainStatus.dns_name} {domainStatus.dns_type} {domainStatus.dns_value}</span> : null}
+                  </div>
+                  {domainStatus.error ? <div className="text-xs text-warn">{domainStatus.error}</div> : null}
+                  <button type="button" className={buttonClass()} disabled={domainBusy} onClick={detachDomain}>{domainBusy ? "Disconnecting..." : "Disconnect domain"}</button>
+                </>
+              ) : domainStatus && !domainStatus.domains_bound ? (
+                <div className="text-sm text-text-muted">Bind the Domains app to Community, then return here to choose the subdomain.</div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Subdomain"><input className={inputClass} value={domainSubdomain} onChange={(e) => setDomainSubdomain(slugify(e.target.value))} placeholder="courses" /></Field>
+                    <Field label="Domain">
+                      <select className={inputClass} value={domainApex} onChange={(e) => setDomainApex(e.target.value)}>
+                        {(domainStatus?.available_domains || []).map((domain) => <option key={domain.id} value={domain.name}>{domain.name}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  {domainApex ? <div className="text-xs text-text-muted">This will publish <strong>{domainSubdomain ? `${domainSubdomain}.` : ""}{domainApex}</strong>.</div> : <div className="text-xs text-text-muted">Add a managed domain in Domains first.</div>}
+                  <button type="button" className={buttonClass("primary")} disabled={domainBusy || !domainApex} onClick={attachDomain}>{domainBusy ? "Connecting..." : "Connect domain"}</button>
+                </>
+              )}
+            </section>
             <Field label="Signup policy">
               <select className={inputClass} value={signupMode} onChange={(e) => setSignupMode(e.target.value as "open" | "closed")}>
                 <option value="open">Open signup</option><option value="closed">Existing members only</option>

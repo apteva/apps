@@ -78,6 +78,17 @@ func TestPublicStorefrontGroupsRecurringPricesByCatalogProduct(t *testing.T) {
 	}
 }
 
+func TestStorefrontReturnURLAcceptsConfiguredCustomPortalOrigin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:5280/api/apps/community/portal/checkout/prepare", nil)
+	community := &Community{PortalHost: "https://courses.example.test"}
+	if got, err := validateStorefrontReturnURL(req, "https://courses.example.test/checkout/course?payment=success", community); err != nil || got == "" {
+		t.Fatalf("configured custom portal return URL rejected: got=%q err=%v", got, err)
+	}
+	if _, err := validateStorefrontReturnURL(req, "https://attacker.example/steal", community); err == nil {
+		t.Fatal("foreign return URL accepted")
+	}
+}
+
 func TestStorefrontCheckoutMapsPriceServerSide(t *testing.T) {
 	platform := newSalesPlatformStub()
 	ctx, community, member, _ := salesFixture(t, platform)

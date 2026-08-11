@@ -143,7 +143,7 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 	}
 	urls := map[string]string{}
 	for name, raw := range map[string]string{"return_url": input.ReturnURL, "success_url": input.SuccessURL, "cancel_url": input.CancelURL} {
-		value, validateErr := validateStorefrontReturnURL(r, raw)
+		value, validateErr := validateStorefrontReturnURL(r, raw, &community)
 		if validateErr != nil {
 			writeErr(w, http.StatusBadRequest, validateErr.Error())
 			return
@@ -161,7 +161,7 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, prepared)
 }
 
-func validateStorefrontReturnURL(r *http.Request, raw string) (string, error) {
+func validateStorefrontReturnURL(r *http.Request, raw string, communities ...*Community) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", nil
@@ -170,10 +170,19 @@ func validateStorefrontReturnURL(r *http.Request, raw string) (string, error) {
 	if err != nil || !parsed.IsAbs() || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return "", errors.New("checkout return URL must be an absolute HTTP URL")
 	}
-	if !strings.EqualFold(parsed.Host, r.Host) {
-		return "", errors.New("checkout return URL must use this portal origin")
+	if strings.EqualFold(parsed.Host, r.Host) {
+		return parsed.String(), nil
 	}
-	return parsed.String(), nil
+	for _, community := range communities {
+		if community == nil || strings.TrimSpace(community.PortalHost) == "" {
+			continue
+		}
+		portal, portalErr := url.Parse(community.PortalHost)
+		if portalErr == nil && strings.EqualFold(parsed.Scheme, portal.Scheme) && strings.EqualFold(parsed.Host, portal.Host) {
+			return parsed.String(), nil
+		}
+	}
+	return "", errors.New("checkout return URL must use this portal origin")
 }
 
 func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target storefrontOfferTarget, email, name, recoveryToken string, urls map[string]string) (*preparedStorefrontCheckout, error) {

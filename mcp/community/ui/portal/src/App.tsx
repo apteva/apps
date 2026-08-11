@@ -62,29 +62,29 @@ const nav: Array<{ id: View; label: string; icon: typeof Home }> = [
 
 function requestedCommunitySlug(): string {
   if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("community")?.trim().toLowerCase() || "";
+  return new URLSearchParams(window.location.search).get("community")?.trim().toLowerCase() || window.__COMMUNITY_PORTAL__?.community?.trim().toLowerCase() || "";
 }
 
 function requestedCourse(): string {
   if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("course")?.trim() || "";
+  return new URLSearchParams(window.location.search).get("course")?.trim() || window.__COMMUNITY_PORTAL__?.course?.trim() || "";
 }
 
 function requestedProduct(): string {
   if (typeof window === "undefined") return "";
-  return new URLSearchParams(window.location.search).get("product")?.trim() || "";
+  return new URLSearchParams(window.location.search).get("product")?.trim() || window.__COMMUNITY_PORTAL__?.product?.trim() || "";
 }
 
 function requestedOffer(): number {
   if (typeof window === "undefined") return 0;
-  const value = Number(new URLSearchParams(window.location.search).get("offer"));
+  const value = Number(new URLSearchParams(window.location.search).get("offer") || window.__COMMUNITY_PORTAL__?.offer);
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function wantsCourseCheckout(): boolean {
   if (typeof window === "undefined") return false;
   const params = new URLSearchParams(window.location.search);
-  return !params.has("payment") && params.get("intent") === "buy";
+  return !params.has("payment") && (params.get("intent") || window.__COMMUNITY_PORTAL__?.intent) === "buy";
 }
 
 function hasPaymentResult(): boolean {
@@ -93,7 +93,9 @@ function hasPaymentResult(): boolean {
 
 function initialAuthMode(): AuthMode {
   if (typeof window === "undefined") return "login";
-  return new URLSearchParams(window.location.search).get("auth") === "signup" ? "signup" : "login";
+  const mode = new URLSearchParams(window.location.search).get("auth") || window.__COMMUNITY_PORTAL__?.auth;
+  if (mode === "signup" || mode === "forgot" || mode === "reset") return mode;
+  return "login";
 }
 
 function authSessionKey(): string {
