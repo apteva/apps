@@ -42,16 +42,21 @@ type guestCheckoutItem struct {
 }
 
 type preparedStorefrontCheckout struct {
-	OfferKind      string `json:"offer_kind"`
-	CheckoutID     int64  `json:"checkout_session_id"`
-	RecoveryToken  string `json:"recovery_token,omitempty"`
-	SessionToken   string `json:"session_token,omitempty"`
-	InvoiceID      int64  `json:"invoice_id"`
-	InvoiceNumber  string `json:"invoice_number,omitempty"`
-	Presentation   string `json:"presentation"`
-	ClientSecret   string `json:"client_secret"`
-	PublishableKey string `json:"publishable_key"`
-	CheckoutURL    string `json:"checkout_url,omitempty"`
+	OfferKind          string   `json:"offer_kind"`
+	CheckoutID         int64    `json:"checkout_session_id"`
+	RecoveryToken      string   `json:"recovery_token,omitempty"`
+	SessionToken       string   `json:"session_token,omitempty"`
+	InvoiceID          int64    `json:"invoice_id,omitempty"`
+	InvoiceNumber      string   `json:"invoice_number,omitempty"`
+	Presentation       string   `json:"presentation"`
+	Mode               string   `json:"mode,omitempty"`
+	AmountCents        int64    `json:"amount_cents"`
+	Currency           string   `json:"currency"`
+	PaymentMethodTypes []string `json:"payment_method_types,omitempty"`
+	PaymentIntentID    string   `json:"payment_intent_id,omitempty"`
+	ClientSecret       string   `json:"client_secret,omitempty"`
+	PublishableKey     string   `json:"publishable_key"`
+	CheckoutURL        string   `json:"checkout_url,omitempty"`
 }
 
 type storefrontOfferTarget struct {
@@ -122,10 +127,14 @@ func (a *App) httpPortalCheckoutPrepare(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusBadRequest, "invalid checkout request")
 		return
 	}
-	email, err := validatePurchaseEmail(input.Email)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
+	email := strings.TrimSpace(input.Email)
+	if email != "" {
+		var validateErr error
+		email, validateErr = validatePurchaseEmail(email)
+		if validateErr != nil {
+			writeErr(w, http.StatusBadRequest, validateErr.Error())
+			return
+		}
 	}
 	target, err := resolveStorefrontOffer(globalCtx.AppDB(), community.ID, input.CatalogPriceID)
 	if err != nil {
@@ -180,7 +189,7 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 			return nil, fmt.Errorf("restore Checkout session: %w", err)
 		}
 		session, cart = restored.Session, restored.Cart
-		if err := validatePreparedCheckout(communityID, target, email, session, cart); err != nil {
+		if err := validatePreparedCheckout(communityID, target, session, cart); err != nil {
 			return nil, err
 		}
 	} else {
@@ -209,53 +218,53 @@ func prepareCheckoutWithCheckoutApp(ctx *sdk.AppCtx, communityID string, target 
 		}
 		session = started.Session
 		recoveryToken = session.RecoveryToken
+		patch := map[string]any{"metadata": map[string]any{
+			"source_app": "community", "community_id": communityID, "catalog_price_id": target.Price, "offer_kind": target.Kind,
+		}}
+		if email != "" {
+			patch["email"] = email
+		}
+		if name != "" {
+			patch["customer_name"] = name
+		}
 		var updated struct {
 			Session guestCheckoutSession `json:"session"`
 		}
 		if err := callAppResult(ctx, "checkout", "checkout_update", map[string]any{
-			"_project_id": pid, "session_id": session.ID,
-			"patch": map[string]any{"email": email, "customer_name": name, "metadata": map[string]any{
-				"source_app": "community", "community_id": communityID, "catalog_price_id": target.Price, "offer_kind": target.Kind,
-			}},
+			"_project_id": pid, "session_id": session.ID, "patch": patch,
 		}, &updated); err != nil {
-			return nil, fmt.Errorf("update Checkout buyer: %w", err)
+			return nil, fmt.Errorf("label Checkout session: %w", err)
 		}
 		session = updated.Session
 	}
-	paymentArgs := map[string]any{
-		"_project_id": pid, "session_id": session.ID, "provider": "stripe", "presentation": "elements",
-		"idempotency_key": fmt.Sprintf("community-storefront:%s:%d", communityID, session.ID),
+	var prepared struct {
+		Session guestCheckoutSession `json:"session"`
+		Payment struct {
+			Presentation       string   `json:"presentation"`
+			Mode               string   `json:"mode"`
+			AmountCents        int64    `json:"amount_cents"`
+			Currency           string   `json:"currency"`
+			PaymentMethodTypes []string `json:"payment_method_types"`
+			PublishableKey     string   `json:"publishable_key"`
+		} `json:"payment"`
 	}
-	for name, value := range urls {
-		paymentArgs[name] = value
-	}
-	if target.Kind == "recurring" {
-		paymentArgs["save_payment_method"] = true
-		paymentArgs["set_default_payment_method"] = true
-	}
-	var paid struct {
-		Session       guestCheckoutSession `json:"session"`
-		InvoiceID     int64                `json:"invoice_id"`
-		InvoiceNumber string               `json:"invoice_number"`
-		Payment       map[string]any       `json:"payment"`
-	}
-	if err := callAppResult(ctx, "checkout", "checkout_pay", paymentArgs, &paid); err != nil {
-		return nil, fmt.Errorf("prepare Checkout payment: %w", err)
+	if err := callAppResult(ctx, "checkout", "checkout_prepare", map[string]any{
+		"_project_id": pid, "session_id": session.ID,
+	}, &prepared); err != nil {
+		return nil, fmt.Errorf("prepare Checkout Elements: %w", err)
 	}
 	return &preparedStorefrontCheckout{
-		OfferKind: target.Kind, CheckoutID: paid.Session.ID, RecoveryToken: recoveryToken,
-		SessionToken: cart.SessionToken, InvoiceID: paid.InvoiceID, InvoiceNumber: paid.InvoiceNumber,
-		Presentation: "elements", ClientSecret: strings.TrimSpace(strArg(paid.Payment, "client_secret", "")),
-		PublishableKey: strings.TrimSpace(strArg(paid.Payment, "publishable_key", "")), CheckoutURL: strings.TrimSpace(strArg(paid.Payment, "url", "")),
+		OfferKind: target.Kind, CheckoutID: prepared.Session.ID, RecoveryToken: recoveryToken,
+		SessionToken: cart.SessionToken, Presentation: prepared.Payment.Presentation,
+		Mode: prepared.Payment.Mode, AmountCents: prepared.Payment.AmountCents,
+		Currency: prepared.Payment.Currency, PaymentMethodTypes: prepared.Payment.PaymentMethodTypes,
+		PublishableKey: prepared.Payment.PublishableKey,
 	}, nil
 }
 
-func validatePreparedCheckout(communityID string, target storefrontOfferTarget, email string, session guestCheckoutSession, cart guestCheckoutCart) error {
+func validatePreparedCheckout(communityID string, target storefrontOfferTarget, session guestCheckoutSession, cart guestCheckoutCart) error {
 	if session.Status != "started" && session.Status != "awaiting_payment" {
 		return errors.New("prepared checkout is no longer payable")
-	}
-	if !strings.EqualFold(strings.TrimSpace(session.Email), strings.TrimSpace(email)) {
-		return errors.New("prepared checkout belongs to another email address")
 	}
 	if metadataString(session.Metadata, "community_id") != communityID || metadataString(session.Metadata, "catalog_price_id") != fmt.Sprint(target.Price) || metadataString(session.Metadata, "offer_kind") != target.Kind {
 		return errors.New("prepared checkout does not match this offer")
@@ -294,19 +303,59 @@ func toolStorefrontCheckoutClaim(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if email == "" {
 		return nil, errors.New("verified Auth email is required to claim checkout")
 	}
-	if err := validatePreparedCheckout(communityID, target, email, restored.Session, restored.Cart); err != nil {
+	if err := validatePreparedCheckout(communityID, target, restored.Session, restored.Cart); err != nil {
 		return nil, err
 	}
-	if restored.Session.InvoiceID == nil || *restored.Session.InvoiceID == 0 {
-		return nil, errors.New("prepared checkout has no Billing invoice")
+	if restored.Session.Email != "" && !strings.EqualFold(restored.Session.Email, email) {
+		return nil, errors.New("prepared checkout belongs to another email address")
+	}
+	pid := scopeProject(ctx)
+	if restored.Session.Status == "started" {
+		var updated struct {
+			Session guestCheckoutSession `json:"session"`
+		}
+		if err := callAppResult(ctx, "checkout", "checkout_update", map[string]any{
+			"_project_id": pid, "session_id": restored.Session.ID, "patch": map[string]any{"email": email},
+		}, &updated); err != nil {
+			return nil, fmt.Errorf("bind verified buyer to Checkout session: %w", err)
+		}
+		restored.Session = updated.Session
+	}
+	paymentArgs := map[string]any{
+		"_project_id": pid, "session_id": restored.Session.ID, "provider": "stripe", "presentation": "deferred",
+		"idempotency_key": fmt.Sprintf("community-storefront:%s:%d", communityID, restored.Session.ID),
+	}
+	if target.Kind == "recurring" {
+		paymentArgs["save_payment_method"] = true
+		paymentArgs["set_default_payment_method"] = true
+	}
+	var paid struct {
+		Session       guestCheckoutSession `json:"session"`
+		InvoiceID     int64                `json:"invoice_id"`
+		InvoiceNumber string               `json:"invoice_number"`
+		Payment       map[string]any       `json:"payment"`
+	}
+	if err := callAppResult(ctx, "checkout", "checkout_pay", paymentArgs, &paid); err != nil {
+		return nil, fmt.Errorf("create verified Checkout payment: %w", err)
+	}
+	if paid.InvoiceID == 0 || paid.Session.InvoiceID == nil {
+		return nil, errors.New("Checkout returned no Billing invoice")
 	}
 	memberID := strArg(args, "_viewer_member_id", strArg(args, "member_id", ""))
-	if target.Kind == "one_time" {
-		purchase, claimErr := claimCourseCheckout(ctx, target, memberID, email, strArg(args, "_auth_subject_id", ""), restored.Session)
-		return map[string]any{"offer_kind": target.Kind, "purchase": purchase, "enrolled": purchase == nil && claimErr == nil}, claimErr
+	result := map[string]any{
+		"offer_kind": target.Kind, "presentation": "deferred", "invoice_id": paid.InvoiceID,
+		"invoice_number": paid.InvoiceNumber, "payment_intent_id": strArg(paid.Payment, "payment_intent_id", ""),
+		"client_secret": strArg(paid.Payment, "client_secret", ""), "publishable_key": strArg(paid.Payment, "publishable_key", ""),
 	}
-	subscription, claimErr := claimMembershipCheckout(ctx, target, memberID, email, strArg(args, "_auth_subject_id", ""), restored.Session)
-	return map[string]any{"offer_kind": target.Kind, "subscription": subscription}, claimErr
+	if target.Kind == "one_time" {
+		purchase, claimErr := claimCourseCheckout(ctx, target, memberID, email, strArg(args, "_auth_subject_id", ""), paid.Session)
+		result["purchase"] = purchase
+		result["enrolled"] = purchase == nil && claimErr == nil
+		return result, claimErr
+	}
+	subscription, claimErr := claimMembershipCheckout(ctx, target, memberID, email, strArg(args, "_auth_subject_id", ""), paid.Session)
+	result["subscription"] = subscription
+	return result, claimErr
 }
 
 func claimCourseCheckout(ctx *sdk.AppCtx, target storefrontOfferTarget, memberID, email, authSubjectID string, session guestCheckoutSession) (*CoursePurchase, error) {

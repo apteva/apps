@@ -2,14 +2,16 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.3.0
+version: 0.3.1
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
   manual-payment path (creates a draft → open invoice in billing for
   wire / card-by-portal recording). v0.2.0 adds hosted and custom
   Stripe Checkout Sessions through Billing, with retry-safe invoice
-  reuse and webhook-driven payment completion.
+  reuse and webhook-driven payment completion. v0.3.1 adds deferred
+  Payment Element preparation before buyer identity is known, without
+  prematurely creating customers, invoices, or PaymentIntents.
 
   Storefront blocks (add-to-cart, cart-summary, checkout-page) are
   added to the content app separately — checkout exposes the REST +
@@ -33,6 +35,7 @@ requires:
       optional: false            # cart items reference catalog prices
     - name: billing
       optional: false            # checkout creates invoices for conversion
+      version: ">=0.12.3"
 
 provides:
   http_routes:
@@ -52,6 +55,8 @@ provides:
       description: Lock a cart and create a checkout_session. Cart becomes immutable until session terminates.
     - name: checkout_update
       description: Capture or update email / name / addresses on a started session.
+    - name: checkout_prepare
+      description: Return browser-safe deferred Stripe Elements configuration without creating billing records.
     - name: checkout_bootstrap
       description: Restore durable checkout and cart state by session, cart, or recovery token.
     - name: checkout_advance
@@ -64,7 +69,8 @@ provides:
       description: |
         Submit the session for payment. Manual mode returns a finalized Billing
         invoice. Stripe mode returns either a hosted redirect URL or browser-safe
-        Elements configuration and reuses the same invoice on retries.
+        Elements configuration, including deferred Payment Element confirmation,
+        and reuses the same invoice on retries.
     - name: checkout_get
       description: Fetch a checkout_session by id, including the linked invoice_id when paid.
     - name: checkout_cancel
@@ -100,7 +106,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: checkout/v0.3.0
+    ref: checkout/v0.3.1
     entry: mcp/checkout
   port: 8080
   health_check: /health

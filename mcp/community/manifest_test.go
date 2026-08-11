@@ -92,7 +92,7 @@ func TestManifestParses(t *testing.T) {
 		t.Fatal("Community must orchestrate Billing and Subscriptions directly, not depend on SaaS")
 	}
 	if versions["auth"] != ">=0.9.0" || versions["catalog"] != ">=0.3.0" ||
-		versions["checkout"] != ">=0.3.0" || versions["billing"] != ">=0.12.2" || versions["subscriptions"] != ">=0.7.2" {
+		versions["checkout"] != ">=0.3.1" || versions["billing"] != ">=0.12.3" || versions["subscriptions"] != ">=0.7.2" {
 		t.Errorf("unexpected dependency versions: auth=%q catalog=%q checkout=%q billing=%q subscriptions=%q",
 			versions["auth"], versions["catalog"], versions["checkout"], versions["billing"], versions["subscriptions"])
 	}
@@ -131,12 +131,13 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 	text := string(source)
 	for _, required := range []string{
 		"CheckoutAccountSummary",
-		"CheckoutPaymentPending",
+		"CheckoutPaymentUnavailable",
 		"api.portal.prepareCheckout",
 		"api.storefront.claim",
-		"stripe.initCheckout",
-		"checkout.createPaymentElement",
-		"checkoutRef.current.confirm",
+		"stripe.elements",
+		"elements.create(\"payment\"",
+		"stripeRef.current.confirmPayment",
+		"elementsRef.current.submit",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("inline storefront checkout missing %q", required)
@@ -146,6 +147,9 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 		if strings.Contains(text, stagedCopy) {
 			t.Errorf("storefront must not present staged checkout copy %q", stagedCopy)
 		}
+	}
+	if strings.Contains(text, "Enter a valid email above to load Stripe") {
+		t.Error("payment fields must not be gated on an email address")
 	}
 }
 

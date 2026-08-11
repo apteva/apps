@@ -98,23 +98,20 @@ func TestStorefrontCheckoutMapsPriceServerSide(t *testing.T) {
 	}
 }
 
-func TestPreparedCheckoutMustMatchCommunityOfferAndVerifiedEmail(t *testing.T) {
+func TestPreparedCheckoutMustMatchCommunityOffer(t *testing.T) {
 	target := storefrontOfferTarget{Kind: "one_time", Product: 61, Price: 71, Amount: 9900, Currency: "EUR"}
 	metadata, _ := json.Marshal(map[string]any{
 		"community_id": "comm_1", "catalog_price_id": 71, "offer_kind": "one_time",
 	})
-	session := guestCheckoutSession{ID: 10, Email: "alice@example.test", Status: "awaiting_payment", Metadata: metadata}
+	session := guestCheckoutSession{ID: 10, Status: "started", Metadata: metadata}
 	cart := guestCheckoutCart{ID: 11, Items: []guestCheckoutItem{{
 		PriceID: 71, ProductID: 61, UnitAmountCents: 9900, Currency: "EUR", Quantity: 1,
 	}}}
-	if err := validatePreparedCheckout("comm_1", target, "ALICE@example.test", session, cart); err != nil {
+	if err := validatePreparedCheckout("comm_1", target, session, cart); err != nil {
 		t.Fatalf("valid prepared checkout rejected: %v", err)
 	}
-	if err := validatePreparedCheckout("comm_1", target, "mallory@example.test", session, cart); err == nil {
-		t.Fatal("checkout must not be claimable by a different verified email")
-	}
 	cart.Items[0].UnitAmountCents++
-	if err := validatePreparedCheckout("comm_1", target, "alice@example.test", session, cart); err == nil {
+	if err := validatePreparedCheckout("comm_1", target, session, cart); err == nil {
 		t.Fatal("checkout must not be claimable after its canonical total changes")
 	}
 }
@@ -126,6 +123,36 @@ func TestStorefrontReturnURLStaysOnPortalOrigin(t *testing.T) {
 	}
 	if _, err := validateStorefrontReturnURL(req, "https://attacker.test/steal"); err == nil {
 		t.Fatal("cross-origin checkout return URL must be rejected")
+	}
+}
+
+func TestDeferredStorefrontPreparationWaitsForVerifiedBuyer(t *testing.T) {
+	platform := newSalesPlatformStub()
+	ctx, community, member, _ := salesFixture(t, platform)
+	target, err := resolveStorefrontOffer(ctx.AppDB(), community.ID, 71)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := prepareCheckoutWithCheckoutApp(ctx, community.ID, target, "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Presentation != "deferred" || prepared.AmountCents != 9900 || prepared.Currency != "eur" || prepared.PublishableKey != "pk_test_public" || prepared.ClientSecret != "" || prepared.InvoiceID != 0 {
+		t.Fatalf("unexpected anonymous preparation: %+v", prepared)
+	}
+	if platform.invoice.ID != 0 || platform.checkoutPayments != 0 || platform.checkoutSession.Email != "" {
+		t.Fatalf("anonymous preparation created buyer billing state: invoice=%+v session=%+v", platform.invoice, platform.checkoutSession)
+	}
+	out, err := delegatedTool(t, "storefront_checkout_claim")(
+		userPurchaseContext("auth-alice", "alice@example.test"), ctx,
+		map[string]any{"community_id": community.ID, "catalog_price_id": int64(71), "member_id": member.ID, "recovery_token": prepared.RecoveryToken},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["client_secret"] != "pi_test_course_secret" || result["payment_intent_id"] != "pi_test_course" || platform.checkoutPayments != 1 || platform.checkoutSession.Email != "alice@example.test" {
+		t.Fatalf("verified claim did not create the deferred payment correctly: result=%+v session=%+v", result, platform.checkoutSession)
 	}
 }
 

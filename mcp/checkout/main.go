@@ -63,7 +63,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("checkout mounted",
-		"version", "0.1.3",
+		"version", "0.3.1",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -278,6 +278,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolCheckoutUpdate,
 		},
 		{
+			Name:        "checkout_prepare",
+			Description: "Return browser-safe Stripe Elements configuration for a started checkout without requiring buyer details or creating a Billing customer, invoice, or payment object. Args: session_id.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "integer"},
+			}, []string{"session_id"}),
+			Handler: a.toolCheckoutPrepare,
+		},
+		{
 			Name:        "checkout_bootstrap",
 			Description: "Restore durable checkout state by session_id, cart_id, or recovery_token. Returns the session and cart without changing payment state.",
 			InputSchema: schemaObject(map[string]any{
@@ -320,11 +328,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "checkout_pay",
-			Description: "Freeze a session into a finalized Billing invoice and prepare its configured payment session. provider='manual' returns the invoice; provider='stripe' calls Billing and returns hosted or Elements browser configuration. Retry with the same idempotency_key reuses the invoice and Stripe session. Args: session_id, provider, presentation, idempotency_key, return_url, success_url, cancel_url, expires_at, payment_method_types.",
+			Description: "Freeze a session into a finalized Billing invoice and prepare payment. provider='manual' returns the invoice; provider='stripe' supports hosted, Checkout Session Elements, or deferred Payment Element confirmation. Retry with the same idempotency_key reuses the invoice and Stripe payment object. Args: session_id, provider, presentation, idempotency_key, return_url, success_url, cancel_url, expires_at, payment_method_types.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id":           map[string]any{"type": "integer"},
 				"provider":             map[string]any{"type": "string", "enum": []string{"manual", "stripe"}},
-				"presentation":         map[string]any{"type": "string", "enum": []string{"elements", "hosted"}},
+				"presentation":         map[string]any{"type": "string", "enum": []string{"deferred", "elements", "hosted"}},
 				"idempotency_key":      map[string]any{"type": "string"},
 				"return_url":           map[string]any{"type": "string"},
 				"success_url":          map[string]any{"type": "string"},
@@ -575,6 +583,65 @@ func (a *App) toolCheckoutUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	emitSession(ctx, "checkout.contact_captured", session)
 	return map[string]any{"session": session}, nil
+}
+
+func (a *App) toolCheckoutPrepare(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sessionID := int64Arg(args, "session_id")
+	if sessionID == 0 {
+		return nil, errors.New("session_id required")
+	}
+	session, err := dbCheckoutGet(ctx.AppDB(), pid, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, errors.New("session not found")
+	}
+	if session.Status != "started" {
+		return nil, fmt.Errorf("session %d is %s — only started sessions can be prepared", sessionID, session.Status)
+	}
+	cart, err := dbCartGetByID(ctx.AppDB(), pid, session.CartID)
+	if err != nil || cart == nil {
+		return nil, firstCheckoutErr(err, errors.New("cart not found"))
+	}
+	if len(cart.Items) == 0 || session.TotalCents <= 0 {
+		return nil, errors.New("checkout requires a non-empty cart with a positive total")
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable (billing app must be installed)")
+	}
+	var config map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "payment_processor_public_config", map[string]any{
+		"_project_id": pid,
+	}, &config); err != nil {
+		return nil, fmt.Errorf("billing public payment configuration failed: %w", err)
+	}
+	publishableKey := strings.TrimSpace(strArg(config, "publishable_key"))
+	if publishableKey == "" {
+		return nil, errors.New("Billing returned no Stripe publishable key")
+	}
+	payment := map[string]any{
+		"provider":        "stripe",
+		"presentation":    "deferred",
+		"mode":            "payment",
+		"amount_cents":    session.TotalCents,
+		"currency":        strings.ToLower(session.Currency),
+		"publishable_key": publishableKey,
+	}
+	if methods, ok := config["payment_method_types"]; ok {
+		payment["payment_method_types"] = methods
+	} else {
+		payment["payment_method_types"] = []string{"card"}
+	}
+	return map[string]any{
+		"session":         session,
+		"payment":         payment,
+		"publishable_key": publishableKey,
+	}, nil
 }
 
 func (a *App) toolCheckoutBootstrap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2009,8 +2076,8 @@ func checkoutPaymentConfig(args map[string]any) (string, string, error) {
 	} else if presentation == "" {
 		presentation = "elements"
 	}
-	if provider == "stripe" && presentation != "elements" && presentation != "hosted" {
-		return "", "", errors.New("Stripe presentation must be 'elements' or 'hosted'")
+	if provider == "stripe" && presentation != "deferred" && presentation != "elements" && presentation != "hosted" {
+		return "", "", errors.New("Stripe presentation must be 'deferred', 'elements', or 'hosted'")
 	}
 	return provider, presentation, nil
 }
@@ -2028,7 +2095,6 @@ func prepareCheckoutPayment(ctx *sdk.AppCtx, pid string, session *CheckoutSessio
 	billingArgs := map[string]any{
 		"_project_id":     pid,
 		"invoice_id":      invoiceID,
-		"presentation":    session.Presentation,
 		"idempotency_key": idempotencyKey,
 	}
 	for _, name := range []string{"return_url", "success_url", "cancel_url", "expires_at", "payment_method_types", "save_payment_method", "set_default_payment_method"} {
@@ -2037,12 +2103,21 @@ func prepareCheckoutPayment(ctx *sdk.AppCtx, pid string, session *CheckoutSessio
 		}
 	}
 	var payment map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_create_payment_session", billingArgs, &payment); err != nil {
-		return nil, 0, "", nil, fmt.Errorf("billing payment session failed: %w", err)
+	providerSessionField := "stripe_session_id"
+	if session.Presentation == "deferred" {
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_create_payment_intent", billingArgs, &payment); err != nil {
+			return nil, 0, "", nil, fmt.Errorf("billing payment intent failed: %w", err)
+		}
+		providerSessionField = "payment_intent_id"
+	} else {
+		billingArgs["presentation"] = session.Presentation
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_create_payment_session", billingArgs, &payment); err != nil {
+			return nil, 0, "", nil, fmt.Errorf("billing payment session failed: %w", err)
+		}
 	}
-	providerSessionID := strings.TrimSpace(strArg(payment, "stripe_session_id"))
+	providerSessionID := strings.TrimSpace(strArg(payment, providerSessionField))
 	if providerSessionID == "" {
-		return nil, 0, "", nil, errors.New("Billing returned no Stripe session id")
+		return nil, 0, "", nil, fmt.Errorf("Billing returned no Stripe %s", strings.TrimSuffix(providerSessionField, "_id"))
 	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE checkout_sessions

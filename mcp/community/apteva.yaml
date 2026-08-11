@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.10.2
+version: 0.10.3
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -21,6 +21,9 @@ description: |
   Panel and portal update live via the platform event bus.
   Community drives paid access while Checkout owns durable guest carts,
   buyer sessions, invoice conversion, and inline Stripe configuration.
+  Stripe payment fields render immediately from public deferred Elements
+  configuration; customer, invoice, and PaymentIntent creation wait until
+  the buyer has authenticated with a verified email.
   Catalog owns immutable products/prices, Billing owns invoices and payment
   events, and Community grants or revokes enrollment. For recurring access,
   Subscriptions owns lifecycle and renewal cycles while Billing owns saved
@@ -51,11 +54,11 @@ requires:
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
     - name: checkout
-      version: ">=0.3.0"
+      version: ">=0.3.1"
       optional: false
       reason: Checkout owns durable guest carts, buyer checkout sessions, Billing invoice conversion, and browser-safe Stripe Elements configuration.
     - name: billing
-      version: ">=0.12.2"
+      version: ">=0.12.3"
       optional: false
       events:
         - invoice.paid
@@ -228,7 +231,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: community/v0.10.3
     entry: mcp/community
   port: 8080
   health_check: /health

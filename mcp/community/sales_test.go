@@ -14,12 +14,17 @@ import (
 
 type salesPlatformStub struct {
 	tk.BasePlatformClient
-	mu             sync.Mutex
-	price          catalogPrice
-	product        catalogProduct
-	invoice        billingInvoice
-	invoiceCreates int
-	sessionCreates int
+	mu               sync.Mutex
+	price            catalogPrice
+	product          catalogProduct
+	invoice          billingInvoice
+	invoiceCreates   int
+	sessionCreates   int
+	checkoutSession  guestCheckoutSession
+	checkoutCart     guestCheckoutCart
+	checkoutMeta     json.RawMessage
+	checkoutPrepares int
+	checkoutPayments int
 }
 
 func newSalesPlatformStub() *salesPlatformStub {
@@ -67,6 +72,48 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 		} else {
 			value = map[string]any{"presentation": "hosted", "url": "https://payments.example.test/session", "stripe_session_id": "cs_test_course"}
 		}
+	case "checkout:cart_create":
+		s.checkoutCart = guestCheckoutCart{ID: 801, SessionToken: "cart-recovery"}
+		s.checkoutMeta, _ = json.Marshal(input["metadata"])
+		value = map[string]any{"cart": s.checkoutCart}
+	case "checkout:cart_add_item":
+		s.checkoutCart.Items = []guestCheckoutItem{{PriceID: s.price.ID, ProductID: s.product.ID, UnitAmountCents: s.price.UnitAmountCents, Currency: s.price.Currency, Quantity: 1}}
+		value = map[string]any{"cart": s.checkoutCart}
+	case "checkout:checkout_start":
+		s.checkoutSession = guestCheckoutSession{ID: 802, CartID: s.checkoutCart.ID, Status: "started", TotalCents: s.price.UnitAmountCents, Currency: s.price.Currency, Metadata: s.checkoutMeta, RecoveryToken: "checkout-recovery"}
+		value = map[string]any{"session": s.checkoutSession}
+	case "checkout:checkout_update":
+		patch, _ := input["patch"].(map[string]any)
+		if email, ok := patch["email"].(string); ok {
+			s.checkoutSession.Email = email
+		}
+		if name, ok := patch["customer_name"].(string); ok {
+			s.checkoutSession.CustomerName = name
+		}
+		if metadata, ok := patch["metadata"]; ok {
+			s.checkoutSession.Metadata, _ = json.Marshal(metadata)
+		}
+		value = map[string]any{"session": s.checkoutSession}
+	case "checkout:checkout_prepare":
+		s.checkoutPrepares++
+		value = map[string]any{"session": s.checkoutSession, "payment": map[string]any{
+			"provider": "stripe", "presentation": "deferred", "mode": "payment",
+			"amount_cents": s.price.UnitAmountCents, "currency": strings.ToLower(s.price.Currency),
+			"payment_method_types": []string{"card"}, "publishable_key": "pk_test_public",
+		}}
+	case "checkout:checkout_bootstrap":
+		value = map[string]any{"session": s.checkoutSession, "cart": s.checkoutCart}
+	case "checkout:checkout_pay":
+		s.checkoutPayments++
+		s.invoice = billingInvoice{ID: 701, CustomerID: 501, Status: "open", TotalCents: s.price.UnitAmountCents, Currency: s.price.Currency}
+		invoiceID := s.invoice.ID
+		s.checkoutSession.Status = "awaiting_payment"
+		s.checkoutSession.InvoiceID = &invoiceID
+		s.checkoutSession.ProviderSessionID = "pi_test_course"
+		value = map[string]any{"session": s.checkoutSession, "invoice_id": invoiceID, "invoice_number": "INV-701", "payment": map[string]any{
+			"provider": "stripe", "presentation": "deferred", "payment_intent_id": "pi_test_course",
+			"client_secret": "pi_test_course_secret", "publishable_key": "pk_test_public",
+		}}
 	case "billing:invoices_get":
 		if s.invoice.ID == 0 {
 			return errors.New("invoice not found")

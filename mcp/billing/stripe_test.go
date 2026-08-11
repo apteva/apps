@@ -84,13 +84,17 @@ func (s *stripePlatformStub) ExecuteIntegrationTool(connectionID int64, tool str
 	case "create_payment_intent":
 		data := s.intent
 		if len(data) == 0 {
-			data = json.RawMessage(`{"id":"pi_collect_123","status":"succeeded","amount":1200,"currency":"usd","payment_method":"pm_test_123"}`)
+			if input["confirm"] == true {
+				data = json.RawMessage(`{"id":"pi_collect_123","status":"succeeded","amount":1200,"currency":"usd","customer":"cus_test_123","payment_method":"pm_test_123"}`)
+			} else {
+				data = json.RawMessage(`{"id":"pi_collect_123","client_secret":"pi_collect_123_secret_abc","status":"requires_payment_method","amount":1200,"currency":"usd","customer":"cus_test_123"}`)
+			}
 		}
 		return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
 	case "get_payment_intent":
 		return &sdk.ExecuteResult{
 			Success: true, Status: http.StatusOK,
-			Data: json.RawMessage(`{"id":"pi_checkout_123","status":"succeeded","amount":1100,"currency":"usd","payment_method":"pm_test_123"}`),
+			Data: json.RawMessage(`{"id":"pi_collect_123","client_secret":"pi_collect_123_secret_abc","status":"requires_payment_method","amount":1200,"currency":"usd","customer":"cus_test_123","payment_method":"pm_test_123"}`),
 		}, nil
 	case "get_payment_method":
 		return &sdk.ExecuteResult{
@@ -257,6 +261,56 @@ func TestCreateElementsPaymentSessionReturnsOnlyPublicBrowserConfig(t *testing.T
 	}
 	if presentation != "elements" || key != "checkout-42" {
 		t.Fatalf("persisted presentation=%q key=%q", presentation, key)
+	}
+}
+
+func TestDeferredPaymentConfigDoesNotCreateCustomerOrInvoice(t *testing.T) {
+	platform := &stripePlatformStub{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	out, err := (&App{}).toolPaymentProcessorPublicConfig(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)
+	if got["publishable_key"] != "pk_test_public" || got["provider"] != "stripe" {
+		t.Fatalf("public config=%#v", got)
+	}
+	if len(platform.toolCalls) != 0 {
+		t.Fatalf("public config must not create Stripe resources: %#v", platform.toolCalls)
+	}
+}
+
+func TestCreateInvoicePaymentIntentAfterBuyerIdentification(t *testing.T) {
+	platform := &stripePlatformStub{intent: json.RawMessage(`{"id":"pi_deferred_123","client_secret":"pi_deferred_123_secret_abc","status":"requires_payment_method","amount":2400,"currency":"usd","customer":"cus_test_123"}`)}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	app := &App{}
+	cust := mustCustomer(t, ctx, "deferred@example.com", "Deferred Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, cust.ID, []any{line("Order", 1, 2400, 0)}).ID)
+
+	out, err := app.toolInvoicesCreatePaymentIntent(ctx, map[string]any{
+		"invoice_id": inv.ID, "idempotency_key": "deferred-checkout-1",
+		"save_payment_method": true, "set_default_payment_method": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)
+	if got["client_secret"] != "pi_deferred_123_secret_abc" || got["publishable_key"] != "pk_test_public" {
+		t.Fatalf("intent config=%#v", got)
+	}
+	var presentation string
+	if err := ctx.AppDB().QueryRow(`SELECT presentation FROM billing_checkout_sessions WHERE provider_session_id='pi_deferred_123'`).Scan(&presentation); err != nil {
+		t.Fatal(err)
+	}
+	if presentation != "intent" {
+		t.Fatalf("presentation=%q", presentation)
+	}
+	if err := app.dispatchStripeEvent(ctx, "evt_deferred", "payment_intent.succeeded", json.RawMessage(`{"id":"pi_deferred_123","status":"succeeded","amount":2400,"currency":"usd","customer":"cus_test_123","payment_method":"pm_test_123"}`)); err != nil {
+		t.Fatal(err)
+	}
+	paid, err := dbInvoiceGetByID(ctx.AppDB(), "test-proj", inv.ID)
+	if err != nil || paid.Status != "paid" {
+		t.Fatalf("invoice=%#v err=%v", paid, err)
 	}
 }
 

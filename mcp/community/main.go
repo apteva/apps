@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.10.2
+version: 0.10.3
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -47,8 +47,9 @@ description: |
   Its public storefront projects only Catalog products actively offered by
   each community, groups one-time and recurring prices under generic product
   routes, and shows published course entitlements before authentication.
-  Community uses Checkout for durable guest carts and inline Stripe payment
-  preparation, then claims the resulting Billing invoice into either a
+  Community uses Checkout for durable guest carts and immediate deferred
+  Stripe Elements rendering, then creates and claims the Billing invoice only
+  after verified authentication into either a
   one-time course purchase or a recurring Subscriptions lifecycle. It does
   not depend on Commerce or SaaS.
   Portal calls use
@@ -72,11 +73,11 @@ requires:
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
     - name: checkout
-      version: ">=0.3.0"
+      version: ">=0.3.1"
       optional: false
       reason: Checkout owns durable guest carts, buyer checkout sessions, Billing invoice conversion, and browser-safe Stripe Elements configuration.
     - name: billing
-      version: ">=0.12.2"
+      version: ">=0.12.3"
       optional: false
       events:
         - invoice.paid
@@ -233,7 +234,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: community/v0.10.3
     entry: mcp/community
   port: 8080
   health_check: /health

@@ -79,7 +79,12 @@ export interface StorefrontCheckoutSession {
   session_token?: string;
   invoice_id?: number;
   invoice_number?: string;
-  presentation?: "hosted" | "elements";
+  presentation?: "hosted" | "elements" | "deferred";
+  mode?: "payment";
+  amount_cents?: number;
+  currency?: string;
+  payment_method_types?: string[];
+  payment_intent_id?: string;
   checkout_url?: string;
   client_secret?: string;
   publishable_key?: string;
@@ -133,7 +138,7 @@ export const api = {
       apteva.get<{ product: PublicProduct }>(projectScopedPath(`${communityPublicPath(`/portal/products/${encodeURIComponent(slug)}`)}?community=${encodeURIComponent(community)}`)),
     prepareCheckout: (communitySlug: string, body: {
       catalog_price_id: number;
-      email: string;
+      email?: string;
       customer_name?: string;
       recovery_token?: string;
       return_url: string;

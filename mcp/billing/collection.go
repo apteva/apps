@@ -34,9 +34,11 @@ type CollectionAttempt struct {
 
 type stripePaymentIntent struct {
 	ID            string          `json:"id"`
+	ClientSecret  string          `json:"client_secret"`
 	Status        string          `json:"status"`
 	Amount        int64           `json:"amount"`
 	Currency      string          `json:"currency"`
+	Customer      string          `json:"customer"`
 	PaymentMethod string          `json:"payment_method"`
 	NextAction    json.RawMessage `json:"next_action"`
 	LastError     struct {

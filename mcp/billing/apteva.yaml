@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.12.2
+version: 0.12.3
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -23,6 +23,8 @@ description: |
   v0.11.1 provider-encodes Stripe payment method arrays correctly.
   v0.11.2 uses Stripe's current Elements Checkout Session UI mode.
   v0.12.2 uses Stripe's current hosted-page Checkout Session UI mode.
+  v0.12.3 adds deferred Elements configuration and invoice PaymentIntents,
+  allowing product apps to render payment fields before creating a customer.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -67,6 +69,8 @@ provides:
     - prefix: /webhooks/stripe
       no_auth: true
   mcp_tools:
+    - name: payment_processor_public_config
+      description: Return browser-safe payment configuration such as Stripe's publishable key.
     - name: customers_search
       description: Filtered customer search by name / email / external_id / metadata.
     - name: customers_get
@@ -118,6 +122,11 @@ provides:
         idempotency_key. Payment completion remains webhook-driven.
         On payment success, the platform-verified webhook records the payment
         and transitions the invoice to paid.
+    - name: invoices_create_payment_intent
+      description: |
+        Create or recover a Stripe PaymentIntent for an open invoice after the
+        buyer has been identified. Returns browser-safe client_secret and
+        publishable_key; completion remains webhook-driven.
     - name: invoices_collect
       description: |
         Collect an open invoice automatically using an active reusable saved
@@ -327,7 +336,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.12.2
+    ref: billing/v0.12.3
     entry: mcp/billing
   port: 8080
   health_check: /health

@@ -12,6 +12,7 @@ package main
 // billing keeps working as before (manual payment recording).
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,6 +85,36 @@ func stripePublicBaseURL(ctx *sdk.AppCtx) string {
 		publicURL = strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL"))
 	}
 	return strings.TrimRight(publicURL, "/")
+}
+
+func stripePublishableKey(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) (string, error) {
+	if bound == nil {
+		return "", errors.New("payment_processor integration required")
+	}
+	publicConfig, err := sdk.GetConnectionPublicConfig(ctx.PlatformAPI(), bound.ConnectionID)
+	if err != nil {
+		return "", fmt.Errorf("stripe public config: %w", err)
+	}
+	key := strings.TrimSpace(publicConfig.Fields["publishableKey"])
+	if !strings.HasPrefix(key, "pk_") {
+		return "", errors.New("Stripe connection has no valid public publishable key")
+	}
+	return key, nil
+}
+
+func (a *App) toolPaymentProcessorPublicConfig(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	bound, err := requireProcessor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	key, err := stripePublishableKey(ctx, bound)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"provider": "stripe", "publishable_key": key,
+		"payment_method_types": []string{"card"},
+	}, nil
 }
 
 func ensureStripeWebhook(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) error {
@@ -437,13 +468,9 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 
 	publishableKey := ""
 	if presentation == "elements" {
-		publicConfig, err := sdk.GetConnectionPublicConfig(ctx.PlatformAPI(), bound.ConnectionID)
+		publishableKey, err = stripePublishableKey(ctx, bound)
 		if err != nil {
-			return nil, fmt.Errorf("stripe public config: %w", err)
-		}
-		publishableKey = strings.TrimSpace(publicConfig.Fields["publishableKey"])
-		if !strings.HasPrefix(publishableKey, "pk_") {
-			return nil, errors.New("Stripe connection has no valid public publishable key")
+			return nil, err
 		}
 	}
 
@@ -502,6 +529,133 @@ func (a *App) toolInvoicesCreatePaymentSession(ctx *sdk.AppCtx, args map[string]
 		"save_payment_method":        savePaymentMethod,
 		"set_default_payment_method": setDefaultPaymentMethod,
 	}, nil
+}
+
+// toolInvoicesCreatePaymentIntent creates the PaymentIntent only after a
+// product app has identified the buyer and finalized its invoice. The browser
+// may render deferred Stripe Elements before this call using the public config
+// tool above; no customer or invoice is created merely to show card fields.
+func (a *App) toolInvoicesCreatePaymentIntent(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	invoiceID := int64Arg(args, "invoice_id")
+	if invoiceID == 0 {
+		return nil, errors.New("invoice_id required")
+	}
+	key := strings.TrimSpace(strArg(args, "idempotency_key"))
+	if key == "" {
+		return nil, errors.New("idempotency_key required")
+	}
+	if len(key) > 255 {
+		return nil, errors.New("idempotency_key must be at most 255 characters")
+	}
+	bound, err := requireProcessor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	publishableKey, err := stripePublishableKey(ctx, bound)
+	if err != nil {
+		return nil, err
+	}
+
+	inv, cust, err := loadInvoiceForRender(ctx.AppDB(), pid, invoiceID)
+	if err != nil {
+		return nil, err
+	}
+	if inv == nil {
+		return nil, fmt.Errorf("invoice %d not found", invoiceID)
+	}
+	if inv.Status != "open" && inv.Status != "uncollectible" {
+		return nil, fmt.Errorf("cannot create payment intent for %s invoice", inv.Status)
+	}
+	if cust == nil || strings.TrimSpace(cust.Email) == "" {
+		return nil, errors.New("invoice customer must have an email before payment")
+	}
+	amountDue := inv.TotalCents - inv.AmountPaidCents
+	if amountDue <= 0 {
+		return nil, errors.New("invoice has no outstanding balance")
+	}
+
+	var existingInvoice, existingAmount int64
+	var existingIntent, existingCurrency, existingStatus string
+	err = ctx.AppDB().QueryRow(`SELECT invoice_id,provider_session_id,amount_cents,currency,status
+		FROM billing_checkout_sessions WHERE project_id=? AND idempotency_key=?`, pid, key).
+		Scan(&existingInvoice, &existingIntent, &existingAmount, &existingCurrency, &existingStatus)
+	if err == nil {
+		if existingInvoice != invoiceID || existingAmount != amountDue || !strings.EqualFold(existingCurrency, inv.Currency) {
+			return nil, errors.New("idempotency_key was already used for a different payment")
+		}
+		var intent stripePaymentIntent
+		if err := executeStripe(ctx, bound, "get_payment_intent", map[string]any{"payment_intent_id": existingIntent}, &intent); err != nil {
+			return nil, err
+		}
+		return map[string]any{"provider": "stripe", "presentation": "intent", "payment_intent_id": existingIntent,
+			"client_secret": intent.ClientSecret, "publishable_key": publishableKey, "status": existingStatus, "replayed": true}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+
+	if err := ensureStripeWebhook(ctx, bound); err != nil {
+		return nil, fmt.Errorf("stripe webhook setup: %w", err)
+	}
+	providerCustomerID, err := ensureStripeCustomer(ctx, pid, cust, bound)
+	if err != nil {
+		return nil, err
+	}
+	savePaymentMethod := boolFromArg(args, "save_payment_method")
+	setDefaultPaymentMethod := boolFromArg(args, "set_default_payment_method")
+	if setDefaultPaymentMethod {
+		savePaymentMethod = true
+	}
+	input := map[string]any{
+		"amount": amountDue, "currency": strings.ToLower(inv.Currency), "customer": providerCustomerID,
+		"confirm": false, "automatic_payment_methods": map[string]any{"enabled": true}, "idempotency_key": key,
+		"description": firstString(inv.Number, fmt.Sprintf("Invoice #%d", inv.ID)),
+		"metadata":    map[string]any{"apteva_project_id": pid, "apteva_invoice_id": fmt.Sprint(inv.ID), "apteva_customer_id": fmt.Sprint(inv.CustomerID), "apteva_idempotency_key": key},
+	}
+	if savePaymentMethod {
+		input["setup_future_usage"] = "off_session"
+	}
+	var intent stripePaymentIntent
+	if err := executeStripe(ctx, bound, "create_payment_intent", input, &intent); err != nil {
+		return nil, err
+	}
+	if intent.ID == "" || intent.ClientSecret == "" {
+		return nil, errors.New("Stripe returned incomplete PaymentIntent configuration")
+	}
+	if intent.Amount != 0 && intent.Amount != amountDue {
+		return nil, fmt.Errorf("Stripe payment intent amount mismatch: got %d want %d", intent.Amount, amountDue)
+	}
+	if intent.Currency != "" && !strings.EqualFold(intent.Currency, inv.Currency) {
+		return nil, fmt.Errorf("Stripe payment intent currency mismatch: got %s want %s", intent.Currency, inv.Currency)
+	}
+	now := nowRFC3339()
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO billing_checkout_sessions
+		(project_id,invoice_id,provider,provider_session_id,amount_cents,currency,status,created_at,
+		 save_payment_method,set_default_payment_method,presentation,idempotency_key)
+		VALUES(?,?,'stripe',?,?,?,'pending',?,?,?,?,?)`, pid, invoiceID, intent.ID, amountDue, inv.Currency,
+		now, boolInt(savePaymentMethod), boolInt(setDefaultPaymentMethod), "intent", key); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE invoices SET external_id=?,last_synced_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, intent.ID, now, invoiceID, pid); err != nil {
+		return nil, err
+	}
+	if err := writeAuditTx(tx, invoiceID, callerActor(args), "payment_intent_created", map[string]any{"payment_intent_id": intent.ID, "amount_cents": amountDue, "currency": inv.Currency}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": "stripe", "presentation": "intent", "payment_intent_id": intent.ID,
+		"client_secret": intent.ClientSecret, "publishable_key": publishableKey, "status": intent.Status}, nil
 }
 
 // ─── Webhook handler ────────────────────────────────────────────────
@@ -586,9 +740,9 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 	case "checkout.session.expired":
 		return a.handleCheckoutSessionTerminal(ctx, obj, "expired")
 	case "payment_intent.succeeded":
-		return a.handleCollectionPaymentIntent(ctx, obj)
+		return a.handlePaymentIntent(ctx, obj)
 	case "payment_intent.payment_failed":
-		return a.handleCollectionPaymentIntent(ctx, obj)
+		return a.handlePaymentIntent(ctx, obj)
 	case "setup_intent.succeeded":
 		return a.handleSetupIntentSucceeded(ctx, obj)
 	case "setup_intent.setup_failed":
@@ -605,6 +759,69 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 		ctx.Logger().Info("stripe event not handled by billing", "type", eventType, "event_id", eventID)
 		return nil
 	}
+}
+
+func (a *App) handlePaymentIntent(ctx *sdk.AppCtx, obj json.RawMessage) error {
+	var intent stripePaymentIntent
+	if err := json.Unmarshal(obj, &intent); err != nil {
+		return fmt.Errorf("decode payment_intent: %w", err)
+	}
+	if intent.ID == "" {
+		return nil
+	}
+	var pid, expectedCurrency, sessionStatus string
+	var invoiceID, expectedAmount int64
+	var savePaymentMethod, setDefaultPaymentMethod int
+	err := ctx.AppDB().QueryRow(`SELECT project_id,invoice_id,amount_cents,currency,status,
+		save_payment_method,set_default_payment_method FROM billing_checkout_sessions
+		WHERE provider='stripe' AND provider_session_id=? AND presentation='intent'`, intent.ID).
+		Scan(&pid, &invoiceID, &expectedAmount, &expectedCurrency, &sessionStatus, &savePaymentMethod, &setDefaultPaymentMethod)
+	if errors.Is(err, sql.ErrNoRows) {
+		return a.handleCollectionPaymentIntent(ctx, obj)
+	}
+	if err != nil {
+		return err
+	}
+	if intent.Amount != 0 && intent.Amount != expectedAmount {
+		return fmt.Errorf("payment intent %s amount mismatch: got %d want %d", intent.ID, intent.Amount, expectedAmount)
+	}
+	if intent.Currency != "" && !strings.EqualFold(intent.Currency, expectedCurrency) {
+		return fmt.Errorf("payment intent %s currency mismatch: got %s want %s", intent.ID, intent.Currency, expectedCurrency)
+	}
+	if sessionStatus == "completed" {
+		return nil
+	}
+	inv, err := dbInvoiceGetByID(ctx.AppDB(), pid, invoiceID)
+	if err != nil || inv == nil {
+		return err
+	}
+	projectCtx := ctx.WithProject(pid)
+	switch intent.Status {
+	case "succeeded":
+		now := nowRFC3339()
+		pay, paid, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, expectedAmount, "stripe", intent.ID, now,
+			fmt.Sprintf("Stripe PaymentIntent %s", intent.ID), "system:stripe-webhook")
+		if err != nil {
+			return err
+		}
+		if _, err := ctx.AppDB().Exec(`UPDATE billing_checkout_sessions SET status='completed',completed_at=COALESCE(completed_at,?)
+			WHERE provider='stripe' AND provider_session_id=?`, now, intent.ID); err != nil {
+			return err
+		}
+		if savePaymentMethod == 1 {
+			if err := a.saveCheckoutPaymentMethod(projectCtx, pid, paid.CustomerID, intent.Customer, intent.ID, setDefaultPaymentMethod == 1); err != nil {
+				return err
+			}
+		}
+		emitInvoice(projectCtx, "invoice.paid", paid)
+		ctx.Logger().Info("stripe payment intent recorded", "invoice_id", invoiceID, "payment_id", pay.ID, "intent", intent.ID)
+	case "requires_payment_method", "canceled":
+		if _, err := ctx.AppDB().Exec(`UPDATE billing_checkout_sessions SET status='failed' WHERE provider='stripe' AND provider_session_id=?`, intent.ID); err != nil {
+			return err
+		}
+		emitInvoice(projectCtx, "invoice.payment_failed", inv)
+	}
+	return nil
 }
 
 func (a *App) handleCheckoutSessionTerminal(ctx *sdk.AppCtx, obj json.RawMessage, status string) error {

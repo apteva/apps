@@ -16,7 +16,7 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { loadStripe, type StripeCheckout, type StripePaymentElement } from "@stripe/stripe-js";
+import { loadStripe, type Stripe, type StripeElements, type StripePaymentElement } from "@stripe/stripe-js";
 import { type CSSProperties, FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, type StorefrontCheckoutSession, useDelegatedToken } from "./api";
 import type {
@@ -601,51 +601,44 @@ export default function App() {
 
   useEffect(() => {
     if (!portal || !selectedStorefrontOffer || !wantsCourseCheckout()) return;
-    const email = (auth?.user.email || authForm.email).trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
-    const storageKey = `community-checkout:${portal.community.id}:${selectedStorefrontOffer.catalog_price_id}:${email}`;
+    const storageKey = `community-checkout:${portal.community.id}:${selectedStorefrontOffer.catalog_price_id}`;
     let cancelled = false;
-    const timer = window.setTimeout(() => {
-      setStorefrontPreparing(true);
-      const success = new URL(window.location.href);
-      success.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-success" : "success");
-      success.searchParams.delete("intent");
-      success.searchParams.delete("auth");
-      const cancel = new URL(success);
-      cancel.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-cancelled" : "cancelled");
-      const storedRecoveryToken = window.sessionStorage.getItem(storageKey) || undefined;
-      const prepare = (recovery_token?: string) => api.portal.prepareCheckout(portal.community.slug, {
-        catalog_price_id: selectedStorefrontOffer.catalog_price_id,
-        email,
-        customer_name: authForm.display_name.trim(),
-        recovery_token,
-        return_url: success.toString(),
-        success_url: success.toString(),
-        cancel_url: cancel.toString(),
-      });
-      void prepare(storedRecoveryToken).catch((caught) => {
-        if (!storedRecoveryToken) throw caught;
-        window.sessionStorage.removeItem(storageKey);
-        return prepare();
-      }).then((prepared) => {
-        if (cancelled) return;
-        if (!prepared.client_secret || !prepared.publishable_key || !prepared.recovery_token) {
-          throw new Error("Secure payment configuration is unavailable.");
-        }
-        window.sessionStorage.setItem(storageKey, prepared.recovery_token);
-        setStorefrontCheckout(prepared);
-        setError("");
-      }).catch((caught) => {
-        if (!cancelled) setError(friendlyError(caught));
-      }).finally(() => {
-        if (!cancelled) setStorefrontPreparing(false);
-      });
-    }, auth ? 0 : 500);
+    setStorefrontPreparing(true);
+    const success = new URL(window.location.href);
+    success.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-success" : "success");
+    success.searchParams.delete("intent");
+    success.searchParams.delete("auth");
+    const cancel = new URL(success);
+    cancel.searchParams.set("payment", selectedStorefrontOffer.kind === "recurring" ? "membership-cancelled" : "cancelled");
+    const storedRecoveryToken = window.sessionStorage.getItem(storageKey) || undefined;
+    const prepare = (recovery_token?: string) => api.portal.prepareCheckout(portal.community.slug, {
+      catalog_price_id: selectedStorefrontOffer.catalog_price_id,
+      recovery_token,
+      return_url: success.toString(),
+      success_url: success.toString(),
+      cancel_url: cancel.toString(),
+    });
+    void prepare(storedRecoveryToken).catch((caught) => {
+      if (!storedRecoveryToken) throw caught;
+      window.sessionStorage.removeItem(storageKey);
+      return prepare();
+    }).then((prepared) => {
+      if (cancelled) return;
+      if (!prepared.publishable_key || !prepared.recovery_token || !prepared.amount_cents || !prepared.currency) {
+        throw new Error("Secure payment configuration is unavailable.");
+      }
+      window.sessionStorage.setItem(storageKey, prepared.recovery_token);
+      setStorefrontCheckout(prepared);
+      setError("");
+    }).catch((caught) => {
+      if (!cancelled) setError(friendlyError(caught));
+    }).finally(() => {
+      if (!cancelled) setStorefrontPreparing(false);
+    });
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
     };
-  }, [auth?.user.email, authForm.email, portal, selectedStorefrontOffer]);
+  }, [portal, selectedStorefrontOffer]);
 
   useEffect(() => {
     if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
@@ -905,7 +898,14 @@ export default function App() {
       await Promise.all([loadCommunity(), loadCourse()]);
       return true;
     }
-    if (claimingPreparedCheckout) return true;
+    if (claimingPreparedCheckout) {
+      if (!result.client_secret) {
+        setError("Secure payment confirmation is unavailable. Please try again.");
+        return false;
+      }
+      setStorefrontCheckout((current) => current ? { ...current, ...result } : result);
+      return true;
+    }
     if (result.presentation === "elements" && result.client_secret && result.publishable_key) {
       setStorefrontCheckout(result);
       return true;
@@ -1059,7 +1059,7 @@ export default function App() {
         />
       ) : undefined;
     const paymentPanel = wantsCourseCheckout() && selectedStorefrontOffer ? (
-      storefrontCheckout?.client_secret && storefrontCheckout.publishable_key ? (
+      storefrontCheckout?.publishable_key && storefrontCheckout.amount_cents && storefrontCheckout.currency ? (
         <StripePaymentForm
           session={storefrontCheckout}
           returnURL={(() => {
@@ -1074,7 +1074,7 @@ export default function App() {
           enabled={Boolean(auth && storefrontClaimed)}
           onError={setError}
         />
-      ) : storefrontPreparing ? <CheckoutPreparing /> : <CheckoutPaymentPending />
+      ) : storefrontPreparing ? <CheckoutPreparing /> : <CheckoutPaymentUnavailable />
     ) : undefined;
     if (!auth || wantsCourseCheckout()) {
       return <PublicStorefront
@@ -1612,14 +1612,14 @@ function CheckoutVerificationPending({ email, busy, error, notice, onResend, onB
   </section>;
 }
 
-function CheckoutPaymentPending() {
-  return <section className="stripe-payment checkout-payment-pending" aria-label="Payment details">
-    <div className="checkout-section-title"><CreditCard size={18} /><div><strong>Payment details</strong><small>Enter a valid email above to load Stripe’s secure payment form.</small></div></div>
-  </section>;
-}
-
 function CheckoutPreparing() {
   return <div className="checkout-preparing" role="status"><RefreshCcw className="spin" aria-hidden="true" /><div><strong>Preparing secure payment</strong><small>This usually takes only a moment.</small></div></div>;
+}
+
+function CheckoutPaymentUnavailable() {
+  return <section className="stripe-payment checkout-payment-pending" aria-label="Payment details">
+    <div className="checkout-section-title"><CreditCard size={18} /><div><strong>Payment details</strong><small>Secure payment could not be loaded. Refresh the page to try again.</small></div></div>
+  </section>;
 }
 
 function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }: {
@@ -1631,43 +1631,59 @@ function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }
   onError: (message: string) => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
-  const checkoutRef = useRef<StripeCheckout | null>(null);
+  const stripeRef = useRef<Stripe | null>(null);
+  const elementsRef = useRef<StripeElements | null>(null);
+  const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     let paymentElement: StripePaymentElement | undefined;
+    setMounted(false);
     setReady(false);
-    void loadStripe(session.publishable_key || "").then(async (stripe) => {
-      if (cancelled || !stripe || !mountRef.current || !session.client_secret) return;
-      const checkout = await stripe.initCheckout({
-        fetchClientSecret: async () => session.client_secret || "",
-        elementsOptions: {
-          appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
-        },
+    void loadStripe(session.publishable_key || "").then((stripe) => {
+      if (cancelled || !stripe || !mountRef.current || !session.amount_cents || !session.currency) return;
+      const elements = stripe.elements({
+        mode: "payment",
+        amount: session.amount_cents,
+        currency: session.currency.toLowerCase(),
+        setupFutureUsage: session.offer_kind === "recurring" ? "off_session" : undefined,
+        appearance: { theme: "stripe", variables: { colorPrimary: "#176b57", borderRadius: "10px", fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif" } },
       });
-      if (cancelled) return;
-      checkout.on("change", (state) => setReady(state.canConfirm));
-      paymentElement = checkout.createPaymentElement({ layout: "tabs" });
+      paymentElement = elements.create("payment", { layout: "tabs" });
+      paymentElement.on("ready", () => setMounted(true));
+      paymentElement.on("change", (state) => setReady(state.complete));
       paymentElement.mount(mountRef.current);
-      checkoutRef.current = checkout;
-      setReady(checkout.session().canConfirm);
+      stripeRef.current = stripe;
+      elementsRef.current = elements;
     }).catch(() => onError("Secure payment could not be loaded. Please refresh and try again."));
     return () => {
       cancelled = true;
-      checkoutRef.current = null;
+      stripeRef.current = null;
+      elementsRef.current = null;
       paymentElement?.destroy();
     };
-  }, [onError, session.client_secret, session.publishable_key]);
+  }, [onError, session.amount_cents, session.currency, session.offer_kind, session.publishable_key]);
 
   async function submitPayment(event: FormEvent) {
     event.preventDefault();
-    if (!checkoutRef.current || !enabled) return;
+    if (!stripeRef.current || !elementsRef.current || !enabled || !session.client_secret) return;
     setSubmitting(true);
     onError("");
-    const result = await checkoutRef.current.confirm({ returnUrl: returnURL, redirect: "if_required" });
-    if (result.type === "error") {
+    const submitted = await elementsRef.current.submit();
+    if (submitted.error) {
+      onError(submitted.error.message || "Please check your payment details and try again.");
+      setSubmitting(false);
+      return;
+    }
+    const result = await stripeRef.current.confirmPayment({
+      elements: elementsRef.current,
+      clientSecret: session.client_secret,
+      confirmParams: { return_url: returnURL },
+      redirect: "if_required",
+    });
+    if (result.error) {
       onError(result.error.message || "Payment could not be completed. Please check your details and try again.");
       setSubmitting(false);
       return;
@@ -1679,7 +1695,7 @@ function StripePaymentForm({ session, returnURL, busy, error, enabled, onError }
     <div className="checkout-section-title"><CreditCard size={18} /><div><strong>Card and billing details</strong><small>Processed securely by Stripe.</small></div></div>
     <div ref={mountRef} className="stripe-element" />
     {error && <div className="alert error" role="alert">{error}</div>}
-    {!ready && <div className="stripe-loading"><RefreshCcw className="spin" size={16} /> Loading secure payment…</div>}
+    {!mounted && <div className="stripe-loading"><RefreshCcw className="spin" size={16} /> Loading secure payment…</div>}
     {!enabled && <p className="checkout-payment-note">Create or sign in to your account above before paying.</p>}
     <button className="checkout-pay" disabled={!ready || submitting || busy || !enabled}>{submitting ? "Processing…" : "Pay securely"}<LockKeyhole size={17} /></button>
   </form>;

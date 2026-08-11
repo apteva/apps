@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.12.2
+version: 0.12.3
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Billing issues local invoices. Stripe is an optional payment processor;
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: billing/v0.12.2
+    ref: billing/v0.12.3
     entry: mcp/billing
   port: 8080
   health_check: /health
@@ -259,6 +259,12 @@ func (a *App) handleHTTPPaymentsCollection(w http.ResponseWriter, r *http.Reques
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{
+			Name:        "payment_processor_public_config",
+			Description: "Return browser-safe payment processor configuration. For Stripe this exposes only the publishable key; no credentials or secrets are returned.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolPaymentProcessorPublicConfig,
+		},
 		// ── Customers ────────────────────────────────────────────────
 		{
 			Name:        "customers_search",
@@ -464,6 +470,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"set_default_payment_method": map[string]any{"type": "boolean"},
 			}, []string{"invoice_id", "presentation", "idempotency_key"}),
 			Handler: a.toolInvoicesCreatePaymentSession,
+		},
+		{
+			Name:        "invoices_create_payment_intent",
+			Description: "Create or recover a Stripe PaymentIntent for an identified customer's open invoice. Returns publishable_key + client_secret for confirmation with an already-rendered deferred Payment Element. Args: invoice_id, idempotency_key, save_payment_method, set_default_payment_method.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":                 map[string]any{"type": "integer"},
+				"idempotency_key":            map[string]any{"type": "string"},
+				"save_payment_method":        map[string]any{"type": "boolean"},
+				"set_default_payment_method": map[string]any{"type": "boolean"},
+			}, []string{"invoice_id", "idempotency_key"}),
+			Handler: a.toolInvoicesCreatePaymentIntent,
 		},
 		{
 			Name:        "invoices_send_payment_link",

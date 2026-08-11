@@ -40,6 +40,17 @@ func (p *checkoutPaymentPlatform) CallAppResult(app, tool string, input map[stri
 			"stripe_session_id": "cs_test_91", "client_secret": "cs_test_91_secret_x",
 			"publishable_key": "pk_test_public",
 		}
+	case "billing:payment_processor_public_config":
+		result = map[string]any{
+			"provider": "stripe", "publishable_key": "pk_test_public",
+			"payment_method_types": []string{"card"},
+		}
+	case "billing:invoices_create_payment_intent":
+		result = map[string]any{
+			"provider": "stripe", "presentation": "deferred",
+			"payment_intent_id": "pi_test_91", "client_secret": "pi_test_91_secret_x",
+			"publishable_key": "pk_test_public",
+		}
 	default:
 		return errors.New("unexpected app call: " + app + ":" + tool)
 	}
@@ -380,6 +391,89 @@ func TestCheckoutPayCreatesElementsSessionAndReusesInvoice(t *testing.T) {
 	}
 }
 
+func TestCheckoutPrepareReturnsDeferredElementsWithoutBillingRecords(t *testing.T) {
+	platform := &checkoutPaymentPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(platform))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "deferred-prepare"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedItem(t, ctx.AppDB(), cart.ID, 100, 10, 2400, 1)
+	tx, _ := ctx.AppDB().Begin()
+	if err := recomputeCartTotalsTx(tx, cart.ID, "USD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ctx.AppDB().Exec(`INSERT INTO checkout_sessions
+		(project_id, cart_id, provider, status, subtotal_cents, total_cents, currency)
+		VALUES (?, ?, 'manual', 'started', 2400, 2400, 'USD')`, testPID, cart.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	out, err := (&App{}).toolCheckoutPrepare(ctx, map[string]any{"_project_id": testPID, "session_id": sessionID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payment := out.(map[string]any)["payment"].(map[string]any)
+	if payment["publishable_key"] != "pk_test_public" || payment["amount_cents"] != int64(2400) || payment["currency"] != "usd" {
+		t.Fatalf("unexpected prepare result: %#v", payment)
+	}
+	if len(platform.calls) != 1 || platform.calls[0] != "billing:payment_processor_public_config" {
+		t.Fatalf("prepare created billing records: %v", platform.calls)
+	}
+	session, _ := dbCheckoutGet(ctx.AppDB(), testPID, sessionID)
+	if session.Status != "started" || session.InvoiceID != nil || session.Email != "" {
+		t.Fatalf("prepare mutated checkout: %#v", session)
+	}
+}
+
+func TestCheckoutPayDeferredCreatesPaymentIntentAndReusesInvoice(t *testing.T) {
+	platform := &checkoutPaymentPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testPID), tk.WithPlatform(platform))
+	cart, err := dbCartCreate(ctx, testPID, map[string]any{"session_token": "deferred-pay"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedItem(t, ctx.AppDB(), cart.ID, 100, 10, 2400, 1)
+	tx, _ := ctx.AppDB().Begin()
+	if err := recomputeCartTotalsTx(tx, cart.ID, "USD"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ctx.AppDB().Exec(`INSERT INTO checkout_sessions
+		(project_id, cart_id, provider, status, email, subtotal_cents, total_cents, currency)
+		VALUES (?, ?, 'manual', 'started', 'buyer@example.com', 2400, 2400, 'USD')`, testPID, cart.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID, _ := result.LastInsertId()
+	args := map[string]any{"provider": "stripe", "presentation": "deferred", "idempotency_key": "deferred-1"}
+	session, invoiceID, _, payment, err := dbCheckoutPay(ctx, testPID, sessionID, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Presentation != "deferred" || session.ProviderSessionID != "pi_test_91" || invoiceID != 91 || payment["client_secret"] != "pi_test_91_secret_x" {
+		t.Fatalf("unexpected deferred payment: session=%#v payment=%#v", session, payment)
+	}
+	if _, _, _, _, err := dbCheckoutPay(ctx, testPID, sessionID, args); err != nil {
+		t.Fatalf("retry payment: %v", err)
+	}
+	createCalls := 0
+	for _, call := range platform.calls {
+		if call == "billing:invoices_create" {
+			createCalls++
+		}
+	}
+	if createCalls != 1 {
+		t.Fatalf("invoice create calls=%d, want 1: %v", createCalls, platform.calls)
+	}
+}
+
 func TestCheckoutCancel_RejectsTerminalStates(t *testing.T) {
 	db := newTestDB(t)
 	cartID := seedCart(t, db, testPID, "tok-j", 0, "converted")
@@ -420,7 +514,7 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 	tools := app.MCPTools()
 	want := []string{
 		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
-		"checkout_start", "checkout_update", "checkout_bootstrap", "checkout_advance",
+		"checkout_start", "checkout_update", "checkout_prepare", "checkout_bootstrap", "checkout_advance",
 		"checkout_restart", "checkout_set_adjustments", "checkout_pay", "checkout_get",
 		"checkout_cancel",
 	}
