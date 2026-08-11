@@ -47,6 +47,73 @@ func TestEmbeddedManifestMatchesYAML(t *testing.T) {
 	}
 }
 
+func TestBrowserBackendsAreExplicitInEveryBrowserToolSchema(t *testing.T) {
+	wantTools := map[string]bool{
+		"web_search": true, "web_extract": true, "web_crawl": true,
+		"web_map": true, "web_research": true, "web_snapshot": true,
+	}
+	wantBackends := []string{"local", "browserbase", "steel", "browser-engine", "service"}
+	seen := map[string]bool{}
+	for _, tool := range (&App{}).MCPTools() {
+		if !wantTools[tool.Name] {
+			continue
+		}
+		seen[tool.Name] = true
+		props, ok := tool.InputSchema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s properties schema=%#v", tool.Name, tool.InputSchema["properties"])
+		}
+		backend, ok := props["backend"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s backend schema=%#v", tool.Name, props["backend"])
+		}
+		if got := stringSliceFromAny(backend["enum"]); !sameStrings(got, wantBackends) {
+			t.Fatalf("%s backend enum=%v, want %v", tool.Name, got, wantBackends)
+		}
+		description := strings.ToLower(stringFromAny(backend["description"]))
+		if !strings.Contains(description, "omit") || !strings.Contains(description, "configured default") {
+			t.Fatalf("%s backend description is not actionable: %q", tool.Name, description)
+		}
+	}
+	if len(seen) != len(wantTools) {
+		t.Fatalf("browser tool schemas seen=%v, want=%v", seen, wantTools)
+	}
+}
+
+func TestInventedBackendFailsBeforeComputerCall(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	_, err := app.toolExtract(ctx, map[string]any{
+		"url": "https://example.com", "backend": "camoufox", "store": false, "cache": "bypass",
+	})
+	if err == nil {
+		t.Fatal("expected unsupported backend error")
+	}
+	message := err.Error()
+	for _, want := range []string{"camoufox", "omit backend", "browserbase", "browser-engine"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error %q does not contain %q", message, want)
+		}
+	}
+	if got := countCalls(plat, "computer", "browser_open"); got != 0 {
+		t.Fatalf("invalid backend opened %d Computer sessions", got)
+	}
+}
+
+func TestExplicitBackendIsNormalizedBeforeComputerCall(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	if _, err := app.toolExtract(ctx, map[string]any{
+		"url": "https://example.com", "backend": "BrowserBase", "store": false, "cache": "bypass",
+	}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	open := plat.lastCall("computer", "browser_open")
+	if open["backend"] != "browserbase" {
+		t.Fatalf("backend=%v, want browserbase", open["backend"])
+	}
+}
+
 func TestParseDuckDuckGoResults(t *testing.T) {
 	body := []byte(`
 <html><body>

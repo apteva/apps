@@ -88,6 +88,13 @@ images. It falls back to HTTP retrieval when the active Computer backend cannot
 expose DOM content. Check `extraction_backend` in tool responses when precision
 matters.
 
+Usually omit `backend`; Web then uses its configured Computer default. Only set
+it when the user explicitly needs a provider override. Valid values are
+`local`, `browserbase`, `steel`, `browser-engine`, and `service`. Values such as
+`auto`, `default`, `browser`, `computer`, `http`, `playwright`, and `camoufox`
+are not backends. If an explicit backend is unavailable, report that binding
+problem instead of guessing another name; retry once with the field omitted.
+
 Prefer `store: true` for durable research, crawls, and snapshots. Use
 `snapshots: true` in `web_research` when the user needs visual proof.
 Stored screenshots are explicitly `private` by default. Pass
