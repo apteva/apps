@@ -345,6 +345,12 @@ The workflow is:
 7. `deploy_store_release_approved` releases an Apple-approved version waiting
    for manual developer release.
 
+Store media can be reconciled independently with `media_kinds` (for example,
+`["icon"]`). With `allow_partial`, each valid media kind is committed in its
+own provider transaction while missing or invalid kinds are returned in the
+`blocked` result. This keeps Android Play icons, feature graphics, screenshots,
+and their iOS equivalents independent without deleting unselected media.
+
 Review demo passwords are one-shot apply inputs. Deploy sends them to Apple and
 stores only that one has been configured. Apple privacy answers and Google Play
 App Content declarations remain explicit human attestations because their full

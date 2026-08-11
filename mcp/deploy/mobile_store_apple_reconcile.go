@@ -530,10 +530,13 @@ func (a *App) observeAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment
 	return ready, state, nil
 }
 
-func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment, localizationIDs map[string]string, doc StoreDocument) error {
+func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployment, localizationIDs map[string]string, doc StoreDocument, mediaKinds mediaKindSet) error {
 	grouped := map[string][]StoreAsset{}
 	for _, asset := range doc.Assets {
 		if !strings.Contains(asset.Kind, "screenshot") {
+			continue
+		}
+		if !mediaKinds.has(normalizeMediaKind(asset.Kind)) {
 			continue
 		}
 		locale := defaultStr(asset.Locale, doc.DefaultLocale)
@@ -546,6 +549,9 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 			return err
 		}
 		for _, set := range parseAppleScreenshotSets(setsRaw) {
+			if !mediaKinds.has(appleScreenshotMediaKind(set.DisplayType)) {
+				continue
+			}
 			if _, desired := grouped[locale+"\x00"+set.DisplayType]; desired {
 				continue
 			}
@@ -609,6 +615,13 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 		}
 	}
 	return nil
+}
+
+func appleScreenshotMediaKind(displayType string) string {
+	if strings.Contains(strings.ToUpper(displayType), "IPAD") {
+		return "tablet_screenshot"
+	}
+	return "phone_screenshot"
 }
 
 type appleScreenshotSet struct {

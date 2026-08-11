@@ -186,6 +186,8 @@ type StoreFinding struct {
 	Code         string `json:"code"`
 	Severity     string `json:"severity"`
 	Scope        string `json:"scope"`
+	MediaKind    string `json:"media_kind,omitempty"`
+	AssetID      string `json:"asset_id,omitempty"`
 	Verification string `json:"verification,omitempty"`
 	Locale       string `json:"locale,omitempty"`
 	Field        string `json:"field,omitempty"`
@@ -218,20 +220,25 @@ type StorePlanOp struct {
 
 type StoreApplyRequest struct {
 	Scopes             []string `json:"scopes,omitempty"`
+	MediaKinds         []string `json:"media_kinds,omitempty"`
 	AllowPartial       bool     `json:"allow_partial,omitempty"`
 	ReviewDemoPassword string   `json:"review_demo_password,omitempty"`
 }
 
 type StoreApplyIssue struct {
-	Scope   string `json:"scope"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message"`
+	Scope     string `json:"scope"`
+	MediaKind string `json:"media_kind,omitempty"`
+	AssetID   string `json:"asset_id,omitempty"`
+	Locale    string `json:"locale,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Message   string `json:"message"`
 }
 
 type StoreApplyResult struct {
 	Status        string             `json:"status"`
 	Applied       bool               `json:"applied"`
 	AppliedScopes []string           `json:"applied_scopes"`
+	AppliedAssets []string           `json:"applied_assets"`
 	Blocked       []StoreApplyIssue  `json:"blocked"`
 	Failed        []StoreApplyIssue  `json:"failed"`
 	Config        *MobileStoreConfig `json:"config,omitempty"`
@@ -1505,6 +1512,10 @@ func (a *App) applyAppleStoreConfig(d *Deployment, doc StoreDocument) (map[strin
 }
 
 func (a *App) applyAppleStoreConfigScopes(d *Deployment, doc StoreDocument, scopes storeScopeSet) (map[string]any, error) {
+	return a.applyAppleStoreConfigScopesWithMediaKinds(d, doc, scopes, nil)
+}
+
+func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
 	bound, err := boundIntegration("app_store")
 	if err != nil {
 		return nil, err
@@ -1566,13 +1577,16 @@ func (a *App) applyAppleStoreConfigScopes(d *Deployment, doc StoreDocument, scop
 	if err := a.applyAppleMetadata(bound, appID, doc, scopes); err != nil {
 		return nil, err
 	}
-	if scopes.has("media") {
-		if err := a.reconcileAppleScreenshots(bound, d, localizationIDs, doc); err != nil {
+	if scopes.has("media") && (mediaKinds.has("phone_screenshot") || mediaKinds.has("tablet_screenshot")) {
+		if err := a.reconcileAppleScreenshots(bound, d, localizationIDs, doc, mediaKinds); err != nil {
 			return nil, err
 		}
 	}
 	for _, asset := range doc.Assets {
 		if !scopes.has("media") || strings.Contains(asset.Kind, "screenshot") {
+			continue
+		}
+		if !mediaKinds.has(normalizeMediaKind(asset.Kind)) {
 			continue
 		}
 		if !strings.Contains(asset.Kind, "screenshot") && asset.Kind != "app_preview" && asset.Kind != "review_attachment" {
@@ -2080,6 +2094,10 @@ func (a *App) applyGoogleStoreConfig(d *Deployment, doc StoreDocument) (map[stri
 }
 
 func (a *App) applyGoogleStoreConfigScopes(d *Deployment, doc StoreDocument, scopes storeScopeSet) (map[string]any, error) {
+	return a.applyGoogleStoreConfigScopesWithMediaKinds(d, doc, scopes, nil)
+}
+
+func (a *App) applyGoogleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
 	bound, err := boundIntegration("play_store")
 	if err != nil {
 		return nil, err
@@ -2105,7 +2123,7 @@ func (a *App) applyGoogleStoreConfigScopes(d *Deployment, doc StoreDocument, sco
 			_, _ = executeIntegration(bound, "delete_edit", map[string]any{"packageName": target.PackageName, "editId": editID})
 		}
 	}()
-	if err := a.applyGoogleStoreConfigToEdit(bound, d, target.PackageName, editID, doc, scopes); err != nil {
+	if err := a.applyGoogleStoreConfigToEdit(bound, d, target.PackageName, editID, doc, scopes, mediaKinds); err != nil {
 		return nil, err
 	}
 	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": target.PackageName, "editId": editID}); err != nil {
@@ -2125,7 +2143,7 @@ func (a *App) applyGoogleStoreConfigScopes(d *Deployment, doc StoreDocument, sco
 	return map[string]any{"package_name": target.PackageName, "edit_id": editID, "assets": len(doc.Assets)}, nil
 }
 
-func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deployment, packageName, editID string, doc StoreDocument, scopes storeScopeSet) error {
+func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deployment, packageName, editID string, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) error {
 	defaultLocale := defaultStr(doc.DefaultLocale, "en-US")
 	defaultLoc := doc.Localizations[defaultLocale]
 	if scopes.any("localizations", "review", "privacy") {
@@ -2160,6 +2178,9 @@ func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deplo
 	}
 	grouped := map[string][]StoreAsset{}
 	for _, asset := range doc.Assets {
+		if !mediaKinds.has(normalizeMediaKind(asset.Kind)) {
+			continue
+		}
 		imageType := googleImageType(asset)
 		if imageType == "" {
 			continue
@@ -2250,6 +2271,8 @@ func googleImageType(asset StoreAsset) string {
 		return "tvScreenshots"
 	case "wear_screenshot":
 		return "wearScreenshots"
+	case "automotive_screenshot":
+		return "automotiveScreenshots"
 	}
 	return ""
 }

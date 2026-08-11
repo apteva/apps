@@ -247,6 +247,8 @@ interface StoreFinding {
   code: string;
   severity: "error" | "warning" | "info";
   scope: string;
+  media_kind?: string;
+  asset_id?: string;
   verification?: "provider_read" | "provider_apply" | "provider_commit" | "manual_attestation";
   locale?: string;
   field?: string;
@@ -392,8 +394,9 @@ interface StoreApplyResult {
   status: string;
   applied: boolean;
   applied_scopes: string[];
-  blocked: { scope: string; code?: string; message: string }[];
-  failed: { scope: string; code?: string; message: string }[];
+  applied_assets?: string[];
+  blocked: { scope: string; media_kind?: string; asset_id?: string; locale?: string; code?: string; message: string }[];
+  failed: { scope: string; media_kind?: string; asset_id?: string; locale?: string; code?: string; message: string }[];
 }
 
 const APPLE_CATEGORIES = [
@@ -3265,7 +3268,9 @@ function StoreListingDialog({
         <footer className="px-5 py-3 border-t border-border flex flex-wrap items-center gap-2">
           {err && <span className="text-xs text-red flex-1 truncate" title={err}>{err}</span>}
           {!err && applyResult && <span className="flex-1 text-xs text-text-dim">
-            {applyResult.applied_scopes.length} applied · {applyResult.blocked.length} blocked · {applyResult.failed.length} failed
+            {applyResult.applied_scopes.length} scopes applied
+            {(applyResult.applied_assets?.length || 0) > 0 ? ` · ${applyResult.applied_assets!.join(", ")}` : ""}
+            {` · ${applyResult.blocked.length} blocked · ${applyResult.failed.length} failed`}
           </span>}
           {!err && !applyResult && <span className="flex-1 text-xs text-text-dim">Saving does not submit or release the app.</span>}
           <button type="button" onClick={handleSync} disabled={busy || !hasConfig} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-40">
