@@ -136,11 +136,17 @@ workflows:
           fi
 
           if [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
-            required=(ANDROID_UPLOAD_KEYSTORE_BASE64 ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_STORE_PASSWORD ANDROID_UPLOAD_CERT_SHA256)
+            test "${APTEVA_SIGNING_CONTRACT:-}" = "apteva.mobile-signing/v1" || {
+              echo "unsupported or missing APTEVA_SIGNING_CONTRACT" >&2
+              exit 1
+            }
+            required=(ANDROID_UPLOAD_KEYSTORE_BASE64 ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_STORE_PASSWORD ANDROID_UPLOAD_KEY_PASSWORD ANDROID_UPLOAD_CERT_SHA256)
             for name in "${required[@]}"; do
               test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
             done
             keystore="$CM_BUILD_DIR/apteva-upload-key.p12"
+            cleanup_android_keystore() { rm -f "$keystore"; }
+            trap cleanup_android_keystore EXIT
             export APTEVA_ANDROID_KEYSTORE_PATH="$keystore"
             umask 077
             python3 - <<'PY'
@@ -168,8 +174,9 @@ workflows:
               echo "Android bundle signer does not match Deploy's managed upload certificate" >&2
               exit 1
             fi
-            export APTEVA_ANDROID_SIGNER_SHA256="$actual_fingerprint"
-            rm -f "$keystore"
+            printf 'APTEVA_ANDROID_SIGNER_SHA256=%s\n' "$actual_fingerprint" >> "$CM_ENV"
+            cleanup_android_keystore
+            trap - EXIT
           fi
 
       - name: Publish or package result
@@ -219,6 +226,7 @@ workflows:
               "version_code": os.environ.get("APTEVA_VERSION_CODE", ""),
               "certificate_sha256": os.environ.get("APTEVA_ANDROID_SIGNER_SHA256", ""),
               "signing_verified": bool(os.environ.get("APTEVA_ANDROID_SIGNER_SHA256", "")),
+              "signing_contract": os.environ.get("APTEVA_SIGNING_CONTRACT", ""),
               "device_families": json.loads(os.environ.get("APTEVA_DEVICE_FAMILIES_JSON", "[]")),
           }
           if mode == "store_upload":

@@ -664,7 +664,8 @@ func TestAndroidCloudBuildAdoptsStoreUpload(t *testing.T) {
 		t.Fatalf("unset Codemagic groups must be omitted, got %#v", startEnvironment["groups"])
 	}
 	if startVariables["APTEVA_TARGET_KIND"] != "android" ||
-		startVariables["APTEVA_STORE_CHANNEL"] != "internal" {
+		startVariables["APTEVA_STORE_CHANNEL"] != "internal" ||
+		startVariables["APTEVA_SIGNING_CONTRACT"] != mobileSigningArtifactContractVersion {
 		t.Fatalf("contract variables=%#v", startVariables)
 	}
 	if err := dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{

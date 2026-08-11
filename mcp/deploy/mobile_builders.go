@@ -63,6 +63,7 @@ type artifactManifest struct {
 	VersionCode       string         `json:"version_code,omitempty"`
 	CertificateSHA256 string         `json:"certificate_sha256,omitempty"`
 	SigningVerified   bool           `json:"signing_verified,omitempty"`
+	SigningContract   string         `json:"signing_contract,omitempty"`
 	DeviceFamilies    []string       `json:"device_families,omitempty"`
 	Channel           string         `json:"channel,omitempty"`
 	ExternalProvider  string         `json:"external_provider,omitempty"`
@@ -193,6 +194,9 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 		CertificateSHA256: normalizeCertificateFingerprint(ov.Credentials.AndroidSigning["upload_certificate_sha256"]),
 		SigningVerified:   androidBundleHasSignature(dst),
 		Files:             []artifactFile{mobileArtifactFile(dst, "aab")},
+	}
+	if manifest.SigningVerified && manifest.CertificateSHA256 != "" {
+		manifest.SigningContract = mobileSigningArtifactContractVersion
 	}
 	if err := writeArtifactManifest(artifactDir, manifest); err != nil {
 		return "", err
@@ -1020,60 +1024,19 @@ func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer,
 }
 
 func verifyAndroidBundleSignature(bundlePath, expectedFingerprint string, logW io.Writer) error {
-	jarsigner, err := exec.LookPath("jarsigner")
-	if err != nil {
-		return errors.New("jarsigner not found; install a JDK to verify the Android App Bundle")
-	}
-	cmd := exec.Command(jarsigner, "-verify", "-certs", bundlePath)
-	output, err := cmd.CombinedOutput()
-	if len(output) > 0 {
-		_, _ = logW.Write(output)
-	}
-	if err != nil || !strings.Contains(strings.ToLower(string(output)), "jar verified") {
-		return errors.New("Android App Bundle signature verification failed")
-	}
 	if expectedFingerprint == "" {
 		return errors.New("managed Android upload certificate fingerprint is missing")
 	}
-	actualFingerprint, err := androidBundleSignerFingerprint(bundlePath)
+	actualFingerprint, err := verifyAndroidBundleSignaturePureGo(bundlePath, expectedFingerprint)
 	if err != nil {
 		return err
 	}
-	if normalizeCertificateFingerprint(actualFingerprint) != normalizeCertificateFingerprint(expectedFingerprint) {
-		return fmt.Errorf(
-			"Android App Bundle is signed by %s, expected managed upload certificate %s",
-			actualFingerprint, expectedFingerprint,
-		)
-	}
+	fmt.Fprintf(logW, "Android App Bundle signature and payload verified for certificate %s\n", actualFingerprint)
 	return nil
 }
 
 func androidBundleSignerFingerprint(bundlePath string) (string, error) {
-	keytool, err := exec.LookPath("keytool")
-	if err != nil {
-		return "", errors.New("keytool not found; install a JDK to inspect the Android App Bundle signer")
-	}
-	output, err := exec.Command(keytool, "-printcert", "-jarfile", bundlePath, "-rfc").CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("inspect Android App Bundle signer: %w", err)
-	}
-	for rest := output; len(rest) > 0; {
-		block, next := pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		rest = next
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			continue
-		}
-		_, fingerprint := certificateFingerprints(cert)
-		return fingerprint, nil
-	}
-	return "", errors.New("Android App Bundle signer certificate was not found")
+	return verifyAndroidBundleSignaturePureGo(bundlePath, "")
 }
 
 func androidBundleHasSignature(path string) bool {

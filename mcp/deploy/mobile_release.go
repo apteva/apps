@@ -397,7 +397,10 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 	providerEvidenceMatches := manifest.SigningVerified && androidBundleHasSignature(primary) &&
 		normalizeCertificateFingerprint(manifest.CertificateSHA256) == expectedFingerprint
 	if providerEvidenceMatches {
-		fmt.Fprintln(logW, "Android bundle carries verified build-provider signing evidence for the managed upload certificate")
+		if err := verifyAndroidBundleSignature(primary, expectedFingerprint, logW); err != nil {
+			return err
+		}
+		fmt.Fprintln(logW, "Android bundle and build-provider signing evidence match the managed upload certificate")
 	} else {
 		if err := ensureAndroidBundleSigned(primary, true, logW, signingCredentials); err != nil {
 			return err

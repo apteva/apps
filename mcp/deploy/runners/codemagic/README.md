@@ -15,3 +15,9 @@ Deploy host cannot do so, then Deploy adopts the store result.
 The bootstrap repository contains no per-app source or secrets. Signing and
 publishing credentials are imported from provider secret groups selected in
 the deployment environment.
+
+Android jobs implement `apteva.mobile-signing/v1`: they decode the temporary
+Deploy-owned PKCS#12 key, require every signing variable, sign and verify the
+AAB, publish the actual certificate SHA-256 in the artifact manifest, and
+remove the temporary keystore. Deploy verifies that artifact independently
+before accepting the build.

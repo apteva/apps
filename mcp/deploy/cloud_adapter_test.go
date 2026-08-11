@@ -34,7 +34,10 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 		"ANDROID_UPLOAD_KEYSTORE_BASE64",
 		"ANDROID_UPLOAD_CERT_SHA256",
 		"APTEVA_ANDROID_SIGNER_SHA256",
+		"APTEVA_SIGNING_CONTRACT",
+		"apteva.mobile-signing/v1",
 		`"signing_verified"`,
+		`"signing_contract"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Codemagic adapter is missing %q", required)
@@ -48,6 +51,9 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 	}
 	if strings.Contains(text, "CM_KEYSTORE_PATH") {
 		t.Fatal("Codemagic runner still depends on provider-managed Android signing")
+	}
+	if !strings.Contains(text, `printf 'APTEVA_ANDROID_SIGNER_SHA256=%s\n' "$actual_fingerprint" >> "$CM_ENV"`) {
+		t.Fatal("Codemagic runner does not persist Android signing evidence between scripts")
 	}
 	var signingScript string
 	var findSigningScript func(any)

@@ -20,16 +20,17 @@ import (
 )
 
 const (
-	cloudBuildProtocolVersion = "apteva.build/v1"
-	buildBackendLocal         = "local"
-	buildBackendRunner        = "runner"
-	buildBackendCodemagic     = "codemagic"
-	buildBackendGitHubActions = "github_actions"
-	defaultCloudArtifactName  = "apteva-build"
-	maxCloudArtifactBytes     = int64(2 << 30)
-	cloudBuildPollLease       = 2 * time.Minute
-	cloudBuildPropagationWait = 90 * time.Second
-	cloudBuildMaxPollDelay    = time.Minute
+	cloudBuildProtocolVersion            = "apteva.build/v1"
+	mobileSigningArtifactContractVersion = "apteva.mobile-signing/v1"
+	buildBackendLocal                    = "local"
+	buildBackendRunner                   = "runner"
+	buildBackendCodemagic                = "codemagic"
+	buildBackendGitHubActions            = "github_actions"
+	defaultCloudArtifactName             = "apteva-build"
+	maxCloudArtifactBytes                = int64(2 << 30)
+	cloudBuildPollLease                  = 2 * time.Minute
+	cloudBuildPropagationWait            = 90 * time.Second
+	cloudBuildMaxPollDelay               = time.Minute
 )
 
 type externalJobUnavailableError struct {
@@ -624,6 +625,10 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 			a.failBuild(build, "stage cloud artifact: "+err.Error())
 			return nil
 		}
+		if err := a.verifyStagedCloudMobileArtifact(d, build, distDir); err != nil {
+			a.failBuild(build, "verify cloud artifact: "+err.Error())
+			return nil
+		}
 		if body, err := os.ReadFile(filepath.Join(distDir, artifactManifestFilename)); err == nil && json.Valid(body) {
 			manifestJSON = string(body)
 		}
@@ -958,6 +963,8 @@ func (codemagicBuildBackend) Artifact(_ context.Context, _ *sdk.BoundIntegration
 	candidates := recursiveArtifactURLs(status.ProviderRaw)
 	for _, candidate := range candidates {
 		if cfg.ArtifactName == "" || strings.Contains(strings.ToLower(candidate.Name), strings.ToLower(cfg.ArtifactName)) {
+			candidate.Archive = strings.HasSuffix(strings.ToLower(candidate.Name), ".zip")
+			candidate.FileName = cfg.ArtifactFile
 			return &candidate, nil
 		}
 	}
@@ -1188,6 +1195,9 @@ func cloudBuildContractVariables(cfg cloudBuildConfig, d *Deployment, build *Bui
 		"APTEVA_ENV_B64":           base64.StdEncoding.EncodeToString([]byte(defaultStr(d.EnvJSON, "{}"))),
 		"APTEVA_BUILD_SPEC_B64":    base64.StdEncoding.EncodeToString(specJSON),
 	}
+	if d.TargetKind == "android" {
+		values["APTEVA_SIGNING_CONTRACT"] = mobileSigningArtifactContractVersion
+	}
 	if target, targetErr := parseMobileTargetConfig(d.TargetConfigJSON); targetErr == nil {
 		values["APTEVA_VERSION_NAME"] = target.VersionName
 		values["APTEVA_BUILD_NUMBER"] = target.BuildNumber
@@ -1247,6 +1257,7 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 	}
 	sourcePath := tmpPath
 	sourceName := artifact.Name
+	var providerManifest *artifactManifest
 	if artifact.Archive {
 		unpackedDir, err := os.MkdirTemp(filepath.Dir(distDir), "cloud-file-*")
 		if err != nil {
@@ -1262,6 +1273,11 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 			return err
 		}
 		zr.Close()
+		if manifest, manifestErr := readArtifactManifestFile(filepath.Join(unpackedDir, artifactManifestFilename)); manifestErr == nil {
+			providerManifest = &manifest
+		} else if !errors.Is(manifestErr, os.ErrNotExist) {
+			return fmt.Errorf("decode cloud artifact manifest: %w", manifestErr)
+		}
 		sourcePath, sourceName, err = selectCloudArtifactFile(unpackedDir, artifact.FileName)
 		if err != nil {
 			return err
@@ -1292,12 +1308,35 @@ func (a *App) downloadAndStageCloudArtifact(bound *sdk.BoundIntegration, d *Depl
 			VersionCode: cfg.VersionCode, DeviceFamilies: cfg.DeviceFamilies,
 			Files: []artifactFile{mobileArtifactFile(dst, strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))},
 		}
+		if providerManifest != nil {
+			if providerManifest.Primary != "" && filepath.Base(providerManifest.Primary) != filepath.Base(sourceName) {
+				return fmt.Errorf(
+					"cloud artifact manifest primary %q does not match selected file %q",
+					providerManifest.Primary, sourceName,
+				)
+			}
+			manifest.SigningContract = providerManifest.SigningContract
+			manifest.CertificateSHA256 = providerManifest.CertificateSHA256
+			manifest.SigningVerified = providerManifest.SigningVerified
+		}
 		if d.TargetKind == "ios" && len(manifest.DeviceFamilies) == 0 && strings.EqualFold(filepath.Ext(dst), ".ipa") {
 			manifest.DeviceFamilies, _ = readIPADeviceFamilies(dst)
 		}
 		return writeArtifactManifest(distDir, manifest)
 	}
 	return nil
+}
+
+func readArtifactManifestFile(path string) (artifactManifest, error) {
+	var manifest artifactManifest
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return manifest, err
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return manifest, err
+	}
+	return manifest, nil
 }
 
 func selectCloudArtifactFile(root, configured string) (string, string, error) {

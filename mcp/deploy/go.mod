@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/apteva/app-sdk v0.46.0
 	github.com/ggpslop/go-pkcs12 v0.3.0
+	go.mozilla.org/pkcs7 v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
 	howett.net/plist v1.0.1
 	modernc.org/sqlite v1.50.0

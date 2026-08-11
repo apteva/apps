@@ -184,6 +184,14 @@ Bundle builds also carry a signed source URL, exact byte size, SHA-256, and
 format. The contract is encoded as normal provider variables for Codemagic and
 opt-in `workflow_dispatch` inputs for GitHub Actions.
 
+Managed Android signing adds the provider-neutral
+`apteva.mobile-signing/v1` artifact contract. A provider must return signing
+evidence with the AAB. Deploy preserves that evidence while staging the file,
+then independently verifies the PKCS#7 signature, the signed JAR manifest,
+every payload digest, and the signer certificate fingerprint before marking
+the build successful. Verification is pure Go and does not require a JDK on
+the Deploy host.
+
 Mobile bundle builds run a strict source preflight before a provider job is
 created. iOS checks the project, populated AppIcon asset catalog, orientations,
 bundle ID, and store version. Android checks the Gradle/manifest structure,
@@ -236,10 +244,12 @@ be automated:
    to the selected build provider's secure secret store.
 6. Add the provider secret group to this environment's build configuration.
 
-Deploy stores only resource IDs, the provider secret reference, the public-key
-fingerprint, and status. Private keys are never written to Deploy's database.
-Calling setup again is idempotent; pass `rotate: true` to create and activate a
-replacement before removing the old Apple profile and certificate.
+Deploy stores durable signing identities and encrypted private material in its
+app database. The encryption key is a separate `0600` file in Deploy's DataDir;
+backups require both. Provider setup records contain resource IDs, the provider
+secret reference, the public-key fingerprint, and status. Calling setup again
+is idempotent; pass `rotate: true` to create and activate a replacement before
+removing the old Apple profile and certificate.
 
 Codemagic is the first `mobileSigningProvider` adapter. Additional build
 providers implement the same secret-delivery interface while reusing the
