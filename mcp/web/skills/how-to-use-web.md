@@ -90,6 +90,12 @@ matters.
 
 Prefer `store: true` for durable research, crawls, and snapshots. Use
 `snapshots: true` in `web_research` when the user needs visual proof.
+Stored screenshots are explicitly `private` by default. Pass
+`visibility: "public"` to `web_snapshot`, or alongside `snapshot: true` in
+`web_extract` / `snapshots: true` in `web_research`, only when the returned URL
+must be directly embeddable in a public article. Use `signed` for controlled
+sharing. Snapshot responses return the effective visibility with the storage
+URL.
 
 ## Cache controls
 
@@ -106,5 +112,6 @@ research is 1 hour. Snapshot caching is disabled unless `max_age` is set.
 
 After a high-value `web_search` or `web_research`, attach `web-result-card` for
 the most relevant result when it improves the conversation. For screenshots,
-use the returned signed storage URL directly or attach the existing computer /
-screenshots component if the calling environment supports it.
+use a returned public URL directly only when the request explicitly selected
+`visibility: "public"`; otherwise attach the existing computer / screenshots
+component if the calling environment supports it.

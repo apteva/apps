@@ -358,12 +358,12 @@ func TestSnapshotUploadsAndInjectsProjectID(t *testing.T) {
 	plat.storageURL = "https://storage.test/signed/88"
 	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
 
-	out, err := app.toolSnapshot(ctx, map[string]any{"url": "https://example.com", "label": "Example"})
+	out, err := app.toolSnapshot(ctx, map[string]any{"url": "https://example.com", "label": "Example", "visibility": "public"})
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 	res := out.(map[string]any)
-	if res["storage_id"] != int64(88) || res["url"] != plat.storageURL {
+	if res["storage_id"] != int64(88) || res["url"] != plat.storageURL || res["visibility"] != "public" {
 		t.Fatalf("storage fields wrong: %#v", res)
 	}
 	for _, c := range plat.calls {
@@ -378,6 +378,9 @@ func TestSnapshotUploadsAndInjectsProjectID(t *testing.T) {
 	if upload["content_type"] != "image/png" {
 		t.Fatalf("content_type=%v", upload["content_type"])
 	}
+	if upload["visibility"] != "public" {
+		t.Fatalf("visibility=%v, want public", upload["visibility"])
+	}
 	if _, err := base64.StdEncoding.DecodeString(upload["content_base64"].(string)); err != nil {
 		t.Fatalf("bad upload base64: %v", err)
 	}
@@ -388,9 +391,10 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
 
 	outAny, err := app.toolSnapshot(ctx, map[string]any{
-		"url":       "https://example.com",
-		"query":     "affiliate contact email",
-		"max_shots": 1,
+		"url":        "https://example.com",
+		"query":      "affiliate contact email",
+		"max_shots":  1,
+		"visibility": "public",
 	})
 	if err != nil {
 		t.Fatalf("smart snapshot: %v", err)
@@ -406,6 +410,9 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 	if shots[0]["region_id"] != "r_contact" || shots[0]["stored"] != true {
 		t.Fatalf("shot wrong: %#v", shots[0])
 	}
+	if out["visibility"] != "public" || shots[0]["visibility"] != "public" {
+		t.Fatalf("smart visibility was not returned: out=%#v shot=%#v", out["visibility"], shots[0]["visibility"])
+	}
 	calls := plat.callLog()
 	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_extract", "computer.computer_use", "computer.browser_extract", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
@@ -419,6 +426,27 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 	upload := plat.lastCall("storage", "files_upload")
 	if upload["content_type"] != "image/png" {
 		t.Fatalf("content_type=%v", upload["content_type"])
+	}
+	if upload["visibility"] != "public" {
+		t.Fatalf("visibility=%v, want public", upload["visibility"])
+	}
+}
+
+func TestSnapshotVisibilityDefaultsPrivate(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolSnapshot(ctx, map[string]any{"url": "https://example.com"})
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if out["visibility"] != "private" {
+		t.Fatalf("output visibility=%v, want private", out["visibility"])
+	}
+	upload := plat.lastCall("storage", "files_upload")
+	if upload["visibility"] != "private" {
+		t.Fatalf("upload visibility=%v, want private", upload["visibility"])
 	}
 }
 
@@ -792,6 +820,90 @@ func TestExtractSnapshotHonorsStoreFalseAndReusesSession(t *testing.T) {
 	}
 }
 
+func TestExtractSnapshotForwardsVisibility(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolExtract(ctx, map[string]any{
+		"url":        "https://example.com/public-evidence",
+		"snapshot":   true,
+		"store":      true,
+		"visibility": "public",
+		"cache":      "bypass",
+	})
+	if err != nil {
+		t.Fatalf("extract snapshot: %v", err)
+	}
+	page := outAny.(map[string]any)["page"].(pageDoc)
+	shot, ok := page.Snapshot.(map[string]any)
+	if !ok || shot["visibility"] != "public" {
+		t.Fatalf("snapshot visibility=%#v", page.Snapshot)
+	}
+	foundImage := false
+	for _, call := range plat.calls {
+		if call.app == "storage" && call.tool == "files_upload" && call.args["content_type"] == "image/png" {
+			foundImage = true
+			if call.args["visibility"] != "public" {
+				t.Fatalf("snapshot upload visibility=%v, want public", call.args["visibility"])
+			}
+		}
+	}
+	if !foundImage {
+		t.Fatal("missing extraction snapshot upload")
+	}
+}
+
+func TestResearchSnapshotsForwardVisibility(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolResearch(ctx, map[string]any{
+		"question":    "What is the public evidence?",
+		"queries":     []string{"public evidence"},
+		"max_results": 1,
+		"max_sources": 1,
+		"snapshots":   true,
+		"store":       true,
+		"visibility":  "public",
+		"cache":       "bypass",
+	})
+	if err != nil {
+		t.Fatalf("research snapshots: %v", err)
+	}
+	sources := outAny.(map[string]any)["sources"].([]pageDoc)
+	if len(sources) != 1 {
+		t.Fatalf("sources=%d, want 1", len(sources))
+	}
+	shot, ok := sources[0].Snapshot.(map[string]any)
+	if !ok || shot["visibility"] != "public" {
+		t.Fatalf("research snapshot visibility=%#v", sources[0].Snapshot)
+	}
+	foundImage := false
+	for _, call := range plat.calls {
+		if call.app == "storage" && call.tool == "files_upload" && call.args["content_type"] == "image/png" {
+			foundImage = true
+			if call.args["visibility"] != "public" {
+				t.Fatalf("research snapshot upload visibility=%v, want public", call.args["visibility"])
+			}
+		}
+	}
+	if !foundImage {
+		t.Fatal("missing research snapshot upload")
+	}
+}
+
+func TestSnapshotVisibilityRejectsUnknownValues(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	if _, err := app.toolSnapshot(ctx, map[string]any{"url": "https://example.com", "visibility": "shared"}); err == nil {
+		t.Fatal("expected invalid visibility error")
+	}
+	if got := len(plat.callLog()); got != 0 {
+		t.Fatalf("invalid visibility made %d platform calls", got)
+	}
+}
+
 func TestSnapshotArtifactInsertFailureReturnsErrorAndRollsBackUpload(t *testing.T) {
 	plat := newFakePlatform()
 	ctx, app := newTestCtx(t, plat)
@@ -799,7 +911,7 @@ func TestSnapshotArtifactInsertFailureReturnsErrorAndRollsBackUpload(t *testing.
 		t.Fatalf("close app db: %v", err)
 	}
 	out := map[string]any{"current_url": "https://example.com", "heading": "Example"}
-	if err := app.storeSnapshotImage(ctx, 0, out, testPNGB64(), "snapshot", "Example", 0); err == nil {
+	if err := app.storeSnapshotImage(ctx, 0, out, testPNGB64(), "snapshot", "Example", 0, "private"); err == nil {
 		t.Fatal("expected artifact insert error")
 	}
 	if got := countCalls(plat, "storage", "files_delete"); got != 1 {
@@ -818,6 +930,28 @@ func TestCacheKeyPreservesCrawlSeedOrder(t *testing.T) {
 	}
 	if first == second {
 		t.Fatal("ordered crawl seeds produced the same cache key")
+	}
+}
+
+func TestSnapshotCacheKeyIncludesEffectiveVisibility(t *testing.T) {
+	base := map[string]any{"url": "https://example.com", "mode": "smart", "query": "pricing", "store": true}
+	_, implicitPrivate, err := cacheKey("snapshot", base)
+	if err != nil {
+		t.Fatalf("implicit private cache key: %v", err)
+	}
+	_, explicitPrivate, err := cacheKey("snapshot", mapMerge(base, map[string]any{"visibility": "private"}))
+	if err != nil {
+		t.Fatalf("explicit private cache key: %v", err)
+	}
+	_, public, err := cacheKey("snapshot", mapMerge(base, map[string]any{"visibility": "public"}))
+	if err != nil {
+		t.Fatalf("public cache key: %v", err)
+	}
+	if implicitPrivate != explicitPrivate {
+		t.Fatal("implicit and explicit private visibility produced different cache keys")
+	}
+	if implicitPrivate == public {
+		t.Fatal("private and public snapshots produced the same cache key")
 	}
 }
 

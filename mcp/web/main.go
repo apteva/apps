@@ -1,4 +1,4 @@
-// Web v0.2.3 - browser-backed web intelligence and reusable extractors.
+// Web v0.2.4 - browser-backed web intelligence and reusable extractors.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -166,18 +166,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session, extract readable text, markdown, metadata, structured_data, links, images, and optional artifact storage. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?.",
+			Description: "Open a URL in a browser session, extract readable text, markdown, metadata, structured_data, links, images, and optional artifact storage. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?, visibility? (private|signed|public; applies to stored snapshots and defaults to private).",
 			InputSchema: schemaObject(map[string]any{
-				"url":       map[string]any{"type": "string"},
-				"formats":   map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
-				"backend":   map[string]any{"type": "string"},
-				"viewport":  viewportSchema(),
-				"max_chars": map[string]any{"type": "integer"},
-				"store":     map[string]any{"type": "boolean"},
-				"snapshot":  map[string]any{"type": "boolean"},
-				"cache":     cacheModeSchema(),
-				"max_age":   cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
-				"cache_ttl": cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
+				"url":        map[string]any{"type": "string"},
+				"formats":    map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
+				"backend":    map[string]any{"type": "string"},
+				"viewport":   viewportSchema(),
+				"max_chars":  map[string]any{"type": "integer"},
+				"store":      map[string]any{"type": "boolean"},
+				"snapshot":   map[string]any{"type": "boolean"},
+				"visibility": snapshotVisibilitySchema(),
+				"cache":      cacheModeSchema(),
+				"max_age":    cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
+				"cache_ttl":  cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
 			}, []string{"url"}),
 			Handler: a.toolExtract,
 		},
@@ -220,7 +221,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_research",
-			Description: "Multi-step browser-backed research. Args: question, queries?, max_results?, max_sources?, backend?, snapshots?, store?. Returns extractive report JSON with citations and artifacts.",
+			Description: "Multi-step browser-backed research. Args: question, queries?, max_results?, max_sources?, backend?, snapshots?, store?, visibility? (private|signed|public; applies to stored snapshots and defaults to private). Returns extractive report JSON with citations and artifacts.",
 			InputSchema: schemaObject(map[string]any{
 				"question":    map[string]any{"type": "string"},
 				"queries":     map[string]any{"type": "array", "maxItems": maxResearchQueries, "items": map[string]any{"type": "string"}},
@@ -230,6 +231,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"viewport":    viewportSchema(),
 				"snapshots":   map[string]any{"type": "boolean"},
 				"store":       map[string]any{"type": "boolean"},
+				"visibility":  snapshotVisibilitySchema(),
 				"cache":       cacheModeSchema(),
 				"max_age":     cacheSecondsSchema("Maximum accepted cached research age in seconds. Default 3600."),
 				"cache_ttl":   cacheSecondsSchema("How long to retain newly generated research in seconds. Default 3600."),
@@ -238,7 +240,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_snapshot",
-			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?, mode? (viewport|smart), query?, max_shots?, crop?, cookie_handling? (auto|off).",
+			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?, visibility? (private|signed|public; default private), mode? (viewport|smart), query?, max_shots?, crop?, cookie_handling? (auto|off).",
 			InputSchema: schemaObject(map[string]any{
 				"url":             map[string]any{"type": "string"},
 				"session_id":      map[string]any{"type": "string"},
@@ -251,6 +253,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"crop":            map[string]any{"type": "boolean"},
 				"cookie_handling": map[string]any{"type": "string", "enum": []string{"auto", "off"}},
 				"store":           map[string]any{"type": "boolean"},
+				"visibility":      snapshotVisibilitySchema(),
 				"cache":           cacheModeSchema(),
 				"max_age":         cacheSecondsSchema("Maximum accepted cached snapshot age in seconds. Snapshot caching is disabled unless max_age is set."),
 				"cache_ttl":       cacheSecondsSchema("How long to retain newly captured snapshots in seconds. Defaults to max_age when set."),
@@ -534,6 +537,11 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if target == "" {
 		return nil, errors.New("url required")
 	}
+	if boolArg(args, "snapshot") {
+		if _, err := snapshotVisibility(args); err != nil {
+			return nil, err
+		}
+	}
 	runID, err := startRun(ctx, "extract", args)
 	if err != nil {
 		return nil, fmt.Errorf("start extract run: %w", err)
@@ -691,6 +699,11 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if question == "" {
 		return nil, errors.New("question required")
 	}
+	if boolArg(args, "snapshots") {
+		if _, err := snapshotVisibility(args); err != nil {
+			return nil, err
+		}
+	}
 	runID, err := startRun(ctx, "research", args)
 	if err != nil {
 		return nil, fmt.Errorf("start research run: %w", err)
@@ -827,6 +840,9 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, err := snapshotVisibility(args); err != nil {
+		return nil, err
+	}
 	runID, runErr := startRun(ctx, "snapshot", args)
 	if runErr != nil {
 		return nil, fmt.Errorf("start snapshot run: %w", runErr)
@@ -1005,10 +1021,14 @@ func (a *App) crawl(ctx *sdk.AppCtx, runID int64, seeds []string, args map[strin
 }
 
 func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[string]any, error) {
+	visibility, err := snapshotVisibility(args)
+	if err != nil {
+		return nil, err
+	}
 	sessionID := stringArg(args, "session_id")
 	opened := false
 	var browser *browserSession
-	var err error
+	err = nil
 	if sessionID == "" {
 		target := stringArg(args, "url")
 		if target == "" {
@@ -1060,6 +1080,7 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 		"folder":         folder,
 		"content_type":   "image/png",
 		"source":         "web:snapshot",
+		"visibility":     visibility,
 	})
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
@@ -1074,6 +1095,7 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
 	out["artifact_id"] = art.ID
+	out["visibility"] = visibility
 	out["opened_session"] = opened
 	return out, nil
 }
@@ -1416,6 +1438,10 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 	if query == "" {
 		return nil, errors.New("query required for smart snapshot")
 	}
+	visibility, err := snapshotVisibility(args)
+	if err != nil {
+		return nil, err
+	}
 	cookieResult, err := a.dismissCookieBanner(ctx, sessionID, args)
 	if err != nil {
 		ctx.Logger().Warn("cookie banner dismissal failed", "err", err.Error())
@@ -1463,7 +1489,7 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 			out["png_b64"] = shot.PNGB64
 			return out, nil
 		}
-		if err := a.storeSnapshotImage(ctx, runID, out, shot.PNGB64, "smart-fallback", stringArg(args, "label"), 0); err != nil {
+		if err := a.storeSnapshotImage(ctx, runID, out, shot.PNGB64, "smart-fallback", stringArg(args, "label"), 0, visibility); err != nil {
 			return nil, err
 		}
 		return out, nil
@@ -1549,7 +1575,7 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 		}
 		if store {
 			label := safeFilename(firstNonEmpty(stringArg(args, "label"), region.Heading, "smart-snapshot"))
-			if err := a.storeSnapshotImage(ctx, runID, item, contentB64, "smart", label, 0); err != nil {
+			if err := a.storeSnapshotImage(ctx, runID, item, contentB64, "smart", label, 0, visibility); err != nil {
 				return nil, err
 			}
 		} else {
@@ -1559,7 +1585,7 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 			out["current_url"] = shot.CurrentURL
 			out["width"] = width
 			out["height"] = height
-			for _, key := range []string{"storage_id", "url", "artifact_id", "png_b64"} {
+			for _, key := range []string{"storage_id", "url", "artifact_id", "visibility", "png_b64"} {
 				if v, ok := item[key]; ok {
 					out[key] = v
 				}
@@ -1612,7 +1638,7 @@ func (a *App) locateRegionAfterScroll(ctx *sdk.AppCtx, sessionID string, args ma
 	return region, scrollY, nil
 }
 
-func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]any, pngB64, prefix, label string, size int) error {
+func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]any, pngB64, prefix, label string, size int, visibility string) error {
 	folder := "/.web/snapshots/" + time.Now().UTC().Format("2006-01")
 	var up struct {
 		ID  int64  `json:"id"`
@@ -1628,6 +1654,7 @@ func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]an
 		"folder":         folder,
 		"content_type":   "image/png",
 		"source":         "web:snapshot",
+		"visibility":     visibility,
 	})
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return fmt.Errorf("storage.files_upload: %w", err)
@@ -1644,6 +1671,7 @@ func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]an
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
 	out["artifact_id"] = art.ID
+	out["visibility"] = visibility
 	return nil
 }
 
@@ -2247,6 +2275,17 @@ func cacheKey(kind string, args map[string]any) (string, string, error) {
 	}
 	if kind == "snapshot" {
 		cleaned["store"] = boolArgDefault(args, "store", true)
+		visibility, err := snapshotVisibility(args)
+		if err != nil {
+			return "", "", err
+		}
+		cleaned["visibility"] = visibility
+	} else if (kind == "extract" && boolArg(args, "snapshot")) || (kind == "research" && boolArg(args, "snapshots")) {
+		visibility, err := snapshotVisibility(args)
+		if err != nil {
+			return "", "", err
+		}
+		cleaned["visibility"] = visibility
 	}
 	b, err := json.Marshal(cleaned)
 	if err != nil {
@@ -3826,6 +3865,27 @@ func snapshotStore(ctx *sdk.AppCtx, args map[string]any) bool {
 		return boolArgDefault(args, "_snapshot_store", false)
 	}
 	return boolArgDefault(args, "store", storeDefault(ctx))
+}
+
+func snapshotVisibilitySchema() map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"enum":        []string{"private", "signed", "public"},
+		"description": "Visibility for screenshots stored by this request. Defaults to private.",
+	}
+}
+
+func snapshotVisibility(args map[string]any) (string, error) {
+	visibility := strings.ToLower(strings.TrimSpace(stringArg(args, "visibility")))
+	if visibility == "" {
+		return "private", nil
+	}
+	switch visibility {
+	case "private", "signed", "public":
+		return visibility, nil
+	default:
+		return "", errors.New("visibility must be one of: private, signed, public")
+	}
 }
 
 func nestedSearchCacheMode(args map[string]any) string {
