@@ -394,6 +394,20 @@ export interface PublicTestimonial {
   avatar_file_id?: number;
 }
 
+export interface PublicProductTestimonial {
+  id: number;
+  kind: string;
+  quote: string;
+  result?: string;
+  student_name?: string;
+  role?: string;
+  rating?: number;
+  avatar_storage_file_id?: string;
+  media_url?: string;
+  verified: boolean;
+  verification_status: string;
+}
+
 export interface PublicStorefrontContent {
   headline?: string;
   eyebrow?: string;
@@ -424,6 +438,7 @@ export interface PublicProduct {
   color?: string;
   image_file_id?: number;
   storefront: PublicStorefrontContent;
+  testimonials: PublicProductTestimonial[];
   offers: PublicOffer[];
   courses: PublicCourse[];
 }

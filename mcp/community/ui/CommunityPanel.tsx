@@ -229,10 +229,40 @@ interface CourseInstructorsResult {
   legacy_instructor_name?: string;
 }
 
+interface ProductTestimonial {
+  id: number;
+  kind: string;
+  quote: string;
+  result?: string;
+  student_name?: string;
+  role?: string;
+  rating?: number;
+  avatar_storage_file_id?: string;
+  media_url?: string;
+  verified: boolean;
+  verification_status: string;
+}
+
+interface ProductTestimonialsResult {
+  community_id: string;
+  catalog_product_id: number;
+  testimonial_ids: number[];
+  testimonials: ProductTestimonial[];
+  available_testimonials: ProductTestimonial[];
+  testimonials_available: boolean;
+  unavailable_reason?: string;
+}
+
+interface TestimonialProductTarget {
+  id: number;
+  name: string;
+}
+
 interface MembershipPlan {
   id: string;
   name: string;
   description: string;
+  catalog_product_id: number;
   catalog_price_id: number;
   unit_amount_cents: number;
   currency: string;
@@ -287,6 +317,7 @@ type DialogKind =
   | "instructor"
   | "edit_instructor"
   | "course_instructors"
+  | "product_testimonials"
   | "space"
   | "course"
   | "thread"
@@ -410,6 +441,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
   const [memberSubscriptions, setMemberSubscriptions] = useState<MemberSubscription[]>([]);
   const [lessonId, setLessonId] = useState<string | null>(null);
   const [newLessonSectionId, setNewLessonSectionId] = useState("");
+  const [testimonialProduct, setTestimonialProduct] = useState<TestimonialProductTarget | null>(null);
   const [dialog, setDialog] = useState<DialogKind | null>(null);
   const [status, setStatus] = useState("Loading");
   const [postBody, setPostBody] = useState("");
@@ -807,11 +839,25 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           {membershipPlans.length === 0 ? (
             <div className="text-xs text-text-muted">No recurring plans.</div>
           ) : (
-            <div className="space-y-1">
-              {membershipPlans.slice(0, 3).map((plan) => (
+            <div className="max-h-44 space-y-1 overflow-y-auto">
+              {membershipPlans.map((plan) => (
                 <div key={plan.id} className="rounded border border-border px-2 py-1.5 text-xs">
-                  <div className="font-medium">{plan.name}</div>
-                  <div className="text-text-muted">{formatMoney(plan.unit_amount_cents, plan.currency)} / {plan.interval}</div>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{plan.name}</div>
+                      <div className="text-text-muted">{formatMoney(plan.unit_amount_cents, plan.currency)} / {plan.interval}</div>
+                    </div>
+                    <button
+                      type="button"
+                      className={buttonClass("ghost")}
+                      onClick={() => {
+                        setTestimonialProduct({ id: plan.catalog_product_id, name: plan.name });
+                        setDialog("product_testimonials");
+                      }}
+                    >
+                      Proof
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -879,6 +925,17 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
               <button className={buttonClass()} onClick={() => setDialog("course_instructors")}>
                 Instructors{courseInstructors?.instructor_ids.length ? ` (${courseInstructors.instructor_ids.length})` : ""}
               </button>
+              {courseOffer?.active ? (
+                <button
+                  className={buttonClass()}
+                  onClick={() => {
+                    setTestimonialProduct({ id: courseOffer.catalog_product_id, name: courseOffer.product_name });
+                    setDialog("product_testimonials");
+                  }}
+                >
+                  Testimonials
+                </button>
+              ) : null}
               <button className={buttonClass()} onClick={() => setDialog("offer")}>
                 {courseOffer?.active ? "Edit sale" : "Configure sale"}
               </button>
@@ -1146,6 +1203,7 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
           instructors={instructors}
           instructor={activeInstructor}
           courseInstructors={courseInstructors}
+          testimonialProduct={testimonialProduct}
           lesson={activeLesson}
           offer={courseOffer}
           initialSectionId={newLessonSectionId}
@@ -1180,7 +1238,8 @@ export default function CommunityPanel({ projectId, installId }: NativePanelProp
               dialog === "offer" ||
               dialog === "instructor" ||
               dialog === "edit_instructor" ||
-              dialog === "course_instructors";
+              dialog === "course_instructors" ||
+              dialog === "product_testimonials";
             if (createdCourseContent && (target.spaceId || spaceId)) {
               await refreshCourse(target.spaceId || spaceId!);
             } else if (target.spaceId || spaceId) {
@@ -1310,6 +1369,7 @@ function CommunityDialog({
   instructors,
   instructor,
   courseInstructors,
+  testimonialProduct,
   lesson,
   offer,
   initialSectionId,
@@ -1328,6 +1388,7 @@ function CommunityDialog({
   instructors: InstructorProfile[];
   instructor: InstructorProfile | null;
   courseInstructors: CourseInstructorsResult | null;
+  testimonialProduct: TestimonialProductTarget | null;
   lesson: Lesson | null;
   offer: CourseOffer | null;
   initialSectionId: string;
@@ -1375,6 +1436,11 @@ function CommunityDialog({
   const [primaryInstructorId, setPrimaryInstructorId] = useState(
     courseInstructors?.primary_instructor_id || courseInstructors?.instructor_ids[0] || "",
   );
+  const [selectedTestimonialIds, setSelectedTestimonialIds] = useState<number[]>([]);
+  const [availableTestimonials, setAvailableTestimonials] = useState<ProductTestimonial[]>([]);
+  const [selectedTestimonials, setSelectedTestimonials] = useState<ProductTestimonial[]>([]);
+  const [testimonialsAvailable, setTestimonialsAvailable] = useState(false);
+  const [testimonialsLoading, setTestimonialsLoading] = useState(false);
   const [visibility, setVisibility] = useState<"members" | "public">("members");
   const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
   const [sectionId, setSectionId] = useState(initialSectionId || sections[0]?.id || "");
@@ -1396,6 +1462,38 @@ function CommunityDialog({
   const [domainApex, setDomainApex] = useState("");
   const [domainSubdomain, setDomainSubdomain] = useState(community?.slug || "community");
   const [error, setError] = useState("");
+
+  const testimonialChoices = useMemo(
+    () => Array.from(new Map(
+      [...availableTestimonials, ...selectedTestimonials].map((testimonial) => [testimonial.id, testimonial]),
+    ).values()),
+    [availableTestimonials, selectedTestimonials],
+  );
+
+  useEffect(() => {
+    let active = true;
+    if (kind !== "product_testimonials" || !community || !testimonialProduct) {
+      return () => { active = false; };
+    }
+    setTestimonialsLoading(true);
+    setError("");
+    callTool<ProductTestimonialsResult>("product_testimonials_get", {
+      community_id: community.id,
+      catalog_product_id: testimonialProduct.id,
+    }, projectId).then((result) => {
+      if (!active) return;
+      setSelectedTestimonialIds(result.testimonial_ids || []);
+      setSelectedTestimonials(result.testimonials || []);
+      setAvailableTestimonials(result.available_testimonials || []);
+      setTestimonialsAvailable(result.testimonials_available);
+      if (result.unavailable_reason) setError(result.unavailable_reason);
+    }).catch((loadError) => {
+      if (active) setError((loadError as Error).message || String(loadError));
+    }).finally(() => {
+      if (active) setTestimonialsLoading(false);
+    });
+    return () => { active = false; };
+  }, [kind, community, testimonialProduct, projectId]);
 
   useEffect(() => {
     let active = true;
@@ -1485,6 +1583,8 @@ function CommunityDialog({
       ? "Edit instructor profile"
       : kind === "course_instructors"
       ? "Course instructors"
+      : kind === "product_testimonials"
+      ? "Product testimonials"
       : kind === "course"
       ? "New course"
       : kind === "space"
@@ -1590,6 +1690,14 @@ function CommunityDialog({
           primary_instructor_id: primary,
         });
         await onCreated({ spaceId: space.id });
+      } else if (kind === "product_testimonials") {
+        if (!community || !testimonialProduct) throw new Error("Choose an offered product first");
+        await runTool<ProductTestimonialsResult>("Save product testimonials", "product_testimonials_set", {
+          community_id: community.id,
+          catalog_product_id: testimonialProduct.id,
+          testimonial_ids: selectedTestimonialIds,
+        });
+        await onCreated({});
       } else if (kind === "space" || kind === "course") {
         const tool = kind === "course" ? "courses_create" : "spaces_create";
         const out = await runTool<Space>(kind === "course" ? "Create course" : "Create space", tool, {
@@ -1695,6 +1803,8 @@ function CommunityDialog({
       ? Boolean(storageKey.trim())
       : kind === "course_instructors"
       ? true
+      : kind === "product_testimonials"
+      ? Boolean(testimonialProduct && !testimonialsLoading && (testimonialsAvailable || selectedTestimonialIds.length === 0))
       : kind === "lesson"
       ? Boolean(name.trim() && sectionId)
       : kind === "edit_lesson"
@@ -1716,7 +1826,7 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind !== "video" && kind !== "offer" && kind !== "portal" && kind !== "course_instructors" ? (
+        {kind !== "video" && kind !== "offer" && kind !== "portal" && kind !== "course_instructors" && kind !== "product_testimonials" ? (
           <Field label={kind === "member" || kind === "instructor" || kind === "edit_instructor" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
             <input
               className={inputClass}
@@ -1875,6 +1985,85 @@ function CommunityDialog({
                 Existing fallback: {courseInstructors.legacy_instructor_name}. It remains in place for compatibility and is used only when no public profile is assigned.
               </div>
             ) : null}
+          </div>
+        ) : null}
+
+        {kind === "product_testimonials" ? (
+          <div className="space-y-4">
+            <div className="rounded border border-border bg-bg-secondary p-3 text-sm text-text-muted">
+              <strong className="block text-text">{testimonialProduct?.name || "Selected product"}</strong>
+              Testimonials are assigned to the Catalog product, so the same ordered proof appears anywhere this course, bundle, or membership is sold.
+            </div>
+            {testimonialsLoading ? (
+              <div className="rounded border border-border p-3 text-sm text-text-muted">Loading published testimonials…</div>
+            ) : !testimonialsAvailable ? (
+              <div className="rounded border border-border p-3 text-sm text-text-muted">
+                Install and bind Testimonials, then publish testimonials with granted consent and public or marketing permission. Community stores only the selected IDs and display order.
+              </div>
+            ) : testimonialChoices.length === 0 ? (
+              <div className="rounded border border-border p-3 text-sm text-text-muted">
+                No eligible published testimonials are available yet. Create and publish them in the Testimonials app first.
+              </div>
+            ) : (
+              <>
+                <Field label="Published testimonials">
+                  <div className="max-h-72 space-y-2 overflow-y-auto rounded border border-border p-3">
+                    {testimonialChoices.map((testimonial) => {
+                      const selected = selectedTestimonialIds.includes(testimonial.id);
+                      const atLimit = selectedTestimonialIds.length >= 20;
+                      return (
+                        <label key={testimonial.id} className="flex items-start gap-2 rounded p-2 text-sm hover:bg-bg-secondary">
+                          <input
+                            className="mt-0.5"
+                            type="checkbox"
+                            checked={selected}
+                            disabled={!selected && atLimit}
+                            onChange={(event) => {
+                              setSelectedTestimonialIds((current) => event.target.checked
+                                ? [...current, testimonial.id]
+                                : current.filter((id) => id !== testimonial.id));
+                            }}
+                          />
+                          <span className="min-w-0">
+                            <strong className="block line-clamp-2">“{testimonial.quote}”</strong>
+                            <span className="mt-1 block text-xs text-text-muted">
+                              {testimonial.student_name || `Testimonial #${testimonial.id}`}{testimonial.role ? ` · ${testimonial.role}` : ""}{testimonial.rating ? ` · ${"★".repeat(Math.min(5, testimonial.rating))}` : ""}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </Field>
+                {selectedTestimonialIds.length > 0 ? (
+                  <Field label={`Storefront order (${selectedTestimonialIds.length}/20)`}>
+                    <div className="space-y-2 rounded border border-border p-3">
+                      {selectedTestimonialIds.map((id, index) => {
+                        const testimonial = testimonialChoices.find((item) => item.id === id);
+                        const label = testimonial?.student_name || `Testimonial #${id}`;
+                        const move = (offset: number) => {
+                          setSelectedTestimonialIds((current) => {
+                            const next = [...current];
+                            const target = index + offset;
+                            if (target < 0 || target >= next.length) return current;
+                            [next[index], next[target]] = [next[target], next[index]];
+                            return next;
+                          });
+                        };
+                        return (
+                          <div key={id} className="flex items-center gap-2 rounded bg-bg-secondary px-2 py-2">
+                            <span className="min-w-0 flex-1 truncate text-sm">{index + 1}. {label}</span>
+                            <span className="text-[10px] uppercase tracking-wide text-text-muted">Published with consent</span>
+                            <button type="button" className={buttonClass("ghost")} disabled={index === 0} onClick={() => move(-1)} aria-label={`Move ${label} up`}>↑</button>
+                            <button type="button" className={buttonClass("ghost")} disabled={index === selectedTestimonialIds.length - 1} onClick={() => move(1)} aria-label={`Move ${label} down`}>↓</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Field>
+                ) : null}
+              </>
+            )}
           </div>
         ) : null}
 

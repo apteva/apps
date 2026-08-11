@@ -1499,6 +1499,7 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
   const instructors = Array.from(new Map(
     product.courses.flatMap((course) => course.instructors || []).map((instructor) => [instructor.id, instructor]),
   ).values()).sort((left, right) => Number(right.primary) - Number(left.primary));
+  const testimonials = product.testimonials || [];
   const [preview, setPreview] = useState<PublicLessonPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState("");
   const [previewError, setPreviewError] = useState("");
@@ -1584,7 +1585,24 @@ function PublicStorefront({ product, portal, checkout, signedIn, selectedOffer, 
               </article>)}
             </div>
           </section>}
-          {product.storefront?.testimonial && <figure className="storefront-testimonial">
+          {testimonials.length > 0 && <section className="storefront-testimonials" aria-labelledby="testimonials-title">
+            <div className="storefront-section-heading"><div><p>Student results</p><h2 id="testimonials-title">What learners are saying</h2></div><span>{testimonials.length} {testimonials.length === 1 ? "story" : "stories"}</span></div>
+            <div className="storefront-testimonial-grid">
+              {testimonials.map((testimonial) => <figure key={testimonial.id} className="storefront-testimonial-card">
+                {testimonial.rating && <div className="storefront-testimonial-rating" aria-label={`${testimonial.rating} out of 5 stars`}>{"★".repeat(Math.min(5, testimonial.rating))}</div>}
+                <blockquote>“{testimonial.quote}”</blockquote>
+                {testimonial.result && <p className="storefront-testimonial-result"><CheckCircle2 aria-hidden="true" />{testimonial.result}</p>}
+                <figcaption>
+                  {testimonial.avatar_storage_file_id
+                    ? <img src={storagePublicURL(testimonial.avatar_storage_file_id)} alt="" />
+                    : <span className="storefront-testimonial-avatar" aria-hidden="true">{(testimonial.student_name || "S").slice(0, 1).toUpperCase()}</span>}
+                  <span className="storefront-testimonial-author"><strong>{testimonial.student_name || "Community learner"}</strong>{testimonial.role && <small>{testimonial.role}</small>}</span>
+                  {testimonial.verified && <span className="storefront-testimonial-verified" title="Published with the contributor’s consent"><BadgeCheck aria-hidden="true" />Published with consent</span>}
+                </figcaption>
+              </figure>)}
+            </div>
+          </section>}
+          {testimonials.length === 0 && product.storefront?.testimonial && <figure className="storefront-testimonial">
             <blockquote>“{product.storefront.testimonial.quote}”</blockquote>
             <figcaption>
               {product.storefront.testimonial.avatar_file_id && <img src={storagePublicURL(product.storefront.testimonial.avatar_file_id)} alt="" />}

@@ -97,6 +97,12 @@ func TestManifestParses(t *testing.T) {
 			t.Errorf("%s must be a required Community dependency", name)
 		}
 	}
+	if versions["testimonials"] != ">=0.1.5" {
+		t.Errorf("Testimonials dependency version = %q, want >=0.1.5", versions["testimonials"])
+	}
+	if required["testimonials"] {
+		t.Error("Testimonials must remain optional so storefronts without social proof still run")
+	}
 	permissionSet := map[string]bool{}
 	for _, permission := range m.Requires.Permissions {
 		permissionSet[string(permission)] = true

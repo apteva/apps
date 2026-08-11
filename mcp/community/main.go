@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.12.1
+version: 0.12.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -55,6 +55,9 @@ description: |
   Reusable instructor profiles support ordered multi-instructor courses,
   primary instructors, Storage avatars, public biographies, credentials,
   links, accomplishments, and live teaching statistics.
+  Community curates ordered, published Testimonials proof at the Catalog
+  product level so single courses, bundles, and memberships share one
+  storefront model without duplicating testimonial content.
   Community uses Checkout for durable guest carts and immediate deferred
   Stripe Elements rendering, then creates and claims the Billing invoice only
   after verified authentication into either a
@@ -111,6 +114,10 @@ requires:
         - subscription.ended
         - subscription.cycle_due
       reason: Subscriptions owns recurring lifecycle, trials, renewal cycles, grace periods, scheduled cancellation, and resume.
+    - name: testimonials
+      version: ">=0.1.5"
+      optional: true
+      reason: Testimonials remains the source of truth for published customer proof; Community owns only per-product selection and display order.
   integrations:
     - role: storage
       kind: app
@@ -195,6 +202,8 @@ provides:
     - { name: instructor_profiles_archive, description: "Archive an instructor profile, optionally removing course assignments." }
     - { name: course_instructors_set, description: "Set a course's ordered instructor profiles and primary instructor." }
     - { name: course_instructors_get, description: "Get a course's instructor profiles and calculated statistics." }
+    - { name: product_testimonials_get, description: "Get curated Testimonials proof and available published proof for a Community storefront product." }
+    - { name: product_testimonials_set, description: "Set ordered published Testimonials IDs for a Community storefront product." }
     - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
     - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
     - { name: lesson_bundle_get,  description: "Fetch an available lesson with all member-facing extras." }
@@ -263,7 +272,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: community/v0.12.1
+    ref: community/v0.12.2
     entry: mcp/community
   port: 8080
   health_check: /health
@@ -385,6 +394,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, dmsTools()...)
 	tools = append(tools, coursesTools()...)
 	tools = append(tools, instructorTools()...)
+	tools = append(tools, productTestimonialTools()...)
 	tools = append(tools, courseSalesTools()...)
 	tools = append(tools, membershipTools()...)
 	tools = append(tools, storefrontTools()...)

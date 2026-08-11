@@ -19,17 +19,18 @@ import (
 // source of truth for product presentation; Community owns only the mapping
 // from a price to the access it grants.
 type PublicProduct struct {
-	CatalogProductID int64                   `json:"catalog_product_id"`
-	Slug             string                  `json:"slug"`
-	Name             string                  `json:"name"`
-	Description      string                  `json:"description,omitempty"`
-	Type             string                  `json:"type"`
-	Category         string                  `json:"category,omitempty"`
-	Color            string                  `json:"color,omitempty"`
-	ImageFileID      *int64                  `json:"image_file_id,omitempty"`
-	Storefront       PublicStorefrontContent `json:"storefront"`
-	Offers           []PublicOffer           `json:"offers"`
-	Courses          []PublicCourse          `json:"courses"`
+	CatalogProductID int64                      `json:"catalog_product_id"`
+	Slug             string                     `json:"slug"`
+	Name             string                     `json:"name"`
+	Description      string                     `json:"description,omitempty"`
+	Type             string                     `json:"type"`
+	Category         string                     `json:"category,omitempty"`
+	Color            string                     `json:"color,omitempty"`
+	ImageFileID      *int64                     `json:"image_file_id,omitempty"`
+	Storefront       PublicStorefrontContent    `json:"storefront"`
+	Offers           []PublicOffer              `json:"offers"`
+	Courses          []PublicCourse             `json:"courses"`
+	Testimonials     []PublicProductTestimonial `json:"testimonials"`
 }
 
 type PublicStorefrontContent struct {
@@ -283,7 +284,7 @@ func buildPublicProducts(ctx *sdk.AppCtx, communityID string) ([]PublicProduct, 
 			CatalogProductID: id, Slug: publicProductSlug(product), Name: product.Name,
 			Description: product.Description, Type: product.Type, Category: product.Category,
 			Color: product.Color, ImageFileID: product.ImageFileID, Storefront: publicStorefrontContent(product),
-			Offers: []PublicOffer{}, Courses: []PublicCourse{},
+			Offers: []PublicOffer{}, Courses: []PublicCourse{}, Testimonials: []PublicProductTestimonial{},
 		}
 		products[id] = created
 		return created
@@ -333,6 +334,15 @@ func buildPublicProducts(ctx *sdk.AppCtx, communityID string) ([]PublicProduct, 
 
 	out := make([]PublicProduct, 0, len(products))
 	for _, product := range products {
+		if testimonials, err := publicProductTestimonials(ctx, communityID, product.CatalogProductID); err == nil {
+			product.Testimonials = testimonials
+			if len(testimonials) > 0 {
+				// Catalog's legacy single testimonial remains a compatibility
+				// fallback only. Curated Testimonials proof is the sole rendered
+				// source once a product has explicit assignments.
+				product.Storefront.Testimonial = nil
+			}
+		}
 		sort.Slice(product.Offers, func(i, j int) bool {
 			if product.Offers[i].Kind != product.Offers[j].Kind {
 				return product.Offers[i].Kind < product.Offers[j].Kind

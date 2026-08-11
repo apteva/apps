@@ -28,6 +28,7 @@ type salesPlatformStub struct {
 	signedURLCalls    int
 	signedURLTTL      int
 	signedURLDelivery string
+	testimonials      map[int64]testimonialsAppRecord
 }
 
 func newSalesPlatformStub() *salesPlatformStub {
@@ -36,7 +37,8 @@ func newSalesPlatformStub() *salesPlatformStub {
 			ID: 71, ProductID: 61, Nickname: "Launch price", UnitAmountCents: 9900,
 			Currency: "EUR", BillingScheme: "flat", Active: true,
 		},
-		product: catalogProduct{ID: 61, Name: "Community Course", Slug: "community-course", Description: "Build a stronger community.", Type: "one_time"},
+		product:      catalogProduct{ID: 61, Name: "Community Course", Slug: "community-course", Description: "Build a stronger community.", Type: "one_time"},
+		testimonials: map[int64]testimonialsAppRecord{},
 	}
 }
 
@@ -54,6 +56,18 @@ func (s *salesPlatformStub) CallAppResult(app, tool string, input map[string]any
 		s.signedURLTTL, _ = input["ttl_seconds"].(int)
 		s.signedURLDelivery, _ = input["delivery"].(string)
 		value = map[string]any{"url": "https://files.example.test/signed-preview.mp4?sig=short-lived", "expires_at": int64(4102444800)}
+	case "testimonials:testimonials_get":
+		id, _ := intArg(input, "id")
+		record, found := s.testimonials[id]
+		value = map[string]any{"found": found, "testimonial": record}
+	case "testimonials:testimonials_list":
+		items := []testimonialsAppRecord{}
+		for _, record := range s.testimonials {
+			if record.Status == "published" {
+				items = append(items, record)
+			}
+		}
+		value = map[string]any{"testimonials": items, "count": len(items), "total": len(items)}
 	case "billing:customers_upsert_by_email":
 		value = map[string]any{"customer": map[string]any{"id": int64(501)}, "was_created": true}
 	case "billing:invoices_search":
