@@ -17,7 +17,7 @@ import (
 //
 //   /api/deployments                          collection
 //   /api/deployments/<id-or-name>             one deployment + sub-actions
-//   /api/builds/<id>                          build detail / log
+//   /api/builds/<id>                          build detail / log / artifact
 //   /api/releases/<id>                        release detail / log
 
 func (a *App) handleDeploymentsCollection(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +435,16 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch tail {
 	case "":
-		httpJSON(w, map[string]any{"build": build})
+		pid, err := resolveProjectFromRequest(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if d, getErr := dbGetDeployment(globalCtx.AppDB(), pid, build.DeploymentID); getErr != nil || d == nil {
+			httpErr(w, http.StatusNotFound, "build not found")
+			return
+		}
+		httpJSON(w, map[string]any{"build": buildWithArtifactDownloadURL(build, pid)})
 	case "log":
 		body, _ := tailFile(build.LogPath, queryInt(r, "tail", 200))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -451,6 +460,39 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"})
+	case "artifact":
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD")
+			return
+		}
+		pid, err := resolveProjectFromRequest(r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		deployment, err := dbGetDeployment(globalCtx.AppDB(), pid, build.DeploymentID)
+		if err != nil || deployment == nil {
+			httpErr(w, http.StatusNotFound, "build not found")
+			return
+		}
+		artifact, err := resolveBuildArtifactDownload(deployment, build)
+		if errors.Is(err, errBuildArtifactNotReady) {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		if errors.Is(err, errBuildArtifactPruned) {
+			httpErr(w, http.StatusGone, err.Error())
+			return
+		}
+		if err != nil {
+			httpErr(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if err := serveBuildArtifact(w, r, artifact); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				_, _ = fmt.Fprintf(os.Stderr, "deploy: stream build %d artifact: %v\n", build.ID, err)
+			}
+		}
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -645,7 +687,7 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 		}
 		httpJSON(w, map[string]any{
 			"deployment":      d,
-			"builds":          builds,
+			"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 			"releases":        releases,
 			"current_release": current,
 			"url":             a.deploymentURL(d, current),
@@ -849,7 +891,7 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	res := map[string]any{"build": build}
+	res := map[string]any{"build": buildWithArtifactDownloadURL(build, d.ProjectID)}
 	if boolArg(body, "release") {
 		opts := *releaseOpts
 		if build.Status == "succeeded" {
@@ -866,7 +908,7 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 				"release_requested": true, "release_options_json": string(optsJSON),
 			})
 			build, _ = dbGetBuild(globalCtx.AppDB(), build.ID)
-			res["build"] = build
+			res["build"] = buildWithArtifactDownloadURL(build, d.ProjectID)
 			res["release_requested"] = true
 		}
 	}

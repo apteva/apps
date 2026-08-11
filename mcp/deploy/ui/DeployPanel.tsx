@@ -138,6 +138,7 @@ interface Build {
   artifact_path: string;
   artifact_size: number;
   artifact_manifest_json: string;
+  artifact_download_url?: string;
   target_config_json?: string;
   log_path: string;
   error: string;
@@ -517,6 +518,21 @@ function mobileBuildVersion(build: Build): string {
     } catch {}
   }
   return "-";
+}
+
+function artifactDownloadLabel(deployment: Deployment, build: Build): string {
+  let format = deployment.target_kind === "android"
+    ? "AAB"
+    : deployment.target_kind === "ios"
+      ? "IPA"
+      : "ZIP";
+  try {
+    const manifest = JSON.parse(build.artifact_manifest_json || "{}");
+    const primary = String(manifest.primary || "");
+    const extension = primary.includes(".") ? primary.split(".").pop()?.toUpperCase() : "";
+    if (extension && ["AAB", "APK", "IPA", "ZIP"].includes(extension)) format = extension;
+  } catch {}
+  return `Download ${format}`;
 }
 
 export default function DeployPanel({ projectId, installId }: NativePanelProps) {
@@ -1501,14 +1517,25 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                       <span className="text-text-dim">
                         · {formatDuration(detail.builds[0].duration_ms)} · {formatSize(detail.builds[0].artifact_size)}
                       </span>
-                      {detail.builds[0].status === "succeeded"
-                        && (mobile || detail.current_release?.build_id !== detail.builds[0].id) && (
-                        <button
-                          type="button"
-                          onClick={() => handleReleaseBuild(detail.builds[0].id)}
-                          className="ml-auto px-2 py-0.5 text-[11px] border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-                          title="Promote this build to a live release"
-                        >{mobile ? `Publish to ${mobileChannel}` : "Release this build →"}</button>
+                      {detail.builds[0].status === "succeeded" && (
+                        <div className="ml-auto flex items-center gap-2">
+                          {detail.builds[0].artifact_download_url && (
+                            <a
+                              href={detail.builds[0].artifact_download_url}
+                              download
+                              className="px-2 py-0.5 text-[11px] border border-border text-text-dim rounded hover:text-text hover:border-text-dim"
+                              title="Download the retained build artifact"
+                            >{artifactDownloadLabel(detail.deployment, detail.builds[0])}</a>
+                          )}
+                          {(mobile || detail.current_release?.build_id !== detail.builds[0].id) && (
+                            <button
+                              type="button"
+                              onClick={() => handleReleaseBuild(detail.builds[0].id)}
+                              className="px-2 py-0.5 text-[11px] border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                              title="Promote this build to a live release"
+                            >{mobile ? `Publish to ${mobileChannel}` : "Release this build →"}</button>
+                          )}
+                        </div>
                       )}
                     </div>
                     <div className="text-text-dim truncate">
@@ -1657,6 +1684,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                           onClick={() => { setLogKind("build"); setLogTargetId(b.id); }}
                           className="text-text-dim hover:text-text"
                         >log</button>
+                        {b.artifact_download_url && (
+                          <a
+                            href={b.artifact_download_url}
+                            download
+                            className="text-text-dim hover:text-text"
+                            title="Download the retained build artifact"
+                          >{artifactDownloadLabel(detail.deployment, b).toLowerCase()}</a>
+                        )}
                         {b.status === "succeeded" && (
                           <button
                             type="button"

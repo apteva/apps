@@ -82,6 +82,7 @@ type Build struct {
 	ArtifactPath         string `json:"artifact_path"`
 	ArtifactSize         int64  `json:"artifact_size"`
 	ArtifactManifestJSON string `json:"artifact_manifest_json"`
+	ArtifactDownloadURL  string `json:"artifact_download_url,omitempty"`
 	ExternalJobID        string `json:"external_job_id,omitempty"`
 	ExternalStatus       string `json:"external_status,omitempty"`
 	ExternalMetaJSON     string `json:"external_meta_json,omitempty"`

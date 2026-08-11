@@ -983,7 +983,7 @@ func (a *App) toolPromoteMobile(ctx *sdk.AppCtx, base *Deployment, args map[stri
 		"deployment_id": base.ID, "build_id": build.ID, "source_release_id": source.ID,
 		"target_channel": rel.Channel, "release_id": rel.ID,
 	})
-	return map[string]any{"build": build, "source_release": source, "release": rel, "deployment": d}, nil
+	return map[string]any{"build": buildWithArtifactDownloadURL(build, d.ProjectID), "source_release": source, "release": rel, "deployment": d}, nil
 }
 
 func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release, opts releaseOptions) (*Release, error) {

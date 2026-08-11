@@ -170,6 +170,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			},
 		},
 		{
+			Name: "deploy_artifact_download", Handler: a.toolArtifactDownload,
+			Description: "Return the authenticated download URL and filename for a retained successful build artifact. Supports service ZIPs and mobile AAB, APK, IPA, or ZIP artifacts. Args: build_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"build_id": map[string]any{"type": "integer"},
+				},
+				"required": []string{"build_id"},
+			},
+		},
+		{
 			Name: "deploy_cloud_backend_setup", Handler: a.toolCloudBackendSetup,
 			Description: "Discover or create a provider's shared build adapter and configure this deployment environment. Codemagic setup uses Deploy's maintained iOS/Android capsule workflow. Args: name OR id, environment?, provider?, repository_url?, team_id?, workflow_id?, branch?, artifact_mode?.",
 			InputSchema: map[string]any{
@@ -610,7 +621,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{
 		"deployment":      d,
 		"environments":    envs,
-		"builds":          builds,
+		"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 		"releases":        releases,
 		"current_release": current,
 		"url":             a.deploymentURL(d, current),
@@ -741,7 +752,7 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	res := map[string]any{"build": build}
+	res := map[string]any{"build": buildWithArtifactDownloadURL(build, d.ProjectID)}
 	if boolArg(args, "release") {
 		opts := *releaseOpts
 		if build.Status == "succeeded" {
@@ -758,7 +769,7 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"release_requested": true, "release_options_json": string(body),
 			})
 			build, _ = dbGetBuild(ctx.AppDB(), build.ID)
-			res["build"] = build
+			res["build"] = buildWithArtifactDownloadURL(build, d.ProjectID)
 			res["release_requested"] = true
 		}
 	}
@@ -787,6 +798,36 @@ func (a *App) toolBuildCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	return map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"}, nil
+}
+
+func (a *App) toolArtifactDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	buildID := int64(intArg(args, "build_id"))
+	if buildID == 0 {
+		return nil, errors.New("build_id required")
+	}
+	build, err := dbGetBuild(ctx.AppDB(), buildID)
+	if err != nil || build == nil {
+		return nil, fmt.Errorf("build %d not found", buildID)
+	}
+	deployment, err := dbGetDeployment(ctx.AppDB(), pid, build.DeploymentID)
+	if err != nil || deployment == nil {
+		return nil, fmt.Errorf("build %d not found in this project", buildID)
+	}
+	artifact, err := resolveBuildArtifactDownload(deployment, build)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"build":                 buildWithArtifactDownloadURL(build, pid),
+		"artifact_download_url": buildArtifactDownloadURL(build.ID, pid),
+		"filename":              artifact.Filename,
+		"content_type":          "application/octet-stream",
+		"size":                  artifact.Size,
+	}, nil
 }
 
 func (a *App) toolCloudBackendSetup(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1103,7 +1144,7 @@ func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"source_environment": sourceName, "target_environment": targetName,
 		"release_id": rel.ID,
 	})
-	return map[string]any{"build": build, "release": rel, "deployment": target, "url": a.deploymentURL(target, rel)}, nil
+	return map[string]any{"build": buildWithArtifactDownloadURL(build, target.ProjectID), "release": rel, "deployment": target, "url": a.deploymentURL(target, rel)}, nil
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1119,7 +1160,7 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	return map[string]any{
 		"deployment":      d,
-		"builds":          builds,
+		"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 		"releases":        releases,
 		"current_release": current,
 		"url":             a.deploymentURL(d, current),

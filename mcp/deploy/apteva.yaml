@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.24.1
+version: 0.24.2
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -92,6 +92,8 @@ provides:
       description: Build a service artifact, Android AAB, or iOS IPA.
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
+    - name: deploy_artifact_download
+      description: Return an authenticated download URL for a retained build artifact.
     - name: deploy_cloud_backend_setup
       description: Discover or create a provider's shared build adapter and configure a deployment environment.
     - name: deploy_mobile_signing_setup
