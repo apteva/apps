@@ -424,6 +424,16 @@ func storefrontTools() []sdk.Tool {
 			"presentation":     map[string]any{"type": "string", "enum": []string{"hosted", "elements"}},
 		}, []string{"community_id", "catalog_price_id", "member_id"}),
 		Handler: toolStorefrontCheckoutStart,
+	}, {
+		Name:        "storefront_checkout_claim",
+		Description: "Claim a Checkout app guest session for the verified member before confirming payment.",
+		InputSchema: schemaObject(map[string]any{
+			"community_id":     map[string]any{"type": "string"},
+			"catalog_price_id": map[string]any{"type": "integer"},
+			"member_id":        map[string]any{"type": "string"},
+			"recovery_token":   map[string]any{"type": "string"},
+		}, []string{"community_id", "catalog_price_id", "member_id", "recovery_token"}),
+		Handler: toolStorefrontCheckoutClaim,
 	}}
 }
 

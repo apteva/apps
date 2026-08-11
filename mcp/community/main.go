@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.10.1
+version: 0.10.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -47,9 +47,10 @@ description: |
   Its public storefront projects only Catalog products actively offered by
   each community, groups one-time and recurring prices under generic product
   routes, and shows published course entitlements before authentication.
-  Community directly orchestrates one-time course purchases and recurring
-  course memberships using Catalog, Billing, and Subscriptions. It does not
-  depend on the SaaS app.
+  Community uses Checkout for durable guest carts and inline Stripe payment
+  preparation, then claims the resulting Billing invoice into either a
+  one-time course purchase or a recurring Subscriptions lifecycle. It does
+  not depend on Commerce or SaaS.
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
@@ -70,6 +71,10 @@ requires:
       version: ">=0.3.0"
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
+    - name: checkout
+      version: ">=0.3.0"
+      optional: false
+      reason: Checkout owns durable guest carts, buyer checkout sessions, Billing invoice conversion, and browser-safe Stripe Elements configuration.
     - name: billing
       version: ">=0.12.2"
       optional: false
@@ -114,6 +119,7 @@ provides:
     - { prefix: /portal/bootstrap, method: GET, no_auth: true }
     - { prefix: /portal/products, method: GET, no_auth: true }
     - { prefix: /portal/products/, method: GET, no_auth: true }
+    - { prefix: /portal/checkout/prepare, method: POST, no_auth: true }
     - { prefix: /store/, method: GET, no_auth: true }
   mcp_tools:
     - { name: communities_create,  description: "Create a community." }
@@ -215,6 +221,7 @@ provides:
     - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
     - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
+    - { name: storefront_checkout_claim, description: "Claim a prepared Checkout session for the verified member before payment confirmation." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -318,6 +325,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/portal/bootstrap", Handler: a.httpPortalBootstrap, NoAuth: true},
 		{Method: "GET", Pattern: "/portal/products", Handler: a.httpPortalProducts, NoAuth: true},
 		{Method: "GET", Pattern: "/portal/products/", Handler: a.httpPortalProduct, NoAuth: true},
+		{Method: "POST", Pattern: "/portal/checkout/prepare", Handler: a.httpPortalCheckoutPrepare, NoAuth: true},
 		{Method: "GET", Pattern: "/store/", Handler: a.httpStorefrontRoute, NoAuth: true},
 		{Pattern: "/communities", Handler: operatorHTTP(a.httpCommunities)},
 		{Pattern: "/members", Handler: operatorHTTP(a.httpMembers)},

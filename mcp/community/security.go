@@ -31,6 +31,7 @@ var delegatedMemberTools = map[string]bool{
 	"membership_cancel": true, "membership_resume": true,
 	"course_access_explain":     true,
 	"storefront_checkout_start": true,
+	"storefront_checkout_claim": true,
 }
 
 var enrollmentRequiredTools = map[string]bool{
@@ -176,7 +177,7 @@ func applyMemberIdentity(tool string, args map[string]any, memberID string) {
 		"lessons_mark_complete", "lessons_progress", "course_enroll", "lesson_comments_post",
 		"course_purchase_start", "course_purchase_status", "course_purchase_cancel",
 		"membership_checkout_start", "membership_status", "membership_cancel",
-		"membership_resume", "course_access_explain", "storefront_checkout_start":
+		"membership_resume", "course_access_explain", "storefront_checkout_start", "storefront_checkout_claim":
 		args["member_id"] = memberID
 	case "members_update":
 		args["id"] = memberID

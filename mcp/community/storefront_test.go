@@ -98,6 +98,37 @@ func TestStorefrontCheckoutMapsPriceServerSide(t *testing.T) {
 	}
 }
 
+func TestPreparedCheckoutMustMatchCommunityOfferAndVerifiedEmail(t *testing.T) {
+	target := storefrontOfferTarget{Kind: "one_time", Product: 61, Price: 71, Amount: 9900, Currency: "EUR"}
+	metadata, _ := json.Marshal(map[string]any{
+		"community_id": "comm_1", "catalog_price_id": 71, "offer_kind": "one_time",
+	})
+	session := guestCheckoutSession{ID: 10, Email: "alice@example.test", Status: "awaiting_payment", Metadata: metadata}
+	cart := guestCheckoutCart{ID: 11, Items: []guestCheckoutItem{{
+		PriceID: 71, ProductID: 61, UnitAmountCents: 9900, Currency: "EUR", Quantity: 1,
+	}}}
+	if err := validatePreparedCheckout("comm_1", target, "ALICE@example.test", session, cart); err != nil {
+		t.Fatalf("valid prepared checkout rejected: %v", err)
+	}
+	if err := validatePreparedCheckout("comm_1", target, "mallory@example.test", session, cart); err == nil {
+		t.Fatal("checkout must not be claimable by a different verified email")
+	}
+	cart.Items[0].UnitAmountCents++
+	if err := validatePreparedCheckout("comm_1", target, "alice@example.test", session, cart); err == nil {
+		t.Fatal("checkout must not be claimable after its canonical total changes")
+	}
+}
+
+func TestStorefrontReturnURLStaysOnPortalOrigin(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://community.test/portal/checkout/prepare", nil)
+	if got, err := validateStorefrontReturnURL(req, "http://community.test/course?payment=success"); err != nil || got == "" {
+		t.Fatalf("same-origin URL rejected: got=%q err=%v", got, err)
+	}
+	if _, err := validateStorefrontReturnURL(req, "https://attacker.test/steal"); err == nil {
+		t.Fatal("cross-origin checkout return URL must be rejected")
+	}
+}
+
 func TestStorefrontCheckoutSupportsInlineStripeElementsForCourse(t *testing.T) {
 	platform := newSalesPlatformStub()
 	ctx, community, _, _ := salesFixture(t, platform)

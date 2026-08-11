@@ -74,6 +74,11 @@ export interface MemberSession {
 
 export interface StorefrontCheckoutSession {
   offer_kind: "one_time" | "recurring";
+  checkout_session_id?: number;
+  recovery_token?: string;
+  session_token?: string;
+  invoice_id?: number;
+  invoice_number?: string;
   presentation?: "hosted" | "elements";
   checkout_url?: string;
   client_secret?: string;
@@ -126,6 +131,18 @@ export const api = {
       apteva.get<{ products: PublicProduct[]; count: number }>(projectScopedPath(`${communityPublicPath("/portal/products")}?community=${encodeURIComponent(community)}`)),
     product: (community: string, slug: string) =>
       apteva.get<{ product: PublicProduct }>(projectScopedPath(`${communityPublicPath(`/portal/products/${encodeURIComponent(slug)}`)}?community=${encodeURIComponent(community)}`)),
+    prepareCheckout: (communitySlug: string, body: {
+      catalog_price_id: number;
+      email: string;
+      customer_name?: string;
+      recovery_token?: string;
+      return_url: string;
+      success_url: string;
+      cancel_url: string;
+    }) => apteva.post<StorefrontCheckoutSession>(
+      projectScopedPath(`${communityPublicPath("/portal/checkout/prepare")}?community=${encodeURIComponent(communitySlug)}`),
+      body,
+    ),
   },
   auth: {
     login: (body: { client_id: string; email: string; password: string; organization_slug?: string }) =>
@@ -253,6 +270,10 @@ export const api = {
       community.tool<StorefrontCheckoutSession>("storefront_checkout_start", {
         community_id, catalog_price_id, member_id: self, success_url, cancel_url,
         return_url, presentation: "elements",
+      }),
+    claim: (community_id: string, catalog_price_id: number, recovery_token: string) =>
+      community.tool<StorefrontCheckoutSession>("storefront_checkout_claim", {
+        community_id, catalog_price_id, member_id: self, recovery_token,
       }),
   },
   dms: {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.10.1
+version: 0.10.2
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -19,13 +19,13 @@ description: |
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
   Panel and portal update live via the platform event bus.
-  Community also drives one-time paid course sales: Catalog owns immutable
-  products/prices, Billing owns customers/invoices/payment sessions/refunds,
-  and Community grants or revokes enrollment from authoritative Billing events.
-  Community also owns recurring course memberships directly: Catalog supplies
-  monthly or annual prices, Subscriptions owns lifecycle and renewal cycles,
-  and Billing owns saved payment methods, invoices, hosted recovery links, and
-  off-session collection. Community does not depend on the SaaS app.
+  Community drives paid access while Checkout owns durable guest carts,
+  buyer sessions, invoice conversion, and inline Stripe configuration.
+  Catalog owns immutable products/prices, Billing owns invoices and payment
+  events, and Community grants or revokes enrollment. For recurring access,
+  Subscriptions owns lifecycle and renewal cycles while Billing owns saved
+  payment methods and off-session collection. Community does not depend on
+  Commerce or SaaS.
   Storage and ffmpeg remain optional for course media.
 
 author: Apteva
@@ -50,6 +50,10 @@ requires:
       version: ">=0.3.0"
       optional: false
       reason: Catalog owns the one-time products and immutable prices bound to paid course offers.
+    - name: checkout
+      version: ">=0.3.0"
+      optional: false
+      reason: Checkout owns durable guest carts, buyer checkout sessions, Billing invoice conversion, and browser-safe Stripe Elements configuration.
     - name: billing
       version: ">=0.12.2"
       optional: false
@@ -95,6 +99,7 @@ provides:
     - { prefix: /portal/bootstrap, method: GET, no_auth: true }
     - { prefix: /portal/products, method: GET, no_auth: true }
     - { prefix: /portal/products/, method: GET, no_auth: true }
+    - { prefix: /portal/checkout/prepare, method: POST, no_auth: true }
     - { prefix: /store/, method: GET, no_auth: true }
   mcp_tools:
     # ─── communities ───────────────────────────────────────────
@@ -204,6 +209,7 @@ provides:
     - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
     - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
+    - { name: storefront_checkout_claim, description: "Claim a prepared Checkout session for the verified member before payment confirmation." }
   ui_panels:
     # Dashboard operator/admin surface.
     - slot: project.page

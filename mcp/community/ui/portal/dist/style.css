@@ -235,10 +235,7 @@ textarea { min-height: 92px; resize: vertical; }
 .checkout-preparing strong, .checkout-preparing small { display: block; }
 .checkout-preparing small { margin-top: 4px; color: #75817d; }
 .checkout-payment-pending { opacity: .72; }
-.checkout-payment-skeleton { display: grid; gap: 10px; border: 1px solid #e1e7e4; border-radius: 13px; padding: 17px; background: white; }
-.checkout-payment-skeleton span { height: 38px; overflow: hidden; border-radius: 8px; background: linear-gradient(90deg, #edf1ef 25%, #f7f9f8 50%, #edf1ef 75%); background-size: 220% 100%; animation: checkout-shimmer 1.8s ease-in-out infinite; }
-.checkout-payment-skeleton span:nth-child(2) { width: 67%; }
-.checkout-payment-skeleton span:nth-child(3) { width: 45%; }
+.checkout-payment-note { margin: 0; color: #66736d; font-size: 13px; line-height: 1.45; }
 @keyframes checkout-shimmer { to { background-position: -220% 0; } }
 .stripe-element { min-height: 120px; }
 .stripe-loading { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 70px; color: #6d7975; font-size: .82rem; }

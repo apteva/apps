@@ -55,18 +55,20 @@ func TestManifestParses(t *testing.T) {
 	if !foundPublicPortal {
 		t.Fatal("member portal assets must be exposed as an anonymous GET /ui/ route")
 	}
-	wantStorefrontRoutes := map[string]bool{
-		"/portal/products":  false,
-		"/portal/products/": false,
-		"/store/":           false,
+	wantStorefrontRoutes := map[string]string{
+		"/portal/products":         "GET",
+		"/portal/products/":        "GET",
+		"/portal/checkout/prepare": "POST",
+		"/store/":                  "GET",
 	}
+	foundStorefrontRoutes := map[string]bool{}
 	for _, route := range m.Provides.HTTPRoutes {
-		if _, ok := wantStorefrontRoutes[route.Prefix]; ok && route.Method == "GET" && route.NoAuth {
-			wantStorefrontRoutes[route.Prefix] = true
+		if method, ok := wantStorefrontRoutes[route.Prefix]; ok && route.Method == method && route.NoAuth {
+			foundStorefrontRoutes[route.Prefix] = true
 		}
 	}
-	for route, found := range wantStorefrontRoutes {
-		if !found {
+	for route := range wantStorefrontRoutes {
+		if !foundStorefrontRoutes[route] {
 			t.Errorf("public storefront route %q missing from manifest", route)
 		}
 	}
@@ -81,7 +83,7 @@ func TestManifestParses(t *testing.T) {
 		events[dep.Name] = dep.Events
 		versions[dep.Name] = dep.Version
 	}
-	for _, name := range []string{"auth", "catalog", "billing", "subscriptions"} {
+	for _, name := range []string{"auth", "catalog", "checkout", "billing", "subscriptions"} {
 		if !required[name] {
 			t.Errorf("%s must be a required Community dependency", name)
 		}
@@ -90,9 +92,9 @@ func TestManifestParses(t *testing.T) {
 		t.Fatal("Community must orchestrate Billing and Subscriptions directly, not depend on SaaS")
 	}
 	if versions["auth"] != ">=0.9.0" || versions["catalog"] != ">=0.3.0" ||
-		versions["billing"] != ">=0.12.2" || versions["subscriptions"] != ">=0.7.2" {
-		t.Errorf("unexpected dependency versions: auth=%q catalog=%q billing=%q subscriptions=%q",
-			versions["auth"], versions["catalog"], versions["billing"], versions["subscriptions"])
+		versions["checkout"] != ">=0.3.0" || versions["billing"] != ">=0.12.2" || versions["subscriptions"] != ">=0.7.2" {
+		t.Errorf("unexpected dependency versions: auth=%q catalog=%q checkout=%q billing=%q subscriptions=%q",
+			versions["auth"], versions["catalog"], versions["checkout"], versions["billing"], versions["subscriptions"])
 	}
 	for _, event := range []string{"invoice.paid", "invoice.refunded", "invoice.voided", "invoice.payment_failed"} {
 		if !containsString(events["billing"], event) {
@@ -130,6 +132,8 @@ func TestPortalStorefrontKeepsAccountAndStripeCheckoutInline(t *testing.T) {
 	for _, required := range []string{
 		"CheckoutAccountSummary",
 		"CheckoutPaymentPending",
+		"api.portal.prepareCheckout",
+		"api.storefront.claim",
 		"stripe.initCheckout",
 		"checkout.createPaymentElement",
 		"checkoutRef.current.confirm",
