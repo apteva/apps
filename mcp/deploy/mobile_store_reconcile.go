@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -160,6 +161,9 @@ func mediaKindBlockingIssue(preflight StorePreflight, kind string) *StoreApplyIs
 		if finding.Severity != "error" {
 			continue
 		}
+		if strings.HasPrefix(finding.Code, "provider.") && finding.Automatable {
+			continue
+		}
 		if normalizeStoreScope(finding.Scope) == "media" {
 			if finding.MediaKind != "" && finding.MediaKind != kind {
 				continue
@@ -232,7 +236,10 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 	}
 	preflight := validateStoreDocument(a.dataDir, d, build, cfg, doc, strict)
 	appendProviderReadinessFindings(&preflight, d, cfg)
-	result := &StoreApplyResult{Status: "applied", AppliedScopes: []string{}, AppliedAssets: []string{}, Blocked: []StoreApplyIssue{}, Failed: []StoreApplyIssue{}}
+	result := &StoreApplyResult{
+		Status: "applied", AppliedScopes: []string{}, AppliedAssets: []string{}, ScopeResults: []StoreScopeResult{},
+		ProviderValidations: map[string]providerValidationEvidence{}, Blocked: []StoreApplyIssue{}, Failed: []StoreApplyIssue{},
+	}
 	if len(request.Scopes) == 0 && len(request.MediaKinds) == 0 && cfg.AppliedHash != "" && cfg.AppliedHash == cfg.DesiredHash && preflight.Ready && strings.TrimSpace(request.ReviewDemoPassword) == "" {
 		result.Status = "no_op"
 		result.Applied = true
@@ -260,6 +267,22 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "blocked", "", mustJSON(preflight), "", "store preflight failed")
 		return nil, newStorePreflightError(preflight)
 	}
+	googleBatch := storeScopeSet{}
+	if d.TargetKind == "android" {
+		for _, scope := range []string{"localizations", "review", "privacy"} {
+			if scopes.has(scope) {
+				if _, isBlocked := blocked[scope]; !isBlocked {
+					googleBatch[scope] = true
+				}
+			}
+		}
+		if scopes.has("media") && !partialMedia {
+			if _, isBlocked := blocked["media"]; !isBlocked {
+				googleBatch["media"] = true
+			}
+		}
+	}
+	googleBatchApplied := false
 
 	_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "applying", "", mustJSON(preflight), "", "")
 	for _, scope := range storeScopeOrder {
@@ -268,6 +291,62 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		}
 		if issue, ok := blocked[scope]; ok {
 			result.Blocked = append(result.Blocked, issue)
+			addStoreScopeResult(result, scope, "blocked", issue.Message)
+			continue
+		}
+		if googleBatch.has(scope) && len(googleBatch) > 0 {
+			if googleBatchApplied {
+				continue
+			}
+			googleBatchApplied = true
+			providerResult, applyErr := a.applyGoogleStoreConfigScopesWithMediaKinds(d, doc, googleBatch, nil)
+			if applyErr != nil {
+				for _, batchedScope := range storeScopeOrder {
+					if googleBatch[batchedScope] {
+						result.Failed = append(result.Failed, StoreApplyIssue{Scope: batchedScope, Message: applyErr.Error()})
+						addStoreScopeResult(result, batchedScope, "failed", applyErr.Error())
+					}
+				}
+				if !request.AllowPartial {
+					_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", mustJSON(preflight), "", applyErr.Error())
+					return nil, applyErr
+				}
+				continue
+			}
+			mergeStoreProviderValidations(result.ProviderValidations, providerResult)
+			var privacyErr error
+			if googleBatch["privacy"] && strings.TrimSpace(doc.Privacy.DataSafetyCSV) != "" {
+				bound, boundErr := boundIntegration("play_store")
+				target, targetErr := parseMobileTargetConfig(d.TargetConfigJSON)
+				switch {
+				case boundErr != nil:
+					privacyErr = boundErr
+				case targetErr != nil:
+					privacyErr = targetErr
+				default:
+					var evidence providerValidationEvidence
+					evidence, privacyErr = applyGoogleDataSafety(bound, target.PackageName, doc)
+					if privacyErr == nil && evidence.Status != "" {
+						result.ProviderValidations["google_data_safety"] = evidence
+					}
+				}
+			}
+			for _, batchedScope := range storeScopeOrder {
+				if googleBatch[batchedScope] {
+					if batchedScope == "privacy" && privacyErr != nil {
+						result.Failed = append(result.Failed, StoreApplyIssue{Scope: batchedScope, Message: privacyErr.Error()})
+						addStoreScopeResult(result, batchedScope, "failed", "The Play edit committed, but Data Safety failed: "+privacyErr.Error())
+						continue
+					}
+					result.AppliedScopes = append(result.AppliedScopes, batchedScope)
+					addStoreScopeResult(result, batchedScope, "applied", "Committed in one validated Google Play edit.")
+				}
+			}
+			result.Applied = true
+			if privacyErr != nil && !request.AllowPartial {
+				_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", mustJSON(preflight), "", privacyErr.Error())
+				return nil, privacyErr
+			}
 			continue
 		}
 		if scope == "media" && partialMedia {
@@ -326,9 +405,27 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 			}
 			if len(result.AppliedAssets) > 0 {
 				result.AppliedScopes = append(result.AppliedScopes, "media")
+				addStoreScopeResult(result, "media", "applied", "Applied ready media kinds independently.")
 				result.Applied = true
+			} else if len(blockedKinds) > 0 {
+				addStoreScopeResult(result, "media", "blocked", "No selected media kind was ready to apply.")
 			}
 			continue
+		}
+		if d.TargetKind == "android" {
+			switch scope {
+			case "version":
+				addStoreScopeResult(result, scope, "verified", "Version compatibility is validated from the build artifact and release track.")
+				continue
+			case "classification", "distribution", "compliance":
+				addStoreScopeResult(result, scope, "verified", "This scope is provider-read or manually confirmed; no Google edit was committed.")
+				continue
+			case "testing":
+				if len(doc.Testing.Channels) == 0 {
+					addStoreScopeResult(result, scope, "not_configured", "No Google Play testing audience is configured.")
+					continue
+				}
+			}
 		}
 		one := storeScopeSet{scope: true}
 		var applyErr error
@@ -346,6 +443,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		}
 		if applyErr != nil {
 			result.Failed = append(result.Failed, StoreApplyIssue{Scope: scope, Message: applyErr.Error()})
+			addStoreScopeResult(result, scope, "failed", applyErr.Error())
 			if !request.AllowPartial {
 				_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, "failed", "", mustJSON(preflight), "", applyErr.Error())
 				return nil, applyErr
@@ -353,6 +451,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 			continue
 		}
 		result.AppliedScopes = append(result.AppliedScopes, scope)
+		addStoreScopeResult(result, scope, "applied", "Provider operation completed.")
 		result.Applied = true
 	}
 
@@ -368,10 +467,15 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		if d.TargetKind == "ios" {
 			return a.observeAppleStoreConfig(d, doc)
 		}
-		return a.observeGoogleStoreConfig(d, doc)
+		return a.observeGoogleStoreConfig(d, doc, cfg)
 	}()
 	if observed == nil {
 		observed = map[string]any{}
+	}
+	preserveStoreObservationState(observed, cfg.ObservedJSON)
+	mergeObservedProviderValidations(observed, result.ProviderValidations)
+	if d.TargetKind == "android" {
+		refreshGoogleEvidenceReadiness(observed, doc)
 	}
 	if len(doc.Testing.Channels) > 0 {
 		testing, testingErr := a.observeDesiredTesting(d, doc)
@@ -405,14 +509,83 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		status = "applied"
 		appliedHash = cfg.DesiredHash
 	} else if len(result.AppliedScopes) == 0 {
-		status = "blocked"
+		status = "no_op"
+		for _, scopeResult := range result.ScopeResults {
+			if scopeResult.Status == "blocked" || scopeResult.Status == "failed" {
+				status = "blocked"
+				break
+			}
+		}
 	}
 	result.Status = status
-	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, status, mustJSON(observed), mustJSON(verified), appliedHash, lastError); err != nil {
+	dbStatus := status
+	if dbStatus == "no_op" {
+		dbStatus = "partial"
+		if verified.Ready {
+			dbStatus = "ready"
+		}
+	}
+	if err := dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, dbStatus, mustJSON(observed), mustJSON(verified), appliedHash, lastError); err != nil {
 		return nil, err
 	}
 	result.Config, err = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 	return result, err
+}
+
+func addStoreScopeResult(result *StoreApplyResult, scope, status, message string) {
+	if result == nil {
+		return
+	}
+	for i := range result.ScopeResults {
+		if result.ScopeResults[i].Scope == scope {
+			result.ScopeResults[i] = StoreScopeResult{Scope: scope, Status: status, Message: message}
+			return
+		}
+	}
+	result.ScopeResults = append(result.ScopeResults, StoreScopeResult{Scope: scope, Status: status, Message: message})
+}
+
+func mergeStoreProviderValidations(target map[string]providerValidationEvidence, providerResult map[string]any) {
+	if target == nil || providerResult == nil {
+		return
+	}
+	if values, ok := providerResult["provider_validations"].(map[string]providerValidationEvidence); ok {
+		for key, value := range values {
+			target[key] = value
+		}
+	}
+}
+
+func mergeObservedProviderValidations(observed map[string]any, additions map[string]providerValidationEvidence) {
+	if observed == nil || len(additions) == 0 {
+		return
+	}
+	values, _ := observed["provider_validations"].(map[string]any)
+	if values == nil {
+		values = map[string]any{}
+	}
+	for key, value := range additions {
+		values[key] = value
+	}
+	observed["provider_validations"] = values
+}
+
+func refreshGoogleEvidenceReadiness(observed map[string]any, doc StoreDocument) {
+	readiness, _ := observed["readiness"].(map[string]any)
+	if readiness == nil {
+		readiness = map[string]any{}
+		observed["readiness"] = readiness
+	}
+	validations, _ := observed["provider_validations"].(map[string]any)
+	accepted := false
+	if raw, ok := validations["google_data_safety"]; ok {
+		body, _ := json.Marshal(raw)
+		var evidence providerValidationEvidence
+		accepted = json.Unmarshal(body, &evidence) == nil && evidence.Status == "accepted" && evidence.VersionName == doc.VersionName
+	}
+	if doc.Privacy.ManualAttestations["google_data_safety_published"] || accepted {
+		readiness["privacy"] = readinessCheck(true, "provider_acknowledgement", "Google acknowledged the Data Safety declaration, or publication was manually confirmed.")
+	}
 }
 
 func containsString(values []string, target string) bool {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.24.4
+version: 0.24.5
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -107,9 +107,9 @@ provides:
     - name: deploy_store_plan
       description: Preview the provider reconciliation without changing the store.
     - name: deploy_store_preflight
-      description: Validate listing, media, compliance, and binary version compatibility.
+      description: Validate local requirements and provider-backed listing, media, compliance, distribution, and binary readiness.
     - name: deploy_store_apply
-      description: Reconcile selected listing scopes or individual media kinds with the bound store provider without submitting it.
+      description: Reconcile selected listing scopes or individual media kinds transactionally with the bound store provider without submitting it.
     - name: deploy_store_sync
       description: Read and persist the current provider listing state.
     - name: deploy_store_release_approved
@@ -121,7 +121,7 @@ provides:
     - name: deploy_release
       description: Start a service release or publish a mobile build to a store channel.
     - name: deploy_promote
-      description: Promote a service build between environments or a mobile release between store channels.
+      description: Promote a service build between environments or validate and promote a mobile release between store channels.
     - name: deploy_rollout
       description: Change a Google Play production rollout fraction.
     - name: deploy_halt

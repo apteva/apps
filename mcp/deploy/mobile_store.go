@@ -91,15 +91,18 @@ type StoreAsset struct {
 }
 
 type StoreReview struct {
-	FirstName           string `json:"first_name,omitempty"`
-	LastName            string `json:"last_name,omitempty"`
-	Email               string `json:"email,omitempty"`
-	Phone               string `json:"phone,omitempty"`
-	Notes               string `json:"notes,omitempty"`
-	DemoAccountRequired bool   `json:"demo_account_required,omitempty"`
-	DemoUsername        string `json:"demo_username,omitempty"`
-	DemoPassword        string `json:"demo_password,omitempty"`
-	DemoPasswordSet     bool   `json:"demo_password_set,omitempty"`
+	FirstName            string `json:"first_name,omitempty"`
+	LastName             string `json:"last_name,omitempty"`
+	Email                string `json:"email,omitempty"`
+	Phone                string `json:"phone,omitempty"`
+	Notes                string `json:"notes,omitempty"`
+	AccessInstructions   string `json:"access_instructions,omitempty"`
+	AccessConfirmed      bool   `json:"access_confirmed,omitempty"`
+	CredentialsConfirmed bool   `json:"credentials_confirmed,omitempty"`
+	DemoAccountRequired  bool   `json:"demo_account_required,omitempty"`
+	DemoUsername         string `json:"demo_username,omitempty"`
+	DemoPassword         string `json:"demo_password,omitempty"`
+	DemoPasswordSet      bool   `json:"demo_password_set,omitempty"`
 }
 
 type StoreClassification struct {
@@ -235,13 +238,21 @@ type StoreApplyIssue struct {
 }
 
 type StoreApplyResult struct {
-	Status        string             `json:"status"`
-	Applied       bool               `json:"applied"`
-	AppliedScopes []string           `json:"applied_scopes"`
-	AppliedAssets []string           `json:"applied_assets"`
-	Blocked       []StoreApplyIssue  `json:"blocked"`
-	Failed        []StoreApplyIssue  `json:"failed"`
-	Config        *MobileStoreConfig `json:"config,omitempty"`
+	Status              string                                `json:"status"`
+	Applied             bool                                  `json:"applied"`
+	AppliedScopes       []string                              `json:"applied_scopes"`
+	AppliedAssets       []string                              `json:"applied_assets"`
+	ScopeResults        []StoreScopeResult                    `json:"scope_results"`
+	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
+	Blocked             []StoreApplyIssue                     `json:"blocked"`
+	Failed              []StoreApplyIssue                     `json:"failed"`
+	Config              *MobileStoreConfig                    `json:"config,omitempty"`
+}
+
+type StoreScopeResult struct {
+	Scope   string `json:"scope"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 func mobileStoreProvider(platform string) string {
@@ -487,7 +498,7 @@ func providerStoreStateFullyVerified(d *Deployment, cfg *MobileStoreConfig) bool
 	case "ios":
 		keys = []string{"listing", "media", "review", "classification", "copyright", "content_rights", "pricing", "availability"}
 	case "android":
-		keys = []string{"listing", "media", "pricing", "availability"}
+		keys = []string{"listing", "review", "media", "privacy", "pricing", "availability"}
 	default:
 		return false
 	}
@@ -525,7 +536,14 @@ func (a *App) storePreflight(d *Deployment, build *Build, strict bool) (StorePre
 }
 
 func appendProviderReadinessFindings(out *StorePreflight, d *Deployment, cfg *MobileStoreConfig) {
-	if out == nil || d == nil || cfg == nil || d.TargetKind != "ios" {
+	if out == nil || d == nil || cfg == nil {
+		return
+	}
+	if d.TargetKind == "android" {
+		appendGoogleProviderReadinessFindings(out, cfg)
+		return
+	}
+	if d.TargetKind != "ios" {
 		return
 	}
 	checks := []struct {
@@ -558,6 +576,38 @@ func appendProviderReadinessFindings(out *StorePreflight, d *Deployment, cfg *Mo
 			Action:  "Publish a matching binary, then attach it before review submission.", Automatable: true,
 		})
 		out.Warnings++
+	}
+	sort.SliceStable(out.Findings, func(i, j int) bool {
+		order := map[string]int{"error": 0, "warning": 1, "info": 2}
+		if order[out.Findings[i].Severity] != order[out.Findings[j].Severity] {
+			return order[out.Findings[i].Severity] < order[out.Findings[j].Severity]
+		}
+		return out.Findings[i].Code < out.Findings[j].Code
+	})
+}
+
+func appendGoogleProviderReadinessFindings(out *StorePreflight, cfg *MobileStoreConfig) {
+	checks := []struct {
+		key, scope, message, action string
+	}{
+		{"listing", "localizations", "The Play Store listing has not been verified against the desired localized text.", "Apply or sync the listing metadata."},
+		{"review", "review", "Google Play contact details have not been verified against the desired values.", "Apply or sync the review contact details."},
+		{"media", "media", "The configured Play Store media has not been verified by content hash.", "Apply or sync the Play Store media."},
+		{"privacy", "privacy", "Google has not acknowledged the configured Data Safety declaration.", "Apply Data Safety or confirm that it is already published."},
+		{"availability", "distribution", "Production country availability has not been verified against the desired territories.", "Configure countries in Play Console, then sync."},
+		{"pricing", "distribution", "Google Play pricing has not been confirmed.", "Confirm the app's free or paid pricing in Play Console."},
+	}
+	for _, check := range checks {
+		if providerReadinessVerified(cfg, check.key) {
+			continue
+		}
+		automatable := check.key == "listing" || check.key == "review" || check.key == "media" || check.key == "privacy"
+		out.Findings = append(out.Findings, StoreFinding{
+			Code: "provider.google_" + check.key + "_unverified", Severity: "error", Scope: check.scope,
+			Message: check.message, Action: check.action, Automatable: automatable,
+		})
+		out.Errors++
+		out.Ready = false
 	}
 	sort.SliceStable(out.Findings, func(i, j int) bool {
 		order := map[string]int{"error": 0, "warning": 1, "info": 2}
@@ -655,6 +705,18 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 				})
 			}
 		} else {
+			if strings.TrimSpace(doc.Review.Email) == "" {
+				add("review_contact.required", "error", "review", "", "email", "A Google Play support email is required.", "Add the support email shown on the Play listing.", true)
+			}
+			if doc.Review.DemoAccountRequired && (doc.Review.DemoUsername == "" || !doc.Review.CredentialsConfirmed) {
+				add("review_demo.required", "error", "review", "", "demo_account", "Reusable demo credentials must be configured in Play Console when login is needed.", "Provide the demo username and confirm reusable credentials in Play Console.", false)
+			}
+			if doc.Review.DemoAccountRequired && strings.TrimSpace(firstNonEmpty(doc.Review.AccessInstructions, doc.Review.Notes)) == "" {
+				add("review_access.instructions_required", "error", "review", "", "access_instructions", "Google Play review access instructions are required for restricted functionality.", "Describe how reviewers can reach and exercise the restricted functionality.", false)
+			}
+			if !doc.Review.AccessConfirmed {
+				add("review_access.confirmation_required", "error", "compliance", "", "access_confirmed", "Google Play App access must be completed and confirmed in Play Console.", "Complete App access in Play Console and confirm it here.", false)
+			}
 			if doc.ReleaseMode == "staged" && (doc.Distribution.RolloutFraction <= 0 || doc.Distribution.RolloutFraction >= 1) {
 				add("rollout_fraction.required", "error", "distribution", "", "rollout_fraction", "A staged Google Play rollout requires a fraction greater than 0 and less than 1.", "Choose the initial production rollout percentage.", true)
 			}
@@ -685,7 +747,7 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 		if doc.Distribution.PriceTier == "" && !pricingVerified {
 			add("pricing.required", "error", "distribution", "", "price_tier", "Store pricing has not been configured or verified.", "Set FREE/a provider price point or attest the existing provider pricing.", d.TargetKind == "ios")
 		}
-		if d.TargetKind == "ios" && availabilityConfigured && !validStoreAvailability(doc.Distribution) {
+		if availabilityConfigured && !validStoreAvailability(doc.Distribution) {
 			add("availability.invalid", "error", "distribution", "", "availability", "Availability mode or territory selection is invalid.", "Choose all, all except selected territories, or only selected territories.", true)
 		}
 		if doc.Distribution.PriceTier != "" && doc.Distribution.PriceTier != "FREE" && d.TargetKind == "ios" &&
@@ -749,18 +811,26 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 	if plan.NoOp {
 		return plan, nil
 	}
+	versionAction := "ensure"
+	if d.TargetKind == "android" {
+		versionAction = "verify"
+	}
 	plan.Operations = append(plan.Operations,
-		StorePlanOp{Scope: "version", Action: "ensure"},
+		StorePlanOp{Scope: "version", Action: versionAction},
 		StorePlanOp{Scope: "localizations", Action: "upsert", Count: len(doc.Localizations)},
 	)
 	if len(doc.Assets) > 0 {
 		plan.Operations = append(plan.Operations, StorePlanOp{Scope: "media", Action: "synchronize", Count: len(doc.Assets)})
 	}
+	classificationAction, distributionAction := "upsert", "reconcile"
+	if d.TargetKind == "android" {
+		classificationAction, distributionAction = "manual_verify", "provider_verify"
+	}
 	plan.Operations = append(plan.Operations,
 		StorePlanOp{Scope: "review", Action: "upsert"},
-		StorePlanOp{Scope: "classification", Action: "upsert"},
+		StorePlanOp{Scope: "classification", Action: classificationAction},
 		StorePlanOp{Scope: "privacy", Action: "reconcile"},
-		StorePlanOp{Scope: "distribution", Action: "reconcile"},
+		StorePlanOp{Scope: "distribution", Action: distributionAction},
 	)
 	if len(doc.Testing.Channels) > 0 {
 		plan.Operations = append(plan.Operations, StorePlanOp{Scope: "testing", Action: "synchronize", Count: len(doc.Testing.Channels)})
@@ -798,7 +868,7 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 	case "ios":
 		observed, err = a.observeAppleStoreConfig(d, doc)
 	case "android":
-		observed, err = a.observeGoogleStoreConfig(d, doc)
+		observed, err = a.observeGoogleStoreConfig(d, doc, cfg)
 	default:
 		err = fmt.Errorf("unsupported store platform %q", d.TargetKind)
 	}
@@ -1011,7 +1081,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	return observed, nil
 }
 
-func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument) (map[string]any, error) {
+func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
 	bound, err := boundIntegration("play_store")
 	if err != nil {
 		return nil, err
@@ -1066,28 +1136,182 @@ func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument) (map[st
 		"packageName": target.PackageName, "editId": editID, "track": "production",
 	}); availabilityErr == nil {
 		availability = decodeJSONValue(raw)
-		if value, ok := availability.(map[string]any); ok {
-			_, availabilityVerified = value["countries"]
-		}
+		availabilityVerified = googleAvailabilityMatches(raw, doc.Distribution)
+	}
+	availabilityManuallyConfirmed := boolMapValue(doc.Distribution.Provider, "availability_configured")
+	availabilityReady := availabilityVerified || availabilityManuallyConfirmed
+	availabilityVerification := "provider"
+	availabilityMessage := "Production country availability was compared with the desired territory set."
+	if !availabilityVerified && availabilityManuallyConfirmed {
+		availabilityVerification = "manual"
+		availabilityMessage = "Production country availability was explicitly confirmed in Play Console."
 	}
 	listingValue := decodeJSONValue(listings)
+	detailsValue := decodeJSONValue(details)
+	listingReady := googleListingsMatch(listings, doc)
+	reviewReady := googleAppDetailsMatch(details, doc)
 	imagesReady := len(doc.Assets) == 0
 	if len(doc.Assets) > 0 {
 		imagesReady = len(images) > 0
-		for _, value := range images {
-			imagesReady = imagesReady && jsonValueHasData(value)
+		for key, value := range images {
+			imagesReady = imagesReady && googleImagesMatch(value, desiredGoogleAssetsForKey(doc, key))
 		}
 	}
+	privacyReady := doc.Privacy.ManualAttestations["google_data_safety_published"] || providerCommitValidated(cfg, "google_data_safety", doc.VersionName)
 	return map[string]any{
-		"package_name": target.PackageName, "details": decodeJSONValue(details),
+		"package_name": target.PackageName, "details": detailsValue,
 		"listings": listingValue, "images": images, "availability": availability,
 		"readiness": map[string]any{
-			"listing":      readinessCheck(jsonValueHasData(listingValue), "provider", "Play Store listings were read from Google."),
-			"media":        readinessCheck(imagesReady, "provider", "Configured Play media was read from Google."),
+			"listing":      readinessCheck(listingReady, "provider", "Play Store listings were compared field-by-field with the desired localizations."),
+			"review":       readinessCheck(reviewReady, "provider", "Play Store contact details were compared with the complete desired app details."),
+			"media":        readinessCheck(imagesReady, "provider", "Configured Play media was compared by locale, image type, and SHA-256."),
+			"privacy":      readinessCheck(privacyReady, "provider_acknowledgement", "Google acknowledged the Data Safety declaration, or publication was manually confirmed."),
 			"pricing":      readinessCheck(boolMapValue(doc.Distribution.Provider, "pricing_configured"), "manual", "Google Play pricing is not writable through the publishing API."),
-			"availability": readinessCheck(availabilityVerified, "provider", "Production country availability was read from Google Play."),
+			"availability": readinessCheck(availabilityReady, availabilityVerification, availabilityMessage),
 		},
 	}, nil
+}
+
+type googleAppDetails struct {
+	DefaultLanguage string `json:"defaultLanguage"`
+	ContactWebsite  string `json:"contactWebsite"`
+	ContactEmail    string `json:"contactEmail"`
+	ContactPhone    string `json:"contactPhone"`
+}
+
+type googleListing struct {
+	Language         string `json:"language"`
+	Title            string `json:"title"`
+	FullDescription  string `json:"fullDescription"`
+	ShortDescription string `json:"shortDescription"`
+	Video            string `json:"video"`
+}
+
+type googleListingsResponse struct {
+	Listings []googleListing `json:"listings"`
+}
+
+type googleImage struct {
+	ID     string `json:"id"`
+	SHA256 string `json:"sha256"`
+}
+
+type googleImagesResponse struct {
+	Images []googleImage `json:"images"`
+}
+
+type googleCountryAvailability struct {
+	SyncWithProduction bool `json:"syncWithProduction"`
+	Countries          []struct {
+		CountryCode string `json:"countryCode"`
+	} `json:"countries"`
+	RestOfWorld bool `json:"restOfWorld"`
+}
+
+func googleAppDetailsMatch(raw json.RawMessage, doc StoreDocument) bool {
+	var actual googleAppDetails
+	if json.Unmarshal(raw, &actual) != nil {
+		return false
+	}
+	defaultLocale := defaultStr(doc.DefaultLocale, "en-US")
+	loc := doc.Localizations[defaultLocale]
+	return actual.DefaultLanguage == defaultLocale && actual.ContactEmail == doc.Review.Email &&
+		actual.ContactPhone == doc.Review.Phone && actual.ContactWebsite == firstNonEmpty(doc.Privacy.PolicyURL, loc.SupportURL)
+}
+
+func googleListingsMatch(raw json.RawMessage, doc StoreDocument) bool {
+	var payload googleListingsResponse
+	if json.Unmarshal(raw, &payload) != nil {
+		return false
+	}
+	actual := map[string]googleListing{}
+	for _, listing := range payload.Listings {
+		actual[listing.Language] = listing
+	}
+	for locale, desired := range doc.Localizations {
+		listing, ok := actual[locale]
+		if !ok || listing.Title != desired.Title || listing.ShortDescription != desired.ShortDescription ||
+			listing.FullDescription != desired.Description || listing.Video != desired.VideoURL {
+			return false
+		}
+	}
+	return len(doc.Localizations) > 0
+}
+
+func desiredGoogleAssetsForKey(doc StoreDocument, key string) []StoreAsset {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	out := []StoreAsset{}
+	for _, asset := range doc.Assets {
+		if defaultStr(asset.Locale, doc.DefaultLocale) == parts[0] && googleImageType(asset) == parts[1] {
+			out = append(out, asset)
+		}
+	}
+	return out
+}
+
+func googleImagesMatch(value any, desired []StoreAsset) bool {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var payload googleImagesResponse
+	if json.Unmarshal(raw, &payload) != nil || len(payload.Images) != len(desired) {
+		return false
+	}
+	actual := map[string]int{}
+	for _, image := range payload.Images {
+		actual[normalizeStoreHash(image.SHA256)]++
+	}
+	for _, asset := range desired {
+		hash := normalizeStoreHash(asset.SHA256)
+		if hash == "" || actual[hash] == 0 {
+			return false
+		}
+		actual[hash]--
+	}
+	return true
+}
+
+func normalizeStoreHash(value string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), ":", ""))
+}
+
+func googleAvailabilityMatches(raw json.RawMessage, distribution StoreDistribution) bool {
+	if !storeAvailabilityConfigured(distribution) {
+		return false
+	}
+	var actual googleCountryAvailability
+	if json.Unmarshal(raw, &actual) != nil {
+		return false
+	}
+	desired := distribution.Availability
+	if desired.Mode == "" && len(distribution.Territories) > 0 {
+		desired.Mode = "only"
+		desired.IncludedTerritories = distribution.Territories
+	}
+	countries := make([]string, 0, len(actual.Countries))
+	for _, country := range actual.Countries {
+		countries = append(countries, strings.ToUpper(country.CountryCode))
+	}
+	sort.Strings(countries)
+	switch desired.Mode {
+	case "all":
+		return actual.RestOfWorld
+	case "only":
+		expected := append([]string(nil), desired.IncludedTerritories...)
+		for i := range expected {
+			expected[i] = strings.ToUpper(expected[i])
+		}
+		sort.Strings(expected)
+		return !actual.RestOfWorld && stringSlicesEqual(countries, expected)
+	case "all_except":
+		return false
+	default:
+		return false
+	}
 }
 
 func decodeJSONValue(raw json.RawMessage) any {
@@ -2133,30 +2357,34 @@ func (a *App) applyGoogleStoreConfigScopesWithMediaKinds(d *Deployment, doc Stor
 		return nil, fmt.Errorf("commit Play edit: %w", err)
 	}
 	committed = true
-	if scopes.has("privacy") && doc.Privacy.DataSafetyCSV != "" {
-		if _, err := executeIntegration(bound, "update_data_safety", map[string]any{
-			"packageName": target.PackageName, "safetyLabels": doc.Privacy.DataSafetyCSV,
-		}); err != nil {
-			return nil, err
-		}
-	}
 	return map[string]any{"package_name": target.PackageName, "edit_id": editID, "assets": len(doc.Assets)}, nil
+}
+
+func applyGoogleDataSafety(bound *sdk.BoundIntegration, packageName string, doc StoreDocument) (providerValidationEvidence, error) {
+	if strings.TrimSpace(doc.Privacy.DataSafetyCSV) == "" {
+		return providerValidationEvidence{}, nil
+	}
+	if _, err := executeIntegration(bound, "update_data_safety", map[string]any{
+		"packageName": packageName, "safetyLabels": doc.Privacy.DataSafetyCSV,
+	}); err != nil {
+		return providerValidationEvidence{}, err
+	}
+	return providerValidationEvidence{
+		Provider: "google_play", Requirement: "google_data_safety", Action: "update_data_safety",
+		Status: "accepted", VersionName: doc.VersionName, ValidatedAt: nowUTC(),
+	}, nil
 }
 
 func (a *App) applyGoogleStoreConfigToEdit(bound *sdk.BoundIntegration, d *Deployment, packageName, editID string, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) error {
 	defaultLocale := defaultStr(doc.DefaultLocale, "en-US")
 	defaultLoc := doc.Localizations[defaultLocale]
 	if scopes.any("localizations", "review", "privacy") {
-		input := map[string]any{"packageName": packageName, "editId": editID}
-		if scopes.has("localizations") {
-			input["defaultLanguage"] = defaultLocale
-		}
-		if scopes.has("privacy") {
-			input["contactWebsite"] = firstNonEmpty(doc.Privacy.PolicyURL, defaultLoc.SupportURL)
-		}
-		if scopes.has("review") {
-			input["contactEmail"] = doc.Review.Email
-			input["contactPhone"] = doc.Review.Phone
+		// update_app_details is a replacing PUT. Always send the complete desired
+		// resource so a scoped apply cannot erase fields owned by another scope.
+		input := map[string]any{
+			"packageName": packageName, "editId": editID, "defaultLanguage": defaultLocale,
+			"contactWebsite": firstNonEmpty(doc.Privacy.PolicyURL, defaultLoc.SupportURL),
+			"contactEmail":   doc.Review.Email, "contactPhone": doc.Review.Phone,
 		}
 		if _, err := executeIntegration(bound, "update_app_details", input); err != nil {
 			return err

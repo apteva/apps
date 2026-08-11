@@ -101,6 +101,12 @@ from a test channel to production without rebuilding. `deploy_rollout`
 changes a staged Google Play production fraction; `deploy_halt` halts a
 Play rollout or expires a TestFlight build.
 
+Mobile promotion refreshes provider state and runs strict store preflight
+before changing a release track. Pass `validate_only: true` to stage and
+validate the exact promotion without committing it. Google Play validation
+uses a temporary edit that is always deleted; the result distinguishes local
+readiness, provider validation, and candidate-specific production access.
+
 Test audiences are managed through Deploy rather than by calling store
 integrations directly:
 
@@ -355,6 +361,15 @@ Review demo passwords are one-shot apply inputs. Deploy sends them to Apple and
 stores only that one has been configured. Apple privacy answers and Google Play
 App Content declarations remain explicit human attestations because their full
 questionnaires are not writable through the publishing APIs.
+
+Google listing localizations, contact details, and other compatible selected
+scopes share one validated Play edit. App details are always written as a
+complete resource so a partial apply cannot erase another scope's values.
+Google listings and images are read back using their native response shapes;
+text is compared field-by-field and media by SHA-256. Data Safety is outside
+the Play edit transaction, so its provider acknowledgement is tracked
+separately. Pricing, App Content, and any provider-unavailable declarations are
+reported as manual requirements rather than successful provider writes.
 
 ## Runtime targets (pluggable)
 

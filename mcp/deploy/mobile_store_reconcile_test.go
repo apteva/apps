@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -33,9 +34,14 @@ type appleSettingsPlatform struct {
 
 type googleMediaPlatform struct {
 	tk.BasePlatformClient
-	calls    []integrationCall
-	mu       sync.Mutex
-	uploaded map[string]bool
+	calls           []integrationCall
+	mu              sync.Mutex
+	uploaded        map[string]bool
+	details         map[string]any
+	listings        map[string]map[string]any
+	dataSafety      bool
+	requireCombined bool
+	failTool        string
 }
 
 func (p *googleMediaPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -54,27 +60,63 @@ func (p *googleMediaPlatform) ExecuteIntegrationTool(_ int64, tool string, input
 	p.mu.Lock()
 	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
 	p.mu.Unlock()
+	if tool == p.failTool {
+		return nil, fmt.Errorf("forced %s failure", tool)
+	}
 	data := json.RawMessage(`{}`)
 	switch tool {
 	case "create_edit":
 		data = json.RawMessage(`{"id":"edit-1"}`)
+	case "update_app_details":
+		p.mu.Lock()
+		p.details = cloneAnyMap(input)
+		p.mu.Unlock()
+	case "update_store_listing":
+		p.mu.Lock()
+		if p.listings == nil {
+			p.listings = map[string]map[string]any{}
+		}
+		p.listings[mapStringValue(input, "language")] = cloneAnyMap(input)
+		p.mu.Unlock()
 	case "get_app_details":
-		data = json.RawMessage(`{"data":{"defaultLanguage":"en-US"}}`)
+		p.mu.Lock()
+		data, _ = json.Marshal(p.details)
+		p.mu.Unlock()
 	case "list_store_listings":
-		data = json.RawMessage(`{"data":[{"language":"en-US"}]}`)
+		p.mu.Lock()
+		values := make([]map[string]any, 0, len(p.listings))
+		for _, listing := range p.listings {
+			values = append(values, listing)
+		}
+		data, _ = json.Marshal(map[string]any{"listings": values})
+		p.mu.Unlock()
 	case "list_listing_images":
 		imageType := mapStringValue(input, "imageType")
 		p.mu.Lock()
 		uploaded := p.uploaded[imageType]
 		p.mu.Unlock()
 		if uploaded {
-			data = json.RawMessage(`{"data":[{"id":"image-1"}]}`)
+			data = json.RawMessage(`{"images":[{"id":"image-1","sha256":"unknown"}]}`)
 		} else {
-			data = json.RawMessage(`{"data":[]}`)
+			data = json.RawMessage(`{"images":[]}`)
 		}
 	case "delete_all_listing_images":
 		p.mu.Lock()
 		p.uploaded[mapStringValue(input, "imageType")] = false
+		p.mu.Unlock()
+	case "validate_edit":
+		p.mu.Lock()
+		valid := !p.requireCombined || mapStringValue(p.details, "contactEmail") != "" && len(p.listings) > 0
+		for _, listing := range p.listings {
+			valid = valid && mapStringValue(listing, "shortDescription") != "" && mapStringValue(listing, "fullDescription") != ""
+		}
+		p.mu.Unlock()
+		if !valid {
+			return nil, errors.New("Play edit requires listing descriptions and contact email together")
+		}
+	case "update_data_safety":
+		p.mu.Lock()
+		p.dataSafety = true
 		p.mu.Unlock()
 	}
 	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
@@ -305,6 +347,229 @@ func TestAndroidPartialMediaApplyCommitsValidIconIndependently(t *testing.T) {
 	}
 	if !reflect.DeepEqual(explicit.AppliedAssets, []string{"icon"}) || len(explicit.Blocked) != 0 {
 		t.Fatalf("explicit result=%+v", explicit)
+	}
+}
+
+func TestAndroidMetadataScopesShareOneValidatedEdit(t *testing.T) {
+	platform := &googleMediaPlatform{uploaded: map[string]bool{}, requireCombined: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-listing", TargetKind: "android", SourceKind: "local", SourceRef: "/src", Framework: "android",
+		TargetConfigJSON: `{"package_name":"com.example.listing"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	doc.Localizations["en-US"] = StoreLocalization{
+		Title: "Example", ShortDescription: "Short description", Description: "Full description", VideoURL: "https://youtu.be/example",
+	}
+	doc.Review = StoreReview{Email: "support@example.com", Phone: "+12025550123", AccessConfirmed: true}
+	doc.Privacy.PolicyURL = "https://example.com/privacy"
+	doc.Privacy.DataSafetyCSV = "Question,Answer\ncollects_data,false"
+	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+		Scopes: []string{"localizations", "review", "privacy"}, AllowPartial: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.AppliedScopes, []string{"localizations", "review", "privacy"}) || len(result.Failed) != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.ProviderValidations["google_data_safety"].Status != "accepted" {
+		t.Fatalf("provider validations=%+v", result.ProviderValidations)
+	}
+	platform.mu.Lock()
+	calls := append([]integrationCall(nil), platform.calls...)
+	details := cloneAnyMap(platform.details)
+	dataSafety := platform.dataSafety
+	platform.mu.Unlock()
+	if countIntegrationCalls(calls, "create_edit") != 3 || countIntegrationCalls(calls, "validate_edit") != 1 || countIntegrationCalls(calls, "commit_edit") != 1 {
+		// Read-only observations run before and after the single transactional edit.
+		t.Fatalf("calls=%+v", calls)
+	}
+	if mapStringValue(details, "defaultLanguage") != "en-US" || mapStringValue(details, "contactEmail") != "support@example.com" ||
+		mapStringValue(details, "contactWebsite") != "https://example.com/privacy" || !dataSafety {
+		t.Fatalf("details=%+v dataSafety=%v", details, dataSafety)
+	}
+}
+
+func TestGoogleObservationParsesNativeProviderShapes(t *testing.T) {
+	doc := defaultStoreDocument("android")
+	doc.Localizations["en-US"] = StoreLocalization{
+		Title: "Apteva", ShortDescription: "Agents anywhere", Description: "Full description", VideoURL: "https://youtu.be/example",
+	}
+	doc.Review = StoreReview{Email: "support@example.com", Phone: "+12025550123"}
+	doc.Privacy.PolicyURL = "https://example.com/privacy"
+	doc.Distribution.Availability = StoreAvailability{Mode: "only", IncludedTerritories: []string{"ES", "US"}}
+	doc.Assets = []StoreAsset{{ID: "icon", Kind: "icon", Locale: "en-US", SHA256: "AA:BB"}}
+
+	details := json.RawMessage(`{"defaultLanguage":"en-US","contactWebsite":"https://example.com/privacy","contactEmail":"support@example.com","contactPhone":"+12025550123"}`)
+	listings := json.RawMessage(`{"kind":"androidpublisher#listingsListResponse","listings":[{"language":"en-US","title":"Apteva","shortDescription":"Agents anywhere","fullDescription":"Full description","video":"https://youtu.be/example"}]}`)
+	images := map[string]any{"images": []any{map[string]any{"id": "image-1", "sha256": "aabb"}}}
+	availability := json.RawMessage(`{"syncWithProduction":false,"countries":[{"countryCode":"US"},{"countryCode":"ES"}],"restOfWorld":false}`)
+
+	if !googleAppDetailsMatch(details, doc) || !googleListingsMatch(listings, doc) ||
+		!googleImagesMatch(images, doc.Assets) || !googleAvailabilityMatches(availability, doc.Distribution) {
+		t.Fatal("native Google provider responses did not verify")
+	}
+	doc.Localizations["en-US"] = StoreLocalization{Title: "Apteva", ShortDescription: "Changed", Description: "Full description"}
+	if googleListingsMatch(listings, doc) {
+		t.Fatal("listing mismatch was accepted")
+	}
+	doc.Assets[0].SHA256 = "different"
+	if googleImagesMatch(images, doc.Assets) {
+		t.Fatal("media hash mismatch was accepted")
+	}
+}
+
+func TestGoogleAvailabilityAllowsExplicitManualConfirmation(t *testing.T) {
+	doc := defaultStoreDocument("android")
+	doc.Distribution.Availability = StoreAvailability{Mode: "all_except", ExcludedTerritories: []string{"CN"}}
+	doc.Distribution.Provider = map[string]any{"availability_configured": true}
+
+	platform := &googleMediaPlatform{uploaded: map[string]bool{}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d := &Deployment{TargetKind: "android", TargetConfigJSON: `{"package_name":"com.example.availability"}`}
+
+	observed, err := (&App{}).observeGoogleStoreConfig(d, doc, &MobileStoreConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readiness, _ := observed["readiness"].(map[string]any)
+	availability, _ := readiness["availability"].(map[string]any)
+	if mapStringValue(availability, "status") != "verified" || mapStringValue(availability, "source") != "manual" {
+		t.Fatalf("availability readiness=%+v", availability)
+	}
+}
+
+func TestAndroidRejectsIncompleteAvailabilitySelection(t *testing.T) {
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	doc.Localizations["en-US"] = StoreLocalization{Title: "Example", ShortDescription: "Short", Description: "Full"}
+	doc.Distribution.Availability = StoreAvailability{Mode: "only"}
+	preflight := validateStoreDocument(t.TempDir(), &Deployment{TargetKind: "android"}, nil, &MobileStoreConfig{}, doc, true)
+	if !hasStoreFinding(preflight, "availability.invalid") {
+		t.Fatalf("missing availability validation: %+v", preflight.Findings)
+	}
+}
+
+func TestAndroidDataSafetyFailurePreservesCommittedMetadataResults(t *testing.T) {
+	platform := &googleMediaPlatform{uploaded: map[string]bool{}, requireCombined: true, failTool: "update_data_safety"}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-data-safety", TargetKind: "android", SourceKind: "local", SourceRef: "/src", Framework: "android",
+		TargetConfigJSON: `{"package_name":"com.example.safety"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	d = effectiveDeploymentForEnvironment(d, env)
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	doc.Localizations["en-US"] = StoreLocalization{Title: "Example", ShortDescription: "Short", Description: "Full"}
+	doc.Review = StoreReview{Email: "support@example.com", AccessConfirmed: true}
+	doc.Privacy.PolicyURL = "https://example.com/privacy"
+	doc.Privacy.DataSafetyCSV = "Question,Answer\ncollects_data,false"
+	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+		Scopes: []string{"localizations", "review", "privacy"}, AllowPartial: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.AppliedScopes, []string{"localizations", "review"}) || len(result.Failed) != 1 || result.Failed[0].Scope != "privacy" {
+		t.Fatalf("result=%+v", result)
+	}
+	if countIntegrationCalls(platform.calls, "commit_edit") != 1 {
+		t.Fatalf("metadata edit was not committed exactly once: %+v", platform.calls)
+	}
+}
+
+func TestAndroidProviderReadOnlyScopeIsNotReportedApplied(t *testing.T) {
+	platform := &googleMediaPlatform{uploaded: map[string]bool{}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-version", TargetKind: "android", SourceKind: "local", SourceRef: "/src", Framework: "android",
+		TargetConfigJSON: `{"package_name":"com.example.version"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	d = effectiveDeploymentForEnvironment(d, env)
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&App{dataDir: t.TempDir()}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{Scopes: []string{"version"}, AllowPartial: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Applied || len(result.AppliedScopes) != 0 || result.Status != "no_op" ||
+		len(result.ScopeResults) != 1 || result.ScopeResults[0].Status != "verified" {
+		t.Fatalf("result=%+v", result)
+	}
+	if countIntegrationCalls(platform.calls, "commit_edit") != 0 {
+		t.Fatalf("read-only scope committed an edit: %+v", platform.calls)
+	}
+}
+
+func TestAndroidReviewAccessRequiresExplicitConfirmation(t *testing.T) {
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	doc.Localizations["en-US"] = StoreLocalization{Title: "Example", ShortDescription: "Short", Description: "Full"}
+	doc.Review = StoreReview{Email: "support@example.com", DemoAccountRequired: true, DemoUsername: "reviewer"}
+	preflight := validateStoreDocument(t.TempDir(), &Deployment{TargetKind: "android"}, nil, &MobileStoreConfig{}, doc, true)
+	for _, code := range []string{"review_demo.required", "review_access.instructions_required", "review_access.confirmation_required"} {
+		if !hasStoreFinding(preflight, code) {
+			t.Fatalf("missing %s: %+v", code, preflight.Findings)
+		}
+	}
+}
+
+func TestAndroidReadinessRequiresProviderVerification(t *testing.T) {
+	out := StorePreflight{Ready: true}
+	appendProviderReadinessFindings(&out, &Deployment{TargetKind: "android"}, &MobileStoreConfig{ObservedJSON: `{}`})
+	for _, code := range []string{
+		"provider.google_listing_unverified", "provider.google_review_unverified", "provider.google_media_unverified",
+		"provider.google_privacy_unverified", "provider.google_availability_unverified", "provider.google_pricing_unverified",
+	} {
+		if !hasStoreFinding(out, code) {
+			t.Fatalf("missing %s: %+v", code, out.Findings)
+		}
+	}
+	if out.Ready || out.Errors != 6 {
+		t.Fatalf("preflight=%+v", out)
 	}
 }
 

@@ -336,6 +336,9 @@ interface StoreDocument {
     email?: string;
     phone?: string;
     notes?: string;
+    access_instructions?: string;
+    access_confirmed?: boolean;
+    credentials_confirmed?: boolean;
     demo_account_required?: boolean;
     demo_username?: string;
     demo_password_set?: boolean;
@@ -395,8 +398,21 @@ interface StoreApplyResult {
   applied: boolean;
   applied_scopes: string[];
   applied_assets?: string[];
+  scope_results?: { scope: string; status: string; message?: string }[];
   blocked: { scope: string; media_kind?: string; asset_id?: string; locale?: string; code?: string; message: string }[];
   failed: { scope: string; media_kind?: string; asset_id?: string; locale?: string; code?: string; message: string }[];
+}
+
+interface MobilePromotionValidation {
+  valid: boolean;
+  platform: string;
+  provider: string;
+  target_channel: string;
+  provider_validated: boolean;
+  production_access: string;
+  commit_performed: boolean;
+  preflight: StorePreflight;
+  provider_error?: string;
 }
 
 const APPLE_CATEGORIES = [
@@ -603,6 +619,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [storeState, setStoreState] = useState<StoreConfigState | null>(null);
   const [showStoreListing, setShowStoreListing] = useState(false);
   const [rolloutFractions, setRolloutFractions] = useState<Record<number, number>>({});
+  const [promotionValidations, setPromotionValidations] = useState<Record<number, MobilePromotionValidation>>({});
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -883,6 +900,25 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       loadDetail(detail.deployment.id);
     } catch (e) {
       setError("Promotion failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleValidateMobilePromotion = async (releaseId: number) => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const r = await api<{ validation: MobilePromotionValidation }>("POST", `/deployments/${detail.deployment.id}/promote`, {
+        release_id: releaseId,
+        target_channel: mobileChannel,
+        validate_only: true,
+        submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+      });
+      setPromotionValidations((current) => ({ ...current, [releaseId]: r.validation }));
+      setError("");
+    } catch (e) {
+      setError("Promotion validation failed: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1727,7 +1763,15 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         <td className="text-right space-x-2">
                           <button type="button" onClick={() => { setLogKind("release"); setLogTargetId(rel.id); }} className="text-text-dim hover:text-text">log</button>
                           {rel.status !== "failed" && rel.channel !== mobileChannel && (
-                            <button type="button" onClick={() => handlePromoteMobile(rel.id)} className="text-accent hover:underline">promote</button>
+                            <>
+                              <button type="button" disabled={busy} onClick={() => handleValidateMobilePromotion(rel.id)} className="text-text-dim hover:text-text disabled:opacity-40">validate</button>
+                              <button type="button" disabled={busy} onClick={() => handlePromoteMobile(rel.id)} className="text-accent hover:underline disabled:opacity-40">promote</button>
+                            </>
+                          )}
+                          {promotionValidations[rel.id] && (
+                            <span className={promotionValidations[rel.id].valid ? "text-green" : "text-red"} title={promotionValidations[rel.id].provider_error || `${promotionValidations[rel.id].preflight.errors} blocking findings · ${promotionValidations[rel.id].production_access}`}>
+                              {promotionValidations[rel.id].valid ? "ready" : "blocked"}
+                            </span>
                           )}
                           {(rel.external_status === "approved_pending_release" || rel.external_status === "pending_apple_release") && (
                             <button
@@ -2962,19 +3006,18 @@ function StoreListingDialog({
                   className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                 />
               </label>
-              {deployment.target_kind === "ios" && (
+              <label className="sm:col-span-2 flex items-center gap-2 text-xs text-text-muted">
+                <input
+                  type="checkbox"
+                  checked={Boolean(doc.review.demo_account_required)}
+                  onChange={(e) => setDoc({ ...doc, review: { ...doc.review, demo_account_required: e.target.checked } })}
+                />
+                Review requires login
+              </label>
+              {doc.review.demo_account_required && (
                 <>
-                  <label className="sm:col-span-2 flex items-center gap-2 text-xs text-text-muted">
-                    <input
-                      type="checkbox"
-                      checked={Boolean(doc.review.demo_account_required)}
-                      onChange={(e) => setDoc({ ...doc, review: { ...doc.review, demo_account_required: e.target.checked } })}
-                    />
-                    Review requires login
-                  </label>
-                  {doc.review.demo_account_required && (
-                    <>
-                      <TextField label="Demo username" value={doc.review.demo_username} onChange={(demo_username) => setDoc({ ...doc, review: { ...doc.review, demo_username } })} />
+                  <TextField label="Demo username" value={doc.review.demo_username} onChange={(demo_username) => setDoc({ ...doc, review: { ...doc.review, demo_username } })} />
+                  {deployment.target_kind === "ios" ? (
                       <label className="text-xs text-text-muted">
                         Demo password {doc.review.demo_password_set && <span className="text-green">configured</span>}
                         <input
@@ -2985,8 +3028,37 @@ function StoreListingDialog({
                           className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                         />
                       </label>
-                    </>
+                  ) : (
+                    <label className="flex items-center gap-2 text-xs text-text-muted">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(doc.review.credentials_confirmed)}
+                        onChange={(e) => setDoc({ ...doc, review: { ...doc.review, credentials_confirmed: e.target.checked } })}
+                      />
+                      Reusable credentials configured
+                    </label>
                   )}
+                </>
+              )}
+              {deployment.target_kind === "android" && (
+                <>
+                  <label className="sm:col-span-2 text-xs text-text-muted">
+                    App access instructions
+                    <textarea
+                      rows={4}
+                      value={doc.review.access_instructions || ""}
+                      onChange={(e) => setDoc({ ...doc, review: { ...doc.review, access_instructions: e.target.value } })}
+                      className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                    />
+                  </label>
+                  <label className="sm:col-span-2 flex items-center gap-2 text-xs text-text-muted">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(doc.review.access_confirmed)}
+                      onChange={(e) => setDoc({ ...doc, review: { ...doc.review, access_confirmed: e.target.checked } })}
+                    />
+                    App access completed in Play Console
+                  </label>
                 </>
               )}
             </div>

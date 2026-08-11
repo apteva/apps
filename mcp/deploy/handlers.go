@@ -121,6 +121,7 @@ func (a *App) httpDeploymentStoreConfig(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+		appendProviderReadinessFindings(&preflight, d, cfg)
 		httpJSON(w, map[string]any{"config": cfg, "desired": doc, "preflight": preflight})
 	case http.MethodPut:
 		var body map[string]any
@@ -145,6 +146,7 @@ func (a *App) httpDeploymentStoreConfig(w http.ResponseWriter, r *http.Request, 
 		}
 		a.pruneUnreferencedStoreAssets(d, doc)
 		preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+		appendProviderReadinessFindings(&preflight, d, cfg)
 		_ = dbUpdateMobileStoreState(globalCtx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 		cfg, _ = dbGetMobileStoreConfig(globalCtx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 		emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})
@@ -410,7 +412,7 @@ func (a *App) httpDeploymentPromote(w http.ResponseWriter, r *http.Request, d *D
 	body["_project_id"] = d.ProjectID
 	out, err := a.toolPromote(globalCtx, body)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpStoreErr(w, err, http.StatusBadRequest)
 		return
 	}
 	httpJSON(w, out)

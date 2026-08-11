@@ -29,6 +29,19 @@ type releaseOptions struct {
 	ReleaseNotes    map[string]string `json:"release_notes,omitempty"`
 	SubmitForReview bool              `json:"submit_for_review,omitempty"`
 	BetaGroupID     string            `json:"beta_group_id,omitempty"`
+	ValidateOnly    bool              `json:"validate_only,omitempty"`
+}
+
+type mobilePromotionValidation struct {
+	Valid             bool           `json:"valid"`
+	Platform          string         `json:"platform"`
+	Provider          string         `json:"provider"`
+	TargetChannel     string         `json:"target_channel"`
+	ProviderValidated bool           `json:"provider_validated"`
+	ProductionAccess  string         `json:"production_access"`
+	CommitPerformed   bool           `json:"commit_performed"`
+	Preflight         StorePreflight `json:"preflight"`
+	ProviderError     string         `json:"provider_error,omitempty"`
 }
 
 type mobileReleaseMeta struct {
@@ -999,6 +1012,16 @@ func (a *App) toolPromoteMobile(ctx *sdk.AppCtx, base *Deployment, args map[stri
 	d := effectiveDeploymentForEnvironment(base, env)
 	opts := releaseOptionsFromArgs(args)
 	opts.Channel = defaultStr(strArg(args, "target_channel"), "production")
+	if opts.ValidateOnly {
+		validation, err := a.validateMobilePromotion(d, build, source, opts)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"build": buildWithArtifactDownloadURL(build, d.ProjectID), "source_release": source,
+			"deployment": d, "validation": validation,
+		}, nil
+	}
 	rel, err := a.promoteMobileRelease(d, build, source, opts)
 	if err != nil {
 		return nil, err
@@ -1014,6 +1037,16 @@ func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release,
 	channel, err := normalizeMobileChannel(d.TargetKind, opts.Channel)
 	if err != nil {
 		return nil, err
+	}
+	validation, err := a.validateMobilePromotion(d, build, source, opts)
+	if err != nil {
+		return nil, err
+	}
+	if !validation.Valid {
+		if validation.ProviderError != "" {
+			return nil, fmt.Errorf("mobile promotion validation failed: %s", validation.ProviderError)
+		}
+		return nil, newStorePreflightError(validation.Preflight)
 	}
 	var meta mobileReleaseMeta
 	if err := json.Unmarshal([]byte(defaultStr(source.ReleaseMetaJSON, "{}")), &meta); err != nil {
@@ -1068,6 +1101,96 @@ func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release,
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
 
+func (a *App) validateMobilePromotion(d *Deployment, build *Build, source *Release, opts releaseOptions) (*mobilePromotionValidation, error) {
+	channel, err := normalizeMobileChannel(d.TargetKind, opts.Channel)
+	if err != nil {
+		return nil, err
+	}
+	provider := map[string]string{"android": "google_play", "ios": "app_store_connect"}[d.TargetKind]
+	result := &mobilePromotionValidation{
+		Platform: d.TargetKind, Provider: provider, TargetChannel: channel, ProductionAccess: "not_applicable", CommitPerformed: false,
+	}
+	if d.TargetKind == "android" && isProductionMobileChannel(d.TargetKind, channel) {
+		result.ProductionAccess = "unknown"
+	}
+	if isProductionMobileChannel(d.TargetKind, channel) {
+		if _, _, syncErr := a.observeStoreConfig(d); syncErr != nil {
+			result.ProviderError = "sync store readiness: " + syncErr.Error()
+			return result, nil
+		}
+		preflight, preflightErr := a.storePreflight(d, build, true)
+		if preflightErr != nil {
+			return nil, preflightErr
+		}
+		result.Preflight = preflight
+		if !preflight.Ready {
+			return result, nil
+		}
+	}
+	if d.TargetKind != "android" {
+		result.Valid = result.Preflight.Ready || !isProductionMobileChannel(d.TargetKind, channel)
+		return result, nil
+	}
+	var meta mobileReleaseMeta
+	if err := json.Unmarshal([]byte(defaultStr(source.ReleaseMetaJSON, "{}")), &meta); err != nil {
+		return nil, err
+	}
+	if meta.VersionCode == "" {
+		meta.VersionCode = source.ExternalID
+	}
+	meta.RolloutFraction = opts.RolloutFraction
+	if opts.ReleaseNotes != nil {
+		meta.ReleaseNotes = opts.ReleaseNotes
+	}
+	if err := a.validateAndroidVersionToTrack(d, channel, &meta); err != nil {
+		result.ProviderError = err.Error()
+		if isProductionMobileChannel(d.TargetKind, channel) {
+			result.ProductionAccess = "blocked_or_unverified"
+		}
+		return result, nil
+	}
+	result.ProviderValidated = true
+	if isProductionMobileChannel(d.TargetKind, channel) {
+		result.ProductionAccess = "validated_for_candidate"
+	}
+	result.Valid = true
+	return result, nil
+}
+
+func (a *App) validateAndroidVersionToTrack(d *Deployment, channel string, meta *mobileReleaseMeta) error {
+	if meta == nil || meta.PackageName == "" || meta.VersionCode == "" {
+		return errors.New("Android promotion validation requires package_name and version_code from a prior release")
+	}
+	bound, err := boundIntegration("play_store")
+	if err != nil {
+		return err
+	}
+	created, err := executeIntegration(bound, "create_edit", map[string]any{"packageName": meta.PackageName})
+	if err != nil {
+		return err
+	}
+	editID := jsonStringAt(created, "id")
+	if editID == "" {
+		return errors.New("Google Play create_edit response missing id")
+	}
+	defer func() {
+		_, _ = executeIntegration(bound, "delete_edit", map[string]any{"packageName": meta.PackageName, "editId": editID})
+	}()
+	release := googleTrackRelease(channel, meta)
+	if _, err := executeIntegration(bound, "update_track", map[string]any{
+		"packageName": meta.PackageName, "editId": editID, "track": channel, "releases": []map[string]any{release},
+	}); err != nil {
+		return err
+	}
+	if _, err := a.applyConfiguredGoogleTestingToEdit(bound, d, meta.PackageName, editID, channel); err != nil {
+		return err
+	}
+	if _, err := executeIntegration(bound, "validate_edit", map[string]any{"packageName": meta.PackageName, "editId": editID}); err != nil {
+		return fmt.Errorf("validate Google Play promotion: %w", err)
+	}
+	return nil
+}
+
 func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, channel string, meta *mobileReleaseMeta, logW io.Writer) error {
 	if meta.PackageName == "" || meta.VersionCode == "" {
 		return errors.New("Android promotion requires package_name and version_code from a prior release")
@@ -1090,16 +1213,8 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, chann
 			_, _ = executeIntegration(bound, "delete_edit", map[string]any{"packageName": meta.PackageName, "editId": editID})
 		}
 	}()
-	status := "completed"
-	release := map[string]any{"versionCodes": []string{meta.VersionCode}, "status": status}
-	if isProductionMobileChannel("android", channel) && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
-		status = "inProgress"
-		release["status"] = status
-		release["userFraction"] = meta.RolloutFraction
-	}
-	if notes := googleReleaseNotes(meta.ReleaseNotes); len(notes) > 0 {
-		release["releaseNotes"] = notes
-	}
+	release := googleTrackRelease(channel, meta)
+	status := mapStringValue(release, "status")
 	if _, err := executeIntegration(bound, "update_track", map[string]any{
 		"packageName": meta.PackageName, "editId": editID, "track": channel, "releases": []map[string]any{release},
 	}); err != nil {
@@ -1129,6 +1244,19 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, chann
 	})
 	fmt.Fprintf(logW, "Google Play versionCode=%s promoted to %s (%s)\n", meta.VersionCode, channel, status)
 	return nil
+}
+
+func googleTrackRelease(channel string, meta *mobileReleaseMeta) map[string]any {
+	status := "completed"
+	release := map[string]any{"versionCodes": []string{meta.VersionCode}, "status": status}
+	if isProductionMobileChannel("android", channel) && meta.RolloutFraction > 0 && meta.RolloutFraction < 1 {
+		release["status"] = "inProgress"
+		release["userFraction"] = meta.RolloutFraction
+	}
+	if notes := googleReleaseNotes(meta.ReleaseNotes); len(notes) > 0 {
+		release["releaseNotes"] = notes
+	}
+	return release
 }
 
 func (a *App) toolRollout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1310,7 +1438,10 @@ func isProductionMobileChannel(platform, channel string) bool {
 }
 
 func releaseOptionsFromArgs(args map[string]any) releaseOptions {
-	opts := releaseOptions{Channel: strArg(args, "channel"), SubmitForReview: boolArg(args, "submit_for_review"), BetaGroupID: strArg(args, "beta_group_id")}
+	opts := releaseOptions{
+		Channel: strArg(args, "channel"), SubmitForReview: boolArg(args, "submit_for_review"),
+		BetaGroupID: strArg(args, "beta_group_id"), ValidateOnly: boolArg(args, "validate_only"),
+	}
 	if v, ok := args["rollout_fraction"].(float64); ok {
 		opts.RolloutFraction = v
 	}

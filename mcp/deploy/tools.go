@@ -348,7 +348,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_promote", Handler: a.toolPromote,
-			Description: "Promote a tested service build between environments, or a mobile store release between channels without rebuilding/re-uploading. Mobile args: release_id or build_id, target_channel. Service args: source_environment?, target_environment?, build_id?",
+			Description: "Promote a tested service build between environments, or a mobile store release between channels without rebuilding/re-uploading. Mobile promotions run strict store readiness and provider validation first; validate_only stages and validates without committing. Mobile args: release_id or build_id, target_channel, validate_only?. Service args: source_environment?, target_environment?, build_id?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -363,6 +363,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"release_notes":      map[string]any{"type": "object"},
 					"submit_for_review":  map[string]any{"type": "boolean"},
 					"beta_group_id":      map[string]any{"type": "string"},
+					"validate_only":      map[string]any{"type": "boolean"},
 				},
 			},
 		},
@@ -916,6 +917,7 @@ func (a *App) toolStoreGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	return map[string]any{
 		"deployment_id": d.ID, "environment_id": d.EnvironmentID,
 		"platform": d.TargetKind, "provider": mobileStoreProvider(d.TargetKind),
@@ -948,6 +950,7 @@ func (a *App) toolStoreUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	a.pruneUnreferencedStoreAssets(d, doc)
 	preflight := validateStoreDocument(a.dataDir, d, nil, cfg, doc, false)
+	appendProviderReadinessFindings(&preflight, d, cfg)
 	_ = dbUpdateMobileStoreState(ctx.AppDB(), cfg.ID, cfg.Status, "", mustJSON(preflight), "", cfg.LastError)
 	cfg, _ = dbGetMobileStoreConfig(ctx.AppDB(), d.ID, d.EnvironmentID, d.TargetKind)
 	emit("deploy.store.updated", map[string]any{"deployment_id": d.ID, "environment_id": d.EnvironmentID, "provider": cfg.Provider})

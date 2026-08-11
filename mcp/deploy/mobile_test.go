@@ -253,6 +253,75 @@ func TestAndroidPromotionReusesVersionCode(t *testing.T) {
 	}
 }
 
+func TestAndroidPromotionValidationDoesNotCommit(t *testing.T) {
+	platform := &mobilePlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	d := &Deployment{ID: 1, EnvironmentID: 2, TargetKind: "android", TargetConfigJSON: `{"package_name":"com.example.app"}`}
+	meta := &mobileReleaseMeta{Platform: "android", PackageName: "com.example.app", VersionCode: "88", RolloutFraction: 0.1}
+	if err := (&App{}).validateAndroidVersionToTrack(d, "production", meta); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"create_edit", "update_track", "validate_edit", "delete_edit"}
+	if len(platform.calls) != len(want) {
+		t.Fatalf("calls=%+v", platform.calls)
+	}
+	for i, tool := range want {
+		if platform.calls[i].Tool != tool {
+			t.Fatalf("calls=%+v", platform.calls)
+		}
+	}
+	if countIntegrationCalls(platform.calls, "commit_edit") != 0 {
+		t.Fatalf("validation committed provider state: %+v", platform.calls)
+	}
+}
+
+func TestAndroidPromotionRequiresStoreReadinessBeforeCreatingRelease(t *testing.T) {
+	platform := &mobilePlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-gated", TargetKind: "android", SourceKind: "local", SourceRef: "/src", Framework: "android",
+		TargetConfigJSON: `{"package_name":"com.example.gated"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	d = effectiveDeploymentForEnvironment(d, env)
+	build, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "android", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, build.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Provider = "google_play"
+	source.ExternalID = "88"
+	source.ReleaseMetaJSON = mustJSON(mobileReleaseMeta{Platform: "android", PackageName: "com.example.gated", VersionCode: "88"})
+
+	if _, err := (&App{dataDir: t.TempDir()}).promoteMobileRelease(d, build, source, releaseOptions{Channel: "production"}); err == nil {
+		t.Fatal("promotion succeeded without store configuration")
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("provider was mutated before readiness passed: %+v", platform.calls)
+	}
+	releases, err := dbListReleases(ctx.AppDB(), d.ID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(releases) != 1 {
+		t.Fatalf("failed preflight created a promotion release: %+v", releases)
+	}
+}
+
 func TestGooglePlayBundleUploadStreamsArtifact(t *testing.T) {
 	bundleBody := []byte("large-aab-placeholder")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
