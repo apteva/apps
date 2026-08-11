@@ -18,13 +18,14 @@ import (
 // ─── domain types ──────────────────────────────────────────────────
 
 type Table struct {
-	ID           int64    `json:"id"`
-	Name         string   `json:"name"`
-	Scope        string   `json:"scope"`
-	PhysicalName string   `json:"-"`
-	Columns      []Column `json:"columns"`
-	RowCount     int64    `json:"row_count"`
-	CreatedAt    string   `json:"created_at,omitempty"`
+	ID            int64    `json:"id"`
+	Name          string   `json:"name"`
+	Scope         string   `json:"scope"`
+	PhysicalName  string   `json:"-"`
+	Columns       []Column `json:"columns"`
+	RowCount      int64    `json:"row_count"`
+	CreatedAt     string   `json:"created_at,omitempty"`
+	RowCountKnown bool     `json:"-"`
 }
 
 type Column struct {
@@ -325,6 +326,18 @@ func maxQueryRows(ctx *sdk.AppCtx) int {
 
 func maxQueryMs(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_query_ms", 2000, 1, 60_000))
+}
+
+func maxReadQueueMs(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_read_queue_ms", 1000, 1, 60_000))
+}
+
+func maxReadConns(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_read_conns", 4, 1, 16))
+}
+
+func slowQueryMs(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "slow_query_ms", 250, 1, 60_000))
 }
 
 func maxQueryBytes(ctx *sdk.AppCtx) int64 {

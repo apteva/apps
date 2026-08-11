@@ -1,11 +1,12 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
-	"sort"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -13,6 +14,8 @@ import (
 // ─── rows_insert ───────────────────────────────────────────────────
 
 func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -28,7 +31,7 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(rawRows) > maxBatchRows(ctx) {
 		return nil, errf("rows exceeds max_batch_rows (%d)", maxBatchRows(ctx))
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +130,8 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── rows_upsert ────────────────────────────────────────────────────
 
 func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -161,7 +166,6 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		seenKey[name] = true
 		keyCols = append(keyCols, name)
 	}
-	sort.Strings(keyCols)
 	rawRows := sliceArg(args, "rows")
 	if len(rawRows) == 0 {
 		return nil, errf("rows is required and must be non-empty")
@@ -169,7 +173,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(rawRows) > maxBatchRows(ctx) {
 		return nil, errf("rows exceeds max_batch_rows (%d)", maxBatchRows(ctx))
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -351,21 +355,43 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 func ensureUniqueUpsertIndex(tx *sql.Tx, t *Table, keyCols []string) error {
 	sum := sha256.Sum256([]byte(strings.Join(keyCols, "\x00")))
 	indexName := fmt.Sprintf("ux_%s_%x", t.PhysicalName, sum[:8])
-	quotedCols := make([]string, len(keyCols))
+	logicalName := fmt.Sprintf("managed_upsert_%x", sum[:8])
+	var existing int64
+	if err := tx.QueryRow(`SELECT id FROM indexes_meta WHERE table_id = ? AND name = ?`, t.ID, logicalName).Scan(&existing); err == nil {
+		return nil
+	} else if err != sql.ErrNoRows {
+		return err
+	}
+	var physicalExists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, indexName).Scan(&physicalExists); err != nil {
+		return err
+	}
+	columns := make([]IndexColumn, len(keyCols))
 	for i, col := range keyCols {
-		quotedCols[i] = quote(col)
+		columns[i] = IndexColumn{Col: col, Order: "asc"}
 	}
-	stmt := fmt.Sprintf("CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s)",
-		quote(indexName), quote(t.PhysicalName), strings.Join(quotedCols, ", "))
-	if _, err := tx.Exec(stmt); err != nil {
-		return errf("cannot enforce upsert key (%s); remove duplicate key rows first: %v", strings.Join(keyCols, ", "), err)
+	if physicalExists == 0 {
+		if _, err := tx.Exec(buildCreateIndexSQL(indexName, t.PhysicalName, columns, true)); err != nil {
+			return errf("cannot enforce upsert key (%s); remove duplicate key rows first: %v", strings.Join(keyCols, ", "), err)
+		}
 	}
-	return nil
+	res, err := tx.Exec(`INSERT INTO indexes_meta(table_id, name, physical_name, unique_index, managed)
+		VALUES (?, ?, ?, 1, 1)`, t.ID, logicalName, indexName)
+	if err != nil {
+		return err
+	}
+	indexID, err := res.LastInsertId()
+	if err != nil {
+		return err
+	}
+	return insertIndexColumns(tx, indexID, columns)
 }
 
 // ─── rows_get ──────────────────────────────────────────────────────
 
 func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -378,7 +404,7 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errf("id required")
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -386,10 +412,24 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	row, found, err := fetchRowByID(ctx.AppDB(), t, id, selectClause)
+	read, err := acquireReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
+	qctx, cancel := queryTimeoutContext(ctx)
+	started := time.Now()
+	row, found, err := fetchRowByIDContext(qctx, read.conn, t, id, selectClause)
+	cancel()
+	closeErr := read.conn.Close()
+	sqlTime := time.Since(started)
+	if err != nil {
+		logReadQuery(ctx, tableName, "rows_get", read.queueWait, 0, sqlTime, err, "select")
+		return nil, queryStageErr("select", tableName, err)
+	}
+	if closeErr != nil {
+		return nil, queryStageErr("select", tableName, closeErr)
+	}
+	logReadQuery(ctx, tableName, "rows_get", read.queueWait, 0, sqlTime, nil, "")
 	if !found {
 		return map[string]any{"row": nil, "found": false}, nil
 	}
@@ -402,6 +442,8 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── rows_update ───────────────────────────────────────────────────
 
 func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -418,7 +460,7 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(fields) == 0 {
 		return nil, errf("fields must be a non-empty object")
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -458,9 +500,16 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if n == 0 {
 		return nil, errf("row id=%d not found in table %q", id, tableName)
 	}
-	row, _, err := fetchRowByID(ctx.AppDB(), t, id, "")
+	read, err := acquireReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
+	}
+	qctx, cancel := queryTimeoutContext(ctx)
+	row, _, err := fetchRowByIDContext(qctx, read.conn, t, id, "")
+	cancel()
+	_ = read.conn.Close()
+	if err != nil {
+		return nil, queryStageErr("select", tableName, err)
 	}
 	emit(ctx, topicRowUpdated, map[string]any{
 		"table":  tableName,
@@ -474,6 +523,8 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── rows_delete ───────────────────────────────────────────────────
 
 func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -490,7 +541,7 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id != 0 && len(wherePreds) > 0 {
 		return nil, errf("pass id or where, not both")
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -549,6 +600,8 @@ func deleteRows(ctx *sdk.AppCtx, t *Table, tableName string, id int64, stmt stri
 // ─── rows_search ───────────────────────────────────────────────────
 
 func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -557,7 +610,7 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := validateIdentifier("table", tableName); err != nil {
 		return nil, err
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -581,15 +634,52 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if offset < 0 {
 		offset = 0
 	}
+	includeTotal := true
+	if raw, ok := args["include_total"]; ok {
+		value, ok := raw.(bool)
+		if !ok {
+			return nil, errf("include_total must be boolean")
+		}
+		includeTotal = value
+	}
+	read, err := acquireReadConn(ctx, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer read.conn.Close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
+	var query searchQueryer = read.conn
+	var snapshot *sql.Tx
+	if includeTotal {
+		snapshot, err = read.conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			return nil, queryStageErr("select", tableName, err)
+		}
+		defer snapshot.Rollback()
+		query = snapshot
+	}
 	var total int64
-	if clause == "" {
-		total = t.RowCount
-	} else {
-		totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
-		if err := ctx.AppDB().QueryRowContext(qctx, totalSQL, vals...).Scan(&total); err != nil {
-			return nil, err
+	var countTime time.Duration
+	if includeTotal {
+		countStarted := time.Now()
+		if clause == "" {
+			var cached sql.NullInt64
+			err = query.QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, t.ID).Scan(&cached)
+			if err == nil && cached.Valid {
+				total = cached.Int64
+			} else if err == nil {
+				err = query.QueryRowContext(qctx,
+					fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(t.PhysicalName))).Scan(&total)
+			}
+		} else {
+			totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
+			err = query.QueryRowContext(qctx, totalSQL, vals...).Scan(&total)
+		}
+		countTime = time.Since(countStarted)
+		if err != nil {
+			logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, 0, err, "count")
+			return nil, queryStageErr("count", tableName, err)
 		}
 	}
 
@@ -603,21 +693,41 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	stmt += " " + orderBy
 	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit+1, offset)
-	rows, err := ctx.AppDB().QueryContext(qctx, stmt, vals...)
+	sqlStarted := time.Now()
+	rows, err := query.QueryContext(qctx, stmt, vals...)
 	if err != nil {
-		return nil, err
+		sqlTime := time.Since(sqlStarted)
+		logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, err, "select")
+		return nil, queryStageErr("select", tableName, err)
 	}
-	defer rows.Close()
 	out, truncated, err := scanRowsBudget(rows, t, maxQueryBytes(ctx), limit)
+	closeErr := rows.Close()
+	sqlTime := time.Since(sqlStarted)
 	if err != nil {
-		return nil, err
+		logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, err, "scan")
+		return nil, queryStageErr("scan", tableName, err)
 	}
-	return map[string]any{"rows": out, "total": total, "truncated": truncated}, nil
+	if closeErr != nil {
+		return nil, queryStageErr("scan", tableName, closeErr)
+	}
+	if snapshot != nil {
+		if err := snapshot.Commit(); err != nil {
+			return nil, queryStageErr("scan", tableName, err)
+		}
+	}
+	logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, nil, "")
+	result := map[string]any{"rows": out, "truncated": truncated, "has_more": truncated}
+	if includeTotal {
+		result["total"] = total
+	}
+	return result, nil
 }
 
 // ─── rows_count ────────────────────────────────────────────────────
 
 func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -626,7 +736,7 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateIdentifier("table", tableName); err != nil {
 		return nil, err
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -635,24 +745,39 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if clause == "" {
-		return map[string]any{"count": t.RowCount}, nil
+		count, err := currentRowCount(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"count": count}, nil
 	}
 	stmt := "SELECT COUNT(*) FROM " + quote(t.PhysicalName)
 	if clause != "" {
 		stmt += " " + clause
 	}
 	var n int64
-	qctx, cancel := queryTimeoutContext(ctx)
-	defer cancel()
-	if err := ctx.AppDB().QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
+	read, err := acquireReadConn(ctx, tableName)
+	if err != nil {
 		return nil, err
 	}
+	defer read.conn.Close()
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	started := time.Now()
+	if err := read.conn.QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
+		elapsed := time.Since(started)
+		logReadQuery(ctx, tableName, "rows_count", read.queueWait, elapsed, 0, err, "count")
+		return nil, queryStageErr("count", tableName, err)
+	}
+	logReadQuery(ctx, tableName, "rows_count", read.queueWait, time.Since(started), 0, nil, "")
 	return map[string]any{"count": n}, nil
 }
 
 // ─── rows_aggregate ────────────────────────────────────────────────
 
 func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -661,7 +786,7 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := validateIdentifier("table", tableName); err != nil {
 		return nil, err
 	}
-	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	t, err := a.loadTableSchema(ctx, pid, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -719,22 +844,36 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	stmt += fmt.Sprintf(" LIMIT %d", limit+1)
 
-	qctx, cancel := queryTimeoutContext(ctx)
-	defer cancel()
-	rows, err := ctx.AppDB().QueryContext(qctx, stmt, vals...)
+	read, err := acquireReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out, truncatedByBytes, err := scanAggregateRows(rows, maxQueryBytes(ctx))
+	defer read.conn.Close()
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	started := time.Now()
+	rows, err := read.conn.QueryContext(qctx, stmt, vals...)
 	if err != nil {
-		return nil, err
+		elapsed := time.Since(started)
+		logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, err, "select")
+		return nil, queryStageErr("select", tableName, err)
+	}
+	out, truncatedByBytes, err := scanAggregateRows(rows, maxQueryBytes(ctx))
+	closeErr := rows.Close()
+	elapsed := time.Since(started)
+	if err != nil {
+		logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, err, "scan")
+		return nil, queryStageErr("scan", tableName, err)
+	}
+	if closeErr != nil {
+		return nil, queryStageErr("scan", tableName, closeErr)
 	}
 	truncated := truncatedByBytes
 	if len(out) > limit {
 		truncated = true
 		out = out[:limit]
 	}
+	logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, nil, "")
 	return map[string]any{"rows": out, "truncated": truncated}, nil
 }
 
@@ -887,11 +1026,24 @@ func scalarString(v any) any {
 // or a projection produced by buildSelect) against t for the given id.
 // Pass "" to default to a full-row select.
 func fetchRowByID(db *sql.DB, t *Table, id int64, selectClause string) (map[string]any, bool, error) {
+	return fetchRowByIDContext(context.Background(), db, t, id, selectClause)
+}
+
+type rowQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+type searchQueryer interface {
+	rowQueryer
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func fetchRowByIDContext(ctx context.Context, db rowQueryer, t *Table, id int64, selectClause string) (map[string]any, bool, error) {
 	if selectClause == "" {
 		selectClause = buildSelectAll(t)
 	}
 	stmt := selectClause + " FROM " + quote(t.PhysicalName) + " WHERE id = ?"
-	rows, err := db.Query(stmt, id)
+	rows, err := db.QueryContext(ctx, stmt, id)
 	if err != nil {
 		return nil, false, err
 	}

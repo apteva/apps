@@ -8,14 +8,14 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "tables" {
 		t.Errorf("name=%q", m.Name)
 	}
-	if m.Version != "0.1.13" {
-		t.Errorf("version=%q, want 0.1.13", m.Version)
+	if m.Version != "0.1.14" {
+		t.Errorf("version=%q, want 0.1.14", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
-	if len(m.Provides.MCPTools) != 14 {
-		t.Errorf("expected 14 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 17 {
+		t.Errorf("expected 17 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 }
 

@@ -16,6 +16,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -24,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.13
+version: 0.1.14
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
 icon: /ui/icon.svg
@@ -42,6 +43,9 @@ provides:
     - { name: tables_describe,  description: "Schema + row count for one table." }
     - { name: tables_alter,     description: "Add/rename/drop columns." }
     - { name: tables_drop,      description: "Delete a table and its rows." }
+    - { name: indexes_create,   description: "Create a validated composite index." }
+    - { name: indexes_list,     description: "List a table's indexes." }
+    - { name: indexes_drop,     description: "Drop a user-managed index." }
     - { name: rows_insert,      description: "Insert one or many rows; atomic." }
     - { name: rows_upsert,      description: "Insert or update rows by key; atomic." }
     - { name: rows_get,         description: "Fetch one row by id." }
@@ -104,13 +108,19 @@ config_schema:
   - { name: max_rows_per_table, type: text, default: "1000000" }
   - { name: max_query_rows, type: text, default: "1000" }
   - { name: max_query_ms, type: text, default: "2000" }
+  - { name: max_read_queue_ms, type: text, default: "1000" }
+  - { name: max_read_conns, type: text, default: "4" }
+  - { name: slow_query_ms, type: text, default: "250" }
   - { name: max_query_bytes, type: text, default: "4194304" }
   - { name: max_value_bytes, type: text, default: "1048576" }
   - { name: max_batch_rows, type: text, default: "1000" }
 upgrade_policy: auto-patch
 `
 
-type App struct{}
+type App struct {
+	schemaMu sync.RWMutex
+	cache    schemaCache
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -125,10 +135,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tables requires a db block")
 	}
 	globalCtx = ctx
+	if ctx.AppReadDB() != ctx.AppDB() {
+		ctx.AppReadDB().SetMaxOpenConns(maxReadConns(ctx))
+		ctx.AppReadDB().SetMaxIdleConns(maxReadConns(ctx))
+	}
 	ctx.Logger().Info("tables mounted",
 		"max_rows_per_table", maxRowsPerTable(ctx),
 		"max_query_rows", maxQueryRows(ctx),
 		"max_query_ms", maxQueryMs(ctx),
+		"max_read_queue_ms", maxReadQueueMs(ctx),
+		"max_read_conns", maxReadConns(ctx),
 		"max_query_bytes", maxQueryBytes(ctx),
 		"max_value_bytes", maxValueBytes(ctx),
 		"max_batch_rows", maxBatchRows(ctx))
@@ -202,6 +218,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			"required": []string{"name", "op"},
 		},
 	}
+	indexColumnSchema := map[string]any{
+		"oneOf": []any{
+			map[string]any{"type": "string"},
+			map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"col":   map[string]any{"type": "string"},
+					"order": map[string]any{"type": "string", "enum": []string{"asc", "desc"}},
+				},
+				"required": []string{"col"},
+			},
+		},
+	}
 	return []sdk.Tool{
 		{
 			Name:        "tables_create",
@@ -244,6 +273,35 @@ func (a *App) MCPTools() []sdk.Tool {
 				"confirm": map[string]any{"type": "boolean"},
 			}, []string{"name", "confirm"}),
 			Handler: a.toolTablesDrop,
+		},
+		{
+			Name:        "indexes_create",
+			Description: "Create a safe composite index. Args: table, name, columns ([name | {col, order?}]), unique?. Arbitrary SQL expressions are not accepted. Returns {index}.",
+			InputSchema: schemaObject(map[string]any{
+				"table":   map[string]any{"type": "string"},
+				"name":    map[string]any{"type": "string"},
+				"columns": map[string]any{"type": "array", "items": indexColumnSchema},
+				"unique":  map[string]any{"type": "boolean"},
+			}, []string{"table", "name", "columns"}),
+			Handler: a.toolIndexesCreate,
+		},
+		{
+			Name:        "indexes_list",
+			Description: "List user and rows_upsert-managed indexes for one table. Args: table. Returns {indexes}.",
+			InputSchema: schemaObject(map[string]any{
+				"table": map[string]any{"type": "string"},
+			}, []string{"table"}),
+			Handler: a.toolIndexesList,
+		},
+		{
+			Name:        "indexes_drop",
+			Description: "Drop a user-managed index. Args: table, name, confirm=true. Managed upsert indexes cannot be dropped.",
+			InputSchema: schemaObject(map[string]any{
+				"table":   map[string]any{"type": "string"},
+				"name":    map[string]any{"type": "string"},
+				"confirm": map[string]any{"type": "boolean"},
+			}, []string{"table", "name", "confirm"}),
+			Handler: a.toolIndexesDrop,
 		},
 		{
 			Name:        "rows_insert",
@@ -298,14 +356,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "rows_search",
-			Description: "Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by? (\"col\" | \"col desc\"), limit?, offset?, select? (list of column names — defaults to all columns; lets callers skip heavy/unused columns over the wire). Returns {rows, total}.",
+			Description: "Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Returns {rows, total?, has_more, truncated}.",
 			InputSchema: schemaObject(map[string]any{
-				"table":    map[string]any{"type": "string"},
-				"where":    whereSchema,
-				"order_by": map[string]any{"type": "string"},
-				"limit":    map[string]any{"type": "integer"},
-				"offset":   map[string]any{"type": "integer"},
-				"select":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"table":         map[string]any{"type": "string"},
+				"where":         whereSchema,
+				"order_by":      map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer"},
+				"offset":        map[string]any{"type": "integer"},
+				"select":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"include_total": map[string]any{"type": "boolean"},
 			}, []string{"table"}),
 			Handler: a.toolRowsSearch,
 		},
