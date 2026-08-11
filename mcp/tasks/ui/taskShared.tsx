@@ -511,7 +511,7 @@ export function TaskDetails({
                   className="rounded border border-border bg-bg px-3 py-2"
                 >
                   <div className="flex items-center gap-2 text-[10px]">
-                    <span className="text-text">{eventLabel(event)}</span>
+                    <span className="text-text">{taskEventLabel(event)}</span>
                     <span className="ml-auto text-text-dim">
                       {relativeWhen(event.created_at)}
                     </span>
@@ -576,16 +576,25 @@ export function TaskDetails({
   );
 }
 
-function eventLabel(event: TaskEvent) {
-  if (event.event_type === "created") return "Task created";
-  if (event.event_type === "state_changed")
-    return `State changed${event.to_state ? ` to ${event.to_state}` : ""}`;
-  if (event.event_type === "schedule_paused") return "Schedule paused";
-  if (event.event_type === "schedule_resumed") return "Schedule resumed";
-  if (event.event_type === "schedule_run_requested") return "Run requested";
-  if (event.event_type === "occurrence_skipped_overlap")
-    return "Occurrence skipped to avoid overlap";
-  return event.event_type.replaceAll("_", " ");
+export function taskEventLabel(event: TaskEvent) {
+  let label: string;
+  if (event.event_type === "created") label = "Task created";
+  else if (
+    (event.event_type === "state_changed" || event.event_type === "updated") &&
+    event.to_state
+  ) {
+    label = `${event.to_state.charAt(0).toUpperCase()}${event.to_state.slice(1)}`;
+  } else if (event.event_type === "schedule_paused") label = "Schedule paused";
+  else if (event.event_type === "schedule_resumed") label = "Schedule resumed";
+  else if (event.event_type === "schedule_run_requested") label = "Run requested";
+  else if (event.event_type === "occurrence_skipped_overlap")
+    label = "Occurrence skipped to avoid overlap";
+  else label = event.event_type.replaceAll("_", " ");
+
+  const progress = event.data?.progress;
+  return typeof progress === "number" && Number.isFinite(progress)
+    ? `${label} · ${progress}%`
+    : label;
 }
 
 export function selectGroups(tasks: Task[]) {

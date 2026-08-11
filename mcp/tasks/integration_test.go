@@ -48,7 +48,7 @@ func TestSidecar_DurableLifecycleAcrossMCPAndHTTP(t *testing.T) {
 	updated := sc.MCPAs("update", map[string]any{
 		"task_id": id, "state": "running", "progress": 40, "current_step": "Checking persistence",
 	}, 7, testThread, testProject)
-	if updated["state"] != "running" || updated["current_step"] != "Checking persistence" {
+	if updated["state"] != "running" || updated["current_step"] != "Checking persistence" || updated["execution_thread_id"] != testThread {
 		t.Fatalf("update response=%#v", updated)
 	}
 
@@ -65,8 +65,12 @@ func TestSidecar_DurableLifecycleAcrossMCPAndHTTP(t *testing.T) {
 	done := sc.MCPAs("complete", map[string]any{
 		"task_id": id, "result": "Durable app boundary verified",
 	}, 7, testThread, testProject)
-	if done["state"] != "completed" || done["result"] != "Durable app boundary verified" {
+	if done["state"] != "completed" || done["progress"] != float64(100) || done["current_step"] != "Completed" || done["result"] != "Durable app boundary verified" {
 		t.Fatalf("complete response=%#v", done)
+	}
+	resp = sc.GET(path, &detail)
+	if resp.Status != 200 || len(detail.Events) != 3 || detail.Events[2].Data["progress"] != float64(100) || detail.Events[2].Data["current_step"] != "Completed" {
+		t.Fatalf("completion detail status=%d events=%+v body=%s", resp.Status, detail.Events, resp.Body)
 	}
 
 	var listed struct {

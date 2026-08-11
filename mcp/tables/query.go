@@ -21,8 +21,10 @@ import (
 //  3. Statement count, duration, result rows, and result bytes are capped.
 //
 // Cross-table joins use {table_name} placeholders, which are resolved
-// against the current project plus globally shared tables.
+// strictly against the current project.
 func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -37,7 +39,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := validateReadOnlySQL(rawSQL); err != nil {
 		return nil, err
 	}
-	resolved, err := substitutePlaceholders(ctx, pid, rawSQL)
+	resolved, err := a.substitutePlaceholders(ctx, pid, rawSQL)
 	if err != nil {
 		return nil, err
 	}
@@ -49,16 +51,19 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	bound := make([]any, len(params))
 	copy(bound, params)
 
-	qctx, cancel := queryTimeoutContext(ctx)
-	defer cancel()
-
-	conn, err := ctx.AppDB().Conn(qctx)
+	read, err := acquireReadConn(ctx, "<sql>")
 	if err != nil {
 		return nil, err
 	}
+	conn := read.conn
 	defer conn.Close()
-	if _, err := conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
-		return nil, errf("enable sqlite query_only: %v", err)
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	sharedWriterConnection := ctx.AppReadDB() == ctx.AppDB()
+	if sharedWriterConnection {
+		if _, err := conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
+			return nil, errf("enable sqlite query_only: %v", err)
+		}
 	}
 	previousLengthLimit := -1
 	defer func() {
@@ -67,16 +72,21 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if previousLengthLimit >= 0 {
 			_, _ = sqlite.Limit(conn, 0, previousLengthLimit)
 		}
-		_, _ = conn.ExecContext(resetCtx, "PRAGMA query_only = OFF")
+		if sharedWriterConnection {
+			_, _ = conn.ExecContext(resetCtx, "PRAGMA query_only = OFF")
+		}
 	}()
 	previousLengthLimit, err = sqlite.Limit(conn, 0, int(maxQueryBytes(ctx))) // SQLITE_LIMIT_LENGTH
 	if err != nil {
 		return nil, errf("set sqlite result length limit: %v", err)
 	}
 
+	started := time.Now()
 	rows, err := conn.QueryContext(qctx, resolved, bound...)
 	if err != nil {
-		return nil, err
+		elapsed := time.Since(started)
+		logReadQuery(ctx, "<sql>", "tables_query", read.queueWait, 0, elapsed, err, "select")
+		return nil, queryStageErr("select", "<sql>", err)
 	}
 	defer rows.Close()
 
@@ -123,6 +133,8 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	elapsed := time.Since(started)
+	logReadQuery(ctx, "<sql>", "tables_query", read.queueWait, 0, elapsed, nil, "")
 	return map[string]any{
 		"columns":   cols,
 		"rows":      out,
@@ -159,17 +171,23 @@ func validateReadOnlySQL(s string) error {
 // for every user-table the project owns, leaving anything else alone.
 // This is the only mechanism the agent has to reach into user-tables
 // from raw SQL; we never expose physical names directly.
-func substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
+func (a *App) substitutePlaceholders(ctx *sdk.AppCtx, projectID, query string) (string, error) {
 	if !strings.ContainsAny(query, "{}") {
 		return query, nil
 	}
-	tables, err := loadTables(ctx.AppDB(), projectID)
-	if err != nil {
-		return "", err
-	}
 	out := query
-	for _, t := range tables {
-		out = strings.ReplaceAll(out, "{"+t.Name+"}", quote(t.PhysicalName))
+	seen := map[string]bool{}
+	for _, placeholder := range queryPlaceholderRe.FindAllString(query, -1) {
+		name := strings.TrimSuffix(strings.TrimPrefix(placeholder, "{"), "}")
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		table, err := a.loadTableSchema(ctx, projectID, name)
+		if err != nil {
+			return "", err
+		}
+		out = strings.ReplaceAll(out, placeholder, quote(table.PhysicalName))
 	}
 	if strings.ContainsAny(out, "{}") {
 		// Any unresolved placeholder is almost certainly a typo — fail

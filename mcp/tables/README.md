@@ -8,15 +8,20 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **14 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
-  `tables_alter`, `tables_drop`, `rows_insert`, `rows_get`,
+- **17 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+  `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
+  `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
   `rows_count`, `rows_aggregate`, `tables_query`
 - **Strict typed columns** — `text`, `number`, `bool`, `datetime`,
   `json`, `file_id` (FK into the `storage` app)
 - **Read-only SQL escape hatch** — `tables_query` runs on a SQLite
-  `query_only` connection, requires `{table_name}` placeholders for
+  read pool, requires `{table_name}` placeholders for
   user tables, blocks internal tables, and enforces time/row/byte caps
+- **Concurrent reads** — reads use a four-connection read-only pool while
+  writes remain serialized; schema metadata is cached per project and table
+- **Composite indexes** — validated column-based indexes can be created,
+  inspected, and dropped without exposing physical SQLite names
 - **Skill** — `how-to-use-tables` (`/tables`)
 
 ## Reserved columns
@@ -44,5 +49,5 @@ curl http://localhost:8080/health
 
 - Cross-app `file_id` validation on insert (just stores the integer;
   hydration is best-effort on `rows_get`)
-- General user-defined indexes and FTS. Upsert keys are automatically
-  backed by unique indexes; other filtered columns remain scan-based.
+- Expression indexes, partial indexes, and FTS. Composite indexes are
+  column-based; upsert keys are automatically backed by managed unique indexes.

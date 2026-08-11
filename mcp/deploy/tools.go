@@ -255,10 +255,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_store_apply", Handler: a.toolStoreApply,
-			Description: "Idempotently reconcile selected listing scopes with App Store Connect or Google Play without building or submitting. Args: name OR id, environment?, build_id?, scopes?, allow_partial?, review_demo_password?.",
+			Description: "Idempotently reconcile selected listing scopes with App Store Connect or Google Play without building or submitting. Media can be limited to provider-neutral media_kinds; allow_partial applies each valid media kind independently. Args: name OR id, environment?, build_id?, scopes?, media_kinds?, allow_partial?, review_demo_password?.",
 			InputSchema: storeToolDeploymentSchema(map[string]any{
 				"build_id":             map[string]any{"type": "integer"},
 				"scopes":               map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": storeScopeOrder}},
+				"media_kinds":          map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional media kinds such as icon, feature_graphic, phone_screenshot, tablet_screenshot, app_preview, or review_attachment."},
 				"allow_partial":        map[string]any{"type": "boolean", "description": "Apply independent ready scopes and return blocked/failed scopes separately."},
 				"review_demo_password": map[string]any{"type": "string", "description": "One-shot Apple review password; sent to Apple and never stored by Deploy."},
 			}),
@@ -1008,7 +1009,7 @@ func (a *App) toolStoreApply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	result, err := a.applyStoreConfigScoped(d, build, true, StoreApplyRequest{
-		Scopes: stringSliceValue(args["scopes"]), AllowPartial: boolArg(args, "allow_partial"),
+		Scopes: stringSliceValue(args["scopes"]), MediaKinds: stringSliceValue(args["media_kinds"]), AllowPartial: boolArg(args, "allow_partial"),
 		ReviewDemoPassword: strArg(args, "review_demo_password"),
 	})
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -28,6 +29,81 @@ type availabilityApplePlatform struct {
 type appleSettingsPlatform struct {
 	tk.BasePlatformClient
 	calls []integrationCall
+}
+
+type googleMediaPlatform struct {
+	tk.BasePlatformClient
+	calls    []integrationCall
+	mu       sync.Mutex
+	uploaded map[string]bool
+}
+
+func (p *googleMediaPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{Bindings: map[string]any{"play_store": int64(88)}}, nil
+}
+
+func (p *googleMediaPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "google-play-developer", Status: "active"}, nil
+}
+
+func (p *googleMediaPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "google-play-developer", Fields: map[string]string{"token": "play-token"}}, nil
+}
+
+func (p *googleMediaPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	p.mu.Unlock()
+	data := json.RawMessage(`{}`)
+	switch tool {
+	case "create_edit":
+		data = json.RawMessage(`{"id":"edit-1"}`)
+	case "get_app_details":
+		data = json.RawMessage(`{"data":{"defaultLanguage":"en-US"}}`)
+	case "list_store_listings":
+		data = json.RawMessage(`{"data":[{"language":"en-US"}]}`)
+	case "list_listing_images":
+		imageType := mapStringValue(input, "imageType")
+		p.mu.Lock()
+		uploaded := p.uploaded[imageType]
+		p.mu.Unlock()
+		if uploaded {
+			data = json.RawMessage(`{"data":[{"id":"image-1"}]}`)
+		} else {
+			data = json.RawMessage(`{"data":[]}`)
+		}
+	case "delete_all_listing_images":
+		p.mu.Lock()
+		p.uploaded[mapStringValue(input, "imageType")] = false
+		p.mu.Unlock()
+	}
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
+}
+
+type appleMediaPlatform struct {
+	tk.BasePlatformClient
+	calls       []integrationCall
+	phoneName   string
+	readIPadSet bool
+}
+
+func (p *appleMediaPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	p.calls = append(p.calls, integrationCall{Tool: tool, Input: input})
+	data := json.RawMessage(`{}`)
+	switch tool {
+	case "list_screenshot_sets":
+		data = json.RawMessage(`{"data":[{"id":"iphone-set","attributes":{"screenshotDisplayType":"APP_IPHONE_69"}},{"id":"ipad-set","attributes":{"screenshotDisplayType":"APP_IPAD_PRO_13"}}]}`)
+	case "list_screenshots":
+		if input["set_id"] == "ipad-set" {
+			p.readIPadSet = true
+		}
+		data, _ = json.Marshal(map[string]any{"data": []map[string]any{{
+			"id": "shot-1", "attributes": map[string]any{
+				"fileName": p.phoneName, "assetDeliveryState": map[string]any{"state": "COMPLETE"},
+			},
+		}}})
+	}
+	return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: data}, nil
 }
 
 func (p *appleSettingsPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
@@ -144,6 +220,148 @@ func TestManualPrivacyDoesNotBlockIndependentStoreScopes(t *testing.T) {
 	}
 	if !findingBlocksStoreScope(finding, "compliance") {
 		t.Fatal("privacy attestation did not block compliance")
+	}
+}
+
+func TestAndroidPartialMediaApplyCommitsValidIconIndependently(t *testing.T) {
+	platform := &googleMediaPlatform{uploaded: map[string]bool{}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/icon") {
+			t.Errorf("unexpected upload path %s", r.URL.Path)
+		}
+		platform.mu.Lock()
+		platform.uploaded["icon"] = true
+		platform.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"image-1"}`))
+	}))
+	defer server.Close()
+	oldUploadURL := googlePlayUploadBaseURL
+	googlePlayUploadBaseURL = server.URL
+	t.Cleanup(func() { googlePlayUploadBaseURL = oldUploadURL })
+
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-media", TargetKind: "android", SourceKind: "local", SourceRef: "/src", Framework: "android",
+		TargetConfigJSON: `{"package_name":"com.example.media"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+	root := t.TempDir()
+	doc := defaultStoreDocument("android")
+	doc.VersionName = "1.0"
+	doc.Localizations["en-US"] = StoreLocalization{Title: "Test", ShortDescription: "Short", Description: "Description"}
+	doc.Assets = []StoreAsset{{
+		ID: "icon", Kind: "icon", Locale: "en-US",
+		Path: writeTestStorePNG(t, root, d, "icon", 512, 512, true),
+	}}
+	if _, err := dbUpsertMobileStoreConfig(ctx.AppDB(), d, doc); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&App{dataDir: root}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+		Scopes: []string{"media"}, AllowPartial: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.AppliedAssets, []string{"icon"}) || !containsString(result.AppliedScopes, "media") {
+		t.Fatalf("result=%+v", result)
+	}
+	blocked := map[string]bool{}
+	for _, issue := range result.Blocked {
+		blocked[issue.MediaKind] = true
+	}
+	if !blocked["feature_graphic"] || !blocked["phone_screenshot"] {
+		t.Fatalf("blocked=%+v", result.Blocked)
+	}
+	platform.mu.Lock()
+	calls := append([]integrationCall(nil), platform.calls...)
+	platform.mu.Unlock()
+	for _, call := range calls {
+		if call.Tool == "delete_all_listing_images" && call.Input["imageType"] != "icon" {
+			t.Fatalf("unselected media was deleted: %+v", call)
+		}
+	}
+	if countIntegrationCalls(calls, "commit_edit") != 1 {
+		t.Fatalf("calls=%+v", calls)
+	}
+
+	explicit, err := (&App{dataDir: root}).applyStoreConfigScoped(d, nil, true, StoreApplyRequest{
+		MediaKinds: []string{"icon"}, AllowPartial: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(explicit.AppliedAssets, []string{"icon"}) || len(explicit.Blocked) != 0 {
+		t.Fatalf("explicit result=%+v", explicit)
+	}
+}
+
+func TestExplicitAndroidMediaKindIgnoresOtherMissingKinds(t *testing.T) {
+	doc := StoreDocument{Assets: []StoreAsset{{ID: "icon", Kind: "icon"}}}
+	preflight := StorePreflight{Findings: []StoreFinding{
+		{Code: "feature_graphic.google_required", Severity: "error", Scope: "media", MediaKind: "feature_graphic"},
+		{Code: "screenshots.google_minimum", Severity: "error", Scope: "media", MediaKind: "phone_screenshot"},
+	}}
+	kinds, err := normalizeMediaKinds("android", []string{"icon"})
+	if err != nil || !kinds["icon"] {
+		t.Fatalf("kinds=%v err=%v", kinds, err)
+	}
+	if issue := mediaKindBlockingIssue(preflight, "icon"); issue != nil {
+		t.Fatalf("icon blocked by unrelated finding: %+v", issue)
+	}
+	if got := mediaApplyCandidates("android", doc, preflight); !reflect.DeepEqual(got, []string{"feature_graphic", "icon", "phone_screenshot"}) {
+		t.Fatalf("candidates=%v", got)
+	}
+}
+
+func TestIOSRejectsUnsupportedStoreMediaKind(t *testing.T) {
+	kinds, err := normalizeMediaKinds("ios", []string{"icon"})
+	if err == nil || len(kinds) != 0 || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("kinds=%v err=%v", kinds, err)
+	}
+}
+
+func TestApplePartialScreenshotApplyDoesNotReadOrDeleteIPadSet(t *testing.T) {
+	root := t.TempDir()
+	d := &Deployment{ID: 9, EnvironmentID: 10, TargetKind: "ios"}
+	asset := StoreAsset{
+		ID: "phone", Kind: "phone_screenshot", Locale: "en-US", DisplayTarget: "APP_IPHONE_69", SHA256: "abc",
+		Path: writeTestStorePNG(t, root, d, "phone", 1320, 2868, true),
+	}
+	path, err := resolveStoreAssetPath(root, d, asset.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	platform := &appleMediaPlatform{phoneName: storeUploadFilename(path, asset.SHA256)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	err = (&App{dataDir: root}).reconcileAppleScreenshots(
+		&sdk.BoundIntegration{ConnectionID: 77, AppSlug: "app-store-connect"},
+		d,
+		map[string]string{"en-US": "localization-1"},
+		StoreDocument{DefaultLocale: "en-US", Assets: []StoreAsset{asset}},
+		mediaKindSet{"phone_screenshot": true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if platform.readIPadSet || countIntegrationCalls(platform.calls, "delete_screenshot") != 0 {
+		t.Fatalf("unselected iPad set was touched: calls=%+v", platform.calls)
 	}
 }
 

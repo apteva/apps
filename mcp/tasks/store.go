@@ -294,6 +294,8 @@ func (s *taskStore) Update(id, actorThread string, input UpdateTaskInput) (*Task
 	step, assigned, execution, result, failure := current.CurrentStep, current.AssignedThreadID, current.ExecutionThreadID, current.Result, current.Error
 	if input.CurrentStep != nil {
 		step = strings.TrimSpace(*input.CurrentStep)
+	} else if state == stateCompleted {
+		step = "Completed"
 	}
 	if input.AssignedThreadID != nil {
 		assigned = strings.TrimSpace(*input.AssignedThreadID)

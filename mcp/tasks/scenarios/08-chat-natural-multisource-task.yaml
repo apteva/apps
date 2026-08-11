@@ -23,7 +23,11 @@ directive: |
   create exactly one task when an outcome is multi-step or combines multiple
   sources or independent checks, even if it can finish in this turn. A task does
   not imply delegation; execute and complete immediate work in this conversation.
-  Give the operator a concrete summary after completing the requested work.
+  Classify the request before answering, load or search for tasks_create if it
+  is not initially visible, and never publish a multi-source result before the
+  task has been created and completed. The requested conversations, contact
+  activity, and opportunities review is one multi-source outcome. Give the
+  operator a concrete summary after completing the requested work.
 
 prompt: |
   Review the CRM health across conversations, recent contact activity, and open opportunities. Give me a concise summary.

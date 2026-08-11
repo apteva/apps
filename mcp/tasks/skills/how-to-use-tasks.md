@@ -35,9 +35,18 @@ The calling thread is always the creator. Immediate work defaults to that
 creator. Scheduled work defaults to the agent's configured default thread so a
 schedule does not depend on a UI conversation staying active. Assign an
 explicit opaque thread only when another existing thread should own the work.
-Use `tasks_spawn_thread` only when separate context, ownership, waiting, or
-parallel execution is useful. These are task relationships, not platform thread
-roles: the task record defines who owns the work.
+Tasks records work but does not create threads. When separate context,
+ownership, or parallel execution is useful, main creates the worker with the
+platform `spawn` tool and grants only the domain tools it needs. Keep Tasks
+ledger tools with main: the worker reports meaningful milestones and its final
+result to its parent, and main records them with `tasks_update` and
+`tasks_complete`. Prefer a paused worker, then call `tasks_assign` with that
+existing opaque thread ID so the durable assignment is recorded before work
+starts. The committed assignment event wakes the worker with the task context;
+send additional context explicitly if needed. A non-main thread that needs
+delegation asks main to perform this orchestration. These are task
+relationships, not platform thread roles: the task record defines who owns the
+work.
 
 When a task event reaches a thread, read the task with `tasks_get` before
 acting. A terminal receipt sent to the creator is context for that thread; the
@@ -46,10 +55,32 @@ is appropriate.
 
 ## Progress
 
-Use `tasks_update` at meaningful milestones, waits, blockers, and failures.
-Keep `current_step` concrete and use coarse progress percentages only when they
-help. Do not mirror task progress into global agent status. Finish exactly once
-with `tasks_complete`, or use failed/cancelled when that is the real outcome.
+Progress is task-level, not thread-level. Keep a task `running` while any
+executor is actively working, including a delegated worker. Use `waiting` only
+when nobody can currently advance the task because it awaits an external event
+such as user approval, an API callback, or a retry window. When that event
+arrives, return the task to `running` with an updated concrete `current_step`.
+
+Use `tasks_update` at meaningful phase boundaries, waits, blockers, and
+failures—not after every tool call. A short or empty check may move from its
+first running update directly to completion. Multi-stage, multi-message, or
+delegated work should normally record at least two or three intermediate
+milestones so the task does not sit at its initial percentage throughout the
+work. Percentages represent completed work and remain monotonic; changing
+threads or entering `waiting` does not by itself increase progress.
+
+For example, a four-message delegated inbox review could record:
+
+- `running` · 10% · `Listing unread Gmail messages`
+- `running` · 25% · `Found 4 unread messages`
+- `running` · 40% · `Gmail review worker processing 4 messages`
+- `running` · 70% · `4 messages classified and marked read`
+- `running` · 85% · `Publishing attention alert for Clima Confort`
+- `completed` · 100% · result `Processed 4 messages; 1 alert published`
+
+Do not mirror task progress into global agent status. Finish exactly once with
+`tasks_complete`, which records 100% and `Completed`, or use failed/cancelled
+when that is the real outcome.
 
 ## Scheduling
 

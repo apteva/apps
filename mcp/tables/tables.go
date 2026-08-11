@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 // ─── tables_create ─────────────────────────────────────────────────
 
 func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.Lock()
+	defer a.schemaMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -95,6 +98,7 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	a.cache.invalidate(pid, name)
 
 	emit(ctx, topicTableCreated, map[string]any{
 		"id":      id,
@@ -195,13 +199,28 @@ func buildCreateTableSQL(physical string, cols []Column) (string, error) {
 // ─── tables_list ───────────────────────────────────────────────────
 
 func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	tables, err := loadTables(ctx.AppDB(), pid)
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	tables, err := loadTablesContext(qctx, ctx.AppReadDB(), pid)
 	if err != nil {
-		return nil, err
+		return nil, queryStageErr("metadata", "<tables>", err)
+	}
+	for i := range tables {
+		if !tables[i].RowCountKnown {
+			count, err := currentRowCount(ctx, &tables[i])
+			if err != nil {
+				return nil, err
+			}
+			tables[i].RowCount = count
+			tables[i].RowCountKnown = true
+		}
+		a.cache.put(ctx.AppDBGeneration(), schemaCacheKey{projectID: pid, tableName: tables[i].Name}, &tables[i])
 	}
 	out := make([]map[string]any, 0, len(tables))
 	for _, t := range tables {
@@ -220,6 +239,8 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── tables_describe ───────────────────────────────────────────────
 
 func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.RLock()
+	defer a.schemaMu.RUnlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -228,7 +249,7 @@ func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := validateIdentifier("table", name); err != nil {
 		return nil, err
 	}
-	t, err := loadTable(ctx.AppDB(), pid, name)
+	t, err := a.loadTableWithCount(ctx, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +266,8 @@ func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── tables_alter ──────────────────────────────────────────────────
 
 func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.Lock()
+	defer a.schemaMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -253,7 +276,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := validateIdentifier("table", name); err != nil {
 		return nil, err
 	}
-	t, err := loadTable(ctx.AppDB(), pid, name)
+	t, err := a.loadTableWithCount(ctx, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +385,10 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if _, err := tx.Exec(`UPDATE columns_meta SET name = ? WHERE table_id = ? AND name = ?`, to, t.ID, from); err != nil {
 			return nil, err
 		}
+		if _, err := tx.Exec(`UPDATE index_columns SET column_name = ?
+			WHERE column_name = ? AND index_id IN (SELECT id FROM indexes_meta WHERE table_id = ?)`, to, from, t.ID); err != nil {
+			return nil, err
+		}
 		changeKind, changeCol = "rename", to
 
 	case drop != "":
@@ -373,6 +400,9 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		if columnIndex(t.Columns, drop) < 0 {
 			return nil, errf("column %q not found", drop)
+		}
+		if err := prepareIndexesForColumnDrop(tx, t, drop); err != nil {
+			return nil, err
 		}
 		ddl := fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", quote(t.PhysicalName), quote(drop))
 		if _, err := tx.Exec(ddl); err != nil {
@@ -390,8 +420,9 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	a.cache.invalidate(pid, name)
 
-	updated, err := loadTable(ctx.AppDB(), pid, name)
+	updated, err := a.loadTableWithCount(ctx, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +439,54 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		"columns":   updated.Columns,
 		"row_count": updated.RowCount,
 	}, nil
+}
+
+func prepareIndexesForColumnDrop(tx *sql.Tx, table *Table, column string) error {
+	rows, err := tx.Query(`SELECT i.id, i.name, i.physical_name, i.managed
+		FROM indexes_meta i
+		JOIN index_columns c ON c.index_id = i.id
+		WHERE i.table_id = ? AND c.column_name = ?
+		ORDER BY i.name`, table.ID, column)
+	if err != nil {
+		return err
+	}
+	type indexRef struct {
+		id       int64
+		name     string
+		physical string
+		managed  bool
+	}
+	var managed []indexRef
+	var userNames []string
+	for rows.Next() {
+		var ref indexRef
+		var isManaged int
+		if err := rows.Scan(&ref.id, &ref.name, &ref.physical, &isManaged); err != nil {
+			rows.Close()
+			return err
+		}
+		ref.managed = isManaged != 0
+		if ref.managed {
+			managed = append(managed, ref)
+		} else {
+			userNames = append(userNames, ref.name)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(userNames) > 0 {
+		return errf("column %q is used by indexes (%s); drop those indexes first", column, strings.Join(userNames, ", "))
+	}
+	for _, ref := range managed {
+		if _, err := tx.Exec("DROP INDEX " + quote(ref.physical)); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM indexes_meta WHERE id = ?`, ref.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sqlLiteral produces a safe inline SQL literal for the small subset
@@ -478,6 +557,8 @@ func sqlLiteral(t string, v any) (string, error) {
 // ─── tables_drop ───────────────────────────────────────────────────
 
 func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.schemaMu.Lock()
+	defer a.schemaMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -489,7 +570,7 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if !boolArg(args, "confirm") {
 		return nil, errf("confirm=true required to drop %q", name)
 	}
-	t, err := loadTable(ctx.AppDB(), pid, name)
+	t, err := a.loadTableSchema(ctx, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -510,6 +591,7 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	a.cache.invalidate(pid, name)
 	emit(ctx, topicTableDropped, map[string]any{
 		"id":   t.ID,
 		"name": name,
@@ -540,6 +622,7 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 	t.Columns = cols
 	if rowCount.Valid {
 		t.RowCount = rowCount.Int64
+		t.RowCountKnown = true
 	} else if err := initialiseRowCount(db, t); err != nil {
 		return nil, err
 	}
@@ -547,7 +630,11 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 }
 
 func loadTables(db *sql.DB, projectID string) ([]Table, error) {
-	rows, err := db.Query(`SELECT id, name, scope, physical_name, created_at, row_count
+	return loadTablesContext(context.Background(), db, projectID)
+}
+
+func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Table, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, name, scope, physical_name, created_at, row_count
 		FROM tables_meta
 		WHERE project_id = ?
 		ORDER BY name`, projectID)
@@ -556,7 +643,6 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 	}
 	defer rows.Close()
 	var out []Table
-	unknownCounts := map[int64]bool{}
 	for rows.Next() {
 		var t Table
 		var rowCount sql.NullInt64
@@ -565,8 +651,7 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 		}
 		if rowCount.Valid {
 			t.RowCount = rowCount.Int64
-		} else {
-			unknownCounts[t.ID] = true
+			t.RowCountKnown = true
 		}
 		out = append(out, t)
 	}
@@ -577,7 +662,7 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 	for i := range out {
 		indexByID[out[i].ID] = i
 	}
-	colRows, err := db.Query(`SELECT c.table_id, c.name, c.type, c.nullable, c.default_value
+	colRows, err := db.QueryContext(ctx, `SELECT c.table_id, c.name, c.type, c.nullable, c.default_value
 		FROM columns_meta c
 		JOIN tables_meta t ON t.id = c.table_id
 		WHERE t.project_id = ?
@@ -610,13 +695,6 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 	if err := colRows.Close(); err != nil {
 		return nil, err
 	}
-	for i := range out {
-		if unknownCounts[out[i].ID] {
-			if err := initialiseRowCount(db, &out[i]); err != nil {
-				return nil, err
-			}
-		}
-	}
 	return out, nil
 }
 
@@ -624,6 +702,7 @@ func initialiseRowCount(db *sql.DB, t *Table) error {
 	if err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(t.PhysicalName))).Scan(&t.RowCount); err != nil {
 		return err
 	}
+	t.RowCountKnown = true
 	_, err := db.Exec(`UPDATE tables_meta SET row_count = ? WHERE id = ? AND row_count IS NULL`, t.RowCount, t.ID)
 	return err
 }

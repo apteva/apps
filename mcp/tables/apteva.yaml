@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.13
+version: 0.1.14
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -39,6 +39,12 @@ provides:
       description: 'Add, rename, or drop columns. Args: name, add? / rename? / drop?. Adding a non-nullable column requires a default. Returns the new schema.'
     - name: tables_drop
       description: 'Delete a table and all its rows. Args: name, confirm. Idempotent only when confirm=true.'
+    - name: indexes_create
+      description: 'Create a validated composite index. Args: table, name, columns ([name or {col, order?}]), unique?. Arbitrary SQL expressions are not accepted.'
+    - name: indexes_list
+      description: 'List user and rows_upsert-managed indexes for a table. Args: table.'
+    - name: indexes_drop
+      description: 'Drop a user-managed index. Args: table, name, confirm=true. Managed upsert indexes cannot be dropped.'
     - name: rows_insert
       description: 'Insert one or many rows. Args: table, rows (array of objects keyed by column name). Atomic — first failing row aborts the whole call. Returns {ids, inserted}.'
     - name: rows_upsert
@@ -50,7 +56,7 @@ provides:
     - name: rows_delete
       description: 'Delete by id, or by filter when filter is supplied + confirm=true. Returns {deleted}.'
     - name: rows_search
-      description: 'Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by?, limit?, offset?. Ops: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null. Returns {rows, total}.'
+      description: 'Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Ops: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null.'
     - name: rows_count
       description: 'Count rows matching a filter. Args: table, where?. Returns {count}.'
     - name: rows_aggregate
@@ -142,6 +148,21 @@ config_schema:
     default: "2000"
     label: Max query duration (ms)
     description: Timeout for raw SQL, filtered search/count, and aggregate queries.
+  - name: max_read_queue_ms
+    type: text
+    default: "1000"
+    label: Max read queue wait (ms)
+    description: Time allowed to acquire a read connection before returning a read_queue timeout.
+  - name: max_read_conns
+    type: text
+    default: "4"
+    label: Concurrent read connections
+    description: Read-only SQLite connections available independently of the serialized writer. Valid range is 1 to 16.
+  - name: slow_query_ms
+    type: text
+    default: "250"
+    label: Slow query log threshold (ms)
+    description: Completed reads slower than this emit structured timing logs.
   - name: max_query_bytes
     type: text
     default: "4194304"

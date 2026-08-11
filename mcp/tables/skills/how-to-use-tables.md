@@ -54,6 +54,28 @@ Reference user-tables with `{name}` placeholders — the app substitutes
 the physical table name. Bind values via `?` + `params`, never inline.
 The query is timed-out and row-capped.
 
+## Fast search and pagination
+
+`rows_search` returns an exact `total` by default for compatibility. Set
+`include_total: false` when the caller only needs the current page; Tables
+then skips `COUNT(*)` and returns `has_more` from the `limit + 1` query.
+
+Create composite indexes for recurring filters and sorts. Put equality
+filters first, followed by range or ordering columns:
+
+```json
+{
+  "table": "records",
+  "name": "status_expiry",
+  "columns": ["status", "expires_at", "id"]
+}
+```
+
+Use `indexes_list` to inspect indexes and `indexes_drop` with `confirm: true`
+to remove user-managed indexes. Unique indexes reject creation when existing
+rows contain duplicate keys. `rows_upsert` creates and owns its unique indexes
+automatically.
+
 ## File-backed rows
 
 Set `hydrate_files: true` on `rows_get` to swap each `file_id` integer

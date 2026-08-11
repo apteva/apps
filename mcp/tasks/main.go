@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.4
+version: 3.2.5
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -38,9 +38,8 @@ provides:
     - { name: create, description: "Create one durable task for multi-step, multi-source, delegated, scheduled, or resumable work." }
     - { name: list, description: List durable tasks visible to the calling agent. }
     - { name: get, description: Get one task and its event history. }
-    - { name: update, description: Update meaningful task progress or state. }
-    - { name: assign, description: Assign a task to an opaque agent thread. }
-    - { name: spawn_thread, description: Create a task execution thread and assign the task to it. }
+    - { name: update, description: Record meaningful task-level progress and state. }
+    - { name: assign, description: Assign a task to an existing opaque agent thread. }
     - { name: complete, description: Complete a task with a concrete result. }
     - { name: cancel, description: Cancel a task or schedule. }
     - { name: pause, description: Pause a scheduled task. }
@@ -142,7 +141,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.4")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.5")
 	return nil
 }
 

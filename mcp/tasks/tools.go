@@ -35,12 +35,11 @@ func (a *App) tools() []sdk.Tool {
 			"states": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "include_runs": map[string]any{"type": "boolean"}, "limit": map[string]any{"type": "integer"},
 		}), HandlerCtx: a.toolList},
 		{Name: "get", Description: "Get a task and its chronological event history. Read this before resuming assigned work.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), HandlerCtx: a.toolGet},
-		{Name: "update", Description: "Update task state, coarse progress, or current step only at meaningful milestones, waits, blockers, or failures. This is the task's progress record; do not mirror it into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
+		{Name: "update", Description: "Record task-level state and progress at meaningful phase boundaries. Keep the task running while any executor is actively working, including a delegated worker. Use waiting only when no executor can progress until an external event; when work resumes, return to running with a concrete current_step. Multi-stage or delegated work should usually have at least two or three intermediate milestones, while short work may move directly from its first update to completion. Do not update after every tool call or mirror task progress into global status.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{
 			"task_id": map[string]any{"type": "string"}, "state": map[string]any{"type": "string", "enum": []string{"queued", "running", "waiting", "blocked", "failed"}}, "progress": map[string]any{"type": "integer", "minimum": 0, "maximum": 100}, "current_step": map[string]any{"type": "string"}, "error": map[string]any{"type": "string"}, "schedule": scheduleSchema(),
 		}), Meta: wakeAlways, HandlerCtx: a.toolUpdate},
-		{Name: "assign", Description: "Assign a task to an opaque thread id belonging to the same agent. The platform does not classify the target thread.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
-		{Name: "spawn_thread", Description: "Create a dedicated execution thread for a task and atomically assign the task to it. Use only when separate ownership, context, waiting, or parallelism is useful.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}, "instructions": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolSpawnThread},
-		{Name: "complete", Description: "Complete an assigned task once with its concrete result. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
+		{Name: "assign", Description: "Assign a task to an existing opaque thread id belonging to the same agent. This records ownership and sends the assignment event; it never creates a thread. Main must use the platform spawn tool first when a new worker is needed.", InputSchema: objectSchema([]string{"task_id", "thread_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "thread_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolAssign},
+		{Name: "complete", Description: "Complete an assigned task once with its concrete result. Completion sets progress to 100 and current_step to Completed. Tasks sends a structured terminal receipt to its creator thread when different; do not duplicate that delivery.", InputSchema: objectSchema([]string{"task_id", "result"}, map[string]any{"task_id": map[string]any{"type": "string"}, "result": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolComplete},
 		{Name: "cancel", Description: "Cancel an active task or scheduled series.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}, "reason": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolCancel},
 		{Name: "pause", Description: "Pause a scheduled task without deleting it.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolPause},
 		{Name: "resume", Description: "Resume a paused scheduled task and calculate its next occurrence from server time.", InputSchema: objectSchema([]string{"task_id"}, map[string]any{"task_id": map[string]any{"type": "string"}}), Meta: wakeAlways, HandlerCtx: a.toolResume},
@@ -190,6 +189,13 @@ func (a *App) toolUpdate(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if v, ok := args["error"].(string); ok {
 		input.Error = &v
 	}
+	if input.State != nil && strings.EqualFold(strings.TrimSpace(*input.State), stateRunning) && strings.TrimSpace(task.ExecutionThreadID) == "" {
+		executionThreadID := strings.TrimSpace(task.AssignedThreadID)
+		if executionThreadID == "" {
+			executionThreadID = caller.ThreadID
+		}
+		input.ExecutionThreadID = &executionThreadID
+	}
 	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
 	if err != nil {
 		return nil, err
@@ -209,7 +215,12 @@ func (a *App) toolAssign(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if target == "" {
 		return nil, errors.New("thread_id required")
 	}
-	updated, _, err := a.store.Update(task.ID, caller.ThreadID, UpdateTaskInput{AssignedThreadID: &target})
+	input := UpdateTaskInput{AssignedThreadID: &target}
+	if target != task.AssignedThreadID {
+		noExecutor := ""
+		input.ExecutionThreadID = &noExecutor
+	}
+	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -217,31 +228,6 @@ func (a *App) toolAssign(ctx context.Context, app *sdk.AppCtx, args map[string]a
 		_ = a.notifyAssigned(task.ID, "task.assigned")
 	}
 	return updated, nil
-}
-
-func (a *App) toolSpawnThread(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	caller, task, err := a.taskForCaller(ctx, app, args)
-	if err != nil {
-		return nil, err
-	}
-	threadID := strings.TrimSpace(stringArg(args, "thread_id"))
-	if threadID == "" {
-		return nil, errors.New("thread_id required")
-	}
-	if app.ThreadAPI() == nil {
-		return nil, errors.New("platform thread API unavailable")
-	}
-	directive := fmt.Sprintf("\n\n[ASSIGNED TASK]\nTask ID: %s\nOutcome: %s\n%s\nRead it with the Tasks app, update meaningful progress, and complete it exactly once.", task.ID, task.Title, stringArg(args, "instructions"))
-	spawned, err := app.ThreadAPI().SpawnThread(sdk.ThreadSpawnRequest{AgentID: caller.AgentID, ThreadID: threadID, DirectiveSuffix: directive})
-	if err != nil {
-		return nil, err
-	}
-	updated, _, err := a.store.Update(task.ID, caller.ThreadID, UpdateTaskInput{AssignedThreadID: &threadID, ExecutionThreadID: &threadID})
-	if err != nil {
-		return nil, err
-	}
-	_ = a.notifyAssigned(task.ID, "task.assigned")
-	return map[string]any{"task": updated, "thread": spawned.Thread, "spawn_status": spawned.Status}, nil
 }
 
 func (a *App) toolComplete(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -253,7 +239,15 @@ func (a *App) toolComplete(ctx context.Context, app *sdk.AppCtx, args map[string
 	if result == "" {
 		return nil, errors.New("result required")
 	}
-	updated, _, err := a.store.Update(task.ID, caller.ThreadID, UpdateTaskInput{State: &state, Result: &result})
+	input := UpdateTaskInput{State: &state, Result: &result}
+	if strings.TrimSpace(task.ExecutionThreadID) == "" {
+		executionThreadID := strings.TrimSpace(task.AssignedThreadID)
+		if executionThreadID == "" {
+			executionThreadID = caller.ThreadID
+		}
+		input.ExecutionThreadID = &executionThreadID
+	}
+	updated, _, err := a.store.Update(task.ID, caller.ThreadID, input)
 	if err != nil {
 		return nil, err
 	}
