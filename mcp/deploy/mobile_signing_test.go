@@ -1,18 +1,125 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	"howett.net/plist"
 )
+
+func TestGeneratedAndroidSigningIdentityIsJavaCompatible(t *testing.T) {
+	input, payload, err := generateAndroidSigningIdentity("p1", "com.example.android")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if input.CertificateSHA1 == "" || input.CertificateSHA256 == "" || input.ExpiresAt == "" {
+		t.Fatalf("identity metadata incomplete: %#v", input)
+	}
+	if !strings.HasPrefix(payload.KeyAlias, generatedAndroidKeyAliasPrefix) ||
+		payload.KeyPassword == payload.StorePassword {
+		t.Fatalf("generated alias/passwords are not independent: alias=%q", payload.KeyAlias)
+	}
+	pfx, err := base64.StdEncoding.DecodeString(payload.KeystoreBase64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := androidSigningIdentityFromPKCS12("p1", "com.example.android", pfx, payload.StorePassword, payload.KeyPassword, payload.KeyAlias); err != nil {
+		t.Fatalf("generated keystore cannot be imported: %v", err)
+	}
+	keytool, err := exec.LookPath("keytool")
+	if err != nil {
+		t.Skip("keytool is unavailable")
+	}
+	path := filepath.Join(t.TempDir(), "upload.p12")
+	if err := os.WriteFile(path, pfx, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(keytool, "-list", "-storetype", "PKCS12", "-keystore", path,
+		"-storepass", payload.StorePassword, "-alias", payload.KeyAlias).CombinedOutput()
+	if err != nil {
+		t.Fatalf("keytool rejected generated keystore alias %q: %v\n%s", payload.KeyAlias, err, output)
+	}
+}
+
+func TestAndroidMobileSigningSetupProvisionsCodemagic(t *testing.T) {
+	platform := &mobileSigningPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "android-app", TargetKind: "android", SourceKind: "local", SourceRef: t.TempDir(),
+		Framework: "android", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"runner-app","workflow_id":"android","branch":"main","source_mode":"bundle"}`,
+		TargetConfigJSON: `{"package_name":"com.example.android"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbGetEnvironmentByName(ctx.AppDB(), d.ID, defaultEnvironmentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d = effectiveDeploymentForEnvironment(d, env)
+
+	app := &App{dataDir: t.TempDir()}
+	result, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.Identity == nil || result.Setup.IdentityID != result.Identity.ID ||
+		result.Setup.PreparedRevision != result.Identity.Revision {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.Identity.ApplicationIdentifier != "com.example.android" || result.Identity.CertificateSHA256 == "" {
+		t.Fatalf("identity=%+v", result.Identity)
+	}
+	call := firstSigningCall(platform.calls, "import_group_variables")
+	if call == nil {
+		t.Fatalf("Codemagic variables were not provisioned: calls=%v", platform.calls)
+	}
+	names := map[string]bool{}
+	for _, variable := range call.Input["variables"].([]map[string]any) {
+		names[variable["name"].(string)] = true
+	}
+	for _, required := range []string{
+		"ANDROID_UPLOAD_KEYSTORE_BASE64", "ANDROID_UPLOAD_KEY_ALIAS",
+		"ANDROID_UPLOAD_STORE_PASSWORD", "ANDROID_UPLOAD_KEY_PASSWORD", "ANDROID_UPLOAD_CERT_SHA256",
+	} {
+		if !names[required] {
+			t.Errorf("missing secure Codemagic variable %s", required)
+		}
+	}
+
+	providerCalls := len(platform.calls)
+	second, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Identity.ID != result.Identity.ID || second.Identity.Revision != result.Identity.Revision {
+		t.Fatalf("idempotent setup changed identity: first=%+v second=%+v", result.Identity, second.Identity)
+	}
+	if len(platform.calls) != providerCalls {
+		t.Fatalf("idempotent setup rewrote provider secrets: before=%d after=%d", providerCalls, len(platform.calls))
+	}
+}
 
 type mobileSigningPlatform struct {
 	tk.BasePlatformClient
@@ -20,6 +127,7 @@ type mobileSigningPlatform struct {
 	appExists      bool
 	bundleID       string
 	groupID        string
+	groupName      string
 	variables      map[string]string
 	certificateSeq int
 	profileSeq     int
@@ -106,7 +214,20 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 			p.certificates = map[string]bool{}
 		}
 		p.certificates[id] = true
-		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q}}`, id))
+		csrBlock, _ := pem.Decode([]byte(input["csrContent"].(string)))
+		csr, _ := x509.ParseCertificateRequest(csrBlock.Bytes)
+		caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		now := time.Now().UTC()
+		certificateDER, _ := x509.CreateCertificate(rand.Reader, &x509.Certificate{
+			SerialNumber: big.NewInt(int64(p.certificateSeq)), Subject: pkix.Name{CommonName: "Apple Distribution"},
+			NotBefore: now.Add(-time.Minute), NotAfter: now.AddDate(1, 0, 0), KeyUsage: x509.KeyUsageDigitalSignature,
+		}, &x509.Certificate{
+			SerialNumber: big.NewInt(100), Subject: pkix.Name{CommonName: "Test Apple CA"},
+			NotBefore: now.Add(-time.Hour), NotAfter: now.AddDate(2, 0, 0), IsCA: true,
+			KeyUsage: x509.KeyUsageCertSign, PublicKey: &caKey.PublicKey,
+		}, csr.PublicKey, caKey)
+		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":%q,"attributes":{"certificateContent":%q}}}`,
+			id, base64.StdEncoding.EncodeToString(certificateDER)))
 	case "list_certificates":
 		items := make([]map[string]any, 0, len(p.certificates))
 		for id, available := range p.certificates {
@@ -123,15 +244,18 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 	case "create_profile":
 		p.profileSeq++
 		data = json.RawMessage(fmt.Sprintf(`{"data":{"id":"profile-%d"}}`, p.profileSeq))
+	case "get_profile":
+		data = json.RawMessage(`{"data":{"id":"profile","attributes":{"profileContent":"cHJvZmlsZQ=="}}}`)
 	case "list_app_variable_groups":
 		if p.groupID == "" {
 			data = json.RawMessage(`{"groups":[]}`)
 		} else {
-			data = json.RawMessage(fmt.Sprintf(`{"groups":[{"_id":%q,"name":"apteva-ios-1-production"}]}`, p.groupID))
+			data = json.RawMessage(fmt.Sprintf(`{"groups":[{"_id":%q,"name":%q}]}`, p.groupID, p.groupName))
 		}
 	case "create_app_variable_group":
 		p.groupID = "group-1"
-		data = json.RawMessage(`{"_id":"group-1","name":"apteva-ios-1-production"}`)
+		p.groupName = input["name"].(string)
+		data = json.RawMessage(fmt.Sprintf(`{"_id":"group-1","name":%q}`, p.groupName))
 	case "list_group_variables":
 		items := make([]map[string]string, 0, len(p.variables))
 		for name, id := range p.variables {
@@ -155,6 +279,7 @@ func (p *mobileSigningPlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 
 func newIOSSigningDeployment(t *testing.T, platform *mobileSigningPlatform) (*sdk.AppCtx, *Deployment) {
 	t.Helper()
+	t.Setenv(mobileSigningVaultKeyFileEnv, filepath.Join(t.TempDir(), "vault-key"))
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
 	oldGlobal := globalCtx
 	globalCtx = ctx
@@ -211,6 +336,19 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	if len(result.Setup.KeyFingerprint) != 64 {
 		t.Fatalf("fingerprint=%q", result.Setup.KeyFingerprint)
 	}
+	if result.Identity == nil || result.Identity.CertificatePEM == "" ||
+		result.Identity.CertificateSHA256 == "" || result.Identity.ExpiresAt == "" {
+		t.Fatalf("durable iOS certificate metadata is incomplete: identity=%+v", result.Identity)
+	}
+	credentials, err := app.iosSigningCredentials(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"certificate_private_key", "certificate_pem", "provisioning_profile_base64", "certificate_sha256"} {
+		if credentials[field] == "" {
+			t.Errorf("generic iOS runner credential %s is missing", field)
+		}
+	}
 	var providerConfig map[string]any
 	if err := json.Unmarshal([]byte(result.Setup.ProviderConfigJSON), &providerConfig); err != nil {
 		t.Fatal(err)
@@ -249,7 +387,7 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Groups) != 1 || cfg.Groups[0] != "apteva-ios-1-production" {
+	if len(cfg.Groups) != 1 || !strings.HasPrefix(cfg.Groups[0], "apteva-ios-signing-") {
 		t.Fatalf("groups=%v", cfg.Groups)
 	}
 	target, _ := parseMobileTargetConfig(env.TargetConfigJSON)
@@ -367,8 +505,10 @@ func TestMobileSigningSetupReprovisionsWhenProviderAppChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Setup.AppleCertificateID == first.Setup.AppleCertificateID {
-		t.Fatalf("provider app change reused certificate: first=%+v second=%+v", first.Setup, second.Setup)
+	if second.Setup.AppleCertificateID != first.Setup.AppleCertificateID ||
+		second.Setup.IdentityID != first.Setup.IdentityID ||
+		second.Setup.PreparedRevision != first.Setup.PreparedRevision {
+		t.Fatalf("provider app change replaced durable identity: first=%+v second=%+v", first.Setup, second.Setup)
 	}
 	var providerConfig map[string]any
 	if err := json.Unmarshal([]byte(second.Setup.ProviderConfigJSON), &providerConfig); err != nil {
@@ -376,6 +516,71 @@ func TestMobileSigningSetupReprovisionsWhenProviderAppChanges(t *testing.T) {
 	}
 	if providerConfig["app_id"] != "new-runner-app" {
 		t.Fatalf("provider config=%v", providerConfig)
+	}
+}
+
+func TestIOSSigningIdentitySurvivesDeploymentDeletion(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	ctx, firstDeployment := newIOSSigningDeployment(t, platform)
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), firstDeployment, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Identity == nil {
+		t.Fatal("first setup did not create a durable identity")
+	}
+	if err := dbDeleteDeployment(ctx.AppDB(), "p1", firstDeployment.ID); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := dbGetMobileSigningIdentity(ctx.AppDB(), "p1", "ios", "issuer-secret", "com.example.ios")
+	if err != nil || identity == nil || identity.ID != first.Identity.ID {
+		t.Fatalf("identity did not survive deployment deletion: identity=%+v err=%v", identity, err)
+	}
+	recreated, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "ios-app-recreated", TargetKind: "ios", SourceKind: "local", SourceRef: firstDeployment.SourceRef,
+		Framework: "ios", BuildBackend: "codemagic",
+		BuildBackendJSON: firstDeployment.BuildBackendJSON, TargetConfigJSON: firstDeployment.TargetConfigJSON,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbGetEnvironmentByName(ctx.AppDB(), recreated.ID, defaultEnvironmentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.setupMobileSigning(t.Context(), effectiveDeploymentForEnvironment(recreated, env), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Identity == nil || second.Identity.ID != first.Identity.ID ||
+		second.Setup.AppleCertificateID != first.Setup.AppleCertificateID || platform.certificateSeq != 1 {
+		t.Fatalf("recreated deployment replaced identity: first=%+v second=%+v certificates=%d",
+			first, second, platform.certificateSeq)
+	}
+}
+
+func TestLegacyIOSSigningSetupIsNotRotatedImplicitly(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	ctx, d := newIOSSigningDeployment(t, platform)
+	app := &App{}
+	first, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`DELETE FROM mobile_signing_identities`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE mobile_signing_setups SET identity_id=0, prepared_revision=0 WHERE id=?`, first.Setup.ID); err != nil {
+		t.Fatal(err)
+	}
+	certificateCount := platform.certificateSeq
+	result, err := app.setupMobileSigning(t.Context(), d, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.Identity != nil || len(result.ManualActions) == 0 || platform.certificateSeq != certificateCount {
+		t.Fatalf("legacy setup rotated unexpectedly: result=%+v certificates=%d", result, platform.certificateSeq)
 	}
 }
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.23.12
+version: 0.24.0
 description: |
   Build and release services, Android apps, and iOS apps across local
   and external build backends using a provider-neutral build contract.
@@ -51,13 +51,6 @@ requires:
       capabilities: []
       label: Google Play Developer
       hint: Required to publish signed Android App Bundles to Google Play tracks.
-    - role: android_signing
-      kind: integration
-      required: false
-      compatible_slugs: [android-upload-signing]
-      capabilities: []
-      label: Android Upload Signing
-      hint: Required only when Deploy must sign an Android App Bundle that the project did not sign during its Gradle build.
     - role: app_store
       kind: integration
       required: false
@@ -102,7 +95,7 @@ provides:
     - name: deploy_cloud_backend_setup
       description: Discover or create a provider's shared build adapter and configure a deployment environment.
     - name: deploy_mobile_signing_setup
-      description: Configure, reconcile, repair, or explicitly rotate iOS distribution signing and deliver secrets to the selected cloud build provider. Android upload signing is read from the bound Android Upload Signing integration.
+      description: Create, reconcile, repair, or explicitly rotate Deploy-managed Android or iOS signing and prepare the selected build provider without exposing private keys.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
     - name: deploy_store_get

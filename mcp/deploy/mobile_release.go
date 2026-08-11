@@ -385,8 +385,25 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 		return errors.New("Android release requires target_config_json.package_name")
 	}
 	primary := filepath.Join(b.ArtifactPath, manifest.Primary)
-	if err := ensureAndroidBundleSigned(primary, true, logW); err != nil {
+	d, err := a.deploymentForBuild(b)
+	if err != nil {
 		return err
+	}
+	signingCredentials, err := a.androidSigningCredentials(d)
+	if err != nil {
+		return err
+	}
+	expectedFingerprint := normalizeCertificateFingerprint(signingCredentials["upload_certificate_sha256"])
+	providerEvidenceMatches := manifest.SigningVerified && androidBundleHasSignature(primary) &&
+		normalizeCertificateFingerprint(manifest.CertificateSHA256) == expectedFingerprint
+	if providerEvidenceMatches {
+		fmt.Fprintln(logW, "Android bundle carries verified build-provider signing evidence for the managed upload certificate")
+	} else {
+		if err := ensureAndroidBundleSigned(primary, true, logW, signingCredentials); err != nil {
+			return err
+		}
+		manifest.SigningVerified = true
+		manifest.CertificateSHA256 = expectedFingerprint
 	}
 	for i := range manifest.Files {
 		if manifest.Files[i].Name == manifest.Primary {

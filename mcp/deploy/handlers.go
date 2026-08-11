@@ -77,6 +77,10 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentMobileSigning(w, r, d)
 	case tail == "mobile-signing/setup":
 		a.httpDeploymentMobileSigningSetup(w, r, d)
+	case tail == "mobile-signing/import":
+		a.httpDeploymentMobileSigningImport(w, r, d)
+	case tail == "mobile-signing/recovery":
+		a.httpDeploymentMobileSigningRecovery(w, r, d)
 	case tail == "store-config":
 		a.httpDeploymentStoreConfig(w, r, d)
 	case tail == "store-plan":
@@ -332,11 +336,39 @@ func (a *App) httpDeploymentMobileSigning(w http.ResponseWriter, r *http.Request
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	identities := make([]MobileSigningIdentity, 0, len(setups))
+	seen := map[int64]bool{}
+	for i := range setups {
+		if setups[i].IdentityID <= 0 || seen[setups[i].IdentityID] {
+			continue
+		}
+		identity, getErr := dbGetMobileSigningIdentityByID(globalCtx.AppDB(), setups[i].IdentityID)
+		if getErr != nil {
+			httpErr(w, http.StatusInternalServerError, getErr.Error())
+			return
+		}
+		if identity != nil {
+			identities = append(identities, *identity)
+			seen[identity.ID] = true
+		}
+	}
+	if len(identities) == 0 && d.TargetKind == "android" {
+		identity, getErr := a.mobileSigningIdentityForDeployment(d)
+		if getErr != nil {
+			httpErr(w, http.StatusInternalServerError, getErr.Error())
+			return
+		}
+		if identity != nil {
+			identities = append(identities, *identity)
+		}
+	}
 	httpJSON(w, map[string]any{
 		"deployment_id":  d.ID,
 		"environment_id": d.EnvironmentID,
 		"environment":    d.EnvironmentName,
 		"setups":         setups,
+		"identities":     identities,
+		"signing":        mobileSigningStatusSummary(d, setups, identities),
 		"count":          len(setups),
 	})
 }

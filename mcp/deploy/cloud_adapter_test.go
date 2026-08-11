@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -30,6 +31,10 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 		`print(f"{key}={value}")`,
 		`${APTEVA_XCODE_WORKSPACE:-}`,
 		`${APTEVA_VERSION_CODE:-}`,
+		"ANDROID_UPLOAD_KEYSTORE_BASE64",
+		"ANDROID_UPLOAD_CERT_SHA256",
+		"APTEVA_ANDROID_SIGNER_SHA256",
+		`"signing_verified"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Codemagic adapter is missing %q", required)
@@ -40,6 +45,37 @@ func TestCodemagicAdapterTemplateIsGenericAndValidYAML(t *testing.T) {
 	}
 	if strings.Contains(text, "${APTEVA_VARIANT^}") {
 		t.Fatal("Codemagic runner must remain compatible with macOS Bash 3")
+	}
+	if strings.Contains(text, "CM_KEYSTORE_PATH") {
+		t.Fatal("Codemagic runner still depends on provider-managed Android signing")
+	}
+	var signingScript string
+	var findSigningScript func(any)
+	findSigningScript = func(value any) {
+		switch current := value.(type) {
+		case map[string]any:
+			for key, child := range current {
+				if key == "script" {
+					if script, ok := child.(string); ok && strings.Contains(script, "ANDROID_UPLOAD_KEYSTORE_BASE64") {
+						signingScript = script
+					}
+				}
+				findSigningScript(child)
+			}
+		case []any:
+			for _, child := range current {
+				findSigningScript(child)
+			}
+		}
+	}
+	findSigningScript(document)
+	if signingScript == "" {
+		t.Fatal("Codemagic Android signing script was not found")
+	}
+	command := exec.Command("bash", "-n")
+	command.Stdin = strings.NewReader(signingScript)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Codemagic Android signing script is not valid Bash: %v\n%s", err, output)
 	}
 	for _, required := range []string{
 		`variant_task="$(printf '%s' "$APTEVA_VARIANT" | awk`,

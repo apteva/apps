@@ -130,16 +130,46 @@ workflows:
             fi
             ./gradlew "${args[@]}"
             cp "$(find . -path '*/outputs/bundle/*' -name '*.aab' -print -quit)" "$output/app.aab"
-            if [[ -n "${CM_KEYSTORE_PATH:-}" ]]; then
-              jarsigner \
-                -keystore "$CM_KEYSTORE_PATH" \
-                -storepass:env CM_KEYSTORE_PASSWORD \
-                -keypass:env CM_KEY_PASSWORD \
-                "$output/app.aab" "$CM_KEY_ALIAS"
-            fi
           else
             echo "unsupported APTEVA_TARGET_KIND=$APTEVA_TARGET_KIND" >&2
             exit 1
+          fi
+
+          if [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
+            required=(ANDROID_UPLOAD_KEYSTORE_BASE64 ANDROID_UPLOAD_KEY_ALIAS ANDROID_UPLOAD_STORE_PASSWORD ANDROID_UPLOAD_CERT_SHA256)
+            for name in "${required[@]}"; do
+              test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
+            done
+            keystore="$CM_BUILD_DIR/apteva-upload-key.p12"
+            export APTEVA_ANDROID_KEYSTORE_PATH="$keystore"
+            umask 077
+            python3 - <<'PY'
+          import base64
+          import os
+
+          with open(os.environ["APTEVA_ANDROID_KEYSTORE_PATH"], "wb") as f:
+              f.write(base64.b64decode(os.environ["ANDROID_UPLOAD_KEYSTORE_BASE64"], validate=True))
+          PY
+            chmod 600 "$keystore"
+            if ! unzip -Z1 "$output/app.aab" | grep -Eiq '^META-INF/.*\.SF$'; then
+              jarsigner \
+                -keystore "$keystore" \
+                -storetype PKCS12 \
+                -storepass:env ANDROID_UPLOAD_STORE_PASSWORD \
+                -keypass:env ANDROID_UPLOAD_KEY_PASSWORD \
+                -sigalg SHA256withRSA \
+                -digestalg SHA-256 \
+                "$output/app.aab" "$ANDROID_UPLOAD_KEY_ALIAS"
+            fi
+            jarsigner -verify -certs "$output/app.aab"
+            actual_fingerprint="$(keytool -printcert -jarfile "$output/app.aab" -rfc | openssl x509 -noout -fingerprint -sha256 | sed 's/^[^=]*=//; s/://g' | tr '[:lower:]' '[:upper:]')"
+            expected_fingerprint="$(printf '%s' "$ANDROID_UPLOAD_CERT_SHA256" | sed 's/://g; s/ //g; s/-//g' | tr '[:lower:]' '[:upper:]')"
+            if [[ -z "$actual_fingerprint" || "$actual_fingerprint" != "$expected_fingerprint" ]]; then
+              echo "Android bundle signer does not match Deploy's managed upload certificate" >&2
+              exit 1
+            fi
+            export APTEVA_ANDROID_SIGNER_SHA256="$actual_fingerprint"
+            rm -f "$keystore"
           fi
 
       - name: Publish or package result
@@ -164,7 +194,6 @@ workflows:
             rm -f "$key"
           elif [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "android" ]]; then
             test -n "${GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS:-}"
-            test -n "${CM_KEYSTORE_PATH:-}"
             test -n "${APTEVA_VERSION_CODE:-}"
             fastlane supply \
               --json_key_data "$GOOGLE_PLAY_SERVICE_ACCOUNT_CREDENTIALS" \
@@ -188,6 +217,8 @@ workflows:
               "version_name": os.environ.get("APTEVA_VERSION_NAME", ""),
               "build_number": os.environ.get("APTEVA_BUILD_NUMBER", ""),
               "version_code": os.environ.get("APTEVA_VERSION_CODE", ""),
+              "certificate_sha256": os.environ.get("APTEVA_ANDROID_SIGNER_SHA256", ""),
+              "signing_verified": bool(os.environ.get("APTEVA_ANDROID_SIGNER_SHA256", "")),
               "device_families": json.loads(os.environ.get("APTEVA_DEVICE_FAMILIES_JSON", "[]")),
           }
           if mode == "store_upload":

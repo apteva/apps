@@ -2,11 +2,15 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +24,7 @@ import (
 	"syscall"
 	"time"
 
+	pkcs12 "github.com/ggpslop/go-pkcs12"
 	"howett.net/plist"
 )
 
@@ -49,19 +54,21 @@ type mobileTargetConfig struct {
 }
 
 type artifactManifest struct {
-	Platform         string         `json:"platform"`
-	Primary          string         `json:"primary,omitempty"`
-	PackageName      string         `json:"package_name,omitempty"`
-	BundleID         string         `json:"bundle_id,omitempty"`
-	VersionName      string         `json:"version_name,omitempty"`
-	BuildNumber      string         `json:"build_number,omitempty"`
-	VersionCode      string         `json:"version_code,omitempty"`
-	DeviceFamilies   []string       `json:"device_families,omitempty"`
-	Channel          string         `json:"channel,omitempty"`
-	ExternalProvider string         `json:"external_provider,omitempty"`
-	ExternalID       string         `json:"external_id,omitempty"`
-	ExternalStatus   string         `json:"external_status,omitempty"`
-	Files            []artifactFile `json:"files,omitempty"`
+	Platform          string         `json:"platform"`
+	Primary           string         `json:"primary,omitempty"`
+	PackageName       string         `json:"package_name,omitempty"`
+	BundleID          string         `json:"bundle_id,omitempty"`
+	VersionName       string         `json:"version_name,omitempty"`
+	BuildNumber       string         `json:"build_number,omitempty"`
+	VersionCode       string         `json:"version_code,omitempty"`
+	CertificateSHA256 string         `json:"certificate_sha256,omitempty"`
+	SigningVerified   bool           `json:"signing_verified,omitempty"`
+	DeviceFamilies    []string       `json:"device_families,omitempty"`
+	Channel           string         `json:"channel,omitempty"`
+	ExternalProvider  string         `json:"external_provider,omitempty"`
+	ExternalID        string         `json:"external_id,omitempty"`
+	ExternalStatus    string         `json:"external_status,omitempty"`
+	Files             []artifactFile `json:"files,omitempty"`
 }
 
 type artifactFile struct {
@@ -183,7 +190,9 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 	manifest := artifactManifest{
 		Platform: "android", Primary: primary, PackageName: cfg.PackageName,
 		VersionName: cfg.VersionName, VersionCode: cfg.VersionCode,
-		Files: []artifactFile{mobileArtifactFile(dst, "aab")},
+		CertificateSHA256: normalizeCertificateFingerprint(ov.Credentials.AndroidSigning["upload_certificate_sha256"]),
+		SigningVerified:   androidBundleHasSignature(dst),
+		Files:             []artifactFile{mobileArtifactFile(dst, "aab")},
 	}
 	if err := writeArtifactManifest(artifactDir, manifest); err != nil {
 		return "", err
@@ -262,6 +271,15 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
+	profileUUID := ""
+	if len(ov.Credentials.IOSSigning) > 0 {
+		var cleanup func()
+		profileUUID, cleanup, err = prepareIOSSigningAssets(tmp, ov.Credentials.IOSSigning)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
+	}
 	keyDir := filepath.Join(tmp, "private_keys")
 	if err := os.MkdirAll(keyDir, 0o700); err != nil {
 		return "", err
@@ -278,6 +296,12 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	archiveArgs = append(archiveArgs, authArgs...)
 	if cfg.TeamID != "" {
 		archiveArgs = append(archiveArgs, "DEVELOPMENT_TEAM="+cfg.TeamID)
+	}
+	if profileUUID != "" {
+		archiveArgs = append(archiveArgs,
+			"CODE_SIGN_STYLE=Manual", "CODE_SIGN_IDENTITY=Apple Distribution",
+			"PROVISIONING_PROFILE="+profileUUID,
+		)
 	}
 	if cfg.VersionName != "" {
 		archiveArgs = append(archiveArgs, "MARKETING_VERSION="+cfg.VersionName)
@@ -310,6 +334,142 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	version := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleShortVersionString")
 	buildNumber := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleVersion")
 	return stageIPAWithVersion(ipa, artifactDir, cfg, version, buildNumber, logW)
+}
+
+func prepareIOSSigningAssets(tmp string, fields map[string]string) (string, func(), error) {
+	cleanup := func() {}
+	privateKeyPEM := normalizePEM(fields["certificate_private_key"])
+	certificatePEM := normalizePEM(fields["certificate_pem"])
+	profileBase64 := strings.TrimSpace(fields["provisioning_profile_base64"])
+	if privateKeyPEM == "" || certificatePEM == "" || profileBase64 == "" {
+		return "", cleanup, errors.New("managed iOS signing material is incomplete")
+	}
+	keyBlock, _ := pem.Decode([]byte(privateKeyPEM))
+	certBlock, _ := pem.Decode([]byte(certificatePEM))
+	if keyBlock == nil || certBlock == nil || certBlock.Type != "CERTIFICATE" {
+		return "", cleanup, errors.New("managed iOS signing key or certificate is invalid")
+	}
+	var privateKey any
+	privateKey, err := x509.ParsePKCS1PrivateKey(keyBlock.Bytes)
+	if err != nil {
+		privateKey, err = x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+	}
+	if err != nil {
+		return "", cleanup, errors.New("parse managed iOS signing private key")
+	}
+	certificate, err := x509.ParseCertificate(certBlock.Bytes)
+	if err != nil {
+		return "", cleanup, errors.New("parse managed iOS signing certificate")
+	}
+	signer, ok := privateKey.(crypto.Signer)
+	if !ok {
+		return "", cleanup, errors.New("managed iOS private key cannot sign")
+	}
+	keyPublic, _ := x509.MarshalPKIXPublicKey(signer.Public())
+	certPublic, _ := x509.MarshalPKIXPublicKey(certificate.PublicKey)
+	if !bytes.Equal(keyPublic, certPublic) {
+		return "", cleanup, errors.New("managed iOS private key does not match its certificate")
+	}
+	_, actualFingerprint := certificateFingerprints(certificate)
+	expectedFingerprint := normalizeCertificateFingerprint(fields["certificate_sha256"])
+	if expectedFingerprint != "" && normalizeCertificateFingerprint(actualFingerprint) != expectedFingerprint {
+		return "", cleanup, errors.New("managed iOS certificate fingerprint mismatch")
+	}
+	profile, err := base64.StdEncoding.DecodeString(profileBase64)
+	if err != nil {
+		return "", cleanup, errors.New("decode managed iOS provisioning profile")
+	}
+	profilePath := filepath.Join(tmp, "profile.mobileprovision")
+	if err := os.WriteFile(profilePath, profile, 0o600); err != nil {
+		return "", cleanup, err
+	}
+	decodedProfile, err := exec.Command("security", "cms", "-D", "-i", profilePath).Output()
+	if err != nil {
+		return "", cleanup, errors.New("decode managed iOS provisioning profile")
+	}
+	var profileMetadata struct {
+		UUID string `plist:"UUID"`
+	}
+	if _, err := plist.Unmarshal(decodedProfile, &profileMetadata); err != nil || strings.TrimSpace(profileMetadata.UUID) == "" {
+		return "", cleanup, errors.New("managed iOS provisioning profile has no UUID")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", cleanup, err
+	}
+	profilesDir := filepath.Join(home, "Library", "MobileDevice", "Provisioning Profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		return "", cleanup, err
+	}
+	installedProfile := filepath.Join(profilesDir, profileMetadata.UUID+".mobileprovision")
+	if err := os.WriteFile(installedProfile, profile, 0o600); err != nil {
+		return "", cleanup, err
+	}
+	password, err := randomSigningSecret(24)
+	if err != nil {
+		_ = os.Remove(installedProfile)
+		return "", cleanup, err
+	}
+	pfx, err := pkcs12.Modern.Encode(privateKey, certificate, nil, password)
+	if err != nil {
+		_ = os.Remove(installedProfile)
+		return "", cleanup, err
+	}
+	pfxPath := filepath.Join(tmp, "identity.p12")
+	keychainPath := filepath.Join(tmp, "build.keychain-db")
+	if err := os.WriteFile(pfxPath, pfx, 0o600); err != nil {
+		_ = os.Remove(installedProfile)
+		return "", cleanup, err
+	}
+	oldKeychains, _ := exec.Command("security", "list-keychains", "-d", "user").Output()
+	runSecurity := func(args ...string) error {
+		if output, commandErr := exec.Command("security", args...).CombinedOutput(); commandErr != nil {
+			return fmt.Errorf("security %s: %s", args[0], strings.TrimSpace(string(output)))
+		}
+		return nil
+	}
+	if err := runSecurity("create-keychain", "-p", password, keychainPath); err != nil {
+		_ = os.Remove(installedProfile)
+		return "", cleanup, err
+	}
+	cleanup = func() {
+		_ = os.Remove(installedProfile)
+		keychains := parseSecurityKeychainList(oldKeychains)
+		if len(keychains) > 0 {
+			_ = exec.Command("security", append([]string{"list-keychains", "-d", "user", "-s"}, keychains...)...).Run()
+		}
+		_ = exec.Command("security", "delete-keychain", keychainPath).Run()
+	}
+	if err := runSecurity("unlock-keychain", "-p", password, keychainPath); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	keychains := append([]string{keychainPath}, parseSecurityKeychainList(oldKeychains)...)
+	if err := runSecurity(append([]string{"list-keychains", "-d", "user", "-s"}, keychains...)...); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := runSecurity("import", pfxPath, "-k", keychainPath, "-P", password, "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	if err := runSecurity("set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychainPath); err != nil {
+		cleanup()
+		return "", func() {}, err
+	}
+	return profileMetadata.UUID, cleanup, nil
+}
+
+func parseSecurityKeychainList(raw []byte) []string {
+	fields := strings.Fields(string(raw))
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		field = strings.Trim(strings.TrimSpace(field), `"`)
+		if field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 func mobileVersionBuildEnv(base map[string]string, cfg mobileTargetConfig) map[string]string {
@@ -784,28 +944,23 @@ func mobileBuildCredentialFields(supplied map[string]string, role string) (map[s
 }
 
 func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer, supplied ...map[string]string) error {
+	var fields map[string]string
+	if len(supplied) > 0 && len(supplied[0]) > 0 {
+		fields = supplied[0]
+	}
+	expectedFingerprint := normalizeCertificateFingerprint(fields["upload_certificate_sha256"])
 	if androidBundleHasSignature(bundlePath) {
-		fmt.Fprintln(logW, "Android bundle signature present")
+		if err := verifyAndroidBundleSignature(bundlePath, expectedFingerprint, logW); err != nil {
+			return err
+		}
+		fmt.Fprintln(logW, "Android bundle signature verified against the managed upload certificate")
 		return nil
 	}
 	jarsigner, lookErr := exec.LookPath("jarsigner")
 
-	var fields map[string]string
-	if len(supplied) > 0 && len(supplied[0]) > 0 {
-		fields = supplied[0]
-	} else if globalCtx != nil {
-		creds, credErr := boundConnectionCredentials("android_signing")
-		if credErr == nil {
-			fields = creds.Fields
-		} else if creds, fallbackErr := boundConnectionCredentials("play_store"); fallbackErr == nil {
-			// Compatibility fallback for connections created while upload-key
-			// fields were temporarily part of the Google Play integration.
-			fields = creds.Fields
-		}
-	}
 	if len(fields) == 0 {
 		if required {
-			return errors.New("Android AAB is not signed; configure Gradle release signing or bind Android Upload Signing")
+			return errors.New("Android AAB is not signed and Deploy has no managed signing identity")
 		}
 		fmt.Fprintln(logW, "note: AAB signature was not verified; release will require a signed bundle or upload keystore")
 		return nil
@@ -816,7 +971,7 @@ func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer,
 	keyPassword := fields["upload_key_password"]
 	if encoded == "" || alias == "" || storePassword == "" {
 		if required {
-			return errors.New("Android AAB is not signed and the Android Upload Signing connection is incomplete")
+			return errors.New("Android AAB is not signed and the managed signing identity is incomplete")
 		}
 		fmt.Fprintln(logW, "note: AAB signature was not verified; no upload keystore configured")
 		return nil
@@ -839,7 +994,11 @@ func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer,
 	}
 	env := mobileBuildEnv(nil)
 	env = append(env, "APTEVA_ANDROID_STOREPASS="+storePassword)
-	args := []string{"-keystore", keystorePath, "-storepass:env", "APTEVA_ANDROID_STOREPASS"}
+	args := []string{
+		"-keystore", keystorePath, "-storetype", "PKCS12",
+		"-storepass:env", "APTEVA_ANDROID_STOREPASS",
+		"-sigalg", "SHA256withRSA", "-digestalg", "SHA-256",
+	}
 	if keyPassword != "" {
 		env = append(env, "APTEVA_ANDROID_KEYPASS="+keyPassword)
 		args = append(args, "-keypass:env", "APTEVA_ANDROID_KEYPASS")
@@ -853,11 +1012,68 @@ func ensureAndroidBundleSigned(bundlePath string, required bool, logW io.Writer,
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("sign Android bundle: %w", err)
 	}
-	if !androidBundleHasSignature(bundlePath) {
-		return errors.New("jarsigner completed but the Android bundle has no JAR signature")
+	if err := verifyAndroidBundleSignature(bundlePath, expectedFingerprint, logW); err != nil {
+		return err
 	}
-	fmt.Fprintln(logW, "Android bundle signed with configured upload key")
+	fmt.Fprintln(logW, "Android bundle signed and verified with the managed upload key")
 	return nil
+}
+
+func verifyAndroidBundleSignature(bundlePath, expectedFingerprint string, logW io.Writer) error {
+	jarsigner, err := exec.LookPath("jarsigner")
+	if err != nil {
+		return errors.New("jarsigner not found; install a JDK to verify the Android App Bundle")
+	}
+	cmd := exec.Command(jarsigner, "-verify", "-certs", bundlePath)
+	output, err := cmd.CombinedOutput()
+	if len(output) > 0 {
+		_, _ = logW.Write(output)
+	}
+	if err != nil || !strings.Contains(strings.ToLower(string(output)), "jar verified") {
+		return errors.New("Android App Bundle signature verification failed")
+	}
+	if expectedFingerprint == "" {
+		return errors.New("managed Android upload certificate fingerprint is missing")
+	}
+	actualFingerprint, err := androidBundleSignerFingerprint(bundlePath)
+	if err != nil {
+		return err
+	}
+	if normalizeCertificateFingerprint(actualFingerprint) != normalizeCertificateFingerprint(expectedFingerprint) {
+		return fmt.Errorf(
+			"Android App Bundle is signed by %s, expected managed upload certificate %s",
+			actualFingerprint, expectedFingerprint,
+		)
+	}
+	return nil
+}
+
+func androidBundleSignerFingerprint(bundlePath string) (string, error) {
+	keytool, err := exec.LookPath("keytool")
+	if err != nil {
+		return "", errors.New("keytool not found; install a JDK to inspect the Android App Bundle signer")
+	}
+	output, err := exec.Command(keytool, "-printcert", "-jarfile", bundlePath, "-rfc").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("inspect Android App Bundle signer: %w", err)
+	}
+	for rest := output; len(rest) > 0; {
+		block, next := pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		rest = next
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			continue
+		}
+		_, fingerprint := certificateFingerprints(cert)
+		return fingerprint, nil
+	}
+	return "", errors.New("Android App Bundle signer certificate was not found")
 }
 
 func androidBundleHasSignature(path string) bool {

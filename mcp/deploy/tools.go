@@ -189,7 +189,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_mobile_signing_setup", Handler: a.toolMobileSigningSetup,
-			Description: "Configure or repair iOS signing for the selected cloud build provider. Reconciles source-required Apple capabilities before provisioning, repairs stale profiles without rotating a valid certificate, and rotates the certificate/key only when rotate=true. Args: name OR id, environment?, provider?, rotate?",
+			Description: "Create, configure, or repair a Deploy-managed Android upload identity or iOS distribution identity for the selected build provider. Existing identities survive deployment deletion and provider changes. rotate=true explicitly replaces key material. Args: name OR id, environment?, provider?, rotate?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -818,11 +818,28 @@ func (a *App) toolMobileSigningStatus(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	identities := []MobileSigningIdentity{}
+	seen := map[int64]bool{}
+	for i := range setups {
+		if setups[i].IdentityID <= 0 || seen[setups[i].IdentityID] {
+			continue
+		}
+		identity, getErr := dbGetMobileSigningIdentityByID(ctx.AppDB(), setups[i].IdentityID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if identity != nil {
+			identities = append(identities, *identity)
+			seen[identity.ID] = true
+		}
+	}
 	return map[string]any{
 		"deployment_id":  d.ID,
 		"environment_id": d.EnvironmentID,
 		"environment":    d.EnvironmentName,
 		"setups":         setups,
+		"identities":     identities,
+		"signing":        mobileSigningStatusSummary(d, setups, identities),
 		"count":          len(setups),
 	}, nil
 }

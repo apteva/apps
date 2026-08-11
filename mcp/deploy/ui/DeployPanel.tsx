@@ -180,6 +180,8 @@ interface MobileSigningSetup {
   environment_id?: number;
   platform: string;
   provider: string;
+	identity_id?: number;
+	prepared_revision?: number;
   bundle_id: string;
   status: "pending" | "provisioning" | "action_required" | "ready" | "failed";
   app_store_app_id?: string;
@@ -196,6 +198,20 @@ interface MobileSigningSetup {
   platform_state_json: string;
   last_error?: string;
   updated_at: string;
+}
+
+interface MobileSigningIdentity {
+  id: number;
+  platform: "android" | "ios";
+  application_identifier: string;
+  format: string;
+  revision: number;
+  source: "generated" | "imported";
+  key_alias?: string;
+	certificate_pem?: string;
+  certificate_sha1?: string;
+  certificate_sha256?: string;
+  expires_at?: string;
 }
 
 interface DistributionAudienceMember {
@@ -520,7 +536,12 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [mobileChannel, setMobileChannel] = useState("internal");
   const [submitForReview, setSubmitForReview] = useState(false);
   const [mobileSigning, setMobileSigning] = useState<MobileSigningSetup | null>(null);
+	const [mobileSigningIdentity, setMobileSigningIdentity] = useState<MobileSigningIdentity | null>(null);
   const [signingBusy, setSigningBusy] = useState(false);
+	const [signingImportFile, setSigningImportFile] = useState<File | null>(null);
+	const [signingStorePassword, setSigningStorePassword] = useState("");
+	const [signingKeyPassword, setSigningKeyPassword] = useState("");
+	const [signingKeyAlias, setSigningKeyAlias] = useState("");
   const [distribution, setDistribution] = useState<MobileDistributionState | null>(null);
   const [distributionError, setDistributionError] = useState("");
   const [audienceEmail, setAudienceEmail] = useState("");
@@ -577,19 +598,18 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       try {
         const d = await api<DeploymentDetail>("GET", `/deployments/${id}`);
         setDetail(d);
-        if (d.deployment.target_kind === "ios") {
-          const signing = await api<{ setups?: MobileSigningSetup[] }>("GET", `/deployments/${id}/mobile-signing`);
-          setMobileSigning(
+		if (d.deployment.target_kind === "ios" || d.deployment.target_kind === "android") {
+			const signing = await api<{ setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[] }>("GET", `/deployments/${id}/mobile-signing`);
+			setMobileSigning(
             (signing.setups || []).find((setup) => setup.provider === d.deployment.build_backend)
               || signing.setups?.[0]
               || null,
-          );
-          setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
-        } else if (d.deployment.target_kind === "android") {
-          setMobileSigning(null);
-          setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
-        } else {
-          setMobileSigning(null);
+			);
+			setMobileSigningIdentity(signing.identities?.[0] || null);
+			setStoreState(await api<StoreConfigState>("GET", `/deployments/${id}/store-config`));
+		} else {
+			setMobileSigning(null);
+			setMobileSigningIdentity(null);
           setStoreState(null);
         }
         // Always re-anchor the log pane to THIS deployment, so
@@ -730,6 +750,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     setLogTargetId(null);
     setLogKind("release");
     setMobileSigning(null);
+		setMobileSigningIdentity(null);
+		setSigningImportFile(null);
     setDistribution(null);
     setDistributionError("");
     setStoreState(null);
@@ -811,13 +833,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     if (!detail) return;
     setSigningBusy(true);
     try {
-      const result = await api<{ setup: MobileSigningSetup; ready: boolean; manual_actions?: string[] }>(
+		const result = await api<{ setup: MobileSigningSetup; identity?: MobileSigningIdentity; ready: boolean; manual_actions?: string[] }>(
         "POST",
         `/deployments/${detail.deployment.id}/mobile-signing/setup`,
         { provider: detail.deployment.build_backend, rotate },
       );
-      setMobileSigning(result.setup);
-      if (!result.ready && result.manual_actions?.length) {
+		setMobileSigning(result.setup);
+		if (result.identity) setMobileSigningIdentity(result.identity);
+		if (result.manual_actions?.length) {
         setError(result.manual_actions.join(" "));
       } else {
         setError("");
@@ -834,15 +857,97 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     void runMobileSigningSetup(false);
   };
 
-  const handleMobileSigningRotation = () => {
-    setConfirmState({
-      title: "Rotate iOS signing",
-      body: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
+	const handleMobileSigningRotation = () => {
+		const platform = detail?.deployment.target_kind;
+		setConfirmState({
+			title: platform === "android" ? "Rotate Android upload key" : "Rotate iOS signing",
+			body: platform === "android"
+				? "Replace the managed Android upload key? Google Play must accept the new upload certificate before builds signed with it can be published."
+				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
       confirmLabel: "Rotate",
       tone: "warning",
       onConfirm: () => runMobileSigningSetup(true),
-    });
-  };
+		});
+	};
+
+	const importAndroidSigning = async () => {
+		if (!detail || !signingImportFile || !signingStorePassword) return;
+		setSigningBusy(true);
+		try {
+			const submit = async (commit: boolean) => {
+				const form = new FormData();
+				form.set("keystore", signingImportFile);
+				form.set("store_password", signingStorePassword);
+				form.set("key_password", signingKeyPassword);
+				form.set("key_alias", signingKeyAlias);
+				form.set("inspect_only", commit ? "false" : "true");
+				form.set("confirm_replace", commit && mobileSigningIdentity ? "true" : "false");
+				return fetch(`${API}/deployments/${detail.deployment.id}/mobile-signing/import?${withParams()}`, {
+					method: "POST", credentials: "same-origin", body: form,
+				});
+			};
+			const response = await submit(false);
+			if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+			const preview = await response.json() as { identity: MobileSigningIdentity; replacement_required: boolean };
+			setConfirmState({
+				title: preview.replacement_required ? "Replace Android upload key" : "Import Android upload key",
+				body: `${preview.identity.application_identifier} · alias ${preview.identity.key_alias || "1"} · SHA-1 ${preview.identity.certificate_sha1 || "-"} · SHA-256 ${preview.identity.certificate_sha256 || "-"}`,
+				confirmLabel: preview.replacement_required ? "Replace keystore" : "Import keystore",
+				tone: preview.replacement_required ? "warning" : undefined,
+				onConfirm: async () => {
+					const committed = await submit(true);
+					if (!committed.ok) throw new Error(`${committed.status}: ${await committed.text().catch(() => "")}`);
+					setSigningImportFile(null);
+					setSigningStorePassword("");
+					setSigningKeyPassword("");
+					setSigningKeyAlias("");
+					await loadDetail(detail.deployment.id);
+					setError("");
+				},
+			});
+		} catch (e) {
+			setError("Signing import failed: " + (e as Error).message);
+		} finally {
+			setSigningBusy(false);
+		}
+	};
+
+	const downloadSigningRecovery = () => {
+		if (!detail) return;
+		setConfirmState({
+			title: "Export signing recovery",
+			body: "Download a sensitive archive containing the private signing key and recovery credentials?",
+			confirmLabel: "Download",
+			tone: "warning",
+			onConfirm: async () => {
+				const response = await fetch(`${API}/deployments/${detail.deployment.id}/mobile-signing/recovery?${withParams()}`, {
+					method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ confirm: true }),
+				});
+				if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
+				const blob = await response.blob();
+				const disposition = response.headers.get("Content-Disposition") || "";
+				const filename = disposition.match(/filename="([^"]+)"/)?.[1] || "apteva-signing-recovery.zip";
+				const url = URL.createObjectURL(blob);
+				const anchor = document.createElement("a");
+				anchor.href = url;
+				anchor.download = filename;
+				anchor.click();
+				URL.revokeObjectURL(url);
+			},
+		});
+	};
+
+	const downloadSigningCertificate = () => {
+		if (!mobileSigningIdentity?.certificate_pem) return;
+		const blob = new Blob([mobileSigningIdentity.certificate_pem], { type: "application/x-pem-file" });
+		const url = URL.createObjectURL(blob);
+		const anchor = document.createElement("a");
+		anchor.href = url;
+		anchor.download = `${mobileSigningIdentity.application_identifier}-certificate.pem`;
+		anchor.click();
+		URL.revokeObjectURL(url);
+	};
 
   const handleAddAudience = async () => {
     if (!detail || !audienceEmail.trim() || mobileChannel === "production") return;
@@ -1192,9 +1297,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 busy={busy}
               />
             )}
-            {detail.deployment.target_kind === "ios" && (
+            {mobile && (
               <section className="px-4 py-2 border-b border-border flex items-center gap-3 text-xs flex-wrap">
-                <span className="text-text-dim uppercase">iOS signing</span>
+                <span className="text-text-dim uppercase">{detail.deployment.target_kind} signing</span>
                 <span className={
                   mobileSigning?.status === "ready"
                     ? "text-green"
@@ -1219,7 +1324,19 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     ? ` · ${cloudExecutionLabel(detail.deployment.build_backend_config_json, detail.deployment.build_backend)}`
                     : ""}
                   {mobileSigning?.provider_secret_ref ? ` · secret group ${mobileSigning.provider_secret_ref}` : ""}
+									{mobileSigningIdentity ? ` · identity r${mobileSigningIdentity.revision}` : ""}
                 </span>
+								{mobileSigningIdentity?.certificate_sha1 && (
+									<span className="text-text-dim font-mono truncate max-w-[15rem]" title={mobileSigningIdentity.certificate_sha1}>
+										SHA-1 {mobileSigningIdentity.certificate_sha1}
+									</span>
+								)}
+								{mobileSigningIdentity?.certificate_sha256 && (
+									<span className="text-text-dim font-mono truncate max-w-[15rem]" title={mobileSigningIdentity.certificate_sha256}>
+										SHA-256 {mobileSigningIdentity.certificate_sha256}
+									</span>
+								)}
+								{mobileSigningIdentity?.expires_at && <span className="text-text-dim">expires {mobileSigningIdentity.expires_at.slice(0, 10)}</span>}
                 {mobileSigning?.last_error && (
                   <span className="text-yellow truncate" title={mobileSigning.last_error}>
                     {mobileSigning.last_error}
@@ -1228,11 +1345,11 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 <button
                   type="button"
                   onClick={handleMobileSigningSetup}
-                  disabled={signingBusy || detail.deployment.build_backend !== "codemagic"}
+								disabled={signingBusy || detail.deployment.build_backend === "github_actions"}
                   className="ml-auto px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
                   title={
-                    detail.deployment.build_backend === "codemagic"
-                      ? "Provision Apple distribution signing and store credentials securely at the build provider."
+									detail.deployment.build_backend !== "github_actions"
+										? "Prepare the managed signing identity for this build provider."
                       : "This build provider does not yet expose a signing-secret adapter."
                   }
                 >
@@ -1248,11 +1365,39 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     onClick={handleMobileSigningRotation}
                     disabled={signingBusy}
                     className="px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
-                    title="Replace the Apple distribution certificate, private key, and provisioning profile."
+									title={detail.deployment.target_kind === "android"
+										? "Replace the managed Android upload key."
+										: "Replace the Apple distribution certificate, private key, and provisioning profile."}
                   >
-                    Rotate certificate
+									Rotate key
                   </button>
                 )}
+								{mobileSigningIdentity && (
+									<button
+										type="button"
+										onClick={downloadSigningRecovery}
+										disabled={signingBusy}
+										className="px-2 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-40 shrink-0"
+									>
+										Recovery
+									</button>
+								)}
+								{mobileSigningIdentity?.certificate_pem && (
+									<button type="button" onClick={downloadSigningCertificate} className="px-2 py-0.5 border border-border rounded hover:bg-bg-input shrink-0">
+										Certificate
+									</button>
+								)}
+								{detail.deployment.target_kind === "android" && (
+									<div className="basis-full flex items-center gap-2 pt-1 flex-wrap">
+										<input type="file" accept=".p12,.pfx,application/x-pkcs12" onChange={(event) => setSigningImportFile(event.target.files?.[0] || null)} className="text-xs max-w-[14rem]" />
+										<input type="password" value={signingStorePassword} onChange={(event) => setSigningStorePassword(event.target.value)} placeholder="Store password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
+										<input type="password" value={signingKeyPassword} onChange={(event) => setSigningKeyPassword(event.target.value)} placeholder="Key password" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
+										<input value={signingKeyAlias} onChange={(event) => setSigningKeyAlias(event.target.value)} placeholder="Alias (default 1)" className="bg-bg-input border border-border rounded px-2 py-1 w-32" />
+										<button type="button" onClick={() => void importAndroidSigning()} disabled={signingBusy || !signingImportFile || !signingStorePassword} className="px-2 py-1 border border-border rounded hover:bg-bg-input disabled:opacity-40">
+											{mobileSigningIdentity ? "Replace keystore" : "Import keystore"}
+										</button>
+									</div>
+								)}
               </section>
             )}
             {mobile && mobileChannel !== "production" && (

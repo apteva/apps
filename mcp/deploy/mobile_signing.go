@@ -25,6 +25,10 @@ const (
 )
 
 type mobileSigningSecrets struct {
+	Platform              string
+	IdentityID            int64
+	IdentityRevision      int
+	ApplicationIdentifier string
 	AppStoreIssuerID      string
 	AppStoreKeyID         string
 	AppStorePrivateKey    string
@@ -34,6 +38,11 @@ type mobileSigningSecrets struct {
 	Scheme                string
 	WorkspacePath         string
 	ProjectPath           string
+	AndroidKeystoreBase64 string
+	AndroidKeyAlias       string
+	AndroidStorePassword  string
+	AndroidKeyPassword    string
+	CertificateSHA256     string
 }
 
 type mobileSigningProviderResult struct {
@@ -53,6 +62,8 @@ type mobileSigningProvider interface {
 
 func mobileSigningProviderFor(name string) (mobileSigningProvider, error) {
 	switch normalizeBuildBackend(name) {
+	case buildBackendLocal, buildBackendRunner:
+		return transientSigningProvider{name: normalizeBuildBackend(name)}, nil
 	case buildBackendCodemagic:
 		return codemagicSigningProvider{}, nil
 	default:
@@ -64,9 +75,10 @@ func mobileSigningProviderFor(name string) (mobileSigningProvider, error) {
 }
 
 type mobileSigningSetupResult struct {
-	Setup         *MobileSigningSetup `json:"setup"`
-	Ready         bool                `json:"ready"`
-	ManualActions []string            `json:"manual_actions,omitempty"`
+	Setup         *MobileSigningSetup    `json:"setup"`
+	Identity      *MobileSigningIdentity `json:"identity,omitempty"`
+	Ready         bool                   `json:"ready"`
+	ManualActions []string               `json:"manual_actions,omitempty"`
 }
 
 func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerName string, rotate bool) (*mobileSigningSetupResult, error) {
@@ -76,9 +88,17 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	if d == nil {
 		return nil, errors.New("deployment required")
 	}
-	if d.TargetKind != "ios" {
-		return nil, errors.New("automatic signing setup currently supports iOS deployments")
+	switch d.TargetKind {
+	case "android":
+		return a.setupAndroidMobileSigning(ctx, d, providerName, rotate)
+	case "ios":
+		return a.setupIOSMobileSigning(ctx, d, providerName, rotate)
+	default:
+		return nil, errors.New("mobile signing setup requires an Android or iOS deployment")
 	}
+}
+
+func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, providerName string, rotate bool) (*mobileSigningSetupResult, error) {
 	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -94,7 +114,7 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	if providerName != normalizeBuildBackend(d.BuildBackend) {
 		return nil, fmt.Errorf("provider %q is not this environment's selected build_backend %q", providerName, d.BuildBackend)
 	}
-	cfg, err := parseCloudBuildConfig(providerName, d.BuildBackendJSON)
+	cfg, err := parseMobileSigningBuildConfig(providerName, d.BuildBackendJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +122,7 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	if err != nil {
 		return nil, err
 	}
-	providerBound, err := cloudIntegrationFor(providerName)
+	providerBound, err := mobileSigningProviderBinding(providerName)
 	if err != nil {
 		return nil, err
 	}
@@ -120,6 +140,11 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	if issuerID == "" || keyID == "" || apiPrivateKey == "" {
 		return nil, errors.New("app_store integration requires issuer_id, key_id, and private_key")
 	}
+	identity, err := dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, "ios", issuerID, target.BundleID)
+	if err != nil {
+		return nil, err
+	}
+	identityState := iosSigningIdentityStateFrom(identity)
 	requirements, err := a.inspectMobileRequirements(ctx, d)
 	if err != nil {
 		return nil, err
@@ -136,14 +161,20 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		)
 	}
 	previous := existing
+	providerConnectionID := int64(0)
+	if providerBound != nil {
+		providerConnectionID = providerBound.ConnectionID
+	}
 	setup := &MobileSigningSetup{
 		DeploymentID: d.ID, EnvironmentID: d.EnvironmentID, Platform: "ios",
-		Provider: providerName, ProviderConnectionID: providerBound.ConnectionID,
+		Provider: providerName, ProviderConnectionID: providerConnectionID,
 		BundleID: target.BundleID, Status: "provisioning",
 		RequiredFeaturesJSON: mobileFeaturesJSON(requirements.Features),
 		RequirementsHash:     requirements.Hash,
 	}
 	if previous != nil {
+		setup.IdentityID = previous.IdentityID
+		setup.PreparedRevision = previous.PreparedRevision
 		setup.AppleBundleResourceID = previous.AppleBundleResourceID
 		setup.AppStoreAppID = previous.AppStoreAppID
 		setup.AppleCertificateID = previous.AppleCertificateID
@@ -154,6 +185,25 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		setup.ProvisionedFeaturesJSON = previous.ProvisionedFeaturesJSON
 		setup.ManagedFeaturesJSON = previous.ManagedFeaturesJSON
 		setup.PlatformStateJSON = previous.PlatformStateJSON
+	}
+	if identity != nil {
+		setup.IdentityID = identity.ID
+		setup.PreparedRevision = identity.Revision
+		if setup.AppleBundleResourceID == "" {
+			setup.AppleBundleResourceID = identityState.BundleResourceID
+		}
+		if setup.AppStoreAppID == "" {
+			setup.AppStoreAppID = identityState.AppStoreAppID
+		}
+		if setup.AppleCertificateID == "" {
+			setup.AppleCertificateID = identityState.CertificateID
+		}
+		if setup.AppleProfileID == "" {
+			setup.AppleProfileID = identityState.ProfileID
+		}
+		if setup.KeyFingerprint == "" {
+			setup.KeyFingerprint = identityState.KeyFingerprint
+		}
 	}
 	if previous == nil || previous.Status != mobileSigningStatusReady {
 		setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
@@ -243,15 +293,36 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	setup.PlatformStateJSON = capabilities.StateJSON
 
 	providerMatches := previous != nil &&
-		previous.ProviderConnectionID == providerBound.ConnectionID &&
+		previous.ProviderConnectionID == providerConnectionID &&
 		provider.SetupMatchesBuildConfig(cfg, previous)
-	requirementsMatch := previous != nil &&
+	requirementsMatch := (previous != nil &&
 		previous.RequirementsHash == requirements.Hash &&
 		mobileFeaturesContainAll(
 			mobileFeaturesFromJSON(previous.ProvisionedFeaturesJSON),
 			requirements.Features,
-		)
-	if previous != nil && previous.Status == mobileSigningStatusReady &&
+		)) || (identity != nil &&
+		identityState.RequirementsHash == requirements.Hash &&
+		mobileFeaturesContainAll(
+			mobileFeaturesFromJSON(identityState.ProvisionedFeaturesJSON),
+			requirements.Features,
+		))
+	if identity == nil && previous != nil && previous.Status == mobileSigningStatusReady &&
+		providerMatches && requirementsMatch && !capabilities.Changed && !rotate {
+		legacy := *previous
+		legacy.LastError = ""
+		legacySetup, upsertErr := dbUpsertMobileSigningSetup(globalCtx.AppDB(), &legacy)
+		if upsertErr != nil {
+			return nil, upsertErr
+		}
+		return &mobileSigningSetupResult{
+			Setup: legacySetup, Ready: true,
+			ManualActions: []string{
+				"Rotate signing once to move the existing provider-owned iOS private key into Deploy's durable signing vault.",
+			},
+		}, nil
+	}
+	if identity != nil && previous != nil && previous.Status == mobileSigningStatusReady &&
+		previous.IdentityID == identity.ID && previous.PreparedRevision == identity.Revision &&
 		providerMatches && requirementsMatch && !capabilities.Changed && !rotate {
 		ready := *previous
 		ready.RequiredFeaturesJSON = setup.RequiredFeaturesJSON
@@ -264,53 +335,135 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		if err != nil {
 			return nil, err
 		}
-		return &mobileSigningSetupResult{Setup: readySetup, Ready: true}, nil
+		return &mobileSigningSetupResult{Setup: readySetup, Identity: identity, Ready: true}, nil
 	}
 
-	if previous != nil && previous.Status == mobileSigningStatusReady && providerMatches && !rotate {
-		available, checkErr := appleCertificateAvailable(appleBound, previous.AppleCertificateID)
+	if identity != nil && !rotate {
+		certificateID := defaultStr(setup.AppleCertificateID, identityState.CertificateID)
+		available, checkErr := appleCertificateAvailable(appleBound, certificateID)
 		if checkErr != nil {
 			return nil, failSetup(checkErr)
 		}
 		if available {
-			profile, createErr := executeIntegration(appleBound, "create_profile", map[string]any{
-				"name":            appleReplacementProfileName(d, previous.KeyFingerprint, requirements.Hash),
-				"profileType":     "IOS_APP_STORE",
-				"bundle_id":       bundleResourceID,
-				"certificate_ids": []string{previous.AppleCertificateID},
-			})
-			if createErr != nil {
-				return nil, failSetup(createErr)
+			profileID := setup.AppleProfileID
+			createdProfile := false
+			newProfileContent := ""
+			var createdProfileBody json.RawMessage
+			if profileID == "" || !requirementsMatch || capabilities.Changed {
+				profile, createErr := executeIntegration(appleBound, "create_profile", map[string]any{
+					"name":            appleReplacementProfileName(d, identityState.KeyFingerprint, requirements.Hash),
+					"profileType":     "IOS_APP_STORE",
+					"bundle_id":       bundleResourceID,
+					"certificate_ids": []string{certificateID},
+				})
+				if createErr != nil {
+					return nil, failSetup(createErr)
+				}
+				createdProfileBody = profile
+				profileID = jsonStringAt(profile, "data", "id")
+				if profileID == "" {
+					return nil, failSetup(errors.New("Apple create_profile returned no resource id"))
+				}
+				createdProfile = true
 			}
-			profileID := jsonStringAt(profile, "data", "id")
-			if profileID == "" {
-				return nil, failSetup(errors.New("Apple create_profile returned no resource id"))
+			if createdProfile {
+				profileContent, profileErr := appleProvisioningProfileContent(appleBound, profileID, createdProfileBody)
+				if profileErr != nil {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+					return nil, failSetup(profileErr)
+				}
+				newProfileContent = profileContent
+			}
+			providerResult := &mobileSigningProviderResult{
+				SecretRef: setup.ProviderSecretRef, ConfigJSON: defaultStr(setup.ProviderConfigJSON, "{}"),
+			}
+			if previous == nil || !providerMatches {
+				secretPayload, decryptErr := a.decryptMobileSigningPayload(identity)
+				if decryptErr != nil {
+					if createdProfile {
+						_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+					}
+					return nil, failSetup(decryptErr)
+				}
+				providerResult, err = provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
+					Platform: "ios", IdentityID: identity.ID, IdentityRevision: identity.Revision,
+					ApplicationIdentifier: target.BundleID,
+					AppStoreIssuerID:      issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
+					CertificatePrivateKey: secretPayload.PrivateKeyPEM, BundleID: target.BundleID,
+					AppStoreAppID: appStoreAppID, Scheme: target.Scheme,
+					WorkspacePath: target.WorkspacePath, ProjectPath: target.ProjectPath,
+				})
+				if err != nil {
+					if createdProfile {
+						_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+					}
+					return nil, failSetup(err)
+				}
+				cfg.Groups = uniqueStrings(append(cfg.Groups, providerResult.Groups...))
 			}
 			setup.Status = mobileSigningStatusReady
-			setup.AppleCertificateID = previous.AppleCertificateID
+			setup.IdentityID = identity.ID
+			setup.PreparedRevision = identity.Revision
+			setup.AppleCertificateID = certificateID
 			setup.AppleProfileID = profileID
-			setup.ProviderSecretRef = previous.ProviderSecretRef
-			setup.ProviderConfigJSON = previous.ProviderConfigJSON
-			setup.KeyFingerprint = previous.KeyFingerprint
+			setup.ProviderSecretRef = providerResult.SecretRef
+			setup.ProviderConfigJSON = defaultStr(providerResult.ConfigJSON, "{}")
+			setup.KeyFingerprint = identityState.KeyFingerprint
 			setup.LastError = ""
 			target.AppStoreAppID = appStoreAppID
 			targetBody, marshalErr := json.Marshal(target)
 			if marshalErr != nil {
-				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				if createdProfile {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				}
+				return nil, failSetup(marshalErr)
+			}
+			cfgBody, marshalErr := json.Marshal(cfg)
+			if marshalErr != nil {
+				if createdProfile {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				}
 				return nil, failSetup(marshalErr)
 			}
 			if persistErr := persistEffectiveDeploymentConfig(d, map[string]any{
-				"target_config_json": string(targetBody),
+				"target_config_json": string(targetBody), "build_backend_config_json": string(cfgBody),
 			}); persistErr != nil {
-				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				if createdProfile {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				}
 				return nil, failSetup(persistErr)
+			}
+			identityUpdated := false
+			if createdProfile {
+				secretPayload, decryptErr := a.decryptMobileSigningPayload(identity)
+				if decryptErr != nil {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+					return nil, failSetup(decryptErr)
+				}
+				secretPayload.ProvisioningProfileBase64 = newProfileContent
+				identity, err = a.replaceMobileSigningIdentity(globalCtx.AppDB(), identity, mobileSigningIdentityInput{
+					Format: identity.Format, Source: identity.Source, KeyAlias: identity.KeyAlias,
+					CertificatePEM: identity.CertificatePEM, CertificateSHA1: identity.CertificateSHA1,
+					CertificateSHA256: identity.CertificateSHA256, ExpiresAt: identity.ExpiresAt,
+					ExternalStateJSON: identity.ExternalStateJSON,
+				}, *secretPayload)
+				if err != nil {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+					return nil, failSetup(err)
+				}
+				identityUpdated = true
+				setup.IdentityID = identity.ID
+				setup.PreparedRevision = identity.Revision
 			}
 			setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
 			if err != nil {
-				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				if createdProfile && !identityUpdated {
+					_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": profileID})
+				}
 				return nil, err
 			}
-			if previous.AppleProfileID != "" && previous.AppleProfileID != profileID {
+			_ = dbUpdateMobileSigningIdentityState(globalCtx.AppDB(), identity.ID, iosSigningIdentityStateJSON(setup, issuerID))
+			if previous != nil && previous.AppleProfileID != "" && previous.AppleProfileID != profileID {
 				_, _ = executeIntegration(appleBound, "delete_profile", map[string]any{"profile_id": previous.AppleProfileID})
 			}
 			emit("deploy.mobile_signing.ready", map[string]any{
@@ -318,7 +471,8 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 				"provider": providerName, "bundle_id": target.BundleID,
 				"repair": true,
 			})
-			return &mobileSigningSetupResult{Setup: setup, Ready: true}, nil
+			identity, _ = dbGetMobileSigningIdentityByID(globalCtx.AppDB(), identity.ID)
+			return &mobileSigningSetupResult{Setup: setup, Identity: identity, Ready: true}, nil
 		}
 	}
 
@@ -360,8 +514,14 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		cleanupNewAppleResources()
 		return nil, failSetup(errors.New("Apple create_profile returned no resource id"))
 	}
+	profileContent, err := appleProvisioningProfileContent(appleBound, createdProfileID, profile)
+	if err != nil {
+		cleanupNewAppleResources()
+		return nil, failSetup(err)
+	}
 
 	providerResult, err := provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
+		Platform: "ios", ApplicationIdentifier: target.BundleID,
 		AppStoreIssuerID: issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
 		CertificatePrivateKey: certificatePrivateKey, BundleID: target.BundleID,
 		AppStoreAppID: appStoreAppID, Scheme: target.Scheme,
@@ -406,9 +566,31 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	setup.RequirementsHash = requirements.Hash
 	setup.PlatformStateJSON = capabilities.StateJSON
 	setup.LastError = ""
-	setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
+	certificatePEM, certificateSHA1, certificateSHA256, certificateExpiresAt := appleCertificateMetadata(certificate)
+	identityInput := mobileSigningIdentityInput{
+		ProjectID: d.ProjectID, Platform: "ios", AuthorityScope: issuerID,
+		ApplicationIdentifier: target.BundleID, Format: "pem", Source: "generated",
+		CertificatePEM: certificatePEM, CertificateSHA1: certificateSHA1,
+		CertificateSHA256: certificateSHA256, ExpiresAt: certificateExpiresAt,
+		ExternalStateJSON: iosSigningIdentityStateJSON(setup, issuerID),
+	}
+	identityPayload := mobileSigningSecretPayload{
+		PrivateKeyPEM: certificatePrivateKey, CertificatePEM: certificatePEM,
+		ProvisioningProfileBase64: profileContent,
+	}
+	if identity == nil {
+		identity, err = a.createMobileSigningIdentity(globalCtx.AppDB(), identityInput, identityPayload)
+	} else {
+		identity, err = a.replaceMobileSigningIdentity(globalCtx.AppDB(), identity, identityInput, identityPayload)
+	}
 	if err != nil {
 		cleanupNewAppleResources()
+		return nil, failSetup(err)
+	}
+	setup.IdentityID = identity.ID
+	setup.PreparedRevision = identity.Revision
+	setup, err = dbUpsertMobileSigningSetup(globalCtx.AppDB(), setup)
+	if err != nil {
 		return nil, failSetup(err)
 	}
 
@@ -424,7 +606,32 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 		"deployment_id": d.ID, "environment_id": d.EnvironmentID,
 		"provider": providerName, "bundle_id": target.BundleID,
 	})
-	return &mobileSigningSetupResult{Setup: setup, Ready: true}, nil
+	return &mobileSigningSetupResult{Setup: setup, Identity: identity, Ready: true}, nil
+}
+
+func parseMobileSigningBuildConfig(providerName, raw string) (cloudBuildConfig, error) {
+	if normalizeBuildBackend(providerName) == buildBackendLocal {
+		return cloudBuildConfig{}, nil
+	}
+	return parseCloudBuildConfig(providerName, raw)
+}
+
+type transientSigningProvider struct{ name string }
+
+func (p transientSigningProvider) Name() string { return p.name }
+
+func (transientSigningProvider) SetupMatchesBuildConfig(_ cloudBuildConfig, setup *MobileSigningSetup) bool {
+	return setup != nil
+}
+
+func (transientSigningProvider) ProvisionSigningSecrets(
+	_ context.Context,
+	_ *sdk.BoundIntegration,
+	_ cloudBuildConfig,
+	_ *Deployment,
+	_ mobileSigningSecrets,
+) (*mobileSigningProviderResult, error) {
+	return &mobileSigningProviderResult{ConfigJSON: `{}`}, nil
 }
 
 func (a *App) failMobileSigningSetup(setup *MobileSigningSetup, cause error) error {
@@ -537,7 +744,7 @@ func (codemagicSigningProvider) ProvisionSigningSecrets(
 	d *Deployment,
 	secrets mobileSigningSecrets,
 ) (*mobileSigningProviderResult, error) {
-	groupName := codemagicSigningGroupName(d)
+	groupName := codemagicSigningGroupName(d, secrets)
 	groups, err := executeIntegration(bound, "list_app_variable_groups", map[string]any{
 		"app_id": cfg.AppID, "page_size": 100, "page": 1,
 	})
@@ -558,13 +765,24 @@ func (codemagicSigningProvider) ProvisionSigningSecrets(
 		}
 	}
 
-	values := map[string]string{
-		"APP_STORE_CONNECT_ISSUER_ID":      secrets.AppStoreIssuerID,
-		"APP_STORE_CONNECT_KEY_IDENTIFIER": secrets.AppStoreKeyID,
-		"APP_STORE_CONNECT_PRIVATE_KEY":    secrets.AppStorePrivateKey,
-		"CERTIFICATE_PRIVATE_KEY":          secrets.CertificatePrivateKey,
-		"BUNDLE_ID":                        secrets.BundleID,
-		"APP_STORE_ID":                     secrets.AppStoreAppID,
+	values := map[string]string{}
+	if secrets.Platform == "android" {
+		values = map[string]string{
+			"ANDROID_UPLOAD_KEYSTORE_BASE64": secrets.AndroidKeystoreBase64,
+			"ANDROID_UPLOAD_KEY_ALIAS":       secrets.AndroidKeyAlias,
+			"ANDROID_UPLOAD_STORE_PASSWORD":  secrets.AndroidStorePassword,
+			"ANDROID_UPLOAD_KEY_PASSWORD":    secrets.AndroidKeyPassword,
+			"ANDROID_UPLOAD_CERT_SHA256":     secrets.CertificateSHA256,
+		}
+	} else {
+		values = map[string]string{
+			"APP_STORE_CONNECT_ISSUER_ID":      secrets.AppStoreIssuerID,
+			"APP_STORE_CONNECT_KEY_IDENTIFIER": secrets.AppStoreKeyID,
+			"APP_STORE_CONNECT_PRIVATE_KEY":    secrets.AppStorePrivateKey,
+			"CERTIFICATE_PRIVATE_KEY":          secrets.CertificatePrivateKey,
+			"BUNDLE_ID":                        secrets.BundleID,
+			"APP_STORE_ID":                     secrets.AppStoreAppID,
+		}
 	}
 	if secrets.Scheme != "" {
 		values["XCODE_SCHEME"] = secrets.Scheme
@@ -618,12 +836,22 @@ func (codemagicSigningProvider) ProvisionSigningSecrets(
 
 var nonCodemagicGroupChar = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
-func codemagicSigningGroupName(d *Deployment) string {
+func codemagicSigningGroupName(d *Deployment, secrets mobileSigningSecrets) string {
 	env := defaultEnvironmentName
 	if d != nil && d.EnvironmentName != "" {
 		env = d.EnvironmentName
 	}
-	name := fmt.Sprintf("apteva-ios-%d-%s", d.ID, env)
+	platform := "mobile"
+	if d != nil && (d.TargetKind == "android" || d.TargetKind == "ios") {
+		platform = d.TargetKind
+	}
+	name := ""
+	if identifier := strings.TrimSpace(secrets.ApplicationIdentifier); identifier != "" {
+		sum := sha256.Sum256([]byte(platform + "\n" + identifier))
+		name = fmt.Sprintf("apteva-%s-signing-%s", platform, hex.EncodeToString(sum[:6]))
+	} else {
+		name = fmt.Sprintf("apteva-%s-%d-%s", platform, d.ID, env)
+	}
 	name = nonCodemagicGroupChar.ReplaceAllString(name, "-")
 	return strings.Trim(name, "-")
 }

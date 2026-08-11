@@ -13,6 +13,8 @@ type MobileSigningSetup struct {
 	Platform                string `json:"platform"`
 	Provider                string `json:"provider"`
 	ProviderConnectionID    int64  `json:"provider_connection_id,omitempty"`
+	IdentityID              int64  `json:"identity_id,omitempty"`
+	PreparedRevision        int    `json:"prepared_revision,omitempty"`
 	BundleID                string `json:"bundle_id"`
 	Status                  string `json:"status"`
 	AppStoreAppID           string `json:"app_store_app_id,omitempty"`
@@ -33,7 +35,7 @@ type MobileSigningSetup struct {
 }
 
 const mobileSigningSetupColumns = `id, deployment_id, environment_id, platform, provider,
-	provider_connection_id, bundle_id, status, app_store_app_id,
+	provider_connection_id, identity_id, prepared_revision, bundle_id, status, app_store_app_id,
 	apple_bundle_resource_id, apple_certificate_id, apple_profile_id,
 	provider_secret_ref, provider_config_json, key_fingerprint,
 	required_features_json, provisioned_features_json, managed_features_json,
@@ -80,16 +82,18 @@ func dbUpsertMobileSigningSetup(db *sql.DB, setup *MobileSigningSetup) (*MobileS
 	_, err := db.Exec(`
 		INSERT INTO mobile_signing_setups (
 			deployment_id, environment_id, platform, provider,
-			provider_connection_id, bundle_id, status, app_store_app_id,
+			provider_connection_id, identity_id, prepared_revision, bundle_id, status, app_store_app_id,
 			apple_bundle_resource_id, apple_certificate_id, apple_profile_id,
 			provider_secret_ref, provider_config_json, key_fingerprint,
 			required_features_json, provisioned_features_json, managed_features_json,
 			requirements_hash, platform_state_json, last_error,
 			created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(deployment_id, environment_id, provider) DO UPDATE SET
 			platform = excluded.platform,
 			provider_connection_id = excluded.provider_connection_id,
+			identity_id = excluded.identity_id,
+			prepared_revision = excluded.prepared_revision,
 			bundle_id = excluded.bundle_id,
 			status = excluded.status,
 			app_store_app_id = excluded.app_store_app_id,
@@ -107,7 +111,8 @@ func dbUpsertMobileSigningSetup(db *sql.DB, setup *MobileSigningSetup) (*MobileS
 			last_error = excluded.last_error,
 			updated_at = excluded.updated_at
 	`, setup.DeploymentID, setup.EnvironmentID, setup.Platform, normalizeBuildBackend(setup.Provider),
-		setup.ProviderConnectionID, setup.BundleID, defaultStr(setup.Status, "pending"), setup.AppStoreAppID,
+		setup.ProviderConnectionID, setup.IdentityID, setup.PreparedRevision,
+		setup.BundleID, defaultStr(setup.Status, "pending"), setup.AppStoreAppID,
 		setup.AppleBundleResourceID, setup.AppleCertificateID, setup.AppleProfileID,
 		setup.ProviderSecretRef, defaultStr(setup.ProviderConfigJSON, "{}"), setup.KeyFingerprint,
 		defaultStr(setup.RequiredFeaturesJSON, "[]"), defaultStr(setup.ProvisionedFeaturesJSON, "[]"),
@@ -124,7 +129,8 @@ func scanMobileSigningSetup(row rowScanner) (*MobileSigningSetup, error) {
 	var setup MobileSigningSetup
 	if err := row.Scan(
 		&setup.ID, &setup.DeploymentID, &setup.EnvironmentID, &setup.Platform, &setup.Provider,
-		&setup.ProviderConnectionID, &setup.BundleID, &setup.Status, &setup.AppStoreAppID,
+		&setup.ProviderConnectionID, &setup.IdentityID, &setup.PreparedRevision,
+		&setup.BundleID, &setup.Status, &setup.AppStoreAppID,
 		&setup.AppleBundleResourceID, &setup.AppleCertificateID, &setup.AppleProfileID,
 		&setup.ProviderSecretRef, &setup.ProviderConfigJSON, &setup.KeyFingerprint,
 		&setup.RequiredFeaturesJSON, &setup.ProvisionedFeaturesJSON, &setup.ManagedFeaturesJSON,

@@ -48,6 +48,7 @@ type runnerBuildSpec struct {
 
 type runnerCredentials struct {
 	AppStore       map[string]string `json:"app_store,omitempty"`
+	IOSSigning     map[string]string `json:"ios_signing,omitempty"`
 	AndroidSigning map[string]string `json:"android_signing,omitempty"`
 }
 
@@ -253,16 +254,24 @@ func runnerBuildCredentials(d *Deployment) runnerCredentials {
 	}
 	if d.TargetKind == "ios" || d.Framework == "ios" {
 		out.AppStore = selectedBoundCredentialFields("app_store", []string{"issuer_id", "key_id", "private_key"})
+		out.IOSSigning, _ = (&App{}).iosSigningCredentials(d)
 	}
 	if d.TargetKind == "android" || d.Framework == "android" {
-		keys := []string{
-			"upload_keystore_base64", "upload_key_alias",
-			"upload_keystore_password", "upload_key_password",
-		}
-		out.AndroidSigning = selectedBoundCredentialFields("android_signing", keys)
-		if len(out.AndroidSigning) == 0 {
-			out.AndroidSigning = selectedBoundCredentialFields("play_store", keys)
-		}
+		out.AndroidSigning, _ = (&App{}).androidSigningCredentials(d)
+	}
+	return out
+}
+
+func (a *App) mobileSigningBuildCredentials(d *Deployment) runnerCredentials {
+	if d == nil {
+		return runnerCredentials{}
+	}
+	out := runnerBuildCredentials(d)
+	if d.TargetKind == "android" || d.Framework == "android" {
+		out.AndroidSigning, _ = a.androidSigningCredentials(d)
+	}
+	if d.TargetKind == "ios" || d.Framework == "ios" {
+		out.IOSSigning, _ = a.iosSigningCredentials(d)
 	}
 	return out
 }
@@ -291,13 +300,14 @@ func clearRunnerCredentials(credentials *runnerCredentials) {
 	if credentials == nil {
 		return
 	}
-	for _, fields := range []map[string]string{credentials.AppStore, credentials.AndroidSigning} {
+	for _, fields := range []map[string]string{credentials.AppStore, credentials.IOSSigning, credentials.AndroidSigning} {
 		for key := range fields {
 			fields[key] = strings.Repeat("0", len(fields[key]))
 			delete(fields, key)
 		}
 	}
 	credentials.AppStore = nil
+	credentials.IOSSigning = nil
 	credentials.AndroidSigning = nil
 }
 

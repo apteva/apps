@@ -64,11 +64,11 @@ Android `target_config_json` supports:
 ```
 
 The default build runs `:app:bundleRelease`. Bind `play_store` to a
-Google Play Developer connection for publishing. Gradle may sign the
-bundle itself; otherwise bind `android_signing` to an Android Upload
-Signing connection containing the encrypted base64 keystore, passwords,
-and key alias. AAB uploads stream from disk and retry once after a
-platform-managed OAuth refresh.
+Google Play Developer connection for publishing. Deploy creates or imports
+one durable upload identity per project and package name, stores its PKCS#12
+payload encrypted, and signs unsigned bundles after the build. An existing
+signature must match the managed certificate. AAB uploads stream from disk
+and retry once after a platform-managed OAuth refresh.
 
 iOS `target_config_json` supports:
 
@@ -163,10 +163,17 @@ capsules remain owned by Deploy and are removed when the build reaches a
 terminal state.
 
 For an unsigned iOS compile test, add `"smoke_only": true` to
-`target_config_json`. A signed iOS job receives only the required App Store
-Connect signing fields from Deploy's bound `app_store` connection. Android
-jobs receive upload-key fields from `android_signing` when available. Store
-publishing still happens through Deploy after it retrieves the IPA or AAB.
+`target_config_json`. Signed iOS and Android jobs receive build-only signing
+material from Deploy's encrypted identity vault. Codemagic receives the same
+identity revision through a secure variable group; capsule runners receive it
+inside their authenticated job request. Store publishing still happens
+through Deploy after it retrieves the IPA or AAB.
+
+The vault key is stored as `.mobile-signing-vault-key` in Deploy's DataDir
+with mode `0600`; backups must preserve both that file and `deploy.db`.
+Normal REST and MCP status responses return certificate metadata only.
+Sensitive recovery ZIP downloads require an explicit confirmed POST and are
+never exposed through MCP tools.
 
 ### Provider-neutral cloud contract
 

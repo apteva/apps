@@ -57,11 +57,13 @@ type App struct {
 	maxBuilds       int
 	retainRollbacks int
 
-	buildSem        chan struct{} // throttle concurrent builds
-	watchdogStop    chan struct{} // closed on unmount; pid-owns-port poller
-	cloudBuildMu    sync.Mutex
-	mobileSigningMu sync.Mutex
-	mobileVersionMu sync.Mutex
+	buildSem           chan struct{} // throttle concurrent builds
+	watchdogStop       chan struct{} // closed on unmount; pid-owns-port poller
+	cloudBuildMu       sync.Mutex
+	mobileSigningMu    sync.Mutex
+	mobileVersionMu    sync.Mutex
+	mobileSigningKeyMu sync.Mutex
+	mobileSigningKey   []byte
 
 	sourceCapsuleKeyMu sync.Mutex
 	sourceCapsuleKey   []byte
@@ -118,6 +120,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	if _, err := a.sourceCapsuleSigningKey(); err != nil {
+		return err
+	}
+	if _, err := a.mobileSigningVaultKey(); err != nil {
 		return err
 	}
 	pathsRebased, err := rebaseLegacyPaths(ctx.AppDB(), a.dataDir)
@@ -529,6 +534,21 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 }
 
 func (a *App) runBuildWithOptions(d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
+	if d != nil && (d.TargetKind == "android" || d.TargetKind == "ios") {
+		target, err := parseMobileTargetConfig(d.TargetConfigJSON)
+		if err != nil {
+			return nil, err
+		}
+		if !target.SmokeOnly {
+			result, err := a.setupMobileSigning(context.Background(), d, d.BuildBackend, false)
+			if err != nil {
+				return nil, fmt.Errorf("prepare %s signing: %w", d.TargetKind, err)
+			}
+			if result == nil || !result.Ready {
+				return nil, fmt.Errorf("%s signing requires operator action before the build can start", d.TargetKind)
+			}
+		}
+	}
 	if normalizeBuildBackend(d.BuildBackend) != buildBackendLocal {
 		return a.submitCloudBuildWithOptions(context.Background(), d, releaseOpts)
 	}
@@ -629,6 +649,7 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 		StartCmd:         d.StartCmd,
 		Env:              parseEnvJSON(d.EnvJSON),
 		TargetConfigJSON: d.TargetConfigJSON,
+		Credentials:      a.mobileSigningBuildCredentials(d),
 	}, logF)
 	if err != nil {
 		return a.failBuild(build, err.Error()), nil
