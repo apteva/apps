@@ -29,13 +29,18 @@ func (s *membershipPlatformStub) CallAppResult(app, tool string, input map[strin
 	var value any
 	switch app + ":" + tool {
 	case "catalog:catalog_prices_get":
+		priceID := numberFromAny(input["id"])
+		amount, nickname, interval := int64(9900), "Monthly", "month"
+		if priceID == 92 {
+			amount, nickname, interval = 99000, "Annual", "year"
+		}
 		value = map[string]any{"price": catalogPrice{
-			ID: 91, ProductID: 81, Nickname: "Monthly", UnitAmountCents: 9900,
-			Currency: "EUR", Interval: "month", IntervalCount: 1,
+			ID: priceID, ProductID: 81, Nickname: nickname, UnitAmountCents: amount,
+			Currency: "EUR", Interval: interval, IntervalCount: 1,
 			BillingScheme: "flat", Active: true,
 		}}
 	case "catalog:catalog_products_get":
-		value = map[string]any{"product": catalogProduct{ID: 81, Name: "All courses", Type: "service"}}
+		value = map[string]any{"product": catalogProduct{ID: 81, Name: "All courses", Slug: "all-courses", Description: "Every course and the community.", Type: "service"}}
 	case "billing:customers_upsert_by_email":
 		value = map[string]any{"customer": map[string]any{"id": int64(601)}, "was_created": true}
 	case "subscriptions:subscriptions_create":

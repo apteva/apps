@@ -26,6 +26,8 @@ import type {
   MemberSubscription,
   MembershipPlan,
   Post,
+  PublicOffer,
+  PublicProduct,
   Section,
   Space,
   Thread,
@@ -61,6 +63,17 @@ function requestedCommunitySlug(): string {
 function requestedCourse(): string {
   if (typeof window === "undefined") return "";
   return new URLSearchParams(window.location.search).get("course")?.trim() || "";
+}
+
+function requestedProduct(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("product")?.trim() || "";
+}
+
+function requestedOffer(): number {
+  if (typeof window === "undefined") return 0;
+  const value = Number(new URLSearchParams(window.location.search).get("offer"));
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
 function wantsCourseCheckout(): boolean {
@@ -146,12 +159,31 @@ function formatMembershipPrice(plan: MembershipPlan): string {
   return `${amount} / ${count}${plan.interval}${plan.interval_count > 1 ? "s" : ""}`;
 }
 
+function formatPublicOffer(offer: PublicOffer): string {
+  const amount = (() => {
+    try {
+      return new Intl.NumberFormat(undefined, { style: "currency", currency: offer.currency })
+        .format(offer.unit_amount_cents / 100);
+    } catch {
+      return `${offer.currency} ${(offer.unit_amount_cents / 100).toFixed(2)}`;
+    }
+  })();
+  if (!offer.interval) return amount;
+  const count = (offer.interval_count || 1) > 1 ? `${offer.interval_count} ` : "";
+  return `${amount} / ${count}${offer.interval}${(offer.interval_count || 1) > 1 ? "s" : ""}`;
+}
+
 export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authForm, setAuthForm] = useState(initialAuthForm);
   const [portal, setPortal] = useState<PortalBootstrap | null>(null);
   const [portalError, setPortalError] = useState("");
+  const [publicProduct, setPublicProduct] = useState<PublicProduct | null>(null);
+  const [publicProductLoading, setPublicProductLoading] = useState(Boolean(requestedProduct()));
+  const [publicProductError, setPublicProductError] = useState("");
+  const [storefrontPriceId, setStorefrontPriceId] = useState(requestedOffer);
+  const [storefrontAuthRequested, setStorefrontAuthRequested] = useState(() => requestedOffer() > 0);
   const [recoveryToken, setRecoveryToken] = useState("");
   const [view, setView] = useState<View>(initialView);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -205,6 +237,7 @@ export default function App() {
   const selectedThread = threads.find((item) => item.id === threadId);
   const selectedCourse = courses.find((item) => item.id === courseId);
   const selectedLesson = lessons.find((item) => item.id === lessonId);
+  const selectedStorefrontOffer = publicProduct?.offers.find((offer) => offer.catalog_price_id === storefrontPriceId);
   const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
   const brandName = portal?.brand.name || "your community";
 
@@ -232,6 +265,27 @@ export default function App() {
     });
     return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    const slug = requestedProduct();
+    if (!portal || !slug) {
+      setPublicProductLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setPublicProductLoading(true);
+    api.portal.product(portal.community.slug, slug).then((result) => {
+      if (cancelled) return;
+      setPublicProduct(result.product);
+      setPublicProductError("");
+      document.title = `${result.product.name} · ${portal.brand.name}`;
+    }).catch((caught) => {
+      if (!cancelled) setPublicProductError(friendlyError(caught));
+    }).finally(() => {
+      if (!cancelled) setPublicProductLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [portal]);
 
   useEffect(() => {
     if (!portal || typeof window === "undefined") return;
@@ -509,6 +563,14 @@ export default function App() {
   }, [auth, courseAccessMode, courseId, courseLocked, courseOffer, coursePurchase?.status, portal]);
 
   useEffect(() => {
+    if (!auth || !portal || communityId !== portal.community.id || !selectedStorefrontOffer || automaticCheckoutStarted.current) return;
+    automaticCheckoutStarted.current = true;
+    void startStorefrontCheckout(selectedStorefrontOffer).then((started) => {
+      if (!started) automaticCheckoutStarted.current = false;
+    });
+  }, [auth, communityId, portal, selectedStorefrontOffer]);
+
+  useEffect(() => {
     if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
     const timer = window.setInterval(() => {
       void api.courses.purchase(courseId).then((result) => {
@@ -742,6 +804,40 @@ export default function App() {
     });
   }
 
+  async function startStorefrontCheckout(offer: PublicOffer): Promise<boolean> {
+    if (!portal) return false;
+    const result = await run(async () => {
+      const success = new URL(window.location.href);
+      success.searchParams.set("payment", offer.kind === "recurring" ? "membership-success" : "success");
+      const cancel = new URL(window.location.href);
+      cancel.searchParams.set("payment", offer.kind === "recurring" ? "membership-cancelled" : "cancelled");
+      return api.storefront.checkout(portal.community.id, offer.catalog_price_id, success.toString(), cancel.toString());
+    });
+    if (!result) return false;
+    if ((result.enrolled || result.access_active) && !result.checkout_url) {
+      setNotice("Your access is active.");
+      await Promise.all([loadCommunity(), loadCourse()]);
+      return true;
+    }
+    if (!result.checkout_url) {
+      setError("Checkout is temporarily unavailable. Please try again.");
+      return false;
+    }
+    window.location.assign(result.checkout_url);
+    return true;
+  }
+
+  function chooseStorefrontOffer(offer: PublicOffer) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("product", publicProduct?.slug || requestedProduct());
+    url.searchParams.set("offer", String(offer.catalog_price_id));
+    url.searchParams.set("intent", "buy");
+    window.history.replaceState({}, "", url);
+    setStorefrontPriceId(offer.catalog_price_id);
+    setStorefrontAuthRequested(true);
+    if (portal?.signup.enabled) setAuthMode("signup");
+  }
+
   async function cancelMembership() {
     if (!memberSubscription) return;
     await run(async () => {
@@ -808,6 +904,18 @@ export default function App() {
     return <main className="auth-shell"><section className="auth-card"><h1>Courses unavailable</h1><div className="alert error" role="alert">{portalError}</div></section></main>;
   }
 
+  if (publicProductLoading && portal) {
+    return <main className="auth-shell"><section className="auth-card"><p className="muted">Loading product…</p></section></main>;
+  }
+
+  if (publicProductError) {
+    return <main className="auth-shell"><section className="auth-card"><h1>Product unavailable</h1><div className="alert error" role="alert">{publicProductError}</div></section></main>;
+  }
+
+  if (!auth && portal && publicProduct && !storefrontAuthRequested) {
+    return <PublicStorefront product={publicProduct} portal={portal} checkout={wantsCourseCheckout()} onChoose={chooseStorefrontOffer} onSignIn={() => { setAuthMode("login"); setStorefrontAuthRequested(true); }} />;
+  }
+
   if (!auth && portal) {
     const brand = <>{portal.brand.logo_url ? <img className="brand-logo" src={portal.brand.logo_url} alt={portal.brand.name} /> : <div className="brand-mark"><BookOpen aria-hidden="true" /></div>}</>;
     if (authMode === "verify_pending") {
@@ -856,7 +964,8 @@ export default function App() {
           {brand}
           <p className="eyebrow">{brandName}</p>
           <h1 id="auth-title">{authMode === "login" ? `Sign in to your ${brandName} courses` : `Create your ${brandName} account`}</h1>
-          <p className="muted">{authMode === "login" ? "Continue learning where you left off." : "Create an account to access your courses and community."}</p>
+          <p className="muted">{selectedStorefrontOffer ? "Sign in or create your account to continue securely to payment." : authMode === "login" ? "Continue learning where you left off." : "Create an account to access your courses and community."}</p>
+          {selectedStorefrontOffer && publicProduct && <div className="order-summary"><span>{publicProduct.name}</span><strong>{formatPublicOffer(selectedStorefrontOffer)}</strong></div>}
           {error && <div className="alert error" role="alert">{error}</div>}
           {notice && <div className="alert success" role="status">{notice}</div>}
           <form className="stack" onSubmit={authenticate}>
@@ -1112,6 +1221,58 @@ export default function App() {
         {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p><p>{me?.bio || "No bio yet."}</p><p className="muted">Signed in as {auth?.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
       </main>
     </div>
+  );
+}
+
+function PublicStorefront({ product, portal, checkout, onChoose, onSignIn }: {
+  product: PublicProduct;
+  portal: PortalBootstrap;
+  checkout: boolean;
+  onChoose: (offer: PublicOffer) => void;
+  onSignIn: () => void;
+}) {
+  return (
+    <main className="storefront-shell">
+      <header className="storefront-header">
+        <div className="storefront-brand">
+          {portal.brand.logo_url ? <img src={portal.brand.logo_url} alt={portal.brand.name} /> : <div className="brand-mark"><BookOpen aria-hidden="true" /></div>}
+          <strong>{portal.brand.name}</strong>
+        </div>
+        <button className="secondary" onClick={onSignIn}>Sign in</button>
+      </header>
+      <section className="storefront-hero">
+        <div>
+          <p className="eyebrow">{product.category || "Courses & community"}</p>
+          <h1>{checkout ? `Choose your ${product.name} plan` : product.name}</h1>
+          <p>{product.description || product.courses[0]?.description || product.courses[0]?.summary || "Learn with practical courses and a supportive community."}</p>
+        </div>
+        <aside className="storefront-offers" aria-label="Purchase options">
+          {product.offers.map((offer) => (
+            <article key={offer.catalog_price_id}>
+              <div><span>{offer.name}</span><strong>{formatPublicOffer(offer)}</strong></div>
+              {(offer.trial_days || 0) > 0 && <p>{offer.trial_days}-day trial</p>}
+              <button className="primary" onClick={() => onChoose(offer)}>Continue</button>
+            </article>
+          ))}
+          {product.offers.length === 0 && <div className="empty">This product is not currently for sale.</div>}
+          <small>Access activates automatically after payment is confirmed.</small>
+        </aside>
+      </section>
+      <section className="storefront-content">
+        {product.courses.map((course) => (
+          <article className="public-course" key={course.slug}>
+            <div className="public-course-copy">
+              <p className="eyebrow">Included course</p>
+              <h2>{course.name}</h2>
+              <p>{course.description || course.summary}</p>
+              {course.instructor && <p className="muted">Taught by {course.instructor}{course.level ? ` · ${course.level}` : ""}</p>}
+              {course.outcomes.length > 0 && <ul className="outcome-list">{course.outcomes.map((outcome) => <li key={outcome}><CheckCircle2 size={17} />{outcome}</li>)}</ul>}
+            </div>
+            {course.curriculum.length > 0 && <div className="public-curriculum"><h3>Course outline</h3>{course.curriculum.map((section) => <details key={section.title}><summary>{section.title}<span>{section.lessons.length} lessons</span></summary><ol>{section.lessons.map((lesson) => <li key={lesson}>{lesson}</li>)}</ol></details>)}</div>}
+          </article>
+        ))}
+      </section>
+    </main>
   );
 }
 

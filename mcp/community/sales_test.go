@@ -28,7 +28,7 @@ func newSalesPlatformStub() *salesPlatformStub {
 			ID: 71, ProductID: 61, Nickname: "Launch price", UnitAmountCents: 9900,
 			Currency: "EUR", BillingScheme: "flat", Active: true,
 		},
-		product: catalogProduct{ID: 61, Name: "Community Course", Type: "one_time"},
+		product: catalogProduct{ID: 61, Name: "Community Course", Slug: "community-course", Description: "Build a stronger community.", Type: "one_time"},
 	}
 }
 

@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.8.0
+version: 0.9.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -44,6 +44,9 @@ description: |
   /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
   Each community owns its portal branding and Auth client/organization
   binding, with automatic member linking and course-checkout continuation.
+  Its public storefront projects only Catalog products actively offered by
+  each community, groups one-time and recurring prices under generic product
+  routes, and shows published course entitlements before authentication.
   Community directly orchestrates one-time course purchases and recurring
   course memberships using Catalog, Billing, and Subscriptions. It does not
   depend on the SaaS app.
@@ -109,6 +112,8 @@ provides:
     - prefix: /
     - { prefix: /ui/, method: GET, no_auth: true }
     - { prefix: /portal/bootstrap, method: GET, no_auth: true }
+    - { prefix: /portal/products, method: GET, no_auth: true }
+    - { prefix: /store/, method: GET, no_auth: true }
   mcp_tools:
     - { name: communities_create,  description: "Create a community." }
     - { name: communities_list,    description: "List communities in this scope." }
@@ -208,6 +213,7 @@ provides:
     - { name: membership_subscription_get, description: "Get a recurring Community membership." }
     - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
+    - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
   ui_panels:
     - slot: project.page
       label: Community
@@ -309,6 +315,9 @@ func (a *App) handleBillingEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: "GET", Pattern: "/portal/bootstrap", Handler: a.httpPortalBootstrap, NoAuth: true},
+		{Method: "GET", Pattern: "/portal/products", Handler: a.httpPortalProducts, NoAuth: true},
+		{Method: "GET", Pattern: "/portal/products/", Handler: a.httpPortalProduct, NoAuth: true},
+		{Method: "GET", Pattern: "/store/", Handler: a.httpStorefrontRoute, NoAuth: true},
 		{Pattern: "/communities", Handler: operatorHTTP(a.httpCommunities)},
 		{Pattern: "/members", Handler: operatorHTTP(a.httpMembers)},
 		{Pattern: "/spaces", Handler: operatorHTTP(a.httpSpaces)},
@@ -334,6 +343,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	tools = append(tools, coursesTools()...)
 	tools = append(tools, courseSalesTools()...)
 	tools = append(tools, membershipTools()...)
+	tools = append(tools, storefrontTools()...)
 	return secureTools(tools)
 }
 

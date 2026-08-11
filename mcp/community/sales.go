@@ -81,10 +81,15 @@ type catalogPrice struct {
 }
 
 type catalogProduct struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	ArchivedAt string `json:"archived_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Description string `json:"description"`
+	Type        string `json:"type"`
+	Category    string `json:"category"`
+	ImageFileID *int64 `json:"image_file_id"`
+	Color       string `json:"color"`
+	ArchivedAt  string `json:"archived_at"`
 }
 
 type billingInvoice struct {

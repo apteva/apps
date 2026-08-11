@@ -322,6 +322,49 @@ export interface MemberSubscription {
   plan?: MembershipPlan;
 }
 
+export interface PublicSection {
+  title: string;
+  lessons: string[];
+}
+
+export interface PublicCourse {
+  slug: string;
+  name: string;
+  summary?: string;
+  description?: string;
+  instructor?: string;
+  level?: string;
+  outcomes: string[];
+  cover_file_id?: string;
+  curriculum: PublicSection[];
+}
+
+export interface PublicOffer {
+  catalog_price_id: number;
+  kind: "one_time" | "recurring";
+  name: string;
+  unit_amount_cents: number;
+  currency: string;
+  interval?: "day" | "week" | "month" | "year";
+  interval_count?: number;
+  trial_days?: number;
+  scope_type: "all_courses" | "selected_courses" | "course_tags";
+  course_slugs: string[];
+}
+
+export interface PublicProduct {
+  catalog_product_id: number;
+  slug: string;
+  name: string;
+  description?: string;
+  type: string;
+  category?: string;
+  color?: string;
+  image_file_id?: number;
+  offers: PublicOffer[];
+  courses: PublicCourse[];
+}
+
 export interface CourseAnalytics {
   space_id: string;
   sections: number;

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.8.0
+version: 0.9.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -13,6 +13,9 @@ description: |
   Each community owns its portal branding and Auth client/organization
   binding; visitors see a branded email/password flow, are linked to a
   member automatically, and continue directly into requested course checkout.
+  Its public storefront projects only Catalog products actively offered by
+  each community, groups one-time and recurring prices under generic product
+  routes, and shows published course entitlements before authentication.
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
   Panel and portal update live via the platform event bus.
@@ -90,6 +93,8 @@ provides:
     - prefix: /
     - { prefix: /ui/, method: GET, no_auth: true }
     - { prefix: /portal/bootstrap, method: GET, no_auth: true }
+    - { prefix: /portal/products, method: GET, no_auth: true }
+    - { prefix: /store/, method: GET, no_auth: true }
   mcp_tools:
     # ─── communities ───────────────────────────────────────────
     - { name: communities_create,  description: "Create a community." }
@@ -197,6 +202,7 @@ provides:
     - { name: membership_subscription_get, description: "Get a recurring Community membership." }
     - { name: membership_subscription_reconcile, description: "Reconcile a Community membership with Subscriptions." }
     - { name: course_access_explain, description: "Explain a member's effective course access source." }
+    - { name: storefront_checkout_start, description: "Start verified checkout for a public Catalog price offered by this community." }
   ui_panels:
     # Dashboard operator/admin surface.
     - slot: project.page
@@ -205,6 +211,9 @@ provides:
       entry: /ui/CommunityPanel.mjs
   # Client-facing portal SPA:
   # /api/apps/community/_install/{install_id}/ui/portal/dist/index.html
+  # Generic public aliases:
+  # /api/apps/community/_install/{install_id}/store/{community}/products/{product}
+  # /api/apps/community/_install/{install_id}/store/{community}/checkout/{product}
   # The SDK does not yet expose a first-class ui_pages slot for source apps,
   # so operators link to the portal URL directly for now.
 

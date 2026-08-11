@@ -17,6 +17,7 @@ import type {
   MemberSubscription,
   MembershipPlan,
   Post,
+  PublicProduct,
   Quiz,
   Section,
   Space,
@@ -101,6 +102,10 @@ export const api = {
   portal: {
     bootstrap: (community: string) =>
       apteva.get<PortalBootstrap>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/bootstrap?community=${encodeURIComponent(community)}`)),
+    products: (community: string) =>
+      apteva.get<{ products: PublicProduct[]; count: number }>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/products?community=${encodeURIComponent(community)}`)),
+    product: (community: string, slug: string) =>
+      apteva.get<{ product: PublicProduct }>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/products/${encodeURIComponent(slug)}?community=${encodeURIComponent(community)}`)),
   },
   auth: {
     login: (body: { client_id: string; email: string; password: string; organization_slug?: string }) =>
@@ -222,6 +227,19 @@ export const api = {
       }),
     resume: (id: string) =>
       community.tool<{ subscription: MemberSubscription }>("membership_resume", { id, member_id: self }),
+  },
+  storefront: {
+    checkout: (community_id: string, catalog_price_id: number, success_url: string, cancel_url: string) =>
+      community.tool<{
+        offer_kind: "one_time" | "recurring";
+        checkout_url?: string;
+        enrolled?: boolean;
+        access_active?: boolean;
+        purchase?: CoursePurchase;
+        subscription?: MemberSubscription;
+      }>("storefront_checkout_start", {
+        community_id, catalog_price_id, member_id: self, success_url, cancel_url,
+      }),
   },
   dms: {
     list: (community_id: string) =>
