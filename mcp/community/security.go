@@ -13,7 +13,7 @@ import (
 
 var delegatedMemberTools = map[string]bool{
 	"communities_list": true, "communities_get": true,
-	"members_me": true, "members_list": true, "members_get": true, "members_update": true,
+	"members_me": true, "members_ensure": true, "members_list": true, "members_get": true, "members_update": true,
 	"spaces_list":  true,
 	"threads_list": true, "threads_create": true,
 	"posts_list": true, "posts_create": true, "posts_edit": true, "posts_react": true, "posts_remove": true,
@@ -60,6 +60,10 @@ func secureTools(tools []sdk.Tool) []sdk.Tool {
 			}
 			if tool.Name == "members_me" {
 				result, err := membersForSubject(app, caller.SubjectID, strArg(args, "community_id", ""))
+				return sanitizeDelegatedMembers(result), err
+			}
+			if tool.Name == "members_ensure" {
+				result, err := ensureMemberForSubject(app, caller, strArg(args, "community_id", ""), strArg(args, "display_name", ""))
 				return sanitizeDelegatedMembers(result), err
 			}
 
@@ -112,9 +116,14 @@ func sanitizeDelegatedMembers(result any) any {
 		return member
 	}
 	switch value := result.(type) {
+	case Community:
+		return communityForMember(value)
 	case Member:
 		return sanitize(value)
 	case map[string]any:
+		if community, ok := value["community"].(Community); ok {
+			value["community"] = communityForMember(community)
+		}
 		if member, ok := value["member"].(Member); ok {
 			value["member"] = sanitize(member)
 		}
@@ -212,7 +221,11 @@ func operatorHTTP(next http.HandlerFunc) http.HandlerFunc {
 
 func communitiesForSubject(ctx *sdk.AppCtx, subjectID string) (any, error) {
 	rows, err := ctx.AppDB().Query(
-		`SELECT c.id, c.project_id, c.slug, c.name, c.description, c.created_at, c.archived_at,
+		`SELECT c.id, c.project_id, c.slug, c.name, c.description,
+		        c.auth_client_id, c.auth_organization_id, c.auth_organization_slug,
+		        c.brand_name, c.logo_url, c.favicon_url, c.primary_color, c.accent_color,
+		        c.support_email, c.portal_host, c.signup_mode, c.auto_create_members,
+		        c.created_at, c.archived_at,
 		        m.id, m.community_id, m.contact_id, m.auth_user_id, m.handle, m.display_name,
 		        m.bio, m.status, m.joined_at, m.last_seen_at
 		   FROM members m
@@ -233,13 +246,21 @@ func communitiesForSubject(ctx *sdk.AppCtx, subjectID string) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		communities = append(communities, c)
+		communities = append(communities, communityForMember(c))
 		memberships = append(memberships, m)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return map[string]any{"communities": communities, "memberships": memberships}, nil
+}
+
+func communityForMember(c Community) Community {
+	c.AuthClientID = ""
+	c.AuthOrganizationID = ""
+	c.AuthOrganizationSlug = ""
+	c.PortalHost = ""
+	return c
 }
 
 func scanCommunityMember(scan func(...any) error) (Community, Member, error) {
@@ -250,7 +271,11 @@ func scanCommunityMember(scan func(...any) error) (Community, Member, error) {
 		contact, authUser, seen sql.NullString
 	)
 	err := scan(
-		&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description, &c.CreatedAt, &communityArchived,
+		&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description,
+		&c.AuthClientID, &c.AuthOrganizationID, &c.AuthOrganizationSlug,
+		&c.BrandName, &c.LogoURL, &c.FaviconURL, &c.PrimaryColor, &c.AccentColor,
+		&c.SupportEmail, &c.PortalHost, &c.SignupMode, &c.AutoCreateMembers,
+		&c.CreatedAt, &communityArchived,
 		&m.ID, &m.CommunityID, &contact, &authUser, &m.Handle, &m.DisplayName, &m.Bio, &m.Status, &m.JoinedAt, &seen,
 	)
 	if err != nil {

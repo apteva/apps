@@ -10,6 +10,7 @@
   --surface-soft: #eef5f2;
   --brand: #147d68;
   --brand-dark: #0c5d4d;
+  --brand-accent: #22c55e;
   --danger: #a83c42;
   --shadow: 0 18px 50px rgba(17, 56, 49, 0.08);
 }
@@ -60,8 +61,10 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
   place-items: center;
   border-radius: 13px;
   color: white;
-  background: linear-gradient(145deg, #23a98d, #147d68);
+  background: linear-gradient(145deg, var(--brand-accent), var(--brand));
 }
+.brand-logo { display: block; width: min(180px, 70%); max-height: 64px; margin-bottom: 20px; object-fit: contain; object-position: left center; }
+.brand-logo.sidebar-logo { width: 42px; height: 42px; margin: 0; border-radius: 10px; object-fit: contain; }
 
 .sidebar .field > span { color: #9ebdb6; }
 .sidebar select { border-color: #35534e; color: white; background: #173a36; }

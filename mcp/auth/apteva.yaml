@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.8.0
+version: 0.9.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -15,8 +15,9 @@ description: |
   URL changes from v0.3); the dashboard renders a consolidated AuthPanel
   with OrgSwitcher.
 
-  v0.8.0 adds generic organization-scoped RBAC, trusted role and
-  permission claims, authorization versioning, and dashboard management.
+  v0.9.0 adds complete public email-verification and password-reset
+  routes, client-bound recovery links, and transactional delivery through
+  Messaging for branded customer portals.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/auth
@@ -44,6 +45,18 @@ provides:
       method: POST
       no_auth: true
     - prefix: /login
+      method: POST
+      no_auth: true
+    - prefix: /password/reset/request
+      method: POST
+      no_auth: true
+    - prefix: /password/reset/confirm
+      method: POST
+      no_auth: true
+    - prefix: /email/verify
+      method: POST
+      no_auth: true
+    - prefix: /email/verification/resend
       method: POST
       no_auth: true
     - prefix: /logout
@@ -161,7 +174,7 @@ config_schema:
   - name: from_email
     type: text
     label: Outbound from-address
-    description: Optional. Sender address for transactional email (verify, reset, magic-link). Required only if the messaging app is installed; without it, links are written to the audit log instead. Must be a from-address verified in the messaging app.
+    description: Sender address for transactional email (verify, reset, magic-link). Configure a Messaging-verified address for production portals. When omitted, links are written to the audit log for local development only.
   - name: jwt_access_ttl_seconds
     type: text
     default: "900"

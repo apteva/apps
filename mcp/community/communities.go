@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -19,20 +20,34 @@ import (
 )
 
 type Community struct {
-	ID          string  `json:"id"`
-	ProjectID   string  `json:"project_id"`
-	Slug        string  `json:"slug"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	CreatedAt   string  `json:"created_at"`
-	ArchivedAt  *string `json:"archived_at,omitempty"`
+	ID                   string  `json:"id"`
+	ProjectID            string  `json:"project_id"`
+	Slug                 string  `json:"slug"`
+	Name                 string  `json:"name"`
+	Description          string  `json:"description"`
+	AuthClientID         string  `json:"auth_client_id,omitempty"`
+	AuthOrganizationID   string  `json:"auth_organization_id,omitempty"`
+	AuthOrganizationSlug string  `json:"auth_organization_slug,omitempty"`
+	BrandName            string  `json:"brand_name,omitempty"`
+	LogoURL              string  `json:"logo_url,omitempty"`
+	FaviconURL           string  `json:"favicon_url,omitempty"`
+	PrimaryColor         string  `json:"primary_color"`
+	AccentColor          string  `json:"accent_color"`
+	SupportEmail         string  `json:"support_email,omitempty"`
+	PortalHost           string  `json:"portal_host,omitempty"`
+	SignupMode           string  `json:"signup_mode"`
+	AutoCreateMembers    bool    `json:"auto_create_members"`
+	CreatedAt            string  `json:"created_at"`
+	ArchivedAt           *string `json:"archived_at,omitempty"`
 }
+
+var colorRE = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 func communitiesTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "communities_create",
-			Description: "Create a community. Args: slug (required, url-safe), name (required), description?.",
+			Description: "Create a community. Args: slug (required, url-safe), name (required), description?. Portal/Auth settings may be configured with communities_update.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":        map[string]any{"type": "string"},
 				"name":        map[string]any{"type": "string"},
@@ -59,11 +74,23 @@ func communitiesTools() []sdk.Tool {
 		},
 		{
 			Name:        "communities_update",
-			Description: "Update a community's name or description. Args: id (required), name?, description?.",
+			Description: "Update a community, including its customer portal branding and per-community Auth binding.",
 			InputSchema: schemaObject(map[string]any{
-				"id":          map[string]any{"type": "string"},
-				"name":        map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
+				"id":                     map[string]any{"type": "string"},
+				"name":                   map[string]any{"type": "string"},
+				"description":            map[string]any{"type": "string"},
+				"auth_client_id":         map[string]any{"type": "string"},
+				"auth_organization_id":   map[string]any{"type": "string"},
+				"auth_organization_slug": map[string]any{"type": "string"},
+				"brand_name":             map[string]any{"type": "string"},
+				"logo_url":               map[string]any{"type": "string"},
+				"favicon_url":            map[string]any{"type": "string"},
+				"primary_color":          map[string]any{"type": "string"},
+				"accent_color":           map[string]any{"type": "string"},
+				"support_email":          map[string]any{"type": "string"},
+				"portal_host":            map[string]any{"type": "string"},
+				"signup_mode":            map[string]any{"type": "string", "enum": []string{"open", "closed"}},
+				"auto_create_members":    map[string]any{"type": "boolean"},
 			}, []string{"id"}),
 			Handler: toolCommunitiesUpdate,
 		},
@@ -95,6 +122,49 @@ func toolCommunitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if v, ok := args["description"].(string); ok {
 		sets = append(sets, "description = ?")
+		vals = append(vals, v)
+	}
+	for arg, column := range map[string]string{
+		"auth_client_id": "auth_client_id", "auth_organization_id": "auth_organization_id",
+		"auth_organization_slug": "auth_organization_slug", "brand_name": "brand_name",
+		"logo_url": "logo_url", "favicon_url": "favicon_url", "support_email": "support_email",
+	} {
+		if v, ok := args[arg].(string); ok {
+			sets = append(sets, column+" = ?")
+			vals = append(vals, strings.TrimSpace(v))
+		}
+	}
+	for _, arg := range []string{"primary_color", "accent_color"} {
+		if v, ok := args[arg].(string); ok {
+			v = strings.TrimSpace(v)
+			if !colorRE.MatchString(v) {
+				return nil, fmt.Errorf("%s must be a six-digit hex color", arg)
+			}
+			sets = append(sets, arg+" = ?")
+			vals = append(vals, strings.ToLower(v))
+		}
+	}
+	if v, ok := args["portal_host"].(string); ok {
+		v = strings.TrimRight(strings.TrimSpace(v), "/")
+		if v != "" {
+			parsed, parseErr := url.Parse(v)
+			if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return nil, errors.New("portal_host must be an absolute http(s) URL")
+			}
+		}
+		sets = append(sets, "portal_host = ?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["signup_mode"].(string); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		if v != "open" && v != "closed" {
+			return nil, errors.New("signup_mode must be open or closed")
+		}
+		sets = append(sets, "signup_mode = ?")
+		vals = append(vals, v)
+	}
+	if v, ok := args["auto_create_members"].(bool); ok {
+		sets = append(sets, "auto_create_members = ?")
 		vals = append(vals, v)
 	}
 	if len(sets) == 0 {
@@ -182,7 +252,7 @@ func toolCommunitiesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if projectID == "" {
 		return nil, errors.New("no project context")
 	}
-	q := `SELECT id, project_id, slug, name, description, created_at, archived_at
+	q := `SELECT ` + communityCols + `
 	      FROM communities WHERE project_id = ?`
 	if !includeArchived {
 		q += ` AND archived_at IS NULL`
@@ -233,12 +303,22 @@ func toolCommunitiesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── DB helpers ──────────────────────────────────────────────────
 
-const communityCols = `id, project_id, slug, name, description, created_at, archived_at`
+const communityCols = `id, project_id, slug, name, description,
+       auth_client_id, auth_organization_id, auth_organization_slug,
+       brand_name, logo_url, favicon_url, primary_color, accent_color,
+       support_email, portal_host, signup_mode, auto_create_members,
+       created_at, archived_at`
 
 func scanCommunity(scan func(...any) error) (Community, error) {
 	var c Community
 	var arch sql.NullString
-	if err := scan(&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description, &c.CreatedAt, &arch); err != nil {
+	if err := scan(
+		&c.ID, &c.ProjectID, &c.Slug, &c.Name, &c.Description,
+		&c.AuthClientID, &c.AuthOrganizationID, &c.AuthOrganizationSlug,
+		&c.BrandName, &c.LogoURL, &c.FaviconURL, &c.PrimaryColor, &c.AccentColor,
+		&c.SupportEmail, &c.PortalHost, &c.SignupMode, &c.AutoCreateMembers,
+		&c.CreatedAt, &arch,
+	); err != nil {
 		return c, err
 	}
 	if arch.Valid {

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -174,6 +175,7 @@ type signupRequest struct {
 	DisplayName      string `json:"display_name"`
 	ClientID         string `json:"client_id"`
 	OrganizationSlug string `json:"organization_slug"`
+	ContinueURL      string `json:"continue_url"`
 	IP               string `json:"-"`
 	UserAgent        string `json:"-"`
 	Origin           string `json:"-"`
@@ -224,6 +226,9 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err := requireAllowedOrigin(client, body.Origin); err != nil {
 		return nil, http.StatusForbidden, err
 	}
+	if err := validateRecoveryContinueURL(client, body.ContinueURL); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
 	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
 	if orgErr != nil {
 		return nil, http.StatusBadRequest, orgErr
@@ -257,7 +262,9 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	dbAudit(ctx.AppDB(), pid, org.ID, &uid, client.ClientID, "signup", body.IP, body.UserAgent, nil)
 
 	if verificationRequired {
-		if err := issueVerifyEmailToken(ctx, pid, org, uid, body.Email); err != nil {
+		if err := issueVerifyEmailTokenForClient(ctx, pid, org, uid, body.Email, recoveryLinkOptions{
+			ClientID: client.ClientID, ContinueURL: body.ContinueURL,
+		}); err != nil {
 			ctx.Logger().Warn("verify-email send failed", "err", err)
 		}
 		return &signupResult{User: user, VerificationRequired: true}, http.StatusAccepted, nil
@@ -525,6 +532,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "refresh", r.RemoteAddr, r.UserAgent(), nil)
 
 	resp := map[string]any{
+		"user":          user,
 		"authorization": tokens.authorization,
 		"access_token":  tokens.access,
 		"refresh_token": tokens.refresh,
@@ -848,6 +856,30 @@ func requireAllowedOrigin(client *Client, origin string) error {
 		}
 	}
 	return errors.New("origin not allowed")
+}
+
+func validateRecoveryContinueURL(client *Client, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return errors.New("continue_url must be an absolute http(s) URL")
+	}
+	origin := u.Scheme + "://" + u.Host
+	for _, allowed := range client.AllowedOrigins {
+		if strings.TrimRight(strings.TrimSpace(allowed), "/") == origin || strings.TrimSpace(allowed) == "*" {
+			return nil
+		}
+	}
+	for _, redirect := range client.RedirectURIs {
+		r, parseErr := url.Parse(redirect)
+		if parseErr == nil && r.Scheme+"://"+r.Host == origin {
+			return nil
+		}
+	}
+	return errors.New("continue_url origin is not allowed for this client")
 }
 
 // resolveOrgForRequest picks the Organization for a public-endpoint

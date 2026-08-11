@@ -665,49 +665,61 @@ func dbInsertVerificationToken(db *sql.DB, projectID string, orgID, userID int64
 	return err
 }
 
-// dbConsumeVerificationToken — token_hash is globally unique so the
-// lookup doesn't need org scoping; we return the row's org so the
-// caller can scope side-effects to it.
-func dbConsumeVerificationToken(db *sql.DB, projectID, tokenHash string) (userID, orgID int64, kind, meta string, err error) {
+// dbConsumeVerificationToken validates the tenant, flow kind, and issuing
+// client before marking a token used. Keeping validation and consumption in
+// one transaction prevents a token presented to the wrong community client
+// from being burned and makes concurrent redemption single-use.
+func dbConsumeVerificationToken(db *sql.DB, projectID, tokenHash string, expectedOrgID int64, expectedKind, expectedClientID string) (userID int64, meta string, err error) {
 	tx, err := db.Begin()
 	if err != nil {
-		return 0, 0, "", "", err
+		return 0, "", err
 	}
 	defer tx.Rollback()
 	var expiresAt, used sql.NullString
 	var metaNS sql.NullString
 	var oid sql.NullInt64
+	var kind string
 	err = tx.QueryRow(`
 		SELECT user_id, organization_id, kind, meta, expires_at, used_at
 		FROM verification_tokens
 		WHERE project_id = ? AND token_hash = ?`,
 		projectID, tokenHash).Scan(&userID, &oid, &kind, &metaNS, &expiresAt, &used)
 	if err != nil {
-		return 0, 0, "", "", err
+		return 0, "", err
+	}
+	if !oid.Valid || oid.Int64 != expectedOrgID || kind != expectedKind {
+		return 0, "", errors.New("token does not belong to this client")
+	}
+	if metaNS.Valid && strings.TrimSpace(metaNS.String) != "" && expectedClientID != "" {
+		var opts recoveryLinkOptions
+		if json.Unmarshal([]byte(metaNS.String), &opts) == nil && opts.ClientID != "" && opts.ClientID != expectedClientID {
+			return 0, "", errors.New("token does not belong to this client")
+		}
 	}
 	if used.Valid && used.String != "" {
-		return 0, 0, "", "", errors.New("token already used")
+		return 0, "", errors.New("token already used")
 	}
 	if expiresAt.Valid {
 		if t, perr := time.Parse(time.RFC3339, expiresAt.String); perr == nil && t.Before(time.Now()) {
-			return 0, 0, "", "", errors.New("token expired")
+			return 0, "", errors.New("token expired")
 		}
 	}
-	if _, err := tx.Exec(
-		`UPDATE verification_tokens SET used_at = ? WHERE project_id = ? AND token_hash = ?`,
-		time.Now().UTC().Format(time.RFC3339), projectID, tokenHash); err != nil {
-		return 0, 0, "", "", err
+	result, err := tx.Exec(
+		`UPDATE verification_tokens SET used_at = ? WHERE project_id = ? AND token_hash = ? AND used_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339), projectID, tokenHash)
+	if err != nil {
+		return 0, "", err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return 0, "", errors.New("token already used")
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, 0, "", "", err
+		return 0, "", err
 	}
 	if metaNS.Valid {
 		meta = metaNS.String
 	}
-	if oid.Valid {
-		orgID = oid.Int64
-	}
-	return userID, orgID, kind, meta, nil
+	return userID, meta, nil
 }
 
 func dbMarkEmailVerified(db *sql.DB, projectID string, orgID, userID int64) error {

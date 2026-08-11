@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: community
 display_name: Community
-version: 0.7.8
+version: 0.8.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   each with spaces (feed/forum/chat/course), member directory, posts +
@@ -10,6 +10,9 @@ description: |
   resources, quizzes, assignments, certificates, drip, enrollments, and progress).
   Ships both an operator dashboard panel and a client-facing React portal
   at /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Each community owns its portal branding and Auth client/organization
+  binding; visitors see a branded email/password flow, are linked to a
+  member automatically, and continue directly into requested course checkout.
   Portal calls use
   @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
   Panel and portal update live via the platform event bus.
@@ -37,7 +40,7 @@ requires:
     - platform.apps.call
   apps:
     - name: auth
-      version: ">=0.8.0"
+      version: ">=0.9.0"
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
     - name: catalog
@@ -86,6 +89,7 @@ provides:
   http_routes:
     - prefix: /
     - { prefix: /ui/, method: GET, no_auth: true }
+    - { prefix: /portal/bootstrap, method: GET, no_auth: true }
   mcp_tools:
     # ─── communities ───────────────────────────────────────────
     - { name: communities_create,  description: "Create a community." }
@@ -98,6 +102,7 @@ provides:
     - { name: members_list,        description: "List members of a community." }
     - { name: members_get,         description: "Fetch one member by id or handle." }
     - { name: members_me,          description: "Return the member linked to the verified Auth user." }
+    - { name: members_ensure,      description: "Create or return the active member linked to the verified portal visitor." }
     - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
     # ─── spaces ────────────────────────────────────────────────
     - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }

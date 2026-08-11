@@ -76,6 +76,15 @@ func membersTools() []sdk.Tool {
 			Handler: toolMembersMe,
 		},
 		{
+			Name:        "members_ensure",
+			Description: "Create or return the active Community member linked to the verified visitor. Community portal use only.",
+			InputSchema: schemaObject(map[string]any{
+				"community_id": map[string]any{"type": "string"},
+				"display_name": map[string]any{"type": "string"},
+			}, []string{"community_id"}),
+			Handler: toolMembersEnsure,
+		},
+		{
 			Name:        "members_update",
 			Description: "Update a member's display_name, bio, status, or contact_id. Args: id (required), display_name?, bio?, status? (active|suspended|left), contact_id? (empty string clears).",
 			InputSchema: schemaObject(map[string]any{
@@ -93,6 +102,136 @@ func membersTools() []sdk.Tool {
 
 func toolMembersMe(*sdk.AppCtx, map[string]any) (any, error) {
 	return nil, errors.New("members_me requires a delegated Auth user")
+}
+
+func toolMembersEnsure(*sdk.AppCtx, map[string]any) (any, error) {
+	return nil, errors.New("members_ensure requires a delegated Auth user")
+}
+
+func ensureMemberForSubject(ctx *sdk.AppCtx, caller *sdk.Caller, communityID, requestedName string) (any, error) {
+	communityID = strings.TrimSpace(communityID)
+	if communityID == "" {
+		return nil, errors.New("community_id is required")
+	}
+	if caller == nil || caller.SubjectType != "user" || strings.TrimSpace(caller.SubjectID) == "" {
+		return nil, errors.New("sign in is required")
+	}
+	community, err := loadCommunity(ctx.AppDB(), communityID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityReadable(ctx, community); err != nil {
+		return nil, err
+	}
+	if community.AuthOrganizationID == "" && community.AuthOrganizationSlug == "" {
+		return nil, errors.New("this community's sign-in is not configured")
+	}
+	if community.AuthOrganizationID != "" && community.AuthOrganizationID != strings.TrimSpace(caller.OrganizationID) {
+		return nil, errors.New("this account belongs to a different community")
+	}
+	if community.AuthOrganizationSlug != "" && !strings.EqualFold(community.AuthOrganizationSlug, strings.TrimSpace(caller.OrganizationSlug)) {
+		return nil, errors.New("this account belongs to a different community")
+	}
+
+	existing, err := loadMemberByAuthUser(ctx.AppDB(), communityID, caller.SubjectID)
+	if err == nil {
+		if existing.Status != "active" {
+			return nil, errors.New("your community access is not active")
+		}
+		return map[string]any{"member": existing, "created": false}, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if community.SignupMode != "open" || !community.AutoCreateMembers {
+		return nil, errors.New("this community requires an existing membership")
+	}
+
+	displayName := strings.TrimSpace(requestedName)
+	if len(displayName) > 120 {
+		displayName = displayName[:120]
+	}
+	if displayName == "" {
+		displayName = memberNameFromEmail(caller.SubjectEmail)
+	}
+	handle, err := availableMemberHandle(ctx.AppDB(), communityID, displayName, caller.SubjectEmail)
+	if err != nil {
+		return nil, err
+	}
+	created, err := toolMembersCreate(ctx, map[string]any{
+		"community_id": communityID,
+		"handle":       handle,
+		"display_name": displayName,
+		"auth_user_id": caller.SubjectID,
+	})
+	if err != nil {
+		// A repeated browser request may race the first insert. The unique
+		// auth-user index makes that safe; return the row that won.
+		if member, lookupErr := loadMemberByAuthUser(ctx.AppDB(), communityID, caller.SubjectID); lookupErr == nil {
+			return map[string]any{"member": member, "created": false}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"member": created, "created": true}, nil
+}
+
+func loadMemberByAuthUser(db *sql.DB, communityID, authUserID string) (Member, error) {
+	row := db.QueryRow(
+		`SELECT `+memberCols+` FROM members WHERE community_id = ? AND auth_user_id = ?`,
+		communityID, authUserID,
+	)
+	return scanMember(row.Scan)
+}
+
+var handleCleanupRE = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+func availableMemberHandle(db *sql.DB, communityID, displayName, email string) (string, error) {
+	base := strings.ToLower(strings.TrimSpace(displayName))
+	if base == "" {
+		base = strings.SplitN(strings.ToLower(strings.TrimSpace(email)), "@", 2)[0]
+	}
+	base = handleCleanupRE.ReplaceAllString(base, "_")
+	base = strings.Trim(base, "_-")
+	if len(base) > 24 {
+		base = base[:24]
+	}
+	if len(base) < 2 || base[0] < 'a' || base[0] > 'z' {
+		base = "member_" + base
+	}
+	for i := 0; i < 1000; i++ {
+		candidate := base
+		if i > 0 {
+			candidate = fmt.Sprintf("%s_%d", base, i+1)
+		}
+		if len(candidate) > 31 {
+			candidate = candidate[:31]
+		}
+		var one int
+		err := db.QueryRow(`SELECT 1 FROM members WHERE community_id = ? AND handle = ?`, communityID, candidate).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			return candidate, nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return "", errors.New("could not allocate a member handle")
+}
+
+func memberNameFromEmail(email string) string {
+	local := strings.SplitN(strings.TrimSpace(email), "@", 2)[0]
+	local = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(local)
+	local = strings.TrimSpace(local)
+	if local == "" {
+		return "Member"
+	}
+	words := strings.Fields(local)
+	for i := range words {
+		if len(words[i]) > 0 {
+			words[i] = strings.ToUpper(words[i][:1]) + words[i][1:]
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 var memberStatuses = map[string]bool{"active": true, "suspended": true, "left": true}

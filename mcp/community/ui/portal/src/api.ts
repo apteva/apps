@@ -45,9 +45,25 @@ const auth = apteva.app(AUTH_APP);
 
 export interface AuthResponse {
   user: { id: number; email: string; display_name?: string };
+  refresh_token?: string;
   apteva_access_token?: string;
   apteva_expires_in?: number;
   verification_required?: boolean;
+  stored_at?: number;
+}
+
+export interface PortalBootstrap {
+  community: { id: string; slug: string; name: string; description: string };
+  brand: {
+    name: string;
+    logo_url?: string;
+    favicon_url?: string;
+    primary_color: string;
+    accent_color: string;
+    support_email?: string;
+  };
+  auth: { client_id: string; organization_slug?: string };
+  signup: { enabled: boolean };
 }
 
 export interface MemberSession {
@@ -76,23 +92,41 @@ export function currentProjectId(): string {
 function projectScopedPath(path: string): string {
   const projectId = currentProjectId();
   if (!projectId) return path;
-  return `${path}?project_id=${encodeURIComponent(projectId)}`;
+  return `${path}${path.includes("?") ? "&" : "?"}project_id=${encodeURIComponent(projectId)}`;
 }
 
 const self = "self";
 
 export const api = {
+  portal: {
+    bootstrap: (community: string) =>
+      apteva.get<PortalBootstrap>(projectScopedPath(`/api/apps/${encodeURIComponent(COMMUNITY_APP)}/portal/bootstrap?community=${encodeURIComponent(community)}`)),
+  },
   auth: {
     login: (body: { client_id: string; email: string; password: string; organization_slug?: string }) =>
       auth.post<AuthResponse>(projectScopedPath("/login"), { ...body, project_id: currentProjectId() }),
-    signup: (body: { client_id: string; email: string; password: string; display_name: string; organization_slug?: string }) =>
+    signup: (body: { client_id: string; email: string; password: string; display_name: string; organization_slug?: string; continue_url?: string }) =>
       auth.post<AuthResponse>(projectScopedPath("/signup"), { ...body, project_id: currentProjectId() }),
+    requestPasswordReset: (body: { client_id: string; email: string; organization_slug?: string; continue_url?: string }) =>
+      auth.post<{ ok: boolean }>(projectScopedPath("/password/reset/request"), { ...body, project_id: currentProjectId() }),
+    confirmPasswordReset: (body: { client_id: string; token: string; password: string; organization_slug?: string }) =>
+      auth.post<AuthResponse>(projectScopedPath("/password/reset/confirm"), { ...body, project_id: currentProjectId() }),
+    verifyEmail: (body: { client_id: string; token: string; organization_slug?: string }) =>
+      auth.post<AuthResponse>(projectScopedPath("/email/verify"), { ...body, project_id: currentProjectId() }),
+    resendVerification: (body: { client_id: string; email: string; organization_slug?: string; continue_url?: string }) =>
+      auth.post<{ ok: boolean }>(projectScopedPath("/email/verification/resend"), { ...body, project_id: currentProjectId() }),
+    refresh: (body: { client_id: string; refresh_token: string; organization_slug?: string }) =>
+      auth.post<AuthResponse>(projectScopedPath("/refresh"), { ...body, project_id: currentProjectId() }),
+    logout: (refresh_token?: string) =>
+      auth.post<void>(projectScopedPath("/logout"), { refresh_token, project_id: currentProjectId() }),
   },
   session: () => community.tool<MemberSession>("members_me"),
   communities: {
     list: () => community.tool<MemberSession>("communities_list"),
   },
   members: {
+    ensure: (community_id: string, display_name?: string) =>
+      community.tool<{ member: Member; created: boolean }>("members_ensure", { community_id, display_name }),
     list: (community_id: string) =>
       community.tool<{ members: Member[] }>("members_list", { community_id, status: "active", limit: 500 }),
     me: (community_id: string) =>

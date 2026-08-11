@@ -322,7 +322,7 @@ func (a *App) toolUsersSetPassword(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	password := stringArg(args, "password", "")
 	revokeSessions := boolArg(args, "revoke_sessions", true)
-	revoked, _, err := a.setUserPassword(ctx, pid, org.ID, uid, password, revokeSessions, "", "agent")
+	revoked, _, err := a.setUserPassword(ctx, pid, org.ID, uid, password, revokeSessions, "password_set_admin", "", "", "agent")
 	if err != nil {
 		return nil, err
 	}

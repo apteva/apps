@@ -82,6 +82,18 @@ interface Community {
   slug: string;
   name: string;
   description: string;
+  auth_client_id?: string;
+  auth_organization_id?: string;
+  auth_organization_slug?: string;
+  brand_name?: string;
+  logo_url?: string;
+  favicon_url?: string;
+  primary_color?: string;
+  accent_color?: string;
+  support_email?: string;
+  portal_host?: string;
+  signup_mode?: "open" | "closed";
+  auto_create_members?: boolean;
   created_at: string;
   archived_at?: string;
 }
@@ -207,6 +219,7 @@ interface Post {
 
 type DialogKind =
   | "community"
+  | "portal"
   | "member"
   | "space"
   | "course"
@@ -294,13 +307,22 @@ function slugify(value: string): string {
     .slice(0, 63);
 }
 
+function clientPortalURL(community: Community, projectId: string, installId: number): string {
+  const configured = community.portal_host?.trim();
+  const fallback = `/api/apps/community/_install/${installId}/ui/portal/dist/index.html`;
+  const url = new URL(configured || fallback, window.location.origin);
+  url.searchParams.set("project_id", projectId);
+  url.searchParams.set("community", community.slug);
+  return configured ? url.toString() : `${url.pathname}${url.search}`;
+}
+
 function buttonClass(tone: "primary" | "secondary" | "ghost" = "secondary") {
   if (tone === "primary") return "px-2.5 py-1.5 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50";
   if (tone === "ghost") return "px-2 py-1 rounded text-text-muted hover:bg-bg-secondary text-sm disabled:opacity-50";
   return "px-2.5 py-1.5 rounded border border-border text-sm text-text hover:bg-bg-secondary disabled:opacity-50";
 }
 
-export default function CommunityPanel({ projectId }: NativePanelProps) {
+export default function CommunityPanel({ projectId, installId }: NativePanelProps) {
   const [communities, setCommunities] = useState<Community[]>([]);
   const [communityId, setCommunityId] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -592,6 +614,18 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
           {activeCommunity?.description ? (
             <div className="text-xs text-text-muted line-clamp-3">{activeCommunity.description}</div>
           ) : null}
+          <div className="grid grid-cols-2 gap-2">
+            <button className={buttonClass()} disabled={!activeCommunity} onClick={() => setDialog("portal")}>
+              Portal settings
+            </button>
+            {activeCommunity ? (
+              <a className={`${buttonClass()} text-center`} href={clientPortalURL(activeCommunity, projectId, installId)} target="_blank" rel="noreferrer">
+                Open portal
+              </a>
+            ) : (
+              <button className={buttonClass()} disabled>Open portal</button>
+            )}
+          </div>
         </div>
 
         <div className="p-3 border-b border-border space-y-2">
@@ -977,6 +1011,7 @@ export default function CommunityPanel({ projectId }: NativePanelProps) {
             } else {
               await refreshCommunities();
             }
+            if (dialog === "portal") await refreshCommunities();
             const createdCourseContent =
               dialog === "course" ||
               dialog === "section" ||
@@ -1134,6 +1169,18 @@ function CommunityDialog({
   const [name, setName] = useState(kind === "edit_lesson" ? lesson?.title || "" : "");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
+  const [authClientId, setAuthClientId] = useState(community?.auth_client_id || "");
+  const [authOrganizationId, setAuthOrganizationId] = useState(community?.auth_organization_id || "");
+  const [authOrganizationSlug, setAuthOrganizationSlug] = useState(community?.auth_organization_slug || "");
+  const [brandName, setBrandName] = useState(community?.brand_name || community?.name || "");
+  const [logoUrl, setLogoUrl] = useState(community?.logo_url || "");
+  const [faviconUrl, setFaviconUrl] = useState(community?.favicon_url || "");
+  const [primaryColor, setPrimaryColor] = useState(community?.primary_color || "#147d68");
+  const [accentColor, setAccentColor] = useState(community?.accent_color || "#22c55e");
+  const [supportEmail, setSupportEmail] = useState(community?.support_email || "");
+  const [portalHost, setPortalHost] = useState(community?.portal_host || "");
+  const [signupMode, setSignupMode] = useState<"open" | "closed">(community?.signup_mode || "open");
+  const [autoCreateMembers, setAutoCreateMembers] = useState(community?.auto_create_members ?? true);
   const [authUserId, setAuthUserId] = useState("");
   const [visibility, setVisibility] = useState<"members" | "public">("members");
   const [spaceKind, setSpaceKind] = useState<Space["kind"]>("feed");
@@ -1155,6 +1202,8 @@ function CommunityDialog({
   const title =
     kind === "community"
       ? "New community"
+      : kind === "portal"
+      ? "Client portal settings"
       : kind === "member"
       ? "New member"
       : kind === "course"
@@ -1188,6 +1237,27 @@ function CommunityDialog({
           _project_id: projectId,
         });
         await onCreated({ communityId: out.id });
+      } else if (kind === "portal") {
+        if (!community) throw new Error("Choose a community first");
+        if (authClientId.trim() && !authOrganizationId.trim() && !authOrganizationSlug.trim()) {
+          throw new Error("Set the Auth organization ID or slug for this community");
+        }
+        await runTool<Community>("Save client portal", "communities_update", {
+          id: community.id,
+          auth_client_id: authClientId.trim(),
+          auth_organization_id: authOrganizationId.trim(),
+          auth_organization_slug: authOrganizationSlug.trim(),
+          brand_name: brandName.trim(),
+          logo_url: logoUrl.trim(),
+          favicon_url: faviconUrl.trim(),
+          primary_color: primaryColor,
+          accent_color: accentColor,
+          support_email: supportEmail.trim(),
+          portal_host: portalHost.trim(),
+          signup_mode: signupMode,
+          auto_create_members: autoCreateMembers,
+        });
+        await onCreated({ communityId: community.id });
       } else if (kind === "member") {
         const out = await runTool<Member>("Create member", "members_create", {
           community_id: community?.id,
@@ -1292,7 +1362,9 @@ function CommunityDialog({
 
   const needsSlug = kind === "community" || kind === "member" || kind === "space" || kind === "course";
   const canSubmit =
-    kind === "offer" || kind === "membership_plan"
+    kind === "portal"
+      ? Boolean(authClientId.trim() && (authOrganizationId.trim() || authOrganizationSlug.trim()) && brandName.trim())
+      : kind === "offer" || kind === "membership_plan"
       ? Number.isInteger(Number(catalogPriceId)) && Number(catalogPriceId) > 0
       : kind === "video"
       ? Boolean(storageKey.trim())
@@ -1317,7 +1389,7 @@ function CommunityDialog({
           </Field>
         ) : null}
 
-        {kind !== "video" && kind !== "offer" ? (
+        {kind !== "video" && kind !== "offer" && kind !== "portal" ? (
           <Field label={kind === "member" ? "Display name" : kind === "section" ? "Section title" : kind === "thread" ? "Thread title" : "Name"}>
             <input
               className={inputClass}
@@ -1362,6 +1434,34 @@ function CommunityDialog({
           <Field label={kind === "community" ? "Description" : "Bio"}>
             <textarea className={`${inputClass} min-h-[92px]`} value={description} onChange={(e) => setDescription(e.target.value)} />
           </Field>
+        ) : null}
+
+        {kind === "portal" ? (
+          <>
+            <div className="rounded border border-border bg-bg-secondary p-3 text-xs text-text-muted">
+              Use a dedicated single-organization Auth SPA client for complete community isolation. Customers never see these routing values.
+            </div>
+            <Field label="Auth SPA client ID"><input className={inputClass} value={authClientId} onChange={(e) => setAuthClientId(e.target.value)} placeholder="akc_…" autoFocus /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Auth organization ID"><input className={inputClass} value={authOrganizationId} onChange={(e) => setAuthOrganizationId(e.target.value)} /></Field>
+              <Field label="Organization slug"><input className={inputClass} value={authOrganizationSlug} onChange={(e) => setAuthOrganizationSlug(e.target.value)} /></Field>
+            </div>
+            <Field label="Customer-facing brand"><input className={inputClass} value={brandName} onChange={(e) => setBrandName(e.target.value)} placeholder="Makecademy" /></Field>
+            <Field label="Logo URL"><input className={inputClass} type="url" value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} /></Field>
+            <Field label="Favicon URL"><input className={inputClass} type="url" value={faviconUrl} onChange={(e) => setFaviconUrl(e.target.value)} /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Primary color"><input className={inputClass} type="color" value={primaryColor} onChange={(e) => setPrimaryColor(e.target.value)} /></Field>
+              <Field label="Accent color"><input className={inputClass} type="color" value={accentColor} onChange={(e) => setAccentColor(e.target.value)} /></Field>
+            </div>
+            <Field label="Support email"><input className={inputClass} type="email" value={supportEmail} onChange={(e) => setSupportEmail(e.target.value)} /></Field>
+            <Field label="Portal URL"><input className={inputClass} type="url" value={portalHost} onChange={(e) => setPortalHost(e.target.value)} placeholder="https://courses.example.com" /></Field>
+            <Field label="Signup policy">
+              <select className={inputClass} value={signupMode} onChange={(e) => setSignupMode(e.target.value as "open" | "closed")}>
+                <option value="open">Open signup</option><option value="closed">Existing members only</option>
+              </select>
+            </Field>
+            <label className="flex items-center gap-2 text-sm text-text-muted"><input type="checkbox" checked={autoCreateMembers} onChange={(e) => setAutoCreateMembers(e.target.checked)} />Automatically create and link members after signup</label>
+          </>
         ) : null}
 
         {kind === "member" ? (

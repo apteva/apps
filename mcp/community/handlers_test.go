@@ -106,6 +106,33 @@ func TestCommunitiesGet_BySlug(t *testing.T) {
 	}
 }
 
+func TestPortalBootstrapReturnsBrandAndAutomaticAuthBinding(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	community := mustCreateCommunity(t, ctx, "academy", "Academy")
+	if _, err := toolCommunitiesUpdate(ctx, map[string]any{
+		"id": community.ID, "auth_client_id": "academy-client", "auth_organization_slug": "academy-org",
+		"brand_name": "Makecademy", "primary_color": "#123456", "accent_color": "#fedcba",
+		"signup_mode": "open", "auto_create_members": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/portal/bootstrap?community=academy", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).httpPortalBootstrap(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bootstrap status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{`"name":"Makecademy"`, `"client_id":"academy-client"`, `"organization_slug":"academy-org"`, `"enabled":true`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("bootstrap missing %s: %s", want, body)
+		}
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("bootstrap must not be cached: %q", rec.Header().Get("Cache-Control"))
+	}
+}
+
 // ─── members ─────────────────────────────────────────────────────
 
 func TestMembersCreate_Emits(t *testing.T) {

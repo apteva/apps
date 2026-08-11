@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.8.0
+version: 0.9.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -69,6 +69,18 @@ provides:
       method: POST
       no_auth: true
     - prefix: /login
+      method: POST
+      no_auth: true
+    - prefix: /password/reset/request
+      method: POST
+      no_auth: true
+    - prefix: /password/reset/confirm
+      method: POST
+      no_auth: true
+    - prefix: /email/verify
+      method: POST
+      no_auth: true
+    - prefix: /email/verification/resend
       method: POST
       no_auth: true
     - prefix: /logout
@@ -241,6 +253,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Public auth endpoints — tenant resolved from client_id at runtime.
 		{Pattern: "/signup", Handler: a.handleSignup, NoAuth: true},
 		{Pattern: "/login", Handler: a.handleLogin, NoAuth: true},
+		{Method: "POST", Pattern: "/password/reset/request", Handler: a.handlePasswordResetRequest, NoAuth: true},
+		{Method: "POST", Pattern: "/password/reset/confirm", Handler: a.handlePasswordResetConfirm, NoAuth: true},
+		{Method: "POST", Pattern: "/email/verify", Handler: a.handleEmailVerify, NoAuth: true},
+		{Method: "POST", Pattern: "/email/verification/resend", Handler: a.handleEmailVerificationResend, NoAuth: true},
 		{Pattern: "/logout", Handler: a.handleLogout, NoAuth: true},
 		{Pattern: "/refresh", Handler: a.handleRefresh, NoAuth: true},
 		{Pattern: "/me", Handler: a.handleMe, NoAuth: true},

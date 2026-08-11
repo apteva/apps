@@ -29,6 +29,103 @@ func userCallContext(subjectID string) context.Context {
 	})
 }
 
+func communityUserCallContext(subjectID, email, orgID, orgSlug string) context.Context {
+	return sdk.WithCaller(context.Background(), &sdk.Caller{
+		SubjectType:      "user",
+		SubjectID:        subjectID,
+		SubjectEmail:     email,
+		OrganizationID:   orgID,
+		OrganizationSlug: orgSlug,
+	})
+}
+
+func TestMembersEnsureCreatesIdempotentlyForConfiguredCommunity(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	community := mustCreateCommunity(t, ctx, "academy", "Academy")
+	updated, err := toolCommunitiesUpdate(ctx, map[string]any{
+		"id": community.ID, "auth_client_id": "client-academy",
+		"auth_organization_id": "org-1", "auth_organization_slug": "academy",
+		"signup_mode": "open", "auto_create_members": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.(Community).AuthClientID != "client-academy" {
+		t.Fatalf("portal settings were not stored: %+v", updated)
+	}
+	caller := communityUserCallContext("auth-alice", "alice.smith@example.test", "org-1", "academy")
+	out, err := delegatedTool(t, "members_ensure")(caller, ctx, map[string]any{
+		"community_id": community.ID, "display_name": "Alice Smith",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := out.(map[string]any)
+	if first["created"] != true || first["member"].(Member).Handle != "alice_smith" {
+		t.Fatalf("unexpected first ensure result: %#v", first)
+	}
+	if first["member"].(Member).AuthUserID != nil {
+		t.Fatal("delegated ensure leaked auth_user_id")
+	}
+	out, err = delegatedTool(t, "members_ensure")(caller, ctx, map[string]any{"community_id": community.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["created"] != false {
+		t.Fatalf("repeat ensure should be idempotent: %#v", out)
+	}
+}
+
+func TestMembersEnsureEnforcesCommunityOrgAndSignupPolicy(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	community := mustCreateCommunity(t, ctx, "private", "Private")
+	if _, err := toolCommunitiesUpdate(ctx, map[string]any{
+		"id": community.ID, "auth_client_id": "private-client",
+		"auth_organization_id": "org-private", "signup_mode": "open", "auto_create_members": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := delegatedTool(t, "members_ensure")(
+		communityUserCallContext("auth-mallory", "mallory@example.test", "org-other", "other"),
+		ctx, map[string]any{"community_id": community.ID},
+	)
+	if err == nil || !strings.Contains(err.Error(), "different community") {
+		t.Fatalf("wrong organization should be denied, got %v", err)
+	}
+	if _, err := toolCommunitiesUpdate(ctx, map[string]any{"id": community.ID, "signup_mode": "closed"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = delegatedTool(t, "members_ensure")(
+		communityUserCallContext("auth-alice", "alice@example.test", "org-private", "private"),
+		ctx, map[string]any{"community_id": community.ID},
+	)
+	if err == nil || !strings.Contains(err.Error(), "existing membership") {
+		t.Fatalf("closed signup should not create a member, got %v", err)
+	}
+}
+
+func TestDelegatedCommunityGetDoesNotExposePortalBinding(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	community := mustCreateCommunity(t, ctx, "main", "Main")
+	if _, err := toolCommunitiesUpdate(ctx, map[string]any{
+		"id": community.ID, "auth_client_id": "public-client", "auth_organization_id": "org-secret-routing",
+		"portal_host": "https://courses.example.test",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateLinkedMember(t, ctx, community.ID, "alice", "auth-alice")
+	out, err := delegatedTool(t, "communities_get")(
+		userCallContext("auth-alice"), ctx, map[string]any{"id": community.ID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(Community)
+	if got.AuthClientID != "" || got.AuthOrganizationID != "" || got.PortalHost != "" {
+		t.Fatalf("delegated community leaked operator settings: %+v", got)
+	}
+}
+
 func mustCreateLinkedMember(t *testing.T, ctx *sdk.AppCtx, communityID, handle, subjectID string) Member {
 	t.Helper()
 	out, err := toolMembersCreate(ctx, map[string]any{

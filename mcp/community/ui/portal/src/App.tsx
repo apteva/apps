@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, useDelegatedToken } from "./api";
+import { api, apteva, COMMUNITY_APP, currentProjectId, type AuthResponse, type LessonBundle, type PortalBootstrap, useDelegatedToken } from "./api";
 import type {
   Community,
   CourseOffer,
@@ -32,7 +32,7 @@ import type {
 } from "./types";
 
 type View = "home" | "spaces" | "courses" | "members" | "messages" | "profile";
-type AuthMode = "login" | "signup";
+type AuthMode = "login" | "signup" | "forgot" | "reset" | "verify_pending";
 type AppEvent = {
   topic: string;
   data?: {
@@ -53,33 +53,50 @@ const nav: Array<{ id: View; label: string; icon: typeof Home }> = [
   { id: "profile", label: "Profile", icon: UserRound },
 ];
 
-const authSessionKey = "apteva-community-auth";
+function requestedCommunitySlug(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("community")?.trim().toLowerCase() || "";
+}
+
+function requestedCourse(): string {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("course")?.trim() || "";
+}
+
+function wantsCourseCheckout(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  return !params.has("payment") && params.get("intent") === "buy";
+}
+
+function authSessionKey(): string {
+  return `apteva-community-auth:${requestedCommunitySlug() || "default"}`;
+}
 
 function initialAuthSession(): AuthResponse | null {
   if (typeof window === "undefined") return null;
   try {
-    const stored = JSON.parse(window.sessionStorage.getItem(authSessionKey) || "null") as AuthResponse | null;
+    const stored = JSON.parse(window.sessionStorage.getItem(authSessionKey()) || "null") as AuthResponse | null;
     if (!stored?.apteva_access_token || !stored.user) return null;
     useDelegatedToken(stored.apteva_access_token);
     return stored;
   } catch {
-    window.sessionStorage.removeItem(authSessionKey);
+    window.sessionStorage.removeItem(authSessionKey());
     return null;
   }
 }
 
 function initialView(): View {
   if (typeof window === "undefined") return "home";
-  return new URLSearchParams(window.location.search).has("payment") ? "courses" : "home";
+  const params = new URLSearchParams(window.location.search);
+  return params.has("payment") || params.has("course") ? "courses" : "home";
 }
 
 function initialAuthForm() {
-  const params = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
   return {
-    client_id: params.get("client_id") || "",
-    organization_slug: params.get("organization_slug") || params.get("organization") || "",
     email: "",
     password: "",
+    password_confirm: "",
     display_name: "",
   };
 }
@@ -87,10 +104,15 @@ function initialAuthForm() {
 function friendlyError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("not linked to an active member")) {
-    return "Your account is not linked to a community membership yet. Ask a community operator to link your Auth user ID.";
+    return "We could not activate your community access. Please contact support.";
   }
+  if (message.includes("requires an existing membership")) return "This community is currently available to approved members only.";
+  if (message.includes("different community")) return "This account belongs to a different community. Sign out and use the correct account.";
   if (message.includes("active course enrollment required")) return "Enroll in this course to open its lessons.";
   if (message.includes("lesson is not available yet")) return "This lesson is scheduled for a later date.";
+  if (message.includes("email_unverified")) return "Please verify your email before signing in.";
+  if (message.includes("invalid_credentials") || message.includes("invalid credentials")) return "The email or password is incorrect.";
+  if (message.includes("origin_not_allowed")) return "This course portal is not configured for this address. Please contact support.";
   const json = message.match(/\{"error":"([^"]+)"\}/);
   if (json?.[1]) return json[1];
   return message.replace(/^HTTP \d+:\s*/, "");
@@ -128,6 +150,9 @@ export default function App() {
   const [auth, setAuth] = useState<AuthResponse | null>(initialAuthSession);
   const [authMode, setAuthMode] = useState<AuthMode>("login");
   const [authForm, setAuthForm] = useState(initialAuthForm);
+  const [portal, setPortal] = useState<PortalBootstrap | null>(null);
+  const [portalError, setPortalError] = useState("");
+  const [recoveryToken, setRecoveryToken] = useState("");
   const [view, setView] = useState<View>(initialView);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pending, setPending] = useState(0);
@@ -169,6 +194,7 @@ export default function App() {
 
   const requestVersion = useRef<Record<string, number>>({});
   const eventTimer = useRef<number | undefined>(undefined);
+  const automaticCheckoutStarted = useRef(false);
   const busy = pending > 0;
 
   const selectedCommunity = communities.find((item) => item.id === communityId);
@@ -180,6 +206,56 @@ export default function App() {
   const selectedCourse = courses.find((item) => item.id === courseId);
   const selectedLesson = lessons.find((item) => item.id === lessonId);
   const memberMap = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
+  const brandName = portal?.brand.name || "your community";
+
+  useEffect(() => {
+    let cancelled = false;
+    api.portal.bootstrap(requestedCommunitySlug()).then((value) => {
+      if (cancelled) return;
+      setPortal(value);
+      setPortalError("");
+      document.title = `${value.brand.name} courses`;
+      document.documentElement.style.setProperty("--brand", value.brand.primary_color);
+      document.documentElement.style.setProperty("--brand-dark", value.brand.primary_color);
+      document.documentElement.style.setProperty("--brand-accent", value.brand.accent_color);
+      if (value.brand.favicon_url) {
+        let favicon = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+        if (!favicon) {
+          favicon = document.createElement("link");
+          favicon.rel = "icon";
+          document.head.appendChild(favicon);
+        }
+        favicon.href = value.brand.favicon_url;
+      }
+    }).catch((caught) => {
+      if (!cancelled) setPortalError(friendlyError(caught));
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!portal || typeof window === "undefined") return;
+    const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const verifyToken = fragment.get("verify");
+    const resetToken = fragment.get("reset");
+    if (resetToken) {
+      setRecoveryToken(resetToken);
+      setAuthMode("reset");
+      window.history.replaceState({}, "", window.location.pathname + window.location.search);
+      return;
+    }
+    if (!verifyToken) return;
+    window.history.replaceState({}, "", window.location.pathname + window.location.search);
+    void run(async () => {
+      const response = await api.auth.verifyEmail({
+        client_id: portal.auth.client_id,
+        organization_slug: portal.auth.organization_slug,
+        token: verifyToken,
+      });
+      finishAuthentication(response);
+      setNotice("Your email is verified. Welcome!");
+    });
+  }, [portal]);
 
   const run = useCallback(async <T,>(
     task: () => Promise<T>,
@@ -209,13 +285,14 @@ export default function App() {
 
   const loadSession = useCallback(async () => {
     await latest("session", api.session, (session) => {
-      setCommunities(session.communities || []);
-      setMemberships(session.memberships || []);
-      setCommunityId((current) =>
-        session.communities.some((item) => item.id === current) ? current : session.communities[0]?.id || "",
-      );
+      const targetID = portal?.community.id || "";
+      const targetCommunities = (session.communities || []).filter((item) => item.id === targetID);
+      const targetMemberships = (session.memberships || []).filter((item) => item.community_id === targetID);
+      setCommunities(targetCommunities);
+      setMemberships(targetMemberships);
+      setCommunityId(targetCommunities[0]?.id || "");
     });
-  }, [latest]);
+  }, [latest, portal]);
 
   const loadCommunity = useCallback(async () => {
     if (!communityId) {
@@ -255,11 +332,13 @@ export default function App() {
             ? current
             : result.spaces.find((item) => item.kind !== "course")?.id || "",
         );
-        setCourseId((current) =>
-          result.spaces.some((item) => item.id === current && item.kind === "course")
-            ? current
-            : result.spaces.find((item) => item.kind === "course")?.id || "",
-        );
+        setCourseId((current) => {
+          if (result.spaces.some((item) => item.id === current && item.kind === "course")) return current;
+          const requested = requestedCourse();
+          return result.spaces.find((item) => item.kind === "course" && (item.id === requested || item.slug === requested))?.id
+            || result.spaces.find((item) => item.kind === "course")?.id
+            || "";
+        });
       },
     );
   }, [communityId, latest]);
@@ -357,9 +436,37 @@ export default function App() {
   }, [dmId, latest]);
 
   useEffect(() => {
-    if (!auth) return;
-    void run(loadSession, { preserveNotice: true });
-  }, [auth, loadSession, run]);
+    if (!auth || !portal) return;
+    void run(async () => {
+      await api.members.ensure(portal.community.id, auth.user.display_name);
+      await loadSession();
+    }, { preserveNotice: true });
+  }, [auth, loadSession, portal, run]);
+
+  useEffect(() => {
+    if (!auth?.refresh_token || !portal) return;
+    let cancelled = false;
+    let timer = 0;
+    const refreshSession = async () => {
+      try {
+        const response = await api.auth.refresh({
+          client_id: portal.auth.client_id,
+          organization_slug: portal.auth.organization_slug,
+          refresh_token: auth.refresh_token!,
+        });
+        if (!cancelled) finishAuthentication(response);
+      } catch {
+        if (!cancelled) timer = window.setTimeout(refreshSession, 30_000);
+      }
+    };
+    const ttl = Math.max(60, auth.apteva_expires_in || 3600) * 1000;
+    const elapsed = auth.stored_at ? Math.max(0, Date.now() - auth.stored_at) : ttl;
+    timer = window.setTimeout(refreshSession, Math.max(1000, Math.floor(ttl * 0.8) - elapsed));
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [auth?.refresh_token, auth?.stored_at, portal]);
 
   useEffect(() => {
     if (!auth) return;
@@ -367,11 +474,12 @@ export default function App() {
       const url = new URL(window.location.href);
       const payment = url.searchParams.get("payment");
       if (!payment) return;
-      if (payment === "success") setNotice("Payment submitted. Course access activates as soon as Billing confirms it.");
+      if (payment === "success") setNotice("Payment submitted. Your course will unlock as soon as it is confirmed.");
       if (payment === "cancelled") setNotice("Checkout was cancelled. You can resume it whenever you are ready.");
-      if (payment === "membership-success") setNotice("Payment submitted. Membership access activates as soon as Billing confirms it.");
+      if (payment === "membership-success") setNotice("Payment submitted. Your membership will activate as soon as it is confirmed.");
       if (payment === "membership-cancelled") setNotice("Membership checkout was cancelled. You can resume it whenever you are ready.");
       url.searchParams.delete("payment");
+      url.searchParams.delete("intent");
       window.history.replaceState({}, "", url);
     });
   }, [auth, loadCommunity, run]);
@@ -391,6 +499,14 @@ export default function App() {
   useEffect(() => {
     if (view === "courses") void run(loadBundle, { quiet: true });
   }, [loadBundle, run, view]);
+
+  useEffect(() => {
+    if (!auth || !portal || !wantsCourseCheckout() || automaticCheckoutStarted.current) return;
+    if (!courseId || !courseLocked || courseAccessMode !== "paid" || !courseOffer) return;
+    if (coursePurchase?.status === "fulfilled" || coursePurchase?.status === "refunded") return;
+    automaticCheckoutStarted.current = true;
+    void purchaseCourse();
+  }, [auth, courseAccessMode, courseId, courseLocked, courseOffer, coursePurchase?.status, portal]);
 
   useEffect(() => {
     if (!auth || !courseId || coursePurchase?.status !== "awaiting_payment") return;
@@ -438,42 +554,108 @@ export default function App() {
     }
   }, [auth, communityId, courseId, lessonId, loadBundle, loadCommunity, loadCourse, loadPosts, loadThreads, run, spaceId, threadId, view]);
 
+  function finishAuthentication(response: AuthResponse) {
+    if (!response.apteva_access_token) throw new Error("Sign-in did not complete. Please try again.");
+    useDelegatedToken(response.apteva_access_token);
+    const next = { ...response, stored_at: Date.now() };
+    window.sessionStorage.setItem(authSessionKey(), JSON.stringify(next));
+    setAuth(next);
+    setAuthMode("login");
+    setAuthForm((current) => ({ ...current, password: "" }));
+  }
+
   async function authenticate(event: FormEvent) {
     event.preventDefault();
+    if (!portal) return;
     await run(async () => {
-      const organization_slug = authForm.organization_slug.trim() || undefined;
-      const response = authMode === "login"
-        ? await api.auth.login({
-          client_id: authForm.client_id.trim(),
-          organization_slug,
-          email: authForm.email.trim(),
-          password: authForm.password,
-        })
-        : await api.auth.signup({
-          client_id: authForm.client_id.trim(),
-          organization_slug,
-          email: authForm.email.trim(),
-          password: authForm.password,
-          display_name: authForm.display_name.trim() || authForm.email.trim(),
-        });
-      if (!response.apteva_access_token) {
-        if (response.verification_required) {
-          setNotice("Account created. Verify your email, then log in.");
-          setAuthMode("login");
+      let response: AuthResponse;
+      try {
+        response = authMode === "login"
+          ? await api.auth.login({
+            client_id: portal.auth.client_id,
+            organization_slug: portal.auth.organization_slug,
+            email: authForm.email.trim(),
+            password: authForm.password,
+          })
+          : await api.auth.signup({
+            client_id: portal.auth.client_id,
+            organization_slug: portal.auth.organization_slug,
+            email: authForm.email.trim(),
+            password: authForm.password,
+            display_name: authForm.display_name.trim() || authForm.email.trim(),
+            continue_url: window.location.href.split("#", 1)[0],
+          });
+      } catch (caught) {
+        if (authMode === "login" && String(caught).includes("email_unverified")) {
+          setAuthMode("verify_pending");
+          setNotice("Please verify your email to continue. You can request a new link below.");
           return;
         }
-        throw new Error("Auth did not return a delegated access token.");
+        throw caught;
       }
-      useDelegatedToken(response.apteva_access_token);
-      window.sessionStorage.setItem(authSessionKey, JSON.stringify(response));
-      setAuth(response);
-      setAuthForm((current) => ({ ...current, password: "" }));
+      if (!response.apteva_access_token) {
+        if (response.verification_required) {
+          setNotice(`We sent a verification link to ${authForm.email.trim()}.`);
+          setAuthMode("verify_pending");
+          return;
+        }
+        throw new Error("Sign-in did not complete. Please try again.");
+      }
+      finishAuthentication(response);
+    });
+  }
+
+  async function requestPasswordReset(event: FormEvent) {
+    event.preventDefault();
+    if (!portal) return;
+    await run(async () => {
+      await api.auth.requestPasswordReset({
+        client_id: portal.auth.client_id,
+        organization_slug: portal.auth.organization_slug,
+        email: authForm.email.trim(),
+        continue_url: window.location.href.split("#", 1)[0],
+      });
+      setNotice(`If an account exists for ${authForm.email.trim()}, a reset link is on its way.`);
+    });
+  }
+
+  async function confirmPasswordReset(event: FormEvent) {
+    event.preventDefault();
+    if (!portal || !recoveryToken) return;
+    if (authForm.password !== authForm.password_confirm) {
+      setError("Passwords do not match.");
+      return;
+    }
+    await run(async () => {
+      const response = await api.auth.confirmPasswordReset({
+        client_id: portal.auth.client_id,
+        organization_slug: portal.auth.organization_slug,
+        token: recoveryToken,
+        password: authForm.password,
+      });
+      finishAuthentication(response);
+      setRecoveryToken("");
+      setNotice("Your password has been updated.");
+    });
+  }
+
+  async function resendVerification() {
+    if (!portal || !authForm.email.trim()) return;
+    await run(async () => {
+      await api.auth.resendVerification({
+        client_id: portal.auth.client_id,
+        organization_slug: portal.auth.organization_slug,
+        email: authForm.email.trim(),
+        continue_url: window.location.href.split("#", 1)[0],
+      });
+      setNotice(`A new verification link was sent to ${authForm.email.trim()}.`);
     });
   }
 
   function logout() {
+    const refreshToken = auth?.refresh_token;
     useDelegatedToken(undefined);
-    window.sessionStorage.removeItem(authSessionKey);
+    window.sessionStorage.removeItem(authSessionKey());
     setAuth(null);
     setCommunities([]);
     setMemberships([]);
@@ -481,6 +663,7 @@ export default function App() {
     setSpaces([]);
     setError("");
     setNotice("Signed out.");
+    if (refreshToken) void api.auth.logout(refreshToken).catch(() => undefined);
   }
 
   async function createThread(event: FormEvent) {
@@ -527,7 +710,7 @@ export default function App() {
         await loadCourse();
         return;
       }
-      if (!result.checkout_url) throw new Error("Billing did not return a checkout URL.");
+      if (!result.checkout_url) throw new Error("Checkout is temporarily unavailable. Please try again.");
       window.location.assign(result.checkout_url);
     });
   }
@@ -554,7 +737,7 @@ export default function App() {
         await Promise.all([loadCommunity(), loadCourse()]);
         return;
       }
-      if (!result.checkout_url) throw new Error("Billing did not return a membership checkout URL.");
+      if (!result.checkout_url) throw new Error("Checkout is temporarily unavailable. Please try again.");
       window.location.assign(result.checkout_url);
     });
   }
@@ -617,25 +800,68 @@ export default function App() {
     });
   }
 
-  if (!auth) {
+  if (!portal && !portalError) {
+    return <main className="auth-shell"><section className="auth-card"><p className="muted">Loading your courses…</p></section></main>;
+  }
+
+  if (portalError) {
+    return <main className="auth-shell"><section className="auth-card"><h1>Courses unavailable</h1><div className="alert error" role="alert">{portalError}</div></section></main>;
+  }
+
+  if (!auth && portal) {
+    const brand = <>{portal.brand.logo_url ? <img className="brand-logo" src={portal.brand.logo_url} alt={portal.brand.name} /> : <div className="brand-mark"><BookOpen aria-hidden="true" /></div>}</>;
+    if (authMode === "verify_pending") {
+      return (
+        <main className="auth-shell"><section className="auth-card" aria-labelledby="auth-title">
+          {brand}<p className="eyebrow">{brandName}</p><h1 id="auth-title">Check your email</h1>
+          <p className="muted">Open the verification link we sent to <strong>{authForm.email}</strong>. You’ll return here automatically.</p>
+          {error && <div className="alert error" role="alert">{error}</div>}
+          {notice && <div className="alert success" role="status">{notice}</div>}
+          <button className="primary" disabled={busy} onClick={resendVerification}>Send another link</button>
+          <button className="text-button" onClick={() => setAuthMode("login")}>Back to sign in</button>
+        </section></main>
+      );
+    }
+    if (authMode === "forgot") {
+      return (
+        <main className="auth-shell"><section className="auth-card" aria-labelledby="auth-title">
+          {brand}<p className="eyebrow">{brandName}</p><h1 id="auth-title">Reset your password</h1>
+          <p className="muted">Enter your email and we’ll send you a secure reset link.</p>
+          {error && <div className="alert error" role="alert">{error}</div>}
+          {notice && <div className="alert success" role="status">{notice}</div>}
+          <form className="stack" onSubmit={requestPasswordReset}>
+            <Field label="Email" id="email"><input id="email" type="email" value={authForm.email} onChange={(event) => setAuthForm({ ...authForm, email: event.target.value })} autoComplete="email" required /></Field>
+            <button className="primary" disabled={busy}>{busy ? "Please wait…" : "Send reset link"}</button>
+          </form>
+          <button className="text-button" onClick={() => setAuthMode("login")}>Back to sign in</button>
+        </section></main>
+      );
+    }
+    if (authMode === "reset") {
+      return (
+        <main className="auth-shell"><section className="auth-card" aria-labelledby="auth-title">
+          {brand}<p className="eyebrow">{brandName}</p><h1 id="auth-title">Choose a new password</h1>
+          {error && <div className="alert error" role="alert">{error}</div>}
+          <form className="stack" onSubmit={confirmPasswordReset}>
+            <Field label="New password" id="password"><input id="password" type="password" value={authForm.password} onChange={(event) => setAuthForm({ ...authForm, password: event.target.value })} autoComplete="new-password" required /></Field>
+            <Field label="Confirm password" id="password-confirm"><input id="password-confirm" type="password" value={authForm.password_confirm} onChange={(event) => setAuthForm({ ...authForm, password_confirm: event.target.value })} autoComplete="new-password" required /></Field>
+            <button className="primary" disabled={busy}>{busy ? "Please wait…" : "Update password"}</button>
+          </form>
+        </section></main>
+      );
+    }
     return (
       <main className="auth-shell">
         <section className="auth-card" aria-labelledby="auth-title">
-          <div className="brand-mark"><MessagesSquare aria-hidden="true" /></div>
-          <p className="eyebrow">Community</p>
-          <h1 id="auth-title">{authMode === "login" ? "Welcome back" : "Create your account"}</h1>
-          <p className="muted">Sign in through Auth to reach your verified community memberships.</p>
+          {brand}
+          <p className="eyebrow">{brandName}</p>
+          <h1 id="auth-title">{authMode === "login" ? `Sign in to your ${brandName} courses` : `Create your ${brandName} account`}</h1>
+          <p className="muted">{authMode === "login" ? "Continue learning where you left off." : "Create an account to access your courses and community."}</p>
           {error && <div className="alert error" role="alert">{error}</div>}
           {notice && <div className="alert success" role="status">{notice}</div>}
           <form className="stack" onSubmit={authenticate}>
-            <Field label="Auth client ID" id="client-id">
-              <input id="client-id" value={authForm.client_id} onChange={(event) => setAuthForm({ ...authForm, client_id: event.target.value })} autoComplete="username" required />
-            </Field>
-            <Field label="Organization (optional)" id="organization">
-              <input id="organization" value={authForm.organization_slug} onChange={(event) => setAuthForm({ ...authForm, organization_slug: event.target.value })} />
-            </Field>
             {authMode === "signup" && (
-              <Field label="Display name" id="display-name">
+              <Field label="Your name (optional)" id="display-name">
                 <input id="display-name" value={authForm.display_name} onChange={(event) => setAuthForm({ ...authForm, display_name: event.target.value })} autoComplete="name" />
               </Field>
             )}
@@ -647,9 +873,10 @@ export default function App() {
             </Field>
             <button className="primary" disabled={busy}>{busy ? "Please wait…" : authMode === "login" ? "Sign in" : "Sign up"}</button>
           </form>
-          <button className="text-button" onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}>
-            {authMode === "login" ? "Need an account? Sign up" : "Already registered? Sign in"}
-          </button>
+          {authMode === "login" && <button className="text-button" onClick={() => setAuthMode("forgot")}>Forgot your password?</button>}
+          {portal.signup.enabled && <button className="text-button" onClick={() => setAuthMode(authMode === "login" ? "signup" : "login")}>
+            {authMode === "login" ? "New here? Create an account" : "Already have an account? Sign in"}
+          </button>}
         </section>
       </main>
     );
@@ -659,15 +886,11 @@ export default function App() {
     return (
       <main className="auth-shell">
       <section className="auth-card">
-        <UserRound size={34} aria-hidden="true" />
-        <h1>Membership pending</h1>
-        <p className="muted">Your Auth account is valid, but it is not linked to an active Community member.</p>
+        {portal?.brand.logo_url ? <img className="brand-logo" src={portal.brand.logo_url} alt={brandName} /> : <UserRound size={34} aria-hidden="true" />}
+        <h1>Access unavailable</h1>
+        <p className="muted">We couldn’t activate your {brandName} access.</p>
         {error && <div className="alert error" role="alert">{error}</div>}
-        <div className="identity-box">
-            <span>Auth user ID</span>
-            <code>{auth.user.id}</code>
-          </div>
-          <p className="muted">Give this ID to a community operator so they can link it to your member profile.</p>
+          {portal?.brand.support_email && <p className="muted">Contact <a href={`mailto:${portal.brand.support_email}`}>{portal.brand.support_email}</a> for help.</p>}
           <button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button>
         </section>
       </main>
@@ -678,22 +901,17 @@ export default function App() {
     <div className="app-shell">
       <header className="mobile-header">
         <button className="icon-button" aria-label="Open navigation" onClick={() => setMenuOpen(true)}><Menu /></button>
-        <strong>{selectedCommunity?.name || "Community"}</strong>
+        <strong>{brandName}</strong>
         <span className="avatar">{displayName(me).slice(0, 1).toUpperCase()}</span>
       </header>
 
       {menuOpen && <button className="nav-scrim" aria-label="Close navigation" onClick={() => setMenuOpen(false)} />}
       <aside className={`sidebar ${menuOpen ? "open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark"><MessagesSquare aria-hidden="true" /></div>
-          <div><strong>Community</strong><span>Member portal</span></div>
+          {portal?.brand.logo_url ? <img className="brand-logo sidebar-logo" src={portal.brand.logo_url} alt="" /> : <div className="brand-mark"><BookOpen aria-hidden="true" /></div>}
+          <div><strong>{brandName}</strong><span>Courses & community</span></div>
           <button className="icon-button mobile-close" aria-label="Close navigation" onClick={() => setMenuOpen(false)}><X /></button>
         </div>
-        <Field label="Community" id="community-select">
-          <select id="community-select" value={communityId} onChange={(event) => setCommunityId(event.target.value)}>
-            {communities.map((community) => <option key={community.id} value={community.id}>{community.name}</option>)}
-          </select>
-        </Field>
         <nav aria-label="Community navigation">
           {nav.map((item) => {
             const Icon = item.icon;
@@ -843,7 +1061,7 @@ export default function App() {
                       <p className="muted">
                         {coursePurchase?.status === "payment_failed"
                           ? "The last payment attempt did not complete. You can safely retry."
-                          : "Payment is handled by Billing. Access activates only after the payment is confirmed."}
+                          : "Your course unlocks automatically after payment is confirmed."}
                       </p>
                     </>
                   )}
@@ -891,7 +1109,7 @@ export default function App() {
           </div>
         )}
 
-        {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p><p>{me?.bio || "No bio yet."}</p><p className="muted">Signed in as {auth.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
+        {view === "profile" && <section className="profile-card"><span className="avatar xlarge">{displayName(me).slice(0, 1).toUpperCase()}</span><div><p className="eyebrow">Member profile</p><h2>{displayName(me)}</h2><p className="muted">@{me?.handle}</p><p>{me?.bio || "No bio yet."}</p><p className="muted">Signed in as {auth?.user.email}</p></div><button className="secondary" onClick={logout}><LogOut size={16} /> Sign out</button></section>}
       </main>
     </div>
   );

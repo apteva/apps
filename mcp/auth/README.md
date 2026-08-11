@@ -1,4 +1,4 @@
-# Auth (v0.8.0)
+# Auth (v0.9.0)
 
 Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
 install owns multiple organizations; each has isolated users, clients, signing

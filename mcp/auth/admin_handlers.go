@@ -471,7 +471,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	if body.RevokeSessions != nil {
 		revokeSessions = *body.RevokeSessions
 	}
-	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, r.RemoteAddr, r.UserAgent())
+	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, "password_set_admin", "", r.RemoteAddr, r.UserAgent())
 	if err != nil {
 		httpErr(w, code, err.Error())
 		return
@@ -479,7 +479,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
 }
 
-func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, orgID, uid int64, password string, revokeSessions bool, ip, ua string) (int64, int, error) {
+func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, orgID, uid int64, password string, revokeSessions bool, auditEvent, clientID, ip, ua string) (int64, int, error) {
 	password = strings.TrimSpace(password)
 	if password == "" {
 		return 0, http.StatusBadRequest, errors.New("password required")
@@ -507,7 +507,7 @@ func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, orgID, uid int64, pas
 		}
 		revoked = n
 	}
-	dbAudit(ctx.AppDB(), pid, orgID, &uid, "", "password_set_admin", ip, ua,
+	dbAudit(ctx.AppDB(), pid, orgID, &uid, clientID, auditEvent, ip, ua,
 		map[string]any{"revoked_sessions": revoked})
 	return revoked, http.StatusOK, nil
 }

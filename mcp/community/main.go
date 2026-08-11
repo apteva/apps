@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.7.8
+version: 0.8.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
@@ -42,6 +42,8 @@ description: |
   quizzes, assignments, certificates, drip, enrollments, and progress). Ships both an
   operator dashboard panel and a client-facing React portal at
   /api/apps/community/_install/{install_id}/ui/portal/dist/index.html.
+  Each community owns its portal branding and Auth client/organization
+  binding, with automatic member linking and course-checkout continuation.
   Community directly orchestrates one-time course purchases and recurring
   course memberships using Catalog, Billing, and Subscriptions. It does not
   depend on the SaaS app.
@@ -58,7 +60,7 @@ requires:
   permissions: [db.write.app, platform.apps.call]
   apps:
     - name: auth
-      version: ">=0.8.0"
+      version: ">=0.9.0"
       optional: false
       reason: The member portal authenticates through Auth and maps verified users to Community members.
     - name: catalog
@@ -106,6 +108,7 @@ provides:
   http_routes:
     - prefix: /
     - { prefix: /ui/, method: GET, no_auth: true }
+    - { prefix: /portal/bootstrap, method: GET, no_auth: true }
   mcp_tools:
     - { name: communities_create,  description: "Create a community." }
     - { name: communities_list,    description: "List communities in this scope." }
@@ -116,6 +119,7 @@ provides:
     - { name: members_list,        description: "List members of a community." }
     - { name: members_get,         description: "Fetch one member by id or handle." }
     - { name: members_me,          description: "Return the member linked to the verified Auth user." }
+    - { name: members_ensure,      description: "Create or return the active member linked to the verified portal visitor." }
     - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
     - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }
     - { name: spaces_list,         description: "List spaces in a community." }
@@ -304,6 +308,7 @@ func (a *App) handleBillingEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: "GET", Pattern: "/portal/bootstrap", Handler: a.httpPortalBootstrap, NoAuth: true},
 		{Pattern: "/communities", Handler: operatorHTTP(a.httpCommunities)},
 		{Pattern: "/members", Handler: operatorHTTP(a.httpMembers)},
 		{Pattern: "/spaces", Handler: operatorHTTP(a.httpSpaces)},
