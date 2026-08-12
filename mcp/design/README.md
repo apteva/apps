@@ -10,7 +10,7 @@ It does not execute user-authored Python or JavaScript. Numeric geometry fields 
 - Replicad/OpenCascade.js: exact B-rep geometry in a one-shot Bun process.
 - Embedded JS/WASM assets: the Go sidecar remains deployable as one binary.
 - Pinned Bun fallback: use configured `bun_path`, then `PATH`, then a SHA-256-verified Bun 1.2.22 download into the app data directory.
-- React panel: source editing, parameter controls, software 3D preview, measurements, checks, exports, and artifact downloads.
+- React panel: source editing, parameter controls, depth-tested WebGL 3D preview, measurements, checks, exports, and artifact downloads.
 
 ## Develop
 

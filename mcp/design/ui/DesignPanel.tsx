@@ -122,41 +122,41 @@ export default function DesignPanel({ projectId }: PanelProps) {
   const report = result?.report || design?.latest_build?.report;
   const checks = result?.checks || design?.latest_build?.checks || [];
 
-  return <div className="h-full flex flex-col bg-bg text-text overflow-hidden">
-    <header className="h-14 px-4 border-b border-border flex items-center gap-3 shrink-0">
+  return <div className="design-studio h-full flex flex-col bg-bg text-text overflow-hidden">
+    <header className="design-header h-14 px-4 border-b border-border flex items-center gap-3 shrink-0">
       <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent grid place-items-center text-lg">◇</div>
       <div><h1 className="text-sm font-semibold leading-tight">Design Studio</h1><p className="text-[11px] text-text-muted">Parametric CAD · B-rep · manufacturing</p></div>
       <span className="flex-1" />
-      <button className="btn" disabled={!!busy || !design} onClick={() => build(["mesh-json", "glb"])}>Build preview</button>
-      <button className="btn" disabled={!!busy || !design} onClick={() => build(["step", "stl", "3mf", "glb"])}>Export CAD</button>
-      <button className="btn-primary" disabled={!!busy || !design} onClick={makePackage}>Manufacturing ZIP</button>
+      <button className="design-button" disabled={!!busy || !design} onClick={() => build(["mesh-json", "glb"])}>Build preview</button>
+      <button className="design-button" disabled={!!busy || !design} onClick={() => build(["step", "stl", "3mf", "glb"])}>Export CAD</button>
+      <button className="design-button design-button-primary" disabled={!!busy || !design} onClick={makePackage}>Manufacturing ZIP</button>
     </header>
     {error && <div className="px-4 py-2 text-xs border-b border-red/30 bg-red/10 text-red">{error}</div>}
     {busy && <div className="h-0.5 bg-accent animate-pulse" />}
-    <div className="flex-1 min-h-0 grid grid-cols-[220px_minmax(360px,1fr)_320px]">
-      <aside className="border-r border-border p-3 overflow-y-auto">
+    <div className="design-workspace">
+      <aside className="design-library">
         <div className="text-[10px] uppercase tracking-widest text-text-muted mb-2">Designs</div>
         <div className="space-y-1">
-          {designs.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)} className={`w-full text-left p-2.5 rounded-lg border ${selectedId === item.id ? "border-accent/50 bg-accent/10" : "border-transparent hover:bg-bg-input/50"}`}>
-            <div className="text-xs font-medium truncate">{item.name}</div><div className="text-[10px] text-text-muted mt-1">{item.kind} · r{item.current_revision?.revision_number || "—"}</div>
+          {designs.map((item) => <button key={item.id} onClick={() => setSelectedId(item.id)} className="design-list-item" data-selected={selectedId === item.id}>
+            <div className="design-list-name">{item.name}</div><div className="design-list-meta">{item.kind}{item.id === design?.id && design.current_revision ? ` · r${design.current_revision.revision_number}` : ""}</div>
           </button>)}
           {!designs.length && <p className="text-xs text-text-muted p-2">No designs yet. Start with the template.</p>}
         </div>
         <div className="mt-5 pt-4 border-t border-border space-y-2">
           <label className="text-[10px] uppercase tracking-widest text-text-muted">New design</label>
           <input className="field" value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Design name" />
-          <button className="btn-primary w-full" disabled={!!busy || !newName.trim() || !parsed} onClick={createDesign}>Create from editor</button>
+          <button className="design-button design-button-primary design-full" disabled={!!busy || !newName.trim() || !parsed} onClick={createDesign}>Create from editor</button>
         </div>
       </aside>
 
-      <main className="min-w-0 flex flex-col bg-[#0c1118]">
+      <main className="design-main">
         <div className="h-11 px-3 border-b border-border flex items-center gap-2 bg-bg">
           <button className={mode === "model" ? "tab-active" : "tab"} onClick={() => setMode("model")}>3D model</button>
           <button className={mode === "source" ? "tab-active" : "tab"} onClick={() => setMode("source")}>Geometry source</button>
           <span className="flex-1" />
           {design && <span className="text-[10px] text-text-muted font-mono">r{design.current_revision?.revision_number} · {design.current_revision?.source_sha256?.slice(0, 10)}</span>}
         </div>
-        {mode === "model" ? <div className="flex-1 min-h-0 relative">
+        {mode === "model" ? <div className="design-viewport">
           <MeshViewer projectId={projectId} artifactId={mesh?.id} />
           {!mesh && <div className="absolute inset-0 grid place-items-center pointer-events-none"><div className="text-center"><div className="text-4xl text-text-muted/30 mb-3">◇</div><p className="text-sm text-text-muted">Build a preview to inspect the model</p><p className="text-[11px] text-text-muted/60 mt-1">Drag to orbit · wheel to zoom</p></div></div>}
           {report && <div className="absolute left-3 bottom-3 flex gap-1.5">
@@ -165,17 +165,17 @@ export default function DesignPanel({ projectId }: PanelProps) {
         </div> : <textarea className="flex-1 min-h-0 resize-none bg-[#0b1016] p-5 font-mono text-xs leading-5 outline-none text-[#cbd5e1]" spellCheck={false} value={definitionText} onChange={(e) => setDefinitionText(e.target.value)} />}
       </main>
 
-      <aside className="border-l border-border overflow-y-auto">
+      <aside className="design-inspector">
         <Section title="Parameters">
-          {Object.entries(specs).map(([name, spec]: [string, any]) => <label key={name} className="block mb-3">
-            <span className="flex text-xs mb-1"><span>{name}</span><span className="ml-auto font-mono text-accent">{parameters[name] ?? spec.default} mm</span></span>
-            <input className="w-full accent-[var(--color-accent)]" type="range" min={spec.min ?? 0} max={spec.max ?? Math.max((spec.default || 1) * 3, 10)} step={spec.step ?? 0.1} value={parameters[name] ?? spec.default} onChange={(e) => setParameters((p) => ({ ...p, [name]: Number(e.target.value) }))} />
+          {Object.entries(specs).map(([name, spec]: [string, any]) => <label key={name} className="design-param">
+            <span className="design-param-head"><span>{name}</span><span className="design-param-value">{parameters[name] ?? spec.default} mm</span></span>
+            <input className="design-range" type="range" min={spec.min ?? 0} max={spec.max ?? Math.max((spec.default || 1) * 3, 10)} step={spec.step ?? 0.1} value={parameters[name] ?? spec.default} onChange={(e) => setParameters((p) => ({ ...p, [name]: Number(e.target.value) }))} />
           </label>)}
           {!Object.keys(specs).length && <p className="text-xs text-text-muted">No exposed parameters.</p>}
         </Section>
         <Section title="Revision">
           <textarea className="field min-h-16 resize-y" value={note} onChange={(e) => setNote(e.target.value)} placeholder="What changed?" />
-          <button className="btn w-full mt-2" disabled={!!busy || !design || !parsed} onClick={saveRevision}>Save immutable revision</button>
+          <button className="design-button design-full design-revision-button" disabled={!!busy || !design || !parsed} onClick={saveRevision}>Save immutable revision</button>
         </Section>
         {report && <Section title="Measurements">
           <Row label="Volume" value={`${fmt(report.volume_mm3)} mm³`} /><Row label="Surface" value={`${fmt(report.surface_area_mm2)} mm²`} /><Row label="Faces" value={String(report.face_count)} /><Row label="Triangles" value={String(report.triangle_count)} />
@@ -204,25 +204,168 @@ function MeshViewer({ projectId, artifactId }: { projectId: string; artifactId?:
   }, [artifactId, projectId]);
 
   const draw = useCallback(() => {
-    const c = canvas.current; if (!c || !mesh) return;
-    const dpr = devicePixelRatio || 1, rect = c.getBoundingClientRect(); c.width = rect.width * dpr; c.height = rect.height * dpr;
-    const g = c.getContext("2d")!; g.scale(dpr, dpr); g.clearRect(0, 0, rect.width, rect.height);
-    const v = mesh.vertices, state = view.current; const pts: [number, number, number][] = [];
-    let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
-    for (let i=0;i<v.length;i+=3) { const x=v[i],y=v[i+1],z=v[i+2]; const cy=Math.cos(state.ry),sy=Math.sin(state.ry),cx=Math.cos(state.rx),sx=Math.sin(state.rx); const x1=x*cy+z*sy,z1=-x*sy+z*cy,y1=y*cx-z1*sx,z2=y*sx+z1*cx; pts.push([x1,y1,z2]); minX=Math.min(minX,x1);maxX=Math.max(maxX,x1);minY=Math.min(minY,y1);maxY=Math.max(maxY,y1); }
-    const scale=Math.min(rect.width/(maxX-minX||1),rect.height/(maxY-minY||1))*.72*state.zoom, ox=rect.width/2-(minX+maxX)/2*scale, oy=rect.height/2+(minY+maxY)/2*scale;
-    const faces=[] as {p:[number,number,number][],z:number,shade:number}[];
-    for(let i=0;i<mesh.triangles.length;i+=3){const p=[pts[mesh.triangles[i]],pts[mesh.triangles[i+1]],pts[mesh.triangles[i+2]]] as [number,number,number][];const ax=p[1][0]-p[0][0],ay=p[1][1]-p[0][1],bx=p[2][0]-p[0][0],by=p[2][1]-p[0][1];faces.push({p,z:(p[0][2]+p[1][2]+p[2][2])/3,shade:Math.max(.18,Math.min(.95,.55+(ax*by-ay*bx)/Math.max(1,Math.abs(ax*by-ay*bx))*.18))});}
-    faces.sort((a,b)=>a.z-b.z); for(const f of faces){g.beginPath();g.moveTo(ox+f.p[0][0]*scale,oy-f.p[0][1]*scale);g.lineTo(ox+f.p[1][0]*scale,oy-f.p[1][1]*scale);g.lineTo(ox+f.p[2][0]*scale,oy-f.p[2][1]*scale);g.closePath();g.fillStyle=`rgba(74,181,255,${f.shade})`;g.fill();g.strokeStyle="rgba(150,220,255,.12)";g.stroke();}
+    const target = canvas.current;
+    if (!target || !mesh) return;
+    renderMeshWebGL(target, mesh, view.current);
   }, [mesh]);
-  useEffect(() => { draw(); const resize=new ResizeObserver(draw); if(canvas.current)resize.observe(canvas.current); return()=>resize.disconnect(); }, [draw]);
-  return <canvas ref={canvas} className="w-full h-full cursor-grab active:cursor-grabbing" onPointerDown={(e)=>{view.current.drag=true;view.current.x=e.clientX;view.current.y=e.clientY;(e.target as Element).setPointerCapture(e.pointerId)}} onPointerMove={(e)=>{if(!view.current.drag)return;view.current.ry+=(e.clientX-view.current.x)*.01;view.current.rx+=(e.clientY-view.current.y)*.01;view.current.x=e.clientX;view.current.y=e.clientY;draw()}} onPointerUp={()=>view.current.drag=false} onWheel={(e)=>{e.preventDefault();view.current.zoom=Math.max(.25,Math.min(5,view.current.zoom*(e.deltaY>0?.9:1.1)));draw()}} />;
+  useEffect(() => {
+    draw();
+    const resize = new ResizeObserver(draw);
+    if (canvas.current) resize.observe(canvas.current);
+    return () => resize.disconnect();
+  }, [draw]);
+  return <canvas ref={canvas} className="design-canvas" onPointerDown={(e)=>{view.current.drag=true;view.current.x=e.clientX;view.current.y=e.clientY;(e.target as Element).setPointerCapture(e.pointerId)}} onPointerMove={(e)=>{if(!view.current.drag)return;view.current.ry+=(e.clientX-view.current.x)*.01;view.current.rx+=(e.clientY-view.current.y)*.01;view.current.x=e.clientX;view.current.y=e.clientY;draw()}} onPointerUp={()=>view.current.drag=false} onPointerCancel={()=>view.current.drag=false} onWheel={(e)=>{e.preventDefault();view.current.zoom=Math.max(.25,Math.min(5,view.current.zoom*(e.deltaY>0?.9:1.1)));draw()}} />;
 }
 
-function Section({ title, children }: { title: string; children: any }) { return <section className="p-4 border-b border-border"><h2 className="text-[10px] uppercase tracking-widest text-text-muted mb-3">{title}</h2>{children}</section> }
-function Row({ label, value }: { label: string; value: string }) { return <div className="flex text-xs py-1"><span className="text-text-muted">{label}</span><span className="ml-auto font-mono">{value}</span></div> }
+type MeshView = { rx: number; ry: number; zoom: number };
+
+const vertexShaderSource = `
+attribute vec3 a_position;
+attribute vec3 a_normal;
+uniform vec3 u_center;
+uniform vec2 u_rotation;
+uniform float u_scale;
+uniform float u_aspect;
+varying float v_light;
+vec3 rotateModel(vec3 p) {
+  float cy = cos(u_rotation.y), sy = sin(u_rotation.y);
+  float cx = cos(u_rotation.x), sx = sin(u_rotation.x);
+  vec3 y = vec3(p.x * cy + p.z * sy, p.y, -p.x * sy + p.z * cy);
+  return vec3(y.x, y.y * cx - y.z * sx, y.y * sx + y.z * cx);
+}
+void main() {
+  vec3 position = rotateModel(a_position - u_center);
+  vec3 normal = normalize(rotateModel(a_normal));
+  vec3 lightDirection = normalize(vec3(-0.35, 0.55, -0.75));
+  v_light = 0.28 + 0.72 * max(0.0, abs(dot(normal, lightDirection)));
+  gl_Position = vec4(position.x * u_scale / u_aspect, position.y * u_scale, position.z * u_scale, 1.0);
+}`;
+
+const fragmentShaderSource = `
+precision mediump float;
+varying float v_light;
+void main() {
+  vec3 blue = vec3(0.12, 0.55, 0.88);
+  gl_FragColor = vec4(blue * v_light + vec3(0.025, 0.035, 0.05), 1.0);
+}`;
+
+type GLResources = {
+  gl: WebGLRenderingContext;
+  program: WebGLProgram;
+  position: WebGLBuffer;
+  normal: WebGLBuffer;
+  vertexCount: number;
+  center: [number, number, number];
+  maxSize: number;
+};
+
+const webglResources = new WeakMap<HTMLCanvasElement, { mesh: Mesh; resources: GLResources }>();
+
+function shader(gl: WebGLRenderingContext, type: number, source: string) {
+  const output = gl.createShader(type);
+  if (!output) throw new Error("WebGL shader allocation failed");
+  gl.shaderSource(output, source);
+  gl.compileShader(output);
+  if (!gl.getShaderParameter(output, gl.COMPILE_STATUS)) {
+    const message = gl.getShaderInfoLog(output) || "WebGL shader compilation failed";
+    gl.deleteShader(output);
+    throw new Error(message);
+  }
+  return output;
+}
+
+function createWebGLResources(canvas: HTMLCanvasElement, mesh: Mesh): GLResources | null {
+  const gl = canvas.getContext("webgl", { alpha: false, antialias: true });
+  if (!gl) return null;
+  const program = gl.createProgram();
+  if (!program) return null;
+  const vertex = shader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+  const fragment = shader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+  gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program);
+  gl.deleteShader(vertex); gl.deleteShader(fragment);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return null;
+
+  const positions: number[] = [], normals: number[] = [];
+  let min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < mesh.vertices.length; i += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      min[axis] = Math.min(min[axis], mesh.vertices[i + axis]);
+      max[axis] = Math.max(max[axis], mesh.vertices[i + axis]);
+    }
+  }
+  for (const index of mesh.triangles) {
+    const offset = index * 3;
+    positions.push(mesh.vertices[offset], mesh.vertices[offset + 1], mesh.vertices[offset + 2]);
+    if (mesh.normals?.length === mesh.vertices.length) {
+      normals.push(mesh.normals[offset], mesh.normals[offset + 1], mesh.normals[offset + 2]);
+    } else {
+      normals.push(0, 0, 1);
+    }
+  }
+  const position = gl.createBuffer(), normal = gl.createBuffer();
+  if (!position || !normal) return null;
+  gl.bindBuffer(gl.ARRAY_BUFFER, position); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, normal); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(normals), gl.STATIC_DRAW);
+  return {
+    gl, program, position, normal, vertexCount: positions.length / 3,
+    center: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
+    maxSize: Math.max(Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]), 1),
+  };
+}
+
+function renderMeshWebGL(canvas: HTMLCanvasElement, mesh: Mesh, view: MeshView) {
+  let cached = webglResources.get(canvas);
+  if (!cached || cached.mesh !== mesh) {
+    if (cached) {
+      cached.resources.gl.deleteBuffer(cached.resources.position);
+      cached.resources.gl.deleteBuffer(cached.resources.normal);
+      cached.resources.gl.deleteProgram(cached.resources.program);
+    }
+    const resources = createWebGLResources(canvas, mesh);
+    if (!resources) return;
+    cached = { mesh, resources };
+    webglResources.set(canvas, cached);
+  }
+  const { gl, program, position, normal, vertexCount, center, maxSize } = cached.resources;
+  const rect = canvas.getBoundingClientRect(), dpr = Math.min(devicePixelRatio || 1, 2);
+  const width = Math.max(1, Math.round(rect.width * dpr)), height = Math.max(1, Math.round(rect.height * dpr));
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+  gl.viewport(0, 0, width, height);
+  gl.clearColor(0.035, 0.05, 0.07, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.disable(gl.BLEND);
+  gl.useProgram(program);
+  const positionLocation = gl.getAttribLocation(program, "a_position"), normalLocation = gl.getAttribLocation(program, "a_normal");
+  gl.bindBuffer(gl.ARRAY_BUFFER, position); gl.enableVertexAttribArray(positionLocation); gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, normal); gl.enableVertexAttribArray(normalLocation); gl.vertexAttribPointer(normalLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.uniform3fv(gl.getUniformLocation(program, "u_center"), center);
+  gl.uniform2f(gl.getUniformLocation(program, "u_rotation"), view.rx, view.ry);
+  gl.uniform1f(gl.getUniformLocation(program, "u_scale"), 1.55 * view.zoom / maxSize);
+  gl.uniform1f(gl.getUniformLocation(program, "u_aspect"), width / height);
+  gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
+}
+
+function Section({ title, children }: { title: string; children: any }) { return <section className="design-section"><h2 className="design-section-title">{title}</h2>{children}</section> }
+function Row({ label, value }: { label: string; value: string }) { return <div className="design-row"><span className="text-text-muted">{label}</span><span className="font-mono">{value}</span></div> }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="rounded bg-black/50 backdrop-blur px-2 py-1 text-[10px]"><span className="text-text-muted mr-1">{label}</span><span className="font-mono">{value}</span></div> }
 
 const styles = `
-.btn,.btn-primary{font-size:11px;padding:6px 10px;border-radius:6px;border:1px solid var(--color-border);transition:.15s}.btn:hover{background:var(--color-bg-input)}.btn-primary{background:var(--color-accent);border-color:var(--color-accent);color:var(--color-bg);font-weight:600}.btn:disabled,.btn-primary:disabled{opacity:.4;cursor:not-allowed}.field{width:100%;border:1px solid var(--color-border);background:var(--color-bg-input);border-radius:6px;padding:7px 8px;font-size:12px;outline:none}.field:focus{border-color:var(--color-accent)}.tab,.tab-active{font-size:11px;padding:6px 9px;border-radius:6px;color:var(--color-text-muted)}.tab-active{background:var(--color-bg-input);color:var(--color-text)}
+.design-studio,.design-studio *{box-sizing:border-box}.design-studio{width:100%;height:100%;min-height:0;background:var(--color-bg,#090b0e);color:var(--color-text,#e8edf2)}
+.design-header{display:flex;align-items:center;gap:12px;height:56px;min-height:56px;padding:0 16px;border-bottom:1px solid var(--color-border,#252a31);overflow-x:auto}
+.design-workspace{display:grid;grid-template-columns:220px minmax(360px,1fr) 320px;flex:1;min-width:0;min-height:0;overflow:hidden}
+.design-library{min-width:0;min-height:0;padding:12px;border-right:1px solid var(--color-border,#252a31);overflow-y:auto;background:var(--color-bg,#090b0e)}
+.design-main{display:flex;flex-direction:column;min-width:0;min-height:0;background:#0c1118}
+.design-viewport{position:relative;flex:1;min-width:0;min-height:0;overflow:hidden;background:#091018}
+.design-inspector{min-width:0;min-height:0;border-left:1px solid var(--color-border,#252a31);overflow-y:auto;background:var(--color-bg,#090b0e)}
+.design-list-item{display:block;width:100%;padding:10px;text-align:left;color:inherit;background:transparent;border:1px solid transparent;border-radius:8px;cursor:pointer;transition:background .15s,border-color .15s}
+.design-list-item:hover{background:var(--color-bg-input,#151a21)}.design-list-item[data-selected="true"]{background:color-mix(in srgb,var(--color-accent,#f97316) 12%,transparent);border-color:color-mix(in srgb,var(--color-accent,#f97316) 48%,transparent)}
+.design-list-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.design-list-meta{margin-top:4px;font-size:10px;color:var(--color-text-muted,#8b949e)}
+.design-button{flex:none;font-size:11px;line-height:1.2;padding:7px 10px;color:var(--color-text,#e8edf2);background:transparent;border:1px solid var(--color-border,#30363d);border-radius:6px;cursor:pointer;transition:background .15s,border-color .15s}.design-button:hover{background:var(--color-bg-input,#151a21);border-color:var(--color-text-muted,#6e7681)}.design-button-primary{background:var(--color-accent,#f97316);border-color:var(--color-accent,#f97316);color:var(--color-bg,#090b0e);font-weight:700}.design-button:disabled{opacity:.4;cursor:not-allowed}.design-full{width:100%}.design-revision-button{margin-top:8px}
+.design-studio .field{display:block;width:100%;border:1px solid var(--color-border,#30363d);background:var(--color-bg-input,#151a21);color:inherit;border-radius:6px;padding:7px 8px;font-size:12px;outline:none}.design-studio .field:focus{border-color:var(--color-accent,#f97316)}
+.design-studio .tab,.design-studio .tab-active{font-size:11px;padding:6px 9px;border:0;border-radius:6px;background:transparent;color:var(--color-text-muted,#8b949e);cursor:pointer}.design-studio .tab-active{background:var(--color-bg-input,#151a21);color:var(--color-text,#e8edf2)}
+.design-canvas{display:block;width:100%;height:100%;cursor:grab;touch-action:none}.design-canvas:active{cursor:grabbing}
+.design-section{padding:16px;border-bottom:1px solid var(--color-border,#252a31)}.design-section-title{margin:0 0 12px;font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.12em;color:var(--color-text-muted,#8b949e)}
+.design-param{display:block;margin-bottom:14px}.design-param-head{display:flex;justify-content:space-between;gap:8px;margin-bottom:5px;font-size:12px}.design-param-value{color:var(--color-accent,#f97316);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.design-range{display:block;width:100%;accent-color:var(--color-accent,#f97316)}
+.design-row{display:flex;justify-content:space-between;gap:12px;padding:4px 0;font-size:12px}
+@media(max-width:1100px){.design-workspace{grid-template-columns:190px minmax(320px,1fr) 280px}}
+@media(max-width:820px){.design-workspace{grid-template-columns:170px minmax(280px,1fr)}.design-inspector{display:none}}
 `;

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: design
 display_name: Design Studio
-version: 0.1.0
+version: 0.1.1
 description: |
   Agent-native parametric 2D/3D design. Designs are immutable revisions of
   a safe, declarative operation graph rendered by Replicad and OpenCascade.
