@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.14
+version: 0.2.15
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -91,6 +91,14 @@ provides:
       description: Read-only current recipient counts by status. Prefer this over reconcile for normal stats checks.
     - name: campaigns_reconcile
       description: Maintenance repair only. Backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
+    # Scheduler-only adapters. app_only keeps them out of agent tool catalogs
+    # while allowing the bound Jobs app to invoke them through the platform.
+    - name: campaigns_materialise
+      exposure: app_only
+      description: Internal Jobs target that materialises a scheduled campaign.
+    - name: campaigns_tick
+      exposure: app_only
+      description: Internal Jobs target that advances a sending campaign by one batch.
   ui_panels:
     - slot: project.page
       label: Campaigns

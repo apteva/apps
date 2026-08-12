@@ -1,9 +1,9 @@
 module github.com/apteva/apps/mcp/campaigns
 
-go 1.25.0
+go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.43.0
+	github.com/apteva/app-sdk v0.55.0
 	modernc.org/sqlite v1.50.0
 )
 

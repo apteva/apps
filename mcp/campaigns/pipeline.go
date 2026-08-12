@@ -2,10 +2,10 @@
 //
 // Pipeline summary:
 //   schedule         — write campaigns.scheduled_at + jobs once-job
-//                      pointed at /materialise
+//                      targeting the app-only campaigns_materialise tool
 //   materialise      — call crm.segments_eval (or list materialise),
 //                      bulk-insert recipients, transition to 'sending',
-//                      schedule jobs every-job pointed at /tick
+//                      schedule jobs every-job targeting campaigns_tick
 //   tick             — claim batch, send each via messaging.send_message,
 //                      mark sent/failed; when zero pending, cancel tick
 //                      job and transition to 'sent'
@@ -290,6 +290,67 @@ func (a *App) toolCampaignsSchedule(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"job_id":       jobID,
 	}))
 	return map[string]any{"campaign": out, "job_id": jobID}, nil
+}
+
+// toolCampaignsMaterialise is the private app-to-app entry point used by Jobs.
+// Its app_only exposure keeps it out of agent tool catalogs. The status guard
+// makes at-least-once Jobs delivery safe.
+func (a *App) toolCampaignsMaterialise(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	c, err := dbCampaignGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, errors.New("campaign not found")
+	}
+	if c.Status != StatusScheduled && c.Status != StatusDraft {
+		return map[string]any{"ok": true, "status": c.Status, "noop": true}, nil
+	}
+	if err := materialiseCampaign(ctx, pid, c); err != nil {
+		return nil, err
+	}
+	out, err := dbCampaignGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "campaign": out}, nil
+}
+
+// toolCampaignsTick is the private app-to-app entry point used by the
+// recurring Jobs schedule. tickCampaign itself no-ops unless the campaign is
+// actively sending, so retries and stale ticks are harmless.
+func (a *App) toolCampaignsTick(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	c, err := dbCampaignGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if c == nil {
+		return nil, errors.New("campaign not found")
+	}
+	if err := tickCampaign(ctx, pid, c); err != nil {
+		return nil, err
+	}
+	out, err := dbCampaignGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "campaign": out}, nil
 }
 
 func (a *App) toolCampaignsStartNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1011,9 +1072,13 @@ func scheduleMaterialiseJob(ctx *sdk.AppCtx, pid string, c *Campaign, scheduledA
 			"run_at": scheduledAt,
 		},
 		"target": map[string]any{
-			"kind": "http",
+			"kind": "app_tool",
 			"app":  "campaigns",
-			"path": campaignJobPath(pid, fmt.Sprintf("/campaigns/%d/materialise", c.ID)),
+			"tool": "campaigns_materialise",
+			"input": map[string]any{
+				"_project_id": pid,
+				"id":          c.ID,
+			},
 		},
 		"max_retries": 3,
 	}
@@ -1042,9 +1107,13 @@ func startTickJob(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 			"every_seconds": tickInterval,
 		},
 		"target": map[string]any{
-			"kind": "http",
+			"kind": "app_tool",
 			"app":  "campaigns",
-			"path": campaignJobPath(pid, fmt.Sprintf("/campaigns/%d/tick", c.ID)),
+			"tool": "campaigns_tick",
+			"input": map[string]any{
+				"_project_id": pid,
+				"id":          c.ID,
+			},
 		},
 		"max_retries": 3,
 	}
@@ -1058,17 +1127,6 @@ func startTickJob(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		prefix = current.JobIDs + ","
 	}
 	return dbCampaignSetJobIDs(ctx.AppDB(), pid, c.ID, prefix+fmt.Sprintf("%d", jobID))
-}
-
-func campaignJobPath(pid, path string) string {
-	if strings.TrimSpace(pid) == "" {
-		return path
-	}
-	sep := "?"
-	if strings.Contains(path, "?") {
-		sep = "&"
-	}
-	return path + sep + "project_id=" + url.QueryEscape(pid)
 }
 
 // callJobsSchedule wraps the jobs MCP tool. Returns the job id.

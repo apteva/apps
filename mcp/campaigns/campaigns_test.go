@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -14,7 +15,9 @@ import (
 
 type campaignsPlatform struct {
 	tk.BasePlatformClient
-	calls []campaignsPlatformCall
+	calls      []campaignsPlatformCall
+	callErrors map[string]error
+	beforeCall func(appName, tool string, input map[string]any)
 }
 
 type campaignsPlatformCall struct {
@@ -25,6 +28,12 @@ type campaignsPlatformCall struct {
 
 func (p *campaignsPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.calls = append(p.calls, campaignsPlatformCall{App: appName, Tool: tool, Input: input})
+	if p.beforeCall != nil {
+		p.beforeCall(appName, tool, input)
+	}
+	if err := p.callErrors[appName+"."+tool]; err != nil {
+		return err
+	}
 	var reply any = map[string]any{}
 	switch tool {
 	case "segments_eval":
@@ -93,6 +102,46 @@ func TestEmbeddedManifestParses(t *testing.T) {
 	}
 	if manifest.Version == "" {
 		t.Fatal("manifest version is empty")
+	}
+}
+
+func TestSchedulerToolsAreAppOnly(t *testing.T) {
+	want := map[string]bool{
+		"campaigns_materialise": false,
+		"campaigns_tick":        false,
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if _, ok := want[tool.Name]; !ok {
+			continue
+		}
+		if tool.Exposure != sdk.ToolExposureAppOnly {
+			t.Errorf("tool %s exposure=%q, want app_only", tool.Name, tool.Exposure)
+		}
+		want[tool.Name] = true
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("MCPTools missing private scheduler tool %s", name)
+		}
+	}
+
+	manifestWant := map[string]bool{
+		"campaigns_materialise": false,
+		"campaigns_tick":        false,
+	}
+	for _, tool := range (&App{}).Manifest().Provides.MCPTools {
+		if _, ok := manifestWant[tool.Name]; !ok {
+			continue
+		}
+		if tool.Exposure != sdk.ToolExposureAppOnly {
+			t.Errorf("manifest tool %s exposure=%q, want app_only", tool.Name, tool.Exposure)
+		}
+		manifestWant[tool.Name] = true
+	}
+	for name, found := range manifestWant {
+		if !found {
+			t.Errorf("manifest missing private scheduler tool %s", name)
+		}
 	}
 }
 
@@ -355,7 +404,7 @@ func TestMessageEventUpdatesCampaignRecipientStatus(t *testing.T) {
 	}
 }
 
-func TestJobsTargetsIncludeProjectIDForGlobalInstall(t *testing.T) {
+func TestJobsTargetsUseAppToolsWithProjectIDForGlobalInstall(t *testing.T) {
 	platform := &campaignsPlatform{}
 	ctx := newCampaignsTestCtx(t, platform)
 	c, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
@@ -379,12 +428,99 @@ func TestJobsTargetsIncludeProjectIDForGlobalInstall(t *testing.T) {
 	if len(jobs) != 2 {
 		t.Fatalf("jobs_schedule calls=%d, want 2", len(jobs))
 	}
-	for _, job := range jobs {
+	wantTools := []string{"campaigns_materialise", "campaigns_tick"}
+	for i, job := range jobs {
 		target, _ := job.Input["target"].(map[string]any)
-		path, _ := target["path"].(string)
-		if !strings.Contains(path, "project_id=test-proj") {
-			t.Fatalf("job target path %q missing project_id", path)
+		if target["kind"] != "app_tool" || target["app"] != "campaigns" || target["tool"] != wantTools[i] {
+			t.Fatalf("job target=%#v, want campaigns app_tool %s", target, wantTools[i])
 		}
+		input, _ := target["input"].(map[string]any)
+		if input["_project_id"] != "test-proj" || input["id"] != c.ID {
+			t.Fatalf("job target input=%#v, want project test-proj campaign %d", input, c.ID)
+		}
+		if target["url"] != nil || target["path"] != nil {
+			t.Fatalf("job target retained HTTP fields: %#v", target)
+		}
+	}
+}
+
+func TestCampaignScheduleJobsFailureLeavesDraftUntouched(t *testing.T) {
+	platform := &campaignsPlatform{callErrors: map[string]error{
+		"jobs.jobs_schedule": errors.New("http target requires an absolute url"),
+	}}
+	ctx := newCampaignsTestCtx(t, platform)
+	c, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name:         "Scheduled",
+		Channel:      ChannelEmail,
+		Subject:      "Hello",
+		BodyText:     "Body",
+		SegmentID:    ptrInt64(42),
+		ScheduleKind: "once",
+	})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	_, err = (&App{}).toolCampaignsSchedule(ctx, map[string]any{
+		"_project_id":  "test-proj",
+		"id":           c.ID,
+		"scheduled_at": "2026-09-01T12:00:00Z",
+	})
+	if err == nil {
+		t.Fatal("schedule succeeded despite Jobs error")
+	}
+	got, getErr := dbCampaignGet(ctx.AppDB(), "test-proj", c.ID)
+	if getErr != nil {
+		t.Fatalf("get campaign: %v", getErr)
+	}
+	if got.Status != StatusDraft || got.ScheduledAt != "" || got.JobIDs != "" {
+		t.Fatalf("campaign mutated after Jobs failure: status=%q scheduled_at=%q job_ids=%q", got.Status, got.ScheduledAt, got.JobIDs)
+	}
+}
+
+func TestCampaignScheduleCreatesJobBeforeTransition(t *testing.T) {
+	platform := &campaignsPlatform{}
+	ctx := newCampaignsTestCtx(t, platform)
+	c, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name:         "Scheduled",
+		Channel:      ChannelEmail,
+		Subject:      "Hello",
+		BodyText:     "Body",
+		SegmentID:    ptrInt64(42),
+		ScheduleKind: "once",
+	})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	checkedDraft := false
+	platform.beforeCall = func(appName, tool string, _ map[string]any) {
+		if appName != "jobs" || tool != "jobs_schedule" {
+			return
+		}
+		got, getErr := dbCampaignGet(ctx.AppDB(), "test-proj", c.ID)
+		if getErr != nil {
+			t.Fatalf("get campaign during Jobs call: %v", getErr)
+		}
+		if got.Status != StatusDraft || got.ScheduledAt != "" || got.JobIDs != "" {
+			t.Fatalf("campaign transitioned before Jobs confirmed: %#v", got)
+		}
+		checkedDraft = true
+	}
+
+	out, err := (&App{}).toolCampaignsSchedule(ctx, map[string]any{
+		"_project_id":  "test-proj",
+		"id":           c.ID,
+		"scheduled_at": "2026-09-01T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("schedule: %v", err)
+	}
+	if !checkedDraft {
+		t.Fatal("Jobs was not called before campaign transition")
+	}
+	got := out.(map[string]any)["campaign"].(*Campaign)
+	if got.Status != StatusScheduled || got.ScheduledAt != "2026-09-01T12:00:00Z" || got.JobIDs != "123" {
+		t.Fatalf("scheduled campaign=%#v", got)
 	}
 }
 

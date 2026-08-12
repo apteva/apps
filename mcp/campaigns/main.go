@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.14
+version: 0.2.15
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -99,6 +99,12 @@ provides:
       description: Read-only current recipient counts by status. Prefer this over reconcile for normal stats checks.
     - name: campaigns_reconcile
       description: Maintenance repair only. Backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
+    - name: campaigns_materialise
+      exposure: app_only
+      description: Internal Jobs target that materialises a scheduled campaign.
+    - name: campaigns_tick
+      exposure: app_only
+      description: Internal Jobs target that advances a sending campaign by one batch.
   ui_panels:
     - slot: project.page
       label: Campaigns
@@ -457,6 +463,24 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolCampaignsReconcile,
+		},
+		{
+			Name:        "campaigns_materialise",
+			Description: "Internal Jobs target that materialises a scheduled campaign. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Exposure: sdk.ToolExposureAppOnly,
+			Handler:  a.toolCampaignsMaterialise,
+		},
+		{
+			Name:        "campaigns_tick",
+			Description: "Internal Jobs target that advances a sending campaign by one batch. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Exposure: sdk.ToolExposureAppOnly,
+			Handler:  a.toolCampaignsTick,
 		},
 	}
 }
