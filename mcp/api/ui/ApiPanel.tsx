@@ -489,7 +489,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
           r.method,
           r.path_pattern,
           `${r.target_kind}:${r.target_ref}${r.target_path ? r.target_path : ""}`,
-          authKind(r.auth_json) || "default",
+          parseAuthKind(r.auth_json) || "default",
           r.enabled ? "enabled" : "disabled",
           <button type="button" className="text-red-300 hover:underline" disabled={busy} onClick={() => onDelete(r.id)}>Delete</button>,
         ])}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,16 @@ func TestManifest(t *testing.T) {
 	}
 	if len(m.Provides.HTTPRoutes) == 0 {
 		t.Fatal("manifest should expose HTTP routes")
+	}
+}
+
+func TestAPIPanelDoesNotCallLegacyAuthKindHelper(t *testing.T) {
+	source, err := os.ReadFile("ui/ApiPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(source), "authKind(r.auth_json)") {
+		t.Fatal("Routes view still calls the removed authKind helper")
 	}
 }
 
