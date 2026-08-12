@@ -365,7 +365,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
   const [dnsMode, setDNSMode] = useState(api.dns_mode || "manual");
   const [status, setStatus] = useState(api.status || "active");
   const [allowHTTP, setAllowHTTP] = useState(!!api.allow_http);
-  const [authKind, setAuthKind] = useState(authKind(api.auth_json));
+  const [authKind, setAuthKind] = useState(parseAuthKind(api.auth_json));
   const [corsEnabled, setCORSEnabled] = useState(corsEnabledFrom(api.cors_json));
 
   useEffect(() => {
@@ -375,7 +375,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
     setDNSMode(api.dns_mode || "manual");
     setStatus(api.status || "active");
     setAllowHTTP(!!api.allow_http);
-    setAuthKind(authKind(api.auth_json));
+    setAuthKind(parseAuthKind(api.auth_json));
     setCORSEnabled(corsEnabledFrom(api.cors_json));
   }, [api]);
 
@@ -581,7 +581,7 @@ function parseJSON(s?: string): Record<string, unknown> {
   }
 }
 
-function authKind(s?: string): string {
+function parseAuthKind(s?: string): string {
   const obj = parseJSON(s);
   return typeof obj.kind === "string" ? obj.kind : "";
 }
