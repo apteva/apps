@@ -66,7 +66,7 @@ func callDfs(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (
 		return nil, nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
 	}
 	if !res.Success || res.Status >= 400 {
-		return nil, nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, res.Status)
+		return nil, nil, &providerRequestError{Provider: "dataforseo", Status: res.Status, Message: tool + " request failed"}
 	}
 	var env dfsEnvelope
 	if err := json.Unmarshal(res.Data, &env); err != nil {
@@ -117,11 +117,7 @@ type dfsDomainRankResult struct {
 	} `json:"items"`
 }
 
-func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain, loc *SEOLocation) (any, error) {
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
@@ -233,15 +229,14 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 	if err != nil {
 		return rankedKeywordRefreshSummary{}, err
 	}
-	if rowRaw == nil {
-		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned no rows"}, nil
-	}
 	var parsed dfsRankedKeywordsResult
-	if err := json.Unmarshal(rowRaw, &parsed); err != nil {
-		return rankedKeywordRefreshSummary{}, fmt.Errorf("parse ranked_keywords: %w", err)
+	if rowRaw != nil {
+		if err := json.Unmarshal(rowRaw, &parsed); err != nil {
+			return rankedKeywordRefreshSummary{}, fmt.Errorf("parse ranked_keywords: %w", err)
+		}
 	}
-	if len(parsed.Items) == 0 {
-		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned zero items"}, nil
+	if rowRaw == nil {
+		parsed.Items = nil
 	}
 	now := time.Now().Unix()
 	observedDate := time.Unix(now, 0).UTC().Format("2006-01-02")
@@ -252,13 +247,16 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 	defer tx.Rollback()
 
 	summary := rankedKeywordRefreshSummary{}
+	if err := replaceRankingObservation(tx, d.ID, loc.ID, "dataforseo", "desktop", observedDate, now); err != nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("replace current ranking observation: %w", err)
+	}
 	for _, item := range parsed.Items {
 		keywordText := normaliseKeyword(item.KeywordData.Keyword)
 		rankURL := strings.TrimSpace(item.RankedSERPElement.SerpItem.URL)
 		if keywordText == "" || rankURL == "" {
 			continue
 		}
-		keywordID, createdKeyword, err := upsertRankedKeyword(tx, d.ProjectID, keywordText, loc, item.KeywordData.SearchVolume, item.KeywordData.KeywordDifficulty, item.KeywordData.CPC, item)
+		keywordID, createdKeyword, err := upsertRankedKeyword(tx, "dataforseo", "google", d.ProjectID, keywordText, loc, item.KeywordData.SearchVolume, item.KeywordData.KeywordDifficulty, item.KeywordData.CPC, item)
 		if err != nil {
 			return rankedKeywordRefreshSummary{}, err
 		}
@@ -287,22 +285,51 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		}
 		summary.RankingRows++
 	}
+	if _, err := tx.Exec(
+		`UPDATE ranking_observations
+		    SET result_count = ?, ts = ?
+		  WHERE domain_id = ? AND location_id = ? AND provider = 'dataforseo'
+		    AND device = 'desktop' AND observed_date = ?`,
+		summary.RankingRows, now, d.ID, loc.ID, observedDate); err != nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("finalize ranking observation: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		summary.Note = "ranked_keywords returned zero items"
+	}
 	if err := tx.Commit(); err != nil {
 		return rankedKeywordRefreshSummary{}, err
 	}
 	return summary, nil
 }
 
-func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
+func replaceRankingObservation(tx *sql.Tx, domainID, locationID int64, provider, device, observedDate string, ts int64) error {
+	if _, err := tx.Exec(
+		`DELETE FROM rankings
+		  WHERE domain_id = ? AND location_id = ? AND provider = ?
+		    AND device = ? AND observed_date = ?`,
+		domainID, locationID, provider, device, observedDate); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		`INSERT INTO ranking_observations
+		    (domain_id, location_id, provider, device, ts, observed_date, result_count)
+		 VALUES (?, ?, ?, ?, ?, ?, 0)
+		 ON CONFLICT(domain_id, location_id, provider, device, observed_date)
+		 DO UPDATE SET ts = excluded.ts, result_count = 0`,
+		domainID, locationID, provider, device, ts, observedDate)
+	return err
+}
+
+func upsertRankedKeyword(tx *sql.Tx, provider, searchEngine, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
 	country := ""
 	if loc.CountryISO != nil {
 		country = strings.ToUpper(*loc.CountryISO)
 	}
 	res, err := tx.Exec(
-		`INSERT INTO keywords (project_id, text, location_id, country_iso, language_iso)
-		   VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO keywords (project_id, search_engine, text, location_id, country_iso, language_iso)
+		   VALUES (?, ?, ?, ?, ?, ?)
 		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
-		projectID, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
+		projectID, searchEngine, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
 	if err != nil {
 		return 0, false, fmt.Errorf("upsert ranked keyword %q: %w", text, err)
 	}
@@ -319,8 +346,8 @@ func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, v
 	if _, err := tx.Exec(
 		`INSERT INTO keyword_metrics
 		   (keyword_id, location_id, provider, ts, volume, difficulty, cpc_usd, raw_json)
-		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?, ?)`,
-		id, loc.ID, time.Now().Unix(), volume, difficulty, cpc, string(rawText),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, loc.ID, provider, time.Now().Unix(), volume, difficulty, cpc, string(rawText),
 	); err != nil {
 		return 0, false, fmt.Errorf("insert ranked keyword metrics for %q: %w", text, err)
 	}
@@ -414,11 +441,25 @@ func decodeKeywordVolumeItem(rowRaw []byte, keyword string) (dfsKeywordVolumeIte
 	return item, nil
 }
 
-func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
+func decodeKeywordDifficulty(rowRaw []byte, keyword string) (*int64, error) {
+	var wrapped struct {
+		Items []struct {
+			Keyword    string `json:"keyword"`
+			Difficulty *int64 `json:"keyword_difficulty"`
+		} `json:"items"`
 	}
+	if err := json.Unmarshal(rowRaw, &wrapped); err != nil {
+		return nil, fmt.Errorf("parse keyword_difficulty: %w", err)
+	}
+	for _, item := range wrapped.Items {
+		if item.Keyword == "" || strings.EqualFold(item.Keyword, keyword) {
+			return item.Difficulty, nil
+		}
+	}
+	return nil, nil
+}
+
+func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, connID int64, k *Keyword, loc *SEOLocation) (any, error) {
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
@@ -441,6 +482,25 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) 
 	if err != nil {
 		return nil, err
 	}
+	difficultyRaw, difficultyTaskRaw, err := callDfs(ctx, connID, "keyword_difficulty", map[string]any{
+		"keywords":      []string{k.Text},
+		"location_code": *loc.LocationCode,
+		"language_code": strings.ToLower(loc.LanguageCode),
+	})
+	if err != nil {
+		return nil, err
+	}
+	var difficulty *int64
+	if difficultyRaw != nil {
+		difficulty, err = decodeKeywordDifficulty(difficultyRaw, k.Text)
+		if err != nil {
+			return nil, err
+		}
+	}
+	rawJSON, _ := json.Marshal(map[string]json.RawMessage{
+		"volume":     json.RawMessage(taskRaw),
+		"difficulty": json.RawMessage(difficultyTaskRaw),
+	})
 	now := time.Now().Unix()
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -450,9 +510,9 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) 
 
 	res, err := tx.Exec(
 		`INSERT INTO keyword_metrics
-		   (keyword_id, location_id, provider, ts, volume, cpc_usd, raw_json)
-		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?)`,
-		k.ID, loc.ID, now, item.SearchVolume, item.CPC, string(taskRaw),
+		   (keyword_id, location_id, provider, ts, volume, difficulty, cpc_usd, raw_json)
+		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?, ?)`,
+		k.ID, loc.ID, now, item.SearchVolume, difficulty, item.CPC, string(rawJSON),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert keyword_metrics: %w", err)
@@ -488,6 +548,7 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) 
 		"provider":     "dataforseo",
 		"fetched_at":   now,
 		"volume":       valOr(item.SearchVolume, 0),
+		"difficulty":   valOr(difficulty, 0),
 		"history_rows": len(item.MonthlySearches),
 	}, nil
 }
@@ -506,11 +567,7 @@ type dfsBacklinkItem struct {
 	LastSeen       string   `json:"last_seen"`
 }
 
-func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain) (any, error) {
 	rowRaw, _, err := callDfs(ctx, connID, "backlinks_list", map[string]any{
 		"target":                d.Host,
 		"mode":                  "as_is",
@@ -581,24 +638,7 @@ func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-func syncLocations(ctx *sdk.AppCtx) (any, error) {
-	slug, _, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
-	switch slug {
-	case "dataforseo":
-		return syncDataForSEOLocations(ctx)
-	default:
-		return nil, fmt.Errorf("provider %q does not support location sync yet", slug)
-	}
-}
-
-func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func syncDataForSEOLocations(ctx *sdk.AppCtx, connID int64) (any, error) {
 	rows, err := dfsToolResultRows(ctx, connID, "locations_and_languages", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -716,7 +756,7 @@ func dfsToolResultRows(ctx *sdk.AppCtx, connID int64, tool string, input map[str
 		return nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
 	}
 	if !res.Success || res.Status >= 400 {
-		return nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, res.Status)
+		return nil, &providerRequestError{Provider: "dataforseo", Status: res.Status, Message: tool + " request failed"}
 	}
 	var env dfsEnvelope
 	if err := json.Unmarshal(res.Data, &env); err == nil && len(env.Tasks) > 0 {

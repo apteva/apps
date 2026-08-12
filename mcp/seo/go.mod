@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/seo
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.35.0
+	github.com/apteva/app-sdk v0.36.3
 	modernc.org/sqlite v1.50.0
 )
 

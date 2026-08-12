@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.0
+
+- Added a provider-neutral execution adapter with complete DataForSEO and
+  YepAPI implementations for locations, keyword metrics, keyword ideas,
+  Google and YouTube SERPs, domains, ranked keywords, and backlinks.
+- Enabled multiple SEO provider bindings with a designated default and an
+  optional `provider` argument on provider-sensitive MCP tools.
+- Added provider selection to the panel and provider-scoped locale, keyword,
+  metric, ranking, backlink, and history reads.
+- Added YepAPI locale seeding for Google and YouTube and response-contract
+  tests for metrics, trends, SERPs, locations, and ranked keywords.
+- Added DataForSEO keyword difficulty to metric refreshes and mapped provider
+  HTTP 402/429 failures to useful app HTTP statuses.
+
+## 0.4.9
+
+- Fixed duplicate `keywords_add` and `domains_add` calls returning stale SQLite
+  insert IDs instead of the canonical existing records.
+
+## 0.4.8
+
+- Unified `rankings_for_keyword` on the generic SERP result model for Google
+  and YouTube, and added `rankings_for_keywords` for efficient batch reads.
+- Replaced same-day domain ranking observations atomically so disappeared
+  rankings no longer remain current.
+- Limited opportunity and YouTube idea analysis to the latest snapshot per
+  keyword and locale, with metric-aware Google opportunity scores.
+- Added search-engine/location validation, strict YouTube video detection,
+  residual legacy-row cleanup, supporting indexes, and 30-snapshot retention.
+
+## 0.4.7
+
+- Added an install migration that backfills keyword search-engine metadata,
+  links existing YouTube SERP snapshots to keyword rows, and cleans legacy
+  YouTube channel/playlist SERP rows.
+
+## 0.4.6
+
+- Changed YouTube SERP ingestion to store and return video results only.
+  Channel and playlist rows from DataForSEO are skipped for normal SEO data.
+- Simplified YouTube content opportunities back to the standard interface while
+  preserving the video-only default.
+
+## 0.4.5
+
+- Classified YouTube SERP rows as videos, channels, or playlists instead of
+  treating every YouTube result as a video.
+- Defaulted YouTube keyword ideas and content opportunities to video results so
+  channel names and playlists do not appear as video topics.
+- Added an explicit `result_type` filter to `content_opportunities`; use
+  `result_type: "all"` to inspect the complete mixed YouTube SERP.
+
+## 0.4.4
+
+- Fixed DataForSEO YouTube SERP refreshes by translating the app's generic
+  `depth` argument to YouTube Organic's provider-specific `block_depth`
+  parameter.
+
 ## 0.4.3
 
 - Added a DataForSEO YouTube location fallback that seeds YouTube locales from

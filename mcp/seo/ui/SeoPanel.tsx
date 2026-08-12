@@ -127,6 +127,9 @@ interface ContentOpportunity {
   top10_count?: number;
   latest_ts?: number;
   example_titles?: string[];
+  reason?: string;
+  volume?: number | null;
+  difficulty?: number | null;
 }
 
 interface PageRankingSummary {
@@ -138,7 +141,13 @@ interface PageRankingSummary {
 }
 
 type SearchEngine = "google" | "youtube";
+type SEOProvider = "dataforseo" | "yepapi";
 type View = "seed" | "domains" | "keywords" | "discover" | "entities" | "locations";
+
+interface ProviderStatus {
+  default: string;
+  providers: string[];
+}
 
 const API = "/api/apps/seo";
 const engines: { id: SearchEngine; label: string }[] = [
@@ -224,6 +233,8 @@ function engineViews(engine: SearchEngine): View[] {
 
 export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [searchEngine, setSearchEngine] = useState<SearchEngine>("google");
+  const [provider, setProvider] = useState<SEOProvider | "">("");
+  const [providers, setProviders] = useState<string[]>([]);
   const [view, setView] = useState<View>("seed");
   const [locations, setLocations] = useState<SEOLocation[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
@@ -237,7 +248,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [domainRankings, setDomainRankings] = useState<Ranking[]>([]);
   const [entityRankings, setEntityRankings] = useState<SearchRanking[]>([]);
   const [selectedRankURL, setSelectedRankURL] = useState<string | null>(null);
-  const [pageSerpRows, setPageSerpRows] = useState<Ranking[]>([]);
+  const [pageSerpRows, setPageSerpRows] = useState<SearchRanking[]>([]);
   const [serpResults, setSerpResults] = useState<SearchRanking[]>([]);
   const [keywordIdeas, setKeywordIdeas] = useState<KeywordIdea[]>([]);
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
@@ -273,6 +284,17 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     [api, projectId],
   );
 
+  const reloadProviders = useCallback(async () => {
+    const resp = await api<ProviderStatus>("GET", "/providers");
+    const available = (resp.providers || []).filter((value) => value === "dataforseo" || value === "yepapi");
+    setProviders(available);
+    setProvider((current) => {
+      if (current && available.includes(current)) return current;
+      if (resp.default === "dataforseo" || resp.default === "yepapi") return resp.default;
+      return (available[0] as SEOProvider | undefined) || "";
+    });
+  }, [api]);
+
   const reloadLocations = useCallback(async () => {
     const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { limit: "500" });
     setLocations(resp.locations || []);
@@ -285,7 +307,10 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   }, [callTool]);
 
   const reloadKeywords = useCallback(async () => {
-    const rows = await callTool<Keyword[]>("keywords_list", { search_engine: searchEngine, limit: 300 });
+    const rows = await callTool<Keyword[]>("keywords_list", {
+      search_engine: searchEngine,
+      limit: 300,
+    });
     setKeywords(rows || []);
     setSelectedKeyword((cur) => (cur && rows?.some((r) => r.id === cur.id) ? cur : rows?.[0] || null));
   }, [callTool, searchEngine]);
@@ -299,23 +324,24 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const reloadOpportunities = useCallback(async () => {
     const resp = await callTool<{ items: ContentOpportunity[] }>("content_opportunities", {
       search_engine: searchEngine,
+      ...(provider ? { provider } : {}),
       limit: 25,
     });
     setOpportunities(resp.items || []);
-  }, [callTool, searchEngine]);
+  }, [callTool, provider, searchEngine]);
 
   const reloadAll = useCallback(async () => {
     setBusy(true);
     setErr("");
     try {
-      await Promise.all([reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities()]);
+      await Promise.all([reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities()]);
       setStatus("Updated");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadOpportunities]);
+  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadOpportunities, reloadProviders]);
 
   useEffect(() => {
     if (!engineViews(searchEngine).includes(view)) {
@@ -325,7 +351,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setSelectedEntity(null);
     setSerpResults([]);
     setKeywordIdeas([]);
-  }, [searchEngine, view]);
+  }, [provider, searchEngine, view]);
 
   useEffect(() => {
     reloadAll();
@@ -338,16 +364,16 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setSelectedRankURL(null);
       return;
     }
-    callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id })
+    callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id, ...(provider ? { provider } : {}) })
       .then((r) => setDomainMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, limit: 500 })
+    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, ...(provider ? { provider } : {}), limit: 500 })
       .then((rows) => {
         setDomainRankings(rows || []);
         setSelectedRankURL(null);
       })
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedDomain]);
+  }, [callTool, provider, selectedDomain]);
 
   useEffect(() => {
     if (!selectedRankURL && domainRankings.length > 0) {
@@ -368,34 +394,38 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setPageSerpRows([]);
       return;
     }
-    Promise.all(ids.map((id) => callTool<Ranking[]>("rankings_for_keyword", { keyword_id: id, limit: 100 })))
-      .then((groups) => setPageSerpRows(groups.flat()))
+    callTool<SearchRanking[]>("rankings_for_keywords", { keyword_ids: ids, ...(provider ? { provider } : {}), limit: 1000 })
+      .then((rows) => setPageSerpRows(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, domainRankings, selectedRankURL]);
+  }, [callTool, domainRankings, provider, selectedRankURL]);
 
   useEffect(() => {
     if (!selectedKeyword) {
       setKeywordMetrics(null);
+      setSerpResults([]);
       return;
     }
-    callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id })
+    callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) })
       .then((r) => setKeywordMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedKeyword]);
+    callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 })
+      .then((rows) => setSerpResults(rows || []))
+      .catch((e) => setErr((e as Error).message));
+  }, [callTool, provider, searchEngine, selectedKeyword]);
 
   useEffect(() => {
     if (!selectedEntity) {
       setEntityRankings([]);
       return;
     }
-    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, limit: 200 })
+    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, ...(provider ? { provider } : {}), limit: 200 })
       .then((rows) => setEntityRankings(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedEntity]);
+  }, [callTool, provider, selectedEntity]);
 
   const filteredLocations = useMemo(
-    () => locations.filter((l) => l.search_engine === searchEngine),
-    [locations, searchEngine],
+    () => locations.filter((l) => l.search_engine === searchEngine && (!provider || l.provider === provider)),
+    [locations, provider, searchEngine],
   );
 
   const locationById = useMemo(() => {
@@ -415,10 +445,10 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      const r = await api<Record<string, unknown>>("POST", "/locations/sync");
+      const r = await api<Record<string, unknown>>("POST", "/locations/sync", provider ? { provider } : {});
       await reloadLocations();
       setStatus(`Synced ${fmt(Number(r.rows_upserted || 0))} locales`);
-      pushActivity(`Synced ${fmt(Number(r.rows_upserted || 0))} locales`);
+      pushActivity(`Synced ${fmt(Number(r.rows_upserted || 0))} ${provider || "provider"} locales`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -430,8 +460,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      const loc = domain.default_location_id || defaultLocation?.id;
-      const params = loc ? { location_id: String(loc) } : {};
+      const configured = domain.default_location_id ? locationById.get(domain.default_location_id) : undefined;
+      const loc = configured?.provider === provider ? configured.id : defaultLocation?.id;
+      const params = {
+        ...(loc ? { location_id: String(loc) } : {}),
+        ...(provider ? { provider } : {}),
+      };
       await api<Record<string, unknown>>(
         "POST",
         backlinks ? `/domains/${domain.id}/backlinks/refresh` : `/domains/${domain.id}/refresh`,
@@ -439,6 +473,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       );
       await reloadDomains();
       setSelectedDomain(domain);
+      if (!backlinks) {
+        const [detail, rows] = await Promise.all([
+          callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: domain.id, ...(provider ? { provider } : {}) }),
+          callTool<Ranking[]>("rankings_for_domain", { domain_id: domain.id, ...(provider ? { provider } : {}), limit: 500 }),
+        ]);
+        setDomainMetrics(detail.metrics || null);
+        setDomainRankings(rows || []);
+      }
       setStatus(backlinks ? "Backlinks refreshed" : "Domain metrics refreshed");
       pushActivity(`${backlinks ? "Backlinks" : "Domain metrics"} refreshed for ${domain.host}`);
     } catch (e) {
@@ -454,9 +496,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     try {
       await api<Record<string, unknown>>("POST", `/keywords/${keyword.id}/refresh`, {
         location_id: String(keyword.location_id),
+        ...(provider ? { provider } : {}),
       });
       await reloadKeywords();
       setSelectedKeyword(keyword);
+      const detail = await callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: keyword.id, ...(provider ? { provider } : {}) });
+      setKeywordMetrics(detail.metrics || null);
       setStatus("Keyword refreshed");
       pushActivity(`Keyword refreshed: ${keyword.text}`);
     } catch (e) {
@@ -471,6 +516,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ results: SearchRanking[]; count: number }>("serp_search", {
+        ...(provider ? { provider } : {}),
         search_engine: keyword.search_engine || searchEngine,
         keyword_id: keyword.id,
         location_id: keyword.location_id,
@@ -492,6 +538,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ results: SearchRanking[]; count: number }>("serp_search", {
+        ...(provider ? { provider } : {}),
         search_engine: searchEngine,
         keyword,
         location_id: locationId,
@@ -513,6 +560,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ items: KeywordIdea[] }>("keyword_ideas", {
+        ...(provider ? { provider } : {}),
         search_engine: searchEngine,
         seed_keywords: seedKeywords,
         location_id: locationId,
@@ -532,8 +580,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 flex flex-col text-text bg-bg">
-      <div className="px-6 pt-5 pb-3 border-b border-border flex items-center justify-between gap-4">
-        <div className="flex items-center gap-4 min-w-0">
+      <div className="px-6 pt-5 pb-3 border-b border-border flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-4 min-w-0">
           <h1 className="text-lg font-semibold shrink-0">SEO</h1>
           <div className="flex rounded border border-border overflow-hidden text-xs">
             {engines.map((engine) => (
@@ -547,6 +595,17 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               </button>
             ))}
           </div>
+          <select
+            className="bg-surface-2 text-text border border-border rounded px-2 py-1.5 text-xs"
+            value={provider}
+            onChange={(event) => setProvider(event.target.value as SEOProvider)}
+            aria-label="SEO data provider"
+          >
+            {providers.length === 0 && <option value="">No provider bound</option>}
+            {providers.map((value) => (
+              <option key={value} value={value}>{value === "dataforseo" ? "DataForSEO" : "YepAPI"}</option>
+            ))}
+          </select>
           <div className="flex rounded border border-border overflow-hidden text-xs">
             {engineViews(searchEngine).map((v) => (
               <button
@@ -588,6 +647,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               let domain: Domain | null = null;
               if (payload.host.trim()) {
                 domain = await callTool<Domain>("domains_add", {
+                  ...(provider ? { provider } : {}),
                   host: payload.host,
                   label: payload.label,
                   location_id: payload.locationId,
@@ -597,6 +657,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               const keywordRows: Keyword[] = [];
               for (const text of payload.keywords) {
                 keywordRows.push(await callTool<Keyword>("keywords_add", {
+                  ...(provider ? { provider } : {}),
                   text,
                   location_id: payload.locationId,
                   search_engine: "google",
@@ -631,10 +692,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           selectedRankURL={selectedRankURL}
           onSelectRankURL={setSelectedRankURL}
           keywords={keywords}
-          allDomains={domains}
           onSelect={setSelectedDomain}
           onAdd={async (host, label, locationId) => {
-            const d = await callTool<Domain>("domains_add", { host, label, location_id: locationId, search_engine: "google" });
+            const d = await callTool<Domain>("domains_add", { ...(provider ? { provider } : {}), host, label, location_id: locationId, search_engine: "google" });
             await reloadDomains();
             setSelectedDomain(d);
           }}
@@ -675,6 +735,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           onSelect={setSelectedEntity}
           onAdd={async (payload) => {
             const entity = await callTool<SearchEntity>("entities_add", {
+              ...(provider ? { provider } : {}),
               search_engine: searchEngine,
               entity_type: payload.entityType,
               identifier: payload.identifier,
@@ -703,7 +764,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           searchEngine={searchEngine}
           onSelect={setSelectedKeyword}
           onAdd={async (text, locationId) => {
-            const k = await callTool<Keyword>("keywords_add", { text, location_id: locationId, search_engine: searchEngine });
+            const k = await callTool<Keyword>("keywords_add", { ...(provider ? { provider } : {}), text, location_id: locationId, search_engine: searchEngine });
             await reloadKeywords();
             setSelectedKeyword(k);
           }}
@@ -775,7 +836,7 @@ function DiscoverView(props: {
           </select>
           {props.locations.length === 0 && (
             <button type="button" className={buttonCls} onClick={props.onSync} disabled={props.busy}>
-              Sync DataForSEO
+              Sync Locations
             </button>
           )}
         </div>
@@ -894,7 +955,10 @@ function OpportunitiesTable({ rows }: { rows: ContentOpportunity[] }) {
                 <td className="px-3 py-2 font-medium">{row.keyword}</td>
                 <td className="px-3 py-2 tabular-nums">{fmt(row.opportunity_score)}</td>
                 <td className="px-3 py-2 tabular-nums">{fmt(row.top10_count)} / {fmt(row.result_count)}</td>
-                <td className="px-3 py-2 text-text-dim">{(row.example_titles || []).slice(0, 3).join(" / ") || "-"}</td>
+                <td className="px-3 py-2 text-text-dim">
+                  <div>{(row.example_titles || []).slice(0, 3).join(" / ") || "-"}</div>
+                  {row.reason && <div className="mt-1 text-xs">{row.reason}</div>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1043,13 +1107,12 @@ function EntitiesView(props: {
 
 function DomainsView(props: {
   domains: Domain[];
-  allDomains: Domain[];
   keywords: Keyword[];
   locations: SEOLocation[];
   selected: Domain | null;
   metrics: DomainMetrics | null;
   rankings: Ranking[];
-  pageSerpRows: Ranking[];
+  pageSerpRows: SearchRanking[];
   selectedRankURL: string | null;
   onSelectRankURL(url: string): void;
   onSelect(d: Domain): void;
@@ -1066,7 +1129,6 @@ function DomainsView(props: {
     ? props.locationById.get(props.selected.default_location_id)
     : undefined;
   const keywordById = useMemo(() => new Map(props.keywords.map((k) => [k.id, k])), [props.keywords]);
-  const domainById = useMemo(() => new Map(props.allDomains.map((d) => [d.id, d])), [props.allDomains]);
   return (
     <div className="flex-1 min-h-0 flex">
       <div className="w-80 border-r border-border flex flex-col min-h-0">
@@ -1134,7 +1196,6 @@ function DomainsView(props: {
               pageSerpRows={props.pageSerpRows}
               onSelectURL={props.onSelectRankURL}
               keywordById={keywordById}
-              domainById={domainById}
             />
           </div>
         ) : (
@@ -1148,18 +1209,17 @@ function DomainsView(props: {
 function RankingExplorer(props: {
   rankings: Ranking[];
   selectedURL: string | null;
-  pageSerpRows: Ranking[];
+  pageSerpRows: SearchRanking[];
   onSelectURL(url: string): void;
   keywordById: Map<number, Keyword>;
-  domainById: Map<number, Domain>;
 }) {
   const pages = useMemo(() => pageSummaries(props.rankings), [props.rankings]);
   const selected = pages.find((p) => p.url === props.selectedURL) || pages[0];
   const selectedKeywordIds = new Set(selected?.keywordIds || []);
   const selectedRows = selected?.rows || [];
   const competingRows = props.pageSerpRows
-    .filter((r) => selectedKeywordIds.has(r.keyword_id))
-    .sort((a, b) => (a.keyword_id - b.keyword_id) || ((a.rank || 9999) - (b.rank || 9999)));
+    .filter((r) => r.keyword_id !== undefined && selectedKeywordIds.has(r.keyword_id))
+    .sort((a, b) => ((a.keyword_id || 0) - (b.keyword_id || 0)) || ((a.rank || 9999) - (b.rank || 9999)));
 
   if (pages.length === 0) {
     return (
@@ -1226,10 +1286,10 @@ function RankingExplorer(props: {
                           ) : (
                             <div className="space-y-1">
                               {serpRows.map((r) => (
-                                <div key={r.id} className={r.rank_url === row.rank_url ? "text-text" : "text-text-dim"}>
+                                <div key={r.id} className={cleanURL(r.url) === cleanURL(row.rank_url) ? "text-text" : "text-text-dim"}>
                                   <span className="tabular-nums">#{r.rank || "-"}</span>{" "}
-                                  <span>{props.domainById.get(r.domain_id)?.host || hostFromURL(r.rank_url) || `Domain #${r.domain_id}`}</span>{" "}
-                                  <span className="truncate inline-block max-w-[360px] align-bottom">{pagePath(r.rank_url)}</span>
+                                  <span>{hostFromURL(r.url) || r.channel_title || r.identifier || "Result"}</span>{" "}
+                                  <span className="truncate inline-block max-w-[360px] align-bottom">{pagePath(r.url)}</span>
                                 </div>
                               ))}
                             </div>
@@ -1275,7 +1335,7 @@ function SeedView(props: {
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">Seed</h2>
             <button type="button" className={buttonCls} onClick={props.onSync} disabled={props.busy}>
-              Sync DataForSEO
+              Sync Locations
             </button>
           </div>
           <form
@@ -1408,11 +1468,10 @@ function KeywordsView(props: {
                 <div className="text-sm text-text-dim">{localeLabel(selectedLoc)}</div>
               </div>
               <div className="flex gap-2">
-                {props.searchEngine === "google" ? (
+                {props.searchEngine === "google" && (
                   <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>
-                ) : (
-                  <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefreshSERP(props.selected!)}>Refresh SERP</button>
                 )}
+                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefreshSERP(props.selected!)}>Refresh SERP</button>
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRemove(props.selected!.id)}>Remove</button>
               </div>
             </div>
@@ -1426,7 +1485,8 @@ function KeywordsView(props: {
                     ["Provider", props.metrics?.provider || "-"],
                   ]}
                 />
-                <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+                <div className="text-xs text-text-dim">Last metrics refresh: {date(props.metrics?.ts)}</div>
+                <SERPResultsTable rows={selectedSerpRows} />
               </>
             ) : (
               <SERPResultsTable rows={selectedSerpRows} />
@@ -1451,7 +1511,7 @@ function LocationsView({ locations, searchEngine, activity, onSync, busy }: { lo
       <div className="min-h-0 flex flex-col">
         <div className="px-6 py-4 border-b border-border flex items-center gap-3">
           <input className={`${inputCls} max-w-sm`} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter locales" />
-          <button type="button" className={primaryBtn} onClick={onSync} disabled={busy}>Sync DataForSEO</button>
+          <button type="button" className={primaryBtn} onClick={onSync} disabled={busy}>Sync Locations</button>
           <span className="text-xs text-text-dim">{fmt(rows.length)} {searchEngine} locales</span>
         </div>
         <div className="flex-1 overflow-auto">
