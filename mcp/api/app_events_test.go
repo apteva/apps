@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,17 +35,66 @@ func TestAppEventsConfigFiltersAndProjectsStaticOutput(t *testing.T) {
 	}
 }
 
+func TestAppEventsConfigMatchesListAndProjectsConstrainedField(t *testing.T) {
+	cfg, err := parseAppEventsConfig(`{
+		"topics":["row.*"],
+		"match":{"data.table":{"in":["appels","ventes","prospects"]}},
+		"output":{"type":"invalidate","table":"$data.table"},
+		"coalesce_ms":25
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, ok := projectAppEvent(cfg, appBusEvent{
+		Topic: "row.updated",
+		Data:  []byte(`{"table":"ventes","id":99,"secret":"never-forward"}`),
+	})
+	if !ok {
+		t.Fatal("expected matching row event")
+	}
+	if got, want := string(output), `{"table":"ventes","type":"invalidate"}`; got != want {
+		t.Fatalf("projected output = %s, want %s", got, want)
+	}
+	if _, ok := projectAppEvent(cfg, appBusEvent{Topic: "row.updated", Data: []byte(`{"table":"customers"}`)}); ok {
+		t.Fatal("event outside the allowlist must not match")
+	}
+}
+
 func TestAppEventsConfigRejectsUnsafeShape(t *testing.T) {
 	bad := []string{
 		`{"topics":[],"output":{"type":"invalidate"}}`,
 		`{"topics":["row.*"],"match":{"project_id":"other"},"output":{"type":"invalidate"}}`,
 		`{"topics":["row.*"],"match":{"data.table":{"$ne":"x"}},"output":{"type":"invalidate"}}`,
+		`{"topics":["row.*"],"match":{"data.table":{"in":[]}},"output":{"type":"invalidate"}}`,
+		`{"topics":["row.*"],"match":{"data.table":{"in":[{"secret":true}]}},"output":{"type":"invalidate"}}`,
+		`{"topics":["row.*"],"match":{"data.table":{"in":["ventes"]}},"output":{"type":"invalidate","id":"$data.id"}}`,
+		`{"topics":["row.*"],"match":{"data.type":{"in":["invalidate"]}},"output":{"type":"$data.type"}}`,
 		`{"topics":["row.*"],"output":{}}`,
 	}
 	for _, raw := range bad {
 		if _, err := parseAppEventsConfig(raw); err == nil {
 			t.Fatalf("config should be rejected: %s", raw)
 		}
+	}
+}
+
+func TestAppEventsConfigBoundsInMatcher(t *testing.T) {
+	values := make([]any, maxEventMatchValues+1)
+	for i := range values {
+		values[i] = fmt.Sprintf("table_%d", i)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"topics": []any{"row.*"},
+		"match": map[string]any{
+			"data.table": map[string]any{"in": values},
+		},
+		"output": map[string]any{"type": "invalidate", "table": "$data.table"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseAppEventsConfig(string(raw)); err == nil || !strings.Contains(err.Error(), "1 to 64") {
+		t.Fatalf("oversized in matcher error = %v", err)
 	}
 }
 
@@ -125,7 +175,8 @@ func TestGatewayProjectsFilteredCoalescedAppEvents(t *testing.T) {
 		for _, frame := range []string{
 			appBusFrame(1, "row.updated", `{"table":"ventes","secret":"never-forward"}`),
 			appBusFrame(2, "row.inserted", `{"table":"ventes","ids":[99]}`),
-			appBusFrame(3, "row.updated", `{"table":"customers"}`),
+			appBusFrame(3, "row.updated", `{"table":"appels","id":41}`),
+			appBusFrame(4, "row.updated", `{"table":"customers"}`),
 		} {
 			_, _ = io.WriteString(w, frame)
 		}
@@ -153,9 +204,11 @@ func TestGatewayProjectsFilteredCoalescedAppEvents(t *testing.T) {
 		"api_slug": "sales", "method": "GET", "path_pattern": "/events",
 		"target_kind": "app_events", "target_ref": "tables",
 		"events": map[string]any{
-			"topics":      []any{"row.inserted", "row.updated"},
-			"match":       map[string]any{"data.table": "ventes"},
-			"output":      map[string]any{"type": "invalidate", "resource": "ventes"},
+			"topics": []any{"row.inserted", "row.updated"},
+			"match": map[string]any{
+				"data.table": map[string]any{"in": []any{"appels", "ventes"}},
+			},
+			"output":      map[string]any{"type": "invalidate", "table": "$data.table"},
 			"coalesce_ms": 25,
 		},
 	}); err != nil {
@@ -179,12 +232,17 @@ func TestGatewayProjectsFilteredCoalescedAppEvents(t *testing.T) {
 	if !strings.Contains(ready, "event: ready") || !strings.Contains(ready, `"revalidate":true`) {
 		t.Fatalf("ready event = %q", ready)
 	}
-	projected := readSSEEvent(reader)
-	if !strings.Contains(projected, "id: 2") || !strings.Contains(projected, "event: invalidate") ||
-		!strings.Contains(projected, `{"resource":"ventes","type":"invalidate"}`) {
-		t.Fatalf("projected event = %q", projected)
+	ventes := readSSEEvent(reader)
+	if !strings.Contains(ventes, "id: 2") || !strings.Contains(ventes, "event: invalidate") ||
+		!strings.Contains(ventes, `{"table":"ventes","type":"invalidate"}`) {
+		t.Fatalf("ventes event = %q", ventes)
 	}
-	if strings.Contains(projected, "secret") || strings.Contains(projected, "ids") || strings.Contains(projected, "install_id") {
+	appels := readSSEEvent(reader)
+	if !strings.Contains(appels, "id: 3") || !strings.Contains(appels, `{"table":"appels","type":"invalidate"}`) {
+		t.Fatalf("appels event = %q", appels)
+	}
+	if projected := ventes + appels; strings.Contains(projected, "secret") || strings.Contains(projected, "ids") ||
+		strings.Contains(projected, "install_id") || strings.Contains(projected, "customers") {
 		t.Fatalf("internal payload leaked: %q", projected)
 	}
 	cancel()

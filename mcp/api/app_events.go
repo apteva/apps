@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,11 @@ import (
 )
 
 const (
-	defaultEventCoalesce = 200 * time.Millisecond
-	eventHeartbeat       = 15 * time.Second
-	eventReplayCapacity  = 256
+	defaultEventCoalesce  = 200 * time.Millisecond
+	eventHeartbeat        = 15 * time.Second
+	eventReplayCapacity   = 256
+	maxEventMatchValues   = 64
+	maxPendingProjections = 256
 )
 
 type appEventsConfig struct {
@@ -59,15 +62,18 @@ func parseAppEventsConfig(raw string) (*appEventsConfig, error) {
 		if !strings.HasPrefix(path, "data.") || len(strings.TrimPrefix(path, "data.")) == 0 {
 			return nil, fmt.Errorf("events.match path %q must start with data.", path)
 		}
-		if !isJSONScalar(value) {
-			return nil, fmt.Errorf("events.match value for %q must be a JSON scalar", path)
+		if err := validateEventMatchCondition(path, value); err != nil {
+			return nil, err
 		}
 	}
 	if len(cfg.Output) == 0 {
-		return nil, errors.New("events.output must be a non-empty static object")
+		return nil, errors.New("events.output must be a non-empty object")
 	}
 	if encoded, err := json.Marshal(cfg.Output); err != nil || len(encoded) > 8*1024 {
 		return nil, errors.New("events.output must be valid JSON no larger than 8 KiB")
+	}
+	if err := validateEventOutput(cfg.Output, cfg.Match, nil); err != nil {
+		return nil, err
 	}
 	if cfg.CoalesceMS == 0 {
 		cfg.CoalesceMS = int(defaultEventCoalesce / time.Millisecond)
@@ -76,6 +82,66 @@ func parseAppEventsConfig(raw string) (*appEventsConfig, error) {
 		return nil, errors.New("events.coalesce_ms must be between 0 and 5000")
 	}
 	return &cfg, nil
+}
+
+func validateEventMatchCondition(path string, condition any) error {
+	if isJSONScalar(condition) {
+		return nil
+	}
+	operator, ok := condition.(map[string]any)
+	if !ok || len(operator) != 1 {
+		return fmt.Errorf("events.match value for %q must be a JSON scalar or an in operator", path)
+	}
+	rawValues, ok := operator["in"]
+	if !ok {
+		return fmt.Errorf("events.match value for %q only supports the in operator", path)
+	}
+	values, ok := rawValues.([]any)
+	if !ok || len(values) == 0 || len(values) > maxEventMatchValues {
+		return fmt.Errorf("events.match in list for %q must contain 1 to %d values", path, maxEventMatchValues)
+	}
+	for _, value := range values {
+		if !isJSONScalar(value) {
+			return fmt.Errorf("events.match in list for %q must contain only JSON scalars", path)
+		}
+	}
+	return nil
+}
+
+func validateEventOutput(value any, match map[string]any, outputPath []string) error {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if err := validateEventOutput(child, match, append(outputPath, key)); err != nil {
+				return err
+			}
+		}
+	case []any:
+		for i, child := range typed {
+			if err := validateEventOutput(child, match, append(outputPath, strconv.Itoa(i))); err != nil {
+				return err
+			}
+		}
+	case string:
+		path, projected := eventProjectionPath(typed)
+		if !projected {
+			return nil
+		}
+		if len(outputPath) == 1 && outputPath[0] == "type" {
+			return errors.New("events.output.type must be static")
+		}
+		if _, constrained := match[path]; !constrained {
+			return fmt.Errorf("events.output projection %q must reference a field constrained by events.match", typed)
+		}
+	}
+	return nil
+}
+
+func eventProjectionPath(value string) (string, bool) {
+	if !strings.HasPrefix(value, "$data.") || len(strings.TrimPrefix(value, "$data.")) == 0 {
+		return "", false
+	}
+	return strings.TrimPrefix(value, "$"), true
 }
 
 func validEventTopicPattern(topic string) bool {
@@ -107,6 +173,11 @@ func isJSONScalar(v any) bool {
 }
 
 func eventMatches(cfg *appEventsConfig, ev appBusEvent) bool {
+	_, ok := projectAppEvent(cfg, ev)
+	return ok
+}
+
+func projectAppEvent(cfg *appEventsConfig, ev appBusEvent) ([]byte, bool) {
 	topicOK := false
 	for _, pattern := range cfg.Topics {
 		if pattern == "*" || pattern == ev.Topic ||
@@ -116,22 +187,103 @@ func eventMatches(cfg *appEventsConfig, ev appBusEvent) bool {
 		}
 	}
 	if !topicOK {
-		return false
-	}
-	if len(cfg.Match) == 0 {
-		return true
+		return nil, false
 	}
 	var data any
-	if json.Unmarshal(ev.Data, &data) != nil {
-		return false
+	if len(cfg.Match) > 0 || outputHasProjection(cfg.Output) {
+		if json.Unmarshal(ev.Data, &data) != nil {
+			return nil, false
+		}
 	}
 	for path, want := range cfg.Match {
 		got, ok := lookupJSONPath(data, strings.Split(strings.TrimPrefix(path, "data."), "."))
-		if !ok || !reflect.DeepEqual(got, want) {
-			return false
+		if !ok || !eventMatchConditionMatches(got, want) {
+			return nil, false
 		}
 	}
-	return true
+	projected, ok := projectEventOutput(cfg.Output, data)
+	if !ok {
+		return nil, false
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil || len(encoded) > 8*1024 {
+		return nil, false
+	}
+	return encoded, true
+}
+
+func eventMatchConditionMatches(got, condition any) bool {
+	if isJSONScalar(condition) {
+		return reflect.DeepEqual(got, condition)
+	}
+	operator, ok := condition.(map[string]any)
+	if !ok {
+		return false
+	}
+	values, ok := operator["in"].([]any)
+	if !ok {
+		return false
+	}
+	for _, want := range values {
+		if reflect.DeepEqual(got, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func outputHasProjection(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, child := range typed {
+			if outputHasProjection(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if outputHasProjection(child) {
+				return true
+			}
+		}
+	case string:
+		_, ok := eventProjectionPath(typed)
+		return ok
+	}
+	return false
+}
+
+func projectEventOutput(value, data any) (any, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, child := range typed {
+			projected, ok := projectEventOutput(child, data)
+			if !ok {
+				return nil, false
+			}
+			out[key] = projected
+		}
+		return out, true
+	case []any:
+		out := make([]any, len(typed))
+		for i, child := range typed {
+			projected, ok := projectEventOutput(child, data)
+			if !ok {
+				return nil, false
+			}
+			out[i] = projected
+		}
+		return out, true
+	case string:
+		path, projected := eventProjectionPath(typed)
+		if !projected {
+			return typed, true
+		}
+		return lookupJSONPath(data, strings.Split(strings.TrimPrefix(path, "data."), "."))
+	default:
+		return value, true
+	}
 }
 
 func lookupJSONPath(value any, path []string) (any, bool) {
@@ -417,27 +569,57 @@ func (a *App) dispatchAppEvents(w http.ResponseWriter, r *http.Request, api *API
 	_, _ = io.WriteString(w, "event: ready\ndata: {\"type\":\"ready\",\"revalidate\":true}\n\n")
 	flusher.Flush()
 
-	output, _ := json.Marshal(cfg.Output)
 	eventName := "invalidate"
 	if name, _ := cfg.Output["type"].(string); validSSEEventName(name) {
 		eventName = name
 	}
 	coalesce := time.Duration(cfg.CoalesceMS) * time.Millisecond
-	var pending bool
-	var pendingSeq uint64
+	type pendingProjection struct {
+		output []byte
+		seq    uint64
+	}
+	pending := make(map[string]pendingProjection)
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	flushPending := func() error {
+		batch := make([]pendingProjection, 0, len(pending))
+		for _, item := range pending {
+			batch = append(batch, item)
+		}
+		sort.Slice(batch, func(i, j int) bool {
+			if batch[i].seq == batch[j].seq {
+				return string(batch[i].output) < string(batch[j].output)
+			}
+			return batch[i].seq < batch[j].seq
+		})
+		for _, item := range batch {
+			if err := writeProjectedEvent(w, flusher, eventName, item.output, item.seq); err != nil {
+				return err
+			}
+		}
+		clear(pending)
+		return nil
+	}
 	queue := func(ev appBusEvent) error {
-		if !eventMatches(cfg, ev) {
+		output, matches := projectAppEvent(cfg, ev)
+		if !matches {
 			return nil
 		}
-		if ev.Seq > pendingSeq {
-			pendingSeq = ev.Seq
-		}
 		if coalesce == 0 {
-			return writeProjectedEvent(w, flusher, eventName, output, pendingSeq)
+			return writeProjectedEvent(w, flusher, eventName, output, ev.Seq)
 		}
-		pending = true
+		key := string(output)
+		if current, ok := pending[key]; !ok || ev.Seq > current.seq {
+			pending[key] = pendingProjection{output: output, seq: ev.Seq}
+		}
+		if len(pending) >= maxPendingProjections {
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+				timerC = nil
+			}
+			return flushPending()
+		}
 		if timer == nil {
 			timer = time.NewTimer(coalesce)
 			timerC = timer.C
@@ -468,11 +650,8 @@ func (a *App) dispatchAppEvents(w http.ResponseWriter, r *http.Request, api *API
 		case <-timerC:
 			timer = nil
 			timerC = nil
-			if pending {
-				if err := writeProjectedEvent(w, flusher, eventName, output, pendingSeq); err != nil {
-					return http.StatusOK, err
-				}
-				pending = false
+			if err := flushPending(); err != nil {
+				return http.StatusOK, err
 			}
 		case ev, ok := <-ch:
 			if !ok {

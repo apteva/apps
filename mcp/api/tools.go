@@ -55,7 +55,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, nil), Handler: a.toolAPIDelete},
 		{
 			Name:        "api_route_add",
-			Description: "Add or update a route. target_kind is function, app, http, or app_events. For app_events, target_ref is the source app and events must contain topics, optional scalar data.* match fields, a static safe output object, and optional coalesce_ms.",
+			Description: "Add or update a route. target_kind is function, app, http, or app_events. For app_events, target_ref is the source app and events must contain topics, optional exact or bounded-in data.* match fields, a safe output object with optional constrained $data.* projections, and optional coalesce_ms.",
 			InputSchema: schemaObject(map[string]any{
 				"project_id":   map[string]any{"type": "string"},
 				"api_id":       map[string]any{"type": "integer"},

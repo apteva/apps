@@ -40,8 +40,34 @@ data: {"type":"invalidate","resource":"ventes"}
 ```
 
 Raw AppBus payloads, project IDs, install IDs, row IDs, and other internal data
-are never forwarded. `match` accepts at most 16 scalar `data.*` comparisons.
-Topic patterns can be exact, `prefix.*`, or `*`. Streams require `api_key` or
+are never forwarded. `match` accepts at most 16 `data.*` comparisons. A
+comparison can be an exact JSON scalar or a bounded `in` allowlist:
+
+```json
+{
+  "topics": ["row.*"],
+  "match": {
+    "data.table": {
+      "in": ["appels", "ventes", "prospects", "rapports"]
+    }
+  },
+  "output": {
+    "type": "invalidate",
+    "table": "$data.table"
+  }
+}
+```
+
+An output may project a complete `$data.*` value only when the same path is
+constrained by an exact or `in` matcher. This preserves the allowlist boundary:
+unmatched fields and arbitrary event payload data cannot be exposed. Projection
+tokens embedded inside larger strings are not expanded, and `output.type` must
+remain static.
+
+Coalescing is keyed by the rendered output. If several allowed resources change
+inside one window, each resource receives one invalidation in AppBus sequence
+order; repeated changes to the same resource collapse into one frame. Topic
+patterns can be exact, `prefix.*`, or `*`. Streams require `api_key` or
 `auth_jwt`; public event routes are rejected. Clients can reconnect with
 `Last-Event-ID` or `since`, and the endpoint sends 15-second heartbeat comments.
 

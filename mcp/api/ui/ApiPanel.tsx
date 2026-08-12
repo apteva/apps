@@ -476,7 +476,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
             auth: auth === "default" ? {} : { kind: auth },
             events: targetKind === "app_events" ? {
               topics: eventTopics.split(",").map((topic) => topic.trim()).filter(Boolean),
-              match: eventMatchPath.trim() ? { [eventMatchPath.trim()]: eventMatchValue } : {},
+              match: eventMatchPath.trim() ? { [eventMatchPath.trim()]: eventMatchCondition(eventMatchValue) } : {},
               output: { type: "invalidate", resource: eventResource.trim() },
               coalesce_ms: Number(coalesceMS) || 200,
             } : {},
@@ -496,10 +496,10 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
           <div className="lg:col-span-6 grid grid-cols-1 lg:grid-cols-4 gap-2 border border-border rounded p-3">
             <Field label="Topics (comma separated)"><input className={inputCls} value={eventTopics} onChange={(e) => setEventTopics(e.target.value)} placeholder="row.inserted, row.updated" /></Field>
             <Field label="Optional match path"><input className={inputCls} value={eventMatchPath} onChange={(e) => setEventMatchPath(e.target.value)} placeholder="data.table" /></Field>
-            <Field label="Match value"><input className={inputCls} value={eventMatchValue} onChange={(e) => setEventMatchValue(e.target.value)} placeholder="ventes" disabled={!eventMatchPath.trim()} /></Field>
-            <Field label="Public resource"><input className={inputCls} value={eventResource} onChange={(e) => setEventResource(e.target.value)} placeholder="ventes" /></Field>
+            <Field label="Match value(s)"><input className={inputCls} value={eventMatchValue} onChange={(e) => setEventMatchValue(e.target.value)} placeholder="appels, ventes, prospects" disabled={!eventMatchPath.trim()} /></Field>
+            <Field label="Public resource"><input className={inputCls} value={eventResource} onChange={(e) => setEventResource(e.target.value)} placeholder="$data.table" /></Field>
             <Field label="Coalesce (ms)"><input className={inputCls} type="number" min="1" max="5000" value={coalesceMS} onChange={(e) => setCoalesceMS(e.target.value)} /></Field>
-            <div className="lg:col-span-3 text-xs text-text-dim self-end pb-2">Only the static invalidation object is exposed; internal AppBus payloads are never forwarded.</div>
+            <div className="lg:col-span-3 text-xs text-text-dim self-end pb-2">Comma-separated values create a safe allowlist. Use $data.&lt;field&gt; as the public resource to project only that constrained value.</div>
           </div>
         )}
         <button type="submit" className={primaryBtn + " lg:col-start-6"} disabled={busy || !targetRef.trim() || !path.trim() || (targetKind === "app_events" && (!eventTopics.trim() || !eventResource.trim()))}>Add</button>
@@ -601,6 +601,11 @@ function parseJSON(s?: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function eventMatchCondition(raw: string): string | { in: string[] } {
+  const values = raw.split(",").map((value) => value.trim()).filter(Boolean);
+  return values.length > 1 ? { in: values } : values[0] || "";
 }
 
 function parseAuthKind(s?: string): string {
