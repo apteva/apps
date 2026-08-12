@@ -1,0 +1,98 @@
+schema: apteva-app/v1
+
+name: tickets
+display_name: Tickets
+version: 0.1.0
+description: |
+  Client feedback and support requests without repository coupling. Clients
+  submit through secure intake links, follow ticket-specific magic links,
+  comment, attach files, and reopen resolved work. Teams and agents triage
+  configurable areas, types, priorities, assignees, and statuses. Every
+  comment and mutation is preserved in an append-only per-ticket timeline.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tickets
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [tickets, feedback, support, issues, clients]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: crm
+      optional: true
+      reason: Link requesters to contacts and mirror important ticket activity into the CRM timeline.
+    - name: storage
+      optional: true
+      reason: Store screenshots and ticket attachments.
+    - name: tasks
+      optional: true
+      reason: Convert accepted tickets into durable agent work.
+    - name: code
+      optional: true
+      reason: Link a ticket to an implementation issue after technical triage.
+    - name: channels
+      optional: true
+      reason: Notify an internal project channel about ticket activity.
+
+provides:
+  http_routes:
+    - prefix: /
+  skills:
+    - name: how-to-use-tickets
+      body_file: skills/how-to-use-tickets.md
+      description: Triage, communicate about, and resolve client feedback and support tickets.
+      metadata:
+        category: productivity
+  mcp_tools:
+    - { name: tickets_create, description: "Create a feedback or support ticket. Args: title, description?, area?, type?, priority?, requester fields?, due_at?." }
+    - { name: tickets_list, description: "Search and filter tickets. Args: q?, status?, area?, type?, priority?, requester_email?, limit?, offset?." }
+    - { name: tickets_get, description: "Fetch one ticket with comments, attachments, links, and chronological history. Args: id." }
+    - { name: tickets_update, description: "Patch ticket fields. Args: id plus title?, description?, area?, type?, priority?, assignee fields?, requester fields?, due_at?." }
+    - { name: tickets_set_status, description: "Move a ticket through its workflow and record the transition. Args: id, status, reason?." }
+    - { name: tickets_comment, description: "Add a public comment visible to the client. Args: id, body, author_name?." }
+    - { name: tickets_add_internal_note, description: "Add an internal team/agent note hidden from the client. Args: id, body, author_name?." }
+    - { name: tickets_edit_comment, description: "Edit a comment while preserving its previous body as a revision. Args: id, comment_id, body." }
+    - { name: tickets_add_attachment, description: "Attach an existing Storage file or upload base64 content through optional Storage. Args: id, file_id? or content_base64?, name, content_type?, visibility?." }
+    - { name: tickets_link, description: "Link a task, Code issue, deployment, URL, or other record. Args: id, kind, label?, app_name?, external_id?, url?, metadata?." }
+    - { name: tickets_history, description: "Read the append-only ticket event history. Args: id, include_internal?." }
+    - { name: ticket_areas_list, description: "List configurable feedback areas." }
+    - { name: ticket_areas_create, description: "Create a feedback area. Args: name, slug?, color?." }
+    - { name: ticket_areas_update, description: "Update or archive a feedback area. Args: id, name?, slug?, color?, archived?, sort_order?." }
+    - { name: tickets_portal_get, description: "Get or configure the secure client intake portal. Args: title?, welcome_text?, enabled?." }
+  ui_panels:
+    - slot: project.page
+      label: Tickets
+      icon: ticket
+      entry: /ui/TicketsPanel.mjs
+  publishes:
+    - { name: ticket.created, description: "A client, team member, or agent created a ticket." }
+    - { name: ticket.updated, description: "Ticket fields changed." }
+    - { name: ticket.status.changed, description: "A ticket moved to another workflow status." }
+    - { name: ticket.commented, description: "A public comment was added." }
+    - { name: ticket.internal_note.added, description: "An internal note was added." }
+    - { name: ticket.attachment.added, description: "A file was attached to a ticket." }
+    - { name: ticket.link.added, description: "A related task, issue, deployment, or URL was linked." }
+    - { name: ticket.reopened, description: "A client or team member reopened a resolved ticket." }
+    - { name: ticket.resolved, description: "A ticket was resolved." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/tickets
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/tickets.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

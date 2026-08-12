@@ -1,0 +1,177 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	_ "modernc.org/sqlite"
+)
+
+func testDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+t.TempDir()+"/tickets.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	body, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+func TestManifestAndHandlersStayInSync(t *testing.T) {
+	app := &App{}
+	m := app.Manifest()
+	if m.Name != "tickets" || m.Version != "0.1.0" {
+		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
+	}
+	if m.DB == nil || m.DB.Migrations == "" {
+		t.Fatal("database migrations missing")
+	}
+	declared := map[string]bool{}
+	for _, tool := range m.Provides.MCPTools {
+		declared[tool.Name] = true
+	}
+	implemented := map[string]bool{}
+	for _, tool := range app.MCPTools() {
+		implemented[tool.Name] = true
+	}
+	if len(declared) != len(implemented) {
+		t.Fatalf("declared=%d implemented=%d", len(declared), len(implemented))
+	}
+	for name := range declared {
+		if !implemented[name] {
+			t.Errorf("manifest tool %s has no handler", name)
+		}
+	}
+	for name := range implemented {
+		if !declared[name] {
+			t.Errorf("handler %s is not declared", name)
+		}
+	}
+	optional := map[string]bool{}
+	for _, dep := range m.Requires.Apps {
+		optional[dep.Name] = dep.Optional
+	}
+	for _, name := range []string{"crm", "storage", "tasks", "code", "channels"} {
+		if !optional[name] {
+			t.Errorf("%s must remain optional", name)
+		}
+	}
+}
+
+func TestTicketLifecycleHistoryAndVisibility(t *testing.T) {
+	db := testDB(t)
+	pid := "client-project"
+	if err := ensureProject(db, pid); err != nil {
+		t.Fatal(err)
+	}
+	client := Actor{Kind: "client", Ref: "alice@example.com", Name: "Alice"}
+	ticket, err := createTicket(db, pid, map[string]any{"title": "Backend returns 500", "description": "Saving the profile fails.", "area": "backend", "type": "bug", "requester_email": "alice@example.com"}, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ticket.AreaSlug != "backend" || ticket.DueAt != "" || ticket.Status != "new" {
+		t.Fatalf("unexpected ticket: %+v", ticket)
+	}
+	public, err := addComment(db, pid, ticket.ID, "public", "We are looking into it.", Actor{Kind: "agent", Name: "Support agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addComment(db, pid, ticket.ID, "internal", "Likely in the session middleware.", Actor{Kind: "agent", Name: "Support agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := editComment(db, pid, ticket.ID, public.ID, "We reproduced it and are looking into it.", Actor{Kind: "agent", Name: "Support agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setTicketStatus(db, pid, ticket.ID, "in_progress", "Assigned to backend", Actor{Kind: "agent", Name: "Support agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setTicketStatus(db, pid, ticket.ID, "resolved", "Fix deployed", Actor{Kind: "agent", Name: "Support agent"}); err != nil {
+		t.Fatal(err)
+	}
+	resolved, _ := getTicket(db, pid, ticket.ID)
+	if resolved.ResolvedAt == "" {
+		t.Fatal("resolved_at was not set")
+	}
+	publicDetail, err := ticketDetail(db, pid, ticket.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publicDetail.Comments) != 1 || publicDetail.Comments[0].Visibility != "public" {
+		t.Fatalf("public comments leaked internal content: %+v", publicDetail.Comments)
+	}
+	for _, event := range publicDetail.Events {
+		if event.Visibility == "internal" {
+			t.Fatalf("public history leaked internal event: %+v", event)
+		}
+	}
+	teamDetail, err := ticketDetail(db, pid, ticket.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(teamDetail.Comments) != 2 {
+		t.Fatalf("team comments=%d, want 2", len(teamDetail.Comments))
+	}
+	foundEdit := false
+	for _, event := range teamDetail.Events {
+		if event.EventType == "ticket.comment.edited" {
+			foundEdit = true
+			var data map[string]any
+			if json.Unmarshal(event.Data, &data) != nil || data["before"] != "We are looking into it." {
+				t.Errorf("edit history=%s", event.Data)
+			}
+		}
+	}
+	if !foundEdit {
+		t.Fatal("comment edit was not recorded")
+	}
+}
+
+func TestProjectIsolationAndPortalTokens(t *testing.T) {
+	db := testDB(t)
+	for _, pid := range []string{"project-a", "project-b"} {
+		if err := ensureProject(db, pid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := createTicket(db, "project-a", map[string]any{"title": "Only A"}, Actor{Kind: "human", Name: "A"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, total, err := listTickets(db, "project-b", TicketFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 0 || len(rows) != 0 {
+		t.Fatalf("project B saw project A tickets: %d", total)
+	}
+	a, err := getPortalByProject(db, "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := getPortalByProject(db, "project-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Token == "" || a.Token == b.Token {
+		t.Fatalf("portal tokens are not unique: %q %q", a.Token, b.Token)
+	}
+}
+
+func TestActorUsesTrustedCaller(t *testing.T) {
+	ctx := sdk.WithCaller(context.Background(), &sdk.Caller{AgentID: 42, ThreadID: "thread-a", ProjectID: "p"})
+	actor := actorFrom(ctx, map[string]any{}, "agent")
+	if actor.Kind != "agent" || actor.Ref != "42" {
+		t.Fatalf("actor=%+v", actor)
+	}
+}
