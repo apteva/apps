@@ -19,8 +19,9 @@ type yepEnvelope struct {
 	OK    bool            `json:"ok"`
 	Data  json.RawMessage `json:"data"`
 	Error *struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
+		Code       string `json:"code"`
+		Message    string `json:"message"`
+		RetryAfter int    `json:"retry_after"`
 	} `json:"error"`
 }
 
@@ -39,15 +40,84 @@ func callYepAPI(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any
 		}
 	}
 	if !res.Success || res.Status >= 400 {
-		return nil, res.Data, &providerRequestError{Provider: "yepapi", Status: res.Status, Message: message}
+		status := res.Status
+		if status < 400 {
+			status = yepErrorHTTPStatus(envelope.Error)
+		}
+		return nil, res.Data, &providerRequestError{
+			Provider: "yepapi", HTTPStatus: status, RetryAfter: yepRetryAfter(res.Data), Message: message,
+		}
 	}
 	if err := json.Unmarshal(res.Data, &envelope); err != nil {
 		return nil, res.Data, fmt.Errorf("yepapi: parse %s response: %w", tool, err)
 	}
 	if !envelope.OK {
-		return nil, res.Data, &providerRequestError{Provider: "yepapi", Message: message}
+		return nil, res.Data, &providerRequestError{
+			Provider: "yepapi", HTTPStatus: yepErrorHTTPStatus(envelope.Error), RetryAfter: yepRetryAfter(res.Data), Message: message,
+		}
 	}
 	return envelope.Data, res.Data, nil
+}
+
+func yepErrorHTTPStatus(providerError *struct {
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	RetryAfter int    `json:"retry_after"`
+}) int {
+	if providerError == nil {
+		return 0
+	}
+	switch strings.ToUpper(strings.TrimSpace(providerError.Code)) {
+	case "VALIDATION_ERROR":
+		return 400
+	case "INVALID_API_KEY", "REVOKED_API_KEY":
+		return 401
+	case "NO_CREDITS":
+		return 402
+	case "NOT_FOUND", "JOB_NOT_FOUND":
+		return 404
+	case "JOB_EXPIRED":
+		return 410
+	case "RATE_LIMITED", "RATE_LIMIT_EXCEEDED":
+		return 429
+	case "UPSTREAM_ERROR", "AI_UPSTREAM_ERROR":
+		return 502
+	case "INTERNAL_ERROR":
+		return 500
+	default:
+		return 0
+	}
+}
+
+func yepRetryAfter(raw []byte) int {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return 0
+	}
+	var find func(any) int
+	find = func(current any) int {
+		switch typed := current.(type) {
+		case map[string]any:
+			for _, key := range []string{"retry_after", "retryAfter"} {
+				if seconds, ok := firstNumber(typed, key); ok && seconds > 0 {
+					return int(seconds)
+				}
+			}
+			for _, nested := range typed {
+				if seconds := find(nested); seconds > 0 {
+					return seconds
+				}
+			}
+		case []any:
+			for _, nested := range typed {
+				if seconds := find(nested); seconds > 0 {
+					return seconds
+				}
+			}
+		}
+		return 0
+	}
+	return find(value)
 }
 
 type yepKeywordMetric struct {
@@ -105,6 +175,35 @@ func (p *yepAPIProvider) RefreshKeyword(ctx *sdk.AppCtx, k *Keyword, loc *SEOLoc
 		return nil, fmt.Errorf("yepapi: zero rows for keyword %q", k.Text)
 	}
 	item := rows[0]
+	rawResponse := json.RawMessage(envelopeRaw)
+	if item.Difficulty == nil || *item.Difficulty == 0 {
+		difficultyInput := map[string]any{
+			"keywords": []string{k.Text}, "language": strings.ToLower(loc.LanguageCode),
+		}
+		if loc.CountryISO != nil && strings.TrimSpace(*loc.CountryISO) != "" {
+			difficultyInput["location"] = strings.ToLower(strings.TrimSpace(*loc.CountryISO))
+		}
+		difficultyRaw, difficultyEnvelope, err := callYepAPI(ctx, p.connID, "seo_keywords_difficulty", difficultyInput)
+		if err != nil {
+			return nil, err
+		}
+		difficultyRows, err := decodeYepKeywordMetrics(difficultyRaw)
+		if err != nil {
+			return nil, err
+		}
+		for _, difficultyRow := range difficultyRows {
+			if normaliseKeyword(difficultyRow.Keyword) == k.Text && difficultyRow.Difficulty != nil {
+				item.Difficulty = difficultyRow.Difficulty
+				break
+			}
+		}
+		combined, marshalErr := json.Marshal(map[string]json.RawMessage{
+			"metrics": envelopeRaw, "difficulty": difficultyEnvelope,
+		})
+		if marshalErr == nil {
+			rawResponse = combined
+		}
+	}
 	now := time.Now().Unix()
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -119,7 +218,7 @@ func (p *yepAPIProvider) RefreshKeyword(ctx *sdk.AppCtx, k *Keyword, loc *SEOLoc
 		    intent_json, serp_features_json, raw_json)
 		 VALUES (?, ?, 'yepapi', ?, ?, ?, ?, ?, ?, ?)`,
 		k.ID, loc.ID, now, item.effectiveVolume(), item.Difficulty, item.CPC,
-		string(intentJSON), string(featuresJSON), string(envelopeRaw))
+		string(intentJSON), string(featuresJSON), string(rawResponse))
 	if err != nil {
 		return nil, fmt.Errorf("insert yepapi keyword_metrics: %w", err)
 	}
@@ -406,6 +505,16 @@ func (p *yepAPIProvider) SERPSearch(ctx *sdk.AppCtx, engine, keyword string, loc
 		"query": keyword, "depth": depth, "location_code": *loc.LocationCode,
 		"language": strings.ToLower(loc.LanguageCode),
 	})
+	if err != nil && engine == "youtube" && retryableProviderServerError(err) {
+		fallbackInput := map[string]any{
+			"query": keyword, "type": "video", "lang": strings.ToLower(loc.LanguageCode),
+		}
+		if loc.CountryISO != nil && strings.TrimSpace(*loc.CountryISO) != "" {
+			fallbackInput["geo"] = strings.ToUpper(strings.TrimSpace(*loc.CountryISO))
+		}
+		dataRaw, envelopeRaw, err = callYepAPI(ctx, p.connID, "youtube_search", fallbackInput)
+		tool = "youtube_search"
+	}
 	if err != nil {
 		return nil, err
 	}

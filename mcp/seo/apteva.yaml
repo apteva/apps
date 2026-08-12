@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.5.0
+version: 0.5.1
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -62,6 +62,11 @@ description: |
   v0.5.0: adds a provider-neutral adapter with DataForSEO and YepAPI support,
         multiple provider bindings with a selectable default, provider-scoped
         locations, and uniform Google/YouTube SERP persistence.
+  v0.5.1: makes omitted-provider reads use the configured default, adds an
+        explicit all-provider read mode, infers keyword engines from locations,
+        enriches ambiguous YepAPI difficulty, preserves upstream HTTP errors,
+        and falls back to video-only YepAPI YouTube search when its SERP
+        endpoint has a retryable server failure.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -110,28 +115,28 @@ provides:
     - { name: entities_remove, description: "Remove one tracked search entity. Args: id." }
     - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: provider?, search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: provider?, search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
-    - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
-    - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
-    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
-    - { name: locations_list, description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
+    - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, provider? (default binding; all for every provider), since?, limit?." }
+    - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, provider? (default binding; all for every provider), since?, limit?, history?." }
+    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only." }
+    - { name: locations_list, description: "List active SEO provider locations. Args: provider? (default binding; all for every provider), search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────
     - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?, location_id? or country_iso+language_code? for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
-    - { name: domains_get,    description: "Read one domain plus its latest metrics snapshot. Args: id." }
+    - { name: domains_get,    description: "Read one domain plus its latest metrics snapshot. Args: id, provider? (default binding; all for newest across providers)." }
     - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
     # ── keyword CRUD (v0.1) ─────────────────────────────────────────
     - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), location_id or country_iso+language_code. No implicit locale fallback is applied." }
-    - { name: keywords_list,   description: "List keywords in this scope. Args: provider?, search_engine?, country_iso?, limit? (default 200)." }
-    - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
+    - { name: keywords_list,   description: "List keywords in this scope. Args: provider? (default binding; all for every provider), search_engine?, country_iso?, limit? (default 200)." }
+    - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id, provider? (default binding; all for newest across providers)." }
     - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }
     # ── read-only views (v0.2) ──────────────────────────────────────
     # Refresh tools are deliberately NOT exposed as MCP. The agent
     # reads cached rows here and uses last_refreshed_at to flag
     # staleness; the human triggers refresh via the panel.
-    - { name: rankings_for_domain,   description: "List a domain's current rankings by default, or daily observations with history=true. Args: domain_id (required), since? (unix), limit? (default 200), history?." }
-    - { name: rankings_for_keyword,  description: "List cached SERP rankings for a keyword with one uniform Google/YouTube result shape. Args: keyword_id (required), since? (unix), limit? (default 200), history?." }
-    - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
-    - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required)." }
+    - { name: rankings_for_domain,   description: "List a domain's current rankings by default, or daily observations with history=true. Args: domain_id (required), provider? (default binding; all for every provider), since? (unix), limit? (default 200), history?." }
+    - { name: rankings_for_keyword,  description: "List cached SERP rankings for a keyword with one uniform Google/YouTube result shape. Args: keyword_id (required), provider? (default binding; all for every provider), since? (unix), limit? (default 200), history?." }
+    - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), provider? (default binding; all for every provider), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
+    - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required), provider? (default binding; all for every provider)." }
   ui_panels:
     - slot: project.page
       label: SEO

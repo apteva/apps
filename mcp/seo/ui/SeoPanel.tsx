@@ -314,8 +314,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     });
   }, [api]);
 
-  const reloadLocations = useCallback(async () => {
-    const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { limit: "500" });
+	const reloadLocations = useCallback(async () => {
+		const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { provider: "all", limit: "500" });
     setLocations(resp.locations || []);
   }, [api]);
 

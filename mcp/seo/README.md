@@ -37,15 +37,22 @@ provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.5 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.5.1 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
+Provider-sensitive cached reads use the configured default unless the caller
+selects another provider; `provider: all` explicitly combines cached providers.
+YepAPI keyword refreshes conditionally use its dedicated difficulty endpoint
+when the general metrics response omits difficulty or reports zero.
 
 Generic `search_engine` support covers Google and YouTube. Both engines
 use the shared locale, keyword, SERP result, entity, and opportunity tooling;
 Google additionally keeps domain metrics, tracked-domain ranking history, and
 backlinks.
+Keyword creation infers the engine from an explicit location. YepAPI YouTube
+SERP requests fall back to its video-filtered YouTube search endpoint on
+retryable provider failures while retaining the same stored result shape.
 Location sync uses each provider's catalog strategy and always creates explicit
 Google and YouTube country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are

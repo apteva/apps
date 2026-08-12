@@ -41,6 +41,7 @@ type providerRequestError struct {
 	Status       int
 	HTTPStatus   int
 	ProviderCode int
+	RetryAfter   int
 	Message      string
 }
 
@@ -79,8 +80,23 @@ func providerHTTPStatus(err error) int {
 		case http.StatusUnauthorized, http.StatusForbidden:
 			return http.StatusBadGateway
 		}
+		if status >= http.StatusInternalServerError && status < 600 {
+			return status
+		}
 	}
 	return 0
+}
+
+func retryableProviderServerError(err error) bool {
+	var requestErr *providerRequestError
+	if !errors.As(err, &requestErr) {
+		return false
+	}
+	status := requestErr.HTTPStatus
+	if status == 0 {
+		status = requestErr.Status
+	}
+	return status >= http.StatusInternalServerError && status < 600
 }
 
 type dataForSEOProvider struct{ connID int64 }
@@ -290,6 +306,32 @@ func selectProvider(ctx *sdk.AppCtx, requested string) (providerAdapter, error) 
 		}
 	}
 	return nil, fmt.Errorf("SEO provider %q is not bound to this install", requested)
+}
+
+// cachedProviderFromArgs applies the configured default to provider-sensitive
+// reads. Explicit "all" keeps cross-provider inspection available, and an
+// install with no current binding may still inspect its existing cache.
+func cachedProviderFromArgs(ctx *sdk.AppCtx, args map[string]any) (string, error) {
+	requested := strings.ToLower(strings.TrimSpace(strArg(args, "provider", "")))
+	if requested == "all" {
+		return "", nil
+	}
+	if requested != "" {
+		switch requested {
+		case "dataforseo", "yepapi":
+			return requested, nil
+		default:
+			return "", &requestValidationError{Message: fmt.Sprintf("SEO provider %q is not supported; use dataforseo, yepapi, or all", requested)}
+		}
+	}
+	provider, err := selectProvider(ctx, "")
+	if errors.Is(err, errProviderUnbound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return provider.Slug(), nil
 }
 
 func providersStatus(ctx *sdk.AppCtx) (map[string]any, error) {

@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.5.0
+version: 0.5.1
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -227,28 +227,28 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolKeywordIdeas},
 		{Name: "rankings_for_entity",
-			Description: "List cached ranking rows for a generic entity. Args: entity_id, provider?, since?, limit?. For YouTube channel entities, matches cached video results by channel id/handle/title when available.",
+			Description: "List cached ranking rows for a generic entity. Args: entity_id, provider? (default binding; all for every provider), since?, limit?. For YouTube channel entities, matches cached video results by channel id/handle/title when available.",
 			InputSchema: schemaObject(map[string]any{
 				"entity_id": map[string]any{"type": "integer"},
-				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"since":     map[string]any{"type": "integer"},
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
 		{Name: "rankings_for_keywords",
-			Description: "List cached SERP rankings for multiple keywords in one call. Returns the latest snapshot for each keyword by default, or retained snapshots with history=true. Args: keyword_ids, since?, limit?, history?.",
+			Description: "List cached SERP rankings for multiple keywords in one call. Returns the latest snapshot for each keyword by default, or retained snapshots with history=true. Args: keyword_ids, provider? (default binding; all for every provider), since?, limit?, history?.",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
-				"provider":    map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":    map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"since":       map[string]any{"type": "integer"},
 				"limit":       map[string]any{"type": "integer"},
 				"history":     map[string]any{"type": "boolean"},
 			}, []string{"keyword_ids"}),
 			Handler: a.toolRankingsForKeywords},
 		{Name: "content_opportunities",
-			Description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider?, search_engine? (google default), limit?. YouTube uses video results only.",
+			Description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only.",
 			InputSchema: schemaObject(map[string]any{
-				"provider":      map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":      map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"search_engine": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, nil),
@@ -270,10 +270,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolDomainsList},
 		{Name: "domains_get",
-			Description: "Read one domain plus its latest metrics snapshot. Args: id, provider?.",
+			Description: "Read one domain plus its latest metrics snapshot. Args: id, provider? (default binding; all for newest across providers).",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
-				"provider": map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider": map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 			}, []string{"id"}),
 			Handler: a.toolDomainsGet},
 		{Name: "domains_remove",
@@ -294,19 +294,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"text"}),
 			Handler: a.toolKeywordsAdd},
 		{Name: "keywords_list",
-			Description: "List keywords in this project scope. Args: provider?, search_engine? (google, youtube), country_iso? (filter), limit? (default 200).",
+			Description: "List keywords in this project scope. Args: provider? (default binding; all for every provider), search_engine? (google, youtube), country_iso? (filter), limit? (default 200).",
 			InputSchema: schemaObject(map[string]any{
-				"provider":      map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":      map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"search_engine": map[string]any{"type": "string"},
 				"country_iso":   map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolKeywordsList},
 		{Name: "keywords_get",
-			Description: "Read one keyword plus its latest metrics snapshot. Args: id, provider?.",
+			Description: "Read one keyword plus its latest metrics snapshot. Args: id, provider? (default binding; all for newest across providers).",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
-				"provider": map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider": map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 			}, []string{"id"}),
 			Handler: a.toolKeywordsGet},
 		{Name: "keywords_remove",
@@ -316,44 +316,44 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── read-only views (v0.2) ──────────────────────────────
 		{Name: "rankings_for_domain",
-			Description: "List a domain's current rankings by default, or daily ranking observations with history=true. Args: domain_id, provider?, since?, limit?, history?.",
+			Description: "List a domain's current rankings by default, or daily ranking observations with history=true. Args: domain_id, provider? (default binding; all for every provider), since?, limit?, history?.",
 			InputSchema: schemaObject(map[string]any{
 				"domain_id": map[string]any{"type": "integer"},
-				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"since":     map[string]any{"type": "integer"},
 				"limit":     map[string]any{"type": "integer"},
 				"history":   map[string]any{"type": "boolean"},
 			}, []string{"domain_id"}),
 			Handler: a.toolRankingsForDomain},
 		{Name: "rankings_for_keyword",
-			Description: "List cached SERP rankings for a keyword using the same result shape for Google and YouTube. Returns the latest snapshot by default, or retained snapshots with history=true. Args: keyword_id, since?, limit?, history?.",
+			Description: "List cached SERP rankings for a keyword using the same result shape for Google and YouTube. Returns the latest snapshot by default, or retained snapshots with history=true. Args: keyword_id, provider? (default binding; all for every provider), since?, limit?, history?.",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
-				"provider":   map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":   map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"since":      map[string]any{"type": "integer"},
 				"limit":      map[string]any{"type": "integer"},
 				"history":    map[string]any{"type": "boolean"},
 			}, []string{"keyword_id"}),
 			Handler: a.toolRankingsForKeyword},
 		{Name: "backlinks_list",
-			Description: "List backlinks pointing at a domain (cached). Args: domain_id, provider?, lost?, dofollow?, limit?.",
+			Description: "List backlinks pointing at a domain (cached). Args: domain_id, provider? (default binding; all for every provider), lost?, dofollow?, limit?.",
 			InputSchema: schemaObject(map[string]any{
 				"domain_id": map[string]any{"type": "integer"},
-				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":  map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"lost":      map[string]any{"type": "boolean"},
 				"dofollow":  map[string]any{"type": "boolean"},
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"domain_id"}),
 			Handler: a.toolBacklinksList},
 		{Name: "keyword_volume_history",
-			Description: "Monthly search-volume series for a keyword (cached). Args: keyword_id, provider?.",
+			Description: "Monthly search-volume series for a keyword (cached). Args: keyword_id, provider? (default binding; all for every provider).",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
-				"provider":   map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi"}},
+				"provider":   map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 			}, []string{"keyword_id"}),
 			Handler: a.toolKeywordVolumeHistory},
 		{Name: "locations_list",
-			Description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the UI/HTTP route first.",
+			Description: "List active SEO provider locations. Args: provider? (default binding; all for every provider), search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the UI/HTTP route first.",
 			InputSchema: schemaObject(map[string]any{
 				"provider":      map[string]any{"type": "string"},
 				"search_engine": map[string]any{"type": "string"},
@@ -585,7 +585,8 @@ func getLocation(db *sql.DB, id int64) (*SEOLocation, error) {
 }
 
 func resolveLocationFromArgs(db *sql.DB, args map[string]any, defaultID *int64) (*SEOLocation, error) {
-	requestedEngine, err := normalizeSearchEngine(strArg(args, "search_engine", "google"))
+	rawEngine := strings.TrimSpace(strArg(args, "search_engine", ""))
+	requestedEngine, err := normalizeSearchEngine(rawEngine)
 	if err != nil {
 		return nil, err
 	}
@@ -594,8 +595,8 @@ func resolveLocationFromArgs(db *sql.DB, args map[string]any, defaultID *int64) 
 		if err != nil || loc == nil {
 			return loc, err
 		}
-		if loc.SearchEngine != requestedEngine {
-			return nil, fmt.Errorf("location %d belongs to search_engine %s, not %s", loc.ID, loc.SearchEngine, requestedEngine)
+		if rawEngine != "" && loc.SearchEngine != requestedEngine {
+			return nil, &requestValidationError{Message: fmt.Sprintf("location %d belongs to search_engine %s, not %s", loc.ID, loc.SearchEngine, requestedEngine)}
 		}
 		if requestedProvider != "" && loc.Provider != requestedProvider {
 			mapped, mapErr := equivalentProviderLocation(db, loc, requestedProvider)
@@ -934,7 +935,11 @@ func (a *App) toolDomainsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	m, err := latestDomainMetrics(ctx.AppDB(), id, strArg(args, "provider", ""))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	m, err := latestDomainMetrics(ctx.AppDB(), id, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -1016,7 +1021,11 @@ func (a *App) toolKeywordsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 	}
 	country := strArg(args, "country_iso", "")
-	return listKeywordsWithSearchEngine(ctx.AppDB(), projectScopeFromArgs(ctx, args), strArg(args, "provider", ""), searchEngine, country, limit)
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return listKeywordsWithSearchEngine(ctx.AppDB(), projectScopeFromArgs(ctx, args), provider, searchEngine, country, limit)
 }
 
 func (a *App) toolKeywordsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1028,7 +1037,11 @@ func (a *App) toolKeywordsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	m, err := latestKeywordMetrics(ctx.AppDB(), id, strArg(args, "provider", ""))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	m, err := latestKeywordMetrics(ctx.AppDB(), id, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -1106,7 +1119,10 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	var rows *sql.Rows
 	var err error
-	provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", "")))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	if boolArg(args, "history", false) {
 		query := `SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date,
 			        rank, rank_url, device, serp_features_json
@@ -1178,7 +1194,11 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	return searchRankingsForKeywordsProvider(ctx.AppDB(), pid, []int64{id}, since, limit, boolArg(args, "history", false), strArg(args, "provider", ""))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return searchRankingsForKeywordsProvider(ctx.AppDB(), pid, []int64{id}, since, limit, boolArg(args, "history", false), provider)
 }
 
 func (a *App) toolRankingsForKeywords(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1194,7 +1214,11 @@ func (a *App) toolRankingsForKeywords(ctx *sdk.AppCtx, args map[string]any) (any
 	if limit <= 0 || limit > 2000 {
 		limit = 1000
 	}
-	return searchRankingsForKeywordsProvider(ctx.AppDB(), pid, ids, toInt64(args["since"]), limit, boolArg(args, "history", false), strArg(args, "provider", ""))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return searchRankingsForKeywordsProvider(ctx.AppDB(), pid, ids, toInt64(args["since"]), limit, boolArg(args, "history", false), provider)
 }
 
 func searchRankingsForKeywords(db *sql.DB, pid string, keywordIDs []int64, since int64, limit int, history bool) ([]SearchRanking, error) {
@@ -1354,13 +1378,17 @@ func (a *App) toolBacklinksList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	// `lost` defaults to false: callers only see live links unless
 	// they ask for the lost set. dofollow nil → no filter.
 	wantLost := boolArg(args, "lost", false)
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	q := `SELECT id, domain_id, provider, source_url, dest_url, anchor,
 	             is_dofollow, is_nofollow, is_ugc, is_sponsored,
 	             source_authority, first_seen, last_seen, is_lost
 	        FROM backlinks
 	       WHERE domain_id = ? AND is_lost = ?`
 	qargs := []any{id, boolToInt(wantLost)}
-	if provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", ""))); provider != "" {
+	if provider != "" {
 		q += ` AND provider = ?`
 		qargs = append(qargs, provider)
 	}
@@ -1400,7 +1428,11 @@ func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (an
 		   FROM keyword_volume_history
 		   WHERE keyword_id = ?`
 	qargs := []any{id}
-	if provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", ""))); provider != "" {
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if provider != "" {
 		query += ` AND provider = ?`
 		qargs = append(qargs, provider)
 	}
@@ -1422,7 +1454,17 @@ func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (an
 }
 
 func (a *App) toolLocationsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return listLocations(ctx.AppDB(), args)
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resolved := copyArgs(args)
+	if provider == "" {
+		delete(resolved, "provider")
+	} else {
+		resolved["provider"] = provider
+	}
+	return listLocations(ctx.AppDB(), resolved)
 }
 
 func (a *App) toolSearchEnginesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1845,13 +1887,20 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	snapshotID, _ := res.LastInsertId()
 	stored := []SearchRanking{}
-	for _, raw := range items {
+	for index, raw := range items {
 		item := normalizeSERPItem(search_engine, raw)
+		if item.Rank == nil {
+			rank := int64(index + 1)
+			item.Rank = &rank
+		}
 		if search_engine == "youtube" && item.ResultType != "video" {
 			continue
 		}
 		if item.Identifier == "" && item.URL == "" && item.Title == "" {
 			continue
+		}
+		if len(stored) >= depth {
+			break
 		}
 		var entityID any
 		if item.EntityType != "" && item.Identifier != "" {
@@ -1933,6 +1982,9 @@ func decodeSERPItems(rowRaw []byte) ([]map[string]any, error) {
 	if rawItems == nil {
 		rawItems, _ = obj["results"].([]any)
 	}
+	if rawItems == nil {
+		rawItems, _ = obj["data"].([]any)
+	}
 	out := []map[string]any{}
 	for _, raw := range rawItems {
 		if m, ok := raw.(map[string]any); ok {
@@ -1950,13 +2002,13 @@ func normalizeSERPItem(search_engine string, raw map[string]any) normalizedSERPI
 		Title:       firstString(raw, "title", "name"),
 		URL:         firstString(raw, "url", "link"),
 		Snippet:     firstString(raw, "description", "snippet"),
-		PublishedAt: firstString(raw, "timestamp", "published_date", "date"),
+		PublishedAt: firstString(raw, "timestamp", "published_date", "publishedAt", "publishDate", "date"),
 		RawJSON:     string(rawText),
 	}
 	switch search_engine {
 	case "youtube":
-		item.ChannelIdentifier = firstString(raw, "channel_id", "channel_url", "author_url")
-		item.ChannelTitle = firstString(raw, "channel_name", "channel_title", "author")
+		item.ChannelIdentifier = firstString(raw, "channel_id", "channelId", "channel_url", "author_url", "channelHandle")
+		item.ChannelTitle = firstString(raw, "channel_name", "channel_title", "channelTitle", "author")
 		item.ResultType = normalizeYouTubeResultType(item.ResultType, item.URL, raw)
 		switch item.ResultType {
 		case "channel":
@@ -1971,9 +2023,12 @@ func normalizeSERPItem(search_engine string, raw map[string]any) normalizedSERPI
 			item.Identifier = youtubePlaylistID(firstString(raw, "playlist_id", "playlist_url", "url", "link"))
 		case "video":
 			item.EntityType = "video"
-			item.Identifier = firstString(raw, "video_id")
+			item.Identifier = firstString(raw, "video_id", "videoId", "id")
 			if item.Identifier == "" {
 				item.Identifier = youtubeVideoID(item.URL)
+			}
+			if item.URL == "" && item.Identifier != "" {
+				item.URL = "https://www.youtube.com/watch?v=" + item.Identifier
 			}
 		default:
 			item.EntityType = ""
@@ -2016,7 +2071,7 @@ func normalizeYouTubeResultType(rawType, rawURL string, raw map[string]any) stri
 			return "video"
 		}
 	}
-	if firstString(raw, "video_id") != "" {
+	if firstString(raw, "video_id", "videoId") != "" {
 		return "video"
 	}
 	if firstString(raw, "playlist_id", "playlist_url") != "" {
@@ -2062,7 +2117,11 @@ func (a *App) toolRankingsForEntity(ctx *sdk.AppCtx, args map[string]any) (any, 
 		qargs = append(qargs, e.Identifier, strings.TrimPrefix(e.Identifier, "@"))
 	}
 	q += `)`
-	if provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", ""))); provider != "" {
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if provider != "" {
 		q += ` AND s.provider = ?`
 		qargs = append(qargs, provider)
 	}
@@ -2260,7 +2319,11 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	return contentOpportunitiesProvider(ctx.AppDB(), projectScopeFromArgs(ctx, args), search_engine, limit, strArg(args, "provider", ""))
+	provider, err := cachedProviderFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return contentOpportunitiesProvider(ctx.AppDB(), projectScopeFromArgs(ctx, args), search_engine, limit, provider)
 }
 
 func contentOpportunities(db *sql.DB, pid, searchEngine string, limit int) (any, error) {
@@ -2626,7 +2689,7 @@ func (a *App) handleLocationsList(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	out, err := listLocations(mustCtx(r).AppDB(), args)
+	out, err := a.toolLocationsList(mustCtx(r), args)
 	writeJSONOrErr(w, map[string]any{"locations": out}, err)
 }
 
@@ -2762,6 +2825,10 @@ func locationArgsFromQuery(r *http.Request) map[string]any {
 	return args
 }
 
+type requestValidationError struct{ Message string }
+
+func (e *requestValidationError) Error() string { return e.Message }
+
 func writeJSONOrErr(w http.ResponseWriter, payload any, err error) {
 	if err != nil {
 		// 503 reads better than 500 for "no provider bound" — it's a
@@ -2769,8 +2836,14 @@ func writeJSONOrErr(w http.ResponseWriter, payload any, err error) {
 		code := http.StatusInternalServerError
 		if errors.Is(err, errProviderUnbound) {
 			code = http.StatusServiceUnavailable
+		} else if validationErr := (*requestValidationError)(nil); errors.As(err, &validationErr) {
+			code = http.StatusBadRequest
 		} else if providerCode := providerHTTPStatus(err); providerCode != 0 {
 			code = providerCode
+		}
+		var requestErr *providerRequestError
+		if errors.As(err, &requestErr) && requestErr.RetryAfter > 0 {
+			w.Header().Set("Retry-After", strconv.Itoa(requestErr.RetryAfter))
 		}
 		http.Error(w, err.Error(), code)
 		return

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.5.1
+
+- Made every provider-sensitive cached read use the configured default provider;
+  callers can request `provider: all` for an intentional cross-provider view.
+- Made keyword creation infer Google or YouTube from an explicit location while
+  returning HTTP 400 for an explicitly conflicting search engine.
+- Preserved provider 5xx status codes and retry hints instead of collapsing them
+  into generic HTTP 500 responses.
+- Enriched missing or zero YepAPI keyword difficulty through its dedicated
+  difficulty endpoint while avoiding the extra paid call for nonzero scores.
+- Added a video-only `youtube_search` fallback when YepAPI's YouTube SERP route
+  returns a retryable server error, including normalization of its camel-case
+  video metadata.
+- Kept the panel's provider selector usable by explicitly loading all provider
+  locations while provider-specific views remain isolated.
+
 ## 0.5.0
 
 - Added a provider-neutral execution adapter with complete DataForSEO and
