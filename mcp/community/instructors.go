@@ -195,17 +195,30 @@ func toolInstructorProfilesList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []InstructorProfile{}
 	for rows.Next() {
 		profile, err := scanInstructorProfile(rows.Scan)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		profile.Statistics, _ = calculateInstructorStatistics(ctx.AppDB(), profile.CommunityID, profile.ID)
 		out = append(out, profile)
 	}
-	return map[string]any{"instructors": out, "count": len(out)}, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	// App databases deliberately use a single SQLite connection. Finish the
+	// profile scan before calculating statistics, since those calculations run
+	// additional queries and would otherwise wait forever for the open rows to
+	// release that sole connection.
+	for index := range out {
+		out[index].Statistics, _ = calculateInstructorStatistics(ctx.AppDB(), out[index].CommunityID, out[index].ID)
+	}
+	return map[string]any{"instructors": out, "count": len(out)}, nil
 }
 
 func toolInstructorProfilesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {

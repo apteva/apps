@@ -5,6 +5,32 @@ import (
 	"testing"
 )
 
+func TestInstructorProfilesListWithSingleDatabaseConnection(t *testing.T) {
+	ctx, communityID, _, _, _, _, _ := setupCourse(t)
+	created, err := toolInstructorProfilesCreate(ctx, map[string]any{
+		"community_id": communityID, "display_name": "Single Connection Instructor",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx.AppDB().SetMaxOpenConns(1)
+
+	listed, err := toolInstructorProfilesList(ctx, map[string]any{
+		"community_id": communityID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := listed.(map[string]any)
+	profiles := result["instructors"].([]InstructorProfile)
+	if len(profiles) != 1 || profiles[0].ID != created.(InstructorProfile).ID {
+		t.Fatalf("listed instructors=%+v", profiles)
+	}
+	if profiles[0].Statistics == nil {
+		t.Fatal("listed instructor is missing calculated statistics")
+	}
+}
+
 func TestInstructorProfilesOneTableAssignmentsAndCalculatedStatistics(t *testing.T) {
 	ctx, communityID, memberID, courseID, _, _, _ := setupCourse(t)
 	primaryOut, err := toolInstructorProfilesCreate(ctx, map[string]any{
