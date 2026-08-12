@@ -1,4 +1,4 @@
-// Functions v1.0 — Lambda-style serverless functions.
+// Functions v1.7 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -54,14 +54,15 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.6.1
+version: 1.7.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
   processes; handlers reach sibling apps via context.call and
   integration connections via context.integration. Auto-routed HTTP
   endpoint at /fn/<name>, plus optional public Function URLs at
-  /url/<name>/<token>.
+  /url/<name>/<token>. Node and Go handlers can stream incremental HTTP
+  responses and Server-Sent Events through their invocation context.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome

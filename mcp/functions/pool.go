@@ -98,7 +98,7 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 // to the worker so cross-app context.call frames can be serviced via
 // its PlatformAPI. The worker goes back to the freelist afterwards
 // unless it died or its version is no longer active.
-func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver *FunctionVersion, spec runtimeSpec, buildDir string, event any, timeout time.Duration) (*invokeResult, error) {
+func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver *FunctionVersion, spec runtimeSpec, buildDir string, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
 	fp := p.poolFor(fn.ID)
 	select {
 	case p.globalQueue <- struct{}{}:
@@ -158,7 +158,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, ver
 		}
 	}
 
-	res, err := w.call(ctx, parent, event, timeout)
+	res, err := w.call(ctx, parent, event, timeout, stream)
 
 	// Return the worker to the freelist if it's still healthy and on
 	// the active version; otherwise let it go.

@@ -10,11 +10,14 @@
 //   worker  -> sidecar:  { type:"ready", ok, error? }        (once, on boot)
 //                        { type:"call", callId, app, tool, input }
 //                        { type:"integration", callId, conn, tool, input }
+//                        { type:"stream_start", id, statusCode, headers }
+//                        { type:"stream_chunk", id, encoding, data }
 //                        { id, ok, result?, error?, logs? }  (invocation result)
 //
 // The handler contract:
 //   export default async function handler(event, context) { return result }
-// context = { functionName, functionId, runtime, env, log, call, integration }.
+// context = { functionName, functionId, runtime, env, log, call, integration,
+//             stream, sse }.
 //
 // context.call(app, tool, input) reaches sibling Apteva apps.
 // context.integration(conn, tool, input) reaches an in-project
@@ -41,6 +44,12 @@ function encodeFrame(obj) {
   const len = Buffer.allocUnsafe(4);
   len.writeUInt32BE(payload.length, 0);
   return Buffer.concat([len, payload]);
+}
+
+function writeFrameAsync(sock, obj) {
+  const frame = encodeFrame(obj);
+  if (sock.write(frame)) return Promise.resolve();
+  return new Promise((resolve) => sock.once("drain", resolve));
 }
 
 // ── log capture ───────────────────────────────────────────────────
@@ -163,6 +172,63 @@ async function main() {
     const logs = [];
     currentLogs = logs;
     currentLogBytes = 0;
+    let streamStarted = false;
+    async function startStream(options = {}) {
+      if (streamStarted) return;
+      streamStarted = true;
+      const statusCode = Number.isInteger(options.statusCode) ? options.statusCode : 200;
+      const headers = {};
+      for (const [key, value] of Object.entries(options.headers || {})) {
+        if (value != null) headers[String(key)] = String(value);
+      }
+      await writeFrameAsync(sock, { type: "stream_start", id, statusCode, headers });
+    }
+    async function writeStream(chunk) {
+      if (!streamStarted) {
+        await startStream({ headers: { "Content-Type": "application/octet-stream" } });
+      }
+      let payload;
+      if (Buffer.isBuffer(chunk)) payload = chunk;
+      else if (ArrayBuffer.isView(chunk)) payload = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+      else if (chunk instanceof ArrayBuffer) payload = Buffer.from(chunk);
+      else payload = Buffer.from(String(chunk ?? ""), "utf8");
+      await writeFrameAsync(sock, {
+        type: "stream_chunk", id, encoding: "base64", data: payload.toString("base64"),
+      });
+    }
+    async function sendSSE(data, options = {}) {
+      if (!streamStarted) {
+        await startStream({
+          statusCode: options.statusCode,
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            ...(options.headers || {}),
+          },
+        });
+      }
+      const lines = [];
+      if (options.id != null) lines.push(`id: ${String(options.id).replace(/[\r\n]/g, "")}`);
+      if (options.event) lines.push(`event: ${String(options.event).replace(/[\r\n]/g, "")}`);
+      if (Number.isInteger(options.retry) && options.retry >= 0) lines.push(`retry: ${options.retry}`);
+      const text = typeof data === "string" ? data : JSON.stringify(data ?? null);
+      for (const line of text.split(/\r?\n/)) lines.push(`data: ${line}`);
+      await writeStream(`${lines.join("\n")}\n\n`);
+    }
+    async function sendSSEComment(comment) {
+      if (!streamStarted) {
+        await startStream({
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+          },
+        });
+      }
+      const text = String(comment ?? "").split(/\r?\n/).map((line) => `: ${line}`).join("\n");
+      await writeStream(`${text}\n\n`);
+    }
     const context = {
       functionName: process.env.APTEVA_FUNCTION_NAME || "",
       functionId: process.env.APTEVA_FUNCTION_ID || "",
@@ -171,6 +237,8 @@ async function main() {
       log: (...a) => console.log(...a),
       call: (app, tool, input) => makeCall(app, tool, input),
       integration: (conn, tool, input) => makeIntegration(conn, tool, input),
+      stream: { start: startStream, write: writeStream },
+      sse: { send: sendSSE, comment: sendSSEComment },
     };
     let frame;
     try {
@@ -182,7 +250,7 @@ async function main() {
       currentLogs = null;
     }
     try {
-      sock.write(encodeFrame(frame));
+      await writeFrameAsync(sock, frame);
     } catch {
       // socket gone — the sidecar already moved on
     }

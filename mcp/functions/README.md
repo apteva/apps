@@ -1,4 +1,4 @@
-# Functions (v1.1)
+# Functions (v1.7)
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
@@ -53,9 +53,49 @@ Either way, `context` / `ctx` gives you:
   certificate settings). `HOME` and temporary directories are private. The
   sidecar's secrets (`APTEVA_APP_TOKEN`, gateway URL) are **not** here.
 - **`context.log(...)`**, **`context.functionName/functionId/runtime`**.
+- **`context.stream` / `context.sse`** — incrementally write HTTP response
+  chunks or Server-Sent Events. Go handlers use `ctx.StreamStart`,
+  `ctx.StreamWrite`, `ctx.SSE`, and `ctx.SSEComment`.
 
 Top-level / package-level code runs once per worker (cold start) —
 put client setup there; it's reused across warm invocations.
+
+## Streaming HTTP responses
+
+Streaming is available on `/fn/<name>` and Function URL HTTP invocations.
+The first chunk is flushed immediately through API Gateway. The
+`functions_invoke` MCP tool remains unary and returns a capped preview when a
+streaming handler is invoked manually or by a job.
+
+Node SSE example:
+
+```js
+export default async function handler(event, context) {
+  await context.sse.send({ phase: "started" }, { event: "progress" });
+  await context.sse.send({ phase: "complete" }, { event: "progress" });
+}
+```
+
+Node handlers can stream arbitrary bytes with
+`await context.stream.start({statusCode, headers})` followed by
+`await context.stream.write(chunk)`.
+
+Go SSE example:
+
+```go
+func Handle(event json.RawMessage, ctx *Context) (any, error) {
+  if err := ctx.SSE("progress", map[string]any{"phase": "started"}); err != nil {
+    return nil, err
+  }
+  if err := ctx.SSE("progress", map[string]any{"phase": "complete"}); err != nil {
+    return nil, err
+  }
+  return nil, nil
+}
+```
+
+Go handlers can stream arbitrary bytes with `ctx.StreamStart` and
+`ctx.StreamWrite`. Handler completion closes the response stream.
 
 ## Lifecycle: deploy ≠ invoke
 

@@ -53,7 +53,7 @@ func TestGlobalQueueRejectsInsteadOfGrowingUnbounded(t *testing.T) {
 	p.globalQueue <- struct{}{}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	_, err := p.invoke(nil, ctx, &Function{ID: 7}, &FunctionVersion{}, runtimeSpec{}, "", nil, time.Second)
+	_, err := p.invoke(nil, ctx, &Function{ID: 7}, &FunctionVersion{}, runtimeSpec{}, "", nil, time.Second, nil)
 	if !errors.Is(err, errFunctionBusy) {
 		t.Fatalf("invoke error = %v, want errFunctionBusy", err)
 	}

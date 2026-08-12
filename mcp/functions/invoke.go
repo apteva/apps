@@ -31,6 +31,15 @@ type invokeResult struct {
 	Response     string
 	Stderr       string
 	Error        string
+	Streamed     bool
+}
+
+// invocationStream receives response metadata and body chunks while a worker
+// is still running. HTTP invocations provide a live sink; MCP, jobs, and
+// manual invocations pass nil and retain the existing unary result contract.
+type invocationStream interface {
+	Start(statusCode int, headers map[string]string) error
+	Write(chunk []byte) error
 }
 
 // invokeFunction runs one event against a function's active version
@@ -38,6 +47,10 @@ type invokeResult struct {
 // returns the result. triggerKind distinguishes http / manual /
 // event-routed invocations in the log.
 func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event any, triggerKind string) (*invokeResult, error) {
+	return invokeFunctionWithStream(ctx, parent, fn, event, triggerKind, nil)
+}
+
+func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Function, event any, triggerKind string, stream invocationStream) (*invokeResult, error) {
 	if fn.Status != "active" {
 		return nil, fmt.Errorf("function %q is %s, refusing to invoke", fn.Name, fn.Status)
 	}
@@ -93,7 +106,7 @@ func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event
 	started := time.Now().UTC()
 	invokeCtx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	res, err := globalPool.invoke(ctx, invokeCtx, fn, ver, spec, dir, event, timeout)
+	res, err := globalPool.invoke(ctx, invokeCtx, fn, ver, spec, dir, event, timeout, stream)
 	if err != nil {
 		return nil, err
 	}

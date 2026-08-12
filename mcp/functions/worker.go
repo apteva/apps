@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -62,6 +63,8 @@ type wireRequest struct {
 //   - ready handshake:     Type=="ready", OK, Error
 //   - cross-app call:      Type=="call", CallID, App, Tool, Input
 //   - integration call:    Type=="integration", CallID, Conn, Tool, Input
+//   - stream start:        Type=="stream_start", ID, StatusCode, Headers
+//   - stream chunk:        Type=="stream_chunk", ID, Data, Encoding
 //   - invocation result:   ID, OK, Result, Error, Logs
 //
 // Conn is the connection reference for integration calls. The harness
@@ -69,17 +72,21 @@ type wireRequest struct {
 // to auto-resolve in the function's project). servicePlatformIntegration
 // handles both shapes.
 type wireResponse struct {
-	Type   string          `json:"type"`
-	ID     int64           `json:"id"`
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error"`
-	Logs   []string        `json:"logs"`
-	CallID int64           `json:"callId"`
-	App    string          `json:"app"`
-	Tool   string          `json:"tool"`
-	Input  json.RawMessage `json:"input"`
-	Conn   json.RawMessage `json:"conn"`
+	Type       string            `json:"type"`
+	ID         int64             `json:"id"`
+	OK         bool              `json:"ok"`
+	Result     json.RawMessage   `json:"result"`
+	Error      string            `json:"error"`
+	Logs       []string          `json:"logs"`
+	CallID     int64             `json:"callId"`
+	App        string            `json:"app"`
+	Tool       string            `json:"tool"`
+	Input      json.RawMessage   `json:"input"`
+	Conn       json.RawMessage   `json:"conn"`
+	StatusCode int               `json:"statusCode"`
+	Headers    map[string]string `json:"headers"`
+	Data       string            `json:"data"`
+	Encoding   string            `json:"encoding"`
 }
 
 // callResult answers a worker's cross-app call request.
@@ -186,7 +193,7 @@ func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int6
 // mid-flight are serviced inline (via ctx's PlatformAPI) and answered
 // over the same socket. A read timeout leaves the worker in an
 // unknown state — call kills it, and the pool discards it.
-func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeout time.Duration) (*invokeResult, error) {
+func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dead {
@@ -227,6 +234,8 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 	}
 	var callWG sync.WaitGroup
 	callSlots := make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_CALLS", 16, 1, 256))
+	streamed := false
+	streamPreview := newCapBuffer(stdoutCap)
 
 	for {
 		_ = w.conn.SetReadDeadline(deadline)
@@ -281,6 +290,41 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 			continue
 		}
 
+		if msg.Type == "stream_start" {
+			if msg.ID != id || streamed {
+				w.killLocked()
+				return nil, fmt.Errorf("invalid stream_start frame")
+			}
+			streamed = true
+			if stream != nil {
+				if err := stream.Start(msg.StatusCode, msg.Headers); err != nil {
+					w.killLocked()
+					return nil, fmt.Errorf("start response stream: %w", err)
+				}
+			}
+			continue
+		}
+
+		if msg.Type == "stream_chunk" {
+			if msg.ID != id || !streamed {
+				w.killLocked()
+				return nil, fmt.Errorf("stream_chunk before stream_start")
+			}
+			chunk, err := decodeStreamChunk(msg)
+			if err != nil {
+				w.killLocked()
+				return nil, err
+			}
+			_, _ = streamPreview.Write(chunk)
+			if stream != nil {
+				if err := stream.Write(chunk); err != nil {
+					w.killLocked()
+					return nil, fmt.Errorf("write response stream: %w", err)
+				}
+			}
+			continue
+		}
+
 		// Invocation result.
 		callsDone := make(chan struct{})
 		go func() {
@@ -301,17 +345,37 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		res := &invokeResult{
 			DurationMS: finished.Sub(started).Milliseconds(),
 			Stderr:     truncate(strings.Join(msg.Logs, "\n"), stderrCap),
+			Streamed:   streamed,
 		}
 		if msg.OK {
 			res.Status = "ok"
 			res.ExitCode = 0
-			res.Response = truncate(string(msg.Result), stdoutCap)
+			if streamed {
+				res.Response = streamPreview.String()
+			} else {
+				res.Response = truncate(string(msg.Result), stdoutCap)
+			}
 		} else {
 			res.Status = "error"
 			res.ExitCode = 1
 			res.Error = msg.Error
 		}
 		return res, nil
+	}
+}
+
+func decodeStreamChunk(msg wireResponse) ([]byte, error) {
+	switch msg.Encoding {
+	case "", "utf8":
+		return []byte(msg.Data), nil
+	case "base64":
+		chunk, err := base64.StdEncoding.DecodeString(msg.Data)
+		if err != nil {
+			return nil, fmt.Errorf("decode stream chunk: %w", err)
+		}
+		return chunk, nil
+	default:
+		return nil, fmt.Errorf("unsupported stream chunk encoding %q", msg.Encoding)
 	}
 }
 

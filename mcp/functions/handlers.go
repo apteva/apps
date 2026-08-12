@@ -29,6 +29,63 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+type httpInvocationStream struct {
+	w       http.ResponseWriter
+	started bool
+}
+
+func (s *httpInvocationStream) Start(statusCode int, headers map[string]string) error {
+	if s.started {
+		return nil
+	}
+	if statusCode < 200 || statusCode > 599 {
+		statusCode = http.StatusOK
+	}
+	for key, value := range headers {
+		if streamResponseHeaderAllowed(key) {
+			s.w.Header().Set(key, value)
+		}
+	}
+	if s.w.Header().Get("Content-Type") == "" {
+		s.w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	s.w.Header().Set("X-Apteva-Function-Stream", "true")
+	s.w.WriteHeader(statusCode)
+	s.started = true
+	return flushHTTPResponse(s.w)
+}
+
+func (s *httpInvocationStream) Write(chunk []byte) error {
+	if !s.started {
+		if err := s.Start(http.StatusOK, nil); err != nil {
+			return err
+		}
+	}
+	if _, err := s.w.Write(chunk); err != nil {
+		return err
+	}
+	return flushHTTPResponse(s.w)
+}
+
+func flushHTTPResponse(w http.ResponseWriter) error {
+	err := http.NewResponseController(w).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func streamResponseHeaderAllowed(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "", "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+		"content-length":
+		return false
+	default:
+		return true
+	}
+}
+
 func resolveProjectFromRequest(r *http.Request) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil
@@ -408,13 +465,20 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 // returns 500 with the error message — callers reading from jobs
 // see the non-2xx and retry on schedule.
 func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, trigger string) {
-	res, err := invokeFunction(ctx, r.Context(), fn, event, trigger)
+	stream := &httpInvocationStream{w: w}
+	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, trigger, stream)
 	if err != nil {
+		if stream.started {
+			return
+		}
 		if errors.Is(err, errFunctionBusy) {
 			httpErr(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if stream.started || res.Streamed {
 		return
 	}
 	w.Header().Set("X-Apteva-Function-Invocation", strconv.FormatInt(res.InvocationID, 10))
@@ -442,13 +506,20 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 }
 
 func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
-	res, err := invokeFunction(ctx, r.Context(), fn, event, "function_url")
+	stream := &httpInvocationStream{w: w}
+	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, "function_url", stream)
 	if err != nil {
+		if stream.started {
+			return
+		}
 		if errors.Is(err, errFunctionBusy) {
 			httpErr(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if stream.started || res.Streamed {
 		return
 	}
 	if cfg != nil && cfg.CORS {

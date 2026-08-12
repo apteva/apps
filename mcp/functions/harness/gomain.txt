@@ -12,12 +12,15 @@
 //   worker  -> sidecar:  { type:"ready", ok }               (once, on boot)
 //                        { type:"call", callId, app, tool, input }
 //                        { type:"integration", callId, conn, tool, input }
+//                        { type:"stream_start", id, statusCode, headers }
+//                        { type:"stream_chunk", id, encoding, data }
 //                        { id, ok, result?, error?, logs? }  (invocation result)
 
 package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -25,6 +28,7 @@ import (
 	"net"
 	"os"
 	"runtime/debug"
+	"strings"
 	"sync"
 )
 
@@ -39,7 +43,10 @@ type Context struct {
 	Runtime      string
 	Env          map[string]string
 
-	h *harness
+	h             *harness
+	invocationID  int64
+	streamMu      sync.Mutex
+	streamStarted bool
 }
 
 // Call invokes another Apteva app's MCP tool. input is marshalled to
@@ -65,14 +72,123 @@ func (c *Context) Log(args ...any) {
 	c.h.appendLog(fmt.Sprintln(args...))
 }
 
+// StreamStart begins an incremental HTTP response. StreamWrite starts a
+// default application/octet-stream response automatically when needed.
+func (c *Context) StreamStart(statusCode int, headers map[string]string) error {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	return c.streamStartLocked(statusCode, headers)
+}
+
+func (c *Context) streamStartLocked(statusCode int, headers map[string]string) error {
+	if c.streamStarted {
+		return nil
+	}
+	if statusCode < 100 || statusCode > 999 {
+		statusCode = 200
+	}
+	clean := map[string]string{}
+	for key, value := range headers {
+		clean[key] = value
+	}
+	if err := c.h.writeFrame(map[string]any{
+		"type": "stream_start", "id": c.invocationID,
+		"statusCode": statusCode, "headers": clean,
+	}); err != nil {
+		return err
+	}
+	c.streamStarted = true
+	return nil
+}
+
+func (c *Context) StreamWrite(chunk []byte) error {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if !c.streamStarted {
+		if err := c.streamStartLocked(200, map[string]string{"Content-Type": "application/octet-stream"}); err != nil {
+			return err
+		}
+	}
+	return c.h.writeFrame(map[string]any{
+		"type": "stream_chunk", "id": c.invocationID,
+		"encoding": "base64", "data": base64.StdEncoding.EncodeToString(chunk),
+	})
+}
+
+// SSE emits one Server-Sent Event, starting the event stream on first use.
+func (c *Context) SSE(event string, data any) error {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if !c.streamStarted {
+		if err := c.streamStartLocked(200, map[string]string{
+			"Content-Type":      "text/event-stream",
+			"Cache-Control":     "no-cache",
+			"X-Accel-Buffering": "no",
+		}); err != nil {
+			return err
+		}
+	}
+	var text string
+	if value, ok := data.(string); ok {
+		text = value
+	} else {
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		text = string(encoded)
+	}
+	var out strings.Builder
+	if event != "" {
+		out.WriteString("event: ")
+		out.WriteString(strings.NewReplacer("\r", "", "\n", "").Replace(event))
+		out.WriteByte('\n')
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		out.WriteString("data: ")
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	out.WriteByte('\n')
+	return c.h.writeFrame(map[string]any{
+		"type": "stream_chunk", "id": c.invocationID,
+		"encoding": "base64", "data": base64.StdEncoding.EncodeToString([]byte(out.String())),
+	})
+}
+
+func (c *Context) SSEComment(comment string) error {
+	c.streamMu.Lock()
+	defer c.streamMu.Unlock()
+	if !c.streamStarted {
+		if err := c.streamStartLocked(200, map[string]string{
+			"Content-Type":      "text/event-stream",
+			"Cache-Control":     "no-cache",
+			"X-Accel-Buffering": "no",
+		}); err != nil {
+			return err
+		}
+	}
+	var out strings.Builder
+	for _, line := range strings.Split(strings.ReplaceAll(comment, "\r\n", "\n"), "\n") {
+		out.WriteString(": ")
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	out.WriteByte('\n')
+	return c.h.writeFrame(map[string]any{
+		"type": "stream_chunk", "id": c.invocationID,
+		"encoding": "base64", "data": base64.StdEncoding.EncodeToString([]byte(out.String())),
+	})
+}
+
 type harness struct {
 	conn    net.Conn
 	writeMu sync.Mutex
 
-	mu      sync.Mutex
-	seq     int64
-	pending map[int64]chan callAnswer
-	logs    []string
+	mu       sync.Mutex
+	seq      int64
+	pending  map[int64]chan callAnswer
+	logs     []string
 	logBytes int
 }
 
@@ -287,6 +403,14 @@ func main() {
 }
 
 func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
+	invocationCtx := &Context{
+		FunctionName: ctx.FunctionName,
+		FunctionID:   ctx.FunctionID,
+		Runtime:      ctx.Runtime,
+		Env:          ctx.Env,
+		h:            h,
+		invocationID: id,
+	}
 	var result any
 	var handlerErr error
 	func() {
@@ -295,7 +419,7 @@ func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
 				handlerErr = fmt.Errorf("handler panic: %v\n%s", r, debug.Stack())
 			}
 		}()
-		result, handlerErr = Handle(event, ctx)
+		result, handlerErr = Handle(event, invocationCtx)
 	}()
 
 	frame := map[string]any{"id": id, "logs": h.takeLogs()}
