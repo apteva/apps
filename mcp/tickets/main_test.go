@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -29,10 +30,24 @@ func testDB(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
+	body, err := os.ReadFile("ui/TicketsPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := string(body)
+	if strings.Contains(module, "react/jsx-dev-runtime") || strings.Contains(module, "jsxDEV") {
+		t.Fatal("panel bundle contains the unsupported React development JSX runtime")
+	}
+	if !strings.Contains(module, "react/jsx-runtime") {
+		t.Fatal("panel bundle does not import the production React JSX runtime")
+	}
+}
+
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.0" {
+	if m.Name != "tickets" || m.Version != "0.1.1" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {

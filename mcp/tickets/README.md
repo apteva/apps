@@ -17,7 +17,7 @@ notes, status history, and secure public intake/ticket links.
 ```sh
 go test ./...
 go test -tags integration ./...
-bun build ui/TicketsPanel.tsx --target=browser --format=esm \
+bun build ui/TicketsPanel.tsx --target=browser --format=esm --minify \
   --external react --external react/jsx-runtime \
   --outfile ui/TicketsPanel.mjs --sourcemap=linked
 ```
