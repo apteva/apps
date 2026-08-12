@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.3.0
+version: 0.3.1
 description: |
   Lightweight API gateway for Apteva SaaS projects. Owns public API
   hostnames, method/path routes, simple API keys, CORS policy, request
@@ -15,6 +15,9 @@ description: |
 
   v0.3.0 adds authenticated app_events routes that filter, sanitize, coalesce,
   and stream safe invalidations from any project's AppBus source app.
+
+  v0.3.1 preserves native EventSource query-key authentication through the
+  platform app proxy, which supplies its own internal Authorization token.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/api

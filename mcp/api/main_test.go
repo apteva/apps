@@ -36,8 +36,8 @@ func TestManifest(t *testing.T) {
 	if m.Name != "api" {
 		t.Fatalf("name = %q, want api", m.Name)
 	}
-	if m.Version != "0.3.0" {
-		t.Fatalf("version = %q, want 0.3.0", m.Version)
+	if m.Version != "0.3.1" {
+		t.Fatalf("version = %q, want 0.3.1", m.Version)
 	}
 	if len(m.Provides.HTTPRoutes) == 0 {
 		t.Fatal("manifest should expose HTTP routes")
@@ -152,6 +152,16 @@ func TestGatewayAPIKeyAuth(t *testing.T) {
 	app.handleGateway(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("valid key status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	// App proxy requests carry the install token in Authorization. A native
+	// EventSource public key in the query must take precedence over it.
+	req = httptest.NewRequest(http.MethodGet, "/gw/secure/secret?project_id="+testProject+"&api_key="+secret, nil)
+	req.Header.Set("Authorization", "Bearer internal-install-token")
+	rr = httptest.NewRecorder()
+	app.handleGateway(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("query key behind app proxy status = %d body=%s", rr.Code, rr.Body.String())
 	}
 }
 

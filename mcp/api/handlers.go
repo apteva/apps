@@ -310,12 +310,16 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 	case "", "public":
 		return authContext{Kind: "public"}, nil
 	case "api_key":
-		key := bearerToken(r.Header.Get("Authorization"))
-		if key == "" {
-			key = r.Header.Get("X-API-Key")
+		// Prefer explicit public API-key carriers over Authorization. The
+		// platform app proxy authenticates itself to this sidecar by replacing
+		// Authorization with the app-install token. Native EventSource cannot
+		// set a header, so its ?api_key= must survive that internal hop.
+		key := strings.TrimSpace(r.Header.Get("X-API-Key"))
+		if queryKey := strings.TrimSpace(r.URL.Query().Get("api_key")); queryKey != "" {
+			key = queryKey
 		}
 		if key == "" {
-			key = r.URL.Query().Get("api_key")
+			key = bearerToken(r.Header.Get("Authorization"))
 		}
 		ok, err := dbValidateAPIKey(globalCtx.AppDB(), api.ProjectID, api.ID, key)
 		if err != nil {
