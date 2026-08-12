@@ -1,0 +1,142 @@
+schema: apteva-app/v1
+
+name: design
+display_name: Design Studio
+version: 0.1.0
+description: |
+  Agent-native parametric 2D/3D design. Designs are immutable revisions of
+  a safe, declarative operation graph rendered by Replicad and OpenCascade.
+  Build exact solids, inspect dimensions and topology, preview meshes, export
+  STEP/STL/3MF, and create traceable manufacturing packages. Direct mesh
+  imports and external text-to-geometry providers fit the same revision and
+  artifact model without making generated meshes pretend to be parametric CAD.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/design
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [design, cad, 2d, 3d, manufacturing, printing]
+
+scopes: [project]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  apps:
+    - name: storage
+      version: ">=0.10.0"
+      reason: Design source packages and derived CAD/manufacturing artifacts are durable Storage files.
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  resources:
+    - name: design
+      label: Design
+      list_endpoint: /api/designs
+      matcher: exact
+      picker: list
+  permissions:
+    - name: designs.read
+      resource: design
+      description: Read designs, revisions, measurements, validations, and artifacts.
+    - name: designs.write
+      resource: design
+      description: Create designs and immutable revisions and run builds.
+    - name: designs.export
+      resource: design
+      description: Export CAD files and manufacturing packages.
+  mcp_tools:
+    - { name: design_examples, description: "Return canonical apteva-design/v1 examples and supported operations.", requires: designs.read }
+    - { name: designs_create, description: "Create a design and immutable first revision from an apteva-design/v1 operation graph.", requires: designs.write }
+    - { name: designs_list, description: "List project designs. Args: q?, kind?, status?, limit?.", requires: designs.read }
+    - { name: designs_get, description: "Fetch a design, its current revision, validation, measurements, and artifacts. Args: id.", requires: designs.read, resource_from: "design/{arg.id}" }
+    - { name: designs_archive, description: "Archive or restore a design. Args: id, archived? (default true).", requires: designs.write, resource_from: "design/{arg.id}" }
+    - { name: revisions_create, description: "Create a child revision with optimistic concurrency. Args: design_id, expected_parent_id, definition?, parameters?, note?.", requires: designs.write, resource_from: "design/{arg.design_id}" }
+    - { name: revisions_get, description: "Fetch one immutable revision. Args: id.", requires: designs.read }
+    - { name: revisions_diff, description: "Compare source, parameters, and geometry reports between two revisions.", requires: designs.read }
+    - { name: design_validate, description: "Build and validate one revision. Args: design_id, revision_id?. Returns exact measurements and check results.", requires: designs.write, resource_from: "design/{arg.design_id}" }
+    - { name: design_render, description: "Build a browser-ready mesh preview for one revision. Args: design_id, revision_id?.", requires: designs.write, resource_from: "design/{arg.design_id}" }
+    - { name: design_export, description: "Build and persist STEP, STL, or 3MF artifacts in Storage. Args: design_id, revision_id?, formats?.", requires: designs.export, resource_from: "design/{arg.design_id}" }
+    - { name: design_artifacts, description: "List derived artifacts for a design or revision.", requires: designs.read, resource_from: "design/{arg.design_id}" }
+    - { name: manufacturing_package_create, description: "Create a traceable ZIP containing CAD/print files, source, hashes, measurements, and validation.", requires: designs.export, resource_from: "design/{arg.design_id}" }
+  ui_panels:
+    - slot: project.page
+      label: Design
+      icon: box
+      entry: /ui/DesignPanel.mjs
+  ui_components:
+    - name: design-card
+      entry: /ui/DesignCard.mjs
+      slots:
+        - chat.message_attachment
+      props_schema:
+        type: object
+        required: [design_id]
+        properties:
+          design_id: { type: integer }
+          revision_id: { type: integer }
+      preview_props:
+        preview: true
+  skills:
+    - name: how-to-use-design
+      command: /design
+      body_file: skills/how-to-use-design.md
+      description: Use Design Studio for parametric CAD, direct meshes, validation, STEP/3MF/STL exports, and manufacturing preparation.
+      metadata:
+        category: design
+        icon: 📐
+  publishes:
+    - { name: design.created, description: A design and its first immutable revision were created. }
+    - { name: design.revision.created, description: A child design revision was created. }
+    - { name: design.build.completed, description: A revision built and validated successfully. }
+    - { name: design.build.failed, description: A revision build or validation failed. }
+    - { name: design.artifact.created, description: "A derived CAD, mesh, or manufacturing artifact was persisted." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/design
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.1
+    memory: 256
+    cpu_limit: 2
+    memory_limit: 1024
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/design.db
+  migrations: migrations/
+
+config_schema:
+  - name: bun_path
+    type: text
+    label: Bun executable
+    description: Optional explicit Bun path. When empty, Design uses PATH or installs its pinned runtime under /data.
+  - name: geometry_timeout_seconds
+    type: text
+    default: "45"
+    label: Geometry build timeout
+  - name: max_operations
+    type: text
+    default: "256"
+    label: Maximum operations per design
+
+upgrade_policy: auto-patch

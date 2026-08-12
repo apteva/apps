@@ -1,0 +1,12 @@
+{
+  "name": "@apteva/design-geometry-runner",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/runner.mjs --target=bun --format=esm --outfile=dist/runner.mjs && cp node_modules/replicad-opencascadejs/src/replicad_single.wasm dist/replicad_single.wasm"
+  },
+  "dependencies": {
+    "replicad": "0.23.1",
+    "replicad-opencascadejs": "0.23.0"
+  }
+}
