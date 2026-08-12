@@ -32,6 +32,7 @@ interface APIRoute {
   target_kind: string;
   target_ref: string;
   target_path?: string;
+  events_json?: string;
   auth_json?: string;
   cors_json?: string;
   timeout_ms: number;
@@ -452,6 +453,11 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
   const [targetRef, setTargetRef] = useState("");
   const [targetPath, setTargetPath] = useState("");
   const [auth, setAuth] = useState("default");
+  const [eventTopics, setEventTopics] = useState("");
+  const [eventMatchPath, setEventMatchPath] = useState("");
+  const [eventMatchValue, setEventMatchValue] = useState("");
+  const [eventResource, setEventResource] = useState("");
+  const [coalesceMS, setCoalesceMS] = useState("200");
 
   const publicBase = api.hostname ? `https://${api.hostname}` : `/api/apps/api/gw/${api.slug}`;
 
@@ -466,21 +472,37 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
             path_pattern: path,
             target_kind: targetKind,
             target_ref: targetRef,
-            target_path: targetPath,
+            target_path: targetKind === "app_events" ? "" : targetPath,
             auth: auth === "default" ? {} : { kind: auth },
+            events: targetKind === "app_events" ? {
+              topics: eventTopics.split(",").map((topic) => topic.trim()).filter(Boolean),
+              match: eventMatchPath.trim() ? { [eventMatchPath.trim()]: eventMatchValue } : {},
+              output: { type: "invalidate", resource: eventResource.trim() },
+              coalesce_ms: Number(coalesceMS) || 200,
+            } : {},
             enabled: true,
           });
           setTargetRef("");
           setTargetPath("");
         }}
       >
-        <Field label="Method"><select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>{["GET", "POST", "PUT", "PATCH", "DELETE", "ANY"].map((m) => <option key={m}>{m}</option>)}</select></Field>
+        <Field label="Method"><select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)} disabled={targetKind === "app_events"}>{["GET", "POST", "PUT", "PATCH", "DELETE", "ANY"].map((m) => <option key={m}>{m}</option>)}</select></Field>
         <Field label="Path"><input className={inputCls} value={path} onChange={(e) => setPath(e.target.value)} placeholder="/v1/items" /></Field>
-        <Field label="Target"><select className={inputCls} value={targetKind} onChange={(e) => setTargetKind(e.target.value)}>{["http", "function", "app"].map((k) => <option key={k}>{k}</option>)}</select></Field>
-        <Field label="Ref"><input className={inputCls} value={targetRef} onChange={(e) => setTargetRef(e.target.value)} placeholder={targetKind === "http" ? "https://..." : targetKind === "function" ? "function-name" : "app-name"} /></Field>
-        <Field label="Target path"><input className={inputCls} value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder="/upstream" /></Field>
-        <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{["default", "public", "api_key", "auth_jwt"].map((k) => <option key={k}>{k}</option>)}</select></Field>
-        <button type="submit" className={primaryBtn + " lg:col-start-6"} disabled={busy || !targetRef.trim() || !path.trim()}>Add</button>
+        <Field label="Target"><select className={inputCls} value={targetKind} onChange={(e) => { const kind = e.target.value; setTargetKind(kind); if (kind === "app_events") { setMethod("GET"); setAuth("api_key"); setTargetPath(""); } }}>{["http", "function", "app", "app_events"].map((k) => <option key={k}>{k}</option>)}</select></Field>
+        <Field label={targetKind === "app_events" ? "Source app" : "Ref"}><input className={inputCls} value={targetRef} onChange={(e) => setTargetRef(e.target.value)} placeholder={targetKind === "http" ? "https://..." : targetKind === "function" ? "function-name" : targetKind === "app_events" ? "tables" : "app-name"} /></Field>
+        <Field label="Target path"><input className={inputCls} value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder={targetKind === "app_events" ? "not used" : "/upstream"} disabled={targetKind === "app_events"} /></Field>
+        <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{(targetKind === "app_events" ? ["api_key", "auth_jwt"] : ["default", "public", "api_key", "auth_jwt"]).map((k) => <option key={k}>{k}</option>)}</select></Field>
+        {targetKind === "app_events" && (
+          <div className="lg:col-span-6 grid grid-cols-1 lg:grid-cols-4 gap-2 border border-border rounded p-3">
+            <Field label="Topics (comma separated)"><input className={inputCls} value={eventTopics} onChange={(e) => setEventTopics(e.target.value)} placeholder="row.inserted, row.updated" /></Field>
+            <Field label="Optional match path"><input className={inputCls} value={eventMatchPath} onChange={(e) => setEventMatchPath(e.target.value)} placeholder="data.table" /></Field>
+            <Field label="Match value"><input className={inputCls} value={eventMatchValue} onChange={(e) => setEventMatchValue(e.target.value)} placeholder="ventes" disabled={!eventMatchPath.trim()} /></Field>
+            <Field label="Public resource"><input className={inputCls} value={eventResource} onChange={(e) => setEventResource(e.target.value)} placeholder="ventes" /></Field>
+            <Field label="Coalesce (ms)"><input className={inputCls} type="number" min="1" max="5000" value={coalesceMS} onChange={(e) => setCoalesceMS(e.target.value)} /></Field>
+            <div className="lg:col-span-3 text-xs text-text-dim self-end pb-2">Only the static invalidation object is exposed; internal AppBus payloads are never forwarded.</div>
+          </div>
+        )}
+        <button type="submit" className={primaryBtn + " lg:col-start-6"} disabled={busy || !targetRef.trim() || !path.trim() || (targetKind === "app_events" && (!eventTopics.trim() || !eventResource.trim()))}>Add</button>
       </form>
       <div className="px-4 py-2 border-b border-border text-xs text-text-dim font-mono truncate">{publicBase}</div>
       <DataTable
@@ -488,7 +510,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete }: {
         rows={routes.map((r) => [
           r.method,
           r.path_pattern,
-          `${r.target_kind}:${r.target_ref}${r.target_path ? r.target_path : ""}`,
+          `${r.target_kind}:${r.target_ref}${r.target_path ? r.target_path : ""}${eventsSummary(r.events_json)}`,
           parseAuthKind(r.auth_json) || "default",
           r.enabled ? "enabled" : "disabled",
           <button type="button" className="text-red-300 hover:underline" disabled={busy} onClick={() => onDelete(r.id)}>Delete</button>,
@@ -589,6 +611,12 @@ function parseAuthKind(s?: string): string {
 function corsEnabledFrom(s?: string): boolean {
   const obj = parseJSON(s);
   return obj.enabled === true || obj.enabled === "true";
+}
+
+function eventsSummary(s?: string): string {
+  const obj = parseJSON(s);
+  const topics = Array.isArray(obj.topics) ? obj.topics.filter((topic): topic is string => typeof topic === "string") : [];
+  return topics.length ? ` [${topics.join(", ")}]` : "";
 }
 
 function date(s?: string): string {

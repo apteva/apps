@@ -2,16 +2,19 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.2.2
+version: 0.3.0
 description: |
   Lightweight API gateway for Apteva SaaS projects. Owns public API
   hostnames, method/path routes, simple API keys, CORS policy, request
-  logs, and dispatch to Functions, installed app HTTP surfaces, or
-  plain HTTP origins.
+  logs, dispatch to Functions, installed app HTTP surfaces, or plain
+  HTTP origins, and expose safe authenticated AppBus invalidation feeds.
 
   v0.2.0 streams Function-target responses through the platform's bound-app
   proxy, including incremental SSE, response headers, status, cancellation,
   and backward-compatible structured non-streaming responses.
+
+  v0.3.0 adds authenticated app_events routes that filter, sanitize, coalesce,
+  and stream safe invalidations from any project's AppBus source app.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/api
@@ -56,7 +59,7 @@ provides:
     - name: api_delete
       description: "Delete an API, routes, keys, and logs."
     - name: api_route_add
-      description: "Add or update a route. Args: api_id or api_slug, method, path_pattern, target_kind (function|app|http), target_ref, target_path?, auth?, cors?, timeout_ms?, priority?, enabled?."
+      description: "Add or update a route. target_kind may be function, app, http, or app_events. app_events routes require authenticated access and a safe events projection."
     - name: api_route_list
       description: "List routes for an API."
     - name: api_route_delete

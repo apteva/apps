@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: api
 display_name: API Gateway
-version: 0.2.2
-description: Lightweight API gateway for Apteva SaaS projects with streaming Function targets.
+version: 0.3.0
+description: Lightweight API gateway for Apteva SaaS projects with streaming Function targets and safe authenticated AppBus invalidation feeds.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -66,6 +66,7 @@ upgrade_policy: auto-patch
 
 type App struct {
 	httpClient *http.Client
+	eventHubs  *appEventHubManager
 }
 
 var globalCtx *sdk.AppCtx
@@ -86,11 +87,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if a.httpClient == nil {
 		a.httpClient = http.DefaultClient
 	}
+	a.eventHubs = newAppEventHubManager(os.Getenv("APTEVA_GATEWAY_URL"), outboundAppToken(), a.httpClient)
 	ctx.Logger().Info("api mounted", "project_id", ctx.CurrentProject())
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.eventHubs != nil {
+		a.eventHubs.close()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }

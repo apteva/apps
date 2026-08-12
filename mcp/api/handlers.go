@@ -303,6 +303,9 @@ type authContext struct {
 func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (authContext, error) {
 	policy := effectiveJSON(api.AuthJSON, route.AuthJSON)
 	kind := stringFromMap(policy, "kind", "public")
+	if route.TargetKind == "app_events" && (kind == "" || kind == "public") {
+		return authContext{Kind: "public"}, errors.New("app_events routes require api_key or auth_jwt authentication")
+	}
 	switch kind {
 	case "", "public":
 		return authContext{Kind: "public"}, nil
@@ -371,6 +374,9 @@ func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
 }
 
 func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute, publicPath string, params map[string]string, auth authContext) (int, error) {
+	if route.TargetKind == "app_events" {
+		return a.dispatchAppEvents(w, r, api, route)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond)
 	defer cancel()
 	switch route.TargetKind {

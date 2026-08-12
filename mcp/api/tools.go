@@ -55,7 +55,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, nil), Handler: a.toolAPIDelete},
 		{
 			Name:        "api_route_add",
-			Description: "Add or update a route. Args: api_id or api_slug, method, path_pattern, target_kind (function|app|http), target_ref, target_path?, auth?, cors?, timeout_ms?, priority?, enabled?.",
+			Description: "Add or update a route. target_kind is function, app, http, or app_events. For app_events, target_ref is the source app and events must contain topics, optional scalar data.* match fields, a static safe output object, and optional coalesce_ms.",
 			InputSchema: schemaObject(map[string]any{
 				"project_id":   map[string]any{"type": "string"},
 				"api_id":       map[string]any{"type": "integer"},
@@ -65,6 +65,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_kind":  map[string]any{"type": "string"},
 				"target_ref":   map[string]any{"type": "string"},
 				"target_path":  map[string]any{"type": "string"},
+				"events":       map[string]any{"type": "object"},
 				"auth":         map[string]any{"type": "object"},
 				"cors":         map[string]any{"type": "object"},
 				"timeout_ms":   map[string]any{"type": "integer"},
@@ -194,6 +195,10 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	eventsJSON, err := jsonTextArg(args, "events", "{}")
+	if err != nil {
+		return nil, err
+	}
 	enabled := true
 	if _, ok := args["enabled"]; ok {
 		enabled = boolArg(args, "enabled", true)
@@ -206,6 +211,7 @@ func (a *App) toolRouteAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		TargetKind:  stringArg(args, "target_kind", ""),
 		TargetRef:   stringArg(args, "target_ref", ""),
 		TargetPath:  stringArg(args, "target_path", ""),
+		EventsJSON:  eventsJSON,
 		AuthJSON:    authJSON,
 		CORSJSON:    corsJSON,
 		TimeoutMS:   intArg(args, "timeout_ms", 30000),

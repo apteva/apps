@@ -41,6 +41,7 @@ type APIRoute struct {
 	TargetKind  string `json:"target_kind"`
 	TargetRef   string `json:"target_ref"`
 	TargetPath  string `json:"target_path,omitempty"`
+	EventsJSON  string `json:"events_json,omitempty"`
 	AuthJSON    string `json:"auth_json,omitempty"`
 	CORSJSON    string `json:"cors_json,omitempty"`
 	TimeoutMS   int    `json:"timeout_ms"`
@@ -102,6 +103,7 @@ type routeInput struct {
 	TargetKind  string
 	TargetRef   string
 	TargetPath  string
+	EventsJSON  string
 	AuthJSON    string
 	CORSJSON    string
 	TimeoutMS   int
@@ -180,10 +182,10 @@ func normalizePathPattern(s string) (string, error) {
 
 func normalizeTargetKind(s string) (string, error) {
 	switch strings.TrimSpace(s) {
-	case "function", "app", "http":
+	case "function", "app", "http", "app_events":
 		return s, nil
 	default:
-		return "", errors.New("target_kind must be function, app, or http")
+		return "", errors.New("target_kind must be function, app, http, or app_events")
 	}
 }
 
@@ -197,6 +199,9 @@ func validateTarget(kind, ref string) error {
 		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
 			return errors.New("http target_ref must be an absolute http(s) URL")
 		}
+	}
+	if kind == "app_events" && !slugRe.MatchString(ref) {
+		return errors.New("app_events target_ref must be an app name")
 	}
 	return nil
 }
@@ -371,13 +376,13 @@ func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 }
 
 const routeCols = `id, project_id, api_id, method, path_pattern, target_kind, target_ref,
-	target_path, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at`
+	target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at`
 
 func scanRoute(row interface{ Scan(dest ...any) error }) (*APIRoute, error) {
 	var r APIRoute
 	var enabled int
 	if err := row.Scan(&r.ID, &r.ProjectID, &r.APIID, &r.Method, &r.PathPattern, &r.TargetKind,
-		&r.TargetRef, &r.TargetPath, &r.AuthJSON, &r.CORSJSON, &r.TimeoutMS, &enabled,
+		&r.TargetRef, &r.TargetPath, &r.EventsJSON, &r.AuthJSON, &r.CORSJSON, &r.TimeoutMS, &enabled,
 		&r.Priority, &r.CreatedAt, &r.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -401,6 +406,16 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 	if err := validateTarget(kind, in.TargetRef); err != nil {
 		return nil, "", err
 	}
+	if kind == "app_events" {
+		if method != "GET" {
+			return nil, "", errors.New("app_events routes must use GET")
+		}
+		if _, err := parseAppEventsConfig(in.EventsJSON); err != nil {
+			return nil, "", err
+		}
+	} else {
+		in.EventsJSON = "{}"
+	}
 	if in.TimeoutMS <= 0 {
 		in.TimeoutMS = 30000
 	}
@@ -417,10 +432,10 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 		return nil, "", err
 	}
 	if existing != nil {
-		_, err = db.Exec(`UPDATE api_routes SET target_kind=?, target_ref=?, target_path=?,
+		_, err = db.Exec(`UPDATE api_routes SET target_kind=?, target_ref=?, target_path=?, events_json=?,
 			auth_json=?, cors_json=?, timeout_ms=?, enabled=?, priority=?, updated_at=?
 			WHERE id=? AND project_id=?`,
-			kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath), defaultJSON(in.AuthJSON),
+			kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath), defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON),
 			defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, existing.ID, in.ProjectID)
 		if err != nil {
 			return nil, "", err
@@ -429,10 +444,10 @@ func dbUpsertRoute(db *sql.DB, in routeInput) (*APIRoute, string, error) {
 		return r, "updated", err
 	}
 	res, err := db.Exec(`INSERT INTO api_routes
-		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(project_id, api_id, method, path_pattern, target_kind, target_ref, target_path, events_json, auth_json, cors_json, timeout_ms, enabled, priority, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ProjectID, in.APIID, method, pattern, kind, strings.TrimSpace(in.TargetRef), strings.TrimSpace(in.TargetPath),
-		defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now)
+		defaultJSON(in.EventsJSON), defaultJSON(in.AuthJSON), defaultJSON(in.CORSJSON), in.TimeoutMS, enabled, in.Priority, now, now)
 	if err != nil {
 		return nil, "", err
 	}
