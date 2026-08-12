@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.11
+version: 0.5.0
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
-  integration role (DataForSEO / Ahrefs / Moz). Schema is grounded in
+  integration role (DataForSEO / YepAPI). Schema is grounded in
   the convergent shape across the major SEO APIs: per-(entity,
   provider, ts) snapshot rows for metrics, dedicated time-series for
   keyword volume history, and per-link rows for backlinks.
@@ -59,6 +59,9 @@ description: |
   v0.4.11: batches Google keyword volume and difficulty refreshes, checks
         DataForSEO credit before paid work, persists resumable progress, and
         returns provider payment and rate-limit errors as HTTP 402/429.
+  v0.5.0: adds a provider-neutral adapter with DataForSEO and YepAPI support,
+        multiple provider bindings with a selectable default, provider-scoped
+        locations, and uniform Google/YouTube SERP persistence.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -78,33 +81,35 @@ requires:
     # but we declare net.egress so the platform allows it transitively
     # if the runner ever runs in-process.
     - net.egress
-    # Lets seo invoke tools on the bound SEO data provider (DataForSEO
-    # etc.) via PlatformAPI().ExecuteIntegrationTool. Credentials never
+    # Lets seo invoke tools on bound SEO data providers via
+    # PlatformAPI().ExecuteIntegrationTool. Credentials never
     # leave the platform proxy.
     - platform.connections.execute
   integrations:
-    # Optional binding. Without it, refresh routes return 503 with a
+    # Optional multi-binding. Without it, refresh routes return 503 with a
     # "bind a provider" hint; read-only MCP tools still work against
     # whatever has been cached.
     - role: seo_data_provider
       kind: integration
-      compatible_slugs: [dataforseo, ahrefs, moz]
+      mode: multiple
+      compatible_slugs: [dataforseo, yepapi]
       capabilities: []
       required: false
-      label: "SEO data provider (optional)"
-      hint: "Bind a DataForSEO, Ahrefs, or Moz connection to populate metrics, rankings, and backlinks. Without a binding, the schema and tools work against whatever's already cached."
+      label: "SEO data providers (optional)"
+      hint: "Bind DataForSEO, YepAPI, or both. The default binding is used unless a provider is requested."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - { name: search_engines_list, description: "List supported search engines and generic SEO capabilities. Google is the default." }
+    - { name: providers_list, description: "List bound SEO providers and the default provider." }
     - { name: entities_add, description: "Add a tracked search entity. Args: search_engine? (google default, youtube), entity_type, identifier, label?, url?, location_id? or country_iso+language_code?." }
     - { name: entities_list, description: "List tracked search entities. Args: search_engine?, entity_type?, limit?." }
     - { name: entities_get, description: "Read one tracked search entity. Args: id." }
     - { name: entities_remove, description: "Remove one tracked search entity. Args: id." }
-    - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
-    - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
+    - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: provider?, search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
+    - { name: keyword_ideas, description: "Find keyword/content ideas. Args: provider?, search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
     - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
@@ -116,7 +121,7 @@ provides:
     - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
     # ── keyword CRUD (v0.1) ─────────────────────────────────────────
     - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), location_id or country_iso+language_code. No implicit locale fallback is applied." }
-    - { name: keywords_list,   description: "List keywords in this scope. Args: search_engine?, country_iso?, limit? (default 200)." }
+    - { name: keywords_list,   description: "List keywords in this scope. Args: provider?, search_engine?, country_iso?, limit? (default 200)." }
     - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
     - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }
     # ── read-only views (v0.2) ──────────────────────────────────────

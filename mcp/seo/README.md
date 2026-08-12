@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.4)
+## Schema (v0.5)
 
 Sixteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -33,18 +33,21 @@ Sixteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Mo
 - `search_serp_results` — ranked result rows linked to cached SERP snapshots
 
 Every snapshot table carries a `raw_json` column that stores the unflattened
-provider response, so provider-specific fields (Ahrefs distribution buckets,
-DataForSEO `pos_*` counts, Moz link-count forest) survive without schema churn.
+provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.4 adds generic `search_engine` support for Google and YouTube. Both engines
+v0.5 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+An installation may bind multiple providers and designate a default; paid MCP
+tools and panel actions can select a specific provider. Provider locations,
+metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
+
+Generic `search_engine` support covers Google and YouTube. Both engines
 use the shared locale, keyword, SERP result, entity, and opportunity tooling;
 Google additionally keeps domain metrics, tracked-domain ranking history, and
 backlinks.
-If DataForSEO's full YouTube location catalog is unavailable, sync seeds
-YouTube locales from active DataForSEO Google locations so YouTube SERP refresh
-still has explicit country/language rows. Domain, keyword-metric, and backlink
+Location sync uses each provider's catalog strategy and always creates explicit
+Google and YouTube country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
 explicit paid MCP actions.
 

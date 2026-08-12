@@ -45,6 +45,7 @@ type keywordMetricJobItem struct {
 
 type keywordMetricJobCreateRequest struct {
 	KeywordIDs []int64 `json:"keyword_ids"`
+	Provider   string  `json:"provider,omitempty"`
 }
 
 type dfsAccountInfo struct {
@@ -80,15 +81,31 @@ func (a *App) handleKeywordMetricJobs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		balance, err := preflightDataForSEO(mustCtx(r))
-		if err != nil {
-			writeJSONOrErr(w, nil, err)
-			return
-		}
 		jobs, err := createKeywordMetricJobs(mustCtx(r).AppDB(), pid, body.KeywordIDs)
 		if err != nil {
 			writeJSONOrErr(w, nil, err)
 			return
+		}
+		balance := float64(0)
+		for _, job := range jobs {
+			if body.Provider != "" && !strings.EqualFold(body.Provider, job.Provider) {
+				writeJSONOrErr(w, nil, fmt.Errorf("keyword metric job uses provider %q, not requested provider %q", job.Provider, body.Provider))
+				return
+			}
+			provider, err := selectProvider(mustCtx(r), job.Provider)
+			if err != nil {
+				writeJSONOrErr(w, nil, err)
+				return
+			}
+			if provider.Slug() != "dataforseo" {
+				writeJSONOrErr(w, nil, fmt.Errorf("bulk keyword metrics are not implemented for provider %q", provider.Slug()))
+				return
+			}
+			balance, err = preflightDataForSEO(mustCtx(r), provider.ConnectionID())
+			if err != nil {
+				writeJSONOrErr(w, nil, err)
+				return
+			}
 		}
 		for _, job := range jobs {
 			go func(id int64) { _ = runKeywordMetricJob(globalCtx, id) }(job.ID)
@@ -119,11 +136,17 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
-		if _, err := getKeywordMetricJob(mustCtx(r).AppDB(), pid, id); err != nil {
+		job, err := getKeywordMetricJob(mustCtx(r).AppDB(), pid, id)
+		if err != nil {
 			writeJSONOrErr(w, nil, err)
 			return
 		}
-		balance, err := preflightDataForSEO(mustCtx(r))
+		provider, err := selectProvider(mustCtx(r), job.Provider)
+		if err != nil {
+			writeJSONOrErr(w, nil, err)
+			return
+		}
+		balance, err := preflightDataForSEO(mustCtx(r), provider.ConnectionID())
 		if err != nil {
 			writeJSONOrErr(w, nil, err)
 			return
@@ -151,14 +174,7 @@ func (a *App) handleKeywordMetricJobItem(w http.ResponseWriter, r *http.Request)
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-func preflightDataForSEO(ctx *sdk.AppCtx) (float64, error) {
-	slug, connID, err := boundProvider(ctx)
-	if err != nil {
-		return 0, err
-	}
-	if slug != "dataforseo" {
-		return 0, fmt.Errorf("bulk keyword metrics are not implemented for provider %q", slug)
-	}
+func preflightDataForSEO(ctx *sdk.AppCtx, connID int64) (float64, error) {
 	rows, _, err := callDfsRowsWithIntegrationInput(ctx, connID, "account_info", map[string]any{})
 	if err != nil {
 		return 0, err
@@ -288,7 +304,7 @@ func runKeywordMetricJob(ctx *sdk.AppCtx, jobID int64) error {
 		setKeywordMetricJobError(db, jobID, err)
 		return err
 	}
-	if _, err := preflightDataForSEO(ctx); err != nil {
+	if _, err := preflightDataForSEO(ctx, connID); err != nil {
 		setKeywordMetricJobError(db, jobID, err)
 		return err
 	}
@@ -319,14 +335,14 @@ func loadKeywordMetricJobRuntime(ctx *sdk.AppCtx, jobID int64) (*keywordMetricJo
 	if loc.LocationCode == nil {
 		return nil, nil, 0, fmt.Errorf("location %d has no DataForSEO location code", loc.ID)
 	}
-	slug, connID, err := boundProvider(ctx)
+	provider, err := selectProvider(ctx, job.Provider)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	if slug != job.Provider || slug != "dataforseo" {
-		return nil, nil, 0, fmt.Errorf("job provider %q does not match bound provider %q", job.Provider, slug)
+	if provider.Slug() != "dataforseo" {
+		return nil, nil, 0, fmt.Errorf("bulk keyword metrics are not implemented for provider %q", provider.Slug())
 	}
-	return job, loc, connID, nil
+	return job, loc, provider.ConnectionID(), nil
 }
 
 func runKeywordMetricVolumePhase(ctx *sdk.AppCtx, job *keywordMetricJob, loc *SEOLocation, connID int64) error {

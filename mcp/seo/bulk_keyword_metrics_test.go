@@ -155,7 +155,7 @@ func TestKeywordMetricJobResumesOnlyMissingFields(t *testing.T) {
 		t.Fatalf("completed job = %#v", completed)
 	}
 	for keywordID, wantDifficulty := range map[int64]int64{firstID: 67, secondID: 31} {
-		metrics, err := latestKeywordMetrics(db, keywordID)
+		metrics, err := latestKeywordMetrics(db, keywordID, "dataforseo")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -57,30 +57,17 @@ type dfsTask struct {
 	Result     []json.RawMessage `json:"result"`
 }
 
-type providerRequestError struct {
-	HTTPStatus   int
-	ProviderCode int
-	Message      string
-}
-
-func (e *providerRequestError) Error() string {
-	if e.ProviderCode != 0 {
-		return fmt.Sprintf("dataforseo: task status %d: %s", e.ProviderCode, e.Message)
-	}
-	return "dataforseo: " + e.Message
-}
-
 func classifyProviderError(code int, message string) error {
 	lower := strings.ToLower(message)
 	switch {
 	case code == 40202, code == 50301,
 		strings.Contains(lower, "rate limit"), strings.Contains(lower, "rates limit"),
 		strings.Contains(lower, "too many requests"):
-		return &providerRequestError{HTTPStatus: http.StatusTooManyRequests, ProviderCode: code, Message: message}
+		return &providerRequestError{Provider: "dataforseo", HTTPStatus: http.StatusTooManyRequests, ProviderCode: code, Message: message}
 	case code == 40200, strings.Contains(lower, "payment required"),
 		strings.Contains(lower, "insufficient") && (strings.Contains(lower, "credit") || strings.Contains(lower, "fund")),
 		strings.Contains(lower, "balance") && strings.Contains(lower, "low"):
-		return &providerRequestError{HTTPStatus: http.StatusPaymentRequired, ProviderCode: code, Message: message}
+		return &providerRequestError{Provider: "dataforseo", HTTPStatus: http.StatusPaymentRequired, ProviderCode: code, Message: message}
 	default:
 		return fmt.Errorf("dataforseo: task status %d: %s", code, message)
 	}
@@ -125,7 +112,7 @@ func callDfsRowsWithIntegrationInput(ctx *sdk.AppCtx, connID int64, tool string,
 			status = http.StatusBadGateway
 		}
 		if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
-			return nil, nil, &providerRequestError{HTTPStatus: status, Message: fmt.Sprintf("%s returned HTTP %d", tool, status)}
+			return nil, nil, &providerRequestError{Provider: "dataforseo", HTTPStatus: status, Message: fmt.Sprintf("%s returned HTTP %d", tool, status)}
 		}
 		return nil, nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, status)
 	}
@@ -180,11 +167,7 @@ type dfsDomainRankResult struct {
 	} `json:"items"`
 }
 
-func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain, loc *SEOLocation) (any, error) {
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
@@ -323,7 +306,7 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		if keywordText == "" || rankURL == "" {
 			continue
 		}
-		keywordID, createdKeyword, err := upsertRankedKeyword(tx, d.ProjectID, keywordText, loc, item.KeywordData.SearchVolume, item.KeywordData.KeywordDifficulty, item.KeywordData.CPC, item)
+		keywordID, createdKeyword, err := upsertRankedKeyword(tx, "dataforseo", "google", d.ProjectID, keywordText, loc, item.KeywordData.SearchVolume, item.KeywordData.KeywordDifficulty, item.KeywordData.CPC, item)
 		if err != nil {
 			return rankedKeywordRefreshSummary{}, err
 		}
@@ -387,16 +370,16 @@ func replaceRankingObservation(tx *sql.Tx, domainID, locationID int64, provider,
 	return err
 }
 
-func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
+func upsertRankedKeyword(tx *sql.Tx, provider, searchEngine, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
 	country := ""
 	if loc.CountryISO != nil {
 		country = strings.ToUpper(*loc.CountryISO)
 	}
 	res, err := tx.Exec(
 		`INSERT INTO keywords (project_id, search_engine, text, location_id, country_iso, language_iso)
-		   VALUES (?, 'google', ?, ?, ?, ?)
+		   VALUES (?, ?, ?, ?, ?, ?)
 		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
-		projectID, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
+		projectID, searchEngine, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
 	if err != nil {
 		return 0, false, fmt.Errorf("upsert ranked keyword %q: %w", text, err)
 	}
@@ -413,8 +396,8 @@ func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, v
 	if _, err := tx.Exec(
 		`INSERT INTO keyword_metrics
 		   (keyword_id, location_id, provider, ts, volume, difficulty, cpc_usd, raw_json)
-		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?, ?)`,
-		id, loc.ID, time.Now().Unix(), volume, difficulty, cpc, string(rawText),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, loc.ID, provider, time.Now().Unix(), volume, difficulty, cpc, string(rawText),
 	); err != nil {
 		return 0, false, fmt.Errorf("insert ranked keyword metrics for %q: %w", text, err)
 	}
@@ -509,14 +492,26 @@ func decodeKeywordVolumeItem(rowRaw []byte, keyword string) (dfsKeywordVolumeIte
 	return item, nil
 }
 
-func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) (any, error) {
+func decodeKeywordDifficulty(rowRaw []byte, keyword string) (*int64, error) {
+	values, err := decodeKeywordDifficultyItems([]json.RawMessage{rowRaw})
+	if err != nil {
+		return nil, err
+	}
+	item, ok := values[normaliseKeyword(keyword)]
+	if !ok {
+		return nil, nil
+	}
+	return item.Difficulty, nil
+}
+
+func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, connID int64, k *Keyword, loc *SEOLocation) (any, error) {
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
 	if loc.ID != k.LocationID {
 		return nil, fmt.Errorf("keyword %d belongs to location %d, not %d", k.ID, k.LocationID, loc.ID)
 	}
-	balance, err := preflightDataForSEO(ctx)
+	balance, err := preflightDataForSEO(ctx, connID)
 	if err != nil {
 		return nil, err
 	}
@@ -535,7 +530,7 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) 
 	if completed.Status != "completed" {
 		return nil, fmt.Errorf("keyword metrics refresh incomplete: %s", completed.LastError)
 	}
-	metrics, err := latestKeywordMetrics(ctx.AppDB(), k.ID)
+	metrics, err := latestKeywordMetrics(ctx.AppDB(), k.ID, "dataforseo")
 	if err != nil {
 		return nil, err
 	}
@@ -574,11 +569,7 @@ type dfsBacklinkItem struct {
 	LastSeen       string   `json:"last_seen"`
 }
 
-func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain) (any, error) {
 	rowRaw, _, err := callDfs(ctx, connID, "backlinks_list", map[string]any{
 		"target":                d.Host,
 		"mode":                  "as_is",
@@ -649,24 +640,7 @@ func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-func syncLocations(ctx *sdk.AppCtx) (any, error) {
-	slug, _, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
-	switch slug {
-	case "dataforseo":
-		return syncDataForSEOLocations(ctx)
-	default:
-		return nil, fmt.Errorf("provider %q does not support location sync yet", slug)
-	}
-}
-
-func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
-	_, connID, err := boundProvider(ctx)
-	if err != nil {
-		return nil, err
-	}
+func syncDataForSEOLocations(ctx *sdk.AppCtx, connID int64) (any, error) {
 	rows, err := dfsToolResultRows(ctx, connID, "locations_and_languages", map[string]any{})
 	if err != nil {
 		return nil, err
@@ -784,7 +758,7 @@ func dfsToolResultRows(ctx *sdk.AppCtx, connID int64, tool string, input map[str
 		return nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
 	}
 	if !res.Success || res.Status >= 400 {
-		return nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, res.Status)
+		return nil, &providerRequestError{Provider: "dataforseo", Status: res.Status, Message: tool + " request failed"}
 	}
 	var env dfsEnvelope
 	if err := json.Unmarshal(res.Data, &env); err == nil && len(env.Tasks) > 0 {

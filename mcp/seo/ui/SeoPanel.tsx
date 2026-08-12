@@ -159,7 +159,13 @@ interface PageRankingSummary {
 }
 
 type SearchEngine = "google" | "youtube";
+type SEOProvider = "dataforseo" | "yepapi";
 type View = "seed" | "domains" | "keywords" | "discover" | "entities" | "locations";
+
+interface ProviderStatus {
+  default: string;
+  providers: string[];
+}
 
 const API = "/api/apps/seo";
 const engines: { id: SearchEngine; label: string }[] = [
@@ -245,6 +251,8 @@ function engineViews(engine: SearchEngine): View[] {
 
 export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [searchEngine, setSearchEngine] = useState<SearchEngine>("google");
+  const [provider, setProvider] = useState<SEOProvider | "">("");
+  const [providers, setProviders] = useState<string[]>([]);
   const [view, setView] = useState<View>("seed");
   const [locations, setLocations] = useState<SEOLocation[]>([]);
   const [domains, setDomains] = useState<Domain[]>([]);
@@ -295,6 +303,17 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     [api, projectId],
   );
 
+  const reloadProviders = useCallback(async () => {
+    const resp = await api<ProviderStatus>("GET", "/providers");
+    const available = (resp.providers || []).filter((value) => value === "dataforseo" || value === "yepapi");
+    setProviders(available);
+    setProvider((current) => {
+      if (current && available.includes(current)) return current;
+      if (resp.default === "dataforseo" || resp.default === "yepapi") return resp.default;
+      return (available[0] as SEOProvider | undefined) || "";
+    });
+  }, [api]);
+
   const reloadLocations = useCallback(async () => {
     const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { limit: "500" });
     setLocations(resp.locations || []);
@@ -307,10 +326,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   }, [callTool]);
 
   const reloadKeywords = useCallback(async () => {
-    const rows = await callTool<Keyword[]>("keywords_list", { search_engine: searchEngine, limit: 300 });
+    const rows = await callTool<Keyword[]>("keywords_list", {
+      ...(provider ? { provider } : {}),
+      search_engine: searchEngine,
+      limit: 300,
+    });
     setKeywords(rows || []);
     setSelectedKeyword((cur) => (cur && rows?.some((r) => r.id === cur.id) ? cur : rows?.[0] || null));
-  }, [callTool, searchEngine]);
+  }, [callTool, provider, searchEngine]);
 
   const reloadEntities = useCallback(async () => {
     const rows = await callTool<SearchEntity[]>("entities_list", { search_engine: searchEngine, limit: 300 });
@@ -321,10 +344,11 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const reloadOpportunities = useCallback(async () => {
     const resp = await callTool<{ items: ContentOpportunity[] }>("content_opportunities", {
       search_engine: searchEngine,
+      ...(provider ? { provider } : {}),
       limit: 25,
     });
     setOpportunities(resp.items || []);
-  }, [callTool, searchEngine]);
+  }, [callTool, provider, searchEngine]);
 
   const mergeMetricJobs = useCallback((rows: KeywordMetricJob[]) => {
     setMetricJobs((current) => {
@@ -343,14 +367,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      await Promise.all([reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities(), reloadMetricJobs()]);
+      await Promise.all([reloadProviders(), reloadLocations(), reloadDomains(), reloadKeywords(), reloadEntities(), reloadOpportunities(), reloadMetricJobs()]);
       setStatus("Updated");
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
-  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities]);
+  }, [reloadDomains, reloadEntities, reloadKeywords, reloadLocations, reloadMetricJobs, reloadOpportunities, reloadProviders]);
 
   useEffect(() => {
     if (!engineViews(searchEngine).includes(view)) {
@@ -360,7 +384,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setSelectedEntity(null);
     setSerpResults([]);
     setKeywordIdeas([]);
-  }, [searchEngine, view]);
+  }, [provider, searchEngine, view]);
 
   useEffect(() => {
     reloadAll();
@@ -373,16 +397,16 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setSelectedRankURL(null);
       return;
     }
-    callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id })
+    callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id, ...(provider ? { provider } : {}) })
       .then((r) => setDomainMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, limit: 500 })
+    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, ...(provider ? { provider } : {}), limit: 500 })
       .then((rows) => {
         setDomainRankings(rows || []);
         setSelectedRankURL(null);
       })
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedDomain]);
+  }, [callTool, provider, selectedDomain]);
 
   useEffect(() => {
     if (!selectedRankURL && domainRankings.length > 0) {
@@ -403,10 +427,10 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setPageSerpRows([]);
       return;
     }
-    callTool<SearchRanking[]>("rankings_for_keywords", { keyword_ids: ids, limit: 1000 })
+    callTool<SearchRanking[]>("rankings_for_keywords", { keyword_ids: ids, ...(provider ? { provider } : {}), limit: 1000 })
       .then((rows) => setPageSerpRows(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, domainRankings, selectedRankURL]);
+  }, [callTool, domainRankings, provider, selectedRankURL]);
 
   useEffect(() => {
     if (!selectedKeyword) {
@@ -414,27 +438,27 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setSerpResults([]);
       return;
     }
-    callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id })
+    callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) })
       .then((r) => setKeywordMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-    callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, limit: 100 })
+    callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 })
       .then((rows) => setSerpResults(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, searchEngine, selectedKeyword]);
+  }, [callTool, provider, searchEngine, selectedKeyword]);
 
   useEffect(() => {
     if (!selectedEntity) {
       setEntityRankings([]);
       return;
     }
-    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, limit: 200 })
+    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, ...(provider ? { provider } : {}), limit: 200 })
       .then((rows) => setEntityRankings(rows || []))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedEntity]);
+  }, [callTool, provider, selectedEntity]);
 
   const filteredLocations = useMemo(
-    () => locations.filter((l) => l.search_engine === searchEngine),
-    [locations, searchEngine],
+    () => locations.filter((l) => l.search_engine === searchEngine && (!provider || l.provider === provider)),
+    [locations, provider, searchEngine],
   );
 
   const locationById = useMemo(() => {
@@ -454,10 +478,10 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      const r = await api<Record<string, unknown>>("POST", "/locations/sync");
+      const r = await api<Record<string, unknown>>("POST", "/locations/sync", provider ? { provider } : {});
       await reloadLocations();
       setStatus(`Synced ${fmt(Number(r.rows_upserted || 0))} locales`);
-      pushActivity(`Synced ${fmt(Number(r.rows_upserted || 0))} locales`);
+      pushActivity(`Synced ${fmt(Number(r.rows_upserted || 0))} ${provider || "provider"} locales`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -469,8 +493,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      const loc = domain.default_location_id || defaultLocation?.id;
-      const params: Record<string, string> = loc ? { location_id: String(loc) } : {};
+      const configured = domain.default_location_id ? locationById.get(domain.default_location_id) : undefined;
+      const loc = configured?.provider === provider ? configured.id : defaultLocation?.id;
+      const params = {
+        ...(loc ? { location_id: String(loc) } : {}),
+        ...(provider ? { provider } : {}),
+      };
       await api<Record<string, unknown>>(
         "POST",
         backlinks ? `/domains/${domain.id}/backlinks/refresh` : `/domains/${domain.id}/refresh`,
@@ -480,8 +508,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setSelectedDomain(domain);
       if (!backlinks) {
         const [detail, rows] = await Promise.all([
-          callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: domain.id }),
-          callTool<Ranking[]>("rankings_for_domain", { domain_id: domain.id, limit: 500 }),
+          callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: domain.id, ...(provider ? { provider } : {}) }),
+          callTool<Ranking[]>("rankings_for_domain", { domain_id: domain.id, ...(provider ? { provider } : {}), limit: 500 }),
         ]);
         setDomainMetrics(detail.metrics || null);
         setDomainRankings(rows || []);
@@ -501,10 +529,11 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     try {
       await api<Record<string, unknown>>("POST", `/keywords/${keyword.id}/refresh`, {
         location_id: String(keyword.location_id),
+        ...(provider ? { provider } : {}),
       });
       await reloadKeywords();
       setSelectedKeyword(keyword);
-      const detail = await callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: keyword.id });
+      const detail = await callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: keyword.id, ...(provider ? { provider } : {}) });
       setKeywordMetrics(detail.metrics || null);
       setStatus("Keyword refreshed");
       pushActivity(`Keyword refreshed: ${keyword.text}`);
@@ -540,11 +569,27 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
 
   async function refreshKeywordMetricsBulk(rows: Keyword[]): Promise<KeywordMetricJob[]> {
     if (rows.length === 0) return [];
+    if (provider === "yepapi") {
+      for (let start = 0; start < rows.length; start += 5) {
+        await Promise.all(
+          rows.slice(start, start + 5).map((keyword) =>
+            api<Record<string, unknown>>("POST", `/keywords/${keyword.id}/refresh`, {
+              location_id: String(keyword.location_id),
+              provider: "yepapi",
+            }),
+          ),
+        );
+      }
+      await reloadKeywords();
+      setStatus(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
+      pushActivity(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords with YepAPI`);
+      return [];
+    }
     const response = await api<{ jobs: KeywordMetricJob[] }>(
       "POST",
       "/keyword-metric-jobs",
       {},
-      { keyword_ids: rows.map((keyword) => keyword.id) },
+      { keyword_ids: rows.map((keyword) => keyword.id), ...(provider ? { provider } : {}) },
     );
     const jobs = await waitForMetricJobs(response.jobs || []);
     setStatus(`Refreshed volume and difficulty for ${fmt(rows.length)} keywords`);
@@ -584,6 +629,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ results: SearchRanking[]; count: number }>("serp_search", {
+        ...(provider ? { provider } : {}),
         search_engine: keyword.search_engine || searchEngine,
         keyword_id: keyword.id,
         location_id: keyword.location_id,
@@ -605,6 +651,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ results: SearchRanking[]; count: number }>("serp_search", {
+        ...(provider ? { provider } : {}),
         search_engine: searchEngine,
         keyword,
         location_id: locationId,
@@ -626,6 +673,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setErr("");
     try {
       const resp = await callTool<{ items: KeywordIdea[] }>("keyword_ideas", {
+        ...(provider ? { provider } : {}),
         search_engine: searchEngine,
         seed_keywords: seedKeywords,
         location_id: locationId,
@@ -645,8 +693,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 flex flex-col text-text bg-bg">
-      <div className="px-6 pt-5 pb-3 border-b border-border flex items-center justify-between gap-4">
-        <div className="flex items-center gap-4 min-w-0">
+      <div className="px-6 pt-5 pb-3 border-b border-border flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-4 min-w-0">
           <h1 className="text-lg font-semibold shrink-0">SEO</h1>
           <div className="flex rounded border border-border overflow-hidden text-xs">
             {engines.map((engine) => (
@@ -660,6 +708,17 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               </button>
             ))}
           </div>
+          <select
+            className="bg-surface-2 text-text border border-border rounded px-2 py-1.5 text-xs"
+            value={provider}
+            onChange={(event) => setProvider(event.target.value as SEOProvider)}
+            aria-label="SEO data provider"
+          >
+            {providers.length === 0 && <option value="">No provider bound</option>}
+            {providers.map((value) => (
+              <option key={value} value={value}>{value === "dataforseo" ? "DataForSEO" : "YepAPI"}</option>
+            ))}
+          </select>
           <div className="flex rounded border border-border overflow-hidden text-xs">
             {engineViews(searchEngine).map((v) => (
               <button
@@ -703,6 +762,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               let domain: Domain | null = null;
               if (payload.host.trim()) {
                 domain = await callTool<Domain>("domains_add", {
+                  ...(provider ? { provider } : {}),
                   host: payload.host,
                   label: payload.label,
                   location_id: payload.locationId,
@@ -712,6 +772,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
               const keywordRows: Keyword[] = [];
               for (const text of payload.keywords) {
                 keywordRows.push(await callTool<Keyword>("keywords_add", {
+                  ...(provider ? { provider } : {}),
                   text,
                   location_id: payload.locationId,
                   search_engine: "google",
@@ -746,7 +807,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           keywords={keywords}
           onSelect={setSelectedDomain}
           onAdd={async (host, label, locationId) => {
-            const d = await callTool<Domain>("domains_add", { host, label, location_id: locationId, search_engine: "google" });
+            const d = await callTool<Domain>("domains_add", { ...(provider ? { provider } : {}), host, label, location_id: locationId, search_engine: "google" });
             await reloadDomains();
             setSelectedDomain(d);
           }}
@@ -787,6 +848,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           onSelect={setSelectedEntity}
           onAdd={async (payload) => {
             const entity = await callTool<SearchEntity>("entities_add", {
+              ...(provider ? { provider } : {}),
               search_engine: searchEngine,
               entity_type: payload.entityType,
               identifier: payload.identifier,
@@ -815,7 +877,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           searchEngine={searchEngine}
           onSelect={setSelectedKeyword}
           onAdd={async (text, locationId) => {
-            const k = await callTool<Keyword>("keywords_add", { text, location_id: locationId, search_engine: searchEngine });
+            const k = await callTool<Keyword>("keywords_add", { ...(provider ? { provider } : {}), text, location_id: locationId, search_engine: searchEngine });
             await reloadKeywords();
             setSelectedKeyword(k);
           }}
@@ -888,7 +950,7 @@ function DiscoverView(props: {
           </select>
           {props.locations.length === 0 && (
             <button type="button" className={buttonCls} onClick={props.onSync} disabled={props.busy}>
-              Sync DataForSEO
+              Sync Locations
             </button>
           )}
         </div>
@@ -1389,7 +1451,7 @@ function SeedView(props: {
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-xl font-semibold">Seed</h2>
             <button type="button" className={buttonCls} onClick={props.onSync} disabled={props.busy}>
-              Sync DataForSEO
+              Sync Locations
             </button>
           </div>
           <form
@@ -1605,7 +1667,7 @@ function LocationsView({ locations, searchEngine, activity, onSync, busy }: { lo
       <div className="min-h-0 flex flex-col">
         <div className="px-6 py-4 border-b border-border flex items-center gap-3">
           <input className={`${inputCls} max-w-sm`} value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter locales" />
-          <button type="button" className={primaryBtn} onClick={onSync} disabled={busy}>Sync DataForSEO</button>
+          <button type="button" className={primaryBtn} onClick={onSync} disabled={busy}>Sync Locations</button>
           <span className="text-xs text-text-dim">{fmt(rows.length)} {searchEngine} locales</span>
         </div>
         <div className="flex-1 overflow-auto">

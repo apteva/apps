@@ -82,6 +82,18 @@ func TestDecodeKeywordVolumeItem_Empty(t *testing.T) {
 	}
 }
 
+func TestDecodeKeywordDifficulty(t *testing.T) {
+	difficulty, err := decodeKeywordDifficulty(json.RawMessage(`{
+		"items": [{"keyword": "seo api", "keyword_difficulty": 42}]
+	}`), "seo api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if difficulty == nil || *difficulty != 42 {
+		t.Fatalf("difficulty = %v, want 42", difficulty)
+	}
+}
+
 func TestSyncDataForSEOGoogleLocationRows_CommitsGoogleRows(t *testing.T) {
 	db := newSEOTestDB(t, "migrations/001_init.sql")
 
@@ -295,7 +307,7 @@ func TestYouTubeIdeasFromCachedSERPs_UsesVideoRowsOnly(t *testing.T) {
 		t.Fatalf("insert old result: %v", err)
 	}
 
-	got, err := youtubeIdeasFromCachedSERPs(db, "project-1", []string{"hypnosis obedience trigger"}, 1, 20)
+	got, err := youtubeIdeasFromCachedSERPs(db, "project-1", []string{"hypnosis obedience trigger"}, 1, 20, "dataforseo")
 	if err != nil {
 		t.Fatalf("youtubeIdeasFromCachedSERPs returned error: %v", err)
 	}

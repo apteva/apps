@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.0
+
+- Added a provider-neutral execution adapter with complete DataForSEO and
+  YepAPI implementations for locations, keyword metrics, keyword ideas,
+  Google and YouTube SERPs, domains, ranked keywords, and backlinks.
+- Enabled multiple SEO provider bindings with a designated default and an
+  optional `provider` argument on provider-sensitive MCP tools.
+- Added provider selection to the panel and provider-scoped locale, keyword,
+  metric, ranking, backlink, and history reads.
+- Added YepAPI locale seeding for Google and YouTube and response-contract
+  tests for metrics, trends, SERPs, locations, and ranked keywords.
+- Preserved resumable DataForSEO bulk keyword metric jobs, account preflight,
+  rate-limit retries, and explicit HTTP 402/429 responses.
+
 ## 0.4.11
 
 - Added bulk Google keyword metric jobs grouped by provider locale, with up to
