@@ -42,12 +42,15 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 	if !strings.Contains(module, "react/jsx-runtime") {
 		t.Fatal("panel bundle does not import the production React JSX runtime")
 	}
+	if !strings.Contains(module, "content-start") {
+		t.Fatal("panel bundle is missing the compact grid alignment that prevents editor rows from stretching")
+	}
 }
 
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.1" {
+	if m.Name != "tickets" || m.Version != "0.1.2" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
