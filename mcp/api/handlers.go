@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -403,43 +404,161 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 			event["body"] = body
 		}
 	}
-	var out struct {
-		Status   string `json:"status"`
-		Response string `json:"response"`
-		Error    string `json:"error"`
+	eventJSON, err := json.Marshal(event)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return http.StatusInternalServerError, err
 	}
-	err := globalCtx.PlatformAPI().CallAppResult("functions", "functions_invoke", map[string]any{
-		"name":        route.TargetRef,
-		"event":       event,
-		"_project_id": api.ProjectID,
-	}, &out)
+	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	token := outboundAppToken()
+	if base == "" || token == "" {
+		err := errors.New("APTEVA_GATEWAY_URL/APTEVA_OUTBOUND_TOKEN required for function targets")
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return http.StatusBadGateway, err
+	}
+	query := url.Values{"project_id": []string{api.ProjectID}}
+	target := base + "/api/apps/callback/apps/functions/proxy/fn/" + url.PathEscape(route.TargetRef) + "?" + query.Encode()
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(eventJSON))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return http.StatusBadGateway, err
 	}
-	if out.Status != "" && out.Status != "ok" {
-		msg := out.Error
-		if msg == "" {
-			msg = "function invocation failed"
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	if accept := r.Header.Get("Accept"); accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			httpErr(w, http.StatusGatewayTimeout, err.Error())
+			return http.StatusGatewayTimeout, err
 		}
+		httpErr(w, http.StatusBadGateway, err.Error())
+		return http.StatusBadGateway, err
+	}
+	defer resp.Body.Close()
+
+	if functionResponseIsStreaming(resp) {
+		copyUpstreamResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		if err := flushResponse(w); err != nil {
+			return resp.StatusCode, err
+		}
+		if err := copyResponseStream(w, resp.Body); err != nil {
+			return resp.StatusCode, err
+		}
+		return resp.StatusCode, nil
+	}
+
+	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if readErr != nil {
+		httpErr(w, http.StatusBadGateway, readErr.Error())
+		return http.StatusBadGateway, readErr
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := functionUpstreamError(responseBody)
 		httpErr(w, http.StatusBadGateway, msg)
 		return http.StatusBadGateway, errors.New(msg)
 	}
-	if out.Response == "" {
+	if len(responseBody) == 0 {
 		w.WriteHeader(http.StatusNoContent)
 		return http.StatusNoContent, nil
 	}
-	rawResp := json.RawMessage(out.Response)
+	rawResp := json.RawMessage(responseBody)
 	if json.Valid(rawResp) && writeStructuredResponse(w, rawResp) {
 		return statusFromStructured(rawResp, http.StatusOK), nil
 	}
+	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	if json.Valid(rawResp) {
 		w.Header().Set("Content-Type", "application/json")
-	} else {
+	} else if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
-	_, _ = w.Write([]byte(out.Response))
-	return http.StatusOK, nil
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(responseBody)
+	return resp.StatusCode, nil
+}
+
+func outboundAppToken() string {
+	if token := strings.TrimSpace(os.Getenv("APTEVA_OUTBOUND_TOKEN")); token != "" {
+		return token
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN"))
+}
+
+func functionResponseIsStreaming(resp *http.Response) bool {
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Apteva-Function-Stream")), "true") {
+		return true
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	return strings.EqualFold(mediaType, "text/event-stream")
+}
+
+func functionUpstreamError(body []byte) string {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &payload) == nil && strings.TrimSpace(payload.Error) != "" {
+		return payload.Error
+	}
+	if msg := strings.TrimSpace(string(body)); msg != "" {
+		return msg
+	}
+	return "function invocation failed"
+}
+
+func copyUpstreamResponseHeaders(dst, src http.Header) {
+	for key, values := range src {
+		if !proxyResponseHeaderAllowed(key) {
+			continue
+		}
+		dst.Del(key)
+		for _, value := range values {
+			dst.Add(key, value)
+		}
+	}
+}
+
+func proxyResponseHeaderAllowed(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "", "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
+		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
+		"content-length":
+		return false
+	default:
+		return true
+	}
+}
+
+func flushResponse(w http.ResponseWriter) error {
+	err := http.NewResponseController(w).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
+func copyResponseStream(w http.ResponseWriter, src io.Reader) error {
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, err := w.Write(buf[:n]); err != nil {
+				return err
+			}
+			if err := flushResponse(w); err != nil {
+				return err
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
 }
 
 func (a *App) dispatchHTTP(w http.ResponseWriter, r *http.Request, route *APIRoute, publicPath string) (int, error) {

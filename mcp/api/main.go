@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: api
 display_name: API Gateway
-version: 0.1.2
-description: Lightweight API gateway for Apteva SaaS projects.
+version: 0.2.0
+description: Lightweight API gateway for Apteva SaaS projects with streaming Function targets.
 author: Apteva
 scopes: [project, global]
 requires:
