@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -247,5 +248,149 @@ func TestResourceOwnershipAndDisconnectCleanup(t *testing.T) {
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM ad_resource_defaults WHERE ad_account_id=?`, firstAccountID).Scan(&defaults)
 	if resources != 0 || defaults != 0 {
 		t.Fatalf("disconnect left account resources behind: resources=%d defaults=%d", resources, defaults)
+	}
+}
+
+func TestPlatformResourceKindSupportMatrix(t *testing.T) {
+	allKinds := []string{
+		resourceIdentity,
+		resourceTrackingSource,
+		resourceConversionAction,
+		resourceLeadForm,
+		resourceAudience,
+		resourceCreativeAsset,
+		resourceFundingSource,
+	}
+	expectedRefreshable := map[string]map[string]bool{
+		"meta": {
+			resourceIdentity: true, resourceTrackingSource: true,
+			resourceLeadForm: true, resourceAudience: true,
+		},
+		"google": {
+			resourceConversionAction: true, resourceLeadForm: true, resourceAudience: true,
+		},
+		"x": {
+			resourceIdentity: true, resourceFundingSource: true, resourceAudience: true,
+		},
+		"reddit": {
+			resourceIdentity: true, resourceTrackingSource: true, resourceFundingSource: true,
+			resourceLeadForm: true, resourceAudience: true,
+		},
+	}
+	for platform, supported := range expectedRefreshable {
+		for _, kind := range allKinds {
+			t.Run(platform+"/"+kind, func(t *testing.T) {
+				if got := platformCanRefreshResourceKind(platform, kind); got != supported[kind] {
+					t.Fatalf("refresh support=%v, want %v", got, supported[kind])
+				}
+				wantList := supported[kind] || kind == resourceCreativeAsset
+				if got := platformCanListResourceKind(platform, kind); got != wantList {
+					t.Fatalf("list support=%v, want %v", got, wantList)
+				}
+			})
+		}
+	}
+	for _, kind := range allKinds {
+		if platformCanListResourceKind("unknown", kind) || platformCanRefreshResourceKind("unknown", kind) {
+			t.Fatalf("unknown platform accepted %s", kind)
+		}
+	}
+}
+
+func TestResourceListRejectsUnsupportedPlatformKindsBeforeRefresh(t *testing.T) {
+	platform := newRecordingPlatform()
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	allKinds := []string{
+		resourceIdentity,
+		resourceTrackingSource,
+		resourceConversionAction,
+		resourceLeadForm,
+		resourceAudience,
+		resourceCreativeAsset,
+		resourceFundingSource,
+	}
+	for platformName := range platformResourceKinds {
+		accountID := seedResourceTestAccount(t, ctx, platformName, platformName+"_account")
+		for _, kind := range allKinds {
+			if platformCanListResourceKind(platformName, kind) {
+				continue
+			}
+			for _, refresh := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/refresh=%t", platformName, kind, refresh), func(t *testing.T) {
+					result, err := app.toolResourceList(ctx, map[string]any{
+						"ad_account_id": accountID,
+						"kind":          kind,
+						"refresh":       refresh,
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					out := result.(map[string]any)
+					want := "unsupported resource kind for " + platformName + ": " + kind
+					if out["isError"] != true || mcpErrorMessage(out) != want {
+						t.Fatalf("unexpected validation response: %#v", out)
+					}
+				})
+			}
+		}
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatalf("unsupported kinds reached provider discovery: %#v", platform.executeCalls)
+	}
+}
+
+func TestResourceListKeepsAppManagedCreativeAssetsListable(t *testing.T) {
+	platform := newRecordingPlatform()
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO ad_resources
+		 (project_id, ad_account_id, platform, native_asset_id, provider_type, kind, display_name, managed_by_app)
+		 VALUES ('test-proj', ?, 'meta', 'image_1', 'image', 'creative_asset', 'Hero image', 1)`,
+		accountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := app.toolResourceList(ctx, map[string]any{
+		"ad_account_id": accountID,
+		"kind":          resourceCreativeAsset,
+		"refresh":       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := result.(map[string]any)["data"].([]map[string]any)
+	if len(data) != 1 || data[0]["name"] != "Hero image" {
+		t.Fatalf("unexpected creative assets: %#v", data)
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatalf("app-managed creative refresh reached provider: %#v", platform.executeCalls)
+	}
+}
+
+func TestMetaCampaignCreateIgnoresGenericFundingSourceResource(t *testing.T) {
+	platform := newRecordingPlatform()
+	ctx := newAdsCtx(t, platform)
+	app := &App{}
+	accountID := seedResourceTestAccount(t, ctx, "meta", "act_42")
+
+	result, err := app.toolCampaignCreate(ctx, map[string]any{
+		"ad_account_id":              accountID,
+		"name":                       "Meta traffic",
+		"objective":                  "traffic",
+		"funding_source_resource_id": 999,
+	})
+	if err != nil || result.(map[string]any)["isError"] == true {
+		t.Fatalf("Meta campaign create failed: result=%#v err=%v", result, err)
+	}
+	input := findExecuteCall(t, platform, "campaign_create").Input
+	if _, exists := input["funding_source_resource_id"]; exists {
+		t.Fatalf("generic local resource id leaked upstream: %#v", input)
+	}
+	if _, exists := input["funding_instrument_id"]; exists {
+		t.Fatalf("Meta campaign unexpectedly required a funding source: %#v", input)
 	}
 }

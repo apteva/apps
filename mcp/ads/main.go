@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.42
+version: 0.1.43
 scopes: [project, global]
 requires:
   permissions:

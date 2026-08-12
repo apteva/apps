@@ -172,10 +172,16 @@ func (a *App) toolResourceList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return errOut, nil
 	}
 	kind := strings.TrimSpace(stringArgAny(args, "kind"))
+	if kind != "" && !platformCanListResourceKind(acct.Platform, kind) {
+		return mcpError("unsupported resource kind for " + acct.Platform + ": " + kind), nil
+	}
 	if refresh, _ := args["refresh"].(bool); refresh {
 		kinds := platformResourceKinds[acct.Platform]
 		if kind != "" {
-			kinds = []string{kind}
+			kinds = nil
+			if platformCanRefreshResourceKind(acct.Platform, kind) {
+				kinds = []string{kind}
+			}
 		}
 		if errorsByKind := a.refreshResourceKinds(ctx, acct, kinds); len(errorsByKind) > 0 {
 			return map[string]any{"data": []any{}, "refresh_errors": errorsByKind}, nil
@@ -190,6 +196,22 @@ func (a *App) toolResourceList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		items = append(items, resource.response())
 	}
 	return map[string]any{"data": items}, nil
+}
+
+func platformCanListResourceKind(platform, kind string) bool {
+	// Creative assets are created and maintained by this app rather than
+	// discovered through a provider list endpoint.
+	return (kind == resourceCreativeAsset && platformResourceKinds[platform] != nil) ||
+		platformCanRefreshResourceKind(platform, kind)
+}
+
+func platformCanRefreshResourceKind(platform, kind string) bool {
+	for _, available := range platformResourceKinds[platform] {
+		if available == kind {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) toolResourceGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
