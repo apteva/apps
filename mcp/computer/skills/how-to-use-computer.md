@@ -37,6 +37,21 @@ goal, pick the lowest.
 no Set-of-Mark labels. Use `computer_use(action="screenshot")` for navigation,
 or pass `annotate=true` to `browser_screenshot` only when labels are desired.
 
+When the structured SoM is requested with `include_som=true`, every target can
+also report `accessible_name`, `disabled`, `loading`, `dangerous`, and
+`destructive_effect`. Disabled and loading controls remain visible in SoM so
+their unresolved state is explicit; do not click them. Screenshot responses
+also return a compact `safety_targets` subset by default whenever any control
+is disabled, loading, or consequential.
+
+For autosave, spinner, `aria-busy`, or other transitional UI, call
+`computer_use(action="wait_for_stable", quiet_ms=1500, timeout_ms=10000)` and
+then take a fresh screenshot. Label clicks are checked against the live target
+again at dispatch time. For the rare raw-coordinate click, pass
+`expected_text` when the intended target has consequences such as Publish,
+Send, Delete, or Pay. Computer rejects a loading/disabled target, a changed
+accessible name, or a consequential coordinate without that confirmation.
+
 ## Chat attachments are agent-selected
 
 Opening or driving a browser does not create an attachment automatically. You

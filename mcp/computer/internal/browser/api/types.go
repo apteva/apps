@@ -12,24 +12,31 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
-	Type         string              `json:"type"`                   // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "select_option", "set_checked", "set_temporal", "set_text"
-	X            int                 `json:"x,omitempty"`            // click/scroll coordinate
-	Y            int                 `json:"y,omitempty"`            // click/scroll coordinate
-	Selector     string              `json:"selector,omitempty"`     // CSS selector for click and DOM-targeted form actions
-	Files        []string            `json:"files,omitempty"`        // local or provider-session file paths for upload_file
-	Text         string              `json:"text,omitempty"`         // for "type" action
-	Value        string              `json:"value,omitempty"`        // for "select_option": option value; for "set_temporal": full field value
-	Checked      bool                `json:"checked,omitempty"`      // for "set_checked": desired checkbox/switch/radio state
-	Texts        []string            `json:"texts,omitempty"`        // for "select_option": option display texts
-	Values       []string            `json:"values,omitempty"`       // for "select_option": option values
-	Mode         string              `json:"mode,omitempty"`         // for "select_option": replace, add, remove, toggle; for "set_text": replace, append
-	NewlineMode  string              `json:"newline_mode,omitempty"` // for "set_text": preserve, compact
-	Key          string              `json:"key,omitempty"`          // for "key" action (e.g. "Enter", "Escape")
-	Direction    string              `json:"direction,omitempty"`    // for "scroll": "up", "down", "left", "right"
-	Amount       int                 `json:"amount,omitempty"`       // for "scroll": CSS pixels; defaults to 300
-	URL          string              `json:"url,omitempty"`          // for "navigate"
-	Duration     int                 `json:"duration,omitempty"`     // for "wait" (milliseconds)
-	Presentation PresentationOptions `json:"-"`
+	Type         string   `json:"type"`                    // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "wait_for_stable", "select_option", "set_checked", "set_temporal", "set_text"
+	X            int      `json:"x,omitempty"`             // click/scroll coordinate
+	Y            int      `json:"y,omitempty"`             // click/scroll coordinate
+	Selector     string   `json:"selector,omitempty"`      // CSS selector for click and DOM-targeted form actions
+	Files        []string `json:"files,omitempty"`         // local or provider-session file paths for upload_file
+	Text         string   `json:"text,omitempty"`          // for "type" action
+	Value        string   `json:"value,omitempty"`         // for "select_option": option value; for "set_temporal": full field value
+	Checked      bool     `json:"checked,omitempty"`       // for "set_checked": desired checkbox/switch/radio state
+	Texts        []string `json:"texts,omitempty"`         // for "select_option": option display texts
+	Values       []string `json:"values,omitempty"`        // for "select_option": option values
+	Mode         string   `json:"mode,omitempty"`          // for "select_option": replace, add, remove, toggle; for "set_text": replace, append
+	NewlineMode  string   `json:"newline_mode,omitempty"`  // for "set_text": preserve, compact
+	Key          string   `json:"key,omitempty"`           // for "key" action (e.g. "Enter", "Escape")
+	Direction    string   `json:"direction,omitempty"`     // for "scroll": "up", "down", "left", "right"
+	Amount       int      `json:"amount,omitempty"`        // for "scroll": CSS pixels; defaults to 300
+	URL          string   `json:"url,omitempty"`           // for "navigate"
+	Duration     int      `json:"duration,omitempty"`      // for "wait" (milliseconds)
+	QuietMS      int      `json:"quiet_ms,omitempty"`      // for "wait_for_stable": required mutation-free interval
+	TimeoutMS    int      `json:"timeout_ms,omitempty"`    // for "wait_for_stable": maximum wait
+	ExpectedText string   `json:"expected_text,omitempty"` // live accessible name required immediately before click
+	// GuardDangerousCoordinate is set by the MCP layer only when the caller
+	// explicitly targeted a raw coordinate. Backends then require expected_text
+	// if the live hit-tested element is consequential.
+	GuardDangerousCoordinate bool                `json:"-"`
+	Presentation             PresentationOptions `json:"-"`
 	// Label: Set-of-Mark target. When non-zero, click/double_click
 	// resolve the target via the label→bbox map populated by the
 	// most recent screenshot. Takes precedence over X/Y when set.
@@ -146,15 +153,20 @@ type ExtractResult struct {
 // Set-of-Mark screenshot. Coordinates are viewport CSS pixels and label is the
 // value accepted by click/double_click label=N.
 type SetOfMarkTarget struct {
-	Label int    `json:"label"`
-	X     int    `json:"x"`
-	Y     int    `json:"y"`
-	W     int    `json:"w"`
-	H     int    `json:"h"`
-	Tag   string `json:"tag"`
-	Role  string `json:"role,omitempty"`
-	Text  string `json:"text,omitempty"`
-	Type  string `json:"type,omitempty"`
+	Label             int    `json:"label"`
+	X                 int    `json:"x"`
+	Y                 int    `json:"y"`
+	W                 int    `json:"w"`
+	H                 int    `json:"h"`
+	Tag               string `json:"tag"`
+	Role              string `json:"role,omitempty"`
+	Text              string `json:"text,omitempty"`
+	AccessibleName    string `json:"accessible_name,omitempty"`
+	Type              string `json:"type,omitempty"`
+	Disabled          bool   `json:"disabled"`
+	Loading           bool   `json:"loading"`
+	Dangerous         bool   `json:"dangerous"`
+	DestructiveEffect string `json:"destructive_effect,omitempty"`
 }
 
 // DOMExtractor is implemented by browser backends that can read structured

@@ -26,6 +26,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
@@ -34,6 +35,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
@@ -744,6 +746,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		// use X,Y for custom rendered targets with no badge.
 		x, y := action.X, action.Y
 		labelNote := ""
+		expectedText := action.ExpectedText
 		if action.Selector != "" {
 			point, err := selectorclick.Resolve(c.ctx, action.Selector)
 			if err != nil {
@@ -755,6 +758,12 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 				cx, cy := e.Center()
 				labelNote = fmt.Sprintf(" [label=%d %s '%.20s' → center %d,%d]", action.Label, e.Tag, e.Text, cx, cy)
 				x, y = cx, cy
+				if expectedText == "" {
+					expectedText = e.AccessibleName
+					if expectedText == "" {
+						expectedText = e.Text
+					}
+				}
 			} else {
 				fmt.Fprintf(os.Stderr, "[BROWSER] click: label=%d not in current screenshot map, using X,Y=%d,%d\n", action.Label, action.X, action.Y)
 			}
@@ -766,9 +775,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing click: %v\n", err)
 		}
-		if err := chromedp.Run(c.ctx,
-			chromedp.MouseClickXY(float64(x), float64(y)),
-		); err != nil {
+		if _, err := clickguard.Click(c.ctx, x, y, 1, clickguard.Options{
+			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER] click ERROR: %v\n", err)
 			return nil, fmt.Errorf("click: %w", err)
 		}
@@ -810,17 +819,24 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		// Same label-to-coord resolution as click.
 		x, y := action.X, action.Y
+		expectedText := action.ExpectedText
 		if action.Label != 0 {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
+				if expectedText == "" {
+					expectedText = e.AccessibleName
+					if expectedText == "" {
+						expectedText = e.Text
+					}
+				}
 			}
 		}
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
-		if err := chromedp.Run(c.ctx,
-			chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(2)),
-		); err != nil {
+		if _, err := clickguard.Click(c.ctx, x, y, 2, clickguard.Options{
+			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
@@ -856,6 +872,12 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			dur = dur * 1000 // Claude sends seconds, convert to ms
 		}
 		time.Sleep(time.Duration(dur) * time.Millisecond)
+		return c.Screenshot()
+
+	case "wait_for_stable":
+		if _, err := stability.Wait(c.ctx, action.QuietMS, action.TimeoutMS); err != nil {
+			return nil, fmt.Errorf("wait_for_stable: %w", err)
+		}
 		return c.Screenshot()
 
 	case "upload_file":
@@ -1598,15 +1620,9 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 	for _, label := range labels {
 		e := c.lastLabels[label]
 		out = append(out, computer.SetOfMarkTarget{
-			Label: e.Label,
-			X:     e.X,
-			Y:     e.Y,
-			W:     e.W,
-			H:     e.H,
-			Tag:   e.Tag,
-			Role:  e.Role,
-			Text:  e.Text,
-			Type:  e.Type,
+			Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
+			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
+			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out

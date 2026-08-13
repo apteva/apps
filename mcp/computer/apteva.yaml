@@ -100,7 +100,14 @@ provides:
         custom rendered widgets. Do not pass both; when both are present,
         coordinate wins. selector is accepted for deterministic compatibility
         flows, but agents should continue using fresh screenshot labels when
-        available. If the page asks to Browse, choose, attach,
+        available. Structured SoM includes accessible_name, disabled, loading,
+        dangerous, and destructive_effect. Computer resolves the live element
+        again immediately before dispatch and rejects loading or disabled
+        targets. A coordinate that lands on a consequential control requires
+        expected_text exactly matching its current accessible name. When
+        autosave, a spinner, aria-busy, or another loading state is visible,
+        use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms
+        (default 10000), then take a fresh screenshot. If the page asks to Browse, choose, attach,
         upload, or drop a file, use action=upload_file with selector or label
         plus source_url/base64/file_path; do not operate the native OS file
         picker. For any native select, dropdown, combobox, listbox, or
@@ -135,12 +142,14 @@ provides:
         temporal-field changes, or navigation, take a fresh screenshot because
         labels are re-enumerated. Args:
         session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?,
+        expected_text?, quiet_ms?, timeout_ms?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
         text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,
         duration?, annotate? (screenshot only, default true), include_som?
         (screenshot only, default false). Returns screenshot bytes plus compact
-        URL and state-change metadata; structured som targets are returned only
-        for action=screenshot with include_som=true.
+        URL and state-change metadata. Screenshot responses always include
+        compact safety_targets for loading, disabled, or consequential controls;
+        full structured som is returned with include_som=true.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,

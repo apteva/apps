@@ -11,7 +11,122 @@ import (
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/chromedp/chromedp"
 )
+
+// TestLocalGuardedPublishClickLive reproduces the Patreon failure shape with a
+// real Chromium page: a spinner-only Publish button is initially loading, and
+// the dangerous coordinate is exactly where an imagined scheduling caret
+// would be. The test proves SoM state, stability waiting, semantic mismatch
+// rejection, dangerous-coordinate confirmation, and a final guarded real click.
+func TestLocalGuardedPublishClickLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_GUARDED_CLICK_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_GUARDED_CLICK_TESTS=1")
+	}
+	var published atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/published" {
+			published.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><style>
+body{font-family:system-ui;margin:0}.bar{height:72px;display:flex;justify-content:flex-end;align-items:center;padding:0 32px;background:#111}
+button{width:150px;height:42px;border:0;border-radius:8px;background:white;color:#111;font-weight:700}.spinner{display:inline-block;width:18px;height:18px;border:3px solid #bbb;border-top-color:#111;border-radius:50%}
+</style><body><div class="bar"><button id="publish" aria-label="Publish" aria-busy="true" data-loading="true" disabled><span class="spinner" role="progressbar" aria-label="Saving"></span></button></div>
+<main style="padding:32px"><h1>Create a post</h1><label>Title <input id="title" placeholder="Post title"></label><p id="status">Autosaving draft…</p></main>
+<script>
+window.releaseLoading=function(){var b=document.getElementById('publish');b.disabled=false;b.removeAttribute('aria-busy');b.removeAttribute('data-loading');b.innerHTML='Publish';document.getElementById('status').textContent='Draft saved';};
+document.getElementById('publish').addEventListener('click',function(){fetch('/published',{method:'POST'});});
+</script></body></html>`))
+	}))
+	defer server.Close()
+
+	c, err := New(computer.DisplaySize{Width: 1000, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OpenSession(computer.OpenOptions{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
+		t.Fatal(err)
+	}
+	var publish computer.SetOfMarkTarget
+	for _, target := range c.LastSetOfMark() {
+		if target.AccessibleName == "Publish" {
+			publish = target
+			break
+		}
+	}
+	if publish.Label == 0 || !publish.Disabled || !publish.Loading || !publish.Dangerous || publish.DestructiveEffect != "immediate_publish" {
+		t.Fatalf("loading Publish SoM target missing state: %+v all=%+v", publish, c.LastSetOfMark())
+	}
+	if _, err := c.Execute(computer.Action{Type: "wait_for_stable", QuietMS: 300, TimeoutMS: 500}); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
+		t.Fatalf("loading page reported stable: %v", err)
+	}
+	x, y := publish.X+publish.W/2, publish.Y+publish.H/2
+	if _, err := c.Execute(computer.Action{Type: "click", X: x, Y: y, ExpectedText: "Schedule", GuardDangerousCoordinate: true}); err == nil || !strings.Contains(err.Error(), "loading") {
+		t.Fatalf("loading publish coordinate was not rejected: %v", err)
+	}
+	if published.Load() != 0 {
+		t.Fatal("loading Publish control was activated")
+	}
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`window.releaseLoading()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "wait_for_stable", QuietMS: 300, TimeoutMS: 3000}); err != nil {
+		t.Fatalf("wait_for_stable: %v", err)
+	}
+	publish = computer.SetOfMarkTarget{}
+	var title computer.SetOfMarkTarget
+	for _, target := range c.LastSetOfMark() {
+		if target.AccessibleName == "Publish" {
+			publish = target
+		}
+		if target.AccessibleName == "Post title" {
+			title = target
+		}
+	}
+	if publish.Label == 0 || publish.Disabled || publish.Loading {
+		t.Fatalf("stable Publish SoM target has stale state: %+v all=%+v", publish, c.LastSetOfMark())
+	}
+	if title.Label == 0 {
+		t.Fatalf("ordinary placeholder input missing from SoM: %+v", c.LastSetOfMark())
+	}
+	if _, err := c.Execute(computer.Action{Type: "click", Label: title.Label}); err != nil {
+		t.Fatalf("ordinary placeholder label click regressed: %v", err)
+	}
+	publish = computer.SetOfMarkTarget{}
+	for _, target := range c.LastSetOfMark() {
+		if target.AccessibleName == "Publish" {
+			publish = target
+			break
+		}
+	}
+	x, y = publish.X+publish.W/2, publish.Y+publish.H/2
+	if _, err := c.Execute(computer.Action{Type: "click", X: x, Y: y, ExpectedText: "Schedule", GuardDangerousCoordinate: true}); err == nil || !strings.Contains(err.Error(), `expected target "Schedule"`) {
+		t.Fatalf("Schedule/Publish mismatch was not rejected: %v", err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "click", X: x, Y: y, GuardDangerousCoordinate: true}); err == nil || !strings.Contains(err.Error(), "consequential target") {
+		t.Fatalf("unconfirmed dangerous coordinate was not rejected: %v", err)
+	}
+	if published.Load() != 0 {
+		t.Fatal("rejected coordinate activated Publish")
+	}
+	if _, err := c.Execute(computer.Action{Type: "click", Label: publish.Label}); err != nil {
+		t.Fatalf("guarded label click: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for published.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if published.Load() != 1 {
+		t.Fatalf("guarded Publish label did not dispatch exactly once: %d", published.Load())
+	}
+}
 
 func TestLocalNavigationLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {

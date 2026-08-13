@@ -93,7 +93,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode?. environment is opt-in for a newly-created session and can set user agent, locale/languages, timezone, geolocation, device scale, mobile, and touch; omit it to preserve normal agent defaults. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. Structured SoM includes accessible_name, disabled, loading, dangerous, and destructive_effect. Computer resolves the live target again immediately before dispatch and rejects loading or disabled targets. A coordinate that lands on a consequential control requires expected_text exactly matching its current accessible name. When autosave, a spinner, aria-busy, or another loading state is visible, use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms (default 10000), then take a fresh screenshot. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, expected_text?, quiet_ms?, timeout_ms?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata. Screenshot responses always include compact safety_targets for loading, disabled, or consequential controls; full structured som is returned with include_som=true."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -582,7 +582,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates that resolve to consequential controls require expected_text exactly matching the live accessible name. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
+				"When autosave, a spinner, aria-busy, or another loading state is visible, use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms (default 10000), then take a fresh screenshot. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
@@ -590,36 +591,39 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, navigate, back, reload, click, double_click, type, key, scroll, wait, upload_file, select_option, set_checked, set_text, set_temporal. " +
-				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
-				"Returns a binary screenshot envelope plus compact current URL and state-change metadata. Full tabs and viewport metadata are available from browser_session.",
+				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), expected_text? (click guard), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, quiet_ms?, timeout_ms?, annotate? (screenshot only, default true). " +
+				"Screenshot responses always include compact safety_targets when SoM finds loading, disabled, or consequential controls; pass include_som=true for every structured target. Returns a binary screenshot envelope plus compact current URL and state-change metadata. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id":   map[string]any{"type": "string"},
-				"action":       map[string]any{"type": "string", "enum": []string{"screenshot", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
-				"url":          map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
-				"tab_id":       map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
-				"coordinate":   map[string]any{"type": "string"},
-				"label":        map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
-				"selector":     map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
-				"checked":      map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
-				"source_url":   map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
-				"base64":       map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
-				"filename":     map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
-				"mime_type":    map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
-				"file_path":    map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
-				"text":         map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
-				"value":        map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, the value to write, such as 2026-07-01 for a date field, 11:00 AM for a time field, or 2026-07-01 11:00 AM only when the target is a single datetime field. For separate date and time fields, call set_temporal twice."},
-				"texts":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
-				"values":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
-				"mode":         map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
-				"newline_mode": map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
-				"key":          map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
-				"direction":    map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
-				"amount":       map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
-				"duration":     map[string]any{"type": "integer"},
-				"annotate":     map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
-				"som":          map[string]any{"type": "boolean", "description": "Alias for annotate."},
-				"include_som":  map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
+				"session_id":    map[string]any{"type": "string"},
+				"action":        map[string]any{"type": "string", "enum": []string{"screenshot", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"url":           map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
+				"tab_id":        map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
+				"coordinate":    map[string]any{"type": "string"},
+				"label":         map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
+				"selector":      map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"expected_text": map[string]any{"type": "string", "description": "For click/double_click, exact accessible name required at dispatch time. Required when a raw coordinate lands on a consequential control; optional extra protection for labels/selectors."},
+				"checked":       map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
+				"source_url":    map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
+				"base64":        map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
+				"filename":      map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
+				"mime_type":     map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
+				"file_path":     map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
+				"text":          map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
+				"value":         map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, the value to write, such as 2026-07-01 for a date field, 11:00 AM for a time field, or 2026-07-01 11:00 AM only when the target is a single datetime field. For separate date and time fields, call set_temporal twice."},
+				"texts":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
+				"values":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
+				"mode":          map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
+				"newline_mode":  map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
+				"key":           map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
+				"direction":     map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
+				"amount":        map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
+				"duration":      map[string]any{"type": "integer"},
+				"quiet_ms":      map[string]any{"type": "integer", "minimum": 100, "maximum": 10000, "description": "For wait_for_stable, required DOM/resource quiet interval. Default 1500 ms."},
+				"timeout_ms":    map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For wait_for_stable, maximum wait. Default 10000 ms."},
+				"annotate":      map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
+				"som":           map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"include_som":   map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
 		},
@@ -1975,6 +1979,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Call computer_use(action=\"screenshot\", som=true), then click a visible label >= 1, or pass coordinate=\"x,y\".",
 			nil)
 	}
+	if err := validateStableArgs(action, args); err != nil {
+		return nil, computerUseFailure("invalid_wait", id, sess, action,
+			err.Error(),
+			"Use action=wait_for_stable with quiet_ms=1500 and timeout_ms between quiet_ms and 30000.",
+			nil)
+	}
 	if err := validateSelectOptionArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			err.Error(),
@@ -2024,6 +2034,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Amount:       intArg(args, "amount"),
 		URL:          strings.TrimSpace(stringArg(args, "url")),
 		Duration:     intArg(args, "duration"),
+		QuietMS:      intArg(args, "quiet_ms"),
+		TimeoutMS:    intArg(args, "timeout_ms"),
+		ExpectedText: strings.TrimSpace(stringArg(args, "expected_text")),
 		Presentation: sess.presentation,
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
@@ -2037,6 +2050,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(args, "coordinate")) != "" {
 		act.Label = 0
 		act.Selector = ""
+		act.GuardDangerousCoordinate = true
 	} else if action == "click" && strings.TrimSpace(act.Selector) != "" {
 		// A selector is an explicit compatibility target and must beat optional
 		// integer defaults synthesized by tool serializers. Label-only behavior
@@ -2088,6 +2102,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Use local, Browserbase, Steel, or browser-engine for selector click; otherwise use a screenshot label or coordinate.",
 			nil)
 	}
+	if action == "wait_for_stable" && sess.backend == "service" {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not expose DOM stability signals", sess.backend),
+			"Use local, Browserbase, Steel, or Browser Engine for wait_for_stable, or use a bounded wait followed by a fresh screenshot.",
+			nil)
+	}
 
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := []backends.TabInfo(nil)
@@ -2120,6 +2140,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				"Take a fresh screenshot. If the page is frozen, close this session and reopen from context.",
 				err)
 		}
+		if strings.Contains(err.Error(), "click rejected:") {
+			return nil, computerUseFailure("unsafe_click_rejected", id, sess, action,
+				err.Error(),
+				"Take a fresh screenshot with include_som=true. Wait for loading=false, then click a current label or retry with expected_text exactly matching the intended accessible name.",
+				err)
+		}
 		return nil, computerUseFailure("backend_error", id, sess, action,
 			fmt.Sprintf("browser action failed: %v", err),
 			"Take a fresh screenshot and retry once. If the session is stale, close it and reopen from context.",
@@ -2150,6 +2176,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	a.recordSessionNavigation(ctx, id, sess)
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
+	stableQuietMS := act.QuietMS
+	if stableQuietMS == 0 {
+		stableQuietMS = 1500
+	}
 	for k, v := range uploadMeta {
 		payload[k] = v
 	}
@@ -2181,6 +2211,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
+	if action == "wait_for_stable" {
+		payload["stable"] = true
+		payload["quiet_ms"] = stableQuietMS
+	}
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
 		"session_id":  id,
@@ -2194,6 +2228,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["height"] = disp.Height
 	}
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
+	if action == "wait_for_stable" {
+		out["stable"] = true
+		out["quiet_ms"] = stableQuietMS
+	}
 	if screenshotSkipped {
 		out["text"] = fmt.Sprintf("Success: %s action dispatched. Call action=wait if needed, then action=screenshot for the visual state.", action)
 		out["screenshot_available"] = false
@@ -2208,6 +2246,11 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if includeSOM && !screenshotSkipped {
 		out["som"] = setOfMarkFor(sess.comp)
+	}
+	if action == "screenshot" && !screenshotSkipped {
+		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
+			out["safety_targets"] = targets
+		}
 	}
 	for k, v := range uploadMeta {
 		out[k] = v
@@ -2550,6 +2593,17 @@ func setOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
 		return nil
 	}
 	return reporter.LastSetOfMark()
+}
+
+func safetySetOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
+	all := setOfMarkFor(comp)
+	out := make([]backends.SetOfMarkTarget, 0, len(all))
+	for _, target := range all {
+		if target.Disabled || target.Loading || target.Dangerous {
+			out = append(out, target)
+		}
+	}
+	return out
 }
 
 func hasSetOfMarkLabel(comp backends.Computer, label int) bool {
@@ -3508,6 +3562,9 @@ func hasClickTargetArg(args map[string]any) bool {
 
 func validateClickTargetArgs(action string, args map[string]any) error {
 	if action != "click" && action != "double_click" {
+		if strings.TrimSpace(stringArg(args, "expected_text")) != "" {
+			return fmt.Errorf("expected_text is only valid for click or double_click")
+		}
 		return nil
 	}
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 && !(action == "click" && strings.TrimSpace(stringArg(args, "selector")) != "") {
@@ -3518,6 +3575,27 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 			return fmt.Errorf("click requires label=N from the latest screenshot, selector, or coordinate=\"x,y\" for targets without a badge")
 		}
 		return fmt.Errorf("double_click requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge")
+	}
+	return nil
+}
+
+func validateStableArgs(action string, args map[string]any) error {
+	if action != "wait_for_stable" {
+		if rawArgPresent(args, "quiet_ms") || rawArgPresent(args, "timeout_ms") {
+			return fmt.Errorf("quiet_ms and timeout_ms are only valid for wait_for_stable")
+		}
+		return nil
+	}
+	quietMS := intArg(args, "quiet_ms")
+	timeoutMS := intArg(args, "timeout_ms")
+	if quietMS != 0 && (quietMS < 100 || quietMS > 10000) {
+		return fmt.Errorf("quiet_ms must be between 100 and 10000")
+	}
+	if timeoutMS != 0 && (timeoutMS < 500 || timeoutMS > 30000) {
+		return fmt.Errorf("timeout_ms must be between 500 and 30000")
+	}
+	if quietMS > 0 && timeoutMS > 0 && timeoutMS < quietMS {
+		return fmt.Errorf("timeout_ms must be greater than or equal to quiet_ms")
 	}
 	return nil
 }

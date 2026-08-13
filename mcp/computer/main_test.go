@@ -245,14 +245,33 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 
 	fake.somTargets = []backends.SetOfMarkTarget{{
-		Label: 3,
-		X:     100,
-		Y:     200,
-		W:     80,
-		H:     32,
-		Tag:   "button",
-		Text:  "I accept",
+		Label:             3,
+		X:                 100,
+		Y:                 200,
+		W:                 80,
+		H:                 32,
+		Tag:               "button",
+		Text:              "I accept",
+		AccessibleName:    "Publish",
+		Disabled:          true,
+		Loading:           true,
+		Dangerous:         true,
+		DestructiveEffect: "immediate_publish",
 	}}
+	safetyOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "screenshot",
+	})
+	if err != nil {
+		t.Fatalf("computer_use default safety targets: %v", err)
+	}
+	if _, ok := safetyOut.(map[string]any)["som"]; ok {
+		t.Fatalf("default screenshot unexpectedly returned full SoM: %#v", safetyOut)
+	}
+	safetyItems, ok := safetyOut.(map[string]any)["safety_targets"].([]backends.SetOfMarkTarget)
+	if !ok || len(safetyItems) != 1 || safetyItems[0].AccessibleName != "Publish" || !safetyItems[0].Loading {
+		t.Fatalf("default safety targets=%#v", safetyOut.(map[string]any)["safety_targets"])
+	}
 	somOut, err := app.toolComputerUse(ctx, map[string]any{
 		"session_id":  sessionID,
 		"action":      "screenshot",
@@ -262,8 +281,14 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 		t.Fatalf("computer_use screenshot include_som: %v", err)
 	}
 	somItems, ok := somOut.(map[string]any)["som"].([]backends.SetOfMarkTarget)
-	if !ok || len(somItems) != 1 || somItems[0].Label != 3 || somItems[0].Text != "I accept" {
+	if !ok || len(somItems) != 1 || somItems[0].Label != 3 || somItems[0].Text != "I accept" ||
+		somItems[0].AccessibleName != "Publish" || !somItems[0].Disabled || !somItems[0].Loading ||
+		!somItems[0].Dangerous || somItems[0].DestructiveEffect != "immediate_publish" {
 		t.Fatalf("structured som=%#v", somOut.(map[string]any)["som"])
+	}
+	safetyItems, ok = somOut.(map[string]any)["safety_targets"].([]backends.SetOfMarkTarget)
+	if !ok || len(safetyItems) != 1 || safetyItems[0].AccessibleName != "Publish" || !safetyItems[0].Loading {
+		t.Fatalf("default safety targets=%#v", somOut.(map[string]any)["safety_targets"])
 	}
 
 	if _, err := app.toolComputerUse(ctx, map[string]any{
@@ -306,15 +331,17 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 		t.Fatalf("selector click action: got %+v", fake.lastAction)
 	}
 	if _, err := app.toolComputerUse(ctx, map[string]any{
-		"session_id": sessionID,
-		"action":     "click",
-		"label":      1,
-		"selector":   `a[href="https://go.marcoschwartz.com/digilo"]`,
-		"coordinate": "113,746",
+		"session_id":    sessionID,
+		"action":        "click",
+		"label":         1,
+		"selector":      `a[href="https://go.marcoschwartz.com/digilo"]`,
+		"coordinate":    "113,746",
+		"expected_text": "Schedule",
 	}); err != nil {
 		t.Fatalf("computer_use coordinate with populated label: %v", err)
 	}
-	if fake.lastAction.Label != 0 || fake.lastAction.Selector != "" || fake.lastAction.X != 113 || fake.lastAction.Y != 746 {
+	if fake.lastAction.Label != 0 || fake.lastAction.Selector != "" || fake.lastAction.X != 113 || fake.lastAction.Y != 746 ||
+		fake.lastAction.ExpectedText != "Schedule" || !fake.lastAction.GuardDangerousCoordinate {
 		t.Errorf("explicit coordinate should override populated label: got %+v", fake.lastAction)
 	}
 	if _, err := app.toolComputerUse(ctx, map[string]any{
@@ -651,17 +678,19 @@ func TestComputerUseReliableNavigationActions(t *testing.T) {
 	}
 }
 
-func TestComputerUseNavigationSchemaAndUnsupportedService(t *testing.T) {
+func TestComputerUseNavigationAndSafetySchema(t *testing.T) {
 	tool := findTool(t, (&App{}).MCPTools(), "computer_use")
 	properties := tool.InputSchema["properties"].(map[string]any)
 	actions := properties["action"].(map[string]any)["enum"].([]string)
-	for _, required := range []string{"navigate", "back", "reload"} {
+	for _, required := range []string{"navigate", "back", "reload", "wait_for_stable"} {
 		if !slices.Contains(actions, required) {
 			t.Fatalf("computer_use action schema missing %q: %v", required, actions)
 		}
 	}
-	if _, ok := properties["url"]; !ok {
-		t.Fatal("computer_use schema missing navigate URL")
+	for _, required := range []string{"url", "expected_text", "quiet_ms", "timeout_ms"} {
+		if _, ok := properties[required]; !ok {
+			t.Fatalf("computer_use schema missing %s", required)
+		}
 	}
 
 	app := appWithSession("br_service", &fakeComp{url: "https://example.com"}, "service")
@@ -670,6 +699,43 @@ func TestComputerUseNavigationSchemaAndUnsupportedService(t *testing.T) {
 		"action":     "reload",
 	}); err == nil || !strings.Contains(err.Error(), "backend_not_supported") {
 		t.Fatalf("service navigation should be rejected as unverifiable: %v", err)
+	}
+}
+
+func TestComputerUseWaitForStableValidationAndDispatch(t *testing.T) {
+	fake := &fakeComp{png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://example.com"}
+	app := appWithSession("br_stable", fake, "local")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_stable",
+		"action":     "wait_for_stable",
+		"quiet_ms":   700,
+		"timeout_ms": 3000,
+	})
+	if err != nil {
+		t.Fatalf("wait_for_stable: %v", err)
+	}
+	if out.(map[string]any)["stable"] != true || out.(map[string]any)["quiet_ms"] != 700 {
+		t.Fatalf("wait_for_stable result: %#v", out)
+	}
+	if fake.lastAction.Type != "wait_for_stable" || fake.lastAction.QuietMS != 700 || fake.lastAction.TimeoutMS != 3000 {
+		t.Fatalf("wait_for_stable dispatch: %+v", fake.lastAction)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_stable",
+		"action":     "wait_for_stable",
+		"quiet_ms":   2000,
+		"timeout_ms": 1000,
+	}); err == nil || !strings.Contains(err.Error(), "invalid_wait") {
+		t.Fatalf("invalid stability bounds should fail: %v", err)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_stable",
+		"action":     "scroll",
+		"quiet_ms":   500,
+	}); err == nil || !strings.Contains(err.Error(), "invalid_wait") {
+		t.Fatalf("quiet_ms on another action should fail: %v", err)
 	}
 }
 
@@ -1213,6 +1279,23 @@ func TestComputerUseDeadlineExceededIsActionTimeout(t *testing.T) {
 	}
 	if _, ok := app.reg.get("br_slow"); !ok {
 		t.Fatalf("action timeout should not evict session automatically")
+	}
+}
+
+func TestComputerUseReportsUnsafeClickRejection(t *testing.T) {
+	fake := &fakeComp{
+		display:    backends.DisplaySize{Width: 1024, Height: 768},
+		executeErr: fmt.Errorf(`click: click rejected: expected target "Schedule" but live target is "Publish"`),
+	}
+	app := appWithSession("br_guard", fake, "local")
+	_, err := app.toolComputerUse(tk.NewAppCtx(t, "apteva.yaml"), map[string]any{
+		"session_id":    "br_guard",
+		"action":        "click",
+		"coordinate":    "900,36",
+		"expected_text": "Schedule",
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsafe_click_rejected") || !strings.Contains(err.Error(), `live target is \"Publish\"`) {
+		t.Fatalf("guard rejection should be actionable: %v", err)
 	}
 }
 
@@ -2497,6 +2580,10 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 		"use action=select_option first",
 		"action=set_checked",
 		"action=set_temporal",
+		"accessible_name",
+		"expected_text",
+		"action=wait_for_stable",
+		"safety_targets",
 	} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("computer_use description missing %q:\n%s", want, desc)
@@ -2524,6 +2611,11 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 			}
 			if !strings.Contains(tool.Description, "use action=select_option first") {
 				t.Fatalf("manifest computer_use description does not teach select_option first:\n%s", tool.Description)
+			}
+			for _, want := range []string{"accessible_name", "expected_text", "action=wait_for_stable", "safety_targets"} {
+				if !strings.Contains(tool.Description, want) {
+					t.Fatalf("manifest computer_use description missing safety workflow %q:\n%s", want, tool.Description)
+				}
 			}
 			return
 		}

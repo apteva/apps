@@ -119,9 +119,13 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 		if len(name) > 40 {
 			name = name[:40]
 		}
+		disabled := axPropertyBool(node, accessibility.PropertyNameDisabled)
+		loading := axPropertyBool(node, accessibility.PropertyNameBusy)
+		effect := destructiveEffectForText(name)
 		out = append(out, Element{
 			X: x, Y: y, W: w, H: h,
-			Tag: role, Role: role, Text: strings.TrimSpace(name),
+			Tag: role, Role: role, Text: strings.TrimSpace(name), AccessibleName: strings.TrimSpace(name),
+			Disabled: disabled, Loading: loading, Dangerous: effect != "", DestructiveEffect: effect,
 		})
 	}
 	out = filterAXByOcclusion(ctx, out)
@@ -381,6 +385,42 @@ func axStringValue(value *accessibility.Value) string {
 		return ""
 	}
 	return result
+}
+
+func axPropertyBool(node *accessibility.Node, name accessibility.PropertyName) bool {
+	if node == nil {
+		return false
+	}
+	for _, property := range node.Properties {
+		if property == nil || property.Name != name || property.Value == nil || len(property.Value.Value) == 0 {
+			continue
+		}
+		var result bool
+		if json.Unmarshal(property.Value.Value, &result) == nil {
+			return result
+		}
+	}
+	return false
+}
+
+func destructiveEffectForText(value string) string {
+	value = strings.ToLower(strings.Join(strings.Fields(value), " "))
+	for _, item := range []struct {
+		words  []string
+		effect string
+	}{
+		{[]string{"publish"}, "immediate_publish"},
+		{[]string{"delete", "destroy", "erase"}, "destructive_delete"},
+		{[]string{"send", "post"}, "immediate_send"},
+		{[]string{"pay", "payout", "purchase", "buy", "checkout", "place order"}, "financial_action"},
+	} {
+		for _, word := range item.words {
+			if value == word || strings.HasPrefix(value, word+" ") || strings.HasSuffix(value, " "+word) || strings.Contains(value, " "+word+" ") {
+				return item.effect
+			}
+		}
+	}
+	return ""
 }
 
 // MergeAX appends AX-only targets while preserving JS target ordering and

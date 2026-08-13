@@ -19,6 +19,7 @@ import (
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
+	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
@@ -27,6 +28,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
@@ -800,6 +802,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 
 	case "click":
 		x, y := action.X, action.Y
+		expectedText := action.ExpectedText
 		if action.Selector != "" {
 			point, err := selectorclick.Resolve(c.ctx, action.Selector)
 			if err != nil {
@@ -809,12 +812,20 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		} else if action.Label != 0 {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
+				if expectedText == "" {
+					expectedText = e.AccessibleName
+					if expectedText == "" {
+						expectedText = e.Text
+					}
+				}
 			}
 		}
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing click: %v\n", err)
 		}
-		if err := c.dispatchClick(x, y, 1); err != nil {
+		if _, err := clickguard.Click(c.ctx, x, y, 1, clickguard.Options{
+			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
 		}
 		focusJS := fmt.Sprintf(`(function(){
@@ -832,15 +843,24 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 
 	case "double_click":
 		x, y := action.X, action.Y
+		expectedText := action.ExpectedText
 		if action.Label != 0 {
 			if e, ok := c.resolveLabel(action.Label); ok {
 				x, y = e.Center()
+				if expectedText == "" {
+					expectedText = e.AccessibleName
+					if expectedText == "" {
+						expectedText = e.Text
+					}
+				}
 			}
 		}
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
-		if err := c.dispatchClick(x, y, 2); err != nil {
+		if _, err := clickguard.Click(c.ctx, x, y, 2, clickguard.Options{
+			ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+		}); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
@@ -874,6 +894,12 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			dur = 1000
 		}
 		time.Sleep(time.Duration(dur) * time.Millisecond)
+		return c.Screenshot()
+
+	case "wait_for_stable":
+		if _, err := stability.Wait(c.ctx, action.QuietMS, action.TimeoutMS); err != nil {
+			return nil, fmt.Errorf("wait_for_stable: %w", err)
+		}
 		return c.Screenshot()
 
 	case "select_option":
@@ -1013,12 +1039,6 @@ func (c *Computer) scroll(a computer.Action) error {
 	return chromedp.Run(c.ctx, chromedp.Evaluate(js, nil))
 }
 
-func (c *Computer) dispatchClick(x, y, clickCount int) error {
-	return chromedp.Run(c.ctx,
-		chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(clickCount)),
-	)
-}
-
 func (c *Computer) Screenshot() ([]byte, error) {
 	return c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true})
 }
@@ -1108,15 +1128,9 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 	for _, label := range labels {
 		e := c.lastLabels[label]
 		out = append(out, computer.SetOfMarkTarget{
-			Label: e.Label,
-			X:     e.X,
-			Y:     e.Y,
-			W:     e.W,
-			H:     e.H,
-			Tag:   e.Tag,
-			Role:  e.Role,
-			Text:  e.Text,
-			Type:  e.Type,
+			Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
+			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
+			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out

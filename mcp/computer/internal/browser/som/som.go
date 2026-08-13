@@ -39,15 +39,20 @@ import (
 // Populated by running EnumScript inside the page's main world; the
 // coordinates are in viewport space (same space clicks dispatch in).
 type Element struct {
-	Label int    `json:"label"` // assigned by Enumerate in order
-	X     int    `json:"x"`
-	Y     int    `json:"y"`
-	W     int    `json:"w"`
-	H     int    `json:"h"`
-	Tag   string `json:"tag"`
-	Role  string `json:"role,omitempty"`
-	Text  string `json:"text,omitempty"`
-	Type  string `json:"type,omitempty"`
+	Label             int    `json:"label"` // assigned by Enumerate in order
+	X                 int    `json:"x"`
+	Y                 int    `json:"y"`
+	W                 int    `json:"w"`
+	H                 int    `json:"h"`
+	Tag               string `json:"tag"`
+	Role              string `json:"role,omitempty"`
+	Text              string `json:"text,omitempty"`
+	AccessibleName    string `json:"accessible_name,omitempty"`
+	Type              string `json:"type,omitempty"`
+	Disabled          bool   `json:"disabled"`
+	Loading           bool   `json:"loading"`
+	Dangerous         bool   `json:"dangerous"`
+	DestructiveEffect string `json:"destructive_effect,omitempty"`
 }
 
 // Center returns the pixel at the center of the element's bbox —
@@ -101,6 +106,52 @@ const EnumScript = `
     '[onclick]','[tabindex]:not([tabindex="-1"])'
   ];
   var vw = window.innerWidth, vh = window.innerHeight;
+
+  function clean(v) { return String(v || '').replace(/\s+/g, ' ').trim(); }
+  function labelledBy(el) {
+    var ids = clean(el.getAttribute && el.getAttribute('aria-labelledby'));
+    if (!ids) return '';
+    var doc = el.ownerDocument || document;
+    return clean(ids.split(/\s+/).map(function(id) {
+      var node = doc.getElementById(id);
+      return node ? (node.innerText || node.textContent || '') : '';
+    }).join(' '));
+  }
+  function accessibleName(el) {
+    return clean((el.getAttribute && el.getAttribute('aria-label')) || labelledBy(el) ||
+      (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
+      el.value || (el.getAttribute && el.getAttribute('alt')) ||
+      (el.getAttribute && el.getAttribute('aria-placeholder')) ||
+      (el.getAttribute && el.getAttribute('placeholder')) ||
+      (el.getAttribute && el.getAttribute('data-placeholder')) ||
+      (el.getAttribute && el.getAttribute('data-text')) || '');
+  }
+  function isVisible(el, styleWin) {
+    if (!el || !el.getBoundingClientRect) return false;
+    var r = el.getBoundingClientRect(), s;
+    try { s = styleWin.getComputedStyle(el); } catch (e) { return false; }
+    return r.width >= 2 && r.height >= 2 && s.display !== 'none' &&
+      s.visibility !== 'hidden' && parseFloat(s.opacity || '1') >= 0.1;
+  }
+  function isLoading(el, styleWin) {
+    for (var node = el; node && node !== node.ownerDocument.documentElement; node = node.parentElement) {
+      if (node.getAttribute && (node.getAttribute('aria-busy') === 'true' ||
+          node.getAttribute('data-loading') === 'true' || node.getAttribute('data-state') === 'loading')) return true;
+      var cls = clean(node.className).toLowerCase();
+      if (/(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls)) return true;
+    }
+    var indicators = el.querySelectorAll ? el.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]') : [];
+    for (var i = 0; i < indicators.length; i++) if (isVisible(indicators[i], styleWin)) return true;
+    return false;
+  }
+  function destructiveEffect(name, text) {
+    var semantic = clean(name + ' ' + text).toLowerCase();
+    if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
+    if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
+    if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
+    if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
+    return '';
+  }
 
   // priority: lower number = wrapper / generic, higher = real input
   // element. Used for both sort ranking and contains-dedup.
@@ -157,7 +208,6 @@ const EnumScript = `
         try { style = styleWin.getComputedStyle(el); } catch (e) { continue; }
         if (style.visibility === 'hidden' || style.display === 'none') continue;
         if (parseFloat(style.opacity) < 0.1) continue;
-        if (el.disabled) continue;
         var x = Math.max(0, Math.round(rLeft));
         var y = Math.max(0, Math.round(rTop));
         var w = Math.min(vw, Math.round(rRight)) - x;
@@ -166,8 +216,8 @@ const EnumScript = `
         // round down to a zero-sized viewport intersection. Do not spend SOM
         // labels on controls that have no usable click area after clipping.
         if (w < 4 || h < 4) continue;
-        var text = (el.innerText || el.value ||
-                    el.getAttribute('aria-label') ||
+        var name = accessibleName(el);
+        var text = (el.innerText || el.value || name ||
                     el.getAttribute('aria-placeholder') ||
                     el.getAttribute('placeholder') ||
                     el.getAttribute('data-placeholder') ||
@@ -196,10 +246,15 @@ const EnumScript = `
         if (text.length > 40) text = text.substr(0, 40);
         var tag = el.tagName.toLowerCase();
         var role = el.getAttribute('role') || '';
+        var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
+          el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
+        var loading = isLoading(el, styleWin);
+        var effect = destructiveEffect(name, text);
         candidates.push({
           el: el, x: x, y: y, w: w, h: h,
-          tag: tag, role: role, text: text,
+          tag: tag, role: role, text: text, accessible_name: name,
           type: el.type || '',
+          disabled: disabled, loading: loading, dangerous: effect !== '', destructive_effect: effect,
           prio: priority(tag, role, el)
         });
       }
@@ -413,7 +468,8 @@ const EnumScript = `
     var c = visible[k];
     out.push({
       x: c.x, y: c.y, w: c.w, h: c.h,
-      tag: c.tag, role: c.role, text: c.text, type: c.type,
+      tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
+      disabled: c.disabled, loading: c.loading, dangerous: c.dangerous, destructive_effect: c.destructive_effect,
       label: k + 1
     });
   }

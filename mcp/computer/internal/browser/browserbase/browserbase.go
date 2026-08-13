@@ -21,6 +21,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
@@ -30,6 +31,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/cdp"
@@ -50,7 +52,7 @@ const (
 	textActionTimeout           = 15 * time.Second
 	keyActionTimeout            = 15 * time.Second
 	scrollActionTimeout         = 15 * time.Second
-	waitActionTimeout           = 30 * time.Second
+	waitActionTimeout           = 35 * time.Second
 	navigateActionTimeout       = 30 * time.Second
 	inlineUploadMaxBytes        = 64 * 1024 * 1024
 )
@@ -451,6 +453,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		return c.Screenshot()
 
+	case "wait_for_stable":
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if _, err := stability.Wait(ctx, action.QuietMS, action.TimeoutMS); err != nil {
+			return nil, fmt.Errorf("wait_for_stable: %w", err)
+		}
+		return c.Screenshot()
+
 	case "upload_file":
 		c.moveToTarget(c.ctx, action)
 		res, err := c.uploadFile(action)
@@ -549,6 +559,11 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 		ctx, cancel := c.actionContext(action.Type)
 		defer cancel()
 		return sleepWithContext(ctx, time.Duration(dur)*time.Millisecond)
+	case "wait_for_stable":
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		_, err := stability.Wait(ctx, action.QuietMS, action.TimeoutMS)
+		return err
 	default:
 		return fmt.Errorf("browserbase action-only unsupported for %s", action.Type)
 	}
@@ -584,6 +599,7 @@ func (c *Computer) scroll(ctx context.Context, a computer.Action) error {
 
 func (c *Computer) executeClick(ctx context.Context, action computer.Action, clickCount int, focusAfter bool) error {
 	x, y := action.X, action.Y
+	expectedText := action.ExpectedText
 	if action.Selector != "" {
 		point, err := selectorclick.Resolve(ctx, action.Selector)
 		if err != nil {
@@ -593,12 +609,20 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 	} else if action.Label != 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			x, y = e.Center()
+			if expectedText == "" {
+				expectedText = e.AccessibleName
+				if expectedText == "" {
+					expectedText = e.Text
+				}
+			}
 		}
 	}
 	if err := presentation.BeforeClick(ctx, x, y, action.Presentation); err != nil {
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cursor unavailable, continuing click: %v\n", err)
 	}
-	if err := c.dispatchClick(ctx, x, y, clickCount); err != nil {
+	if _, err := clickguard.Click(ctx, x, y, clickCount, clickguard.Options{
+		ExpectedText: expectedText, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
+	}); err != nil {
 		return err
 	}
 	if focusAfter {
@@ -620,12 +644,6 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 	}
 	presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 	return nil
-}
-
-func (c *Computer) dispatchClick(ctx context.Context, x, y, clickCount int) error {
-	return chromedp.Run(ctx,
-		chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(clickCount)),
-	)
 }
 
 func (c *Computer) selectOption(ctx context.Context, action computer.Action) (selectinput.Result, error) {
@@ -965,7 +983,7 @@ func actionTimeout(action string) time.Duration {
 		return keyActionTimeout
 	case "scroll":
 		return scrollActionTimeout
-	case "wait":
+	case "wait", "wait_for_stable":
 		return waitActionTimeout
 	case "navigate", "back", "reload":
 		return navigateActionTimeout
@@ -1203,15 +1221,9 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 	for _, label := range labels {
 		e := c.lastLabels[label]
 		out = append(out, computer.SetOfMarkTarget{
-			Label: e.Label,
-			X:     e.X,
-			Y:     e.Y,
-			W:     e.W,
-			H:     e.H,
-			Tag:   e.Tag,
-			Role:  e.Role,
-			Text:  e.Text,
-			Type:  e.Type,
+			Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
+			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
+			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
