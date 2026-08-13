@@ -82,7 +82,7 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		decorateTicketURLs(ctx, detail.Ticket)
-		hydrateAttachmentURLs(ctx, pid, detail.Attachments)
+		decorateAttachmentURLs(ctx, detail.Ticket, detail.Attachments)
 		writeJSON(w, http.StatusOK, detail)
 	case r.Method == http.MethodPatch && action == "":
 		body, err := decodeMap(r)
@@ -176,6 +176,8 @@ func (a *App) handleTicket(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ticket, _ := getTicket(ctx.AppDB(), pid, id)
+		decorateTicketURLs(ctx, ticket)
+		decorateAttachmentURLs(ctx, ticket, []*Attachment{attachment})
 		emitTicket(ctx, "ticket.attachment.added", ticket, map[string]any{"attachment_id": attachment.ID})
 		writeJSON(w, http.StatusCreated, map[string]any{"attachment": attachment})
 	case r.Method == http.MethodPost && action == "links":

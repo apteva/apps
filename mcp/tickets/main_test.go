@@ -4,11 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
 
@@ -50,7 +57,7 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.2" {
+	if m.Name != "tickets" || m.Version != "0.1.3" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
@@ -85,6 +92,120 @@ func TestManifestAndHandlersStayInSync(t *testing.T) {
 		if !optional[name] {
 			t.Errorf("%s must remain optional", name)
 		}
+	}
+	publicPortalDeclared := false
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.Prefix == "/p/" && route.NoAuth {
+			publicPortalDeclared = true
+		}
+	}
+	if !publicPortalDeclared {
+		t.Fatal("manifest must declare /p/ as no_auth so token-authenticated client routes pass the platform proxy")
+	}
+}
+
+type attachmentContentPlatform struct {
+	tk.BasePlatformClient
+	calls int
+}
+
+func (p *attachmentContentPlatform) CallAppResult(appName, tool string, _ map[string]any, out any) error {
+	p.calls++
+	if appName != "storage" || tool != "files_get_content" {
+		return errors.New("unexpected app call")
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"name":           "proof.txt",
+		"content_type":   "text/plain",
+		"content_base64": "cHJvb2Y=",
+	})
+	return json.Unmarshal(raw, out)
+}
+
+func TestAttachmentReadsDoNotMintStorageURLs(t *testing.T) {
+	ticket := &Ticket{PortalToken: "secret-token"}
+	attachments := []*Attachment{
+		{ID: 7, Visibility: "public", URL: "https://storage.invalid/original"},
+		{ID: 8, Visibility: "internal", URL: "https://storage.invalid/internal"},
+	}
+	decorateAttachmentURLs(nil, ticket, attachments)
+	if got, want := attachments[0].URL, "http://localhost:5280/api/apps/tickets/p/ticket/secret-token/attachments/7/content"; got != want {
+		t.Fatalf("public attachment URL = %q, want %q", got, want)
+	}
+	if got := attachments[1].URL; got != "https://storage.invalid/internal" {
+		t.Fatalf("internal attachment URL changed to %q", got)
+	}
+	for _, file := range []string{"http.go", "portal.go", "integrations.go"} {
+		body, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "files_get_url") {
+			t.Fatalf("%s performs synchronous Storage URL minting in a ticket read path", file)
+		}
+	}
+}
+
+func TestPublicAttachmentProxy(t *testing.T) {
+	pid := "attachment-project"
+	platform := &attachmentContentPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(pid), tk.WithPlatform(platform))
+	if err := ensureProject(ctx.AppDB(), pid); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := createTicket(ctx.AppDB(), pid, map[string]any{"title": "Attachment"}, Actor{Kind: "client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment, err := addAttachmentRecord(ctx.AppDB(), pid, ticket.ID, nil, "42", "proof.txt", "text/plain", 5, "", "public", Actor{Kind: "client"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := addLink(ctx.AppDB(), pid, ticket.ID, map[string]any{"kind": "task", "external_id": "42"}, Actor{Kind: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	detailDone := make(chan error, 1)
+	go func() {
+		detail, detailErr := ticketDetail(ctx.AppDB(), pid, ticket.ID, true)
+		if detailErr == nil && (len(detail.Attachments) != 1 || len(detail.Links) != 1) {
+			detailErr = fmt.Errorf("detail attachments=%d links=%d", len(detail.Attachments), len(detail.Links))
+		}
+		detailDone <- detailErr
+	}()
+	select {
+	case err := <-detailDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		// The pre-v0.1.3 implementation queried each attachment/link while
+		// its outer rows cursor still held the app's single SQLite connection.
+		ctx.AppDB().SetMaxOpenConns(2) // release the blocked goroutine before failing
+		<-detailDone
+		t.Fatal("ticket detail deadlocked while listing attachments or links")
+	}
+	recorder := httptest.NewRecorder()
+	(&App{}).servePublicAttachment(recorder, ctx, ticket, strconv.FormatInt(attachment.ID, 10))
+	if recorder.Code != http.StatusOK || recorder.Body.String() != "proof" {
+		t.Fatalf("download status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Disposition"); !strings.Contains(got, "proof.txt") {
+		t.Fatalf("content disposition = %q", got)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("storage content calls = %d, want 1", platform.calls)
+	}
+	internal, err := addAttachmentRecord(ctx.AppDB(), pid, ticket.ID, nil, "43", "secret.txt", "text/plain", 6, "", "internal", Actor{Kind: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	(&App{}).servePublicAttachment(recorder, ctx, ticket, strconv.FormatInt(internal.ID, 10))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("internal download status = %d, want 404", recorder.Code)
+	}
+	if platform.calls != 1 {
+		t.Fatalf("internal attachment reached Storage; calls = %d", platform.calls)
 	}
 }
 

@@ -1,10 +1,16 @@
 package main
 
 import (
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"html/template"
+	"mime"
 	"net/http"
+	"strconv"
 	"strings"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 var intakeTemplate = template.Must(template.New("intake").Parse(`<!doctype html>
@@ -123,7 +129,7 @@ func (a *App) handlePublicTicket(w http.ResponseWriter, r *http.Request, parts [
 			return
 		}
 		publicTicket(detail.Ticket)
-		hydrateAttachmentURLs(ctx, ticket.ProjectID, detail.Attachments)
+		decorateAttachmentURLs(ctx, ticket, detail.Attachments)
 		writeJSON(w, http.StatusOK, detail)
 		return
 	}
@@ -133,6 +139,8 @@ func (a *App) handlePublicTicket(w http.ResponseWriter, r *http.Request, parts [
 		action = parts[2]
 	}
 	switch {
+	case r.Method == http.MethodGet && action == "attachments" && len(parts) == 5 && parts[4] == "content":
+		a.servePublicAttachment(w, ctx, ticket, parts[3])
 	case r.Method == http.MethodPost && action == "comments":
 		body, err := decodeMapLimited(w, r, 1<<20)
 		if err != nil {
@@ -160,6 +168,7 @@ func (a *App) handlePublicTicket(w http.ResponseWriter, r *http.Request, parts [
 			return
 		}
 		emitTicket(ctx, "ticket.attachment.added", ticket, map[string]any{"attachment_id": attachment.ID})
+		decorateAttachmentURLs(ctx, ticket, []*Attachment{attachment})
 		writeJSON(w, http.StatusCreated, map[string]any{"attachment": attachment})
 	case r.Method == http.MethodPost && action == "reopen":
 		if ticket.Status != "resolved" && ticket.Status != "closed" {
@@ -177,6 +186,46 @@ func (a *App) handlePublicTicket(w http.ResponseWriter, r *http.Request, parts [
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (a *App) servePublicAttachment(w http.ResponseWriter, ctx *sdk.AppCtx, ticket *Ticket, rawID string) {
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	attachment, err := getAttachment(ctx.AppDB(), ticket.ProjectID, ticket.ID, id)
+	if err != nil || attachment.Visibility != "public" || attachment.StorageFileID == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	fileID, err := strconv.ParseInt(attachment.StorageFileID, 10, 64)
+	if err != nil || fileID <= 0 || ctx.PlatformAPI() == nil {
+		httpErr(w, errors.New("attachment is unavailable"), http.StatusServiceUnavailable)
+		return
+	}
+	var stored struct {
+		ContentBase64 string `json:"content_base64"`
+		ContentType   string `json:"content_type"`
+		Name          string `json:"name"`
+	}
+	if err := ctx.WithProject(ticket.ProjectID).PlatformAPI().CallAppResult("storage", "files_get_content", map[string]any{"id": fileID}, &stored); err != nil {
+		httpErr(w, fmt.Errorf("attachment is unavailable: %w", err), http.StatusBadGateway)
+		return
+	}
+	body, err := base64.StdEncoding.DecodeString(stored.ContentBase64)
+	if err != nil {
+		httpErr(w, errors.New("attachment content is invalid"), http.StatusBadGateway)
+		return
+	}
+	contentType := firstNonEmpty(stored.ContentType, attachment.ContentType, "application/octet-stream")
+	name := firstNonEmpty(stored.Name, attachment.Name, "attachment")
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": name}))
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func publicTicket(ticket *Ticket) {

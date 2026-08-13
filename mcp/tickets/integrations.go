@@ -55,7 +55,7 @@ func (a *App) toolGet(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (
 		return nil, err
 	}
 	decorateTicketURLs(ctx, detail.Ticket)
-	hydrateAttachmentURLs(ctx, pid, detail.Attachments)
+	decorateAttachmentURLs(ctx, detail.Ticket, detail.Attachments)
 	return detail, nil
 }
 
@@ -159,6 +159,8 @@ func (a *App) toolAddAttachment(callCtx context.Context, ctx *sdk.AppCtx, args m
 		return nil, err
 	}
 	ticket, _ := getTicket(ctx.AppDB(), pid, attachment.TicketID)
+	decorateTicketURLs(ctx, ticket)
+	decorateAttachmentURLs(ctx, ticket, []*Attachment{attachment})
 	emitTicket(ctx, "ticket.attachment.added", ticket, map[string]any{"attachment_id": attachment.ID, "name": attachment.Name})
 	return map[string]any{"attachment": attachment}, nil
 }
@@ -275,7 +277,7 @@ func addAttachment(ctx *sdk.AppCtx, pid string, ticketID int64, args map[string]
 	}
 	visibility := firstNonEmpty(stringArg(args, "visibility"), "public")
 	fileID := stringArg(args, "file_id")
-	fileURL := ""
+	fileURL := stringArg(args, "url")
 	size := int64Arg(args, "size_bytes")
 	contentType := firstNonEmpty(stringArg(args, "content_type"), "application/octet-stream")
 	if content := stringArg(args, "content_base64"); content != "" {
@@ -295,7 +297,7 @@ func addAttachment(ctx *sdk.AppCtx, pid string, ticketID int64, args map[string]
 			FileID any    `json:"file_id"`
 			URL    string `json:"url"`
 		}
-		err = ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{"name": name, "content_base64": content, "folder": "tickets/" + strconv.FormatInt(ticketID, 10), "content_type": contentType, "visibility": "signed", "source": "tickets"}, &got)
+		err = ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{"name": name, "content_base64": content, "folder": "tickets/" + strconv.FormatInt(ticketID, 10), "content_type": contentType, "visibility": "private", "source": "tickets"}, &got)
 		if err != nil {
 			return nil, fmt.Errorf("Storage is optional but required for uploads: %w", err)
 		}
@@ -312,23 +314,14 @@ func addAttachment(ctx *sdk.AppCtx, pid string, ticketID int64, args map[string]
 	return addAttachmentRecord(ctx.AppDB(), pid, ticketID, commentID, fileID, name, contentType, size, fileURL, visibility, actor)
 }
 
-func hydrateAttachmentURLs(ctx *sdk.AppCtx, pid string, attachments []*Attachment) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
+func decorateAttachmentURLs(ctx *sdk.AppCtx, ticket *Ticket, attachments []*Attachment) {
+	if ticket == nil || ticket.PortalToken == "" {
 		return
 	}
+	base := publicAppBase(ctx) + "/p/ticket/" + url.PathEscape(ticket.PortalToken)
 	for _, a := range attachments {
-		if a.StorageFileID == "" {
-			continue
-		}
-		id, err := strconv.ParseInt(a.StorageFileID, 10, 64)
-		if err != nil {
-			continue
-		}
-		var got struct {
-			URL string `json:"url"`
-		}
-		if ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{"id": id, "ttl_seconds": 3600}, &got) == nil && got.URL != "" {
-			a.URL = got.URL
+		if a != nil && a.Visibility == "public" {
+			a.URL = base + "/attachments/" + strconv.FormatInt(a.ID, 10) + "/content"
 		}
 	}
 }

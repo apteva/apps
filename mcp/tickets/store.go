@@ -692,7 +692,7 @@ func getAttachment(db *sql.DB, pid string, ticketID, id int64) (*Attachment, err
 }
 
 func listAttachments(db *sql.DB, pid string, ticketID int64, includeInternal bool) ([]*Attachment, error) {
-	q := `SELECT id FROM ticket_attachments WHERE project_id=? AND ticket_id=?`
+	q := `SELECT id,ticket_id,comment_id,storage_file_id,name,content_type,size_bytes,url,visibility,uploaded_by_kind,uploaded_by_ref,uploaded_by_name,created_at FROM ticket_attachments WHERE project_id=? AND ticket_id=?`
 	if !includeInternal {
 		q += ` AND visibility='public'`
 	}
@@ -704,13 +704,13 @@ func listAttachments(db *sql.DB, pid string, ticketID int64, includeInternal boo
 	defer rows.Close()
 	out := []*Attachment{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		a := &Attachment{}
+		var comment sql.NullInt64
+		if err := rows.Scan(&a.ID, &a.TicketID, &comment, &a.StorageFileID, &a.Name, &a.ContentType, &a.SizeBytes, &a.URL, &a.Visibility, &a.UploadedByKind, &a.UploadedByRef, &a.UploadedByName, &a.CreatedAt); err != nil {
 			return nil, err
 		}
-		a, e := getAttachment(db, pid, ticketID, id)
-		if e != nil {
-			return nil, e
+		if comment.Valid {
+			a.CommentID = &comment.Int64
 		}
 		out = append(out, a)
 	}
@@ -761,21 +761,19 @@ func getLink(db *sql.DB, pid string, ticketID, id int64) (*Link, error) {
 }
 
 func listLinks(db *sql.DB, pid string, ticketID int64) ([]*Link, error) {
-	rows, err := db.Query(`SELECT id FROM ticket_links WHERE project_id=? AND ticket_id=? ORDER BY created_at,id`, pid, ticketID)
+	rows, err := db.Query(`SELECT id,ticket_id,kind,label,app_name,external_id,url,metadata_json,created_by_kind,created_by_ref,created_by_name,created_at FROM ticket_links WHERE project_id=? AND ticket_id=? ORDER BY created_at,id`, pid, ticketID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []*Link{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		l := &Link{}
+		var raw string
+		if err := rows.Scan(&l.ID, &l.TicketID, &l.Kind, &l.Label, &l.AppName, &l.ExternalID, &l.URL, &raw, &l.CreatedByKind, &l.CreatedByRef, &l.CreatedByName, &l.CreatedAt); err != nil {
 			return nil, err
 		}
-		l, e := getLink(db, pid, ticketID, id)
-		if e != nil {
-			return nil, e
-		}
+		l.Metadata = json.RawMessage(raw)
 		out = append(out, l)
 	}
 	return out, rows.Err()

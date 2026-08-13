@@ -36,7 +36,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tickets requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("tickets mounted", "version", "0.1.2")
+	ctx.Logger().Info("tickets mounted", "version", "0.1.3")
 	return nil
 }
 
@@ -125,7 +125,7 @@ func commentSchema() map[string]any {
 func attachmentSchema() map[string]any {
 	return objectSchema(map[string]any{
 		"id": sInteger(), "comment_id": sInteger(), "file_id": map[string]any{"oneOf": []any{sInteger(), sString()}}, "content_base64": sString(),
-		"name": sString(), "content_type": sString(), "size_bytes": sInteger(),
+		"name": sString(), "content_type": sString(), "size_bytes": sInteger(), "url": sString(),
 		"visibility": enumSchema([]string{"public", "internal"}), "actor_name": sString(),
 	}, []string{"id", "name"})
 }

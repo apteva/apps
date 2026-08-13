@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tickets
 display_name: Tickets
-version: 0.1.2
+version: 0.1.3
 description: |
   Client feedback and support requests without repository coupling. Clients
   submit through secure intake links, follow ticket-specific magic links,
@@ -42,6 +42,8 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /p/
+      no_auth: true
     - prefix: /
   skills:
     - name: how-to-use-tickets
@@ -58,7 +60,7 @@ provides:
     - { name: tickets_comment, description: "Add a public comment visible to the client. Args: id, body, author_name?." }
     - { name: tickets_add_internal_note, description: "Add an internal team/agent note hidden from the client. Args: id, body, author_name?." }
     - { name: tickets_edit_comment, description: "Edit a comment while preserving its previous body as a revision. Args: id, comment_id, body." }
-    - { name: tickets_add_attachment, description: "Attach an existing Storage file or upload base64 content through optional Storage. Args: id, file_id? or content_base64?, name, content_type?, visibility?." }
+    - { name: tickets_add_attachment, description: "Attach an existing Storage file or upload base64 content through optional Storage. Args: id, file_id? or content_base64?, name, content_type?, visibility?, url?." }
     - { name: tickets_link, description: "Link a task, Code issue, deployment, URL, or other record. Args: id, kind, label?, app_name?, external_id?, url?, metadata?." }
     - { name: tickets_history, description: "Read the append-only ticket event history. Args: id, include_internal?." }
     - { name: ticket_areas_list, description: "List configurable feedback areas." }
