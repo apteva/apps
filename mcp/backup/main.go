@@ -8,7 +8,7 @@
 //	│  (jobs_schedule)     │   POST /run  │  (this binary)       │
 //	└──────────────────────┘              └──────┬───────────────┘
 //	                                             │
-//	                                             │  GET /api/platform/snapshot
+//	                                             │  app-authorized streaming callback
 //	                                             ▼
 //	                                      ┌──────────────────────┐
 //	                                      │  apteva-server       │
@@ -51,7 +51,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.3
+version: 0.3.4
 description: |
   Periodic database backups of the platform DB and app.db from running
   sidecars. Supports local disk, AWS S3, Cloudflare R2, and local Fleet tenants.
@@ -63,6 +63,8 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.backup.read
+    - platform.backup.restore
     - platform.connections.read_credentials
   apps:
     - name: jobs
@@ -94,7 +96,7 @@ provides:
     - { name: backup_now, description: "Run a platform or Fleet tenant backup immediately." }
     - { name: backup_schedule, description: "Create a scheduled platform or Fleet tenant backup policy." }
     - { name: backup_list, description: "List past backup runs." }
-    - { name: backup_restore, description: "Verify and restore a past backup." }
+    - { name: backup_restore, description: "Verify and restore a past backup after explicit operator confirmation." }
   ui_panels:
     - slot: project.page
       label: Backup
@@ -104,7 +106,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.3
+    ref: backup/v0.3.4
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -221,10 +223,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "backup_restore",
-			Description: "Restore the bytes of a past run. App DBs swap live; the platform DB is staged for the next server boot. Args: run_id (required).",
+			Description: "Restore the bytes of a past run after explicit operator confirmation. App DBs swap live; the platform DB is staged for the next server boot. Args: run_id and confirm=true (both required).",
 			InputSchema: schemaObject(map[string]any{
-				"run_id": map[string]any{"type": "integer"},
-			}, []string{"run_id"}),
+				"run_id":  map[string]any{"type": "integer"},
+				"confirm": map[string]any{"type": "boolean", "description": "Must be true after the operator explicitly approves this destructive restore."},
+			}, []string{"run_id", "confirm"}),
 			Handler: a.toolBackupRestore,
 		},
 	}
@@ -428,6 +431,10 @@ func (a *App) toolBackupRestore(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	runID := int64Arg(args, "run_id")
 	if runID == 0 {
 		return nil, errors.New("run_id required")
+	}
+	confirmed, _ := args["confirm"].(bool)
+	if !confirmed {
+		return nil, errors.New("confirm=true is required after explicit operator approval")
 	}
 	report, err := restoreFromRun(ctx, runID)
 	if err != nil {
@@ -778,7 +785,7 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"run": run})
 }
 
-// handleRestore expects POST {run_id: <int>}.
+// handleRestore expects POST {run_id: <int>, confirm: true}.
 func (a *App) handleRestore(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -786,10 +793,15 @@ func (a *App) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := getAppCtx(r)
 	var body struct {
-		RunID int64 `json:"run_id"`
+		RunID   int64 `json:"run_id"`
+		Confirm bool  `json:"confirm"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RunID == 0 {
 		httpErr(w, http.StatusBadRequest, "run_id required")
+		return
+	}
+	if !body.Confirm {
+		httpErr(w, http.StatusBadRequest, "confirm=true is required after explicit operator approval")
 		return
 	}
 	report, err := restoreFromRun(ctx, body.RunID)

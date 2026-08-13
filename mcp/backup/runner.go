@@ -4,7 +4,7 @@ package main
 //
 // Steps for a successful run:
 //   1. Insert a runs row in 'running' state (so the UI can see it live)
-//   2. Stream GET /api/platform/snapshot from the gateway, hashing the
+//   2. Stream a platform snapshot through the app-authorized SDK, hashing the
 //      bytes as they fly past, into a temp file
 //   3. Read the snapshot's manifest.json out of the tar without
 //      decompressing the whole archive into memory
@@ -50,6 +50,8 @@ var platformTransferClient = func() *http.Client {
 	transport.IdleConnTimeout = 90 * time.Second
 	return &http.Client{Transport: transport}
 }()
+
+const platformBackupUnsupportedMessage = "server does not support app-authorized platform backups; update Apteva Server"
 
 var operationState struct {
 	sync.Mutex
@@ -192,43 +194,42 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	return successful, nil
 }
 
-// streamSnapshot copies /api/platform/snapshot into dst. Returns the
-// number of bytes written. Auth uses the install's APTEVA_APP_TOKEN —
-// the auth middleware resolves it to the install's installed_by user
-// (admin id=1 for self-host setups), which the snapshot endpoint then
-// gates on.
-func streamSnapshot(ctx context.Context, dst io.Writer) (int64, error) {
-	gateway := os.Getenv("APTEVA_GATEWAY_URL")
-	if gateway == "" {
-		return 0, fmt.Errorf("APTEVA_GATEWAY_URL not set — backup cannot reach the platform")
-	}
-	token := os.Getenv("APTEVA_APP_TOKEN")
-	if token == "" {
-		return 0, fmt.Errorf("APTEVA_APP_TOKEN not set — backup cannot authenticate")
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(gateway, "/")+"/api/platform/snapshot", nil)
+// streamSnapshot copies an app-authorized platform snapshot into dst. The SDK
+// owns authentication and keeps the response streaming; Backup never receives
+// an administrator API key and never calls the management route directly.
+func streamSnapshot(ctx context.Context, appCtx *sdk.AppCtx, dst io.Writer) (int64, error) {
+	api, err := platformBackupAPI(appCtx)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := platformTransferClient.Do(req)
+	reader, err := api.OpenPlatformSnapshot(ctx)
 	if err != nil {
-		return 0, err
+		return 0, normalizePlatformBackupError(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return 0, fmt.Errorf("snapshot endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	return io.Copy(dst, resp.Body)
+	defer reader.Close()
+	return io.Copy(dst, reader)
 }
 
 func writeSnapshot(opCtx context.Context, ctx *sdk.AppCtx, dst io.Writer, scope Scope) (int64, string, error) {
 	if scope.Kind == "" || scope.Kind == "platform" {
-		n, err := streamSnapshot(opCtx, dst)
+		n, err := streamSnapshot(opCtx, ctx, dst)
 		return n, "", err
 	}
 	return streamProviderSnapshot(opCtx, ctx, dst, scope)
+}
+
+func platformBackupAPI(ctx *sdk.AppCtx) (sdk.PlatformBackupClient, error) {
+	if ctx == nil || ctx.PlatformBackupAPI() == nil {
+		return nil, errors.New(platformBackupUnsupportedMessage)
+	}
+	return ctx.PlatformBackupAPI(), nil
+}
+
+func normalizePlatformBackupError(err error) error {
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "http 404") {
+		return errors.New(platformBackupUnsupportedMessage)
+	}
+	return err
 }
 
 type providerSnapshotResponse struct {

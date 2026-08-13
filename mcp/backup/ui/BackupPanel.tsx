@@ -356,7 +356,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         partial_failure?: boolean;
         failures?: string[];
         failure_count?: number;
-      } }>("POST", "/restore", { run_id: runID });
+      } }>("POST", "/restore", { run_id: runID, confirm: true });
       const restart = out?.report?.restart_required;
       const run = runs.find((item) => item.id === runID);
       const fleetTenant = run?.scope?.kind === "fleet_tenant";

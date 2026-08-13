@@ -94,7 +94,7 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 		}
 		restoreSize = info.Size()
 	}
-	report, err := postRestoreReader(opCtx, restoreBody, restoreSize)
+	report, err := postRestoreReader(opCtx, ctx, restoreBody, restoreSize)
 	if err != nil {
 		return nil, err
 	}
@@ -147,49 +147,20 @@ func restoreProviderRunStream(opCtx context.Context, ctx *sdk.AppCtx, run *Run, 
 	return annotateRestoreReport(report), nil
 }
 
-func postRestore(body []byte) (map[string]any, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), transferTimeout)
+func postRestore(appCtx *sdk.AppCtx, body []byte) (map[string]any, error) {
+	opCtx, cancel := context.WithTimeout(context.Background(), transferTimeout)
 	defer cancel()
-	return postRestoreReader(ctx, bytes.NewReader(body), int64(len(body)))
+	return postRestoreReader(opCtx, appCtx, bytes.NewReader(body), int64(len(body)))
 }
 
-func postRestoreReader(ctx context.Context, body io.Reader, size int64) (map[string]any, error) {
-	gateway := os.Getenv("APTEVA_GATEWAY_URL")
-	if gateway == "" {
-		return nil, fmt.Errorf("APTEVA_GATEWAY_URL not set")
-	}
-	token := os.Getenv("APTEVA_APP_TOKEN")
-	if token == "" {
-		return nil, fmt.Errorf("APTEVA_APP_TOKEN not set")
-	}
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		strings.TrimRight(gateway, "/")+"/api/platform/restore",
-		body)
+func postRestoreReader(ctx context.Context, appCtx *sdk.AppCtx, body io.Reader, size int64) (map[string]any, error) {
+	api, err := platformBackupAPI(appCtx)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/gzip")
-	req.Header.Set("X-Confirm-Restore", "yes")
-	if size >= 0 {
-		req.ContentLength = size
-	}
-
-	resp, err := platformTransferClient.Do(req)
+	report, err := api.RestorePlatformSnapshot(ctx, body, size)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
-	if readErr != nil {
-		return nil, fmt.Errorf("read restore report: %w", readErr)
-	}
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("restore endpoint returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-	var report map[string]any
-	if err := json.Unmarshal(respBody, &report); err != nil {
-		return nil, fmt.Errorf("decode restore report: %w", err)
+		return nil, normalizePlatformBackupError(err)
 	}
 	return annotateRestoreReport(report), nil
 }

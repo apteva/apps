@@ -33,6 +33,7 @@ snapshot transport is implemented.
 - Soft-deleted destinations, preserving historical restore metadata
 - Durable run progress with interrupted-run recovery and bounded failed history
 - Destination health checks and partial-restore reporting
+- App-authorized streaming with separate snapshot and restore permissions
 
 ## Scheduling
 
@@ -89,6 +90,13 @@ Platform app databases are swapped by the platform restore endpoint. The
 platform database is staged and activated on the next `apteva-server` restart.
 Fleet restores validate the archive's provider, tenant ID, and tenant slug
 before replacing the selected tenant directory.
+
+The global Backup installation uses its own install token through dedicated
+platform callback routes. It never receives an administrator API key and it
+cannot access the management snapshot routes. Snapshot and restore are separate
+approved permissions, and every restore requires explicit operator confirmation.
+Older servers without the app-authorized streaming capability are rejected with
+a clear upgrade error; Backup does not fall back to an administrator credential.
 
 The restore report is inspected entry by entry. If the platform applies some
 databases but rejects others, Backup reports a partial restore and lists the

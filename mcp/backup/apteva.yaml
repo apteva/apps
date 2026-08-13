@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.3.3
+version: 0.3.4
 description: |
   Periodic database backups of your Apteva instance: the platform DB
   plus app.db from running sidecars. Snapshots are captured online and
@@ -26,6 +26,8 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.backup.read
+    - platform.backup.restore
     - platform.connections.read_credentials
   apps:
     - name: jobs
@@ -62,7 +64,7 @@ provides:
     - name: backup_list
       description: List past backup runs with size, destination, scope, and status.
     - name: backup_restore
-      description: Verify and restore a past backup.
+      description: Verify and restore a past backup after explicit operator confirmation.
   ui_panels:
     - slot: project.page
       label: Backup
@@ -74,7 +76,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.3
+    ref: backup/v0.3.4
     entry: mcp/backup
   port: 8080
   health_check: /health

@@ -78,6 +78,43 @@ func newTestCtx(t *testing.T) *sdk.AppCtx {
 	return sdk.NewAppCtxForTest(&m, db, sdk.Config{}, nil, &silentLogger{})
 }
 
+type backupPlatform struct {
+	tk.BasePlatformClient
+	snapshot       []byte
+	snapshotErr    error
+	waitForContext bool
+	restoreReport  map[string]any
+	restoreErr     error
+	restoreBody    []byte
+	restoreSize    int64
+}
+
+func (p *backupPlatform) OpenPlatformSnapshot(ctx context.Context) (io.ReadCloser, error) {
+	if p.waitForContext {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if p.snapshotErr != nil {
+		return nil, p.snapshotErr
+	}
+	return io.NopCloser(bytes.NewReader(p.snapshot)), nil
+}
+
+func (p *backupPlatform) RestorePlatformSnapshot(_ context.Context, body io.Reader, size int64) (map[string]any, error) {
+	p.restoreSize = size
+	p.restoreBody, _ = io.ReadAll(body)
+	if p.restoreErr != nil {
+		return nil, p.restoreErr
+	}
+	return p.restoreReport, nil
+}
+
+func newBackupTestCtx(t *testing.T, platform *backupPlatform) *sdk.AppCtx {
+	t.Helper()
+	manifest := (&App{}).Manifest()
+	return sdk.NewAppCtxForTest(&manifest, openTestDB(t), sdk.Config{}, platform, silentLogger{})
+}
+
 type silentLogger struct{}
 
 func (silentLogger) Info(string, ...any)  {}
@@ -141,6 +178,9 @@ func TestManifestsAgreeOnReleaseContract(t *testing.T) {
 		}
 		if !permissions["platform.connections.read_credentials"] {
 			t.Errorf("%s manifest is missing restricted credential permission", label)
+		}
+		if !permissions["platform.backup.read"] || !permissions["platform.backup.restore"] {
+			t.Errorf("%s manifest is missing dedicated platform backup permissions", label)
 		}
 		if permissions["platform.connections.execute"] {
 			t.Errorf("%s manifest retains unused connection execution permission", label)
@@ -667,7 +707,6 @@ func TestAnnotateRestoreReportSurfacesPartialFailure(t *testing.T) {
 }
 
 func TestRunBackup_FailureIsReturnedAndRecorded(t *testing.T) {
-	t.Setenv("APTEVA_GATEWAY_URL", "")
 	ctx := newTestCtx(t)
 	dir := t.TempDir()
 	dest, err := dbCreateDestination(ctx.AppDB(), &Destination{
@@ -677,7 +716,7 @@ func TestRunBackup_FailureIsReturnedAndRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, err := runBackup(ctx, dest, nil, defaultScope())
-	if err == nil || !strings.Contains(err.Error(), "APTEVA_GATEWAY_URL") {
+	if err == nil || !strings.Contains(err.Error(), "server does not support app-authorized platform backups") {
 		t.Fatalf("run error = %v", err)
 	}
 	if run == nil || run.Status != "failed" || run.Error == "" {
@@ -865,9 +904,8 @@ func TestHTTPRoutes_LocalLifecycle(t *testing.T) {
 		t.Fatalf("policies = %#v", policies)
 	}
 
-	t.Setenv("APTEVA_GATEWAY_URL", "")
 	runResponse := request(http.MethodPost, "/run", fmt.Sprintf(`{"destination_id":%d}`, destinationID), app.handleRunNow)
-	if runResponse.Code != http.StatusInternalServerError || !strings.Contains(runResponse.Body.String(), "APTEVA_GATEWAY_URL") {
+	if runResponse.Code != http.StatusInternalServerError || !strings.Contains(runResponse.Body.String(), "server does not support app-authorized platform backups") {
 		t.Fatalf("run now: status=%d body=%s", runResponse.Code, runResponse.Body.String())
 	}
 	allRuns, _ := dbListRuns(db, destinationID, 10)
@@ -878,7 +916,7 @@ func TestHTTPRoutes_LocalLifecycle(t *testing.T) {
 	if runItem.Code != http.StatusOK {
 		t.Fatalf("run item: status=%d body=%s", runItem.Code, runItem.Body.String())
 	}
-	restoreResponse := request(http.MethodPost, "/restore", fmt.Sprintf(`{"run_id":%d}`, allRuns[0].ID), app.handleRestore)
+	restoreResponse := request(http.MethodPost, "/restore", fmt.Sprintf(`{"run_id":%d,"confirm":true}`, allRuns[0].ID), app.handleRestore)
 	if restoreResponse.Code != http.StatusInternalServerError || !strings.Contains(restoreResponse.Body.String(), "only successful") {
 		t.Fatalf("restore failed run: status=%d body=%s", restoreResponse.Code, restoreResponse.Body.String())
 	}
@@ -1043,65 +1081,51 @@ func TestCreateCloudDestinationRejectsUnboundConnectionID(t *testing.T) {
 
 // ─── snapshot streamer ─────────────────────────────────────────────
 
-func TestStreamSnapshot_NoGatewayEnv(t *testing.T) {
-	t.Setenv("APTEVA_GATEWAY_URL", "")
-	if _, err := streamSnapshot(context.Background(), io.Discard); err == nil {
-		t.Errorf("expected error when APTEVA_GATEWAY_URL unset")
+func TestStreamSnapshot_UnsupportedServer(t *testing.T) {
+	if _, err := streamSnapshot(context.Background(), newTestCtx(t), io.Discard); err == nil || !strings.Contains(err.Error(), "update Apteva Server") {
+		t.Errorf("expected clear unsupported-server error, got %v", err)
 	}
 }
 
 func TestStreamSnapshot_HappyPath(t *testing.T) {
 	body := []byte("synthetic-snapshot-bytes")
-	var sawAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/platform/snapshot" {
-			t.Errorf("path = %s", r.URL.Path)
-		}
-		sawAuth = r.Header.Get("Authorization")
-		w.Header().Set("Content-Type", "application/gzip")
-		_, _ = w.Write(body)
-	}))
-	defer srv.Close()
-	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
-	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
+	platform := &backupPlatform{snapshot: body}
+	ctx := newBackupTestCtx(t, platform)
 
 	var buf bytes.Buffer
-	n, err := streamSnapshot(context.Background(), &buf)
+	n, err := streamSnapshot(context.Background(), ctx, &buf)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != int64(len(body)) || !bytes.Equal(buf.Bytes(), body) {
 		t.Errorf("body mismatch (n=%d, want=%d)", n, len(body))
 	}
-	if sawAuth != "Bearer dev-42" {
-		t.Errorf("missing/incorrect auth header: %q", sawAuth)
-	}
 }
 
 func TestStreamSnapshot_NonOKResponse(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "admin only", 403)
-	}))
-	defer srv.Close()
-	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
-	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
+	platform := &backupPlatform{snapshotErr: errors.New("snapshot endpoint returned 403: admin only")}
+	ctx := newBackupTestCtx(t, platform)
 
-	if _, err := streamSnapshot(context.Background(), io.Discard); err == nil || !strings.Contains(err.Error(), "403") {
+	if _, err := streamSnapshot(context.Background(), ctx, io.Discard); err == nil || !strings.Contains(err.Error(), "403") {
 		t.Errorf("expected 403 in error, got %v", err)
 	}
 }
 
+func TestStreamSnapshot_OlderServerReturnsClearUpgradeError(t *testing.T) {
+	platform := &backupPlatform{snapshotErr: errors.New("platform /api/apps/callback/platform/snapshot: http 404: not found")}
+	ctx := newBackupTestCtx(t, platform)
+	if _, err := streamSnapshot(context.Background(), ctx, io.Discard); err == nil || err.Error() != platformBackupUnsupportedMessage {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestStreamSnapshot_RespectsCancellation(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
-	defer srv.Close()
-	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
-	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
+	platform := &backupPlatform{waitForContext: true}
+	appCtx := newBackupTestCtx(t, platform)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
 	defer cancel()
-	if _, err := streamSnapshot(ctx, io.Discard); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := streamSnapshot(ctx, appCtx, io.Discard); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected deadline exceeded, got %v", err)
 	}
 }
@@ -1109,31 +1133,40 @@ func TestStreamSnapshot_RespectsCancellation(t *testing.T) {
 // ─── postRestore ───────────────────────────────────────────────────
 
 func TestPostRestore_HappyPath(t *testing.T) {
-	var sawConfirm, sawCT string
-	var sawBody []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawConfirm = r.Header.Get("X-Confirm-Restore")
-		sawCT = r.Header.Get("Content-Type")
-		sawBody, _ = io.ReadAll(r.Body)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"format_version_seen": 1,
-			"server_db":           "staged",
-			"restart_required":    true,
-			"installs":            []any{},
-		})
-	}))
-	defer srv.Close()
-	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
-	t.Setenv("APTEVA_APP_TOKEN", "dev-42")
+	platform := &backupPlatform{restoreReport: map[string]any{
+		"format_version_seen": 1,
+		"server_db":           "staged",
+		"restart_required":    true,
+		"installs":            []any{},
+	}}
+	ctx := newBackupTestCtx(t, platform)
 
-	report, err := postRestore([]byte("fake-tarball"))
+	report, err := postRestore(ctx, []byte("fake-tarball"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sawConfirm != "yes" || sawCT != "application/gzip" || !bytes.Equal(sawBody, []byte("fake-tarball")) {
-		t.Errorf("request shape wrong: confirm=%q ct=%q body=%q", sawConfirm, sawCT, sawBody)
+	if platform.restoreSize != int64(len("fake-tarball")) || !bytes.Equal(platform.restoreBody, []byte("fake-tarball")) {
+		t.Errorf("request shape wrong: size=%d body=%q", platform.restoreSize, platform.restoreBody)
 	}
 	if report["restart_required"] != true || report["server_db"] != "staged" {
 		t.Errorf("report = %+v", report)
+	}
+}
+
+func TestBackupRestoreRequiresExplicitConfirmation(t *testing.T) {
+	app := &App{}
+	ctx := newTestCtx(t)
+	if _, err := app.toolBackupRestore(ctx, map[string]any{"run_id": float64(42)}); err == nil || !strings.Contains(err.Error(), "confirm=true") {
+		t.Fatalf("tool restore without confirmation error = %v", err)
+	}
+
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	req := httptest.NewRequest(http.MethodPost, "/restore", strings.NewReader(`{"run_id":42}`))
+	recorder := httptest.NewRecorder()
+	app.handleRestore(recorder, req)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "confirm=true") {
+		t.Fatalf("REST restore without confirmation: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
