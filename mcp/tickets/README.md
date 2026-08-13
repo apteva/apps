@@ -12,6 +12,10 @@ CRM, Storage, Tasks, Code, and Channels are all optional. With no bindings,
 Tickets still provides ticket CRUD, configurable areas, comments, internal
 notes, status history, and secure public intake/ticket links.
 
+The project panel includes both list and Kanban board views. Moving a card
+between workflow columns updates its status through the normal ticket API, so
+the transition remains part of the permanent ticket history.
+
 ## Development
 
 ```sh

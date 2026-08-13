@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tickets
 display_name: Tickets
-version: 0.1.3
+version: 0.1.4
 description: |
   Client feedback and support requests without repository coupling. Clients
   submit through secure intake links, follow ticket-specific magic links,

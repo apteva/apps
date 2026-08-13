@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type DragEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 interface NativePanelProps { appName: string; installId: number; projectId: string; instanceId?: number }
 interface Area { id:number; slug:string; name:string; color:string; sort_order:number; archived:boolean }
@@ -9,6 +9,7 @@ interface Attachment { id:number; name:string; content_type:string; size_bytes:n
 interface Link { id:number; kind:string; label?:string; app_name?:string; external_id?:string; url?:string; created_at:string }
 interface Detail { ticket:Ticket; comments:Comment[]; events:Event[]; attachments:Attachment[]; links:Link[] }
 interface Portal { title:string; welcome_text:string; enabled:boolean; intake_url:string }
+type ViewMode="list"|"board";
 
 const API="/api/apps/tickets";
 const statuses=["new","acknowledged","planned","in_progress","waiting_client","resolved","closed"];
@@ -19,6 +20,7 @@ export default function TicketsPanel({projectId}:NativePanelProps){
   const [tickets,setTickets]=useState<Ticket[]>([]),[areas,setAreas]=useState<Area[]>([]);
   const [selectedId,setSelectedId]=useState(0),[detail,setDetail]=useState<Detail|null>(null);
   const [query,setQuery]=useState(""),[statusFilter,setStatusFilter]=useState(""),[areaFilter,setAreaFilter]=useState("");
+  const [view,setView]=useState<ViewMode>("list"),[draggingId,setDraggingId]=useState(0);
   const [message,setMessage]=useState(""),[busy,setBusy]=useState(false),[creating,setCreating]=useState(false),[showAreas,setShowAreas]=useState(false);
   const [portal,setPortal]=useState<Portal|null>(null),[composer,setComposer]=useState(""),[internal,setInternal]=useState(false);
   const [draft,setDraft]=useState(emptyDraft());
@@ -26,28 +28,35 @@ export default function TicketsPanel({projectId}:NativePanelProps){
 
   const loadAreas=useCallback(async()=>{const r=await fetch(withProject("/areas"),{credentials:"same-origin"});if(r.ok)setAreas((await r.json()).areas??[])},[withProject]);
   const loadPortal=useCallback(async()=>{const r=await fetch(withProject("/portal"),{credentials:"same-origin"});if(r.ok)setPortal((await r.json()).portal??null)},[withProject]);
-  const loadTickets=useCallback(async()=>{const p=new URLSearchParams();if(query.trim())p.set("q",query.trim());if(statusFilter)p.set("status",statusFilter);if(areaFilter)p.set("area",areaFilter);try{const r=await fetch(withProject(`/tickets?${p}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();const rows=out.tickets??[];setTickets(rows);setSelectedId(current=>current&&rows.some((t:Ticket)=>t.id===current)?current:rows[0]?.id??0);setMessage(`${out.total??rows.length} ticket${(out.total??rows.length)===1?"":"s"}`)}catch(e){setMessage((e as Error).message)}},[areaFilter,query,statusFilter,withProject]);
+  const loadTickets=useCallback(async()=>{const p=new URLSearchParams();if(query.trim())p.set("q",query.trim());if(view==="list"&&statusFilter)p.set("status",statusFilter);if(areaFilter)p.set("area",areaFilter);p.set("limit","200");try{const r=await fetch(withProject(`/tickets?${p}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();const rows=out.tickets??[];setTickets(rows);setSelectedId(current=>current&&rows.some((t:Ticket)=>t.id===current)?current:rows[0]?.id??0);setMessage(`${out.total??rows.length} ticket${(out.total??rows.length)===1?"":"s"}`)}catch(e){setMessage((e as Error).message)}},[areaFilter,query,statusFilter,view,withProject]);
   const loadDetail=useCallback(async(id:number)=>{if(!id){setDetail(null);return}try{const r=await fetch(withProject(`/tickets/${id}`),{credentials:"same-origin"});if(!r.ok)throw new Error(await r.text());const out=await r.json();setDetail(out);const t=out.ticket as Ticket;setDraft({title:t.title,description:t.description,type:t.type,status:t.status,priority:t.priority,area:t.area_slug||"general",requester_name:t.requester_name||"",requester_email:t.requester_email||"",requester_organization:t.requester_organization||"",assignee_name:t.assignee_name||"",due_at:t.due_at||""})}catch(e){setMessage((e as Error).message)}},[withProject]);
   useEffect(()=>{void loadAreas();void loadPortal()},[loadAreas,loadPortal]);
   useEffect(()=>{const timer=window.setTimeout(()=>void loadTickets(),query?220:0);return()=>window.clearTimeout(timer)},[loadTickets,query]);
-  useEffect(()=>{if(!creating&&!showAreas)void loadDetail(selectedId)},[creating,loadDetail,selectedId,showAreas]);
+  useEffect(()=>{if(view==="list"&&!creating&&!showAreas)void loadDetail(selectedId)},[creating,loadDetail,selectedId,showAreas,view]);
 
   const selected=useMemo(()=>tickets.find(t=>t.id===selectedId)??null,[selectedId,tickets]);
-  const startNew=()=>{setCreating(true);setShowAreas(false);setSelectedId(0);setDetail(null);setDraft(emptyDraft());setMessage("New ticket")};
+  const startNew=()=>{setView("list");setCreating(true);setShowAreas(false);setSelectedId(0);setDetail(null);setDraft(emptyDraft());setMessage("New ticket")};
   const createTicket=async()=>{if(!draft.title.trim()){setMessage("Title is required.");return}setBusy(true);try{const body={...draft,status:undefined,due_at:draft.due_at||""};const r=await fetch(withProject("/tickets"),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const out=await r.json();if(!r.ok)throw new Error(out.error||"Create failed");setCreating(false);await loadTickets();setSelectedId(out.ticket.id);setMessage(`${out.ticket.key} created.`)}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
   const saveTicket=async()=>{if(!detail)return;setBusy(true);try{const patch={title:draft.title,description:draft.description,type:draft.type,priority:draft.priority,area:draft.area,requester_name:draft.requester_name,requester_email:draft.requester_email,requester_organization:draft.requester_organization,assignee_name:draft.assignee_name,due_at:draft.due_at};let r=await fetch(withProject(`/tickets/${detail.ticket.id}`),{method:"PATCH",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(patch)});let out=await r.json();if(!r.ok)throw new Error(out.error||"Save failed");if(draft.status!==detail.ticket.status){r=await fetch(withProject(`/tickets/${detail.ticket.id}/status`),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:draft.status})});out=await r.json();if(!r.ok)throw new Error(out.error||"Status update failed")}await loadTickets();await loadDetail(detail.ticket.id);setMessage("Saved.")}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
   const addComment=async()=>{if(!detail||!composer.trim())return;setBusy(true);try{const path=internal?"internal-notes":"comments";const r=await fetch(withProject(`/tickets/${detail.ticket.id}/${path}`),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({body:composer})});const out=await r.json();if(!r.ok)throw new Error(out.error||"Reply failed");setComposer("");await loadDetail(detail.ticket.id);await loadTickets();setMessage(internal?"Internal note added.":"Reply added.")}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
   const upload=async(files:FileList|null)=>{if(!detail||!files?.length)return;setBusy(true);try{for(const file of Array.from(files)){if(file.size>10*1024*1024)throw new Error(`${file.name} exceeds 10 MB`);setMessage(`Uploading ${file.name}…`);const content_base64=await fileBase64(file);const r=await fetch(withProject(`/tickets/${detail.ticket.id}/attachments`),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:file.name,content_type:file.type||"application/octet-stream",content_base64,visibility:internal?"internal":"public"})});const out=await r.json();if(!r.ok)throw new Error(out.error||"Upload failed")}await loadDetail(detail.ticket.id);setMessage("Attachment added.")}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
   const copyPortal=async()=>{if(!portal)return;await navigator.clipboard.writeText(portal.intake_url);setMessage("Client intake link copied.")};
+  const moveTicket=async(ticket:Ticket,status:string)=>{if(ticket.status===status||busy)return;const previous=ticket.status;setBusy(true);setTickets(rows=>rows.map(row=>row.id===ticket.id?{...row,status,updated_at:new Date().toISOString()}:row));setMessage(`Moving ${ticket.key} to ${label(status)}…`);try{const r=await fetch(withProject(`/tickets/${ticket.id}/status`),{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({status,reason:"Moved on Kanban board"})});const out=await r.json();if(!r.ok)throw new Error(out.error||"Status update failed");setMessage(`${ticket.key} moved to ${label(status)}.`);await loadTickets()}catch(e){setTickets(rows=>rows.map(row=>row.id===ticket.id?{...row,status:previous}:row));setMessage((e as Error).message)}finally{setBusy(false);setDraggingId(0)}};
+  const openFromBoard=(ticket:Ticket)=>{setSelectedId(ticket.id);setCreating(false);setShowAreas(false);setView("list")};
 
   return <div className="h-full min-h-0 flex flex-col bg-bg text-text">
     <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
       <div><h1 className="text-sm font-semibold">Tickets</h1><p className="text-xs text-text-muted">Client feedback, support requests, and permanent history.</p></div>
       <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search tickets" className="ml-auto w-64 bg-bg-input border border-border rounded px-2.5 py-1.5 text-sm"/>
-      <button onClick={()=>{setShowAreas(true);setCreating(false)}} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Areas</button>
+      <div className="flex rounded border border-border overflow-hidden" aria-label="Ticket view">
+        <button onClick={()=>setView("list")} aria-pressed={view==="list"} className={`px-2.5 py-1.5 text-xs ${view==="list"?"bg-accent text-bg":"hover:bg-bg-input text-text-muted"}`}>List</button>
+        <button onClick={()=>{setStatusFilter("");setCreating(false);setShowAreas(false);setView("board")}} aria-pressed={view==="board"} className={`px-2.5 py-1.5 text-xs border-l border-border ${view==="board"?"bg-accent text-bg":"hover:bg-bg-input text-text-muted"}`}>Board</button>
+      </div>
+      <button onClick={()=>{setView("list");setShowAreas(true);setCreating(false)}} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Areas</button>
       {portal&&<button onClick={copyPortal} className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Copy intake link</button>}
       <button onClick={startNew} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium">New ticket</button>
     </header>
+    {view==="board"&&!creating&&!showAreas?<KanbanBoard tickets={tickets} areas={areas} areaFilter={areaFilter} setAreaFilter={setAreaFilter} draggingId={draggingId} setDraggingId={setDraggingId} busy={busy} message={message} moveTicket={moveTicket} openTicket={openFromBoard}/>:<>
     <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">
       <aside className="border-r border-border min-h-0 flex flex-col">
         <div className="p-3 border-b border-border grid grid-cols-2 gap-2">
@@ -68,7 +77,36 @@ export default function TicketsPanel({projectId}:NativePanelProps){
         </div><Timeline detail={detail}/></div>
       </section>:<div className="grid place-items-center text-sm text-text-muted">Select or create a ticket.</div>}
     </main>
+    </>}
   </div>
+}
+
+function KanbanBoard({tickets,areas,areaFilter,setAreaFilter,draggingId,setDraggingId,busy,message,moveTicket,openTicket}:{tickets:Ticket[];areas:Area[];areaFilter:string;setAreaFilter:(value:string)=>void;draggingId:number;setDraggingId:(id:number)=>void;busy:boolean;message:string;moveTicket:(ticket:Ticket,status:string)=>Promise<void>;openTicket:(ticket:Ticket)=>void}){
+  const grouped=useMemo(()=>Object.fromEntries(statuses.map(status=>[status,tickets.filter(ticket=>ticket.status===status)])) as Record<string,Ticket[]>,[tickets]);
+  const drop=(event:DragEvent<HTMLElement>,status:string)=>{event.preventDefault();const id=Number(event.dataTransfer.getData("text/plain")||draggingId);const ticket=tickets.find(row=>row.id===id);if(ticket)void moveTicket(ticket,status)};
+  return <main className="flex-1 min-h-0 flex flex-col">
+    <div className="shrink-0 px-4 py-2.5 border-b border-border flex items-center gap-3">
+      <select value={areaFilter} onChange={event=>setAreaFilter(event.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs"><option value="">All areas</option>{areas.map(area=><option key={area.id} value={area.slug}>{area.name}</option>)}</select>
+      <span className="text-xs text-text-muted">Drag tickets between columns to update status and record the change in history.</span>
+      <span className="ml-auto text-xs text-text-dim">{message}</span>
+    </div>
+    <div className="flex-1 min-h-0 overflow-auto p-3">
+      <div className="h-full flex gap-3 min-w-max" data-ticket-kanban>
+        {statuses.map(status=><section key={status} data-kanban-status={status} onDragOver={event=>{event.preventDefault();event.dataTransfer.dropEffect="move"}} onDrop={event=>drop(event,status)} className="w-72 h-full min-h-0 flex flex-col rounded-lg border border-border bg-bg-input">
+          <header style={{borderTopWidth:2}} className={`shrink-0 px-3 py-2.5 border-b border-border flex items-center gap-2 ${statusAccent(status)}`}><h2 className="text-xs font-semibold">{label(status)}</h2><span className="ml-auto min-w-5 text-center text-[10px] rounded-full bg-bg px-1.5 py-0.5 text-text-muted">{grouped[status].length}</span></header>
+          <div className="flex-1 min-h-0 overflow-y-auto p-2 space-y-2">
+            {grouped[status].map(ticket=><button key={ticket.id} draggable={!busy} onDragStart={event=>{event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",String(ticket.id));setDraggingId(ticket.id)}} onDragEnd={()=>setDraggingId(0)} onClick={()=>openTicket(ticket)} className={`w-full text-left rounded-md border border-border bg-bg p-3 shadow-sm hover:border-accent/60 hover:bg-bg-input cursor-grab active:cursor-grabbing ${draggingId===ticket.id?"opacity-40":""}`}>
+              <div className="flex items-center gap-2"><span className="text-[10px] text-text-dim">{ticket.key}</span><span className={`ml-auto text-[10px] rounded px-1.5 py-0.5 ${priorityClass(ticket.priority)}`}>{label(ticket.priority)}</span></div>
+              <div className="mt-1.5 text-sm font-medium leading-snug line-clamp-3">{ticket.title}</div>
+              <div className="mt-2 flex items-center gap-1.5 text-[10px] text-text-muted"><span className="w-2 h-2 rounded-full" style={{background:ticket.area_color||"#6b7280"}}/><span className="truncate">{ticket.area_name||"General"}</span><span className="ml-auto">{relative(ticket.updated_at)}</span></div>
+              {(ticket.public_comment_count||ticket.attachment_count)?<div className="mt-2 text-[10px] text-text-dim">{ticket.public_comment_count?`${ticket.public_comment_count} repl${ticket.public_comment_count===1?"y":"ies"}`:""}{ticket.public_comment_count&&ticket.attachment_count?" · ":""}{ticket.attachment_count?`${ticket.attachment_count} file${ticket.attachment_count===1?"":"s"}`:""}</div>:null}
+            </button>)}
+            {grouped[status].length===0?<div className="rounded border border-dashed border-border p-4 text-center text-[11px] text-text-dim">Drop a ticket here</div>:null}
+          </div>
+        </section>)}
+      </div>
+    </div>
+  </main>
 }
 
 type Draft=ReturnType<typeof emptyDraft>;
@@ -105,6 +143,8 @@ function AreaManager({areas,withProject,reload,close}:{areas:Area[];withProject:
 function emptyDraft(){return{title:"",description:"",type:"feedback",status:"new",priority:"normal",area:"general",requester_name:"",requester_email:"",requester_organization:"",assignee_name:"",due_at:""}}
 function label(v:string){return v.replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase())}
 function statusClass(v:string){if(v==="resolved"||v==="closed")return"bg-green/15 text-green";if(v==="waiting_client")return"bg-yellow/15 text-yellow";if(v==="in_progress")return"bg-accent/15 text-accent";return"bg-border text-text-muted"}
+function statusAccent(v:string){if(v==="resolved"||v==="closed")return"border-t-text-dim text-green";if(v==="waiting_client")return"border-t-text-dim text-yellow";if(v==="in_progress")return"border-t-accent text-accent";return"border-t-text-dim"}
+function priorityClass(v:string){if(v==="urgent")return"bg-red/15 text-red";if(v==="high")return"bg-yellow/15 text-yellow";if(v==="low")return"bg-border text-text-muted";return"bg-accent/10 text-accent"}
 function formatDate(v:string){const d=new Date(v);return Number.isNaN(d.getTime())?v:d.toLocaleString()}
 function relative(v:string){const ms=Date.now()-new Date(v).getTime();if(!v||Number.isNaN(ms))return"";const m=Math.floor(ms/60000);if(m<1)return"now";if(m<60)return`${m}m`;const h=Math.floor(m/60);if(h<24)return`${h}h`;return`${Math.floor(h/24)}d`}
 function eventSummary(e:Event){const d=e.data||{};if(d.reason)return String(d.reason);if(d.from!==undefined&&d.to!==undefined)return`${label(String(d.from))} → ${label(String(d.to))}`;if(d.changes&&typeof d.changes==="object")return`Changed ${Object.keys(d.changes).map(label).join(", ")}`;return""}
