@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -199,11 +198,12 @@ func (a *App) handleProxyResources(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if binding.AppSlug != "dataimpulse" {
-		httpErr(w, http.StatusBadRequest, fmt.Sprintf("proxy provider %q does not support resource discovery", binding.AppSlug))
+	discovery, ok := proxyResourceDiscoveryFor(binding.AppSlug)
+	if !ok {
+		writeJSON(w, map[string]any{"resources": []safeProxyResource{}, "manual": true})
 		return
 	}
-	result, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, "list_sub_users", map[string]any{})
+	result, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, discovery.Tool, discovery.Input)
 	if err != nil || result == nil || !result.Success {
 		httpErr(w, http.StatusBadGateway, "proxy provider resource lookup failed")
 		return
@@ -213,24 +213,46 @@ func (a *App) handleProxyResources(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadGateway, "proxy provider returned an invalid resource list")
 		return
 	}
-	writeJSON(w, map[string]any{"resources": safeProxyResources(payload)})
+	writeJSON(w, map[string]any{"resources": safeProxyResourcesFor(payload, discovery.IDKeys...)})
+}
+
+type proxyResourceDiscovery struct {
+	Tool   string
+	Input  map[string]any
+	IDKeys []string
+}
+
+func proxyResourceDiscoveryFor(slug string) (proxyResourceDiscovery, bool) {
+	switch slug {
+	case "dataimpulse":
+		return proxyResourceDiscovery{Tool: "list_sub_users", Input: map[string]any{}, IDKeys: []string{"subuser_id"}}, true
+	case "iproyal":
+		return proxyResourceDiscovery{Tool: "list_sub_users", Input: map[string]any{"per_page": 100}, IDKeys: []string{"subuser_hash", "hash"}}, true
+	default:
+		return proxyResourceDiscovery{}, false
+	}
 }
 
 func safeProxyResources(payload any) []safeProxyResource {
+	return safeProxyResourcesFor(payload, "subuser_id", "sub_user_id", "subuser_hash", "hash")
+}
+
+func safeProxyResourcesFor(payload any, idKeys ...string) []safeProxyResource {
 	out := make([]safeProxyResource, 0)
 	seen := map[string]bool{}
 	var walk func(any)
 	walk = func(value any) {
 		switch item := value.(type) {
 		case map[string]any:
-			id, hasSubuserID := safeResourceID(item["subuser_id"])
-			if !hasSubuserID {
-				if _, looksLikeSubuser := item["label"]; looksLikeSubuser {
-					id, hasSubuserID = safeResourceID(item["id"])
+			var id string
+			var hasResourceID bool
+			for _, key := range idKeys {
+				if id, hasResourceID = safeResourceID(item[key]); hasResourceID {
+					break
 				}
 			}
-			if hasSubuserID && !seen[id] {
-				name := "Sub-user " + id
+			if hasResourceID && !seen[id] {
+				name := "Resource " + id
 				if label, ok := item["label"].(string); ok && strings.TrimSpace(label) != "" {
 					name = strings.TrimSpace(label)
 				} else if label, ok := item["name"].(string); ok && strings.TrimSpace(label) != "" {

@@ -1896,7 +1896,7 @@ function AddProxyProfileModal({
 }) {
   const [name, setName] = useState("");
   const [connectionID, setConnectionID] = useState(() => String(connections.find((connection) => connection.default)?.connection_id ?? connections[0]?.connection_id ?? ""));
-  const [subuserID, setSubuserID] = useState("");
+  const [resourceRef, setResourceRef] = useState("");
   const [protocol, setProtocol] = useState("http");
   const [country, setCountry] = useState("");
   const [sticky, setSticky] = useState("session");
@@ -1905,6 +1905,12 @@ function AddProxyProfileModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const selectedConnection = connections.find((connection) => String(connection.connection_id) === connectionID);
+  const providerSlug = selectedConnection?.provider_slug ?? "";
+  const resourceRequired = providerSlug === "dataimpulse" || providerSlug === "iproyal" || providerSlug === "proxy-cheap";
+
+  useEffect(() => {
+    if (providerSlug === "proxy-cheap" && protocol === "socks5") setProtocol("http");
+  }, [providerSlug, protocol]);
 
   useEffect(() => {
     if (!connectionID) {
@@ -1941,7 +1947,7 @@ function AddProxyProfileModal({
           name,
           provider_slug: selectedConnection.provider_slug,
           connection_id: selectedConnection.connection_id,
-          external_ref: subuserID,
+          external_ref: resourceRef,
           pool_type: "residential",
           protocol,
           default_country: country.toUpperCase(),
@@ -1974,7 +1980,7 @@ function AddProxyProfileModal({
         </p>
         {connections.length === 0 ? (
           <div className="border border-border bg-bg-subtle text-text-muted" style={{ borderRadius: "6px", padding: "12px", fontSize: "12px" }}>
-            Connect and bind a supported proxy provider to Computer first. DataImpulse is supported now.
+            Connect and bind DataImpulse, IPRoyal, or Proxy-Cheap to Computer first.
           </div>
         ) : (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
@@ -1982,14 +1988,14 @@ function AddProxyProfileModal({
               <input value={name} onChange={(e) => setName(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle} placeholder="US research" />
             </Field>
             <Field label="Provider connection">
-              <select value={connectionID} onChange={(e) => setConnectionID(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
+              <select value={connectionID} onChange={(e) => { setConnectionID(e.target.value); setResourceRef(""); }} className="border border-border bg-bg text-text" style={inputStyle}>
                 {connections.map((connection) => (
                   <option key={connection.connection_id} value={connection.connection_id}>{connection.name} ({connection.provider_slug})</option>
                 ))}
               </select>
             </Field>
-            <Field label="DataImpulse sub-user ID">
-              <input value={subuserID} onChange={(e) => setSubuserID(e.target.value)} list="computer-proxy-resources" inputMode="numeric" className="border border-border bg-bg text-text" style={inputStyle} placeholder={resourcesLoading ? "Loading..." : "12345"} />
+            <Field label={proxyResourceLabel(providerSlug)}>
+              <input value={resourceRef} onChange={(e) => setResourceRef(e.target.value)} list="computer-proxy-resources" inputMode={providerSlug === "dataimpulse" ? "numeric" : "text"} className="border border-border bg-bg text-text" style={inputStyle} placeholder={resourcesLoading ? "Loading..." : proxyResourcePlaceholder(providerSlug)} />
               <datalist id="computer-proxy-resources">
                 {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}
               </datalist>
@@ -1998,7 +2004,7 @@ function AddProxyProfileModal({
               <select value={protocol} onChange={(e) => setProtocol(e.target.value)} className="border border-border bg-bg text-text" style={inputStyle}>
                 <option value="http">HTTP</option>
                 <option value="https">HTTPS</option>
-                <option value="socks5">SOCKS5</option>
+                {providerSlug !== "proxy-cheap" && <option value="socks5">SOCKS5</option>}
               </select>
             </Field>
             <Field label="Default country">
@@ -2016,13 +2022,31 @@ function AddProxyProfileModal({
         {err && <div style={{ marginTop: "10px", fontSize: "12px", color: "#dc2626" }}>{err}</div>}
         <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>
           <IconButton onClick={onClose} disabled={busy} title="Cancel">Cancel</IconButton>
-          <IconButton onClick={submit} disabled={busy || connections.length === 0 || !name.trim() || !subuserID.trim()} title="Create proxy profile">
+          <IconButton onClick={submit} disabled={busy || connections.length === 0 || !name.trim() || (resourceRequired && !resourceRef.trim())} title="Create proxy profile">
             {busy ? "Creating..." : "Create profile"}
           </IconButton>
         </div>
       </div>
     </div>
   );
+}
+
+function proxyResourceLabel(provider: string): string {
+  switch (provider) {
+    case "dataimpulse": return "Sub-user ID";
+    case "iproyal": return "Sub-user hash";
+    case "proxy-cheap": return "Order ID";
+    default: return "Provider resource";
+  }
+}
+
+function proxyResourcePlaceholder(provider: string): string {
+  switch (provider) {
+    case "dataimpulse": return "12345";
+    case "iproyal": return "Residential sub-user hash";
+    case "proxy-cheap": return "Rotating residential order ID";
+    default: return "Provider resource ID";
+  }
 }
 
 function ConfirmModal({

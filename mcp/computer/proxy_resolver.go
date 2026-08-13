@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -220,6 +219,10 @@ func resolveProxyProvider(ctx *sdk.AppCtx, binding *sdk.BoundIntegration, profil
 	switch slug {
 	case "dataimpulse":
 		return resolveDataImpulseProxy(ctx, binding.ConnectionID, profile, country, sticky, appContextID)
+	case "iproyal":
+		return resolveIPRoyalProxy(ctx, binding.ConnectionID, profile, country, sticky, appContextID)
+	case "proxy-cheap":
+		return resolveProxyCheapProxy(ctx, binding.ConnectionID, profile, country, sticky, appContextID)
 	default:
 		return nil, fmt.Errorf("proxy provider %q is not supported by Computer yet", slug)
 	}
@@ -256,8 +259,7 @@ func resolveDataImpulseProxy(ctx *sdk.AppCtx, connectionID int64, profile *Proxy
 	if sticky != "rotating" {
 		identity := newSessionProxyIdentity()
 		if sticky == "context" {
-			sum := sha256.Sum256([]byte(profile.ID + ":" + appContextID))
-			identity = hex.EncodeToString(sum[:10])
+			identity = stableProxyIdentity(profile.ID, appContextID)
 		}
 		params = append(params, "sessid."+identity)
 	}

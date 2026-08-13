@@ -85,7 +85,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [dataimpulse]
+      compatible_slugs: [dataimpulse, iproyal, proxy-cheap]
 provides:
   http_routes:
     - prefix: /
