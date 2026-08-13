@@ -1,0 +1,77 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "task-overview",
+  "version": "1.0.0",
+  "title": "Tasks",
+  "description": "Live work, upcoming schedules, and recent outcomes",
+  "icon": "list-checks",
+  "context": {"scope": "project"},
+  "presentation": "widget",
+  "data_sources": {
+    "summary": {
+      "request": {
+        "method": "GET",
+        "path": "/mobile/summary",
+        "query": {"recent_limit": "$settings.recent_limit"}
+      },
+      "response": {"item": "$"}
+    }
+  },
+  "blocks": [
+    {
+      "id": "counts",
+      "type": "metrics",
+      "source": "summary",
+      "metrics": [
+        {"label": "Active", "value": "$.counts.active", "format": "count"},
+        {"label": "Scheduled", "value": "$.counts.scheduled", "format": "count"}
+      ]
+    },
+    {
+      "id": "active",
+      "type": "list",
+      "title": "Active and attention",
+      "source": "summary",
+      "items": "$.active",
+      "limit": 4,
+      "visible_if": "$settings.show_active",
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.title}",
+        "subtitle": [{"value": "{item.current_step}", "fallback": "{item.state}"}]
+      },
+      "empty": {"title": "No active tasks", "icon": "check-circle"}
+    },
+    {
+      "id": "upcoming",
+      "type": "list",
+      "title": "Upcoming",
+      "source": "summary",
+      "items": "$.upcoming",
+      "limit": 3,
+      "visible_if": "$settings.show_upcoming",
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.title}",
+        "subtitle": [{"value": "{item.next_run_at}", "format": "date_time"}]
+      },
+      "empty": {"title": "No upcoming schedules", "icon": "calendar"}
+    },
+    {
+      "id": "recent",
+      "type": "list",
+      "title": "Recent outcomes",
+      "source": "summary",
+      "items": "$.recent",
+      "limit": 4,
+      "visible_if": "$settings.show_recent",
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.title}",
+        "subtitle": [{"value": "{item.state}"}]
+      },
+      "empty": {"title": "No recent outcomes", "icon": "history"}
+    }
+  ],
+  "navigation": {"surface": "tasks"}
+}

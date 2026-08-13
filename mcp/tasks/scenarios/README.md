@@ -36,6 +36,7 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `09-chat-bounded-lookup-no-task.yaml` | A single bounded lookup remains task-free, preserving the other side of the classification boundary. |
 | `10-simultaneous-directive-wake-and-task.yaml` | A directive-owned timer and a due Tasks event race on main; both outcomes must complete exactly once. |
 | `11-delegated-multistage-progress.yaml` | A four-message delegated occurrence stays running while its Core-spawned worker records meaningful progress milestones. |
+| `12-concurrent-multitask-workers.yaml` | Four tasks and four Core workers race assignments and reports without crossing progress, executors, or results. |
 
 Conversation scenarios use `setup.interaction: conversation`: `directive` is
 the agent's durable role and `prompt` is sent as a real dashboard-channel user

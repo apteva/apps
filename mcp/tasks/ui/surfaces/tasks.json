@@ -1,0 +1,190 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "tasks",
+  "version": "1.0.0",
+  "title": "Tasks",
+  "description": "Review durable work, schedules, progress, and outcomes.",
+  "icon": "list-checks",
+  "context": {"scope": "project"},
+  "state": {
+    "query": {"type": "string", "default": ""}
+  },
+  "data_sources": {
+    "tasks": {
+      "request": {
+        "method": "GET",
+        "path": "/tasks",
+        "query": {"limit": 200}
+      },
+      "response": {"items": "$.tasks", "id": "$.id"},
+      "pagination": {"type": "none"},
+      "refresh": {"on_appear": true, "pull_to_refresh": true}
+    },
+    "task": {
+      "request": {"method": "GET", "path": "/tasks/{item.id}"},
+      "response": {"item": "$.task", "id": "$.id"}
+    },
+    "events": {
+      "request": {"method": "GET", "path": "/tasks/{item.id}/events"},
+      "response": {"items": "$.events", "id": "$.id"}
+    }
+  },
+  "sections": [
+    {
+      "id": "tasks",
+      "kind": "collection",
+      "title": "Tasks",
+      "source": "tasks",
+      "presentation": "list",
+      "search": {"state": "query", "placeholder": "Search tasks"},
+      "item": {
+        "id": "$item.id",
+        "title": "$item.title",
+        "subtitle": [
+          {"value": "$item.current_step", "fallback": "$item.state"},
+          {"value": "$item.state"}
+        ],
+        "badge": {"value": "$item.state"},
+        "destination": "task_detail",
+        "actions": ["update_task", "pause_schedule", "resume_schedule", "run_now", "cancel_task"]
+      },
+      "empty": {
+        "title": "No tasks yet",
+        "description": "Durable work and schedules will appear here.",
+        "icon": "list-checks"
+      },
+      "loading": {"description": "Loading tasks"},
+      "error": {
+        "title": "Could not load tasks",
+        "description": "Check the connection and try again.",
+        "retry": true
+      }
+    }
+  ],
+  "destinations": {
+    "task_detail": {
+      "type": "detail",
+      "title": "{item.title}",
+      "source": "task",
+      "sections": [
+        {
+          "id": "details",
+          "kind": "properties",
+          "title": "Details",
+          "fields": [
+            {"id": "state", "label": "State", "value": "$item.state"},
+            {"id": "progress", "label": "Progress", "value": "$item.progress", "format": "number"},
+            {"id": "current_step", "label": "Current step", "value": "$item.current_step"},
+            {"id": "assigned_thread", "label": "Assigned thread", "value": "$item.assigned_thread_id"},
+            {"id": "schedule", "label": "Schedule", "value": "$item.schedule_kind"},
+            {"id": "schedule_expression", "label": "Schedule expression", "value": "$item.schedule_expression"},
+            {"id": "schedule_timezone", "label": "Schedule timezone", "value": "$item.schedule_timezone"},
+            {"id": "next_run", "label": "Next run", "value": "$item.next_run_at", "format": "date_time"},
+            {"id": "result", "label": "Result", "value": "$item.result"},
+            {"id": "error", "label": "Error", "value": "$item.error"},
+            {"id": "created", "label": "Created", "value": "$item.created_at", "format": "date_time"},
+            {"id": "updated", "label": "Updated", "value": "$item.updated_at", "format": "date_time"}
+          ]
+        },
+        {
+          "id": "events",
+          "kind": "timeline",
+          "title": "Activity",
+          "source": "events",
+          "timeline": {
+            "id": "$item.id",
+            "title": "$item.event_type",
+            "detail": "$item.to_state",
+            "time": "$item.created_at"
+          }
+        }
+      ],
+      "actions": ["update_task", "pause_schedule", "resume_schedule", "run_now", "cancel_task"]
+    }
+  },
+  "actions": {
+    "update_task": {
+      "type": "form",
+      "label": "Update task",
+      "icon": "edit",
+      "placements": ["item", "detail"],
+      "request": {
+        "method": "PATCH",
+        "path": "/tasks/{item.id}",
+        "encoding": "json",
+        "body": {
+          "state": "$input.state",
+          "progress": "$input.progress",
+          "current_step": "$input.current_step"
+        }
+      },
+      "fields": [
+        {
+          "name": "state",
+          "type": "choice",
+          "label": "State",
+          "default": "$item.state",
+          "required": true,
+          "options": [
+            {"label": "Queued", "value": "queued"},
+            {"label": "Running", "value": "running"},
+            {"label": "Waiting", "value": "waiting"},
+            {"label": "Blocked", "value": "blocked"},
+            {"label": "Completed", "value": "completed"},
+            {"label": "Failed", "value": "failed"},
+            {"label": "Cancelled", "value": "cancelled"}
+          ]
+        },
+        {"name": "progress", "type": "integer", "label": "Progress", "default": "$item.progress"},
+        {"name": "current_step", "type": "string", "label": "Current step", "default": "$item.current_step"}
+      ],
+      "success": {
+        "refresh": ["tasks", "task", "events"],
+        "dismiss": true,
+        "toast": "Task updated"
+      }
+    },
+    "pause_schedule": {
+      "type": "request",
+      "label": "Pause schedule",
+      "icon": "pause",
+      "placements": ["item", "detail"],
+      "request": {"method": "POST", "path": "/tasks/{item.id}/pause"},
+      "success": {"refresh": ["tasks", "task", "events"], "toast": "Schedule paused"}
+    },
+    "resume_schedule": {
+      "type": "request",
+      "label": "Resume schedule",
+      "icon": "play",
+      "placements": ["item", "detail"],
+      "request": {"method": "POST", "path": "/tasks/{item.id}/resume"},
+      "success": {"refresh": ["tasks", "task", "events"], "toast": "Schedule resumed"}
+    },
+    "run_now": {
+      "type": "request",
+      "label": "Run now",
+      "icon": "play-circle",
+      "placements": ["item", "detail"],
+      "request": {"method": "POST", "path": "/tasks/{item.id}/run-now"},
+      "success": {"refresh": ["tasks", "task", "events"], "toast": "Run requested"}
+    },
+    "cancel_task": {
+      "type": "confirm",
+      "label": "Cancel task",
+      "icon": "cancel",
+      "placements": ["item", "detail"],
+      "destructive": true,
+      "request": {"method": "DELETE", "path": "/tasks/{item.id}"},
+      "confirmation": {
+        "title": "Cancel this task?",
+        "message": "The task or schedule will stop and be marked cancelled.",
+        "confirm_label": "Cancel task"
+      },
+      "success": {
+        "refresh": ["tasks", "task", "events"],
+        "dismiss": true,
+        "toast": "Task cancelled"
+      }
+    }
+  }
+}

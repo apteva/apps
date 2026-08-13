@@ -4,9 +4,30 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const (
+	defaultMobileRecentLimit = 4
+	maxMobileRecentLimit     = 12
+	maxMobileSummaryTasks    = 500
+)
+
+type mobileSummaryCounts struct {
+	Active    int `json:"active"`
+	Scheduled int `json:"scheduled"`
+	Blocked   int `json:"blocked"`
+}
+
+type mobileTaskSummary struct {
+	Counts   mobileSummaryCounts `json:"counts"`
+	Active   []Task              `json:"active"`
+	Upcoming []Task              `json:"upcoming"`
+	Recent   []Task              `json:"recent"`
+}
 
 func requestProjectID(r *http.Request) string {
 	if r == nil {
@@ -40,6 +61,131 @@ func splitStates(value string) []string {
 		}
 	}
 	return out
+}
+
+func mobileRecentLimit(value string) int {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return defaultMobileRecentLimit
+	}
+	limit, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultMobileRecentLimit
+	}
+	return clampMobileRecentLimit(limit)
+}
+
+func clampMobileRecentLimit(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	if limit > maxMobileRecentLimit {
+		return maxMobileRecentLimit
+	}
+	return limit
+}
+
+func mobileActiveRank(state string) int {
+	switch state {
+	case stateBlocked:
+		return 0
+	case stateRunning:
+		return 1
+	case stateQueued:
+		return 2
+	case stateWaiting:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func taskRecentTime(task Task) time.Time {
+	if task.CompletedAt != nil {
+		return task.CompletedAt.UTC()
+	}
+	return task.UpdatedAt.UTC()
+}
+
+func buildMobileTaskSummary(tasks []Task, recentLimit int) mobileTaskSummary {
+	summary := mobileTaskSummary{Active: []Task{}, Upcoming: []Task{}, Recent: []Task{}}
+	for _, task := range tasks {
+		isScheduleDefinition := task.ScheduleKind != "" && task.State == stateWaiting
+		if isScheduleDefinition && task.ScheduleEnabled && task.NextRunAt != nil {
+			summary.Upcoming = append(summary.Upcoming, task)
+		}
+		if !isScheduleDefinition {
+			switch task.State {
+			case stateQueued, stateRunning, stateWaiting, stateBlocked:
+				summary.Active = append(summary.Active, task)
+				if task.State == stateBlocked {
+					summary.Counts.Blocked++
+				}
+			}
+		}
+		if terminalState(task.State) {
+			summary.Recent = append(summary.Recent, task)
+		}
+	}
+	summary.Counts.Active = len(summary.Active)
+	summary.Counts.Scheduled = len(summary.Upcoming)
+
+	sort.SliceStable(summary.Active, func(i, j int) bool {
+		left, right := summary.Active[i], summary.Active[j]
+		if mobileActiveRank(left.State) != mobileActiveRank(right.State) {
+			return mobileActiveRank(left.State) < mobileActiveRank(right.State)
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		return left.ID > right.ID
+	})
+	sort.SliceStable(summary.Upcoming, func(i, j int) bool {
+		left, right := summary.Upcoming[i], summary.Upcoming[j]
+		if !left.NextRunAt.Equal(*right.NextRunAt) {
+			return left.NextRunAt.Before(*right.NextRunAt)
+		}
+		return left.ID < right.ID
+	})
+	sort.SliceStable(summary.Recent, func(i, j int) bool {
+		left, right := summary.Recent[i], summary.Recent[j]
+		leftTime, rightTime := taskRecentTime(left), taskRecentTime(right)
+		if !leftTime.Equal(rightTime) {
+			return leftTime.After(rightTime)
+		}
+		return left.ID > right.ID
+	})
+
+	if len(summary.Active) > 6 {
+		summary.Active = summary.Active[:6]
+	}
+	if len(summary.Upcoming) > 4 {
+		summary.Upcoming = summary.Upcoming[:4]
+	}
+	recentLimit = clampMobileRecentLimit(recentLimit)
+	if len(summary.Recent) > recentLimit {
+		summary.Recent = summary.Recent[:recentLimit]
+	}
+	return summary
+}
+
+func (a *App) handleMobileSummary(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	projectID := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
+	if projectID == "" {
+		http.Error(w, "project context required", http.StatusBadRequest)
+		return
+	}
+	empty := ""
+	tasks, err := a.store.List(TaskFilter{ProjectID: projectID, ParentTaskID: &empty, Limit: maxMobileSummaryTasks})
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, buildMobileTaskSummary(tasks, mobileRecentLimit(r.URL.Query().Get("recent_limit"))))
 }
 
 func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {

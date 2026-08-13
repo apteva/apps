@@ -10,9 +10,12 @@ package main
 // Run with: go test -tags integration ./...
 
 import (
+	"encoding/json"
+	"net/http"
 	"net/url"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -133,5 +136,38 @@ func TestSidecar_CrossProjectHTTPIsolation(t *testing.T) {
 	resp := sc.GET("/tasks/"+url.PathEscape(id)+"?project_id=other", nil)
 	if resp.Status != 403 {
 		t.Fatalf("cross-project status=%d body=%s", resp.Status, resp.Body)
+	}
+}
+
+func TestSidecar_ServesNativeSurfacesAndMobileSummary(t *testing.T) {
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID(testProject))
+	for _, path := range []string{"/ui/surfaces/task-overview.json", "/ui/surfaces/tasks.json"} {
+		response := sc.GET(path, nil)
+		if response.Status != http.StatusOK {
+			t.Fatalf("surface %s status=%d body=%s", path, response.Status, response.Body)
+		}
+		if _, err := sdk.ParseNativeSurface(response.Body); err != nil {
+			t.Fatalf("surface %s: %v", path, err)
+		}
+	}
+
+	sc.MCPAs("create", map[string]any{"title": "Visible in native summary"}, 7, testThread, testProject)
+	request, err := http.NewRequest(http.MethodGet, sc.URL()+"/mobile/summary?project_id=other", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+sc.Token())
+	request.Header.Set("X-Apteva-Project-ID", testProject)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var summary mobileTaskSummary
+	if err := json.NewDecoder(response.Body).Decode(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || summary.Counts.Active != 1 || len(summary.Active) != 1 || summary.Active[0].ProjectID != testProject {
+		t.Fatalf("summary status=%d payload=%+v", response.StatusCode, summary)
 	}
 }

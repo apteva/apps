@@ -17,7 +17,7 @@ var taskSkillBody string
 const manifestYAML = `schema: apteva-app/v1
 name: tasks
 display_name: Tasks
-version: 3.2.5
+version: 3.2.7
 description: Durable work, progress, schedules, occurrences, and thread assignment for Apteva agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tasks
@@ -51,6 +51,13 @@ provides:
       icon: list-checks
       entry: /ui/TasksPanel.mjs
       suggested: true
+  ui_surfaces:
+    - id: tasks
+      label: Tasks
+      icon: list-checks
+      schema: apteva-native-surface/v1
+      entry: /ui/surfaces/tasks.json
+      slots: [mobile.project_app]
   ui_components:
     - name: task-overview
       label: Tasks
@@ -60,6 +67,11 @@ provides:
       suggested: true
       supported_sizes: [half, full]
       default_size: half
+      visibility: project
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/task-overview.json
       settings_schema:
         type: object
         properties:
@@ -86,8 +98,10 @@ provides:
       label: Agent tasks
       description: Work and schedules associated with an agent.
       entry: /ui/AgentTasksWidget.mjs
-      slots: [dashboard.agent_card, dashboard.agent_detail]
+      slots: [dashboard.agent_card, dashboard.agent_detail, dashboard.thread_sidebar]
       suggested: true
+      visibility: attached
+      refresh_topics: [task.created, task.updated, task.state_changed, task.schedule_updated, task.schedule_paused, task.schedule_resumed, task.schedule_run_requested, task.occurrence_skipped_overlap]
       default_width: 1
     - name: task-card
       entry: /ui/TaskCard.mjs
@@ -141,7 +155,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		ctx.EmitWithProject("task."+event.EventType, eventProjectID(a.store, event.TaskID), event)
 	})
 	a.scheduler = &scheduler{store: a.store, app: a}
-	ctx.Logger().Info("tasks app mounted", "version", "3.2.5")
+	ctx.Logger().Info("tasks app mounted", "version", "3.2.7")
 	return nil
 }
 
@@ -160,6 +174,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/mobile/summary", Handler: a.handleMobileSummary},
 		{Pattern: "/tasks", Handler: a.handleTasks},
 		{Pattern: "/tasks/", Handler: a.handleTask},
 	}

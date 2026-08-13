@@ -441,12 +441,20 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.5" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.7" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
 	if overview.Name != "task-overview" || overview.DefaultSize != "half" || len(overview.SupportedSizes) != 2 || overview.SettingsSchema["type"] != "object" {
 		t.Fatalf("task overview widget contract incomplete: %+v", overview)
+	}
+	agentWidget := manifest.Provides.UIComponents[1]
+	hasThreadSidebar := false
+	for _, slot := range agentWidget.Slots {
+		hasThreadSidebar = hasThreadSidebar || slot == sdk.UIComponentSlotDashboardThreadSidebar
+	}
+	if agentWidget.Visibility != sdk.UIComponentVisibilityAttached || !hasThreadSidebar || len(agentWidget.RefreshTopics) == 0 {
+		t.Fatalf("agent task widget contextual contract incomplete: %+v", agentWidget)
 	}
 	if len(manifest.Provides.UIPanels) != 1 || !manifest.Provides.UIPanels[0].Suggested {
 		t.Fatalf("task page should be a generic suggested sidebar contribution: %+v", manifest.Provides.UIPanels)
