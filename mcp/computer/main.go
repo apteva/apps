@@ -54,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.67
+version: 0.7.68
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.67 persists generic
-  closed-session proxy usage and reports final Browserbase proxy bytes without
-  coupling downstream apps to provider APIs.
+  Watch, steer, and replay hosted browser sessions. v0.7.68 adds secure proxy
+  profile resolution through DataImpulse, IPRoyal, and Proxy-Cheap integration
+  APIs while keeping provider credentials out of agent-visible session state.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
