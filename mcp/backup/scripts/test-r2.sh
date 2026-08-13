@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # scripts/test-r2.sh — end-to-end smoke test of the cloudflare-r2
-# integration against a real R2 bucket. Validates the operations our
-# integration JSON declares (put_object, list_objects, get_object,
-# delete_object) work end-to-end with the SigV4 signer + body_input
-# runner field.
+# destination against a real R2 bucket. It validates the same S3-compatible
+# put/list/get/delete surface used by the app's minio-go client.
 #
 # Credentials are read from scripts/.env.local (gitignored) or from
 # pre-set env vars. See scripts/.env.local.example for the template.
@@ -29,7 +27,7 @@ fi
 R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
 
 # aws CLI handles SigV4; R2 is S3-compatible at this endpoint with
-# region=auto. Same code path our integration's aws_sigv4 signer uses.
+# region=auto, matching the app's R2 client configuration.
 export AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
 export AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
 export AWS_DEFAULT_REGION="auto"
@@ -122,15 +120,13 @@ cat <<EOF
 
 ────────────────────────────────────────────────────
   R2 round-trip OK against bucket "$R2_BUCKET".
-  Confirms our cloudflare-r2 integration JSON paths
-  match R2's S3-compatible surface and SigV4 signs
-  correctly.
+  Confirms R2's S3-compatible surface accepts the
+  operations and SigV4 settings used by Backup.
 ────────────────────────────────────────────────────
 
-Next: install backup v0.2.0 on a running apteva-server,
+Next: install the current Backup release on a running apteva-server,
 bind a cloudflare-r2 connection (account_id, access_key,
 secret), then "Run now" with kind=s3 + bucket=$R2_BUCKET.
-Backup goes through the platform proxy →
-ExecuteIntegrationTool → the same SigV4-signed PUT this
-script just verified.
+Backup reads that bound connection through the restricted
+credential API and streams the object directly to R2.
 EOF
