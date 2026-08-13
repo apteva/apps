@@ -962,13 +962,14 @@ func ocrScreenshotText(t *testing.T, out map[string]any) string {
 
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
 	t.Helper()
-	b64, _ := out["screenshot_b64"].(string)
+	envelope, _ := out["screenshot"].(map[string]any)
+	b64, _ := envelope["base64"].(string)
 	if b64 == "" {
-		t.Fatalf("missing screenshot_b64 in result: %v", out)
+		t.Fatalf("missing screenshot envelope in result: %v", out)
 	}
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
-		t.Fatalf("decode screenshot_b64: %v", err)
+		t.Fatalf("decode screenshot envelope: %v", err)
 	}
 	return raw
 }

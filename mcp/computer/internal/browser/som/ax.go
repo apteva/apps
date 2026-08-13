@@ -123,7 +123,8 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 		loading := axPropertyBool(node, accessibility.PropertyNameBusy)
 		effect := destructiveEffectForText(name)
 		out = append(out, Element{
-			X: x, Y: y, W: w, H: h,
+			ID: fmt.Sprintf("ax_%d", node.BackendDOMNodeID),
+			X:  x, Y: y, W: w, H: h,
 			Tag: role, Role: role, Text: strings.TrimSpace(name), AccessibleName: strings.TrimSpace(name),
 			Disabled: disabled, Loading: loading, Dangerous: effect != "", DestructiveEffect: effect,
 		})
@@ -413,6 +414,8 @@ func destructiveEffectForText(value string) string {
 		{[]string{"delete", "destroy", "erase"}, "destructive_delete"},
 		{[]string{"send", "post"}, "immediate_send"},
 		{[]string{"pay", "payout", "purchase", "buy", "checkout", "place order"}, "financial_action"},
+		{[]string{"withdraw", "withdrawal"}, "financial_action"},
+		{[]string{"schedule", "set publish date"}, "schedule_publish"},
 	} {
 		for _, word := range item.words {
 			if value == word || strings.HasPrefix(value, word+" ") || strings.HasSuffix(value, " "+word) || strings.Contains(value, " "+word+" ") {

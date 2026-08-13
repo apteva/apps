@@ -37,6 +37,7 @@ type Action struct {
 	// if the live hit-tested element is consequential.
 	GuardDangerousCoordinate bool                `json:"-"`
 	Presentation             PresentationOptions `json:"-"`
+	NoScreenshot             bool                `json:"-"`
 	// Label: Set-of-Mark target. When non-zero, click/double_click
 	// resolve the target via the label→bbox map populated by the
 	// most recent screenshot. Takes precedence over X/Y when set.
@@ -153,6 +154,7 @@ type ExtractResult struct {
 // Set-of-Mark screenshot. Coordinates are viewport CSS pixels and label is the
 // value accepted by click/double_click label=N.
 type SetOfMarkTarget struct {
+	ID                string `json:"id"`
 	Label             int    `json:"label"`
 	X                 int    `json:"x"`
 	Y                 int    `json:"y"`

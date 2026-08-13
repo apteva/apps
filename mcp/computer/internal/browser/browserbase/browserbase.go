@@ -113,8 +113,9 @@ type Computer struct {
 	lastUsage       *computer.SessionUsage
 
 	// SoM: same wiring as local.Computer. See local.go for rationale.
-	labelMu    sync.RWMutex
-	lastLabels map[int]som.Element
+	labelMu          sync.RWMutex
+	lastLabels       map[int]som.Element
+	stabilityTracker *stability.Tracker
 
 	selectMu           sync.Mutex
 	lastSelectResult   *selectinput.Result
@@ -454,9 +455,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "wait_for_stable":
-		ctx, cancel := c.actionContext(action.Type)
+		_, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := stability.Wait(ctx, action.QuietMS, action.TimeoutMS); err != nil {
+		if _, err := c.waitForStable(action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for_stable: %w", err)
 		}
 		return c.Screenshot()
@@ -560,9 +561,9 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 		defer cancel()
 		return sleepWithContext(ctx, time.Duration(dur)*time.Millisecond)
 	case "wait_for_stable":
-		ctx, cancel := c.actionContext(action.Type)
+		_, cancel := c.actionContext(action.Type)
 		defer cancel()
-		_, err := stability.Wait(ctx, action.QuietMS, action.TimeoutMS)
+		_, err := c.waitForStable(action.QuietMS, action.TimeoutMS)
 		return err
 	default:
 		return fmt.Errorf("browserbase action-only unsupported for %s", action.Type)
@@ -1221,7 +1222,7 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 	for _, label := range labels {
 		e := c.lastLabels[label]
 		out = append(out, computer.SetOfMarkTarget{
-			Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
+			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
@@ -1384,11 +1385,32 @@ func (c *Computer) establishCDP(connectURL string) error {
 	}
 	c.allocCtx = browserCtx
 	c.ctx = ctx
+	c.attachStabilityTracker()
 	c.cancel = cancel
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
 	return nil
+}
+
+func (c *Computer) attachStabilityTracker() {
+	c.stabilityTracker = nil
+	if c.ctx == nil {
+		return
+	}
+	tracker, err := stability.New(c.ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] stability tracker unavailable: %v\n", err)
+		return
+	}
+	c.stabilityTracker = tracker
+}
+
+func (c *Computer) waitForStable(quietMS, timeoutMS int) (stability.Result, error) {
+	if c.stabilityTracker != nil {
+		return c.stabilityTracker.Wait(quietMS, timeoutMS)
+	}
+	return stability.Wait(c.ctx, quietMS, timeoutMS)
 }
 
 func pickInitialPageTarget(infos []*target.Info) target.ID {
@@ -1450,6 +1472,7 @@ func (c *Computer) SwitchTab(tabID string) error {
 	}
 	c.ctx = ctx
 	c.cancel = cancel
+	c.attachStabilityTracker()
 	return nil
 }
 

@@ -85,8 +85,9 @@ type Computer struct {
 	// SoM (Set-of-Mark) state. Populated on every Screenshot(),
 	// consumed by Execute for click/double_click
 	// when the action carries a label= instead of coordinate=x,y.
-	labelMu    sync.RWMutex
-	lastLabels map[int]som.Element
+	labelMu          sync.RWMutex
+	lastLabels       map[int]som.Element
+	stabilityTracker *stability.Tracker
 
 	selectMu           sync.Mutex
 	lastSelectResult   *selectinput.Result
@@ -526,6 +527,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	fmt.Fprintf(os.Stderr, "[BROWSER] pid=%d uid=%d ua=%q debug=%s\n", os.Getpid(), os.Getuid(), ua, c.debugURL)
 
 	c.ctx = ctx
+	c.attachStabilityTracker()
 	c.cancel = cancel
 	c.allocCtx = allocCtx
 	c.allocCancel = allocCancel
@@ -719,14 +721,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	}
 	switch action.Type {
 	case "screenshot":
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "navigate", "back", "reload":
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
 			return nil, fmt.Errorf("%s: %w", action.Type, err)
 		}
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "click":
 		// Reject silent no-target clicks. The agent has been observed
@@ -810,7 +812,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		} else {
 			fmt.Fprintf(os.Stderr, "[BROWSER] click done, URL unchanged: %s\n", urlAfter)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "double_click":
 		// Same no-target guard as click — see the comment there.
@@ -840,7 +842,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "type":
 		delay := time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond
@@ -872,13 +874,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			dur = dur * 1000 // Claude sends seconds, convert to ms
 		}
 		time.Sleep(time.Duration(dur) * time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "wait_for_stable":
-		if _, err := stability.Wait(c.ctx, action.QuietMS, action.TimeoutMS); err != nil {
+		if _, err := c.waitForStable(action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for_stable: %w", err)
 		}
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "upload_file":
 		c.moveToTarget(action)
@@ -941,6 +943,44 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
+}
+
+func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
+	if action.NoScreenshot {
+		return nil, nil
+	}
+	return c.Screenshot()
+}
+
+func (c *Computer) ExecuteAction(action computer.Action) error {
+	switch action.Type {
+	case "click", "double_click", "wait", "wait_for_stable":
+		action.NoScreenshot = true
+		_, err := c.Execute(action)
+		return err
+	default:
+		return fmt.Errorf("local action-only unsupported for %s", action.Type)
+	}
+}
+
+func (c *Computer) attachStabilityTracker() {
+	c.stabilityTracker = nil
+	if c.ctx == nil {
+		return
+	}
+	tracker, err := stability.New(c.ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[BROWSER] stability tracker unavailable: %v\n", err)
+		return
+	}
+	c.stabilityTracker = tracker
+}
+
+func (c *Computer) waitForStable(quietMS, timeoutMS int) (stability.Result, error) {
+	if c.stabilityTracker != nil {
+		return c.stabilityTracker.Wait(quietMS, timeoutMS)
+	}
+	return stability.Wait(c.ctx, quietMS, timeoutMS)
 }
 
 func (c *Computer) LastSelectResult() *selectinput.Result {
@@ -1620,7 +1660,7 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 	for _, label := range labels {
 		e := c.lastLabels[label]
 		out = append(out, computer.SetOfMarkTarget{
-			Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
+			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
 		})
@@ -1783,6 +1823,7 @@ func (c *Computer) SwitchTab(tabID string) error {
 	}
 	c.ctx = ctx
 	c.cancel = cancel
+	c.attachStabilityTracker()
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}

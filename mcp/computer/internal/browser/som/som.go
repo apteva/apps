@@ -39,6 +39,7 @@ import (
 // Populated by running EnumScript inside the page's main world; the
 // coordinates are in viewport space (same space clicks dispatch in).
 type Element struct {
+	ID                string `json:"id"`
 	Label             int    `json:"label"` // assigned by Enumerate in order
 	X                 int    `json:"x"`
 	Y                 int    `json:"y"`
@@ -86,8 +87,9 @@ func (e Element) Center() (int, int) {
 //	buttons (4) > anchors (3) > role=button/link (2) > generic
 //	onclick/tabindex (1). Area is the within-tier tiebreaker.
 //
-// Read-only: queries DOM, reads layout, reads computed style. No
-// mutations, no listeners, no globals. Safe against MutationObserver.
+// The only page state retained is a non-enumerable window-side cache of stable
+// target identities and their last non-loading accessible names. The DOM is
+// never mutated, so page MutationObservers are not disturbed.
 const EnumScript = `
 (function() {
   var selectors = [
@@ -107,7 +109,44 @@ const EnumScript = `
   ];
   var vw = window.innerWidth, vh = window.innerHeight;
 
+  var somState = window.__aptevaComputerSOM;
+  if (!somState) {
+    somState = {names: Object.create(null)};
+    try { Object.defineProperty(window, '__aptevaComputerSOM', {value: somState, configurable: true}); }
+    catch (e) { window.__aptevaComputerSOM = somState; }
+  }
+
   function clean(v) { return String(v || '').replace(/\s+/g, ' ').trim(); }
+
+  // Prefer application-authored identity attributes, then fall back to a
+  // structural path. This survives React/Vue replacing a button node while
+  // remaining stable for the lifetime of the current document.
+  function targetKey(el) {
+    var attrs = ['id','data-testid','data-test','data-qa','name'];
+    for (var ai = 0; ai < attrs.length; ai++) {
+      var av = clean(el.getAttribute && el.getAttribute(attrs[ai]));
+      if (av) return attrs[ai] + ':' + av;
+    }
+    var parts = [];
+    for (var n = el; n && n.nodeType === 1 && parts.length < 12; n = n.parentElement) {
+      var tag = (n.tagName || '').toLowerCase();
+      var index = 1;
+      for (var p = n.previousElementSibling; p; p = p.previousElementSibling) {
+        if (p.tagName === n.tagName) index++;
+      }
+      parts.push(tag + ':nth-of-type(' + index + ')');
+    }
+    return 'path:' + parts.reverse().join('>');
+  }
+  function compactID(key) {
+    var hash = 2166136261;
+    var scoped = String(location.pathname || '') + '|' + key;
+    for (var i = 0; i < scoped.length; i++) {
+      hash ^= scoped.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return 'som_' + (hash >>> 0).toString(36);
+  }
   function labelledBy(el) {
     var ids = clean(el.getAttribute && el.getAttribute('aria-labelledby'));
     if (!ids) return '';
@@ -150,6 +189,8 @@ const EnumScript = `
     if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
     if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
     if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
+	if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
+	if (/\b(schedule|set publish date)\b/.test(semantic)) return 'schedule_publish';
     return '';
   }
 
@@ -216,6 +257,8 @@ const EnumScript = `
         // round down to a zero-sized viewport intersection. Do not spend SOM
         // labels on controls that have no usable click area after clipping.
         if (w < 4 || h < 4) continue;
+        var key = targetKey(el);
+        var stableID = compactID(key);
         var name = accessibleName(el);
         var text = (el.innerText || el.value || name ||
                     el.getAttribute('aria-placeholder') ||
@@ -249,9 +292,13 @@ const EnumScript = `
         var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
           el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
         var loading = isLoading(el, styleWin);
+		// Spinners commonly replace the visible text while autosave is active.
+		// Preserve the last stable semantic name for the same logical control.
+		if (loading && !name && somState.names[stableID]) name = somState.names[stableID];
+		if (!loading && name) somState.names[stableID] = name;
         var effect = destructiveEffect(name, text);
         candidates.push({
-          el: el, x: x, y: y, w: w, h: h,
+          el: el, id: stableID, x: x, y: y, w: w, h: h,
           tag: tag, role: role, text: text, accessible_name: name,
           type: el.type || '',
           disabled: disabled, loading: loading, dangerous: effect !== '', destructive_effect: effect,
@@ -457,9 +504,23 @@ const EnumScript = `
   // Score = priority × big-multiplier + log(area). Priority dominates
   // strictly; area is the tiebreaker so same-tier elements stay in
   // a sensible order (Publish button beats hidden secondary actions).
+  function safetyPriority(c) {
+    if (c.dangerous) return 3;
+    if (c.loading) return 2;
+    if (c.disabled) return 1;
+    return 0;
+  }
   function score(c) { return c.prio * 1e6 + Math.sqrt(c.w * c.h); }
-  visible.sort(function(a, b) { return score(b) - score(a); });
-  if (visible.length > 50) visible = visible.slice(0, 50);
+  var safety = visible.filter(function(c) { return safetyPriority(c) > 0; });
+  var ordinary = visible.filter(function(c) { return safetyPriority(c) === 0; });
+  safety.sort(function(a, b) {
+    var d = safetyPriority(b) - safetyPriority(a);
+    return d || score(b) - score(a);
+  });
+  ordinary.sort(function(a, b) { return score(b) - score(a); });
+  // Safety controls are never lost to the ordinary 50-target budget. If a
+  // pathological page has >50 safety controls, retain them all.
+  visible = safety.concat(ordinary.slice(0, Math.max(0, 50 - safety.length)));
 
   // Strip the el reference (not JSON-encodable + serializing DOM
   // nodes hangs chromedp.Evaluate) and assign final labels.
@@ -467,7 +528,7 @@ const EnumScript = `
   for (var k = 0; k < visible.length; k++) {
     var c = visible[k];
     out.push({
-      x: c.x, y: c.y, w: c.w, h: c.h,
+      id: c.id, x: c.x, y: c.y, w: c.w, h: c.h,
       tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
       disabled: c.disabled, loading: c.loading, dangerous: c.dangerous, destructive_effect: c.destructive_effect,
       label: k + 1

@@ -309,6 +309,8 @@ type session struct {
 	environment      backends.EnvironmentOptions
 	openedAt         time.Time
 	lastUsed         time.Time
+	somRevision      int
+	somPrevious      map[string]backends.SetOfMarkTarget
 }
 
 type reapedSession struct {
@@ -591,12 +593,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Use action=batch with steps=[{action:\"click\",...},{action:\"wait_for_stable\"}] for an atomic guarded sequence that aborts on the first error and returns one final screenshot. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
 				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), expected_text? (click guard), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, quiet_ms?, timeout_ms?, annotate? (screenshot only, default true). " +
-				"Screenshot responses always include compact safety_targets when SoM finds loading, disabled, or consequential controls; pass include_som=true for every structured target. Returns a binary screenshot envelope plus compact current URL and state-change metadata. Full tabs and viewport metadata are available from browser_session.",
+				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Explicit screenshot and batch return one binary screenshot envelope. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id":    map[string]any{"type": "string"},
-				"action":        map[string]any{"type": "string", "enum": []string{"screenshot", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"session_id": map[string]any{"type": "string"},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"steps": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 20,
+					"description": "For action=batch. Ordered click/double_click/wait/wait_for_stable steps. The batch aborts on the first failed guard/action and captures one final annotated screenshot after all steps succeed.",
+					"items":       map[string]any{"type": "object"},
+				},
 				"url":           map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
 				"tab_id":        map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate":    map[string]any{"type": "string"},
@@ -2018,6 +2025,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, fmt.Errorf("switch tab %s: %w", tabID, err)
 		}
 	}
+	if action == "batch" {
+		return a.toolComputerUseBatchLocked(ctx, id, sess, args)
+	}
 
 	act := backends.Action{
 		Type:         action,
@@ -2124,11 +2134,15 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if action == "screenshot" {
 		shot, err = screenshotWithOptions(sess.comp, annotate)
-	} else if shouldSkipPostActionScreenshot(sess, action) {
+	} else if canExecuteActionOnly(sess, action) {
 		err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
 		screenshotSkipped = true
 	} else {
-		shot, err = sess.comp.Execute(act)
+		// Preserve the backend Execute contract for older implementations, but
+		// do not copy its image into every MCP action result. The live frame is
+		// available from screenshot_url and explicit screenshot/batch calls.
+		_, err = sess.comp.Execute(act)
+		screenshotSkipped = true
 	}
 	if err != nil {
 		if isSessionUnhealthyError(err) {
@@ -2184,8 +2198,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		payload[k] = v
 	}
 	if screenshotSkipped {
-		payload["screenshot_available"] = false
-		payload["post_action_screenshot"] = "skipped"
+		payload["screenshot_available"] = true
+		payload["post_action_screenshot"] = "not_embedded"
 	}
 	recovery := screenshotRecoveryFor(sess.comp)
 	var selectResult *selectinput.Result
@@ -2217,8 +2231,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
-		"session_id":  id,
-		"current_url": afterURL,
+		"session_id":     id,
+		"current_url":    afterURL,
+		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
 	}
 	if tabID := activeTabID(sess.comp); tabID != "" && (action == "screenshot" || tabEvent.Switched || stringArg(args, "tab_id") != "") {
 		out["active_tab_id"] = tabID
@@ -2233,21 +2248,21 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["quiet_ms"] = stableQuietMS
 	}
 	if screenshotSkipped {
-		out["text"] = fmt.Sprintf("Success: %s action dispatched. Call action=wait if needed, then action=screenshot for the visual state.", action)
-		out["screenshot_available"] = false
-		out["post_action_screenshot"] = "skipped"
-		out["next_step"] = "Call computer_use(action=wait, duration=1000), then computer_use(action=screenshot)."
+		out["text"] = fmt.Sprintf("Success: %s action completed. Latest visual state is available at screenshot_url.", action)
+		out["screenshot_available"] = true
+		out["post_action_screenshot"] = "not_embedded"
+		out["next_step"] = "Call computer_use(action=screenshot) when visual grounding is needed."
 	} else {
 		mime := imageMIME(shot)
 		out["text"] = fmt.Sprintf("Success: %s action completed. Screenshot attached.", action)
 		out["screenshot"] = binaryEnvelope(shot, mime)
-		out["screenshot_b64"] = base64.StdEncoding.EncodeToString(shot)
 		out["mime_type"] = mime
 	}
 	if includeSOM && !screenshotSkipped {
 		out["som"] = setOfMarkFor(sess.comp)
 	}
 	if action == "screenshot" && !screenshotSkipped {
+		out["som_delta"] = setOfMarkDelta(sess)
 		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 			out["safety_targets"] = targets
 		}
@@ -2279,20 +2294,127 @@ func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, a
 		cause)
 }
 
-func shouldSkipPostActionScreenshot(sess *session, action string) bool {
-	if sess == nil || sess.backend != "browserbase" {
-		return false
-	}
-	if os.Getenv("APTEVA_BROWSERBASE_SPLIT_ACTION_SCREENSHOT") != "1" {
+func canExecuteActionOnly(sess *session, action string) bool {
+	if sess == nil {
 		return false
 	}
 	switch action {
-	case "click", "double_click", "wait":
+	case "click", "double_click", "wait", "wait_for_stable":
 	default:
 		return false
 	}
 	_, ok := sess.comp.(backends.ActionOnlyExecutor)
 	return ok
+}
+
+func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *session, args map[string]any) (any, error) {
+	steps, err := batchStepArgs(args["steps"])
+	if err != nil {
+		return nil, computerUseFailure("invalid_batch", id, sess, "batch", err.Error(),
+			"Pass 1-20 ordered click/double_click/wait/wait_for_stable step objects.", err)
+	}
+	beforeURL := currentURL(sess.comp)
+	beforeTabs := tabsFor(sess.comp)
+	completed := make([]map[string]any, 0, len(steps))
+	for index, step := range steps {
+		action := strings.TrimSpace(stringArg(step, "action"))
+		switch action {
+		case "click", "double_click":
+			if err := validateClickTargetArgs(action, step); err != nil {
+				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+					fmt.Sprintf("step %d: %v", index+1, err), "Take a fresh screenshot and use a current label, selector, or explicit coordinate.", err)
+			}
+		case "wait_for_stable":
+			if sess.backend == "service" {
+				return nil, computerUseFailure("backend_not_supported", id, sess, "batch", "wait_for_stable is unavailable on service backend", "Use a browser backend with DOM stability signals.", nil)
+			}
+			if err := validateStableArgs(action, step); err != nil {
+				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, err), "Use quiet_ms=1500 and timeout_ms up to 30000.", err)
+			}
+		case "wait":
+		default:
+			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, wait, or wait_for_stable inside a batch.", nil)
+		}
+
+		act := backends.Action{
+			Type: action, Label: intArg(step, "label"), Selector: stringArg(step, "selector"),
+			Duration: intArg(step, "duration"), QuietMS: intArg(step, "quiet_ms"), TimeoutMS: intArg(step, "timeout_ms"),
+			ExpectedText: strings.TrimSpace(stringArg(step, "expected_text")), Presentation: sess.presentation,
+		}
+		act.X, act.Y = coordinateArg(step)
+		if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(step, "coordinate")) != "" {
+			act.Label, act.Selector, act.GuardDangerousCoordinate = 0, "", true
+		} else if action == "click" && strings.TrimSpace(act.Selector) != "" {
+			act.Label = 0
+		}
+		if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
+			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+				fmt.Sprintf("step %d: Set-of-Mark label %d is stale or absent", index+1, act.Label), "Take a fresh screenshot and rebuild the batch from current labels.", nil)
+		}
+
+		if canExecuteActionOnly(sess, action) {
+			err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
+		} else {
+			_, err = sess.comp.Execute(act)
+		}
+		if err != nil {
+			code := "batch_step_failed"
+			if strings.Contains(err.Error(), "click rejected:") {
+				code = "unsafe_click_rejected"
+			}
+			return nil, computerUseFailure(code, id, sess, "batch",
+				fmt.Sprintf("step %d (%s) failed after %d completed steps: %v", index+1, action, len(completed), err),
+				"No later steps were executed. Take a fresh screenshot and inspect the live target state before retrying.", err)
+		}
+		completed = append(completed, map[string]any{"index": index + 1, "action": action, "status": "completed"})
+	}
+
+	tabEvent := autoFollowNewTab(sess.comp, beforeTabs)
+	shot, err := screenshotWithOptions(sess.comp, annotateArg(args, true))
+	if err != nil {
+		return nil, computerUseFailure("backend_error", id, sess, "batch", "batch completed but final screenshot failed", "Call action=screenshot to retrieve the latest frame.", err)
+	}
+	a.recordSessionNavigation(ctx, id, sess)
+	afterURL := currentURL(sess.comp)
+	mime := imageMIME(shot)
+	out := map[string]any{
+		"session_id": id, "current_url": afterURL, "text": "Success: batch completed. One final screenshot attached.",
+		"steps": completed, "completed_steps": len(completed), "screenshot": binaryEnvelope(shot, mime), "mime_type": mime,
+		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"), "som_delta": setOfMarkDelta(sess),
+	}
+	if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
+		out["safety_targets"] = targets
+	}
+	if boolArgDefault(args, "include_som", false) {
+		out["som"] = setOfMarkFor(sess.comp)
+	}
+	mergeNavigationDelta(out, "batch", beforeURL, afterURL, "")
+	mergeTabFollowPayload(out, tabEvent)
+	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": len(completed), "current_url": afterURL})
+	return out, nil
+}
+
+func batchStepArgs(raw any) ([]map[string]any, error) {
+	if typed, ok := raw.([]map[string]any); ok {
+		if len(typed) == 0 || len(typed) > 20 {
+			return nil, fmt.Errorf("steps must contain between 1 and 20 objects")
+		}
+		return typed, nil
+	}
+	items, ok := raw.([]any)
+	if !ok || len(items) == 0 || len(items) > 20 {
+		return nil, fmt.Errorf("steps must contain between 1 and 20 objects")
+	}
+	out := make([]map[string]any, 0, len(items))
+	for i, item := range items {
+		step, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("step %d must be an object", i+1)
+		}
+		out = append(out, step)
+	}
+	return out, nil
 }
 
 func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2602,6 +2724,49 @@ func safetySetOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
 		if target.Disabled || target.Loading || target.Dangerous {
 			out = append(out, target)
 		}
+	}
+	return out
+}
+
+// setOfMarkDelta returns only semantic/geometry changes since the previous
+// annotated frame. Stable target IDs make this useful across spinner and
+// re-render transitions without repeatedly sending the entire SoM payload.
+func setOfMarkDelta(sess *session) map[string]any {
+	current := setOfMarkFor(sess.comp)
+	previous := sess.somPrevious
+	next := make(map[string]backends.SetOfMarkTarget, len(current))
+	added := make([]backends.SetOfMarkTarget, 0)
+	changed := make([]backends.SetOfMarkTarget, 0)
+	for _, target := range current {
+		key := target.ID
+		if key == "" {
+			key = fmt.Sprintf("legacy_label_%d", target.Label)
+		}
+		next[key] = target
+		old, ok := previous[key]
+		if !ok {
+			added = append(added, target)
+		} else if !reflect.DeepEqual(old, target) {
+			changed = append(changed, target)
+		}
+	}
+	removed := make([]string, 0)
+	for key := range previous {
+		if _, ok := next[key]; !ok {
+			removed = append(removed, key)
+		}
+	}
+	sort.Strings(removed)
+	sess.somPrevious = next
+	sess.somRevision++
+	out := map[string]any{
+		"revision": sess.somRevision,
+		"added":    added,
+		"changed":  changed,
+		"removed":  removed,
+	}
+	if len(added) == 0 && len(changed) == 0 && len(removed) == 0 {
+		out["unchanged"] = true
 	}
 	return out
 }

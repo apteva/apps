@@ -34,9 +34,10 @@ func TestLocalGuardedPublishClickLive(t *testing.T) {
 		_, _ = w.Write([]byte(`<!doctype html><html><style>
 body{font-family:system-ui;margin:0}.bar{height:72px;display:flex;justify-content:flex-end;align-items:center;padding:0 32px;background:#111}
 button{width:150px;height:42px;border:0;border-radius:8px;background:white;color:#111;font-weight:700}.spinner{display:inline-block;width:18px;height:18px;border:3px solid #bbb;border-top-color:#111;border-radius:50%}
-</style><body><div class="bar"><button id="publish" aria-label="Publish" aria-busy="true" data-loading="true" disabled><span class="spinner" role="progressbar" aria-label="Saving"></span></button></div>
+</style><body><div class="bar"><button id="publish">Publish</button></div>
 <main style="padding:32px"><h1>Create a post</h1><label>Title <input id="title" placeholder="Post title"></label><p id="status">Autosaving draft…</p></main>
 <script>
+window.startLoading=function(){var b=document.getElementById('publish');b.disabled=true;b.setAttribute('aria-busy','true');b.setAttribute('data-loading','true');b.innerHTML='<span class="spinner" role="progressbar" aria-label="Saving"></span>';};
 window.releaseLoading=function(){var b=document.getElementById('publish');b.disabled=false;b.removeAttribute('aria-busy');b.removeAttribute('data-loading');b.innerHTML='Publish';document.getElementById('status').textContent='Draft saved';};
 document.getElementById('publish').addEventListener('click',function(){fetch('/published',{method:'POST'});});
 </script></body></html>`))
@@ -54,6 +55,22 @@ document.getElementById('publish').addEventListener('click',function(){fetch('/p
 	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
 		t.Fatal(err)
 	}
+	var stablePublish computer.SetOfMarkTarget
+	for _, target := range c.LastSetOfMark() {
+		if target.AccessibleName == "Publish" {
+			stablePublish = target
+			break
+		}
+	}
+	if stablePublish.ID == "" {
+		t.Fatalf("stable Publish target missing identity: %+v", c.LastSetOfMark())
+	}
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`window.startLoading()`, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
+		t.Fatal(err)
+	}
 	var publish computer.SetOfMarkTarget
 	for _, target := range c.LastSetOfMark() {
 		if target.AccessibleName == "Publish" {
@@ -63,6 +80,9 @@ document.getElementById('publish').addEventListener('click',function(){fetch('/p
 	}
 	if publish.Label == 0 || !publish.Disabled || !publish.Loading || !publish.Dangerous || publish.DestructiveEffect != "immediate_publish" {
 		t.Fatalf("loading Publish SoM target missing state: %+v all=%+v", publish, c.LastSetOfMark())
+	}
+	if publish.ID != stablePublish.ID {
+		t.Fatalf("loading replacement lost stable target identity: before=%+v after=%+v", stablePublish, publish)
 	}
 	if _, err := c.Execute(computer.Action{Type: "wait_for_stable", QuietMS: 300, TimeoutMS: 500}); err == nil || !strings.Contains(err.Error(), "did not stabilize") {
 		t.Fatalf("loading page reported stable: %v", err)
@@ -125,6 +145,40 @@ document.getElementById('publish').addEventListener('click',function(){fetch('/p
 	}
 	if published.Load() != 1 {
 		t.Fatalf("guarded Publish label did not dispatch exactly once: %d", published.Load())
+	}
+}
+
+func TestLocalSOMRetainsSafetyControlsBeyondOrdinaryCapLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_GUARDED_CLICK_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_GUARDED_CLICK_TESTS=1")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><style>body{margin:0}button{width:110px;height:34px;margin:2px}</style><div id="ordinary"></div>
+<button id="publish" aria-label="Publish">Publish</button><button id="schedule">Schedule</button><button id="withdraw">Withdraw funds</button>
+<script>for(let i=0;i<60;i++){let b=document.createElement('button');b.textContent='Ordinary '+i;document.querySelector('#ordinary').appendChild(b)}</script>`))
+	}))
+	defer server.Close()
+	c, err := New(computer.DisplaySize{Width: 1000, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OpenSession(computer.OpenOptions{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
+		t.Fatal(err)
+	}
+	found := map[string]computer.SetOfMarkTarget{}
+	for _, target := range c.LastSetOfMark() {
+		found[target.AccessibleName] = target
+	}
+	for name, effect := range map[string]string{"Publish": "immediate_publish", "Schedule": "schedule_publish", "Withdraw funds": "financial_action"} {
+		target, ok := found[name]
+		if !ok || !target.Dangerous || target.DestructiveEffect != effect || target.ID == "" {
+			t.Fatalf("safety target %q was truncated or incomplete: target=%+v all=%+v", name, target, c.LastSetOfMark())
+		}
 	}
 }
 

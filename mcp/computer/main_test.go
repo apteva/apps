@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,7 +225,8 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 		t.Fatalf("computer_use screenshot: %v", err)
 	}
 	shotMap := shotOut.(map[string]any)
-	gotPNG, _ := base64.StdEncoding.DecodeString(shotMap["screenshot_b64"].(string))
+	envelope := shotMap["screenshot"].(map[string]any)
+	gotPNG, _ := base64.StdEncoding.DecodeString(envelope["base64"].(string))
 	if len(gotPNG) != len(fake.png) || gotPNG[0] != 0x89 {
 		t.Errorf("screenshot bytes round-trip failed: got %v", gotPNG)
 	}
@@ -1789,12 +1791,12 @@ func TestComputerUseAutoFollowsSingleNewTab(t *testing.T) {
 	if len(fake.switchCalls) != 1 || fake.switchCalls[0] != newTab.ID {
 		t.Fatalf("switch calls: want [%s], got %v", newTab.ID, fake.switchCalls)
 	}
-	if fake.screenshotCalls != 1 {
-		t.Fatalf("auto-follow should rescreenshot switched tab once, got %d calls", fake.screenshotCalls)
+	if fake.screenshotCalls != 0 {
+		t.Fatalf("summary-only click should not embed a switched-tab screenshot, got %d calls", fake.screenshotCalls)
 	}
 }
 
-func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T) {
+func TestComputerUseReturnsSummaryAndFrameReferenceByDefault(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
 
@@ -1824,11 +1826,17 @@ func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T
 		t.Fatalf("computer_use click: %v", err)
 	}
 	m := out.(map[string]any)
-	if _, ok := m["screenshot_b64"]; !ok {
-		t.Fatalf("screenshot_b64 should be present by default: %v", m)
+	if _, ok := m["screenshot"]; ok {
+		t.Fatalf("ordinary action should not embed a screenshot: %v", m)
 	}
-	if len(fake.actionOnlyCalls) != 0 {
-		t.Fatalf("action-only should not be used by default: %+v", fake.actionOnlyCalls)
+	if got := m["screenshot_available"]; got != true {
+		t.Fatalf("latest frame should remain available: %v", m)
+	}
+	if got, _ := m["screenshot_url"].(string); !strings.Contains(got, "/sessions/"+sessionID+"/screenshot") {
+		t.Fatalf("missing live frame reference: %v", m)
+	}
+	if len(fake.actionOnlyCalls) != 1 {
+		t.Fatalf("action-only should avoid an unnecessary capture: %+v", fake.actionOnlyCalls)
 	}
 	if fake.lastAction.Type != "click" {
 		t.Fatalf("execute action: want click, got %+v", fake.lastAction)
@@ -1840,8 +1848,7 @@ func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T
 	}
 }
 
-func TestComputerUseBrowserbaseActionOnlyOptInSkipsPostScreenshot(t *testing.T) {
-	t.Setenv("APTEVA_BROWSERBASE_SPLIT_ACTION_SCREENSHOT", "1")
+func TestComputerUseActionOnlyAlsoAppliesToWait(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
 
@@ -1869,14 +1876,14 @@ func TestComputerUseBrowserbaseActionOnlyOptInSkipsPostScreenshot(t *testing.T) 
 		t.Fatalf("computer_use click: %v", err)
 	}
 	m := out.(map[string]any)
-	if got := m["screenshot_available"]; got != false {
-		t.Fatalf("screenshot_available: want false, got %v", got)
+	if got := m["screenshot_available"]; got != true {
+		t.Fatalf("screenshot_available: want true, got %v", got)
 	}
 	if _, ok := m["screenshot_b64"]; ok {
 		t.Fatalf("screenshot_b64 should be omitted when screenshot is skipped: %v", m)
 	}
-	if got := m["post_action_screenshot"]; got != "skipped" {
-		t.Fatalf("post_action_screenshot: want skipped, got %v", got)
+	if got := m["post_action_screenshot"]; got != "not_embedded" {
+		t.Fatalf("post_action_screenshot: want not_embedded, got %v", got)
 	}
 	if len(fake.actionOnlyCalls) != 1 || fake.actionOnlyCalls[0].Type != "click" {
 		t.Fatalf("action-only calls: want one click, got %+v", fake.actionOnlyCalls)
@@ -1890,11 +1897,89 @@ func TestComputerUseBrowserbaseActionOnlyOptInSkipsPostScreenshot(t *testing.T) 
 	if err != nil {
 		t.Fatalf("computer_use wait: %v", err)
 	}
-	if got := waitOut.(map[string]any)["screenshot_available"]; got != false {
-		t.Fatalf("wait screenshot_available: want false, got %v", got)
+	if got := waitOut.(map[string]any)["screenshot_available"]; got != true {
+		t.Fatalf("wait screenshot_available: want true, got %v", got)
 	}
 	if len(fake.actionOnlyCalls) != 2 || fake.actionOnlyCalls[1].Type != "wait" {
 		t.Fatalf("action-only calls after wait: %+v", fake.actionOnlyCalls)
+	}
+}
+
+func TestComputerUseBatchAbortsAndReturnsOneFinalFrame(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com/editor",
+		somTargets: []backends.SetOfMarkTarget{{
+			ID: "som_publish", Label: 4, AccessibleName: "Publish", Dangerous: true, DestructiveEffect: "immediate_publish",
+		}},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID, "action": "batch",
+		"steps": []any{
+			map[string]any{"action": "click", "label": 4, "expected_text": "Publish"},
+			map[string]any{"action": "wait_for_stable", "quiet_ms": 200, "timeout_ms": 1000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	m := out.(map[string]any)
+	if got := m["completed_steps"]; got != 2 {
+		t.Fatalf("completed_steps=%v", got)
+	}
+	if fake.screenshotCalls != 1 {
+		t.Fatalf("batch must capture exactly one final frame, got %d", fake.screenshotCalls)
+	}
+	if len(fake.actionOnlyCalls) != 2 {
+		t.Fatalf("action calls=%+v", fake.actionOnlyCalls)
+	}
+	if _, ok := m["screenshot"].(map[string]any); !ok {
+		t.Fatalf("missing final screenshot: %v", m)
+	}
+	if _, duplicated := m["screenshot_b64"]; duplicated {
+		t.Fatalf("duplicate screenshot_b64 returned: %v", m)
+	}
+	delta := m["som_delta"].(map[string]any)
+	if got := delta["revision"]; got != 1 {
+		t.Fatalf("delta revision=%v", got)
+	}
+
+	fake.executeActionHook = func(action backends.Action) error {
+		if action.Type == "wait_for_stable" {
+			return errors.New("still saving")
+		}
+		return nil
+	}
+	fake.actionOnlyCalls = nil
+	fake.screenshotCalls = 0
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID, "action": "batch",
+		"steps": []any{
+			map[string]any{"action": "click", "label": 4, "expected_text": "Publish"},
+			map[string]any{"action": "wait_for_stable"},
+			map[string]any{"action": "click", "label": 4, "expected_text": "Publish"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "step 2") {
+		t.Fatalf("batch should abort at step 2: %v", err)
+	}
+	if len(fake.actionOnlyCalls) != 2 {
+		t.Fatalf("later step executed after failure: %+v", fake.actionOnlyCalls)
+	}
+	if fake.screenshotCalls != 0 {
+		t.Fatalf("failed batch must not claim a final screenshot, got %d", fake.screenshotCalls)
 	}
 }
 
@@ -2793,6 +2878,7 @@ type fakeComp struct {
 	executeErr        error
 	screenshotErr     error
 	executeActionErr  error
+	executeActionHook func(backends.Action) error
 	executeHook       func(backends.Action) error
 	openSessionURL    string
 	openSessionID     string
@@ -2857,6 +2943,14 @@ func (f *fakeComp) ExecuteAction(action backends.Action) error {
 		f.addTabOnClick = nil
 	}
 	f.mu.Unlock()
+	if f.executeActionHook != nil {
+		if err := f.executeActionHook(action); err != nil {
+			return err
+		}
+	}
+	if f.executeActionErr == nil && f.executeErr != nil {
+		return f.executeErr
+	}
 	return f.executeActionErr
 }
 

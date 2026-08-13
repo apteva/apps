@@ -107,7 +107,8 @@ provides:
         expected_text exactly matching its current accessible name. When
         autosave, a spinner, aria-busy, or another loading state is visible,
         use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms
-        (default 10000), then take a fresh screenshot. If the page asks to Browse, choose, attach,
+        (default 10000), then take a fresh screenshot. Stability includes DOM,
+        navigation, loading-frame, and finite network activity. If the page asks to Browse, choose, attach,
         upload, or drop a file, use action=upload_file with selector or label
         plus source_url/base64/file_path; do not operate the native OS file
         picker. For any native select, dropdown, combobox, listbox, or
@@ -137,7 +138,9 @@ provides:
         for a small viewport move and omit amount for the 300px default.
         Use action=navigate with url for direct navigation, action=back for
         browser history, and action=reload to refresh the current page. Do not
-        emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling,
+        emulate these with Control+L, Alt+ArrowLeft, or F5. Use action=batch
+        with ordered click/double_click/wait/wait_for_stable steps for an
+        abort-on-error guarded sequence and one final screenshot. After scrolling,
         tab switching, selection, upload, checked-state changes, text changes,
         temporal-field changes, or navigation, take a fresh screenshot because
         labels are re-enumerated. Args:
@@ -145,11 +148,12 @@ provides:
         expected_text?, quiet_ms?, timeout_ms?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
         text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,
-        duration?, annotate? (screenshot only, default true), include_som?
-        (screenshot only, default false). Returns screenshot bytes plus compact
-        URL and state-change metadata. Screenshot responses always include
-        compact safety_targets for loading, disabled, or consequential controls;
-        full structured som is returned with include_som=true.
+        duration?, steps? (batch only), annotate? (screenshot/batch, default true), include_som?
+        (screenshot/batch, default false). Ordinary actions return a compact
+        summary and screenshot_url without embedding duplicate image bytes.
+        Explicit screenshot and batch return one binary frame plus som_delta.
+        They also include compact safety_targets for loading, disabled, or
+        consequential controls; full structured som is returned with include_som=true.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,
