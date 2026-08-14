@@ -116,9 +116,13 @@ func (e *remoteFFmpegExecutor) Render(
 	} else {
 		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(edit))
 	}
-	usesFont := argsUseComposerFont(args)
-	if usesFont {
-		args = materializeComposerFontArgs(args, "./"+composerFontFilename)
+	fontFaces := composerFontFacesInArgs(args)
+	if len(fontFaces) > 0 {
+		fontPaths := make(map[string]string, len(fontFaces))
+		for _, face := range fontFaces {
+			fontPaths[face.ID] = "./" + face.Filename
+		}
+		args = materializeComposerFontArgs(args, fontPaths)
 	}
 	cmd := shellEcho("ffmpeg", args)
 
@@ -131,11 +135,11 @@ func (e *remoteFFmpegExecutor) Render(
 		return Result{FFmpegCommand: cmd}, errors.New("remote render requires APTEVA_OUTBOUND_TOKEN or APTEVA_APP_TOKEN for Storage upload")
 	}
 	filename := fmt.Sprintf("composition-remote-%d.%s", time.Now().UnixNano(), output.Format)
-	fontURL := ""
-	if usesFont {
-		fontURL = strings.TrimRight(publicURL, "/") + "/api/apps/composer/render-font?project_id=" + url.QueryEscape(projectID)
+	fontURLs := make(map[string]string, len(fontFaces))
+	for _, face := range fontFaces {
+		fontURLs[face.ID] = strings.TrimRight(publicURL, "/") + "/api/apps/composer/render-font?project_id=" + url.QueryEscape(projectID) + "&face=" + url.QueryEscape(face.ID)
 	}
-	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURL)
+	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURLs)
 
 	app.Logger().Info("remote ffmpeg render", "host_id", e.hostID, "inputs", len(urls), "format", output.Format)
 
@@ -209,15 +213,19 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 // Convention: input URLs become ./in0, ./in1, … in the working dir,
 // the ffmpeg command is appended verbatim, and the output is
 // echoed back as APTEVA_RESULT:{...} for the parser.
-func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType, fontURL string) string {
+func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string, fontURLs map[string]string) string {
 	var b strings.Builder
 	b.WriteString("set -eu -o pipefail\n")
 	b.WriteString("WORKDIR=$(mktemp -d)\n")
 	b.WriteString("trap 'rm -rf \"$WORKDIR\"' EXIT\n")
 	b.WriteString("cd \"$WORKDIR\"\n")
 	b.WriteString(remoteFFmpegBootstrapScript())
-	if strings.TrimSpace(fontURL) != "" {
-		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %q -o ./%s %q\n", "Authorization: Bearer "+token, composerFontFilename, fontURL)
+	for _, face := range composerFontFaces {
+		fontURL := strings.TrimSpace(fontURLs[face.ID])
+		if fontURL == "" {
+			continue
+		}
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %q -o ./%s %q\n", "Authorization: Bearer "+token, face.Filename, fontURL)
 	}
 	for i, u := range urls {
 		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %q\n", i, u)

@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.5.10
+version: 0.6.3
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -81,11 +81,12 @@ description: |
   Render rows are created before AI materialization, asynchronous submissions
   continue through generation, rendering, upload, and QA without a second
   render call, and interrupted queued work resumes after sidecar restarts.
-  V1 text rendering is deterministic across executors: Composer serves its
-  bundled Go Mono TTF to remote render hosts and writes the same bytes into
-  local render scratch space. Every ffmpeg drawtext filter uses an explicit
-  fontfile, so composition font-family metadata never depends on host
-  Fontconfig packages or proprietary fonts.
+  V1 text rendering is deterministic across executors: Composer bundles Inter
+  Regular, Medium, Semibold, and Bold plus Go Mono Regular and Bold, resolves
+  every requested family and weight to an explicit font file, and serves the
+  same bytes to local and remote render hosts. Validation and render QA report
+  family substitutions and unsupported spacing fields instead of silently
+  depending on host Fontconfig packages or proprietary fonts.
 author: Apteva
 scopes: [project, global]
 requires:

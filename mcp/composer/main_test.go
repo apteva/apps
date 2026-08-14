@@ -451,12 +451,12 @@ func TestBuildLocalFFmpegArgs_TextOverlay(t *testing.T) {
 	if !strings.Contains(cmd, "fontsize=40") {
 		t.Errorf("font_size should plumb through: %s", cmd)
 	}
-	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+	if !strings.Contains(cmd, "fontfile='"+composerFontFor(nil).Token+"'") {
 		t.Errorf("text overlay should use the bundled font token: %s", cmd)
 	}
 }
 
-func TestBuildLocalFFmpegArgs_RichTextIgnoresUnavailableFontFamily(t *testing.T) {
+func TestBuildLocalFFmpegArgs_RichTextResolvesApprovedFontFamily(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
 		{"type":"overlay","clips":[{"asset":{"type":"text","text":"Remote-safe","font":{"family":"Courier New","size":42}},"start":0,"length":2}]}
@@ -469,17 +469,58 @@ func TestBuildLocalFFmpegArgs_RichTextIgnoresUnavailableFontFamily(t *testing.T)
 	if strings.Contains(cmd, "font='Courier New'") {
 		t.Fatalf("font family must not require host Fontconfig: %s", cmd)
 	}
-	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+	face := composerFontFor(&TextFont{Family: "Courier New", Size: 42})
+	if face.ID != composerFontMonoRegular || !strings.Contains(cmd, "fontfile='"+face.Token+"'") {
 		t.Fatalf("rich text should use the bundled font token: %s", cmd)
 	}
-	materialized := strings.Join(materializeComposerFontArgs(args, "./"+composerFontFilename), " ")
-	if strings.Contains(materialized, composerFontToken) || !strings.Contains(materialized, "fontfile='./"+composerFontFilename+"'") {
+	materialized := strings.Join(materializeComposerFontArgs(args, map[string]string{face.ID: "./" + face.Filename}), " ")
+	if strings.Contains(materialized, face.Token) || !strings.Contains(materialized, "fontfile='./"+face.Filename+"'") {
 		t.Fatalf("font token was not materialized: %s", materialized)
 	}
 }
 
+func TestBuildLocalFFmpegArgs_RichTextSelectsInterWeight(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"overlay","clips":[
+			{"asset":{"type":"text","text":"Regular","font":{"family":"Inter","weight":400}},"start":0,"length":2},
+			{"asset":{"type":"text","text":"Bold","font":{"family":"Inter","weight":800}},"start":0,"length":2}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := strings.Join(buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a"}, -1, "out.mp4"), " ")
+	if !strings.Contains(cmd, composerFontFor(&TextFont{Family: "Inter", Weight: 400}).Token) {
+		t.Fatalf("regular Inter token missing: %s", cmd)
+	}
+	if !strings.Contains(cmd, composerFontFor(&TextFont{Family: "Inter", Weight: 800}).Token) {
+		t.Fatalf("bold Inter token missing: %s", cmd)
+	}
+}
+
+func TestV1TypographyWarningsReportSubstitutionAndUnsupportedSpacing(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"overlay","clips":[{"asset":{"type":"text","text":"Title","font":{"family":"Arial","weight":800},"style":{"letter_spacing":2,"line_height":1.2}},"start":0,"length":2}]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings := strings.Join(v1TypographyWarnings(e), "\n")
+	for _, want := range []string{
+		"Arial unavailable; rendering with Inter.",
+		"V1 letter_spacing is not rendered; the value was ignored.",
+		"V1 line_height is not rendered; the value was ignored.",
+	} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("warning %q missing from %q", want, warnings)
+		}
+	}
+}
+
 func TestRenderFontEndpointServesBundledTTF(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/render-font", nil)
+	req := httptest.NewRequest(http.MethodGet, "/render-font?face=inter-bold", nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handleRenderFont(rec, req)
 	res := rec.Result()
@@ -499,13 +540,14 @@ func TestBundledFontRendersWithFFmpeg(t *testing.T) {
 		t.Skip("ffmpeg not installed")
 	}
 	dir := t.TempDir()
-	fontPath, err := writeComposerFont(dir)
+	face := composerFontFor(nil)
+	fontPaths, err := writeComposerFonts(dir, []composerFontFace{face})
 	if err != nil {
 		t.Fatal(err)
 	}
 	filter := materializeComposerFontArgs([]string{buildDrawText(&TextOver{
 		Body: "Remote-safe text", FontSize: 32, Color: "white", Position: "center",
-	}, 320, 180)}, fontPath)[0]
+	}, 320, 180)}, fontPaths)[0]
 	cmd := exec.Command(ffmpeg,
 		"-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.1",
 		"-vf", filter, "-frames:v", "1", "-f", "null", "-",
@@ -2198,7 +2240,7 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"token-redacted",
 		"composition.mp4",
 		"video/mp4",
-		"https://agents.example.com/api/apps/composer/render-font?project_id=project-1",
+		map[string]string{composerFontInterBold: "https://agents.example.com/api/apps/composer/render-font?project_id=project-1&face=inter-bold"},
 	)
 	for _, want := range []string{
 		`export STORAGE_BASE="https://agents.example.com/api/apps/callback/apps/storage/proxy"`,
@@ -2208,8 +2250,8 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID",
 		"composer-render",
 		"Authorization: Bearer token-redacted",
-		"-o ./composer-go-mono.ttf",
-		"/api/apps/composer/render-font?project_id=project-1",
+		"-o ./composer-inter-bold.ttf",
+		"/api/apps/composer/render-font?project_id=project-1&face=inter-bold",
 		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
 		"STORAGE_INIT_FAILED code=$INIT_CODE",
 		"STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE",

@@ -92,7 +92,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	ctx.EmitWithProject("composition.created", pid, map[string]any{
 		"composition_id": id, "name": name, "duration_seconds": dur,
 	})
-	return map[string]any{"id": id, "version": "composer/v1", "duration_seconds": dur}, nil
+	return map[string]any{"id": id, "version": "composer/v1", "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
 }
 
 func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -218,7 +218,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	ctx.EmitWithProject("composition.updated", projectID, map[string]any{
 		"composition_id": id, "name": name, "duration_seconds": dur,
 	})
-	return map[string]any{"id": id, "duration_seconds": dur}, nil
+	return map[string]any{"id": id, "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
 }
 
 func compositionPayloadFromV2Args(args map[string]any) (editJSON string, outputJSON string, duration float64, version string, ok bool, err error) {
@@ -775,7 +775,7 @@ func renderEditFromStoredJSON(editJSON, outputJSON string) (*Edit, Output, strin
 	var output Output
 	_ = json.Unmarshal([]byte(outputJSON), &output)
 	validateOutput(&output)
-	return edit, output, "composer/v1", nil, nil
+	return edit, output, "composer/v1", v1TypographyWarnings(edit), nil
 }
 
 // saveRenderOutput uploads the bytes to storage and returns the

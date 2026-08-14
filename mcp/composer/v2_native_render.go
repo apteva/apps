@@ -657,33 +657,17 @@ func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output
 }
 
 func loadFontFace(bold bool, size float64) font.Face {
-	paths := []string{}
+	data := interRegularTTF
 	if bold {
-		paths = append(paths,
-			"/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-			"/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-			"/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-		)
-	} else {
-		paths = append(paths,
-			"/System/Library/Fonts/Supplemental/Arial.ttf",
-			"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-			"/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-		)
+		data = interBoldTTF
 	}
-	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		ft, err := opentype.Parse(b)
-		if err != nil {
-			continue
-		}
-		face, err := opentype.NewFace(ft, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
-		if err == nil {
-			return face
-		}
+	ft, err := opentype.Parse(data)
+	if err != nil {
+		return basicfont.Face7x13
+	}
+	face, err := opentype.NewFace(ft, &opentype.FaceOptions{Size: size, DPI: 72, Hinting: font.HintingFull})
+	if err == nil {
+		return face
 	}
 	return basicfont.Face7x13
 }

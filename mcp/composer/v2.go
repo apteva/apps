@@ -745,7 +745,7 @@ func validateCompositionJSON(s string) CompositionValidation {
 	if err != nil {
 		return CompositionValidation{Valid: false, Version: "composer/v1", Renderer: "none", Errors: []string{err.Error()}}
 	}
-	return CompositionValidation{Valid: true, Version: "composer/v1", DurationSeconds: editDurationSeconds(edit), Renderer: "ffmpeg"}
+	return CompositionValidation{Valid: true, Version: "composer/v1", DurationSeconds: editDurationSeconds(edit), Renderer: "ffmpeg", Warnings: v1TypographyWarnings(edit)}
 }
 
 func v2UseDirectRenderer(spec *V2Composition) bool {
