@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.2
+
+- Pin source installs to the immutable `prospecting/v0.2.2` release tag.
+
 ## v0.2.1
 
 - Strip bullet-separated marketing taglines from extracted company names.
