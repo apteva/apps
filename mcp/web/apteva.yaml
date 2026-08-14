@@ -2,11 +2,15 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.2.6
+version: 0.2.7
 description: |
   Browser-native web intelligence and reusable Apify-style extractors for
   agents. Provides JSON-first search, extraction, crawl, map, research,
   snapshots, durable extractor runs, and Jobs-backed schedules.
+
+  v0.2.7 prioritizes search-result links during rendered extraction, retries
+  truncated linkless responses once with a links-only request, and fails
+  closed when visible results still cannot be extracted.
 
   v0.2.6 makes Computer the sole default-backend authority. Web only forwards
   explicit per-call overrides, reports requested and effective backends for
