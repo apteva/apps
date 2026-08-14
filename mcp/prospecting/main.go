@@ -97,8 +97,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_candidates_get", Description: "Get one candidate with evidence and CRM handoff state. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCandidatesGet},
 		{Name: "prospecting_candidates_update", Description: "Patch a candidate's company or person details and recalculate explainable scores. Args: id and editable fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, candidateFields), []string{"id"}), Handler: a.toolCandidatesUpdate},
 		{Name: "prospecting_candidates_research", Description: "Research one candidate through Web and persist cited evidence. Args: id, question?. Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "question": sString()}, []string{"id"}), Handler: a.toolCandidatesResearch},
-		{Name: "prospecting_candidates_qualify", Description: "Deterministically qualify one candidate from up to five first-party website pages, extracting contact details, operating signals, location, and evidence-backed scores without AI. Args: id, max_pages? (default 3). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "max_pages": sInteger()}, []string{"id"}), Handler: a.toolCandidatesQualify},
-		{Name: "prospecting_candidates_qualify_batch", Description: "Deterministically qualify a bounded candidate batch without AI. Args: profile_id?, status? (default ready), limit? (default 10, max 25), max_pages? (default 3, max 5). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "limit": sInteger(), "max_pages": sInteger()}, nil), Handler: a.toolCandidatesQualifyBatch},
+		{Name: "prospecting_candidates_qualify", Description: "Deterministically qualify one candidate from up to five first-party website pages, extracting contact details, operating signals, location, and evidence-backed scores without AI. Args: id, max_pages? (default 5). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "max_pages": sInteger()}, []string{"id"}), Handler: a.toolCandidatesQualify},
+		{Name: "prospecting_candidates_qualify_batch", Description: "Deterministically qualify the next bounded batch of unenriched candidates without AI. Args: profile_id?, status? (default ready), limit? (default 10, max 25), max_pages? (default 5, max 5), requalify? (default false). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "limit": sInteger(), "max_pages": sInteger(), "requalify": sBoolean()}, nil), Handler: a.toolCandidatesQualifyBatch},
 		{Name: "prospecting_candidates_defer", Description: "Defer a candidate. Args: id, reason?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString()}, []string{"id"}), Handler: a.toolCandidatesDefer},
 		{Name: "prospecting_candidates_reject", Description: "Reject a candidate. Args: id, reason?, exclude_company? (default false). Rejected or excluded candidates are not contacted.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString(), "exclude_company": sBoolean()}, []string{"id"}), Handler: a.toolCandidatesReject},
 		{Name: "prospecting_candidates_accept", Description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids? (CRM list ids or slugs). This does not send a message or create an opportunity.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "list_ids": map[string]any{"type": "array"}}, []string{"id"}), Handler: a.toolCandidatesAccept},
@@ -214,11 +214,11 @@ func (a *App) toolCandidatesResearch(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolCandidatesQualify(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return qualifyCandidate(ctx, int64Arg(args, "id"), intArg(args, "max_pages", 3))
+	return qualifyCandidate(ctx, int64Arg(args, "id"), intArg(args, "max_pages", 5))
 }
 
 func (a *App) toolCandidatesQualifyBatch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return qualifyBatch(ctx, int64Arg(args, "profile_id"), stringArg(args, "status"), intArg(args, "limit", 10), intArg(args, "max_pages", 3))
+	return qualifyBatch(ctx, int64Arg(args, "profile_id"), stringArg(args, "status"), intArg(args, "limit", 10), intArg(args, "max_pages", 5), boolArg(args, "requalify", false))
 }
 
 func (a *App) toolCandidatesDefer(ctx *sdk.AppCtx, args map[string]any) (any, error) {

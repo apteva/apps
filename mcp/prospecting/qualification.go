@@ -19,6 +19,8 @@ var deterministicNoiseDomains = []string{
 	"facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
 	"x.com", "twitter.com", "pinterest.com", "wikipedia.org", "mapquest.com",
 	"yellowpages.com", "bbb.org", "indeed.com", "glassdoor.com", "ziprecruiter.com",
+	"etsy.com", "amazon.com", "ebay.com", "walmart.com", "alibaba.com", "aliexpress.com",
+	"scribd.com", "template.net", "jotform.com", "pdffiller.com", "signnow.com", "dochub.com",
 }
 
 var genericPageTitles = map[string]bool{
@@ -66,7 +68,7 @@ func isNoiseDomain(domain string) (bool, string) {
 	domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "www."))
 	for _, blocked := range deterministicNoiseDomains {
 		if domain == blocked || strings.HasSuffix(domain, "."+blocked) {
-			return true, "known directory, social, community, or job platform"
+			return true, "known directory, marketplace, social, community, or job platform"
 		}
 	}
 	return false, ""
@@ -81,6 +83,9 @@ func classifySearchResult(result webSearchResult, domain string) (bool, string) 
 	providerSignals := []string{"marketing agency", "website design for dentists", "dental marketing", "software for dental", "dentist directory", "find a dentist"}
 	if containsAny(title+" "+snippet, providerSignals) {
 		return false, "provider or directory content rather than an operating target company"
+	}
+	if containsAny(title+" "+snippet, []string{"patient form template", "dental form template", "printable dental form", "download dental form", "editable dental form", "dental forms pdf"}) {
+		return false, "form template or marketplace content rather than an operating target company"
 	}
 	if containsAny(title, []string{"top 10 ", "best dental websites", "dental website examples", "how to ", "guide to ", "marketing ideas"}) {
 		return false, "editorial or list content rather than an operating target company"
@@ -189,6 +194,7 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	}
 	queue := []string{startURL}
 	seen := map[string]bool{}
+	queued := map[string]bool{startURL: true}
 	pages := make([]webExtractPage, 0, maxPages)
 	errorsByURL := map[string]string{}
 	for len(queue) > 0 && len(pages) < maxPages {
@@ -200,8 +206,8 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 		seen[pageURL] = true
 		var out webExtractOutput
 		callErr := ctx.PlatformAPI().CallAppResult("web", "web_extract", map[string]any{
-			"url": pageURL, "formats": []string{"text", "metadata", "structured_data", "links"},
-			"max_chars": 20000, "store": true, "snapshot": false,
+			"url": pageURL, "formats": []string{"links", "structured_data", "metadata", "text"},
+			"max_chars": 50000, "store": true, "snapshot": false,
 		}, &out)
 		if callErr != nil {
 			errorsByURL[pageURL] = callErr.Error()
@@ -225,8 +231,24 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 			CandidateID: id, SourceKind: "web_extract", Title: page.Title, URL: defaultString(page.FinalURL, page.URL),
 			Excerpt: qualificationExcerpt(page), ArtifactID: artifactID, RetrievedAt: nowUTC(),
 		})
+		links := selectQualificationLinks(page, candidate.CompanyDomain, maxPages*2)
+		toAdd := make([]string, 0, len(links)+1)
+		for _, link := range links {
+			if !seen[link] && !queued[link] {
+				queued[link] = true
+				toAdd = append(toAdd, link)
+			}
+		}
 		if len(pages) == 1 {
-			queue = append(queue, selectQualificationLinks(page, candidate.CompanyDomain, maxPages-1)...)
+			if root := rootURL(defaultString(candidate.Website, startURL)); root != "" && !seen[root] && !queued[root] {
+				queued[root] = true
+				toAdd = append(toAdd, root)
+			}
+			// Contact/team/about links from the search result page are more
+			// likely to contain identity and contact facts than its homepage.
+			queue = append(toAdd, queue...)
+		} else {
+			queue = append(queue, toAdd...)
 		}
 	}
 	if len(pages) == 0 {
@@ -249,7 +271,7 @@ func qualifyCandidate(ctx *sdk.AppCtx, id int64, maxPages int) (map[string]any, 
 	}, nil
 }
 
-func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPages int) (map[string]any, error) {
+func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPages int, requalify bool) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
@@ -258,9 +280,21 @@ func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPag
 	}
 	limit = clamp(limit, 1, 25)
 	maxPages = clamp(maxPages, 1, 5)
-	candidates, _, err := listCandidates(ctx.AppDB(), ctx.CurrentProject(), candidateFilter{ProfileID: profileID, Status: status, Limit: limit})
+	allCandidates, _, err := listCandidates(ctx.AppDB(), ctx.CurrentProject(), candidateFilter{ProfileID: profileID, Status: status, Limit: 200})
 	if err != nil {
 		return nil, err
+	}
+	candidates := make([]Candidate, 0, limit)
+	skippedEnriched := 0
+	for _, candidate := range allCandidates {
+		if !requalify && candidate.EnrichedAt != "" {
+			skippedEnriched++
+			continue
+		}
+		candidates = append(candidates, candidate)
+		if len(candidates) >= limit {
+			break
+		}
 	}
 	results := make([]map[string]any, 0, len(candidates))
 	qualified, rejected, failed := 0, 0, 0
@@ -281,7 +315,7 @@ func qualifyBatch(ctx *sdk.AppCtx, profileID int64, status string, limit, maxPag
 		}
 		results = append(results, row)
 	}
-	return map[string]any{"results": results, "processed": len(results), "qualified": qualified, "rejected": rejected, "failed": failed}, nil
+	return map[string]any{"results": results, "processed": len(results), "qualified": qualified, "rejected": rejected, "failed": failed, "skipped_enriched": skippedEnriched}, nil
 }
 
 func qualificationExcerpt(page webExtractPage) string {
@@ -435,54 +469,161 @@ func domainBrand(domain string) string {
 }
 
 func extractBestEmail(pages []webExtractPage, domain string) string {
-	candidates := []string{}
-	for _, page := range pages {
-		for _, link := range page.Links {
-			if strings.HasPrefix(strings.ToLower(link.URL), "mailto:") {
-				candidates = append(candidates, strings.TrimPrefix(strings.Split(link.URL, "?")[0], "mailto:"))
-			}
-		}
-		candidates = append(candidates, emailPattern.FindAllString(page.Text+" "+page.Description, -1)...)
+	type rankedEmail struct {
+		Value string
+		Score int
+		Order int
 	}
-	best := ""
-	for _, raw := range candidates {
+	candidates := []rankedEmail{}
+	order := 0
+	add := func(raw string, score int) {
 		email := normalizeEmail(raw)
-		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com"}) {
-			continue
+		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@"}) {
+			return
 		}
 		if domain != "" && strings.HasSuffix(email, "@"+domain) {
-			return email
+			score += 100
 		}
-		if best == "" {
-			best = email
+		local := strings.SplitN(email, "@", 2)[0]
+		if containsAny(local, []string{"info", "contact", "office", "hello", "reception", "frontdesk", "schedule", "appointment", "admin"}) {
+			score += 20
+		}
+		candidates = append(candidates, rankedEmail{Value: email, Score: score, Order: order})
+		order++
+	}
+	for _, page := range pages {
+		pageScore := 0
+		if containsAny(strings.ToLower(page.URL+" "+page.FinalURL+" "+page.Title), []string{"contact", "location", "appointment"}) {
+			pageScore = 20
+		}
+		for _, link := range page.Links {
+			if strings.HasPrefix(strings.ToLower(link.URL), "mailto:") {
+				add(strings.TrimPrefix(strings.Split(link.URL, "?")[0], "mailto:"), 80+pageScore)
+			}
+		}
+		corpus := deobfuscateEmailText(strings.Join([]string{page.Text, page.Description, metadataText(page.Metadata), structuredDataText(page.StructuredData)}, " "))
+		for _, raw := range emailPattern.FindAllString(corpus, -1) {
+			add(raw, 40+pageScore)
 		}
 	}
-	return best
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].Order < candidates[j].Order
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	if len(candidates) > 0 {
+		return candidates[0].Value
+	}
+	return ""
 }
 
 func extractBestPhone(pages []webExtractPage) string {
+	type rankedPhone struct {
+		Value string
+		Score int
+		Order int
+	}
+	candidates := []rankedPhone{}
+	order := 0
+	add := func(raw string, score int) {
+		if phone := normalizeQualifiedPhone(raw); phone != "" {
+			candidates = append(candidates, rankedPhone{Value: phone, Score: score, Order: order})
+			order++
+		}
+	}
 	for _, page := range pages {
+		pageScore := 0
+		if containsAny(strings.ToLower(page.URL+" "+page.FinalURL+" "+page.Title), []string{"contact", "location", "appointment"}) {
+			pageScore = 20
+		}
 		for _, link := range page.Links {
 			if strings.HasPrefix(strings.ToLower(link.URL), "tel:") {
-				if phone := normalizeQualifiedPhone(strings.TrimPrefix(link.URL, "tel:")); phone != "" {
-					return phone
-				}
+				add(strings.TrimPrefix(link.URL, "tel:"), 100+pageScore)
 			}
 		}
-	}
-	for _, page := range pages {
-		for _, line := range strings.Split(page.Text, "\n") {
-			if !containsAny(line, []string{"phone", "call", "tel", "contact", "appointment", "whatsapp", "schedule"}) {
-				continue
+		for _, raw := range phonePattern.FindAllString(structuredDataText(page.StructuredData), -1) {
+			add(raw, 70+pageScore)
+		}
+		for _, line := range nonEmptyLines(page.Text + "\n" + page.Description + "\n" + metadataText(page.Metadata)) {
+			score := 30 + pageScore
+			lower := strings.ToLower(line)
+			if containsAny(lower, []string{"phone", "call", "tel", "contact", "appointment", "whatsapp", "schedule", "office"}) {
+				score += 25
+			}
+			if containsAny(lower, []string{"fax"}) && !containsAny(lower, []string{"phone", "call", "tel"}) {
+				score -= 25
 			}
 			for _, raw := range phonePattern.FindAllString(line, -1) {
-				if phone := normalizeQualifiedPhone(raw); phone != "" {
-					return phone
-				}
+				add(raw, score)
 			}
 		}
 	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score == candidates[j].Score {
+			return candidates[i].Order < candidates[j].Order
+		}
+		return candidates[i].Score > candidates[j].Score
+	})
+	if len(candidates) > 0 {
+		return candidates[0].Value
+	}
 	return ""
+}
+
+func deobfuscateEmailText(value string) string {
+	plainObfuscated := regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+\s+at\s+[a-z0-9-]+(?:\s+dot\s+[a-z0-9-]+)+\b`)
+	value = plainObfuscated.ReplaceAllStringFunc(value, func(match string) string {
+		parts := regexp.MustCompile(`(?i)\s+at\s+`).Split(match, 2)
+		if len(parts) != 2 {
+			return match
+		}
+		domain := regexp.MustCompile(`(?i)\s+dot\s+`).ReplaceAllString(parts[1], ".")
+		return parts[0] + "@" + domain
+	})
+	replacements := []struct {
+		Pattern *regexp.Regexp
+		Value   string
+	}{
+		{regexp.MustCompile(`(?i)\s*(?:\[at\]|\(at\)|\{at\})\s*`), "@"},
+		{regexp.MustCompile(`(?i)\s*(?:\[dot\]|\(dot\)|\{dot\})\s*`), "."},
+	}
+	for _, replacement := range replacements {
+		value = replacement.Pattern.ReplaceAllString(value, replacement.Value)
+	}
+	return value
+}
+
+func structuredDataText(value any) string {
+	parts := []string{}
+	var walk func(any)
+	walk = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				parts = append(parts, key)
+				walk(typed[key])
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		case string:
+			parts = append(parts, typed)
+		case fmt.Stringer:
+			parts = append(parts, typed.String())
+		case nil:
+		default:
+			parts = append(parts, fmt.Sprint(typed))
+		}
+	}
+	walk(value)
+	return strings.Join(parts, " ")
 }
 
 func normalizeQualifiedPhone(raw string) string {

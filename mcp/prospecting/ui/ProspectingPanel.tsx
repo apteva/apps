@@ -455,7 +455,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
 	const [creating, setCreating] = useState(false);
 	const qualifyReady = () => runAction(() => api("/qualify", {
 		method: "POST",
-		body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" ? "ready" : statusFilter, limit: 10, max_pages: 3 }),
+		body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" ? "ready" : statusFilter, limit: 10, max_pages: 5 }),
 	}), "Candidate batch qualified from first-party websites without AI.");
 	return (
     <div className="h-full min-h-0 flex flex-col">
@@ -469,7 +469,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
           <option value={0}>All profiles</option>
           {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
         </select>
-		<button type="button" onClick={qualifyReady} disabled={busy || candidates.length === 0} title="Extract facts and workflow signals from up to three first-party pages per candidate" className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Qualify batch</button>
+		<button type="button" onClick={qualifyReady} disabled={busy || candidates.length === 0} title="Extract facts and workflow signals from up to five first-party pages per candidate" className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Qualify batch</button>
 		<button type="button" onClick={() => setCreating(true)} className="px-3 py-1.5 text-xs bg-accent text-bg rounded">Add manually</button>
       </div>
       <div className="flex-1 min-h-0 grid lg:grid-cols-[390px_minmax(0,1fr)]">
@@ -520,7 +520,7 @@ function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, run
   }, [candidate]);
   const save = () => runAction(() => api(`/candidates/${candidate.id}`, { method: "PATCH", body: JSON.stringify(draft) }), "Candidate saved and rescored.");
 	const research = () => runAction(() => api(`/candidates/${candidate.id}/research`, { method: "POST", body: "{}" }), "Web research completed.");
-	const qualify = () => runAction(() => api(`/candidates/${candidate.id}/qualify`, { method: "POST", body: JSON.stringify({ max_pages: 3 }) }), "Candidate deterministically qualified from first-party pages.");
+	const qualify = () => runAction(() => api(`/candidates/${candidate.id}/qualify`, { method: "POST", body: JSON.stringify({ max_pages: 5 }) }), "Candidate deterministically qualified from first-party pages.");
   const defer = () => runAction(() => api(`/candidates/${candidate.id}/defer`, { method: "POST", body: JSON.stringify({ reason: "Review later" }) }), "Candidate deferred.");
   const reject = () => {
     const reason = window.prompt("Reason for rejection", candidate.decision_reason || "Not a fit");

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.2
+version: 0.2.3
 description: |
   Web-first prospect discovery and deterministic qualification for Apteva.
   Define target profiles, run bounded company searches with provider fallback
@@ -11,9 +11,11 @@ description: |
 
   Prospecting owns only the pre-CRM workflow. Web remains the source of raw
   research artifacts and CRM remains the canonical owner of accepted contacts.
-  v0.2.2 pins installs to an immutable release source. The qualification
-  pipeline uses no AI model and deliberately does not send messages, run
-  campaigns, create opportunities, or call paid lead-data providers.
+  v0.2.3 adds contact-first page traversal, stronger deterministic contact
+  extraction, marketplace filtering, and cleaner company identities. The
+  qualification pipeline uses no AI model and deliberately does not send
+  messages, run campaigns, create opportunities, or call paid lead-data
+  providers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
@@ -30,7 +32,7 @@ requires:
     - platform.apps.call
   apps:
     - name: web
-      version: ">=0.1.5"
+      version: ">=0.2.7"
       optional: false
       reason: Performs browser-backed company discovery and research while retaining raw artifacts.
     - name: crm
@@ -89,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.2
+    ref: prospecting/v0.2.3
     entry: mcp/prospecting
   port: 8080
   health_check: /health

@@ -418,17 +418,53 @@ func canonicalCandidateKey(domain, website, companyName, sourceURL string) strin
 }
 
 func cleanCompanyTitle(title, domain string) string {
-	title = strings.TrimSpace(title)
+	title = compactWhitespace(title)
+	// Google sometimes combines the organic title and its displayed URL in
+	// one anchor label. The URL and breadcrumb are evidence, not company-name
+	// material.
+	if match := regexp.MustCompile(`(?i)\s+https?://`).FindStringIndex(title); match != nil {
+		title = strings.TrimSpace(title[:match[0]])
+	}
+	title = regexp.MustCompile(`\s*\(\+\d+\)\s*$`).ReplaceAllString(title, "")
 	for _, sep := range []string{" • ", " · ", " | ", " — ", " – ", " - "} {
-		if parts := strings.SplitN(title, sep, 2); len(parts) == 2 && len(strings.TrimSpace(parts[0])) >= 2 {
-			title = strings.TrimSpace(parts[0])
+		if parts := strings.SplitN(title, sep, 2); len(parts) == 2 {
+			left, right := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+			switch {
+			case isGenericCompanyTitle(left) && !isGenericCompanyTitle(right):
+				title = right
+			case len(left) >= 2:
+				title = left
+			}
 			break
 		}
 	}
-	if title == "" {
-		title = strings.Split(domain, ".")[0]
+	title = regexp.MustCompile(`\s*\(\+\d+\)\s*$`).ReplaceAllString(strings.TrimSpace(title), "")
+	for _, prefix := range []string{
+		"easy online patient forms", "new dental patient forms", "new patient dental forms",
+		"complete new patient forms", "new patient forms", "patient forms",
+		"request an appointment", "request appointment", "schedule an appointment", "schedule appointment",
+	} {
+		lower := strings.ToLower(title)
+		if strings.HasPrefix(lower, prefix+" ") {
+			title = strings.TrimSpace(title[len(prefix):])
+			break
+		}
+	}
+	if title == "" || isGenericCompanyTitle(title) {
+		return domainBrand(domain)
 	}
 	return title
+}
+
+func isGenericCompanyTitle(value string) bool {
+	lower := strings.ToLower(strings.Trim(strings.TrimSpace(value), "-–—|:;"))
+	if genericPageTitles[lower] {
+		return true
+	}
+	return containsAny(lower, []string{
+		"new dental patient forms", "new patient dental forms", "complete new patient forms",
+		"online patient forms", "patient forms online",
+	})
 }
 
 func validateProfile(p *TargetProfile) error {

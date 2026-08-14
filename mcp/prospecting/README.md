@@ -42,10 +42,13 @@ use the version pinned in `go.mod`.
 
 1. Create a target profile.
 2. Run `prospecting_search_run`. Google automatically falls back to DuckDuckGo
-   when blocked, and known directories/social results are filtered.
+   when blocked, and known directories, marketplaces, social results, and form
+   templates are filtered.
 3. Run `prospecting_candidates_qualify` or the bounded batch variant. The app
-   reads up to five first-party pages, extracts structured facts, detects
-   automation opportunities, classifies eligibility, and recalculates scores.
+   prioritizes contact and identity pages across up to five first-party pages,
+   extracts structured facts, detects automation opportunities, classifies
+   eligibility, and recalculates scores. Repeated batch calls advance through
+   candidates that have not yet been enriched.
 4. Review the candidate, rule explanations, and saved source evidence.
 5. Optionally use `prospecting_candidates_research` for broader cited research.
 6. Add or correct decision-maker details, then reject, defer, or accept.

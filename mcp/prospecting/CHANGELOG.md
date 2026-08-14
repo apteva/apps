@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.3
+
+- Reject marketplaces and downloadable form-template results during discovery.
+- Normalize Google result labels into company names instead of page titles or displayed URLs.
+- Traverse contact, team, about, and homepage links across up to five first-party pages.
+- Extract and rank emails and phone numbers from links, visible text, metadata, structured data,
+  obfuscated email text, and unlabeled footer contact blocks.
+- Make repeated batch qualification advance through unenriched candidates by default.
+
 ## v0.2.2
 
 - Pin source installs to the immutable `prospecting/v0.2.2` release tag.

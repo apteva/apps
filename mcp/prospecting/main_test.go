@@ -147,14 +147,68 @@ func TestDiscoveryDeduplicatesAndHonorsExclusions(t *testing.T) {
 
 func TestCleanCompanyTitleRemovesMarketingTaglines(t *testing.T) {
 	tests := map[string]string{
-		"The Teeth Doctors™ • Worry Free, Five Star Rated Fayetteville Dentist": "The Teeth Doctors™",
-		"Bright Smiles Dental · Family Dentistry in Austin":                     "Bright Smiles Dental",
-		"Acme Dental | Request an Appointment":                                  "Acme Dental",
+		"The Teeth Doctors™ • Worry Free, Five Star Rated Fayetteville Dentist":                  "The Teeth Doctors™",
+		"Bright Smiles Dental · Family Dentistry in Austin":                                      "Bright Smiles Dental",
+		"Acme Dental | Request an Appointment":                                                   "Acme Dental",
+		"New Patient Forms Falko Family Dental":                                                  "Falko Family Dental",
+		"New Patient Forms - Carolina Dentistry":                                                 "Carolina Dentistry",
+		"Easy Online Patient Forms Great Expressions Dental https://example.com › patient-forms": "Great Expressions Dental",
+		"Indian Creek Dental (+2) - Patient Forms":                                               "Indian Creek Dental",
+		"Patient Forms": "Example",
 	}
 	for input, want := range tests {
 		if got := cleanCompanyTitle(input, "example.com"); got != want {
 			t.Errorf("cleanCompanyTitle(%q)=%q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestDiscoveryFiltersMarketplacesAndFormTemplates(t *testing.T) {
+	platform := &platformStub{searchPayload: map[string]any{
+		"count": 3,
+		"results": []map[string]any{
+			{"title": "New Patient Dental Forms", "url": "https://www.etsy.com/market/new_patient_dental_forms", "source": "google"},
+			{"title": "Printable dental form template", "url": "https://forms.example/download", "snippet": "Download editable dental forms PDF", "source": "google"},
+			{"title": "Bright Smiles Dental | Contact Us", "url": "https://brightsmiles.example/contact", "source": "google"},
+		},
+	}}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{
+		"name": "US Dental", "industries": []any{"Dental practice"}, "locations": []any{"United States"},
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	result, err := runDiscovery(ctx, profile.ID, "dentist contact", 10)
+	if err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	if result["created"].(int) != 1 || result["excluded"].(int) != 2 {
+		t.Fatalf("filter result: %#v", result)
+	}
+}
+
+func TestContactExtractionUsesStructuredDataObfuscationAndFooterPhones(t *testing.T) {
+	pages := []webExtractPage{
+		{
+			URL: "https://brightsmiles.example/contact", Title: "Contact Bright Smiles Dental",
+			Text:           "Email info [at] brightsmiles [dot] example\n123 Main Street\n(512) 555-0199",
+			StructuredData: map[string]any{"json_ld": []any{map[string]any{"@type": "Dentist", "email": "office@brightsmiles.example", "telephone": "+1 512 555 0188"}}},
+		},
+	}
+	if got := extractBestEmail(pages, "brightsmiles.example"); got != "info@brightsmiles.example" {
+		t.Fatalf("email=%q, want deobfuscated first-party email", got)
+	}
+	if got := extractBestPhone(pages); got != "+15125550188" {
+		t.Fatalf("phone=%q, want structured contact phone", got)
+	}
+}
+
+func TestDeobfuscateEmailTextDoesNotRewriteOrdinaryProse(t *testing.T) {
+	input := "Contact us at info@example.com or office at brightsmiles dot example"
+	want := "Contact us at info@example.com or office@brightsmiles.example"
+	if got := deobfuscateEmailText(input); got != want {
+		t.Fatalf("deobfuscateEmailText=%q, want %q", got, want)
 	}
 }
 
