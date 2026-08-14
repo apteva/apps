@@ -54,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.69
+version: 0.7.70
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.69 adds stable,
-  safety-prioritized browser targets, guarded action batches, compact SoM
-  deltas, and navigation/network-aware stability waits.
+  Watch, steer, and replay hosted browser sessions. v0.7.70 adds semantic
+  scroll regions, observed movement feedback, stable target revision guards,
+  corrected risk metadata, and verified rich-text paragraph entry.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
