@@ -1981,6 +1981,94 @@ func TestComputerUseBatchAbortsAndReturnsOneFinalFrame(t *testing.T) {
 	if fake.screenshotCalls != 0 {
 		t.Fatalf("failed batch must not claim a final screenshot, got %d", fake.screenshotCalls)
 	}
+
+	settings := backends.ScrollRegion{ID: "scroll_settings", Name: "Settings", Role: "region", CanScrollY: true, MaxScrollY: 800}
+	fake.executeActionHook = nil
+	fake.actionOnlyCalls = nil
+	fake.screenshotCalls = 0
+	fake.scrollRegions = []backends.ScrollRegion{settings}
+	fake.scrollResult = &backends.ScrollResult{
+		RequestedTargetID: settings.ID, ActualTargetID: settings.ID,
+		RequestedTargetName: settings.Name, ActualTargetName: settings.Name,
+		Moved: true, DeltaY: 350, AfterTop: 350, Regions: []backends.ScrollRegion{settings},
+	}
+	scrollBatch, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID, "action": "batch",
+		"steps": []any{
+			map[string]any{"action": "scroll", "target_id": settings.ID, "expected_name": "Settings", "expected_role": "region", "direction": "down", "amount": 350},
+			map[string]any{"action": "wait_for_stable", "quiet_ms": 200, "timeout_ms": 1000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("semantic scroll batch: %v", err)
+	}
+	if fake.screenshotCalls != 1 || len(fake.actionOnlyCalls) != 2 || fake.actionOnlyCalls[0].TargetID != settings.ID {
+		t.Fatalf("scroll batch did not remain action-only until one final frame: screenshots=%d calls=%+v", fake.screenshotCalls, fake.actionOnlyCalls)
+	}
+	steps := scrollBatch.(map[string]any)["steps"].([]map[string]any)
+	if steps[0]["scroll_moved"] != true || steps[0]["scroll_actual_target_name"] != "Settings" {
+		t.Fatalf("scroll batch omitted movement feedback: %+v", steps[0])
+	}
+}
+
+func TestComputerUseSemanticScrollFeedbackAndStableRevision(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	settings := backends.ScrollRegion{ID: "scroll_settings", Name: "Settings", Role: "region", X: 700, Y: 50, W: 280, H: 500, CanScrollY: true, MaxScrollY: 900}
+	editor := backends.ScrollRegion{ID: "scroll_editor", Name: "Post body", Role: "textbox", X: 0, Y: 50, W: 680, H: 500, CanScrollY: true, MaxScrollY: 900}
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1000, Height: 600}, png: []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}, url: "https://example.com/editor",
+		somTargets:    []backends.SetOfMarkTarget{{ID: "som_body", Label: 1, Role: "textbox", AccessibleName: "Post body"}},
+		scrollRegions: []backends.ScrollRegion{editor, settings},
+		scrollResult:  &backends.ScrollResult{RequestedTargetID: settings.ID, ActualTargetID: settings.ID, TargetName: "Settings", TargetRole: "region", BeforeTop: 0, AfterTop: 420, DeltaY: 420, Moved: true, Regions: []backends.ScrollRegion{editor, settings}},
+	}
+	fake.executeHook = func(action backends.Action) error {
+		if action.Type == "scroll" {
+			fake.somTargets = []backends.SetOfMarkTarget{{ID: "som_body", Label: 1, Role: "textbox", AccessibleName: "Post body"}, {ID: "som_schedule", Label: 2, Role: "button", AccessibleName: "Set publish date", Dangerous: true, DestructiveEffect: "schedule_publish"}}
+		}
+		return nil
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	opened, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := opened.(map[string]any)["session_id"].(string)
+	shot, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "screenshot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := shot.(map[string]any)["som_delta"].(map[string]any)["revision"].(int)
+	if regions := shot.(map[string]any)["scroll_regions"].([]backends.ScrollRegion); len(regions) != 2 {
+		t.Fatalf("scroll regions=%+v", regions)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "scroll", "direction": "down", "amount": 300}); err == nil || !strings.Contains(err.Error(), "ambiguous_scroll_target") {
+		t.Fatalf("ambiguous scroll accepted: %v", err)
+	}
+	out, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "scroll", "direction": "down", "amount": 420, "target_id": settings.ID, "expected_name": "Settings", "expected_role": "region", "som_revision": revision})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["scroll_moved"] != true || m["scroll_wrong_target"] != false || m["navigation_progress"] != true {
+		t.Fatalf("scroll feedback=%+v", m)
+	}
+	revealed := m["revealed_targets"].([]backends.SetOfMarkTarget)
+	if len(revealed) != 1 || revealed[0].ID != "som_schedule" {
+		t.Fatalf("revealed targets=%+v", revealed)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "click", "target_id": "som_body", "som_revision": revision}); err == nil || !strings.Contains(err.Error(), "stale") {
+		t.Fatalf("stale revision accepted: %v", err)
+	}
+	currentRevision := m["som_delta"].(map[string]any)["revision"].(int)
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": id, "action": "click", "target_id": "som_body", "som_revision": currentRevision, "expected_name": "Post body", "expected_role": "textbox"}); err != nil {
+		t.Fatalf("stable target click: %v", err)
+	}
+	if fake.lastAction.Label != 1 {
+		t.Fatalf("target_id did not resolve current label: %+v", fake.lastAction)
+	}
 }
 
 func TestComputerUseReportsScreenshotRecoveryMetadata(t *testing.T) {
@@ -2893,6 +2981,8 @@ type fakeComp struct {
 	screenshotCalls   int
 	annotateCalls     []bool
 	somTargets        []backends.SetOfMarkTarget
+	scrollRegions     []backends.ScrollRegion
+	scrollResult      *backends.ScrollResult
 	closeCalls        int
 	tabs              []backends.TabInfo
 	activeTabID       string
@@ -2985,6 +3075,23 @@ func (f *fakeComp) LastSetOfMark() []backends.SetOfMarkTarget {
 	out := make([]backends.SetOfMarkTarget, len(f.somTargets))
 	copy(out, f.somTargets)
 	return out
+}
+
+func (f *fakeComp) ScrollRegions() []backends.ScrollRegion {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]backends.ScrollRegion(nil), f.scrollRegions...)
+}
+
+func (f *fakeComp) LastScrollResult() *backends.ScrollResult {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.scrollResult == nil {
+		return nil
+	}
+	clone := *f.scrollResult
+	clone.Regions = append([]backends.ScrollRegion(nil), f.scrollResult.Regions...)
+	return &clone
 }
 
 func (f *fakeComp) lastScreenshotAnnotate() *bool {

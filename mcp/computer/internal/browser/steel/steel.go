@@ -23,12 +23,12 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
+	"github.com/apteva/apps/mcp/computer/internal/browser/scrolltarget"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectorclick"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
-	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
@@ -93,6 +93,9 @@ type Computer struct {
 	labelMu          sync.RWMutex
 	lastLabels       map[int]som.Element
 	stabilityTracker *stability.Tracker
+	scrollMu         sync.RWMutex
+	lastScrollResult *computer.ScrollResult
+	scrollRegions    []computer.ScrollRegion
 
 	selectMu         sync.Mutex
 	lastSelectResult *selectinput.Result
@@ -511,7 +514,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "wait":
 		dur := action.Duration
@@ -551,7 +554,7 @@ func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
 
 func (c *Computer) ExecuteAction(action computer.Action) error {
 	switch action.Type {
-	case "click", "double_click", "wait", "wait_for_stable":
+	case "click", "double_click", "scroll", "wait", "wait_for_stable":
 		action.NoScreenshot = true
 		_, err := c.Execute(action)
 		return err
@@ -679,27 +682,39 @@ func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 }
 
 func (c *Computer) scroll(a computer.Action) error {
-	dx, dy, err := computer.ScrollDelta(a.Direction, a.Amount)
-	if err != nil {
-		return err
+	if a.Label > 0 && a.TargetID == "" {
+		if e, ok := c.resolveLabel(a.Label); ok {
+			a.X, a.Y = e.Center()
+		}
 	}
-
-	x, y := float64(a.X), float64(a.Y)
-	if x == 0 && y == 0 {
-		x = float64(c.display.Width) / 2
-		y = float64(c.display.Height) / 2
-	}
-
-	err = chromedp.Run(c.ctx,
-		input.DispatchMouseEvent(input.MouseWheel, x, y).
-			WithDeltaX(dx).WithDeltaY(dy),
-	)
+	result, err := scrolltarget.Run(c.ctx, a, c.display)
+	c.scrollMu.Lock()
+	c.lastScrollResult = scrolltarget.CloneResult(&result)
 	if err == nil {
-		return nil
+		c.scrollRegions = scrolltarget.CloneRegions(result.Regions)
 	}
-	fmt.Fprintf(os.Stderr, "[STEEL] wheel dispatch failed (%v), falling back to window.scrollBy\n", err)
-	js := fmt.Sprintf("window.scrollBy(%d, %d)", int(dx), int(dy))
-	return chromedp.Run(c.ctx, chromedp.Evaluate(js, nil))
+	c.scrollMu.Unlock()
+	return err
+}
+
+func (c *Computer) LastScrollResult() *computer.ScrollResult {
+	c.scrollMu.RLock()
+	defer c.scrollMu.RUnlock()
+	return scrolltarget.CloneResult(c.lastScrollResult)
+}
+func (c *Computer) ScrollRegions() []computer.ScrollRegion {
+	c.scrollMu.RLock()
+	defer c.scrollMu.RUnlock()
+	return scrolltarget.CloneRegions(c.scrollRegions)
+}
+func (c *Computer) refreshScrollRegions() {
+	regions, err := scrolltarget.Enumerate(c.ctx)
+	if err != nil {
+		return
+	}
+	c.scrollMu.Lock()
+	c.scrollRegions = scrolltarget.CloneRegions(regions)
+	c.scrollMu.Unlock()
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {
@@ -754,6 +769,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		c.labelMu.Lock()
 		c.lastLabels = m
 		c.labelMu.Unlock()
+		c.refreshScrollRegions()
 
 		annotated, aerr := som.Annotate(buf, elements)
 		if aerr != nil {

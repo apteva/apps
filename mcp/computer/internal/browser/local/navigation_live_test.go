@@ -182,6 +182,116 @@ func TestLocalSOMRetainsSafetyControlsBeyondOrdinaryCapLive(t *testing.T) {
 	}
 }
 
+func TestLocalSemanticNestedScrollAndRenderedTextLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_SEMANTIC_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_SEMANTIC_TESTS=1")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><style>
+html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui}.top{height:56px;display:flex;justify-content:flex-end;align-items:center;background:#111;padding:0 20px}.top button{height:36px;width:120px}.layout{height:544px;display:grid;grid-template-columns:1fr 320px;gap:12px}.pane{overflow-y:auto;border:1px solid #aaa;padding:12px}.spacer{height:700px}
+</style><div class="top"><button id="publish">Publish</button></div><div class="layout">
+<main id="editor" class="pane" contenteditable="true" role="textbox" aria-label="Post body"><p>Draft introduction</p><div class="spacer"></div><p>Editor footer</p></main>
+<aside id="settings" class="pane" role="region" aria-label="Settings"><h2>Settings</h2><label>Audience <select><option>Everyone</option></select></label><div class="spacer"></div><button id="schedule">Set publish date</button></aside>
+</div>`))
+	}))
+	defer server.Close()
+	c, err := New(computer.DisplaySize{Width: 1000, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OpenSession(computer.OpenOptions{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	var body, publish computer.SetOfMarkTarget
+	for _, target := range c.LastSetOfMark() {
+		switch target.AccessibleName {
+		case "Post body":
+			body = target
+		case "Publish":
+			publish = target
+		}
+	}
+	if body.ID == "" || body.Dangerous {
+		t.Fatalf("draft editor risk classification is wrong: %+v", body)
+	}
+	if !publish.Dangerous || publish.DestructiveEffect != "immediate_publish" {
+		t.Fatalf("Publish lost risk classification: %+v", publish)
+	}
+	initialBodyID := body.ID
+	var editorRegion, settingsRegion computer.ScrollRegion
+	for _, region := range c.ScrollRegions() {
+		switch region.Name {
+		case "Post body":
+			editorRegion = region
+		case "Settings":
+			settingsRegion = region
+		}
+	}
+	if editorRegion.ID == "" || settingsRegion.ID == "" || editorRegion.ID == settingsRegion.ID {
+		t.Fatalf("semantic scroll regions missing: %+v", c.ScrollRegions())
+	}
+
+	if _, err := c.Execute(computer.Action{Type: "scroll", Direction: "down", Amount: 420, TargetID: settingsRegion.ID, ExpectedName: "Post body", ExpectedRole: "region"}); err == nil || !strings.Contains(err.Error(), "expected target name") {
+		t.Fatalf("intent/target mismatch was not rejected: %v", err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "scroll", Direction: "down", Amount: 760, TargetID: settingsRegion.ID, ExpectedName: "Settings", ExpectedRole: "region"}); err != nil {
+		t.Fatalf("settings scroll: %v", err)
+	}
+	result := c.LastScrollResult()
+	if result == nil || !result.Moved || result.WrongTarget || result.ActualTargetID != settingsRegion.ID || result.DeltaY <= 0 {
+		t.Fatalf("wrong scroll movement report: %+v", result)
+	}
+	var offsets struct {
+		Editor   int `json:"editor"`
+		Settings int `json:"settings"`
+	}
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`({editor:document.querySelector('#editor').scrollTop,settings:document.querySelector('#settings').scrollTop})`, &offsets)); err != nil {
+		t.Fatal(err)
+	}
+	if offsets.Editor != 0 || offsets.Settings <= 0 {
+		t.Fatalf("wrong region moved: %+v", offsets)
+	}
+	var schedule computer.SetOfMarkTarget
+	for _, target := range c.LastSetOfMark() {
+		if target.AccessibleName == "Set publish date" {
+			schedule = target
+		}
+		if target.AccessibleName == "Post body" && target.ID != initialBodyID {
+			t.Fatalf("stable body identity changed: before=%s after=%s", initialBodyID, target.ID)
+		}
+	}
+	if schedule.ID == "" {
+		t.Fatalf("newly revealed scheduling control missing: %+v", c.LastSetOfMark())
+	}
+	if _, err := c.Execute(computer.Action{Type: "scroll", Direction: "down", Amount: 300, TargetID: settingsRegion.ID, ExpectedName: "Settings"}); err != nil {
+		t.Fatalf("boundary scroll: %v", err)
+	}
+	if boundary := c.LastScrollResult(); boundary == nil || boundary.Moved || !boundary.AtEnd {
+		t.Fatalf("no-movement boundary report: %+v", boundary)
+	}
+
+	if _, err := c.Execute(computer.Action{Type: "set_text", Selector: "#editor", Text: "First paragraph.\n\nSecond paragraph.", NewlineMode: "preserve"}); err != nil {
+		t.Fatalf("set rich text: %v", err)
+	}
+	textResult := c.LastTextResult()
+	if textResult == nil || !textResult.Verified || textResult.RenderedText != "First paragraph.\n\nSecond paragraph." || len(textResult.Paragraphs) != 2 {
+		t.Fatalf("rendered text readback mismatch: %+v", textResult)
+	}
+	var paragraphCount int
+	if err := chromedp.Run(c.ctx, chromedp.Evaluate(`document.querySelectorAll('#editor > p').length`, &paragraphCount)); err != nil {
+		t.Fatal(err)
+	}
+	if paragraphCount != 2 {
+		t.Fatalf("rich text was not rendered as two paragraphs: %d", paragraphCount)
+	}
+}
+
 func TestLocalNavigationLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_NAVIGATION_TESTS=1")

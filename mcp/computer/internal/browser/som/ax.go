@@ -121,7 +121,7 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 		}
 		disabled := axPropertyBool(node, accessibility.PropertyNameDisabled)
 		loading := axPropertyBool(node, accessibility.PropertyNameBusy)
-		effect := destructiveEffectForText(name)
+		effect := destructiveEffectForText(name, role)
 		out = append(out, Element{
 			ID: fmt.Sprintf("ax_%d", node.BackendDOMNodeID),
 			X:  x, Y: y, W: w, H: h,
@@ -404,7 +404,12 @@ func axPropertyBool(node *accessibility.Node, name accessibility.PropertyName) b
 	return false
 }
 
-func destructiveEffectForText(value string) string {
+func destructiveEffectForText(value, role string) string {
+	switch strings.ToLower(strings.TrimSpace(role)) {
+	case "button", "menuitem", "link":
+	default:
+		return ""
+	}
 	value = strings.ToLower(strings.Join(strings.Fields(value), " "))
 	for _, item := range []struct {
 		words  []string

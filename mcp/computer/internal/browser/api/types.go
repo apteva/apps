@@ -32,6 +32,10 @@ type Action struct {
 	QuietMS      int      `json:"quiet_ms,omitempty"`      // for "wait_for_stable": required mutation-free interval
 	TimeoutMS    int      `json:"timeout_ms,omitempty"`    // for "wait_for_stable": maximum wait
 	ExpectedText string   `json:"expected_text,omitempty"` // live accessible name required immediately before click
+	TargetID     string   `json:"target_id,omitempty"`     // stable SoM target or semantic scroll-region id
+	SOMRevision  int      `json:"som_revision,omitempty"`  // optional revision guard for label/target_id actions
+	ExpectedName string   `json:"expected_name,omitempty"` // semantic target name required before dispatch
+	ExpectedRole string   `json:"expected_role,omitempty"` // semantic target role required before dispatch
 	// GuardDangerousCoordinate is set by the MCP layer only when the caller
 	// explicitly targeted a raw coordinate. Backends then require expected_text
 	// if the live hit-tested element is consequential.
@@ -171,6 +175,50 @@ type SetOfMarkTarget struct {
 	DestructiveEffect string `json:"destructive_effect,omitempty"`
 }
 
+// ScrollRegion is one independently scrollable viewport or DOM container.
+// IDs are stable for the current document and are accepted by scroll actions.
+type ScrollRegion struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Role       string `json:"role"`
+	X          int    `json:"x"`
+	Y          int    `json:"y"`
+	W          int    `json:"w"`
+	H          int    `json:"h"`
+	ScrollLeft int    `json:"scroll_left"`
+	ScrollTop  int    `json:"scroll_top"`
+	MaxScrollX int    `json:"max_scroll_x"`
+	MaxScrollY int    `json:"max_scroll_y"`
+	CanScrollX bool   `json:"can_scroll_x"`
+	CanScrollY bool   `json:"can_scroll_y"`
+	ParentID   string `json:"parent_id,omitempty"`
+	Document   bool   `json:"document"`
+}
+
+// ScrollResult reports observed movement, not merely wheel-event delivery.
+type ScrollResult struct {
+	RequestedTargetID   string         `json:"requested_target_id,omitempty"`
+	ActualTargetID      string         `json:"actual_target_id,omitempty"`
+	TargetName          string         `json:"target_name,omitempty"` // compatibility alias for requested_target_name
+	TargetRole          string         `json:"target_role,omitempty"` // compatibility alias for requested_target_role
+	RequestedTargetName string         `json:"requested_target_name,omitempty"`
+	RequestedTargetRole string         `json:"requested_target_role,omitempty"`
+	ActualTargetName    string         `json:"actual_target_name,omitempty"`
+	ActualTargetRole    string         `json:"actual_target_role,omitempty"`
+	BeforeLeft          int            `json:"before_left"`
+	BeforeTop           int            `json:"before_top"`
+	AfterLeft           int            `json:"after_left"`
+	AfterTop            int            `json:"after_top"`
+	DeltaX              int            `json:"delta_x"`
+	DeltaY              int            `json:"delta_y"`
+	Moved               bool           `json:"moved"`
+	WrongTarget         bool           `json:"wrong_target"`
+	AtStart             bool           `json:"at_start"`
+	AtEnd               bool           `json:"at_end"`
+	Ambiguous           bool           `json:"ambiguous"`
+	Regions             []ScrollRegion `json:"regions,omitempty"`
+}
+
 // DOMExtractor is implemented by browser backends that can read structured
 // content from the active page's live DOM.
 type DOMExtractor interface {
@@ -276,6 +324,11 @@ type ScreenshotRecoveryReporter interface {
 // returning this payload because it can be large.
 type SetOfMarkReporter interface {
 	LastSetOfMark() []SetOfMarkTarget
+}
+
+type ScrollReporter interface {
+	LastScrollResult() *ScrollResult
+	ScrollRegions() []ScrollRegion
 }
 
 const (

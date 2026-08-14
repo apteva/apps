@@ -26,15 +26,18 @@ type SetRequest struct {
 }
 
 type SetResult struct {
-	Kind          string `json:"kind"`
-	Selector      string `json:"selector,omitempty"`
-	Label         string `json:"label,omitempty"`
-	InputType     string `json:"input_type,omitempty"`
-	PreviousValue string `json:"previous_value"`
-	Value         string `json:"value"`
-	Changed       bool   `json:"changed"`
-	Mode          string `json:"mode"`
-	NewlineMode   string `json:"newline_mode"`
+	Kind          string   `json:"kind"`
+	Selector      string   `json:"selector,omitempty"`
+	Label         string   `json:"label,omitempty"`
+	InputType     string   `json:"input_type,omitempty"`
+	PreviousValue string   `json:"previous_value"`
+	Value         string   `json:"value"`
+	Changed       bool     `json:"changed"`
+	Mode          string   `json:"mode"`
+	NewlineMode   string   `json:"newline_mode"`
+	RenderedText  string   `json:"rendered_text"`
+	Paragraphs    []string `json:"paragraphs"`
+	Verified      bool     `json:"verified"`
 }
 
 func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) {
@@ -81,8 +84,20 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
     if (el.closest) return el.closest('textarea,input:not([type="hidden"]),[contenteditable="true"],[contenteditable=""],[role="textbox"]') || el;
     return el;
   }
-  function valueOf(el, contentEditable) {
-    return contentEditable ? String(el.innerText || el.textContent || '') : String(el.value || '');
+  function normalizeLines(value) { return String(value||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n'); }
+  function paragraphList(value) {
+    var lines=normalizeLines(value).split('\n'),paragraphs=[],current=[];
+    lines.forEach(function(line){
+      if(line===''){paragraphs.push(current.join('\n').replace(/[ \t]+$/gm,'').trim());current=[];}
+      else current.push(line);
+    });
+    paragraphs.push(current.join('\n').replace(/[ \t]+$/gm,'').trim());
+    return paragraphs;
+  }
+  function renderedReadback(el, contentEditable) {
+    if (!contentEditable) { var nativeValue=normalizeLines(el.value||''); return {text:nativeValue,paragraphs:paragraphList(nativeValue)}; }
+    var paragraphs=paragraphList(normalizeLines(el.innerText||el.textContent||'').replace(/\u00a0/g,' '));
+    return {text:paragraphs.join('\n\n'),paragraphs:paragraphs};
   }
   function setNativeValue(el, value) {
     var proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -101,18 +116,34 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
   var isContentEditable = !!el.isContentEditable || (el.getAttribute && el.getAttribute('role') === 'textbox');
   if (!isNative && !isContentEditable) return {error:'set_text: target is not a text input, textarea, contenteditable, or textbox'};
   if (isNative && (el.disabled || el.readOnly)) return {error:'set_text: target is disabled or readonly'};
-  var previous = valueOf(el, isContentEditable);
+  var previousReadback = renderedReadback(el, isContentEditable);
+  var previous = previousReadback.text;
   var incoming = req.NewlineMode === 'compact' ? compactNewlines(req.Text) : req.Text;
   var value = req.Mode === 'append' ? previous + incoming : incoming;
   try { el.focus(); } catch (e) {}
   if (isContentEditable) {
-    el.textContent = value;
+	// Represent paragraph breaks structurally. A text node containing "\n\n"
+	// is visually collapsed by normal CSS and is not a reliable rich-editor
+	// update. Paragraph blocks plus <br> for soft line breaks work across plain
+	// contenteditable, ProseMirror/Lexical-like surfaces, and normal browser
+	// rendering without editor-specific selectors.
+	var fragment=document.createDocumentFragment();
+	paragraphList(value).forEach(function(paragraph){
+	  var block=document.createElement('p'),lines=paragraph.split('\n');
+	  lines.forEach(function(line,index){if(index)block.appendChild(document.createElement('br'));block.appendChild(document.createTextNode(line));});
+	  if(!block.childNodes.length)block.appendChild(document.createElement('br'));
+	  fragment.appendChild(block);
+	});
+	el.replaceChildren(fragment);
   } else {
     setNativeValue(el, value);
   }
   dispatchTextEvents(el, value);
   try { el.blur(); } catch (e) {}
-  var after = valueOf(el, isContentEditable);
+  await new Promise(function(resolve){requestAnimationFrame(function(){requestAnimationFrame(resolve);});});
+  var rendered = renderedReadback(el, isContentEditable);
+  var requestedParagraphs=paragraphList(value);
+  var verified=requestedParagraphs.length===rendered.paragraphs.length&&requestedParagraphs.every(function(p,i){return p===rendered.paragraphs[i];});
   return {
     ok: true,
     kind: isContentEditable ? 'contenteditable' : 'native',
@@ -120,10 +151,13 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
     label: labelFor(el),
     input_type: isContentEditable ? 'contenteditable' : String(el.type || el.tagName || '').toLowerCase(),
     previous_value: previous,
-    value: after,
-    changed: previous !== after,
+    value: rendered.text,
+    changed: previous !== rendered.text,
     mode: req.Mode,
-    newline_mode: req.NewlineMode
+    newline_mode: req.NewlineMode,
+    rendered_text: rendered.text,
+    paragraphs: rendered.paragraphs,
+    verified: verified
   };
 })(%s, %s)`, domselector.UniqueCSSPathFunction, string(targetJSON), string(reqJSON))
 
@@ -142,6 +176,9 @@ func Set(ctx context.Context, target Target, req SetRequest) (SetResult, error) 
 	}
 	if !out.OK {
 		return out.SetResult, errors.New("set_text failed")
+	}
+	if !out.Verified {
+		return out.SetResult, fmt.Errorf("set_text rendered text mismatch: requested paragraphs do not match rendered paragraphs")
 	}
 	return out.SetResult, nil
 }

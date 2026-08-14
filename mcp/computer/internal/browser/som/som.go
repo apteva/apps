@@ -183,14 +183,21 @@ const EnumScript = `
     for (var i = 0; i < indicators.length; i++) if (isVisible(indicators[i], styleWin)) return true;
     return false;
   }
-  function destructiveEffect(name, text) {
+  function destructiveEffect(name, text, tag, role, el) {
+    var inputType = clean(el && el.type).toLowerCase();
+    var actionable = tag === 'button' || tag === 'a' || role === 'button' || role === 'menuitem' || role === 'link' ||
+      (tag === 'input' && (inputType === 'button' || inputType === 'submit' || inputType === 'reset'));
+    // Content surfaces may legitimately be named "Post body", "Send a
+    // message", etc. Risk describes activating a consequential control, not
+    // editing a draft, so editable targets are never classified here.
+    if (!actionable || (el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return '';
     var semantic = clean(name + ' ' + text).toLowerCase();
     if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
     if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
     if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
     if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
-	if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
-	if (/\b(schedule|set publish date)\b/.test(semantic)) return 'schedule_publish';
+    if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
+    if (/\b(schedule|set publish date)\b/.test(semantic)) return 'schedule_publish';
     return '';
   }
 
@@ -296,7 +303,7 @@ const EnumScript = `
 		// Preserve the last stable semantic name for the same logical control.
 		if (loading && !name && somState.names[stableID]) name = somState.names[stableID];
 		if (!loading && name) somState.names[stableID] = name;
-        var effect = destructiveEffect(name, text);
+        var effect = destructiveEffect(name, text, tag, role, el);
         candidates.push({
           el: el, id: stableID, x: x, y: y, w: w, h: h,
           tag: tag, role: role, text: text, accessible_name: name,

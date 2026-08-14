@@ -41,6 +41,20 @@ func TestShouldAugmentAXForConsentOrEmptySOM(t *testing.T) {
 	}
 }
 
+func TestDestructiveEffectOnlyClassifiesActionableControls(t *testing.T) {
+	for _, role := range []string{"textbox", "searchbox", "region", "document"} {
+		if got := destructiveEffectForText("Post body", role); got != "" {
+			t.Fatalf("draft surface role %q classified as %q", role, got)
+		}
+	}
+	if got := destructiveEffectForText("Publish", "button"); got != "immediate_publish" {
+		t.Fatalf("Publish button effect=%q", got)
+	}
+	if got := destructiveEffectForText("Withdraw funds", "menuitem"); got != "financial_action" {
+		t.Fatalf("Withdraw menuitem effect=%q", got)
+	}
+}
+
 func TestSnapshotBoxesUsesBackendIDsAndViewportOffsets(t *testing.T) {
 	documents := []*domsnapshot.DocumentSnapshot{{
 		ScrollOffsetX: 10,

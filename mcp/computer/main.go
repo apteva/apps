@@ -93,7 +93,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode?. environment is opt-in for a newly-created session and can set user agent, locale/languages, timezone, geolocation, device scale, mobile, and touch; omit it to preserve normal agent defaults. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. Structured SoM includes accessible_name, disabled, loading, dangerous, and destructive_effect. Computer resolves the live target again immediately before dispatch and rejects loading or disabled targets. A coordinate that lands on a consequential control requires expected_text exactly matching its current accessible name. When autosave, a spinner, aria-busy, or another loading state is visible, use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms (default 10000), then take a fresh screenshot. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, expected_text?, quiet_ms?, timeout_ms?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata. Screenshot responses always include compact safety_targets for loading, disabled, or consequential controls; full structured som is returned with include_som=true."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, and semantic scroll_regions. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and returns normalized rendered-text verification. Use wait_for_stable around loading UI. Use batch for guarded click/double_click/scroll/wait/wait_for_stable sequences with one final screenshot."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -591,25 +591,29 @@ func (a *App) MCPTools() []sdk.Tool {
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
-				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
+				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch with steps=[{action:\"click\",...},{action:\"wait_for_stable\"}] for an atomic guarded sequence that aborts on the first error and returns one final screenshot. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
-				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), expected_text? (click guard), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, quiet_ms?, timeout_ms?, annotate? (screenshot only, default true). " +
+				"Use action=batch with steps=[{action:\"scroll\",target_id:\"scroll_...\"},{action:\"wait_for_stable\"}] or guarded click steps for a sequence that aborts on the first error and returns one final screenshot. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click guard), expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, quiet_ms?, timeout_ms?, annotate? (screenshot only, default true). " +
 				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Explicit screenshot and batch return one binary screenshot envelope. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
-					"description": "For action=batch. Ordered click/double_click/wait/wait_for_stable steps. The batch aborts on the first failed guard/action and captures one final annotated screenshot after all steps succeed.",
+					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for_stable steps. Scroll steps accept target_id, direction, amount, expected_name, and expected_role. The batch aborts on the first failed guard/action and captures one final annotated screenshot after all steps succeed.",
 					"items":       map[string]any{"type": "object"},
 				},
 				"url":           map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
 				"tab_id":        map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate":    map[string]any{"type": "string"},
 				"label":         map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
+				"target_id":     map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
+				"som_revision":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
 				"selector":      map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
 				"expected_text": map[string]any{"type": "string", "description": "For click/double_click, exact accessible name required at dispatch time. Required when a raw coordinate lands on a consequential control; optional extra protection for labels/selectors."},
+				"expected_name": map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, especially scroll."},
+				"expected_role": map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, especially scroll."},
 				"checked":       map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
 				"source_url":    map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
 				"base64":        map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
@@ -2047,6 +2051,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		QuietMS:      intArg(args, "quiet_ms"),
 		TimeoutMS:    intArg(args, "timeout_ms"),
 		ExpectedText: strings.TrimSpace(stringArg(args, "expected_text")),
+		TargetID:     strings.TrimSpace(stringArg(args, "target_id")),
+		SOMRevision:  intArg(args, "som_revision"),
+		ExpectedName: strings.TrimSpace(stringArg(args, "expected_name")),
+		ExpectedRole: strings.TrimSpace(stringArg(args, "expected_role")),
 		Presentation: sess.presentation,
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
@@ -2066,6 +2074,24 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		// integer defaults synthesized by tool serializers. Label-only behavior
 		// remains unchanged when selector is absent.
 		act.Label = 0
+	}
+	if err := resolveStableActionTarget(sess, &act); err != nil {
+		return nil, computerUseFailure("stale_or_mismatched_target", id, sess, action, err.Error(),
+			"Take a fresh screenshot and use its current target_id/som_revision or scroll_regions entry.", err)
+	}
+	if action == "scroll" && act.TargetID == "" && act.Label <= 0 && !hasCoordinateArg(args) {
+		regions := scrollRegionsFor(sess.comp)
+		count := 0
+		for _, region := range regions {
+			if ((act.Direction == "left" || act.Direction == "right") && region.CanScrollX) || ((act.Direction != "left" && act.Direction != "right") && region.CanScrollY) {
+				count++
+			}
+		}
+		if count > 1 {
+			return nil, computerUseFailure("ambiguous_scroll_target", id, sess, action,
+				fmt.Sprintf("%d independently scrollable regions are visible; a generic center scroll is ambiguous", count),
+				"Choose a stable id from scroll_regions and pass target_id, optionally with expected_name and expected_role.", nil)
+		}
 	}
 	if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
@@ -2218,10 +2244,20 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "set_text" {
 		textResult = textResultFor(sess.comp)
 	}
+	var scrollResult *backends.ScrollResult
+	var actionSOMDelta map[string]any
+	if action == "scroll" {
+		scrollResult = scrollResultFor(sess.comp)
+		actionSOMDelta = setOfMarkDelta(sess)
+	}
 	mergeSelectResultPayload(payload, selectResult)
 	mergeCheckedResultPayload(payload, checkedResult)
 	mergeTemporalResultPayload(payload, temporalResult)
 	mergeTextResultPayload(payload, textResult)
+	mergeScrollResultPayload(payload, scrollResult)
+	if actionSOMDelta != nil {
+		payload["som_delta"] = actionSOMDelta
+	}
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
@@ -2258,11 +2294,23 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["screenshot"] = binaryEnvelope(shot, mime)
 		out["mime_type"] = mime
 	}
+	if action == "scroll" && scrollResult != nil {
+		if !scrollResult.Moved {
+			out["text"] = "Scroll was dispatched, but no scrollable region moved. The target may already be at its boundary or may be wrong."
+			out["navigation_progress"] = false
+		} else if scrollResult.WrongTarget {
+			out["text"] = "Scroll moved a different region than requested; inspect scroll.actual_target_id before continuing."
+			out["navigation_progress"] = false
+		} else {
+			out["navigation_progress"] = true
+		}
+	}
 	if includeSOM && !screenshotSkipped {
 		out["som"] = setOfMarkFor(sess.comp)
 	}
 	if action == "screenshot" && !screenshotSkipped {
 		out["som_delta"] = setOfMarkDelta(sess)
+		out["scroll_regions"] = scrollRegionsFor(sess.comp)
 		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 			out["safety_targets"] = targets
 		}
@@ -2274,6 +2322,13 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeCheckedResultPayload(out, checkedResult)
 	mergeTemporalResultPayload(out, temporalResult)
 	mergeTextResultPayload(out, textResult)
+	mergeScrollResultPayload(out, scrollResult)
+	if actionSOMDelta != nil {
+		out["som_delta"] = actionSOMDelta
+		if added, ok := actionSOMDelta["added"]; ok {
+			out["revealed_targets"] = added
+		}
+	}
 	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
 	return out, nil
@@ -2307,11 +2362,19 @@ func canExecuteActionOnly(sess *session, action string) bool {
 	return ok
 }
 
+func canExecuteBatchActionOnly(sess *session, action string) bool {
+	if action == "scroll" {
+		_, ok := sess.comp.(backends.ActionOnlyExecutor)
+		return ok
+	}
+	return canExecuteActionOnly(sess, action)
+}
+
 func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *session, args map[string]any) (any, error) {
 	steps, err := batchStepArgs(args["steps"])
 	if err != nil {
 		return nil, computerUseFailure("invalid_batch", id, sess, "batch", err.Error(),
-			"Pass 1-20 ordered click/double_click/wait/wait_for_stable step objects.", err)
+			"Pass 1-20 ordered click/double_click/scroll/wait/wait_for_stable step objects.", err)
 	}
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := tabsFor(sess.comp)
@@ -2331,16 +2394,25 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 			if err := validateStableArgs(action, step); err != nil {
 				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, err), "Use quiet_ms=1500 and timeout_ms up to 30000.", err)
 			}
+		case "scroll":
+			if strings.TrimSpace(stringArg(step, "direction")) == "" {
+				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+					fmt.Sprintf("step %d: scroll requires direction", index+1), "Use up, down, left, or right.", nil)
+			}
 		case "wait":
 		default:
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
-				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, wait, or wait_for_stable inside a batch.", nil)
+				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, scroll, wait, or wait_for_stable inside a batch.", nil)
 		}
 
 		act := backends.Action{
 			Type: action, Label: intArg(step, "label"), Selector: stringArg(step, "selector"),
+			Direction: stringArg(step, "direction"), Amount: intArg(step, "amount"),
 			Duration: intArg(step, "duration"), QuietMS: intArg(step, "quiet_ms"), TimeoutMS: intArg(step, "timeout_ms"),
-			ExpectedText: strings.TrimSpace(stringArg(step, "expected_text")), Presentation: sess.presentation,
+			ExpectedText: strings.TrimSpace(stringArg(step, "expected_text")),
+			TargetID:     strings.TrimSpace(stringArg(step, "target_id")), SOMRevision: intArg(step, "som_revision"),
+			ExpectedName: strings.TrimSpace(stringArg(step, "expected_name")), ExpectedRole: strings.TrimSpace(stringArg(step, "expected_role")),
+			Presentation: sess.presentation,
 		}
 		act.X, act.Y = coordinateArg(step)
 		if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(step, "coordinate")) != "" {
@@ -2348,12 +2420,28 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		} else if action == "click" && strings.TrimSpace(act.Selector) != "" {
 			act.Label = 0
 		}
+		if err := resolveStableActionTarget(sess, &act); err != nil {
+			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+				fmt.Sprintf("step %d: %v", index+1, err), "Take a fresh screenshot and rebuild the batch from current stable targets.", err)
+		}
+		if action == "scroll" && act.TargetID == "" && act.Label <= 0 && !hasCoordinateArg(step) {
+			count := 0
+			for _, region := range scrollRegionsFor(sess.comp) {
+				if ((act.Direction == "left" || act.Direction == "right") && region.CanScrollX) || ((act.Direction != "left" && act.Direction != "right") && region.CanScrollY) {
+					count++
+				}
+			}
+			if count > 1 {
+				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
+					fmt.Sprintf("step %d: %d independently scrollable regions make this target ambiguous", index+1, count), "Pass a scroll_regions target_id.", nil)
+			}
+		}
 		if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
 				fmt.Sprintf("step %d: Set-of-Mark label %d is stale or absent", index+1, act.Label), "Take a fresh screenshot and rebuild the batch from current labels.", nil)
 		}
 
-		if canExecuteActionOnly(sess, action) {
+		if canExecuteBatchActionOnly(sess, action) {
 			err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
 		} else {
 			_, err = sess.comp.Execute(act)
@@ -2367,7 +2455,11 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 				fmt.Sprintf("step %d (%s) failed after %d completed steps: %v", index+1, action, len(completed), err),
 				"No later steps were executed. Take a fresh screenshot and inspect the live target state before retrying.", err)
 		}
-		completed = append(completed, map[string]any{"index": index + 1, "action": action, "status": "completed"})
+		stepResult := map[string]any{"index": index + 1, "action": action, "status": "completed"}
+		if action == "scroll" {
+			mergeScrollResultPayload(stepResult, scrollResultFor(sess.comp))
+		}
+		completed = append(completed, stepResult)
 	}
 
 	tabEvent := autoFollowNewTab(sess.comp, beforeTabs)
@@ -2381,8 +2473,14 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	out := map[string]any{
 		"session_id": id, "current_url": afterURL, "text": "Success: batch completed. One final screenshot attached.",
 		"steps": completed, "completed_steps": len(completed), "screenshot": binaryEnvelope(shot, mime), "mime_type": mime,
-		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"), "som_delta": setOfMarkDelta(sess),
+		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
 	}
+	delta := setOfMarkDelta(sess)
+	out["som_delta"] = delta
+	if added, ok := delta["added"]; ok {
+		out["revealed_targets"] = added
+	}
+	out["scroll_regions"] = scrollRegionsFor(sess.comp)
 	if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 		out["safety_targets"] = targets
 	}
@@ -2690,6 +2788,9 @@ func mergeTextResultPayload(payload map[string]any, result *textinput.SetResult)
 	payload["text_changed"] = result.Changed
 	payload["text_mode"] = result.Mode
 	payload["text_newline_mode"] = result.NewlineMode
+	payload["text_rendered"] = result.RenderedText
+	payload["text_paragraphs"] = result.Paragraphs
+	payload["text_verified"] = result.Verified
 	if result.Selector != "" {
 		payload["text_selector"] = result.Selector
 	}
@@ -2699,6 +2800,19 @@ func mergeTextResultPayload(payload map[string]any, result *textinput.SetResult)
 	if result.InputType != "" {
 		payload["text_input_type"] = result.InputType
 	}
+}
+
+func mergeScrollResultPayload(payload map[string]any, result *backends.ScrollResult) {
+	if result == nil {
+		return
+	}
+	payload["scroll"] = result
+	payload["scroll_moved"] = result.Moved
+	payload["scroll_wrong_target"] = result.WrongTarget
+	payload["scroll_actual_target_id"] = result.ActualTargetID
+	payload["scroll_requested_target_id"] = result.RequestedTargetID
+	payload["scroll_actual_target_name"] = result.ActualTargetName
+	payload["scroll_requested_target_name"] = result.RequestedTargetName
 }
 
 func screenshotRecoveryFor(comp backends.Computer) *backends.ScreenshotRecoveryInfo {
@@ -2726,6 +2840,80 @@ func safetySetOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
 		}
 	}
 	return out
+}
+
+func scrollReporterFor(comp backends.Computer) backends.ScrollReporter {
+	reporter, _ := comp.(backends.ScrollReporter)
+	return reporter
+}
+
+func scrollRegionsFor(comp backends.Computer) []backends.ScrollRegion {
+	if reporter := scrollReporterFor(comp); reporter != nil {
+		return reporter.ScrollRegions()
+	}
+	return nil
+}
+
+func scrollResultFor(comp backends.Computer) *backends.ScrollResult {
+	if reporter := scrollReporterFor(comp); reporter != nil {
+		return reporter.LastScrollResult()
+	}
+	return nil
+}
+
+func resolveStableActionTarget(sess *session, action *backends.Action) error {
+	if sess == nil || action == nil {
+		return nil
+	}
+	if action.SOMRevision > 0 && action.SOMRevision != sess.somRevision {
+		return fmt.Errorf("target revision %d is stale; current revision is %d", action.SOMRevision, sess.somRevision)
+	}
+	if action.Type == "scroll" && strings.HasPrefix(action.TargetID, "scroll_") {
+		for _, region := range scrollRegionsFor(sess.comp) {
+			if region.ID != action.TargetID {
+				continue
+			}
+			if action.ExpectedName != "" && !strings.EqualFold(strings.TrimSpace(action.ExpectedName), strings.TrimSpace(region.Name)) {
+				return fmt.Errorf("expected target name %q but scroll region is %q", action.ExpectedName, region.Name)
+			}
+			if action.ExpectedRole != "" && !strings.EqualFold(strings.TrimSpace(action.ExpectedRole), strings.TrimSpace(region.Role)) {
+				return fmt.Errorf("expected target role %q but scroll region is %q", action.ExpectedRole, region.Role)
+			}
+			return nil
+		}
+		return fmt.Errorf("scroll region %q is not present in the latest screenshot", action.TargetID)
+	}
+	if action.TargetID == "" && action.Label <= 0 {
+		return nil
+	}
+	var target *backends.SetOfMarkTarget
+	for _, candidate := range setOfMarkFor(sess.comp) {
+		if (action.TargetID != "" && candidate.ID == action.TargetID) || (action.TargetID == "" && candidate.Label == action.Label) {
+			copy := candidate
+			target = &copy
+			break
+		}
+	}
+	if target == nil {
+		if action.TargetID != "" {
+			return fmt.Errorf("target_id %q is not present in the latest screenshot", action.TargetID)
+		}
+		return nil
+	}
+	if action.ExpectedName != "" {
+		actual := firstNonEmpty(target.AccessibleName, target.Text)
+		if !strings.EqualFold(strings.TrimSpace(action.ExpectedName), strings.TrimSpace(actual)) {
+			return fmt.Errorf("expected target name %q but current target is %q", action.ExpectedName, actual)
+		}
+	}
+	if action.ExpectedRole != "" && !strings.EqualFold(strings.TrimSpace(action.ExpectedRole), strings.TrimSpace(target.Role)) {
+		return fmt.Errorf("expected target role %q but current target is %q", action.ExpectedRole, target.Role)
+	}
+	action.Label = target.Label
+	if action.Type == "scroll" {
+		action.TargetID = ""
+	} // scroll the target's nearest semantic ancestor
+	return nil
 }
 
 // setOfMarkDelta returns only semantic/geometry changes since the previous
@@ -3073,6 +3261,18 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 			payload["key"] = act.Key
 		}
 	case "scroll":
+		if act.TargetID != "" {
+			payload["target_id"] = act.TargetID
+		}
+		if act.Label > 0 {
+			payload["label"] = act.Label
+		}
+		if act.ExpectedName != "" {
+			payload["expected_name"] = act.ExpectedName
+		}
+		if act.ExpectedRole != "" {
+			payload["expected_role"] = act.ExpectedRole
+		}
 		if act.Direction != "" {
 			payload["direction"] = act.Direction
 		}
@@ -3716,6 +3916,9 @@ func coordinateArg(args map[string]any) (int, int) {
 }
 
 func hasClickTargetArg(args map[string]any) bool {
+	if strings.TrimSpace(stringArg(args, "target_id")) != "" {
+		return true
+	}
 	if strings.TrimSpace(stringArg(args, "selector")) != "" {
 		return true
 	}
@@ -3732,12 +3935,12 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 		}
 		return nil
 	}
-	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 && !(action == "click" && strings.TrimSpace(stringArg(args, "selector")) != "") {
+	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 && strings.TrimSpace(stringArg(args, "target_id")) == "" && !(action == "click" && strings.TrimSpace(stringArg(args, "selector")) != "") {
 		return fmt.Errorf("label=%d is not clickable; label must be a positive label from the latest screenshot", intArg(args, "label"))
 	}
 	if !hasClickTargetArg(args) {
 		if action == "click" {
-			return fmt.Errorf("click requires label=N from the latest screenshot, selector, or coordinate=\"x,y\" for targets without a badge")
+			return fmt.Errorf("click requires label or target_id from the latest screenshot, selector, or coordinate=\"x,y\" for targets without a badge")
 		}
 		return fmt.Errorf("double_click requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge")
 	}
@@ -3769,7 +3972,7 @@ func validateSelectOptionArgs(action string, args map[string]any) error {
 	if action != "select_option" {
 		return nil
 	}
-	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && strings.TrimSpace(stringArg(args, "target_id")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
 		return fmt.Errorf("select_option requires label=N, selector, or coordinate=\"x,y\"")
 	}
 	if strings.TrimSpace(stringArg(args, "text")) == "" &&
@@ -3785,7 +3988,7 @@ func validateSetCheckedArgs(action string, args map[string]any) error {
 	if action != "set_checked" {
 		return nil
 	}
-	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && strings.TrimSpace(stringArg(args, "target_id")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
 		return fmt.Errorf("set_checked requires label=N, selector, or coordinate=\"x,y\"")
 	}
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
@@ -3801,7 +4004,7 @@ func validateSetTemporalArgs(action string, args map[string]any) error {
 	if action != "set_temporal" {
 		return nil
 	}
-	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && strings.TrimSpace(stringArg(args, "target_id")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
 		return fmt.Errorf("set_temporal requires label=N, selector, or coordinate=\"x,y\"")
 	}
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
@@ -3817,7 +4020,7 @@ func validateSetTextArgs(action string, args map[string]any) error {
 	if action != "set_text" {
 		return nil
 	}
-	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && strings.TrimSpace(stringArg(args, "target_id")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
 		return fmt.Errorf("set_text requires label=N, selector, or coordinate=\"x,y\"")
 	}
 	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
