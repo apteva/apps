@@ -50,13 +50,15 @@ provides:
     - name: browser_session
       description: |
         Open a fresh app-owned browser session, inspect it, close it, or switch
-        its tabs. Args: action, session_id?, tab_id?, backend?, url?,
-        context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy_mode?, proxy_profile?, proxy_country?,
-        proxy_sticky?, viewport?, environment?, presentation_mode?. environment
-        is opt-in for newly-created sessions and can set user agent,
-        locale/languages, timezone, geolocation, device scale, mobile, and
-        touch. Omit it to preserve normal agent defaults. Use
+        its tabs. For ordinary browsing, pass only action=open plus url or
+        context_id/context_name. Omit every other optional field unless the
+        task explicitly requires that override; never populate optional fields
+        with guessed or schema-default values. environment is an advanced
+        QA/device-emulation override only for a specifically requested user
+        agent, locale/languages, timezone, geolocation, device scale, mobile,
+        or touch profile. Never send environment for normal navigation,
+        read-only audits, or saved-login contexts. Proxy overrides are opt-in:
+        omit proxy_mode and all proxy_* fields to use Computer settings. Use
         presentation_mode=demo for a visible cursor, click feedback, human-paced
         typing, non-interactive cues for structured control changes, and longer
         holds in user-facing walkthroughs; fast is the default and preserves
@@ -193,11 +195,12 @@ provides:
         credentials.
     - name: browser_open
       description: |
-        Compatibility alias for browser_session(action=open). Supports the
-        same optional environment object for newly-created sessions; omit it
-        to preserve agent defaults. Browserbase honors timeout as max session
-        lifetime. Pass presentation_mode=demo for visible, human-paced actions
-        in live views and recordings.
+        Compatibility alias for browser_session(action=open). For ordinary
+        browsing pass only url or context_id/context_name. Omit every advanced
+        optional field and never synthesize defaults. environment is only for
+        explicitly requested QA/device emulation, never normal navigation,
+        audits, or saved login. Browserbase honors timeout as max session
+        lifetime.
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,

@@ -1083,9 +1083,17 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	if _, ok := props["proxy"]; ok {
 		t.Fatal("browser_session must not advertise the deprecated proxy boolean")
 	}
+	if !strings.Contains(tool.Description, "Ordinary open: pass only") ||
+		!strings.Contains(tool.Description, "never populate optional fields") ||
+		!strings.Contains(tool.Description, "Never send environment for normal navigation") {
+		t.Fatalf("browser_session must teach agents the minimal default call:\n%s", tool.Description)
+	}
 	environmentSchema, ok := props["environment"].(map[string]any)
 	if !ok {
 		t.Fatalf("browser_session environment schema missing: %#v", props["environment"])
+	}
+	if description, _ := environmentSchema["description"].(string); !strings.Contains(description, "ADVANCED QA/device-emulation") || !strings.Contains(description, "Omit this entire object") {
+		t.Fatalf("environment schema must clearly be advanced opt-in: %q", description)
 	}
 	environmentProps, ok := environmentSchema["properties"].(map[string]any)
 	if !ok {

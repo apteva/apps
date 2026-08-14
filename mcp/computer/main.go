@@ -91,7 +91,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode?. environment is opt-in for a newly-created session and can set user agent, locale/languages, timezone, geolocation, device scale, mobile, and touch; omit it to preserve normal agent defaults. Proxy routing is provider-neutral: managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, direct explicitly disables proxies, and auto uses Computer settings. Use presentation_mode=demo for a visible cursor, click feedback, human-paced typing, non-interactive cues for structured control changes, and longer holds in user-facing walkthroughs; fast is the default and preserves normal automation behavior. Presentation overlays never receive pointer events or replace the agent's underlying action. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
       description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, and semantic scroll_regions. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and returns normalized rendered-text verification. Use wait_for_stable around loading UI. Use batch for guarded click/double_click/scroll/wait/wait_for_stable sequences with one final screenshot."
     - name: computer_context_create
@@ -107,7 +107,7 @@ provides:
     - name: computer_proxy_profile_list
       description: "List safe proxy profiles available for agent-selected browser sessions. Returns profile ids, names, providers, countries, protocols, and sticky policies; never credentials or proxy URLs."
     - name: browser_open
-      description: "Compatibility alias for browser_session(action=open). Supports the same optional environment object for newly-created sessions; omit it to preserve agent defaults. Pass presentation_mode=demo for visible, human-paced actions in live views and recordings."
+      description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name. Omit every advanced optional field and never synthesize defaults. environment is only for explicitly requested QA/device emulation, never normal navigation, audits, or saved login."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). Returns screenshot_url, a stable app-owned URL that continues serving the clean final frame after the browser closes."
     - name: browser_extract
@@ -533,9 +533,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_session",
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
-				"Open args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, timeout?, proxy_mode?, proxy_profile?, proxy_country?, proxy_sticky?, viewport?, environment?, presentation_mode? (fast|demo, default fast). " +
-				"environment is opt-in for new sessions and sets browser-visible identity/emulation; omit it to preserve normal agent defaults. " +
+				"Ordinary open: pass only action=open plus url? or context_id?/context_name?. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. " +
+				"Advanced open overrides are backend?, persist?, auto_create_context?, timeout?, proxy_mode?/proxy_profile?/proxy_country?/proxy_sticky?, viewport?, environment?, and presentation_mode?. " +
+				"environment is advanced, opt-in QA/device emulation for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. " +
+				"Proxy overrides are opt-in; omit proxy_mode and every proxy_* selector to use Computer's configured routing. " +
 				"Use presentation_mode=demo for visible cursor/click feedback, human-paced typing, non-interactive structured-control cues, and longer holds in user-facing walkthroughs. " +
 				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"session_id is the app-owned live br_* handle for status/close/computer_use and cannot reopen a closed session. " +
@@ -553,7 +554,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"action":            map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
 				"session_id":        map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
 				"tab_id":            map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
-				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
 				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo shows a non-interactive cursor/click pulse and structured-control cues on CDP backends, types short text character by character, and holds visible states. Presentation overlays never dispatch input events or replace agent actions."},
 				"url":               map[string]any{"type": "string"},
 				"context_id":        map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
@@ -564,10 +565,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Provider-neutral routing mode. profile uses a configured proxy profile; managed uses the browser backend's own proxy."},
-				"proxy_profile":       map[string]any{"type": "string", "description": "Configured proxy profile id or unique name. Use computer_proxy_profile_list to discover safe choices."},
-				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
-				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "External profile identity lifetime. context requires an app-managed browser context."},
+				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing. profile uses a configured profile; managed uses the browser backend's proxy; direct disables proxies."},
+				"proxy_profile":       map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Configured profile id or unique name from computer_proxy_profile_list. Never guess or synthesize this value."},
+				"proxy_country":       map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Two-letter ISO code such as DE. Omit otherwise."},
+				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when a sticky lifetime was explicitly requested. Omit otherwise; context requires an app-managed browser context."},
 				"environment":         sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
@@ -697,15 +698,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "browser_open",
-			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
+			Description: "Compatibility alias for browser_session(action=open). For ordinary browsing pass only url or context_id/context_name; omit all advanced optional fields and never synthesize defaults. Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
 				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?, presentation_mode? (fast|demo, default fast). Use demo for visible, human-paced actions and non-interactive structured-control cues in live views and recordings. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
-				"Pass environment? only when a new session needs a specific user agent, locale/languages, timezone, geolocation, device scale, mobile, or touch profile; omit it to preserve agent defaults. " +
+				"Pass environment only for an explicitly requested QA/device-emulation profile; never send it for normal navigation, audits, or saved login. " +
 				"Browserbase honors timeout as max session lifetime. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
 			InputSchema: schemaObject(map[string]any{
-				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"backend":           map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}, "description": "Optional provider override. Omit for normal browsing so Computer uses its configured default."},
 				"presentation_mode": map[string]any{"type": "string", "enum": []string{"fast", "demo"}, "description": "Opt-in recording presentation layer. fast preserves normal automation behavior (default); demo adds non-interactive visual cues and pacing without replacing agent actions."},
 				"url":               map[string]any{"type": "string"},
 				"context_id":        map[string]any{"type": "string"},
@@ -716,10 +717,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}},
-				"proxy_profile":       map[string]any{"type": "string"},
-				"proxy_country":       map[string]any{"type": "string", "description": "Two-letter ISO proxy exit country, for example DE. Overrides a configured profile's country; managed mode country selection is supported by Browserbase and Browser Engine."},
-				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}},
+				"proxy_mode":          map[string]any{"type": "string", "enum": []string{"auto", "direct", "managed", "profile"}, "description": "Advanced routing override only. Omit this and all proxy_* fields for normal browsing."},
+				"proxy_profile":       map[string]any{"type": "string", "description": "Only for proxy_mode=profile. Never guess or synthesize this value."},
+				"proxy_country":       map[string]any{"type": "string", "description": "Only for an explicitly requested managed/profile country override. Omit otherwise."},
+				"proxy_sticky":        map[string]any{"type": "string", "enum": []string{"rotating", "session", "context"}, "description": "Only for proxy_mode=profile when explicitly requested. Omit otherwise."},
 				"environment":         sessionEnvironmentSchema(),
 				"viewport": map[string]any{
 					"type":        "object",
@@ -4543,7 +4544,7 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 func sessionEnvironmentSchema() map[string]any {
 	return map[string]any{
 		"type":                 "object",
-		"description":          "Optional browser-visible environment for this newly-created session. Omit it to preserve the backend's normal agent defaults. Proxy country controls network egress separately and does not infer these values.",
+		"description":          "ADVANCED QA/device-emulation override only. Omit this entire object for normal navigation, read-only audits, saved-login contexts, and ordinary agent browsing. Use it only when the task explicitly requires a specific user agent, locale/languages, timezone, geolocation, device scale, mobile, or touch profile. Never populate its fields with guessed or schema-default values. Proxy country controls network egress separately and does not infer these values.",
 		"additionalProperties": false,
 		"properties": map[string]any{
 			"user_agent": map[string]any{"type": "string"},
