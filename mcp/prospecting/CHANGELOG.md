@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.2.1
+
+- Strip bullet-separated marketing taglines from extracted company names.
+
 ## v0.2.0
 
 - Add Google-to-DuckDuckGo discovery fallback when a provider blocks a search.

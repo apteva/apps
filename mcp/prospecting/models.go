@@ -419,7 +419,7 @@ func canonicalCandidateKey(domain, website, companyName, sourceURL string) strin
 
 func cleanCompanyTitle(title, domain string) string {
 	title = strings.TrimSpace(title)
-	for _, sep := range []string{" | ", " — ", " – ", " - "} {
+	for _, sep := range []string{" • ", " · ", " | ", " — ", " – ", " - "} {
 		if parts := strings.SplitN(title, sep, 2); len(parts) == 2 && len(strings.TrimSpace(parts[0])) >= 2 {
 			title = strings.TrimSpace(parts[0])
 			break

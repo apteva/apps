@@ -145,6 +145,19 @@ func TestDiscoveryDeduplicatesAndHonorsExclusions(t *testing.T) {
 	}
 }
 
+func TestCleanCompanyTitleRemovesMarketingTaglines(t *testing.T) {
+	tests := map[string]string{
+		"The Teeth Doctors™ • Worry Free, Five Star Rated Fayetteville Dentist": "The Teeth Doctors™",
+		"Bright Smiles Dental · Family Dentistry in Austin":                     "Bright Smiles Dental",
+		"Acme Dental | Request an Appointment":                                  "Acme Dental",
+	}
+	for input, want := range tests {
+		if got := cleanCompanyTitle(input, "example.com"); got != want {
+			t.Errorf("cleanCompanyTitle(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestDiscoveryFallsBackAndFiltersNoise(t *testing.T) {
 	platform := &platformStub{
 		blockedEngines: map[string]bool{"google": true},
