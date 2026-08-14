@@ -52,7 +52,7 @@ provides:
         Open a fresh app-owned browser session, inspect it, close it, or switch
         its tabs. Args: action, session_id?, tab_id?, backend?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy? (legacy), proxy_mode?, proxy_profile?, proxy_country?,
+        proxy_mode?, proxy_profile?, proxy_country?,
         proxy_sticky?, viewport?, environment?, presentation_mode?. environment
         is opt-in for newly-created sessions and can set user agent,
         locale/languages, timezone, geolocation, device scale, mobile, and

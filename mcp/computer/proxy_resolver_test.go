@@ -185,6 +185,41 @@ func assertSafeProxyState(t *testing.T, state SessionProxyState, forbidden ...st
 	}
 }
 
+func TestResolveSessionProxyPrefersModeOverLegacyBoolean(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	app := &App{}
+	for _, test := range []struct {
+		name        string
+		args        map[string]any
+		wantMode    string
+		wantManaged *bool
+	}{
+		{name: "serializer false with auto", args: map[string]any{"proxy": false, "proxy_mode": "auto"}, wantMode: "auto"},
+		{name: "legacy true cannot override direct", args: map[string]any{"proxy": true, "proxy_mode": "direct"}, wantMode: "direct", wantManaged: boolPointer(false)},
+		{name: "legacy true alone remains managed", args: map[string]any{"proxy": true}, wantMode: "managed", wantManaged: boolPointer(true)},
+		{name: "legacy false alone remains direct", args: map[string]any{"proxy": false}, wantMode: "direct", wantManaged: boolPointer(false)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, err := app.resolveSessionProxy(ctx, test.args, "local", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.State.Mode != test.wantMode {
+				t.Fatalf("mode=%q want %q", policy.State.Mode, test.wantMode)
+			}
+			if test.wantManaged == nil {
+				if policy.Managed != nil {
+					t.Fatalf("managed=%v want nil", *policy.Managed)
+				}
+			} else if policy.Managed == nil || *policy.Managed != *test.wantManaged {
+				t.Fatalf("managed=%v want %v", policy.Managed, *test.wantManaged)
+			}
+		})
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
 func TestResolveSessionProxyUsesBoundDataImpulseProfile(t *testing.T) {
 	platform := &proxyPlatformStub{connectionID: 77}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))

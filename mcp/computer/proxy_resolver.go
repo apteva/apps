@@ -48,9 +48,12 @@ func (a *App) resolveSessionProxy(ctx *sdk.AppCtx, args map[string]any, backend 
 	profileRef := strings.TrimSpace(stringArg(args, "proxy_profile"))
 	country := strings.ToUpper(strings.TrimSpace(stringArg(args, "proxy_country")))
 	sticky := strings.ToLower(strings.TrimSpace(stringArg(args, "proxy_sticky")))
-	_, proxyWasSet := args["proxy"]
-	if !settings.LockProxyPolicy && mode != "" && proxyWasSet {
-		return resolvedProxyPolicy{}, fmt.Errorf("proxy_mode cannot be combined with the legacy proxy boolean")
+	legacyProxy, proxyWasSet := boolArg(args, "proxy")
+	// proxy_mode is the provider-neutral public contract. Some tool clients
+	// still synthesize the removed legacy boolean, often as proxy=false. When a
+	// mode is present it is authoritative and the legacy value is ignored.
+	if mode != "" {
+		proxyWasSet = false
 	}
 	explicit := mode != "" || profileRef != "" || country != "" || sticky != "" || proxyWasSet
 
@@ -69,7 +72,7 @@ func (a *App) resolveSessionProxy(ctx *sdk.AppCtx, args map[string]any, backend 
 		case profileRef != "":
 			mode = "profile"
 		case proxyWasSet:
-			if boolArgDefault(args, "proxy", false) {
+			if legacyProxy {
 				mode = "managed"
 			} else {
 				mode = "direct"

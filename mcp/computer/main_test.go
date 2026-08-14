@@ -1039,6 +1039,9 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	if _, ok := props["backend_session_id"]; ok {
 		t.Fatal("browser_session must not advertise provider-session attachment")
 	}
+	if _, ok := props["proxy"]; ok {
+		t.Fatal("browser_session must not advertise the deprecated proxy boolean")
+	}
 	environmentSchema, ok := props["environment"].(map[string]any)
 	if !ok {
 		t.Fatalf("browser_session environment schema missing: %#v", props["environment"])
@@ -1077,6 +1080,11 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	}
 	if !strings.Contains(tool.Description, "Always use action=open for new browsing work") {
 		t.Fatalf("browser_session does not direct agents to fresh sessions:\n%s", tool.Description)
+	}
+	legacyOpen := findTool(t, app.MCPTools(), "browser_open")
+	legacyProps := legacyOpen.InputSchema["properties"].(map[string]any)
+	if _, ok := legacyProps["proxy"]; ok {
+		t.Fatal("browser_open must not advertise the deprecated proxy boolean")
 	}
 
 	for _, manifestTool := range app.Manifest().Provides.MCPTools {
