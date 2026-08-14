@@ -153,7 +153,7 @@ interface TemplateRow {
   updated_at?: string;
 }
 interface ProviderTemplateRow {
-  sid: string;
+  provider_template_id: string;
   name: string;
   language?: string;
   category?: string;
@@ -2556,8 +2556,9 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   const [busy, setBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [providerRows, setProviderRows] = useState<ProviderTemplateRow[]>([]);
+  const [providerLabel, setProviderLabel] = useState("Provider");
   const [providerLoading, setProviderLoading] = useState(false);
-  const [selectedSids, setSelectedSids] = useState<string[]>([]);
+  const [selectedProviderTemplateIDs, setSelectedProviderTemplateIDs] = useState<string[]>([]);
   const [updateExisting, setUpdateExisting] = useState(true);
   const providerCapable = channel === "sms" || channel === "whatsapp";
 
@@ -2569,7 +2570,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
     e.preventDefault();
     setBusy(true);
     try {
-      const out = await api<{ template?: TemplateRow; provider?: { provider_template_id?: string; provider_status?: string; submitted?: boolean } }>("POST", "/tools/call", {}, {
+      const out = await api<{ template?: TemplateRow; provider?: { provider?: string; provider_template_id?: string; provider_status?: string; submitted?: boolean } }>("POST", "/tools/call", {}, {
         tool: "template_create",
         args: {
           channel,
@@ -2585,7 +2586,8 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
       setBodyText("");
       reload();
       if (out.provider?.provider_template_id) {
-        notify("info", `Template added on Twilio: ${out.provider.provider_status || "created"}.`);
+        const label = out.provider.provider || providerLabel;
+        notify("info", `Template added on ${label}: ${out.provider.provider_status || "created"}.`);
       } else {
         notify("info", "Template added.");
       }
@@ -2599,10 +2601,11 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   const loadProviderTemplates = async () => {
     setProviderLoading(true);
     try {
-      const out = await api<{ templates: ProviderTemplateRow[] }>("GET", "/templates/provider-preview", { channel: "whatsapp" });
+      const out = await api<{ templates: ProviderTemplateRow[]; provider_label?: string }>("GET", "/templates/provider-preview", { channel: "whatsapp" });
       const next = out.templates || [];
+      setProviderLabel(out.provider_label || "Provider");
       setProviderRows(next);
-      setSelectedSids(next.filter((t) => t.local_state !== "imported" && t.status === "approved").map((t) => t.sid));
+      setSelectedProviderTemplateIDs(next.filter((t) => t.local_state !== "imported" && t.status === "approved").map((t) => t.provider_template_id));
       setImportOpen(true);
     } catch (e) {
       notify("error", `Load failed: ${parseSendersError((e as Error).message)}`);
@@ -2611,8 +2614,8 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
     }
   };
 
-  const toggleProviderTemplate = (sid: string) => {
-    setSelectedSids((prev) => prev.includes(sid) ? prev.filter((x) => x !== sid) : [...prev, sid]);
+  const toggleProviderTemplate = (providerTemplateID: string) => {
+    setSelectedProviderTemplateIDs((prev) => prev.includes(providerTemplateID) ? prev.filter((x) => x !== providerTemplateID) : [...prev, providerTemplateID]);
   };
 
   const importProviderTemplates = async (mode: "selected" | "approved") => {
@@ -2620,7 +2623,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
     try {
       const out = await api<{ imported?: number; updated?: number; skipped?: number }>("POST", "/templates/import", {}, {
         channel: "whatsapp",
-        sids: mode === "selected" ? selectedSids : [],
+        provider_template_ids: mode === "selected" ? selectedProviderTemplateIDs : [],
         approved_only: mode === "approved",
         update_existing: updateExisting,
       });
@@ -2650,15 +2653,15 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   const handleDelete = async (id: number) => {
     const tpl = rows.find((t) => t.id === id);
     confirmAction({
-      title: "Delete template",
+      title: "Remove template",
       tone: "danger",
-      confirmLabel: "Delete",
+      confirmLabel: "Remove",
       message: (
         <>
-          <div>Delete template <code>{tpl?.name || `#${id}`}</code>?</div>
+          <div>Remove template <code>{tpl?.name || `#${id}`}</code> from this project?</div>
           {tpl?.provider_template_id ? (
             <div className="mt-2 text-text-dim">
-              This template is linked to Twilio <code>{tpl.provider_template_id}</code>. Messaging will delete it from Twilio first, then hide the local row.
+              The shared provider template <code>{tpl.provider_template_id}</code> remains available to other projects.
             </div>
           ) : null}
           <div className="mt-2 text-text-dim">Messages that reference this saved template will no longer be able to use it.</div>
@@ -2694,7 +2697,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
     try {
       await api("POST", `/templates/${t.id}/provider-create`, {}, { category, language });
       reload();
-      notify("info", "Template synced to Twilio.");
+      notify("info", "Template synced to the phone provider.");
     } catch (e) {
       notify("error", `Sync failed: ${parseSendersError((e as Error).message)}`);
     }
@@ -2729,7 +2732,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
         {providerCapable && (
           <label className="flex items-center gap-2 text-xs text-text-dim pb-2">
             <input type="checkbox" checked={providerCreate} onChange={(e) => setProviderCreate(e.target.checked)} />
-            Sync to Twilio
+            Sync to provider
           </label>
         )}
         {channel === "whatsapp" && providerCreate && (
@@ -2743,7 +2746,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
         </Field>
         <button type="submit" className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50" disabled={busy}>Add</button>
         <button type="button" className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={loadProviderTemplates} disabled={busy || providerLoading}>
-          {providerLoading ? "Loading…" : "Import from Twilio"}
+          {providerLoading ? "Loading…" : `Import from ${providerLabel}`}
         </button>
         <button type="button" className="px-3 py-1.5 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={refreshAllStatuses} disabled={busy || providerLoading}>
           Refresh WhatsApp statuses
@@ -2788,7 +2791,7 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
                     </>
                   )}
                   {t.channel === "sms" && !t.provider_template_id && (
-                    <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleProviderCreate(t)}>Sync to Twilio</button>
+                    <button type="button" className="text-accent hover:underline text-xs mr-3" onClick={() => handleProviderCreate(t)}>Sync to provider</button>
                   )}
                   <button type="button" className="text-text-dim hover:text-red-500 text-xs" onClick={() => handleDelete(t.id)}>Delete</button>
                 </td>
@@ -2798,9 +2801,10 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
         </table>
       )}
       {importOpen && (
-        <TwilioTemplateImportModal
+        <ProviderTemplateImportModal
           rows={providerRows}
-          selectedSids={selectedSids}
+          providerLabel={providerLabel}
+          selectedProviderTemplateIDs={selectedProviderTemplateIDs}
           updateExisting={updateExisting}
           busy={providerLoading}
           onToggle={toggleProviderTemplate}
@@ -2815,9 +2819,10 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
   );
 }
 
-function TwilioTemplateImportModal({
+function ProviderTemplateImportModal({
   rows,
-  selectedSids,
+  providerLabel,
+  selectedProviderTemplateIDs,
   updateExisting,
   busy,
   onToggle,
@@ -2828,26 +2833,27 @@ function TwilioTemplateImportModal({
   onClose,
 }: {
   rows: ProviderTemplateRow[];
-  selectedSids: string[];
+  providerLabel: string;
+  selectedProviderTemplateIDs: string[];
   updateExisting: boolean;
   busy: boolean;
-  onToggle: (sid: string) => void;
+  onToggle: (providerTemplateID: string) => void;
   onUpdateExisting: (value: boolean) => void;
   onImportSelected: () => void;
   onImportApproved: () => void;
   onRefresh: () => void;
   onClose: () => void;
 }) {
-  const selectedCount = selectedSids.length;
+  const selectedCount = selectedProviderTemplateIDs.length;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4" role="presentation" onMouseDown={(e) => {
       if (e.target === e.currentTarget && !busy) onClose();
     }}>
-      <div role="dialog" aria-modal="true" aria-labelledby="twilio-template-import-title" className="w-full max-w-5xl max-h-[86vh] rounded border border-border bg-surface text-text shadow-2xl flex flex-col" onMouseDown={(e) => e.stopPropagation()}>
+      <div role="dialog" aria-modal="true" aria-labelledby="provider-template-import-title" className="w-full max-w-5xl max-h-[86vh] rounded border border-border bg-surface text-text shadow-2xl flex flex-col" onMouseDown={(e) => e.stopPropagation()}>
         <div className="px-5 py-4 border-b border-border flex items-center justify-between gap-3">
           <div>
-            <div id="twilio-template-import-title" className="font-semibold">Import WhatsApp templates</div>
-            <div className="text-xs text-text-dim">Twilio Content templates become Messaging templates and keep their approval status.</div>
+            <div id="provider-template-import-title" className="font-semibold">Import WhatsApp templates</div>
+            <div className="text-xs text-text-dim">Select which {providerLabel} templates belong to this project. Approval status stays synchronized.</div>
           </div>
           <button type="button" className="text-text-dim hover:text-text" onClick={onClose} disabled={busy}>×</button>
         </div>
@@ -2857,7 +2863,7 @@ function TwilioTemplateImportModal({
             Update already imported templates
           </label>
           <div className="flex items-center gap-2">
-            <button type="button" className="px-2 py-1 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={onRefresh} disabled={busy}>Refresh Twilio</button>
+            <button type="button" className="px-2 py-1 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={onRefresh} disabled={busy}>Refresh {providerLabel}</button>
             <button type="button" className="px-2 py-1 rounded border border-border text-text-dim hover:text-text hover:bg-surface-2 disabled:opacity-50" onClick={onImportApproved} disabled={busy}>Import all approved</button>
             <button type="button" className="px-3 py-1 rounded bg-accent text-white disabled:opacity-50" onClick={onImportSelected} disabled={busy || selectedCount === 0}>
               Import selected ({selectedCount})
@@ -2866,7 +2872,7 @@ function TwilioTemplateImportModal({
         </div>
         <div className="overflow-auto">
           {rows.length === 0 ? (
-            <div className="p-6 text-sm text-text-dim">No Twilio templates found.</div>
+            <div className="p-6 text-sm text-text-dim">No provider templates found.</div>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-xs text-text-dim sticky top-0 bg-surface">
@@ -2883,13 +2889,13 @@ function TwilioTemplateImportModal({
                 {rows.map((row) => {
                   const vars = Object.keys(row.variables || {}).sort();
                   return (
-                    <tr key={row.sid} className="border-b border-border">
+                    <tr key={row.provider_template_id} className="border-b border-border">
                       <td className="px-4 py-2">
-                        <input type="checkbox" checked={selectedSids.includes(row.sid)} onChange={() => onToggle(row.sid)} disabled={busy} aria-label={`Select ${row.name}`} />
+                        <input type="checkbox" checked={selectedProviderTemplateIDs.includes(row.provider_template_id)} onChange={() => onToggle(row.provider_template_id)} disabled={busy} aria-label={`Select ${row.name}`} />
                       </td>
                       <td className="px-4 py-2 min-w-56">
-                        <div className="font-medium">{row.name || row.sid}</div>
-                        <div className="text-[11px] text-text-dim font-mono">{row.sid}</div>
+                        <div className="font-medium">{row.name || row.provider_template_id}</div>
+                        <div className="text-[11px] text-text-dim font-mono">{row.provider_template_id}</div>
                         {(row.language || row.category) && (
                           <div className="text-[11px] text-text-dim">{[row.language, row.category].filter(Boolean).join(" · ")}</div>
                         )}

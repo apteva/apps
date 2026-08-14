@@ -290,7 +290,11 @@ func TestSuppression_DomainBlocksOutboundAndRequiresForceForCommonDomains(t *tes
 // Unused PlatformClient methods — return zero values; tests that hit
 // them would panic, which is the intended signal.
 func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
-	return &sdk.PlatformConnection{ID: id, AppSlug: "aws-ses", Status: "active"}, nil
+	slug := "aws-ses"
+	if id == 2 {
+		slug = "twilio"
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
 }
 func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
 	if s.connectionCreds == nil {
@@ -3122,11 +3126,10 @@ func newPhoneStub(reply *sdk.ExecuteResult) *stubPlatform {
 			"email_provider": float64(1),
 			"phone_provider": float64(2),
 		},
+		replyByTool: map[string]*sdk.ExecuteResult{},
 	}
 	if reply != nil {
-		p.replyByTool = map[string]*sdk.ExecuteResult{
-			"list_content_templates": reply,
-		}
+		p.replyByTool["list_content_templates"] = reply
 	}
 	return p
 }
@@ -3189,86 +3192,58 @@ func TestSendMessageWhatsAppFreeformAllowedAfterInbound(t *testing.T) {
 	}
 }
 
-func TestTemplatesSyncProvider_UpsertsTwilioContent(t *testing.T) {
+func TestTemplateListDoesNotImportProviderCatalog(t *testing.T) {
+	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"contents": [{"sid":"HXshared","friendly_name":"shared","approval_requests":{"status":"approved"}}]
+	}`)}
+	plat := newPhoneStub(twilioReply)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	listed, err := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	templates := listed.(map[string]any)["templates"].([]*Template)
+	if len(templates) != 0 {
+		t.Fatalf("template_list imported provider catalog rows: %+v", templates)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("template_list called provider: %+v", plat.executeCalls)
+	}
+}
+
+func TestTemplatesRefreshProviderOnlyUpdatesImportedRows(t *testing.T) {
 	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
 		"contents": [
-			{
-				"sid": "HX0000000000000000000000000000aa",
-				"friendly_name": "order_confirmation",
-				"language": "en",
-				"variables": {"1":"name","2":"order_id"},
-				"types": {"twilio/text": {"body": "Hi {{1}}, order #{{2}}"}},
-				"approval_requests": [{"status": "approved"}]
-			},
-			{
-				"sid": "HX0000000000000000000000000000bb",
-				"friendly_name": "shipping_update",
-				"variables": {"1":"name"},
-				"types": {"twilio/text": {"body": "Hi {{1}}"}},
-				"approval_requests": [{"status": "pending"}]
-			}
+			{"sid":"HXassigned","friendly_name":"updated","types":{"twilio/text":{"body":"Updated"}},"approval_requests":{"status":"approved"}},
+			{"sid":"HXunassigned","friendly_name":"other","types":{"twilio/text":{"body":"Other"}},"approval_requests":{"status":"approved"}}
 		]
 	}`)}
 	plat := newPhoneStub(twilioReply)
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
+	if _, err := upsertProviderTemplate(ctx, "test-proj", providerTemplateInfo{
+		ProviderTemplateID: "HXassigned", Name: "old", BodyText: "Old", Status: "pending", Variables: map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	out, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.(map[string]any)["synced"] != 2 {
-		t.Errorf("synced count: %+v", out)
+	if out.(map[string]any)["refreshed"] != 1 {
+		t.Fatalf("unexpected refresh result: %+v", out)
 	}
-
-	// Templates appear in template_list.
-	listed, err := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tpls := listed.(map[string]any)["templates"].([]*Template)
-	if len(tpls) != 2 {
-		t.Fatalf("expected 2 templates, got %d", len(tpls))
-	}
-	byName := map[string]*Template{}
-	for _, tpl := range tpls {
-		byName[tpl.Name] = tpl
-	}
-	if byName["order_confirmation"].ProviderStatus != "approved" {
-		t.Errorf("status=%q", byName["order_confirmation"].ProviderStatus)
-	}
-	if byName["shipping_update"].ProviderStatus != "pending" {
-		t.Errorf("status=%q", byName["shipping_update"].ProviderStatus)
-	}
-	for _, tpl := range tpls {
-		if tpl.ProviderTemplateID == "" {
-			t.Errorf("missing ContentSid: %+v", tpl)
-		}
-		if tpl.VarStyle != "numbered" {
-			t.Errorf("var_style=%q", tpl.VarStyle)
-		}
-	}
-}
-
-func TestTemplatesSyncProvider_IdempotentOnRerun(t *testing.T) {
-	twilioReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
-		"contents": [{
-			"sid": "HX111", "friendly_name": "welcome",
-			"types": {"twilio/text": {"body": "Hi"}},
-			"approval_requests": [{"status": "approved"}]
-		}]
-	}`)}
-	plat := newPhoneStub(twilioReply)
-	ctx := newTestCtx(t, plat)
-	app := &App{}
-
-	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
-	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
 
 	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
 	tpls := listed.(map[string]any)["templates"].([]*Template)
 	if len(tpls) != 1 {
-		t.Errorf("expected 1 row after dedup, got %d", len(tpls))
+		t.Fatalf("refresh imported unassigned catalog rows: %+v", tpls)
+	}
+	if tpls[0].ProviderTemplateID != "HXassigned" || tpls[0].Name != "updated" || tpls[0].ProviderStatus != "approved" {
+		t.Fatalf("assigned row was not refreshed: %+v", tpls[0])
 	}
 }
 
@@ -3302,7 +3277,9 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 		t.Fatalf("preview status=%d body=%s", w.Code, w.Body.String())
 	}
 	var preview struct {
-		Templates []providerTemplateInfo `json:"templates"`
+		Provider      string                 `json:"provider"`
+		ProviderLabel string                 `json:"provider_label"`
+		Templates     []providerTemplateInfo `json:"templates"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &preview); err != nil {
 		t.Fatal(err)
@@ -3310,8 +3287,11 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 	if len(preview.Templates) != 2 || preview.Templates[0].LocalState != "new" || preview.Templates[0].Status != "approved" || preview.Templates[0].Category != "UTILITY" {
 		t.Fatalf("unexpected preview: %+v", preview)
 	}
+	if preview.Provider != "twilio" || preview.ProviderLabel != "Twilio" {
+		t.Fatalf("unexpected provider metadata: %+v", preview)
+	}
 
-	body := strings.NewReader(`{"channel":"whatsapp","sids":["HXaaa"],"update_existing":true}`)
+	body := strings.NewReader(`{"channel":"whatsapp","provider_template_ids":["HXaaa"],"update_existing":true}`)
 	r = httptest.NewRequest("POST", "/templates/import?project_id=test-proj", body)
 	w = httptest.NewRecorder()
 	app.handleTemplatesImport(w, r)
@@ -3332,6 +3312,13 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 	if len(tpls) != 1 || tpls[0].ProviderTemplateID != "HXaaa" || tpls[0].ProviderStatus != "approved" {
 		t.Fatalf("unexpected templates: %+v", tpls)
 	}
+	otherProject, err := dbTemplateList(globalCtx.AppDB(), "other-proj", "whatsapp", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(otherProject) != 0 {
+		t.Fatalf("provider import leaked into another project: %+v", otherProject)
+	}
 
 	r = httptest.NewRequest("GET", "/templates/provider-preview?project_id=test-proj&channel=whatsapp", nil)
 	w = httptest.NewRecorder()
@@ -3340,19 +3327,79 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 		t.Fatalf("preview after import status=%d body=%s", w.Code, w.Body.String())
 	}
 	preview = struct {
-		Templates []providerTemplateInfo `json:"templates"`
+		Provider      string                 `json:"provider"`
+		ProviderLabel string                 `json:"provider_label"`
+		Templates     []providerTemplateInfo `json:"templates"`
 	}{}
 	_ = json.Unmarshal(w.Body.Bytes(), &preview)
 	stateBySID := map[string]string{}
 	for _, tpl := range preview.Templates {
-		stateBySID[tpl.Sid] = tpl.LocalState
+		stateBySID[tpl.ProviderTemplateID] = tpl.LocalState
 	}
 	if stateBySID["HXaaa"] != "imported" || stateBySID["HXbbb"] != "new" {
 		t.Fatalf("unexpected local states: %+v", stateBySID)
 	}
 }
 
-func TestTemplateDelete_DeletesTwilioContentThenSoftDeletesLocal(t *testing.T) {
+func TestProviderTemplatePreviewFollowsPagination(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.executeOverride = func(tool string, priorCalls int) *sdk.ExecuteResult {
+		if tool != "list_content_templates" {
+			return nil
+		}
+		if priorCalls == 0 {
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+				"contents":[{"sid":"HXpage1","friendly_name":"page_one","approval_requests":{"status":"approved"}}],
+				"meta":{"next_page_url":"https://content.twilio.com/v1/ContentAndApprovals?PageSize=500&PageToken=next-token"}
+			}`)}
+		}
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+			"contents":[{"sid":"HXpage2","friendly_name":"page_two","approval_requests":{"status":"pending"}}],
+			"meta":{"next_page_url":null}
+		}`)}
+	}
+	ctx := newTestCtx(t, plat)
+
+	items, err := listProviderTemplates(ctx, "test-proj", "whatsapp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].ProviderTemplateID != "HXpage1" || items[1].ProviderTemplateID != "HXpage2" {
+		t.Fatalf("unexpected paginated catalog: %+v", items)
+	}
+	var calls []executeCall
+	for _, call := range plat.executeCalls {
+		if call.Tool == "list_content_templates" {
+			calls = append(calls, call)
+		}
+	}
+	if len(calls) != 2 || calls[1].Input["PageToken"] != "next-token" {
+		t.Fatalf("pagination token was not followed: %+v", calls)
+	}
+}
+
+func TestTemplatesRefreshMarksMissingImportedTemplateDeleted(t *testing.T) {
+	plat := newPhoneStub(&sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"contents":[],"meta":{}}`)})
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	if _, err := upsertProviderTemplate(ctx, "test-proj", providerTemplateInfo{
+		ProviderTemplateID: "HXgone", Name: "gone", Status: "approved", Variables: map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"}); err != nil {
+		t.Fatal(err)
+	}
+	template, err := dbTemplateGetByProviderID(ctx.AppDB(), "test-proj", "HXgone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if template == nil || template.ProviderStatus != "deleted" {
+		t.Fatalf("missing provider template was not marked deleted: %+v", template)
+	}
+}
+
+func TestTemplateDelete_ExplicitlyDeletesProviderThenSoftDeletesLocal(t *testing.T) {
 	plat := newPhoneStub(nil)
 	plat.replyByTool = map[string]*sdk.ExecuteResult{
 		"delete_content_template": {
@@ -3374,7 +3421,7 @@ func TestTemplateDelete_DeletesTwilioContentThenSoftDeletesLocal(t *testing.T) {
 	}
 	id, _ := res.LastInsertId()
 
-	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id})
+	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id, "delete_provider": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3403,7 +3450,7 @@ func TestTemplateDelete_DeletesTwilioContentThenSoftDeletesLocal(t *testing.T) {
 	}
 }
 
-func TestTemplateDelete_TwilioFailureKeepsLocalRow(t *testing.T) {
+func TestTemplateDelete_ProviderFailureKeepsLocalRow(t *testing.T) {
 	plat := newPhoneStub(nil)
 	plat.replyByTool = map[string]*sdk.ExecuteResult{
 		"delete_content_template": {
@@ -3425,7 +3472,7 @@ func TestTemplateDelete_TwilioFailureKeepsLocalRow(t *testing.T) {
 	}
 	id, _ := res.LastInsertId()
 
-	_, err = app.toolTemplateDelete(ctx, map[string]any{"id": id})
+	_, err = app.toolTemplateDelete(ctx, map[string]any{"id": id, "delete_provider": true})
 	if err == nil || !strings.Contains(err.Error(), "delete provider template") {
 		t.Fatalf("expected provider delete error, got %v", err)
 	}
@@ -3438,7 +3485,7 @@ func TestTemplateDelete_TwilioFailureKeepsLocalRow(t *testing.T) {
 	}
 }
 
-func TestTemplateDelete_LocalOnlySkipsTwilioContentDelete(t *testing.T) {
+func TestTemplateDelete_DefaultOnlyRemovesProjectAssignment(t *testing.T) {
 	plat := newPhoneStub(nil)
 	plat.replyByTool = map[string]*sdk.ExecuteResult{
 		"delete_content_template": {
@@ -3460,7 +3507,7 @@ func TestTemplateDelete_LocalOnlySkipsTwilioContentDelete(t *testing.T) {
 	}
 	id, _ := res.LastInsertId()
 
-	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id, "local_only": true})
+	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3693,16 +3740,7 @@ func TestTemplateCreate_SMSCanCreateProviderTemplateWithoutApproval(t *testing.T
 }
 
 func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
-	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
-		"contents": [{
-			"sid": "HXabc",
-			"friendly_name": "promo",
-			"variables": {"1":"name"},
-			"types": {"twilio/text": {"body": "Hi {{1}}"}},
-			"approval_requests": [{"status": "approved"}]
-		}]
-	}`)}
-	plat := newPhoneStub(twilioListReply)
+	plat := newPhoneStub(nil)
 	plat.replyByTool["send_whatsapp"] = &sdk.ExecuteResult{
 		Success: true, Status: 201,
 		Data: json.RawMessage(`{"sid":"SMxxxx"}`),
@@ -3710,8 +3748,9 @@ func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	// Sync first.
-	if _, err := app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"}); err != nil {
+	if _, err := upsertProviderTemplate(ctx, "test-proj", providerTemplateInfo{
+		ProviderTemplateID: "HXabc", Name: "promo", BodyText: "Hi {{1}}", Status: "approved", Variables: map[string]any{"1": "name"},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
@@ -3757,19 +3796,15 @@ func TestSendMessageTemplate_UsesContentSidWhenProviderTemplate(t *testing.T) {
 }
 
 func TestSendMessageTemplate_RejectsPendingApproval(t *testing.T) {
-	twilioListReply := &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
-		"contents": [{
-			"sid": "HXpending",
-			"friendly_name": "draft",
-			"types": {"twilio/text": {"body": "..."}},
-			"approval_requests": [{"status": "pending"}]
-		}]
-	}`)}
-	plat := newPhoneStub(twilioListReply)
+	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	_, _ = app.toolTemplatesSyncProvider(ctx, map[string]any{"channel": "whatsapp"})
+	if _, err := upsertProviderTemplate(ctx, "test-proj", providerTemplateInfo{
+		ProviderTemplateID: "HXpending", Name: "draft", BodyText: "...", Status: "pending", Variables: map[string]any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	listed, _ := app.toolTemplateList(ctx, map[string]any{"channel": "whatsapp"})
 	tplID := listed.(map[string]any)["templates"].([]*Template)[0].ID
 

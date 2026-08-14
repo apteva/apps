@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.41
+version: 0.13.42
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -115,11 +115,11 @@ provides:
     - { name: inbound_route_list,     description: "List configured inbound routes." }
     - { name: inbound_route_delete,   description: "Remove an inbound route. Args: id." }
     # templates
-    - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?, provider_create?, language?, category?, submit_for_approval?. Phone templates can create Twilio Content; WhatsApp submits for approval by default." }
+    - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?, provider_create?, language?, category?, submit_for_approval?. Phone templates can create an upstream provider template; WhatsApp submits for approval by default." }
     - { name: template_update,        description: "Update a template (partial). Args: id, fields…" }
     - { name: template_get,           description: "Fetch one template by id." }
     - { name: template_list,          description: "List templates. Args: channel?, limit?." }
-    - { name: template_delete,        description: "Delete a template. Args: id." }
+    - { name: template_delete,        description: "Remove a template from this project. Args: id, delete_provider? (default false)." }
     # suppression
     - { name: suppression_list,       description: "List suppressed exact addresses and domains. Args: channel?, limit?." }
     - { name: suppression_add,        description: "Suppress an exact address or email domain for outbound sends and inbound dispatch. Args: address, channel?, kind? (address|domain), reason?, source?, force?." }
