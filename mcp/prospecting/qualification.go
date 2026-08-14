@@ -418,8 +418,15 @@ func applyDeterministicQualification(profile *TargetProfile, candidate *Candidat
 		candidate.CompanyDomain = domain
 		candidate.Website = "https://" + domain
 	}
-	if normalizeQualifiedEmail(candidate.Email, candidate.CompanyDomain) == "" {
+	// A second qualification pass is a refresh of website-derived contacts,
+	// not a validation of stale extraction output. Rebuild both fields from
+	// the current first-party pages while preserving manually supplied values
+	// on the initial qualification pass.
+	if candidate.EnrichedAt != "" {
 		candidate.Email = ""
+		candidate.Phone = ""
+	} else {
+		candidate.Email = normalizeQualifiedEmail(candidate.Email, candidate.CompanyDomain)
 	}
 	if email := extractBestEmail(pages, candidate.CompanyDomain); candidate.Email == "" && email != "" {
 		candidate.Email = email
@@ -632,9 +639,8 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 			if containsAny(lower, []string{"fax"}) && !containsAny(lower, []string{"phone", "call", "tel"}) {
 				score -= 25
 			}
-			semantic := containsAny(lower, []string{"phone", "call", "tel", "contact", "appointment", "whatsapp", "schedule", "office"})
 			for _, raw := range phonePattern.FindAllString(line, -1) {
-				add(raw, score, semantic)
+				add(raw, score, hasNearbyPhoneContext(line, raw))
 			}
 		}
 	}
@@ -653,6 +659,23 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 func hasPhoneFormatting(raw string) bool {
 	raw = strings.TrimSpace(raw)
 	return strings.ContainsAny(raw, "()-. ")
+}
+
+func hasNearbyPhoneContext(line, raw string) bool {
+	lower := strings.ToLower(line)
+	index := strings.Index(line, raw)
+	if index < 0 {
+		return false
+	}
+	start := index - 48
+	if start < 0 {
+		start = 0
+	}
+	end := index + len(raw) + 48
+	if end > len(line) {
+		end = len(line)
+	}
+	return containsAny(lower[start:end], []string{"phone", "call", "tel", "contact", "appointment", "whatsapp", "schedule", "office"})
 }
 
 func deobfuscateEmailText(value string) string {

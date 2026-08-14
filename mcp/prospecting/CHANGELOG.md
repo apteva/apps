@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.6
+
+- Rebuild previously website-derived email and phone fields during requalification instead of preserving stale extraction output.
+- Normalize valid pre-existing email values on an initial qualification pass.
+- Require phone labels to be near unformatted digit sequences, preventing a distant `contact` word in minified page text from legitimizing tracking IDs.
+- Continue accepting semantically typed `tel:` and structured-data phones plus visibly formatted phone numbers.
+
 ## v0.2.5
 
 - Accept extracted email addresses only when they match the target's domain or a recognized public mailbox provider.

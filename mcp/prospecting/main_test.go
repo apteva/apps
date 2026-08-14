@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -235,6 +236,26 @@ func TestUSPhoneExtractionRequiresEvidenceForPlainDigits(t *testing.T) {
 	pages[0].Text = "Phone 4599888728"
 	if got := extractBestPhone(pages, []string{"United States"}); got != "4599888728" {
 		t.Fatalf("phone=%q, want labelled digits accepted", got)
+	}
+	pages[0].Text = "Contact us " + strings.Repeat("x", 100) + " 4599888728\n(954) 523-6525"
+	if got := extractBestPhone(pages, []string{"United States"}); got != "9545236525" {
+		t.Fatalf("phone=%q, want distant plain digits ignored", got)
+	}
+}
+
+func TestRequalificationRebuildsPreviouslyExtractedContacts(t *testing.T) {
+	profile := &TargetProfile{Locations: []string{"United States"}}
+	candidate := &Candidate{
+		CompanyName: "Practice", CompanyDomain: "practice.example", Website: "https://practice.example",
+		Email: "agency@vendor.example", Phone: "4599888728", EnrichedAt: "2026-01-01T00:00:00Z",
+	}
+	pages := []webExtractPage{{
+		URL: "https://practice.example/contact", FinalURL: "https://practice.example/contact",
+		Text: "Email info@practice.example\nPhone (512) 555-0199",
+	}}
+	applyDeterministicQualification(profile, candidate, pages)
+	if candidate.Email != "info@practice.example" || candidate.Phone != "5125550199" {
+		t.Fatalf("contacts=%q %q, want refreshed first-party values", candidate.Email, candidate.Phone)
 	}
 }
 
