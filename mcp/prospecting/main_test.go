@@ -156,6 +156,7 @@ func TestCleanCompanyTitleRemovesMarketingTaglines(t *testing.T) {
 		"Easy Online Patient Forms Great Expressions Dental https://example.com › patient-forms": "Great Expressions Dental",
 		"Indian Creek Dental (+2) - Patient Forms":                                               "Indian Creek Dental",
 		"Contact Our Dental Team in North Austin":                                                "Example",
+		"Website":       "Example",
 		"Patient Forms": "Example",
 	}
 	for input, want := range tests {

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.8
+
+- Treat `Website`, `Homepage`, and `Official Website` as generic search/page titles.
+- Replace those labels with first-party site identity metadata, a meaningful page title, or the domain brand during qualification.
+
 ## v0.2.7
 
 - Extract structured-data phones only from explicit `telephone`, `phone`, `phoneNumber`, or `contactPhone` fields.

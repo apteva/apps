@@ -28,7 +28,8 @@ var deterministicNoiseDomains = []string{
 
 var genericPageTitles = map[string]bool{
 	"about": true, "about us": true, "contact": true, "contact us": true,
-	"home": true, "new patient": true, "new patients": true,
+	"home": true, "homepage": true, "website": true, "official website": true,
+	"new patient": true, "new patients": true,
 	"new patient forms": true, "patient forms": true, "patient information": true,
 	"patient resources": true, "request appointment": true, "schedule appointment": true,
 	"meet the team": true, "our team": true, "team": true,
