@@ -2,17 +2,17 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.1.0
+version: 0.2.0
 description: |
-  Web-first prospect discovery and qualification for Apteva. Define target
-  profiles, run bounded company searches through Web, research and score
-  candidate companies and people, preserve source evidence, reject or defer
-  candidates, and hand accepted contacts to CRM idempotently.
+  Web-first prospect discovery and deterministic qualification for Apteva.
+  Define target profiles, run bounded company searches with provider fallback
+  and noise filtering, extract facts and automation signals from first-party
+  websites, preserve evidence, and hand accepted contacts to CRM idempotently.
 
   Prospecting owns only the pre-CRM workflow. Web remains the source of raw
   research artifacts and CRM remains the canonical owner of accepted contacts.
-  v0.1 deliberately does not send messages, run campaigns, create
-  opportunities, or call paid lead-data providers.
+  v0.2 uses no AI model and deliberately does not send messages, run campaigns,
+  create opportunities, or call paid lead-data providers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
@@ -29,6 +29,7 @@ requires:
     - platform.apps.call
   apps:
     - name: web
+      version: ">=0.1.5"
       optional: false
       reason: Performs browser-backed company discovery and research while retaining raw artifacts.
     - name: crm
@@ -45,13 +46,15 @@ provides:
     - { name: prospecting_profiles_get, description: "Get one target profile. Args: id." }
     - { name: prospecting_profiles_update, description: "Patch a target profile. Args: id and any editable profile fields." }
     - { name: prospecting_profiles_archive, description: "Archive a target profile. Args: id." }
-    - { name: prospecting_search_run, description: "Run a bounded Web search and persist new company candidates. Args: profile_id, query?, limit? (1-50)." }
+    - { name: prospecting_search_run, description: "Run a bounded Web search with provider fallback and deterministic noise filtering. Args: profile_id, query?, limit? (1-50), engine?, fallback_engine?." }
     - { name: prospecting_runs_list, description: "List discovery runs. Args: profile_id?, limit?." }
     - { name: prospecting_candidates_create, description: "Create a candidate manually. Args: profile_id, company_name, website?, person fields?, email?, phone?, summary?, source_url?." }
     - { name: prospecting_candidates_search, description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?." }
     - { name: prospecting_candidates_get, description: "Get one candidate with evidence and handoff state. Args: id." }
     - { name: prospecting_candidates_update, description: "Patch a candidate's company or person details and recalculate its explainable scores. Args: id and editable fields." }
     - { name: prospecting_candidates_research, description: "Research one candidate through Web and persist cited evidence. Args: id, question?." }
+    - { name: prospecting_candidates_qualify, description: "Deterministically qualify one candidate from first-party pages without AI. Args: id, max_pages? (1-5)." }
+    - { name: prospecting_candidates_qualify_batch, description: "Deterministically qualify a bounded candidate batch without AI. Args: profile_id?, status?, limit? (1-25), max_pages? (1-5)." }
     - { name: prospecting_candidates_defer, description: "Defer a candidate without rejecting it. Args: id, reason?." }
     - { name: prospecting_candidates_reject, description: "Reject a candidate. Args: id, reason?, exclude_company? (default false)." }
     - { name: prospecting_candidates_accept, description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
@@ -77,6 +80,7 @@ provides:
     - { name: prospecting.search.completed, description: "A bounded Web discovery run completed." }
     - { name: prospecting.candidate.created, description: "A candidate was discovered or created manually." }
     - { name: prospecting.candidate.researched, description: "A candidate received new Web research evidence." }
+    - { name: prospecting.candidate.qualified, description: "A candidate was deterministically qualified from first-party Web evidence." }
     - { name: prospecting.candidate.accepted, description: "A candidate was handed to CRM." }
     - { name: prospecting.candidate.rejected, description: "A candidate was rejected." }
 

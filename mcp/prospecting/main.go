@@ -50,6 +50,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/profiles", Handler: a.handleProfiles},
 		{Pattern: "/profiles/", Handler: a.handleProfileItem},
 		{Pattern: "/discover", Handler: a.handleDiscover},
+		{Pattern: "/qualify", Handler: a.handleQualifyBatch},
 		{Pattern: "/runs", Handler: a.handleRuns},
 		{Pattern: "/candidates", Handler: a.handleCandidates},
 		{Pattern: "/candidates/", Handler: a.handleCandidateItem},
@@ -89,13 +90,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "prospecting_profiles_get", Description: "Get one target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesGet},
 		{Name: "prospecting_profiles_update", Description: "Patch a target profile. Args: id and any editable profile fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, profileFields), []string{"id"}), Handler: a.toolProfilesUpdate},
 		{Name: "prospecting_profiles_archive", Description: "Archive a target profile. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolProfilesArchive},
-		{Name: "prospecting_search_run", Description: "Run a bounded Web search and persist new company candidates. Args: profile_id, query?, limit? (default 20, max 50). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "query": sString(), "limit": sInteger()}, []string{"profile_id"}), Handler: a.toolSearchRun},
+		{Name: "prospecting_search_run", Description: "Run a bounded Web search, fall back to another engine when blocked, filter deterministic noise, and persist new company candidates. Args: profile_id, query?, limit? (default 20, max 50), engine? (default google), fallback_engine? (default duckduckgo). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "query": sString(), "limit": sInteger(), "engine": sString(), "fallback_engine": sString()}, []string{"profile_id"}), Handler: a.toolSearchRun},
 		{Name: "prospecting_runs_list", Description: "List discovery runs. Args: profile_id?, limit?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "limit": sInteger()}, nil), Handler: a.toolRunsList},
 		{Name: "prospecting_candidates_create", Description: "Create a candidate manually. Args: profile_id, company_name, website?, person fields?, email?, phone?, summary?, source_url?.", InputSchema: schemaObject(mergeSchemas(map[string]any{"profile_id": sInteger()}, candidateFields), []string{"profile_id", "company_name"}), Handler: a.toolCandidatesCreate},
 		{Name: "prospecting_candidates_search", Description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "q": sString(), "limit": sInteger(), "offset": sInteger()}, nil), Handler: a.toolCandidatesSearch},
 		{Name: "prospecting_candidates_get", Description: "Get one candidate with evidence and CRM handoff state. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCandidatesGet},
 		{Name: "prospecting_candidates_update", Description: "Patch a candidate's company or person details and recalculate explainable scores. Args: id and editable fields.", InputSchema: schemaObject(mergeSchemas(map[string]any{"id": sInteger()}, candidateFields), []string{"id"}), Handler: a.toolCandidatesUpdate},
 		{Name: "prospecting_candidates_research", Description: "Research one candidate through Web and persist cited evidence. Args: id, question?. Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "question": sString()}, []string{"id"}), Handler: a.toolCandidatesResearch},
+		{Name: "prospecting_candidates_qualify", Description: "Deterministically qualify one candidate from up to five first-party website pages, extracting contact details, operating signals, location, and evidence-backed scores without AI. Args: id, max_pages? (default 3). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "max_pages": sInteger()}, []string{"id"}), Handler: a.toolCandidatesQualify},
+		{Name: "prospecting_candidates_qualify_batch", Description: "Deterministically qualify a bounded candidate batch without AI. Args: profile_id?, status? (default ready), limit? (default 10, max 25), max_pages? (default 3, max 5). Does not contact anyone.", InputSchema: schemaObject(map[string]any{"profile_id": sInteger(), "status": sString(), "limit": sInteger(), "max_pages": sInteger()}, nil), Handler: a.toolCandidatesQualifyBatch},
 		{Name: "prospecting_candidates_defer", Description: "Defer a candidate. Args: id, reason?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString()}, []string{"id"}), Handler: a.toolCandidatesDefer},
 		{Name: "prospecting_candidates_reject", Description: "Reject a candidate. Args: id, reason?, exclude_company? (default false). Rejected or excluded candidates are not contacted.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "reason": sString(), "exclude_company": sBoolean()}, []string{"id"}), Handler: a.toolCandidatesReject},
 		{Name: "prospecting_candidates_accept", Description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids? (CRM list ids or slugs). This does not send a message or create an opportunity.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "list_ids": map[string]any{"type": "array"}}, []string{"id"}), Handler: a.toolCandidatesAccept},
@@ -144,7 +147,7 @@ func (a *App) toolProfilesArchive(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolSearchRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return runDiscovery(ctx, int64Arg(args, "profile_id"), stringArg(args, "query"), intArg(args, "limit", 20))
+	return runDiscoveryWithOptions(ctx, int64Arg(args, "profile_id"), stringArg(args, "query"), intArg(args, "limit", 20), stringArg(args, "engine"), stringArg(args, "fallback_engine"))
 }
 
 func (a *App) toolRunsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -208,6 +211,14 @@ func (a *App) toolCandidatesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 
 func (a *App) toolCandidatesResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return researchCandidate(ctx, int64Arg(args, "id"), stringArg(args, "question"))
+}
+
+func (a *App) toolCandidatesQualify(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return qualifyCandidate(ctx, int64Arg(args, "id"), intArg(args, "max_pages", 3))
+}
+
+func (a *App) toolCandidatesQualifyBatch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return qualifyBatch(ctx, int64Arg(args, "profile_id"), stringArg(args, "status"), intArg(args, "limit", 10), intArg(args, "max_pages", 3))
 }
 
 func (a *App) toolCandidatesDefer(ctx *sdk.AppCtx, args map[string]any) (any, error) {

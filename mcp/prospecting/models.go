@@ -47,35 +47,50 @@ type SearchRun struct {
 }
 
 type Candidate struct {
-	ID                int64           `json:"id"`
-	ProjectID         string          `json:"project_id,omitempty"`
-	ProfileID         int64           `json:"profile_id"`
-	RunID             *int64          `json:"run_id,omitempty"`
-	CanonicalKey      string          `json:"canonical_key"`
-	CompanyName       string          `json:"company_name"`
-	CompanyDomain     string          `json:"company_domain"`
-	Website           string          `json:"website"`
-	PersonFirstName   string          `json:"person_first_name"`
-	PersonLastName    string          `json:"person_last_name"`
-	PersonDisplayName string          `json:"person_display_name"`
-	JobTitle          string          `json:"job_title"`
-	Email             string          `json:"email"`
-	Phone             string          `json:"phone"`
-	Summary           string          `json:"summary"`
-	FitScore          int             `json:"fit_score"`
-	ConfidenceScore   int             `json:"confidence_score"`
-	ScoreReasons      json.RawMessage `json:"score_reasons"`
-	Status            string          `json:"status"`
-	Source            string          `json:"source"`
-	SourceURL         string          `json:"source_url"`
-	DecisionReason    string          `json:"decision_reason,omitempty"`
-	CRMContactID      *int64          `json:"crm_contact_id,omitempty"`
-	ResearchedAt      string          `json:"researched_at,omitempty"`
-	AcceptedAt        string          `json:"accepted_at,omitempty"`
-	RejectedAt        string          `json:"rejected_at,omitempty"`
-	DeferredAt        string          `json:"deferred_at,omitempty"`
-	CreatedAt         string          `json:"created_at"`
-	UpdatedAt         string          `json:"updated_at"`
+	ID                 int64              `json:"id"`
+	ProjectID          string             `json:"project_id,omitempty"`
+	ProfileID          int64              `json:"profile_id"`
+	RunID              *int64             `json:"run_id,omitempty"`
+	CanonicalKey       string             `json:"canonical_key"`
+	CompanyName        string             `json:"company_name"`
+	CompanyDomain      string             `json:"company_domain"`
+	Website            string             `json:"website"`
+	PersonFirstName    string             `json:"person_first_name"`
+	PersonLastName     string             `json:"person_last_name"`
+	PersonDisplayName  string             `json:"person_display_name"`
+	JobTitle           string             `json:"job_title"`
+	Email              string             `json:"email"`
+	Phone              string             `json:"phone"`
+	Summary            string             `json:"summary"`
+	Location           string             `json:"location"`
+	EmployeeEstimate   *int               `json:"employee_estimate,omitempty"`
+	LocationCount      int                `json:"location_count"`
+	Eligibility        string             `json:"eligibility"`
+	EligibilityReasons []string           `json:"eligibility_reasons"`
+	AutomationSignals  []AutomationSignal `json:"automation_signals"`
+	FitScore           int                `json:"fit_score"`
+	ConfidenceScore    int                `json:"confidence_score"`
+	ScoreReasons       json.RawMessage    `json:"score_reasons"`
+	Status             string             `json:"status"`
+	Source             string             `json:"source"`
+	SourceURL          string             `json:"source_url"`
+	DecisionReason     string             `json:"decision_reason,omitempty"`
+	CRMContactID       *int64             `json:"crm_contact_id,omitempty"`
+	ResearchedAt       string             `json:"researched_at,omitempty"`
+	AcceptedAt         string             `json:"accepted_at,omitempty"`
+	RejectedAt         string             `json:"rejected_at,omitempty"`
+	DeferredAt         string             `json:"deferred_at,omitempty"`
+	EnrichedAt         string             `json:"enriched_at,omitempty"`
+	CreatedAt          string             `json:"created_at"`
+	UpdatedAt          string             `json:"updated_at"`
+}
+
+type AutomationSignal struct {
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	Weight   int    `json:"weight"`
+	Evidence string `json:"evidence"`
+	URL      string `json:"url,omitempty"`
 }
 
 type Evidence struct {
@@ -152,6 +167,40 @@ type webSearchOutput struct {
 	Count   int               `json:"count"`
 	Blocked bool              `json:"blocked"`
 	Error   string            `json:"error"`
+	Engine  string            `json:"engine"`
+	Page    struct {
+		Text string `json:"text"`
+	} `json:"page"`
+}
+
+type webLink struct {
+	URL  string `json:"url"`
+	Text string `json:"text"`
+}
+
+type webExtractPage struct {
+	URL            string           `json:"url"`
+	FinalURL       string           `json:"final_url"`
+	Title          string           `json:"title"`
+	Description    string           `json:"description"`
+	Text           string           `json:"text"`
+	Links          []webLink        `json:"links"`
+	Metadata       map[string]any   `json:"metadata"`
+	StructuredData any              `json:"structured_data"`
+	Status         int              `json:"status"`
+	Artifact       *webPageArtifact `json:"artifact"`
+	Error          string           `json:"error"`
+}
+
+type webExtractOutput struct {
+	Page webExtractPage `json:"page"`
+}
+
+type qualificationResult struct {
+	Candidate *Candidate       `json:"candidate,omitempty"`
+	Pages     []webExtractPage `json:"pages,omitempty"`
+	Rejected  bool             `json:"rejected"`
+	Error     string           `json:"error,omitempty"`
 }
 
 type webCitation struct {

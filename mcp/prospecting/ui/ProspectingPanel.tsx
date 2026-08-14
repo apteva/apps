@@ -35,16 +35,23 @@ interface Candidate {
   job_title: string;
   email: string;
   phone: string;
+  location: string;
+  employee_estimate?: number;
+  location_count: number;
   summary: string;
   fit_score: number;
   confidence_score: number;
   score_reasons: string[];
+  eligibility: string;
+  eligibility_reasons: string[];
+  automation_signals: Array<{ key: string; label: string; evidence: string; url: string; weight: number }>;
   status: string;
   source: string;
   source_url: string;
   decision_reason?: string;
   crm_contact_id?: number;
   researched_at?: string;
+  enriched_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -84,6 +91,8 @@ interface Overview {
   active_profiles: number;
   search_runs: number;
   candidates: Record<string, number>;
+  qualifications: Record<string, number>;
+  enriched: number;
   evidence: number;
   exclusions: number;
 }
@@ -363,7 +372,7 @@ function DiscoverView({ profiles, runs, busy, api, onDone, onError, setBusy }: {
     onError("");
     try {
       const data = await api("/discover", { method: "POST", body: JSON.stringify({ profile_id: profileId, query: customQuery.trim(), limit }) });
-      await onDone(`${data.created || 0} new candidates; ${data.duplicates || 0} duplicates and ${data.excluded || 0} exclusions skipped.`);
+      await onDone(`${data.created || 0} new candidates via ${data.engine || "Web"}; ${data.duplicates || 0} duplicates and ${data.excluded || 0} noisy or excluded results skipped${data.fallback_used ? " (fallback search used)" : ""}.`);
     } catch (error) {
       onError((error as Error).message);
     } finally {
@@ -375,7 +384,7 @@ function DiscoverView({ profiles, runs, busy, api, onDone, onError, setBusy }: {
       <section className="border border-border rounded-lg p-5 space-y-5">
         <div>
           <h2 className="font-medium">Discover companies</h2>
-          <p className="mt-1 text-sm text-text-muted">Run a bounded browser-backed search. Results become reviewable candidates; no messages are sent.</p>
+          <p className="mt-1 text-sm text-text-muted">Run a bounded browser-backed search with automatic provider fallback and deterministic noise filtering. No messages are sent.</p>
         </div>
         {profiles.length === 0 ? <Empty text="Create an active target profile in Settings first." /> : (
           <>
@@ -443,8 +452,12 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
   api: (path: string, init?: RequestInit) => Promise<any>;
   runAction: (action: () => Promise<unknown>, success: string) => Promise<void>;
 }) {
-  const [creating, setCreating] = useState(false);
-  return (
+	const [creating, setCreating] = useState(false);
+	const qualifyReady = () => runAction(() => api("/qualify", {
+		method: "POST",
+		body: JSON.stringify({ profile_id: profileFilter || undefined, status: statusFilter === "all" ? "ready" : statusFilter, limit: 10, max_pages: 3 }),
+	}), "Candidate batch qualified from first-party websites without AI.");
+	return (
     <div className="h-full min-h-0 flex flex-col">
       <div className="shrink-0 px-4 py-3 border-b border-border flex flex-wrap gap-2">
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search candidates" className={`${controlClass} max-w-xs`} />
@@ -456,7 +469,8 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
           <option value={0}>All profiles</option>
           {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
         </select>
-        <button type="button" onClick={() => setCreating(true)} className="ml-auto px-3 py-1.5 text-xs bg-accent text-bg rounded">Add manually</button>
+		<button type="button" onClick={qualifyReady} disabled={busy || candidates.length === 0} title="Extract facts and workflow signals from up to three first-party pages per candidate" className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50">Qualify batch</button>
+		<button type="button" onClick={() => setCreating(true)} className="px-3 py-1.5 text-xs bg-accent text-bg rounded">Add manually</button>
       </div>
       <div className="flex-1 min-h-0 grid lg:grid-cols-[390px_minmax(0,1fr)]">
         <aside className="min-h-0 overflow-auto border-r border-border">
@@ -470,7 +484,7 @@ function CandidatesView({ profiles, candidates, selected, evidence, handoff, sel
                       <Status value={candidate.status} />
                     </div>
                     <div className="mt-1 text-xs text-text-muted truncate">{candidate.person_display_name ? `${candidate.person_display_name}${candidate.job_title ? ` · ${candidate.job_title}` : ""}` : candidate.company_domain}</div>
-                    <div className="mt-2 flex gap-2"><Score value={candidate.fit_score} label="fit" /><Score value={candidate.confidence_score} label="confidence" /></div>
+					<div className="mt-2 flex gap-2"><Score value={candidate.fit_score} label="fit" /><Score value={candidate.confidence_score} label="confidence" />{candidate.eligibility && <Status value={candidate.eligibility} />}</div>
                   </button>
                 </li>
               ))}
@@ -505,7 +519,8 @@ function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, run
     setDraft(Object.fromEntries(Object.keys(emptyCandidate).map((key) => [key, String((candidate as any)[key] || "")])) as typeof emptyCandidate);
   }, [candidate]);
   const save = () => runAction(() => api(`/candidates/${candidate.id}`, { method: "PATCH", body: JSON.stringify(draft) }), "Candidate saved and rescored.");
-  const research = () => runAction(() => api(`/candidates/${candidate.id}/research`, { method: "POST", body: "{}" }), "Web research completed.");
+	const research = () => runAction(() => api(`/candidates/${candidate.id}/research`, { method: "POST", body: "{}" }), "Web research completed.");
+	const qualify = () => runAction(() => api(`/candidates/${candidate.id}/qualify`, { method: "POST", body: JSON.stringify({ max_pages: 3 }) }), "Candidate deterministically qualified from first-party pages.");
   const defer = () => runAction(() => api(`/candidates/${candidate.id}/defer`, { method: "POST", body: JSON.stringify({ reason: "Review later" }) }), "Candidate deferred.");
   const reject = () => {
     const reason = window.prompt("Reason for rejection", candidate.decision_reason || "Not a fit");
@@ -521,8 +536,9 @@ function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, run
           <div className="flex gap-2 items-center"><h2 className="text-lg font-semibold">{candidate.company_name}</h2><Status value={candidate.status} /></div>
           <div className="mt-1 text-xs text-text-muted">{profile?.name || `Profile ${candidate.profile_id}`} · {candidate.source} · updated {dateLabel(candidate.updated_at)}</div>
         </div>
-        <div className="ml-auto flex flex-wrap gap-2">
-          <button type="button" onClick={research} disabled={busy || candidate.status === "accepted" || candidate.status === "rejected"} className={secondaryButton}>Research</button>
+		<div className="ml-auto flex flex-wrap gap-2">
+		  <button type="button" onClick={qualify} disabled={busy || candidate.status === "accepted" || candidate.status === "rejected"} className={secondaryButton}>Qualify</button>
+		  <button type="button" onClick={research} disabled={busy || candidate.status === "accepted" || candidate.status === "rejected"} className={secondaryButton}>Research</button>
           <button type="button" onClick={defer} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Defer</button>
           <button type="button" onClick={reject} disabled={busy || candidate.status === "accepted"} className={secondaryButton}>Reject</button>
           <button type="button" onClick={accept} disabled={busy || candidate.status === "accepted" || (!candidate.email && !candidate.phone)} title={!candidate.email && !candidate.phone ? "Add an email or phone first" : "Writes to CRM; does not send a message"} className="px-3 py-1.5 text-xs bg-accent text-bg rounded font-medium disabled:opacity-40">Accept into CRM</button>
@@ -550,12 +566,17 @@ function CandidateDetail({ candidate, profile, evidence, handoff, busy, api, run
           <button type="button" onClick={save} disabled={busy} className="px-3 py-1.5 text-xs bg-accent text-bg rounded disabled:opacity-50">Save details</button>
         </section>
       </div>
-      <section className="border border-border rounded-lg p-4">
-        <div className="flex items-center gap-3"><h3 className="text-sm font-medium">Qualification</h3><Score value={candidate.fit_score} label="fit" /><Score value={candidate.confidence_score} label="confidence" /></div>
-        <ul className="mt-3 grid md:grid-cols-2 gap-2 text-xs text-text-muted">
-          {(candidate.score_reasons || []).map((reason, index) => <li key={`${reason}-${index}`} className="rounded bg-bg-input px-3 py-2">{reason}</li>)}
-        </ul>
-      </section>
+	  <section className="border border-border rounded-lg p-4">
+		<div className="flex flex-wrap items-center gap-3"><h3 className="text-sm font-medium">Deterministic qualification</h3><Score value={candidate.fit_score} label="fit" /><Score value={candidate.confidence_score} label="confidence" />{candidate.eligibility && <Status value={candidate.eligibility} />}</div>
+		{(candidate.location || candidate.employee_estimate || candidate.location_count > 0) && <div className="mt-3 text-xs text-text-muted">{candidate.location || "Location not found"}{candidate.employee_estimate ? ` · about ${candidate.employee_estimate} employees` : ""}{candidate.location_count > 0 ? ` · ${candidate.location_count} location${candidate.location_count === 1 ? "" : "s"}` : ""}</div>}
+		<ul className="mt-3 grid md:grid-cols-2 gap-2 text-xs text-text-muted">
+		  {(candidate.score_reasons || []).map((reason, index) => <li key={`${reason}-${index}`} className="rounded bg-bg-input px-3 py-2">{reason}</li>)}
+		</ul>
+		{(candidate.eligibility_reasons || []).length > 0 && <div className="mt-3 text-xs text-text-muted">Eligibility: {candidate.eligibility_reasons.join(" · ")}</div>}
+		{(candidate.automation_signals || []).length > 0 && <div className="mt-4 grid md:grid-cols-2 gap-2">
+		  {candidate.automation_signals.map((signal) => <div key={signal.key} className="rounded border border-border px-3 py-2"><div className="text-xs font-medium">{signal.label} <span className="text-text-dim">+{signal.weight}</span></div><div className="mt-1 text-[11px] text-text-muted">{signal.evidence}</div></div>)}
+		</div>}
+	  </section>
       <section className="border border-border rounded-lg overflow-hidden">
         <div className="px-4 py-3 border-b border-border"><h3 className="text-sm font-medium">Evidence</h3></div>
         {evidence.length === 0 ? <Empty text="No evidence saved. Run Research to collect cited sources." /> : (
@@ -638,10 +659,11 @@ function SettingsView({ profiles, exclusions, busy, api, runAction }: {
       </section>
       <div className="space-y-5">
         <section className="border border-border rounded-lg p-4">
-          <h2 className="text-sm font-medium">V1 boundaries</h2>
-          <ul className="mt-3 space-y-2 text-xs text-text-muted">
-            <li>Web performs discovery and owns raw research artifacts.</li>
-            <li>Prospecting owns candidates, evidence references, decisions, and scores.</li>
+		  <h2 className="text-sm font-medium">Deterministic v0.2</h2>
+		  <ul className="mt-3 space-y-2 text-xs text-text-muted">
+			<li>Web performs discovery and first-party page extraction; Google can fall back to DuckDuckGo when blocked.</li>
+			<li>Noise filtering, field extraction, workflow signals, eligibility, and scoring use fixed rules—not an AI model.</li>
+			<li>Prospecting owns candidates, evidence references, decisions, and scores.</li>
             <li>CRM owns accepted contacts and duplicate detection.</li>
             <li>Accepting a candidate never sends a message or creates an opportunity.</li>
           </ul>
@@ -696,7 +718,7 @@ function Score({ value, label }: { value: number; label: string }) {
 }
 
 function Status({ value }: { value: string }) {
-  const tones: Record<string, string> = { ready: "bg-accent/10 text-accent", accepted: "bg-green/10 text-green", rejected: "bg-red/10 text-red", failed: "bg-red/10 text-red", researching: "bg-amber/10 text-amber", running: "bg-amber/10 text-amber", deferred: "bg-border text-text-muted", completed: "bg-green/10 text-green" };
+	const tones: Record<string, string> = { ready: "bg-accent/10 text-accent", eligible: "bg-green/10 text-green", review: "bg-amber/10 text-amber", ineligible: "bg-red/10 text-red", accepted: "bg-green/10 text-green", rejected: "bg-red/10 text-red", failed: "bg-red/10 text-red", researching: "bg-amber/10 text-amber", running: "bg-amber/10 text-amber", deferred: "bg-border text-text-muted", completed: "bg-green/10 text-green" };
   return <span className={`ml-auto text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap ${tones[value] || "bg-border text-text-muted"}`}>{value}</span>;
 }
 

@@ -291,8 +291,10 @@ func getCandidateByKey(db *sql.DB, pid string, profileID int64, key string) (*Ca
 }
 
 const candidateSelect = `SELECT id,project_id,profile_id,run_id,canonical_key,company_name,company_domain,website,
-    person_first_name,person_last_name,person_display_name,job_title,email,phone,summary,fit_score,confidence_score,score_reasons_json,
-    status,source,source_url,decision_reason,crm_contact_id,COALESCE(researched_at,''),COALESCE(accepted_at,''),COALESCE(rejected_at,''),COALESCE(deferred_at,''),created_at,updated_at FROM candidates`
+    person_first_name,person_last_name,person_display_name,job_title,email,phone,summary,
+    location,employee_estimate,location_count,eligibility,eligibility_reasons_json,automation_signals_json,
+    fit_score,confidence_score,score_reasons_json,status,source,source_url,decision_reason,crm_contact_id,
+    COALESCE(researched_at,''),COALESCE(accepted_at,''),COALESCE(rejected_at,''),COALESCE(deferred_at,''),COALESCE(enriched_at,''),created_at,updated_at FROM candidates`
 
 func getCandidate(db *sql.DB, pid string, id int64) (*Candidate, error) {
 	c, err := scanCandidateRow(db.QueryRow(candidateSelect+` WHERE project_id=? AND id=?`, pid, id))
@@ -304,11 +306,13 @@ func getCandidate(db *sql.DB, pid string, id int64) (*Candidate, error) {
 
 func scanCandidateRow(row scanner) (*Candidate, error) {
 	var c Candidate
-	var runID, crmID sql.NullInt64
-	var reasons string
+	var runID, crmID, employeeEstimate sql.NullInt64
+	var reasons, eligibilityReasons, automationSignals string
 	err := row.Scan(&c.ID, &c.ProjectID, &c.ProfileID, &runID, &c.CanonicalKey, &c.CompanyName, &c.CompanyDomain, &c.Website,
-		&c.PersonFirstName, &c.PersonLastName, &c.PersonDisplayName, &c.JobTitle, &c.Email, &c.Phone, &c.Summary, &c.FitScore, &c.ConfidenceScore, &reasons,
-		&c.Status, &c.Source, &c.SourceURL, &c.DecisionReason, &crmID, &c.ResearchedAt, &c.AcceptedAt, &c.RejectedAt, &c.DeferredAt, &c.CreatedAt, &c.UpdatedAt)
+		&c.PersonFirstName, &c.PersonLastName, &c.PersonDisplayName, &c.JobTitle, &c.Email, &c.Phone, &c.Summary,
+		&c.Location, &employeeEstimate, &c.LocationCount, &c.Eligibility, &eligibilityReasons, &automationSignals,
+		&c.FitScore, &c.ConfidenceScore, &reasons, &c.Status, &c.Source, &c.SourceURL, &c.DecisionReason, &crmID,
+		&c.ResearchedAt, &c.AcceptedAt, &c.RejectedAt, &c.DeferredAt, &c.EnrichedAt, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -320,10 +324,20 @@ func scanCandidateRow(row scanner) (*Candidate, error) {
 		v := crmID.Int64
 		c.CRMContactID = &v
 	}
+	if employeeEstimate.Valid {
+		v := int(employeeEstimate.Int64)
+		c.EmployeeEstimate = &v
+	}
 	if !json.Valid([]byte(reasons)) {
 		reasons = "[]"
 	}
 	c.ScoreReasons = json.RawMessage(reasons)
+	if err := json.Unmarshal([]byte(eligibilityReasons), &c.EligibilityReasons); err != nil || c.EligibilityReasons == nil {
+		c.EligibilityReasons = []string{}
+	}
+	if err := json.Unmarshal([]byte(automationSignals), &c.AutomationSignals); err != nil || c.AutomationSignals == nil {
+		c.AutomationSignals = []AutomationSignal{}
+	}
 	return &c, nil
 }
 
@@ -425,6 +439,50 @@ func updateCandidate(db *sql.DB, pid string, id int64, args map[string]any) (*Ca
 		return nil, err
 	}
 	return getCandidate(db, pid, id)
+}
+
+func saveCandidateQualification(db *sql.DB, pid string, candidate *Candidate) (*Candidate, error) {
+	if candidate == nil {
+		return nil, errors.New("candidate required")
+	}
+	profile, err := getProfile(db, pid, candidate.ProfileID)
+	if err != nil || profile == nil {
+		return nil, fmt.Errorf("load target profile: %w", err)
+	}
+	evidenceCount, _ := countEvidence(db, pid, candidate.ID)
+	fit, confidence, reasons := scoreCandidate(profile, candidate, evidenceCount)
+	now := nowUTC()
+	status := candidate.Status
+	decisionReason := candidate.DecisionReason
+	rejectedAt := candidate.RejectedAt
+	if candidate.Eligibility == "ineligible" && status != "accepted" {
+		status = "rejected"
+		decisionReason = "Deterministic qualification: " + strings.Join(candidate.EligibilityReasons, "; ")
+		rejectedAt = now
+	} else if status == "discovered" || status == "researching" {
+		status = "ready"
+	}
+	_, err = db.Exec(`UPDATE candidates SET
+        company_name=?,company_domain=?,website=?,person_first_name=?,person_last_name=?,person_display_name=?,job_title=?,email=?,phone=?,summary=?,
+        location=?,employee_estimate=?,location_count=?,eligibility=?,eligibility_reasons_json=?,automation_signals_json=?,
+        fit_score=?,confidence_score=?,score_reasons_json=?,status=?,decision_reason=?,rejected_at=?,enriched_at=?,updated_at=?
+        WHERE project_id=? AND id=?`,
+		candidate.CompanyName, candidate.CompanyDomain, candidate.Website, candidate.PersonFirstName, candidate.PersonLastName,
+		candidate.PersonDisplayName, candidate.JobTitle, normalizeEmail(candidate.Email), normalizePhone(candidate.Phone), truncate(candidate.Summary, 5000),
+		candidate.Location, nullableInt(candidate.EmployeeEstimate), candidate.LocationCount, defaultString(candidate.Eligibility, "review"),
+		mustJSON(candidate.EligibilityReasons), mustJSON(candidate.AutomationSignals), fit, confidence, mustJSON(reasons), status,
+		truncate(decisionReason, 1000), nullableText(rejectedAt), now, now, pid, candidate.ID)
+	if err != nil {
+		return nil, err
+	}
+	return getCandidate(db, pid, candidate.ID)
+}
+
+func nullableText(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func setCandidateResearch(db *sql.DB, pid string, candidate *Candidate, summary string, evidenceCount int) (*Candidate, error) {
@@ -666,13 +724,31 @@ func overview(db *sql.DB, pid string) (map[string]any, error) {
 		statuses[status] = count
 	}
 	rows.Close()
-	var evidence, exclusions int
+	qualifications := map[string]int{}
+	rows, err = db.Query(`SELECT eligibility,COUNT(*) FROM candidates WHERE project_id=? GROUP BY eligibility`, pid)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var eligibility string
+		var count int
+		if err := rows.Scan(&eligibility, &count); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		qualifications[eligibility] = count
+	}
+	rows.Close()
+	var evidence, exclusions, enriched int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM candidate_evidence WHERE project_id=?`, pid).Scan(&evidence)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM exclusions WHERE project_id=?`, pid).Scan(&exclusions)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM candidates WHERE project_id=? AND enriched_at IS NOT NULL AND enriched_at<>''`, pid).Scan(&enriched)
 	return map[string]any{
 		"active_profiles": profiles,
 		"search_runs":     runs,
 		"candidates":      statuses,
+		"qualifications":  qualifications,
+		"enriched":        enriched,
 		"evidence":        evidence,
 		"exclusions":      exclusions,
 	}, nil

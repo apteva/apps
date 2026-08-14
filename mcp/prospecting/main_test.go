@@ -17,7 +17,10 @@ type recordedCall struct {
 
 type platformStub struct {
 	tk.BasePlatformClient
-	calls []recordedCall
+	calls          []recordedCall
+	blockedEngines map[string]bool
+	searchPayload  any
+	extractPages   map[string]any
 }
 
 func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -25,13 +28,28 @@ func (p *platformStub) CallAppResult(app, tool string, input map[string]any, out
 	var payload any
 	switch app + "/" + tool {
 	case "web/web_search":
-		payload = map[string]any{
-			"count": 2,
-			"results": []map[string]any{
-				{"title": "Acme Cloud | Automation for SaaS", "url": "https://acme.example/about", "snippet": "B2B SaaS automation company based in Spain", "source": "google", "rank": 1, "fetched_at": "2026-08-14T08:00:00Z", "confidence": "medium"},
-				{"title": "Beta Systems - Operations software", "url": "https://beta.example", "snippet": "Spanish operations software company", "source": "google", "rank": 2, "fetched_at": "2026-08-14T08:00:00Z", "confidence": "medium"},
-			},
+		engine := fmt.Sprint(input["engine"])
+		if p.blockedEngines[engine] {
+			return fmt.Errorf("search_blocked: %s unavailable", engine)
 		}
+		if p.searchPayload != nil {
+			payload = p.searchPayload
+		} else {
+			payload = map[string]any{
+				"count": 2,
+				"results": []map[string]any{
+					{"title": "Acme Cloud | Automation for SaaS", "url": "https://acme.example/about", "snippet": "B2B SaaS automation company based in Spain", "source": "google", "rank": 1, "fetched_at": "2026-08-14T08:00:00Z", "confidence": "medium"},
+					{"title": "Beta Systems - Operations software", "url": "https://beta.example", "snippet": "Spanish operations software company", "source": "google", "rank": 2, "fetched_at": "2026-08-14T08:00:00Z", "confidence": "medium"},
+				},
+			}
+		}
+	case "web/web_extract":
+		pageURL := fmt.Sprint(input["url"])
+		page, ok := p.extractPages[pageURL]
+		if !ok {
+			return fmt.Errorf("missing extract fixture for %s", pageURL)
+		}
+		payload = map[string]any{"page": page}
 	case "web/web_research":
 		payload = map[string]any{
 			"answer":     "Research completed.",
@@ -124,6 +142,111 @@ func TestDiscoveryDeduplicatesAndHonorsExclusions(t *testing.T) {
 	}
 	if third["excluded"].(int) != 1 || third["duplicates"].(int) != 1 {
 		t.Fatalf("unexpected exclusion result: %#v", third)
+	}
+}
+
+func TestDiscoveryFallsBackAndFiltersNoise(t *testing.T) {
+	platform := &platformStub{
+		blockedEngines: map[string]bool{"google": true},
+		searchPayload: map[string]any{
+			"count": 3,
+			"results": []map[string]any{
+				{"title": "Find a Dentist", "url": "https://www.zocdoc.com/dentists/austin-texas", "snippet": "Dentist directory", "source": "duckduckgo", "rank": 1},
+				{"title": "Website Design for Dentists", "url": "https://agency.example/dental", "snippet": "Dental marketing agency for growing practices", "source": "duckduckgo", "rank": 2},
+				{"title": "Bright Smiles Dental", "url": "https://brightsmiles.example", "snippet": "Family dental practice in Austin, Texas", "source": "duckduckgo", "rank": 3},
+			},
+		},
+	}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{
+		"name": "US Dental", "industries": []any{"Dental practice"}, "locations": []any{"United States"},
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+
+	result, err := runDiscoveryWithOptions(ctx, profile.ID, "dentist Austin", 10, "google", "duckduckgo")
+	if err != nil {
+		t.Fatalf("discovery: %v", err)
+	}
+	if result["engine"] != "duckduckgo" || result["fallback_used"] != true {
+		t.Fatalf("fallback metadata: %#v", result)
+	}
+	if result["created"].(int) != 1 || result["excluded"].(int) != 2 {
+		t.Fatalf("filter result: %#v", result)
+	}
+	if len(platform.calls) != 2 || platform.calls[0].Input["engine"] != "google" || platform.calls[1].Input["engine"] != "duckduckgo" {
+		t.Fatalf("unexpected search calls: %+v", platform.calls)
+	}
+	exclusions, err := listExclusions(ctx.AppDB(), ctx.CurrentProject(), "domain", 10)
+	if err != nil || len(exclusions) != 2 {
+		t.Fatalf("noise exclusion missing: %+v err=%v", exclusions, err)
+	}
+}
+
+func TestDeterministicQualificationExtractsSignalsAndScores(t *testing.T) {
+	platform := &platformStub{extractPages: map[string]any{
+		"https://brightsmiles.example/new-patients": map[string]any{
+			"url": "https://brightsmiles.example/new-patients", "final_url": "https://brightsmiles.example/new-patients", "status": 200,
+			"title": "New Patient Forms", "description": "Bright Smiles Dental welcomes new patients.",
+			"metadata": map[string]any{"og:site_name": "Bright Smiles Dental"},
+			"text":     "Bright Smiles Dental\n123 Main St, Austin, TX 78701\nComplete new patient forms before your appointment.\nOur office will contact you to confirm the day and time.\nWe verify insurance information.\nRequest appointment online.",
+			"links":    []map[string]any{{"url": "/contact", "text": "Contact"}, {"url": "/team", "text": "Meet the team"}},
+			"artifact": map[string]any{"id": 301},
+		},
+		"https://brightsmiles.example/contact": map[string]any{
+			"url": "https://brightsmiles.example/contact", "status": 200, "title": "Contact Bright Smiles Dental",
+			"text":     "Contact us for appointments in Austin, TX 78701.",
+			"links":    []map[string]any{{"url": "mailto:hello@brightsmiles.example", "text": "Email"}, {"url": "tel:+15125550199", "text": "Call"}},
+			"artifact": map[string]any{"id": 302},
+		},
+		"https://brightsmiles.example/team": map[string]any{
+			"url": "https://brightsmiles.example/team", "status": 200, "title": "Our Dental Team",
+			"text":     "Dr. Ada Stone\nPractice Owner\nBen Lee\nOffice Manager\nOur front desk schedules appointments and patient recalls.",
+			"artifact": map[string]any{"id": 303},
+		},
+	}}
+	ctx := newTestContext(t, platform)
+	profile, err := createProfile(ctx.AppDB(), ctx.CurrentProject(), map[string]any{
+		"name": "Small US Dental Practices", "industries": []any{"Dental practice"}, "locations": []any{"Austin", "Texas"},
+		"employee_min": 2, "employee_max": 25, "target_titles": []any{"Practice Owner", "Office Manager"},
+	})
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	candidate, _, err := insertCandidate(ctx.AppDB(), ctx.CurrentProject(), candidateInput{
+		ProfileID: profile.ID, CompanyName: "New Patient Forms", CompanyDomain: "brightsmiles.example",
+		Website: "https://brightsmiles.example", SourceURL: "https://brightsmiles.example/new-patients", Source: "web_search",
+	}, profile)
+	if err != nil {
+		t.Fatalf("insert candidate: %v", err)
+	}
+
+	result, err := qualifyCandidate(ctx, candidate.ID, 3)
+	if err != nil {
+		t.Fatalf("qualify: %v", err)
+	}
+	updated := result["candidate"].(*Candidate)
+	if updated.CompanyName != "Bright Smiles Dental" || updated.Email != "hello@brightsmiles.example" || updated.Phone != "+15125550199" {
+		t.Fatalf("identity/contact extraction failed: %+v", updated)
+	}
+	if updated.PersonDisplayName != "Ada Stone" || updated.JobTitle == "" {
+		t.Fatalf("decision-maker extraction failed: %+v", updated)
+	}
+	if updated.Eligibility != "eligible" || updated.Location == "" || updated.EmployeeEstimate == nil || *updated.EmployeeEstimate < 2 {
+		t.Fatalf("eligibility/firmographics failed: %+v", updated)
+	}
+	if len(updated.AutomationSignals) < 4 || updated.FitScore < 50 || updated.ConfidenceScore < 60 || updated.EnrichedAt == "" {
+		t.Fatalf("qualification was not strong enough: %+v", updated)
+	}
+	evidence := result["evidence"].([]Evidence)
+	if len(evidence) != 3 {
+		t.Fatalf("evidence=%d, want 3", len(evidence))
+	}
+	for _, call := range platform.calls {
+		if call.App != "web" || call.Tool != "web_extract" {
+			t.Fatalf("qualification used a non-extraction tool: %+v", call)
+		}
 	}
 }
 

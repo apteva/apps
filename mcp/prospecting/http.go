@@ -92,6 +92,20 @@ func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 	respond(w, out, err)
 }
 
+func (a *App) handleQualifyBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	args, err := decodeOptionalBody(r)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
+	out, err := a.toolCandidatesQualifyBatch(requestCtx(r), args)
+	respond(w, out, err)
+}
+
 func (a *App) handleCandidates(w http.ResponseWriter, r *http.Request) {
 	ctx := requestCtx(r)
 	switch r.Method {
@@ -147,6 +161,15 @@ func (a *App) handleCandidateItem(w http.ResponseWriter, r *http.Request) {
 		}
 		body["id"] = id
 		out, err := a.toolCandidatesResearch(ctx, body)
+		respond(w, out, err)
+	case r.Method == http.MethodPost && action == "qualify":
+		body, err := decodeOptionalBody(r)
+		if err != nil {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		body["id"] = id
+		out, err := a.toolCandidatesQualify(ctx, body)
 		respond(w, out, err)
 	case r.Method == http.MethodPost && action == "defer":
 		body, err := decodeOptionalBody(r)
@@ -209,7 +232,7 @@ func respond(w http.ResponseWriter, out any, err error) {
 	if err != nil {
 		status := http.StatusBadRequest
 		message := strings.ToLower(err.Error())
-		if strings.Contains(message, "unavailable") || strings.Contains(message, "web search") || strings.Contains(message, "web research") || strings.Contains(message, "crm handoff") {
+		if strings.Contains(message, "unavailable") || strings.Contains(message, "web search") || strings.Contains(message, "web research") || strings.Contains(message, "web qualification") || strings.Contains(message, "crm handoff") {
 			status = http.StatusServiceUnavailable
 		}
 		writeError(w, err, status)

@@ -4,13 +4,15 @@ Prospecting is Apteva's Web-first candidate discovery and qualification app.
 It follows the same orchestration pattern as Commerce: the app owns its domain
 workflow and delegates specialized work to authoritative sibling apps.
 
-## V1 boundary
+## v0.2 boundary
 
 Prospecting owns:
 
 - target profiles;
 - bounded discovery runs;
 - candidate companies and people;
+- deterministic noise filtering and qualification;
+- extracted contact, location, team-size, and workflow signals;
 - explainable fit and confidence scores;
 - Web evidence references;
 - review decisions and exclusions;
@@ -18,11 +20,11 @@ Prospecting owns:
 
 Prospecting delegates:
 
-- browser search and research to `web`;
+- browser search, page extraction, and raw artifacts to `web`;
 - accepted contacts and duplicate detection to `crm`.
 
-V1 does not send messages, make calls, create opportunities, operate campaigns,
-or execute paid lead-data providers.
+v0.2 does not use an AI model. It does not send messages, make calls, create
+opportunities, operate campaigns, or execute paid lead-data providers.
 
 ## Local development
 
@@ -39,9 +41,12 @@ use the version pinned in `go.mod`.
 ## Core flow
 
 1. Create a target profile.
-2. Run `prospecting_search_run` to search through Web.
-3. Review a candidate and its source evidence.
-4. Use `prospecting_candidates_research` for deeper cited research.
-5. Add or correct decision-maker details.
-6. Reject, defer, or accept the candidate.
+2. Run `prospecting_search_run`. Google automatically falls back to DuckDuckGo
+   when blocked, and known directories/social results are filtered.
+3. Run `prospecting_candidates_qualify` or the bounded batch variant. The app
+   reads up to five first-party pages, extracts structured facts, detects
+   automation opportunities, classifies eligibility, and recalculates scores.
+4. Review the candidate, rule explanations, and saved source evidence.
+5. Optionally use `prospecting_candidates_research` for broader cited research.
+6. Add or correct decision-maker details, then reject, defer, or accept.
 7. Acceptance upserts the person into CRM and never sends a message.

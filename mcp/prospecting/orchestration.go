@@ -53,6 +53,10 @@ func quoteQuery(value string) string {
 }
 
 func runDiscovery(ctx *sdk.AppCtx, profileID int64, query string, limit int) (map[string]any, error) {
+	return runDiscoveryWithOptions(ctx, profileID, query, limit, "google", "duckduckgo")
+}
+
+func runDiscoveryWithOptions(ctx *sdk.AppCtx, profileID int64, query string, limit int, engine, fallbackEngine string) (map[string]any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("prospecting context unavailable")
 	}
@@ -74,22 +78,12 @@ func runDiscovery(ctx *sdk.AppCtx, profileID int64, query string, limit int) (ma
 		return nil, err
 	}
 
-	var webOut webSearchOutput
-	callErr := ctx.PlatformAPI().CallAppResult("web", "web_search", map[string]any{
-		"query":     query,
-		"limit":     limit,
-		"visit_top": false,
-		"store":     true,
-	}, &webOut)
+	webOut, usedEngine, fallbackUsed, callErr := executeWebSearch(ctx, query, limit, engine, fallbackEngine)
 	if callErr != nil {
 		_ = finishSearchRun(ctx.AppDB(), pid, run.ID, "failed", 0, callErr.Error())
 		return nil, fmt.Errorf("web search: %w", callErr)
 	}
-	if webOut.Blocked {
-		errText := defaultString(webOut.Error, "search provider blocked the request")
-		_ = finishSearchRun(ctx.AppDB(), pid, run.ID, "failed", 0, errText)
-		return nil, errors.New(errText)
-	}
+	_, _ = ctx.AppDB().Exec(`UPDATE search_runs SET source=? WHERE project_id=? AND id=?`, "web:"+usedEngine, pid, run.ID)
 
 	created := make([]Candidate, 0, len(webOut.Results))
 	duplicates := 0
@@ -97,6 +91,11 @@ func runDiscovery(ctx *sdk.AppCtx, profileID int64, query string, limit int) (ma
 	for _, result := range webOut.Results {
 		website, domain := normalizeWebsite(result.URL)
 		if website == "" || domain == "" {
+			continue
+		}
+		if eligible, reason := classifySearchResult(result, domain); !eligible {
+			excluded++
+			_, _ = addExclusion(ctx.AppDB(), pid, "domain", domain, "Automatic discovery filter: "+reason)
 			continue
 		}
 		input := candidateInput{
@@ -147,14 +146,17 @@ func runDiscovery(ctx *sdk.AppCtx, profileID int64, query string, limit int) (ma
 	}
 	run, _ = getSearchRun(ctx.AppDB(), pid, run.ID)
 	ctx.EmitWithProject("prospecting.search.completed", pid, map[string]any{
-		"run_id": run.ID, "profile_id": profileID, "query": query, "created": len(created), "duplicates": duplicates, "excluded": excluded,
+		"run_id": run.ID, "profile_id": profileID, "query": query, "engine": usedEngine, "fallback_used": fallbackUsed,
+		"created": len(created), "duplicates": duplicates, "excluded": excluded,
 	})
 	return map[string]any{
-		"run":        run,
-		"candidates": created,
-		"created":    len(created),
-		"duplicates": duplicates,
-		"excluded":   excluded,
+		"run":           run,
+		"candidates":    created,
+		"created":       len(created),
+		"duplicates":    duplicates,
+		"excluded":      excluded,
+		"engine":        usedEngine,
+		"fallback_used": fallbackUsed,
 	}, nil
 }
 
@@ -281,13 +283,48 @@ func scoreCandidate(profile *TargetProfile, candidate *Candidate, evidenceCount 
 	}, " "))
 	fit := 0
 	reasons := []string{}
-	if candidate.CompanyDomain != "" && candidate.Website != "" {
-		fit += 20
-		reasons = append(reasons, "+20 identifiable company website")
+	if candidate.Eligibility == "ineligible" {
+		reasons = append(reasons, "0 deterministic eligibility gate failed")
+		for _, reason := range candidate.EligibilityReasons {
+			reasons = append(reasons, "ineligible: "+reason)
+		}
+		return 0, qualificationConfidence(candidate, evidenceCount), reasons
 	}
-	fit += criterionScore(text, profile.Industries, 25, 10, "industry", &reasons)
-	fit += criterionScore(text, profile.Locations, 15, 5, "location", &reasons)
-	fit += criterionScore(text, profile.Keywords, 20, 10, "keyword", &reasons)
+	if candidate.CompanyDomain != "" && candidate.Website != "" {
+		fit += 10
+		reasons = append(reasons, "+10 identifiable company website")
+	}
+	if candidate.Eligibility == "eligible" {
+		fit += 20
+		reasons = append(reasons, "+20 operating company and target industry confirmed")
+	} else {
+		fit += criterionScore(text, profile.Industries, 15, 5, "industry", &reasons)
+	}
+	if locationMatchesProfile(candidate.Location, profile.Locations) {
+		fit += 15
+		reasons = append(reasons, "+15 location matches target")
+	} else if len(profile.Locations) == 0 {
+		fit += 5
+		reasons = append(reasons, "+5 no location constraint")
+	}
+	if employeeMatchesProfile(candidate.EmployeeEstimate, profile.EmployeeMin, profile.EmployeeMax) {
+		fit += 10
+		reasons = append(reasons, "+10 observed team size matches target")
+	} else if profile.EmployeeMin == nil && profile.EmployeeMax == nil {
+		fit += 5
+		reasons = append(reasons, "+5 no company-size constraint")
+	}
+	signalScore := 0
+	for _, signal := range candidate.AutomationSignals {
+		signalScore += signal.Weight
+	}
+	signalScore = clamp(signalScore, 0, 25)
+	if signalScore > 0 {
+		fit += signalScore
+		reasons = append(reasons, fmt.Sprintf("+%d deterministic automation-opportunity signals", signalScore))
+	} else {
+		fit += criterionScore(text, profile.Keywords, 10, 0, "keyword", &reasons)
+	}
 	if len(profile.TargetTitles) == 0 {
 		fit += 10
 		reasons = append(reasons, "+10 no target-title constraint")
@@ -303,33 +340,77 @@ func scoreCandidate(profile *TargetProfile, candidate *Candidate, evidenceCount 
 		reasons = append(reasons, "+10 professional contact channel available")
 	}
 	fit = clamp(fit, 0, 100)
+	confidence := qualificationConfidence(candidate, evidenceCount)
+	reasons = append(reasons, fmt.Sprintf("confidence %d/100 from identity, evidence, and contact completeness", confidence))
+	return fit, confidence, reasons
+}
 
+func qualificationConfidence(candidate *Candidate, evidenceCount int) int {
 	confidence := 0
 	if candidate.CompanyDomain != "" {
-		confidence += 15
-	}
-	if candidate.Website != "" {
-		confidence += 15
-	}
-	if candidate.Summary != "" {
-		confidence += 15
-	}
-	confidence += clamp(evidenceCount*10, 0, 30)
-	if candidate.PersonDisplayName != "" {
 		confidence += 10
 	}
-	if candidate.JobTitle != "" {
+	if candidate.Website != "" {
+		confidence += 10
+	}
+	if candidate.Summary != "" {
+		confidence += 10
+	}
+	confidence += clamp(evidenceCount*8, 0, 24)
+	if candidate.Eligibility == "eligible" || candidate.Eligibility == "ineligible" {
+		confidence += 10
+	}
+	if candidate.Location != "" {
+		confidence += 8
+	}
+	if candidate.EmployeeEstimate != nil {
 		confidence += 5
+	}
+	if candidate.PersonDisplayName != "" {
+		confidence += 6
+	}
+	if candidate.JobTitle != "" {
+		confidence += 4
 	}
 	if candidate.Email != "" {
 		confidence += 7
 	}
 	if candidate.Phone != "" {
-		confidence += 3
+		confidence += 6
 	}
-	confidence = clamp(confidence, 0, 100)
-	reasons = append(reasons, fmt.Sprintf("confidence %d/100 from identity, evidence, and contact completeness", confidence))
-	return fit, confidence, reasons
+	return clamp(confidence, 0, 100)
+}
+
+func locationMatchesProfile(location string, targets []string) bool {
+	if len(targets) == 0 {
+		return false
+	}
+	lower := strings.ToLower(location)
+	for _, target := range targets {
+		target = strings.ToLower(strings.TrimSpace(target))
+		if target == "united states" || target == "usa" || target == "us" {
+			if usAddressPattern.MatchString(location) {
+				return true
+			}
+		}
+		if target != "" && strings.Contains(lower, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func employeeMatchesProfile(estimate, min, max *int) bool {
+	if estimate == nil || (min == nil && max == nil) {
+		return false
+	}
+	if min != nil && *estimate < *min {
+		return false
+	}
+	if max != nil && *estimate > *max {
+		return false
+	}
+	return true
 }
 
 func criterionScore(text string, terms []string, matchScore, neutralScore int, label string, reasons *[]string) int {
