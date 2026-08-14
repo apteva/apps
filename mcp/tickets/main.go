@@ -36,7 +36,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("tickets requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("tickets mounted", "version", "0.1.4")
+	ctx.Logger().Info("tickets mounted", "version", "0.1.5")
 	return nil
 }
 

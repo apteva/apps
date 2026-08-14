@@ -52,7 +52,7 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 	if !strings.Contains(module, "content-start") {
 		t.Fatal("panel bundle is missing the compact grid alignment that prevents editor rows from stretching")
 	}
-	for _, marker := range []string{"data-ticket-kanban", "data-kanban-status", "draggable", "Moved on Kanban board"} {
+	for _, marker := range []string{"data-ticket-kanban", "data-kanban-status", "data-ticket-detail-drawer", "data-ticket-view", "Close ticket details", "draggable", "Moved on Kanban board"} {
 		if !strings.Contains(module, marker) {
 			t.Fatalf("panel bundle is missing Kanban marker %q", marker)
 		}
@@ -62,7 +62,7 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.4" {
+	if m.Name != "tickets" || m.Version != "0.1.5" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
