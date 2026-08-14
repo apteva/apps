@@ -231,8 +231,52 @@ func TestSearchUsesComputerDOMParser(t *testing.T) {
 	}
 	extractArgs := plat.lastCall("computer", "browser_extract")
 	formats, _ := extractArgs["formats"].([]string)
-	if !sameStrings(formats, []string{"text", "html", "links", "metadata"}) {
+	if !sameStrings(formats, []string{"links", "text", "metadata"}) {
 		t.Fatalf("formats=%#v", formats)
+	}
+}
+
+func TestSearchRetriesLinksOnlyAfterTruncatedExtraction(t *testing.T) {
+	plat := newFakePlatform()
+	plat.searchTruncatedFirst = true
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolSearch(ctx, map[string]any{"query": "alpha", "cache": "bypass"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	results := outAny.(map[string]any)["results"].([]searchResult)
+	if len(results) != 2 {
+		t.Fatalf("results=%#v, want recovered links", results)
+	}
+	var extractCalls []fakeCall
+	for _, call := range plat.callsSnapshot() {
+		if call.app == "computer" && call.tool == "browser_extract" {
+			extractCalls = append(extractCalls, call)
+		}
+	}
+	if len(extractCalls) != 2 {
+		t.Fatalf("extract calls=%d, want 2", len(extractCalls))
+	}
+	if formats, _ := extractCalls[0].args["formats"].([]string); !sameStrings(formats, []string{"links", "text", "metadata"}) {
+		t.Fatalf("initial formats=%#v", formats)
+	}
+	if formats, _ := extractCalls[1].args["formats"].([]string); !sameStrings(formats, []string{"links"}) {
+		t.Fatalf("retry formats=%#v", formats)
+	}
+}
+
+func TestSearchFailsWhenVisibleTruncatedResultsStillHaveNoLinks(t *testing.T) {
+	plat := newFakePlatform()
+	plat.searchTruncatedAlways = true
+	ctx, app := newTestCtx(t, plat)
+
+	_, err := app.toolSearch(ctx, map[string]any{"query": "alpha", "cache": "bypass"})
+	if err == nil || !strings.Contains(err.Error(), "search_extraction_incomplete") {
+		t.Fatalf("error=%v, want search_extraction_incomplete", err)
+	}
+	if got := countCalls(plat, "computer", "browser_extract"); got != 2 {
+		t.Fatalf("browser_extract calls=%d, want one links-only retry", got)
 	}
 }
 
@@ -1190,25 +1234,28 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu                   sync.Mutex
-	calls                []fakeCall
-	storageID            int64
-	storageURL           string
-	openURL              string
-	searchBlocked        bool
-	cookieBanner         bool
-	cookieBannerSOM      bool
-	cookieTextBanner     bool
-	cookiePolicyText     bool
-	cookieDismissed      bool
-	duplicateCrawlLinks  bool
-	extractorPagination  bool
-	extractorPage        int
-	scrollY              int
-	selectorRedirectURL  string
-	openBackendOverride  string
-	proxyModeOverride    string
-	proxyCountryOverride string
+	mu                    sync.Mutex
+	calls                 []fakeCall
+	storageID             int64
+	storageURL            string
+	openURL               string
+	searchBlocked         bool
+	searchTruncatedFirst  bool
+	searchTruncatedAlways bool
+	searchExtractCount    int
+	cookieBanner          bool
+	cookieBannerSOM       bool
+	cookieTextBanner      bool
+	cookiePolicyText      bool
+	cookieDismissed       bool
+	duplicateCrawlLinks   bool
+	extractorPagination   bool
+	extractorPage         int
+	scrollY               int
+	selectorRedirectURL   string
+	openBackendOverride   string
+	proxyModeOverride     string
+	proxyCountryOverride  string
 }
 
 func newFakePlatform() *fakePlatform {
@@ -1260,6 +1307,7 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 	case "computer.browser_extract":
 		if strings.Contains(p.openURL, "google.com/search") {
+			p.searchExtractCount++
 			if p.searchBlocked {
 				return map[string]any{
 					"session_id":         in["session_id"],
@@ -1269,6 +1317,17 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 					"text":               "Our systems have detected unusual traffic from your computer network.",
 					"links":              []map[string]any{{"url": "https://www.google.com/sorry/index", "text": "Google"}},
 					"rendered":           true,
+					"extraction_backend": "browser_dom",
+				}
+			}
+			if p.searchTruncatedAlways || (p.searchTruncatedFirst && p.searchExtractCount == 1) {
+				return map[string]any{
+					"session_id":         in["session_id"],
+					"backend":            "local",
+					"current_url":        p.openURL,
+					"title":              "Google Search",
+					"text":               "Peer-To-Peer Lending Affiliate Programs Affiliate Partnerships",
+					"truncated":          true,
 					"extraction_backend": "browser_dom",
 				}
 			}

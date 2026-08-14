@@ -302,6 +302,7 @@ type browserExtractResult struct {
 	Metadata          map[string]any  `json:"metadata"`
 	StructuredData    map[string]any  `json:"structured_data"`
 	Rendered          bool            `json:"rendered"`
+	Truncated         bool            `json:"truncated"`
 	ExtractionBackend string          `json:"extraction_backend"`
 	Width             int             `json:"width"`
 	Height            int             `json:"height"`
@@ -483,13 +484,27 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	defer a.closeBrowser(ctx, browser.SessionID)
 
 	extracted, err := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
-		"formats": []string{"text", "html", "links", "metadata"},
+		"formats": searchExtractFormats(engine),
 	}), true)
 	if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
+	if extracted.Truncated && len(extracted.Links) == 0 {
+		linksOnly, retryErr := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
+			"formats": []string{"links"},
+		}), false)
+		if retryErr == nil && len(linksOnly.Links) > 0 {
+			extracted.Links = linksOnly.Links
+		}
+	}
 	results := parseSearchResults(engine, extracted, limit)
+	searchBlocked := detectSearchBlocked(engine, extracted)
+	if searchBlocked == "" && len(results) == 0 && hasVisibleSearchResultContent(extracted) {
+		err := errors.New("search_extraction_incomplete: visible search results were rendered but result links could not be extracted")
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	for i := range results {
 		results[i].FetchedAt = now
@@ -510,7 +525,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"links_count": len(extracted.Links),
 		},
 	}
-	if searchBlocked := detectSearchBlocked(engine, extracted); searchBlocked != "" {
+	if searchBlocked != "" {
 		out["blocked"] = true
 		out["error"] = searchBlocked
 	}
@@ -532,6 +547,33 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	completeRun(ctx, runID, "completed", out, nil)
 	return out, nil
+}
+
+func searchExtractFormats(engine string) []string {
+	if engine == "google" {
+		return []string{"links", "text", "metadata"}
+	}
+	return []string{"links", "html", "text", "metadata"}
+}
+
+func hasVisibleSearchResultContent(extracted *browserExtractResult) bool {
+	if extracted == nil {
+		return false
+	}
+	text := strings.ToLower(cleanText(extracted.Text))
+	if len(strings.Fields(text)) < 3 {
+		return false
+	}
+	for _, marker := range []string{
+		"did not match any documents",
+		"no results found",
+		"there are no results for",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
