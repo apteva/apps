@@ -1,0 +1,97 @@
+schema: apteva-app/v1
+
+name: prospecting
+display_name: Prospecting
+version: 0.1.0
+description: |
+  Web-first prospect discovery and qualification for Apteva. Define target
+  profiles, run bounded company searches through Web, research and score
+  candidate companies and people, preserve source evidence, reject or defer
+  candidates, and hand accepted contacts to CRM idempotently.
+
+  Prospecting owns only the pre-CRM workflow. Web remains the source of raw
+  research artifacts and CRM remains the canonical owner of accepted contacts.
+  v0.1 deliberately does not send messages, run campaigns, create
+  opportunities, or call paid lead-data providers.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/prospecting
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [prospecting, leads, sales, research, crm, growth]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: web
+      optional: false
+      reason: Performs browser-backed company discovery and research while retaining raw artifacts.
+    - name: crm
+      optional: false
+      reason: Owns accepted contacts, duplicate detection, lists, and relationship history.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: prospecting_overview, description: "Summarize target profiles, runs, and candidate statuses for the current project." }
+    - { name: prospecting_profiles_create, description: "Create a target profile. Args: name, description?, industries?, locations?, employee_min?, employee_max?, target_titles?, keywords?." }
+    - { name: prospecting_profiles_list, description: "List target profiles. Args: status? (active|archived|all)." }
+    - { name: prospecting_profiles_get, description: "Get one target profile. Args: id." }
+    - { name: prospecting_profiles_update, description: "Patch a target profile. Args: id and any editable profile fields." }
+    - { name: prospecting_profiles_archive, description: "Archive a target profile. Args: id." }
+    - { name: prospecting_search_run, description: "Run a bounded Web search and persist new company candidates. Args: profile_id, query?, limit? (1-50)." }
+    - { name: prospecting_runs_list, description: "List discovery runs. Args: profile_id?, limit?." }
+    - { name: prospecting_candidates_create, description: "Create a candidate manually. Args: profile_id, company_name, website?, person fields?, email?, phone?, summary?, source_url?." }
+    - { name: prospecting_candidates_search, description: "Search candidates. Args: profile_id?, status?, q?, limit?, offset?." }
+    - { name: prospecting_candidates_get, description: "Get one candidate with evidence and handoff state. Args: id." }
+    - { name: prospecting_candidates_update, description: "Patch a candidate's company or person details and recalculate its explainable scores. Args: id and editable fields." }
+    - { name: prospecting_candidates_research, description: "Research one candidate through Web and persist cited evidence. Args: id, question?." }
+    - { name: prospecting_candidates_defer, description: "Defer a candidate without rejecting it. Args: id, reason?." }
+    - { name: prospecting_candidates_reject, description: "Reject a candidate. Args: id, reason?, exclude_company? (default false)." }
+    - { name: prospecting_candidates_accept, description: "REAL CRM WRITE: accept a candidate and idempotently upsert it into CRM. Requires email or phone. Args: id, list_ids?. Does not send a message or create an opportunity." }
+    - { name: prospecting_exclusions_list, description: "List excluded companies, domains, or people. Args: kind?, limit?." }
+    - { name: prospecting_exclusions_remove, description: "Remove one exclusion. Args: id." }
+  ui_panels:
+    - slot: project.page
+      label: Prospecting
+      icon: search
+      entry: /ui/ProspectingPanel.mjs
+  skills:
+    - name: prospecting
+      command: /prospecting
+      body_file: skills/how-to-use-prospecting.md
+      description: |
+        Teaches agents to define target profiles, run bounded Web discovery,
+        research and qualify candidates, preserve evidence, and hand accepted
+        contacts to CRM without initiating outreach.
+      metadata:
+        category: sales
+  publishes:
+    - { name: prospecting.profile.created, description: "A target profile was created." }
+    - { name: prospecting.search.completed, description: "A bounded Web discovery run completed." }
+    - { name: prospecting.candidate.created, description: "A candidate was discovered or created manually." }
+    - { name: prospecting.candidate.researched, description: "A candidate received new Web research evidence." }
+    - { name: prospecting.candidate.accepted, description: "A candidate was handed to CRM." }
+    - { name: prospecting.candidate.rejected, description: "A candidate was rejected." }
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/prospecting
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/prospecting.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
