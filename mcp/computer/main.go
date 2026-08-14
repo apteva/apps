@@ -54,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.72
+version: 0.7.73
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.72 preserves
-  structured extraction fields before large document bodies and reports every
-  omitted or partial field through truncated_fields.
+  Watch, steer, and replay hosted browser sessions. v0.7.73 makes proxy_mode
+  authoritative over serializer-filled proxy selectors and ignores inactive
+  touch defaults, restoring browser sessions for over-specified agent calls.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
