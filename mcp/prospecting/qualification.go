@@ -627,8 +627,10 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 				add(strings.TrimPrefix(link.URL, "tel:"), 100+pageScore, true)
 			}
 		}
-		for _, raw := range phonePattern.FindAllString(structuredDataText(page.StructuredData), -1) {
-			add(raw, 70+pageScore, true)
+		for _, value := range structuredPhoneValues(page.StructuredData) {
+			for _, raw := range phonePattern.FindAllString(value, -1) {
+				add(raw, 70+pageScore, true)
+			}
 		}
 		for _, line := range nonEmptyLines(page.Text + "\n" + page.Description + "\n" + metadataText(page.Metadata)) {
 			score := 30 + pageScore
@@ -731,6 +733,38 @@ func structuredDataText(value any) string {
 	}
 	walk(value)
 	return strings.Join(parts, " ")
+}
+
+func structuredPhoneValues(value any) []string {
+	values := []string{}
+	var walk func(any)
+	walk = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				lowerKey := strings.ToLower(strings.TrimSpace(key))
+				if lowerKey == "telephone" || lowerKey == "phone" || lowerKey == "phonenumber" || lowerKey == "contactphone" {
+					switch contact := child.(type) {
+					case string:
+						values = append(values, contact)
+					case []any:
+						for _, entry := range contact {
+							if text, ok := entry.(string); ok {
+								values = append(values, text)
+							}
+						}
+					}
+				}
+				walk(child)
+			}
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	return values
 }
 
 func normalizeQualifiedPhone(raw string, locations []string) string {

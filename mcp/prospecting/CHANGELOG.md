@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.7
+
+- Extract structured-data phones only from explicit `telephone`, `phone`, `phoneNumber`, or `contactPhone` fields.
+- Ignore numeric fragments in structured-data image URLs, analytics identifiers, hashes, and unrelated metadata.
+
 ## v0.2.6
 
 - Rebuild previously website-derived email and phone fields during requalification instead of preserving stale extraction output.

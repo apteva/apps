@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: prospecting
 display_name: Prospecting
-version: 0.2.6
+version: 0.2.7
 description: |
   Web-first prospect discovery and deterministic qualification for Apteva.
   Define target profiles, run bounded company searches with provider fallback
@@ -11,8 +11,8 @@ description: |
 
   Prospecting owns only the pre-CRM workflow. Web remains the source of raw
   research artifacts and CRM remains the canonical owner of accepted contacts.
-  v0.2.6 makes requalification rebuild website-derived contacts and requires
-  nearby labels for unformatted phone digits. It retains third-party email and
+  v0.2.7 restricts structured-data phone extraction to explicit phone fields.
+  It retains contact rebuilding, nearby labels for unformatted digits, third-party email and
   directory/document filtering, US-aware phone validation, contact-first traversal, and stronger
   deterministic contact extraction, marketplace filtering, and cleaner company
   identities. The
@@ -94,7 +94,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: prospecting/v0.2.6
+    ref: prospecting/v0.2.7
     entry: mcp/prospecting
   port: 8080
   health_check: /health

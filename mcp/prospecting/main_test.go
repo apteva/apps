@@ -206,6 +206,19 @@ func TestContactExtractionUsesStructuredDataObfuscationAndFooterPhones(t *testin
 	}
 }
 
+func TestStructuredPhoneExtractionIgnoresNumericAssetHashes(t *testing.T) {
+	pages := []webExtractPage{{
+		URL:  "https://practice.example/contact",
+		Text: "Call us at (954) 523-6525",
+		StructuredData: map[string]any{
+			"image": map[string]any{"url": "https://example.com/avatar/4599888728aa9ac69a03"},
+		},
+	}}
+	if got := extractBestPhone(pages, []string{"United States"}); got != "9545236525" {
+		t.Fatalf("phone=%q, want visible formatted contact phone", got)
+	}
+}
+
 func TestUSPhoneExtractionRejectsLongIdentifiers(t *testing.T) {
 	pages := []webExtractPage{{
 		URL:  "https://example.com/contact",
