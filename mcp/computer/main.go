@@ -54,11 +54,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.73
+version: 0.7.74
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.73 makes proxy_mode
-  authoritative over serializer-filled proxy selectors and ignores inactive
-  touch defaults, restoring browser sessions for over-specified agent calls.
+  Watch, steer, and replay hosted browser sessions. v0.7.74 keeps routine
+  browser opens minimal by making proxy and environment overrides explicitly
+  opt-in while tolerating serializer-filled defaults.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
