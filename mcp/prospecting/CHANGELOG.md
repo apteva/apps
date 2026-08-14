@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.5
+
+- Accept extracted email addresses only when they match the target's domain or a recognized public mailbox provider.
+- Repair collapsed contact text such as a phone number concatenated before an `info@` mailbox, while rejecting long numeric local parts.
+- Require formatting or semantic contact context before treating plain digits as a phone number.
+- Filter additional directories, suppliers, hosted schedulers, PDF documents, email-list vendors, and staging domains during discovery.
+- Clear previously extracted malformed or third-party email addresses during requalification.
+
 ## v0.2.4
 
 - Reject non-phone tracking identifiers when qualifying United States targets; retain only valid 10-digit US numbers or 11-digit numbers beginning with country code `1`.

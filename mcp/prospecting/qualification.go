@@ -21,6 +21,9 @@ var deterministicNoiseDomains = []string{
 	"yellowpages.com", "bbb.org", "indeed.com", "glassdoor.com", "ziprecruiter.com",
 	"etsy.com", "amazon.com", "ebay.com", "walmart.com", "alibaba.com", "aliexpress.com",
 	"scribd.com", "template.net", "jotform.com", "pdffiller.com", "signnow.com", "dochub.com",
+	"myftpupload.com", "modento.io", "jarvisanalytics.com", "floridaweekly.com",
+	"blackowneddentalpractices.com", "dhpsupply.com", "ada.org", "dentistemaillist.com",
+	"issuu.com", "hofstra.edu", "namwolf.org", "wherewespend.com", "publicleads.com",
 }
 
 var genericPageTitles = map[string]bool{
@@ -89,6 +92,12 @@ func classifySearchResult(result webSearchResult, domain string) (bool, string) 
 	}
 	if containsAny(title, []string{"top 10 ", "best dental websites", "dental website examples", "how to ", "guide to ", "marketing ideas"}) {
 		return false, "editorial or list content rather than an operating target company"
+	}
+	if strings.HasSuffix(strings.ToLower(result.URL), ".pdf") || containsAny(title+" "+snippet, []string{
+		"email list", "verified us practices", "dental supplies", "calendar of events", "scholarship",
+		"audit report", "interactive map directory", "download pdf",
+	}) {
+		return false, "document, directory, or supplier content rather than an operating target company"
 	}
 	return true, ""
 }
@@ -409,6 +418,9 @@ func applyDeterministicQualification(profile *TargetProfile, candidate *Candidat
 		candidate.CompanyDomain = domain
 		candidate.Website = "https://" + domain
 	}
+	if normalizeQualifiedEmail(candidate.Email, candidate.CompanyDomain) == "" {
+		candidate.Email = ""
+	}
 	if email := extractBestEmail(pages, candidate.CompanyDomain); candidate.Email == "" && email != "" {
 		candidate.Email = email
 	}
@@ -509,7 +521,7 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 	candidates := []rankedEmail{}
 	order := 0
 	add := func(raw string, score int) {
-		email := normalizeEmail(raw)
+		email := normalizeQualifiedEmail(raw, domain)
 		if email == "" || containsAny(email, []string{"example.com", "sentry.io", "wixpress.com", "noreply@", "no-reply@", "privacy@", "abuse@"}) {
 			return
 		}
@@ -550,6 +562,37 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 	return ""
 }
 
+var publicMailboxDomains = map[string]bool{
+	"gmail.com": true, "googlemail.com": true, "yahoo.com": true, "outlook.com": true,
+	"hotmail.com": true, "live.com": true, "aol.com": true, "icloud.com": true,
+	"me.com": true, "proton.me": true, "protonmail.com": true,
+}
+
+func normalizeQualifiedEmail(raw, targetDomain string) string {
+	email := normalizeEmail(raw)
+	if email == "" {
+		return ""
+	}
+	parts := strings.SplitN(email, "@", 2)
+	local, emailDomain := parts[0], strings.TrimPrefix(parts[1], "www.")
+	// Browser text can collapse a phone and an email into one token. Recover a
+	// recognized mailbox suffix, but never retain the concatenated prefix.
+	for _, mailbox := range []string{"appointments", "appointment", "reception", "frontdesk", "contact", "office", "hello", "schedule", "admin", "info"} {
+		if len(local) > len(mailbox) && strings.HasSuffix(local, mailbox) {
+			local = mailbox
+			break
+		}
+	}
+	if len(local) > 32 || regexp.MustCompile(`\d{5,}`).MatchString(local) {
+		return ""
+	}
+	targetDomain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(targetDomain), "www."))
+	if targetDomain != "" && emailDomain != targetDomain && !strings.HasSuffix(targetDomain, "."+emailDomain) && !publicMailboxDomains[emailDomain] {
+		return ""
+	}
+	return local + "@" + emailDomain
+}
+
 func extractBestPhone(pages []webExtractPage, locations []string) string {
 	type rankedPhone struct {
 		Value string
@@ -558,7 +601,10 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 	}
 	candidates := []rankedPhone{}
 	order := 0
-	add := func(raw string, score int) {
+	add := func(raw string, score int, semantic bool) {
+		if !semantic && !hasPhoneFormatting(raw) {
+			return
+		}
 		if phone := normalizeQualifiedPhone(raw, locations); phone != "" {
 			candidates = append(candidates, rankedPhone{Value: phone, Score: score, Order: order})
 			order++
@@ -571,11 +617,11 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 		}
 		for _, link := range page.Links {
 			if strings.HasPrefix(strings.ToLower(link.URL), "tel:") {
-				add(strings.TrimPrefix(link.URL, "tel:"), 100+pageScore)
+				add(strings.TrimPrefix(link.URL, "tel:"), 100+pageScore, true)
 			}
 		}
 		for _, raw := range phonePattern.FindAllString(structuredDataText(page.StructuredData), -1) {
-			add(raw, 70+pageScore)
+			add(raw, 70+pageScore, true)
 		}
 		for _, line := range nonEmptyLines(page.Text + "\n" + page.Description + "\n" + metadataText(page.Metadata)) {
 			score := 30 + pageScore
@@ -586,8 +632,9 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 			if containsAny(lower, []string{"fax"}) && !containsAny(lower, []string{"phone", "call", "tel"}) {
 				score -= 25
 			}
+			semantic := containsAny(lower, []string{"phone", "call", "tel", "contact", "appointment", "whatsapp", "schedule", "office"})
 			for _, raw := range phonePattern.FindAllString(line, -1) {
-				add(raw, score)
+				add(raw, score, semantic)
 			}
 		}
 	}
@@ -601,6 +648,11 @@ func extractBestPhone(pages []webExtractPage, locations []string) string {
 		return candidates[0].Value
 	}
 	return ""
+}
+
+func hasPhoneFormatting(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	return strings.ContainsAny(raw, "()-. ")
 }
 
 func deobfuscateEmailText(value string) string {

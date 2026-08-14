@@ -215,6 +215,29 @@ func TestUSPhoneExtractionRejectsLongIdentifiers(t *testing.T) {
 	}
 }
 
+func TestContactExtractionRejectsThirdPartyEmailAndRepairsCollapsedMailbox(t *testing.T) {
+	if got := normalizeQualifiedEmail("alejandro@agency.example", "practice.example"); got != "" {
+		t.Fatalf("third-party email=%q, want rejected", got)
+	}
+	if got := normalizeQualifiedEmail("9am-5pm478-275-0630478-275-0630info@practice.example", "practice.example"); got != "info@practice.example" {
+		t.Fatalf("collapsed email=%q, want repaired info mailbox", got)
+	}
+	if got := normalizeQualifiedEmail("practice@gmail.com", "practice.example"); got != "practice@gmail.com" {
+		t.Fatalf("public mailbox=%q, want accepted", got)
+	}
+}
+
+func TestUSPhoneExtractionRequiresEvidenceForPlainDigits(t *testing.T) {
+	pages := []webExtractPage{{URL: "https://example.com", Text: "Tracking 4599888728"}}
+	if got := extractBestPhone(pages, []string{"United States"}); got != "" {
+		t.Fatalf("phone=%q, want unlabelled plain digits rejected", got)
+	}
+	pages[0].Text = "Phone 4599888728"
+	if got := extractBestPhone(pages, []string{"United States"}); got != "4599888728" {
+		t.Fatalf("phone=%q, want labelled digits accepted", got)
+	}
+}
+
 func TestCompanyNameKeepsUsefulDiscoveryTitle(t *testing.T) {
 	candidate := &Candidate{CompanyName: "Austex Dental", CompanyDomain: "austexdental.com"}
 	pages := []webExtractPage{{Title: "Bill Ding", Metadata: map[string]any{"og:site_name": "Bill Ding"}}}
