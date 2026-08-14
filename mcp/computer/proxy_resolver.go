@@ -50,10 +50,24 @@ func (a *App) resolveSessionProxy(ctx *sdk.AppCtx, args map[string]any, backend 
 	sticky := strings.ToLower(strings.TrimSpace(stringArg(args, "proxy_sticky")))
 	legacyProxy, proxyWasSet := boolArg(args, "proxy")
 	// proxy_mode is the provider-neutral public contract. Some tool clients
-	// still synthesize the removed legacy boolean, often as proxy=false. When a
-	// mode is present it is authoritative and the legacy value is ignored.
+	// still synthesize every optional field. When a mode is present it is
+	// authoritative: ignore both the removed legacy boolean and selectors that
+	// do not apply to that mode.
 	if mode != "" {
 		proxyWasSet = false
+	}
+	switch mode {
+	case "auto", "direct":
+		profileRef, country, sticky = "", "", ""
+	case "managed":
+		profileRef, sticky = "", ""
+	case "":
+		// A sticky policy has meaning only for an external profile. Treat an
+		// orphan serializer default as omitted; profileRef still infers profile
+		// mode, while country still infers managed mode.
+		if profileRef == "" {
+			sticky = ""
+		}
 	}
 	explicit := mode != "" || profileRef != "" || country != "" || sticky != "" || proxyWasSet
 

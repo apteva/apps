@@ -88,6 +88,12 @@ func normalizeSessionEnvironmentArgs(environment map[string]any) map[string]any 
 			delete(out, key)
 		}
 	}
+	if touch, ok := out["touch"].(bool); ok && !touch {
+		// Some tool serializers populate max_touch_points with the schema
+		// minimum even while touch=false. In that combination the integer is a
+		// non-applicable default, not an intended environment override.
+		delete(out, "max_touch_points")
+	}
 	if geolocation, ok := out["geolocation"].(map[string]any); ok {
 		geo := make(map[string]any, len(geolocation))
 		for key, value := range geolocation {

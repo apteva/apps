@@ -17,7 +17,7 @@ func TestNormalizeBrowserSessionArgsDropsSynthesizedDefaults(t *testing.T) {
 		"environment": map[string]any{
 			"user_agent": "", "locale": "", "languages": []any{}, "timezone": "",
 			"geolocation": map[string]any{}, "device_scale_factor": float64(0),
-			"mobile": false, "touch": false, "max_touch_points": float64(0),
+			"mobile": false, "touch": false, "max_touch_points": float64(1),
 		},
 	}
 	got := normalizeBrowserSessionArgs(args)
@@ -67,12 +67,12 @@ func TestBrowserSessionAcceptsOverSpecifiedDefaultArguments(t *testing.T) {
 		"action": "open", "backend": "local", "url": "https://example.com",
 		"session_id": "", "tab_id": "", "context_id": "", "context_name": "", "provider_context_id": "",
 		"auto_create_context": false, "persist": false, "timeout": float64(0), "presentation_mode": "",
-		"proxy": false, "proxy_mode": "auto", "proxy_profile": "", "proxy_country": "", "proxy_sticky": "",
+		"proxy": false, "proxy_mode": "auto", "proxy_profile": "", "proxy_country": "", "proxy_sticky": "session",
 		"viewport": map[string]any{"width": float64(0), "height": float64(0)},
 		"environment": map[string]any{
 			"user_agent": "", "locale": "", "languages": []any{}, "timezone": "",
 			"geolocation": map[string]any{}, "device_scale_factor": float64(0),
-			"mobile": false, "touch": false, "max_touch_points": float64(0),
+			"mobile": false, "touch": false, "max_touch_points": float64(1),
 		},
 	})
 	if err != nil {

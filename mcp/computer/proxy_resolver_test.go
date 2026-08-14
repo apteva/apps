@@ -218,6 +218,66 @@ func TestResolveSessionProxyPrefersModeOverLegacyBoolean(t *testing.T) {
 	}
 }
 
+func TestResolveSessionProxyIgnoresModeIncompatibleSerializerDefaults(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	app := &App{}
+	for _, test := range []struct {
+		name        string
+		args        map[string]any
+		backend     string
+		wantMode    string
+		wantManaged *bool
+		wantCountry string
+	}{
+		{
+			name: "auto ignores all selectors",
+			args: map[string]any{
+				"proxy_mode": "auto", "proxy_profile": "serializer-default",
+				"proxy_country": "DE", "proxy_sticky": "session",
+			},
+			backend: "browser-engine", wantMode: "auto",
+		},
+		{
+			name: "direct ignores all selectors",
+			args: map[string]any{
+				"proxy_mode": "direct", "proxy_profile": "serializer-default",
+				"proxy_country": "DE", "proxy_sticky": "session",
+			},
+			backend: "browser-engine", wantMode: "direct", wantManaged: boolPointer(false),
+		},
+		{
+			name: "managed keeps country only",
+			args: map[string]any{
+				"proxy_mode": "managed", "proxy_profile": "serializer-default",
+				"proxy_country": "DE", "proxy_sticky": "session",
+			},
+			backend: "browser-engine", wantMode: "managed", wantManaged: boolPointer(true), wantCountry: "DE",
+		},
+		{
+			name:    "orphan sticky default is omitted",
+			args:    map[string]any{"proxy_sticky": "session"},
+			backend: "browser-engine", wantMode: "auto",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy, err := app.resolveSessionProxy(ctx, test.args, test.backend, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if policy.State.Mode != test.wantMode || policy.State.Country != test.wantCountry {
+				t.Fatalf("state=%+v want mode=%q country=%q", policy.State, test.wantMode, test.wantCountry)
+			}
+			if test.wantManaged == nil {
+				if policy.Managed != nil {
+					t.Fatalf("managed=%v want nil", *policy.Managed)
+				}
+			} else if policy.Managed == nil || *policy.Managed != *test.wantManaged {
+				t.Fatalf("managed=%v want %v", policy.Managed, *test.wantManaged)
+			}
+		})
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func TestResolveSessionProxyUsesBoundDataImpulseProfile(t *testing.T) {
