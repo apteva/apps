@@ -22,9 +22,10 @@ directive: |
   needed. Tasks is the durable ledger and main is its only writer.
 
   Create exactly these four unscheduled tasks, in this order, and no others.
-  Omit the schedule argument entirely: do not pass kind, after, at, every, or
-  cron. Use the exact idempotency key shown so a transport retry cannot create
-  a durable duplicate:
+  Each task description must contain its matching exact worker message shown
+  later so the task record is authoritative. Omit the schedule argument
+  entirely: do not pass kind, after, at, every, or cron. Use the exact
+  idempotency key shown so a transport retry cannot create a durable duplicate:
 
   1. "Stress Alpha" — `stress-alpha-${APTEVA_TEST_AGENT_ID}`
   2. "Stress Beta" — `stress-beta-${APTEVA_TEST_AGENT_ID}`
@@ -39,16 +40,18 @@ directive: |
   - Delta: running, 10, "Preparing Delta worker"
 
   Spawn all four workers before assigning any task. Use the platform spawn
-  tool, paused=true, model=small, reasoning=minimal, no MCPs, and these exact
-  opaque IDs:
+  tool, paused=true, model=small, reasoning=minimal, tools exactly
+  "tasks_get", no MCP server preload, and these exact opaque IDs:
 
   - stress-worker-alpha
   - stress-worker-beta
   - stress-worker-gamma
   - stress-worker-delta
 
-  Each worker directive must tell that worker to wait for its assignment, then
-  send exactly one message to its parent and terminate. The exact messages are:
+  Each worker directive must tell that worker to wait for its assignment, call
+  tasks_get with the task ID in the assignment event, read its exact message
+  from the authoritative task description, then send exactly that one message
+  to its parent and terminate. The exact messages are:
 
   - `ALPHA|40|Alpha worker started|80|Alpha worker finished|ALPHA OK`
   - `BETA|40|Beta worker started|80|Beta worker finished|BETA OK`
@@ -104,6 +107,7 @@ assert:
       args:
         id: stress-worker-alpha
         paused: "true"
+        tools: tasks_get
       count: 1
   - tool_called_with:
       tool: spawn
@@ -111,6 +115,7 @@ assert:
       args:
         id: stress-worker-beta
         paused: "true"
+        tools: tasks_get
       count: 1
   - tool_called_with:
       tool: spawn
@@ -118,6 +123,7 @@ assert:
       args:
         id: stress-worker-gamma
         paused: "true"
+        tools: tasks_get
       count: 1
   - tool_called_with:
       tool: spawn
@@ -125,6 +131,7 @@ assert:
       args:
         id: stress-worker-delta
         paused: "true"
+        tools: tasks_get
       count: 1
   - tool_called_with:
       tool: tasks_assign
@@ -154,6 +161,26 @@ assert:
       args:
         thread_id: stress-worker-delta
       count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: stress-worker-alpha
+      count: 1
+      before: send
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: stress-worker-beta
+      count: 1
+      before: send
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: stress-worker-gamma
+      count: 1
+      before: send
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: stress-worker-delta
+      count: 1
+      before: send
   - tool_called_with:
       tool: tasks_update
       thread_id: main

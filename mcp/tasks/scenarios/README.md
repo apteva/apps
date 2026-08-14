@@ -37,6 +37,13 @@ apteva test ./scenarios/ --max-budget-usd 0.50
 | `10-simultaneous-directive-wake-and-task.yaml` | A directive-owned timer and a due Tasks event race on main; both outcomes must complete exactly once. |
 | `11-delegated-multistage-progress.yaml` | A four-message delegated occurrence stays running while its Core-spawned worker records meaningful progress milestones. |
 | `12-concurrent-multitask-workers.yaml` | Four tasks and four Core workers race assignments and reports without crossing progress, executors, or results. |
+| `13-authoritative-worker-task-fetch.yaml` | A general read-only worker fetches execution-critical values from the authoritative task before acting, with no corrective parent handoff. |
+
+Scenario 13 also mounts a spawnable in-process `creator-sandbox` MCP. Its
+`verify_post` tool performs no external action; the assertion requires the
+worker to populate every argument from `tasks_get` before invoking it. This
+keeps the handoff test representative of a real Tasks + domain-tool worker
+without depending on Patreon, Computer, or network access.
 
 Conversation scenarios use `setup.interaction: conversation`: `directive` is
 the agent's durable role and `prompt` is sent as a real dashboard-channel user

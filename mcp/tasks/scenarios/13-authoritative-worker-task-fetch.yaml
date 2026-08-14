@@ -1,0 +1,155 @@
+name: authoritative-worker-task-fetch
+description: |
+  Reproduces the production handoff failure: execution-critical copy exists
+  only in the authoritative Tasks record. Main creates a general paused worker
+  with read-only tasks_get access, assignment supplies the opaque task ID, and
+  the worker fetches the complete record before doing or reporting anything.
+
+timeout: 4m
+settle_for: 5s
+max_iterations: 24
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    spawnable: true
+  fake_mcp_servers:
+    - name: creator-sandbox
+      tools:
+        - name: verify_post
+          description: Verify a simulated creator post using exact authoritative fields. This fixture performs no external action.
+          required: [creator, title, body, media_url, audience, sell, local_time, timezone, final_action]
+          result: DOMAIN ACTION VERIFIED
+  initial_wake:
+    after: 8s
+  seed_mcp_calls:
+    - app: tasks
+      tool: create
+      thread_id: operator-intake
+      args:
+        title: Verify authoritative creator-post handoff
+        assigned_thread_id: main
+        idempotency_key: authoritative-worker-fetch-${APTEVA_TEST_AGENT_ID}
+        schedule:
+          kind: once
+          at: ${APTEVA_TEST_WAKE_AT}
+        description: |
+          Operation: verify_authoritative_handoff_only
+          Creator: Monika's Hypnosis Reactions
+          Exact title: Freeze Play in Full
+          Exact body: Hello my lovelies! This exact body lives only in Tasks. Keep punctuation, capitalization, and this closing token unchanged: BODY-END-7Q9.
+          Media URL: https://iframe.mediadelivery.net/embed/authoritative-bunny-931d9ce2
+          Audience tiers: Member, Exclusive
+          Sell: false
+          Schedule local time: 2026-08-14T20:00:00
+          Timezone: Europe/Madrid
+          Allowed final action: Schedule
+          Required domain action: Call creator-sandbox_verify_post exactly once with creator, title, body, media_url, audience="Member+Exclusive", sell="false", local_time, timezone, and final_action from the fields above.
+          Stop condition: The creator-sandbox tool is the only allowed domain action and performs no external change. If any field above is missing, report the missing field and stop without calling it.
+          Domain success requirement: Continue only if the tool returns exactly DOMAIN ACTION VERIFIED.
+          Required result: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule
+
+directive: |
+  You are the manager for assigned durable work. The business details for an
+  incoming task are intentionally absent from this directive and must never be
+  guessed from parent context.
+
+  When the task.ready event arrives, call tasks_get before delegating so you
+  can determine that this is the verification-only operation and which tools
+  are safe. Then spawn exactly one paused worker named
+  "authoritative-task-worker". Give it exactly one explicitly named tool by
+  setting tools to "tasks_get", and attach the separate domain MCP by setting
+  mcp to "creator-sandbox". Do not grant Tasks mutation tools.
+
+  Give the worker a general directive: on assignment it must call tasks_get
+  with the event's task ID before any action, treat the returned task as the
+  only authoritative execution input, validate every listed field, call the
+  specified creator-sandbox domain tool with the exact record values, obey the
+  stop condition, and send the task's Required result exactly once to main only
+  after the domain tool succeeds.
+  Do not copy the creator, title, body, media, audience, selling, schedule, or
+  result values into the worker directive and do not send a corrective context
+  message later.
+
+  After spawn succeeds, call tasks_assign for the existing task and that worker.
+  The assignment event must be what wakes it. When the worker returns, complete
+  the same task exactly once using its exact result. Do not create another task,
+  do not perform any external action, and stop after completion.
+
+assert:
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: main
+      count: 1
+      before: spawn
+  - tool_called_with:
+      tool: spawn
+      thread_id: main
+      args:
+        id: authoritative-task-worker
+        paused: "true"
+        tools: tasks_get
+        mcp: creator-sandbox
+      count: 1
+  - tool_called_with:
+      tool: tasks_assign
+      thread_id: main
+      args:
+        thread_id: authoritative-task-worker
+      count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: authoritative-task-worker
+      count: 1
+      before: creator-sandbox_verify_post
+  - tool_called_with:
+      tool: creator-sandbox_verify_post
+      exact: true
+      thread_id: authoritative-task-worker
+      args:
+        creator: Monika's Hypnosis Reactions
+        title: Freeze Play in Full
+        body: "Hello my lovelies! This exact body lives only in Tasks. Keep punctuation, capitalization, and this closing token unchanged: BODY-END-7Q9."
+        media_url: https://iframe.mediadelivery.net/embed/authoritative-bunny-931d9ce2
+        audience: Member+Exclusive
+        sell: "false"
+        local_time: "2026-08-14T20:00:00"
+        timezone: Europe/Madrid
+        final_action: Schedule
+      count: 1
+      before: send
+  - tool_called_with:
+      tool: send
+      thread_id: authoritative-task-worker
+      args:
+        id: main
+        message: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule
+      count: 1
+  - tool_not_called_with:
+      tool: send
+      thread_id: main
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: main
+      args:
+        result: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule
+      count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.result
+    expect_field_eq: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.execution_thread_id
+    expect_field_eq: authoritative-task-worker
+  - iterations_at_most: 24
+
+budget:
+  total_tokens: 350000
+  cost_usd: 2.00

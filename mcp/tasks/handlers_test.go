@@ -143,7 +143,10 @@ func TestEmptyStructuredScheduleRemainsImmediate(t *testing.T) {
 func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	creator := callerContext(7, "thread-origin", "project-a")
-	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Prepare briefing"})
+	const authoritativeDescription = "Title: Freeze Play in Full\nBody: Hello my lovelies! … keep this punctuation exactly.\nMedia: https://iframe.mediadelivery.net/embed/authoritative-id\nAudience: Member, Exclusive\nSell: false\nSchedule: 2026-08-14 20:00 Europe/Madrid\nAllowed final action: Schedule"
+	raw, err := app.toolCreate(creator, appCtx, map[string]any{
+		"title": "Prepare briefing", "description": authoritativeDescription,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,6 +164,18 @@ func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 	}
 	if len(platform.events) != 1 || platform.events[0].Target.ThreadID != "thread-exec-91" {
 		t.Fatalf("assignment receipt=%+v", platform.events)
+	}
+	assignment, ok := platform.events[0].Message.(map[string]any)
+	if !ok {
+		t.Fatalf("assignment payload type=%T", platform.events[0].Message)
+	}
+	for key, want := range map[string]any{
+		"type": "task.assigned", "task_id": task.ID, "title": task.Title,
+		"description": authoritativeDescription, "state": task.State,
+	} {
+		if got := assignment[key]; got != want {
+			t.Fatalf("assignment payload %s=%#v, want %#v; payload=%+v", key, got, want, assignment)
+		}
 	}
 
 	executor := callerContext(7, "thread-exec-91", "project-a")
@@ -441,7 +456,7 @@ func TestHTTPProjectIsolationAndOperatorLifecycle(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.2.7" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.2.8" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -465,6 +480,11 @@ func TestManifestAndToolContract(t *testing.T) {
 		"even when its calls can run in parallel",
 		"one bounded lookup or action",
 		"does not imply delegation",
+		"grants `tasks_get` plus only the domain tools it needs",
+		"must call `tasks_get` with that ID",
+		"must not substitute parent context for the record",
+		"stops before making external changes",
+		"should not paraphrase the task into a second source of truth",
 	} {
 		if !strings.Contains(normalizedManifestSkill, required) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
@@ -505,8 +525,19 @@ func TestManifestAndToolContract(t *testing.T) {
 				}
 			}
 		}
-		if tool.Name == "assign" && !strings.Contains(tool.Description, "existing opaque thread") {
-			t.Fatalf("assign tool must not imply thread creation: %s", tool.Description)
+		if tool.Name == "assign" {
+			for _, required := range []string{"existing opaque thread", "grant the worker tasks_get", "retain all Tasks mutation tools", "call tasks_get before any domain action"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("assign tool missing worker retrieval rule %q: %s", required, tool.Description)
+				}
+			}
+		}
+		if tool.Name == "get" {
+			for _, required := range []string{"authoritative task", "delegated worker", "before any domain action", "without granting Tasks mutation tools"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("get tool missing delegated-read rule %q: %s", required, tool.Description)
+				}
+			}
 		}
 		if tool.Name == "update" {
 			for _, required := range []string{"Keep the task running while any executor is actively working", "Use waiting only when no executor can progress", "at least two or three intermediate milestones"} {
@@ -535,6 +566,11 @@ func TestManifestAndToolContract(t *testing.T) {
 		"one bounded lookup or action",
 		"does not imply delegation",
 		"Tasks records work but does not create threads",
+		"grants `tasks_get` plus only the domain tools it needs",
+		"must call `tasks_get` with that ID",
+		"must not substitute parent context for the record",
+		"stops before making external changes",
+		"should not paraphrase the task into a second source of truth",
 		"Keep a task `running` while any executor is actively working",
 		"at least two or three intermediate milestones",
 		"changing threads or entering `waiting` does not by itself increase progress",

@@ -27,13 +27,16 @@ directive: |
   1. running, 10, "Listing unread Gmail messages"
   2. running, 25, "Found 4 unread messages"
 
-  Main must delegate the remaining work using the platform spawn tool, not a
-  Tasks spawning tool. Spawn a paused worker named "gmail-review-worker" and
-  then assign the existing task to it with tasks_assign. Do not grant Tasks
-  tools to the worker. The worker reports each milestone and the final result
-  to its parent; main remains responsible for calling tasks_update and
-  tasks_complete on the worker's behalf. Do not set the task to waiting: the
-  task remains active while the worker is working.
+  Put the authoritative inbox snapshot and the three worker milestones below
+  in the task description. Main must delegate the remaining work using the
+  platform spawn tool, not a Tasks spawning tool. Spawn a paused worker named
+  "gmail-review-worker" with tools set exactly to "tasks_get", then assign the
+  existing task to it with tasks_assign. The worker must call tasks_get using
+  the assignment event's task ID before reporting anything. Do not grant any
+  Tasks mutation tool to the worker. The worker reports each milestone and the
+  final result to its parent; main remains responsible for calling
+  tasks_update and tasks_complete on the worker's behalf. Do not set the task
+  to waiting: the task remains active while the worker is working.
 
   The simulated worker must report all three exact milestones and the final
   result to main in one concise message, in this order. Main must then record
@@ -63,6 +66,7 @@ assert:
       args:
         id: gmail-review-worker
         paused: "true"
+        tools: tasks_get
       count: 1
   - tool_called_with:
       tool: tasks_assign
@@ -70,6 +74,11 @@ assert:
       args:
         thread_id: gmail-review-worker
       count: 1
+  - tool_called_with:
+      tool: tasks_get
+      thread_id: gmail-review-worker
+      count: 1
+      before: send
   - tool_called_with:
       tool: tasks_update
       thread_id: main

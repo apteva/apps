@@ -37,21 +37,36 @@ schedule does not depend on a UI conversation staying active. Assign an
 explicit opaque thread only when another existing thread should own the work.
 Tasks records work but does not create threads. When separate context,
 ownership, or parallel execution is useful, main creates the worker with the
-platform `spawn` tool and grants only the domain tools it needs. Keep Tasks
-ledger tools with main: the worker reports meaningful milestones and its final
+platform `spawn` tool and grants `tasks_get` plus only the domain tools it
+needs. Do not grant delegated workers `tasks_create`, `tasks_update`,
+`tasks_assign`, `tasks_complete`, or other Tasks mutation tools. Main remains
+the ledger writer: the worker reports meaningful milestones and its final
 result to its parent, and main records them with `tasks_update` and
-`tasks_complete`. Prefer a paused worker, then call `tasks_assign` with that
-existing opaque thread ID so the durable assignment is recorded before work
-starts. The committed assignment event wakes the worker with the task context;
-send additional context explicitly if needed. A non-main thread that needs
-delegation asks main to perform this orchestration. These are task
-relationships, not platform thread roles: the task record defines who owns the
-work.
+`tasks_complete`.
 
-When a task event reaches a thread, read the task with `tasks_get` before
-acting. A terminal receipt sent to the creator is context for that thread; the
-thread decides whether a user-facing message, report, alert, or no publication
-is appropriate.
+Prefer a paused worker with a general task-execution directive, then call
+`tasks_assign` with that existing opaque thread ID. The committed assignment
+event supplies the authoritative task ID and wakes the worker only after the
+durable assignment is recorded. Before any domain action, the worker must call
+`tasks_get` with that ID and treat the returned task record as authoritative.
+It must preserve exact strings and must not substitute parent context for the
+record. If `tasks_get` fails or any execution-critical value is absent or
+unresolved, the worker stops before making external changes and reports the
+specific missing fields to main. Phrases such as “use the copy from the task”,
+“as discussed above”, or “use the supplied media” are not concrete execution
+values.
+
+Main may read the task before spawning to select the necessary domain tools,
+but it should not paraphrase the task into a second source of truth. The task
+ID is traceability, not a request for the worker to infer content: the worker
+resolves it through `tasks_get`. A non-main thread that needs delegation asks
+main to perform this orchestration. These are task relationships, not platform
+thread roles: the task record defines who owns the work.
+
+When a task event reaches any thread, including a delegated worker, read the
+task with `tasks_get` before acting. A terminal receipt sent to the creator is
+context for that thread; the thread decides whether a user-facing message,
+report, alert, or no publication is appropriate.
 
 ## Progress
 
