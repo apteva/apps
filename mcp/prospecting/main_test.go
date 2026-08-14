@@ -154,6 +154,7 @@ func TestCleanCompanyTitleRemovesMarketingTaglines(t *testing.T) {
 		"New Patient Forms - Carolina Dentistry":                                                 "Carolina Dentistry",
 		"Easy Online Patient Forms Great Expressions Dental https://example.com › patient-forms": "Great Expressions Dental",
 		"Indian Creek Dental (+2) - Patient Forms":                                               "Indian Creek Dental",
+		"Contact Our Dental Team in North Austin":                                                "Example",
 		"Patient Forms": "Example",
 	}
 	for input, want := range tests {
@@ -199,8 +200,26 @@ func TestContactExtractionUsesStructuredDataObfuscationAndFooterPhones(t *testin
 	if got := extractBestEmail(pages, "brightsmiles.example"); got != "info@brightsmiles.example" {
 		t.Fatalf("email=%q, want deobfuscated first-party email", got)
 	}
-	if got := extractBestPhone(pages); got != "+15125550188" {
+	if got := extractBestPhone(pages, []string{"United States"}); got != "+15125550188" {
 		t.Fatalf("phone=%q, want structured contact phone", got)
+	}
+}
+
+func TestUSPhoneExtractionRejectsLongIdentifiers(t *testing.T) {
+	pages := []webExtractPage{{
+		URL:  "https://example.com/contact",
+		Text: "Tracking 35051546391753\nCall (512) 555-0199",
+	}}
+	if got := extractBestPhone(pages, []string{"United States"}); got != "5125550199" {
+		t.Fatalf("phone=%q, want valid US phone", got)
+	}
+}
+
+func TestCompanyNameKeepsUsefulDiscoveryTitle(t *testing.T) {
+	candidate := &Candidate{CompanyName: "Austex Dental", CompanyDomain: "austexdental.com"}
+	pages := []webExtractPage{{Title: "Bill Ding", Metadata: map[string]any{"og:site_name": "Bill Ding"}}}
+	if got := extractCompanyName(candidate, pages); got != "Austex Dental" {
+		t.Fatalf("company=%q, want existing discovery name", got)
 	}
 }
 

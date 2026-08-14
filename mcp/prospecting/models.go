@@ -443,10 +443,15 @@ func cleanCompanyTitle(title, domain string) string {
 		"easy online patient forms", "new dental patient forms", "new patient dental forms",
 		"complete new patient forms", "new patient forms", "patient forms",
 		"request an appointment", "request appointment", "schedule an appointment", "schedule appointment",
+		"contact our dental team", "contact our team", "contact our office", "contact us", "contact",
 	} {
 		lower := strings.ToLower(title)
 		if strings.HasPrefix(lower, prefix+" ") {
-			title = strings.TrimSpace(title[len(prefix):])
+			remaining := strings.TrimSpace(title[len(prefix):])
+			if strings.HasPrefix(prefix, "contact") && !strings.ContainsAny(remaining, "|—–-") {
+				return domainBrand(domain)
+			}
+			title = remaining
 			break
 		}
 	}

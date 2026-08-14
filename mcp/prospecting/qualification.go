@@ -412,7 +412,10 @@ func applyDeterministicQualification(profile *TargetProfile, candidate *Candidat
 	if email := extractBestEmail(pages, candidate.CompanyDomain); candidate.Email == "" && email != "" {
 		candidate.Email = email
 	}
-	if phone := extractBestPhone(pages); candidate.Phone == "" && phone != "" {
+	if !validQualifiedPhone(candidate.Phone, profile.Locations) {
+		candidate.Phone = ""
+	}
+	if phone := extractBestPhone(pages, profile.Locations); candidate.Phone == "" && phone != "" {
 		candidate.Phone = phone
 	}
 	if person := extractDecisionMaker(pages, profile.TargetTitles); candidate.PersonDisplayName == "" && person.DisplayName != "" {
@@ -432,12 +435,25 @@ func applyDeterministicQualification(profile *TargetProfile, candidate *Candidat
 }
 
 func extractCompanyName(candidate *Candidate, pages []webExtractPage) string {
+	// Search-result titles are usually a better company label than a person's
+	// name or a stray heading found on a deep contact page. Only replace a
+	// useful discovery name when the extracted site name clearly agrees with
+	// the candidate's domain brand.
+	current := strings.TrimSpace(candidate.CompanyName)
+	currentUseful := validCompanyName(current) && !isGenericCompanyTitle(current)
+	domainToken := strings.ToLower(strings.Split(strings.TrimPrefix(candidate.CompanyDomain, "www."), ".")[0])
 	for _, page := range pages {
 		for _, key := range []string{"og:site_name", "application-name", "apple-mobile-web-app-title"} {
 			if value := metadataString(page.Metadata, key); validCompanyName(value) {
-				return cleanCompanyTitle(value, candidate.CompanyDomain)
+				cleaned := cleanCompanyTitle(value, candidate.CompanyDomain)
+				if !currentUseful || companyNameMatchesDomain(cleaned, domainToken) {
+					return cleaned
+				}
 			}
 		}
+	}
+	if currentUseful {
+		return current
 	}
 	for _, page := range pages {
 		title := cleanCompanyTitle(page.Title, candidate.CompanyDomain)
@@ -449,6 +465,22 @@ func extractCompanyName(candidate *Candidate, pages []webExtractPage) string {
 		return domainBrand(candidate.CompanyDomain)
 	}
 	return candidate.CompanyName
+}
+
+func companyNameMatchesDomain(name, domainToken string) bool {
+	name = strings.ToLower(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, name))
+	domainToken = strings.ToLower(strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return r
+		}
+		return -1
+	}, domainToken))
+	return len(name) >= 4 && len(domainToken) >= 4 && (strings.Contains(domainToken, name) || strings.Contains(name, domainToken))
 }
 
 func validCompanyName(value string) bool {
@@ -518,7 +550,7 @@ func extractBestEmail(pages []webExtractPage, domain string) string {
 	return ""
 }
 
-func extractBestPhone(pages []webExtractPage) string {
+func extractBestPhone(pages []webExtractPage, locations []string) string {
 	type rankedPhone struct {
 		Value string
 		Score int
@@ -527,7 +559,7 @@ func extractBestPhone(pages []webExtractPage) string {
 	candidates := []rankedPhone{}
 	order := 0
 	add := func(raw string, score int) {
-		if phone := normalizeQualifiedPhone(raw); phone != "" {
+		if phone := normalizeQualifiedPhone(raw, locations); phone != "" {
 			candidates = append(candidates, rankedPhone{Value: phone, Score: score, Order: order})
 			order++
 		}
@@ -626,13 +658,34 @@ func structuredDataText(value any) string {
 	return strings.Join(parts, " ")
 }
 
-func normalizeQualifiedPhone(raw string) string {
+func normalizeQualifiedPhone(raw string, locations []string) string {
 	phone := normalizePhone(raw)
-	digits := strings.TrimPrefix(phone, "+")
-	if len(digits) < 10 || len(digits) > 15 {
+	if !validQualifiedPhone(phone, locations) {
 		return ""
 	}
 	return phone
+}
+
+func validQualifiedPhone(phone string, locations []string) bool {
+	phone = normalizePhone(phone)
+	digits := strings.TrimPrefix(phone, "+")
+	if targetsUnitedStates(locations) {
+		return len(digits) == 10 || (len(digits) == 11 && strings.HasPrefix(digits, "1"))
+	}
+	if len(digits) < 10 || len(digits) > 15 {
+		return false
+	}
+	return true
+}
+
+func targetsUnitedStates(locations []string) bool {
+	for _, location := range locations {
+		normalized := strings.ToLower(strings.TrimSpace(location))
+		if normalized == "united states" || normalized == "united states of america" || normalized == "usa" || normalized == "us" || normalized == "u.s." {
+			return true
+		}
+	}
+	return false
 }
 
 func extractDecisionMaker(pages []webExtractPage, targetTitles []string) extractedPerson {

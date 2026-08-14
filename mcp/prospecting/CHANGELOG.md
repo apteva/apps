@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.4
+
+- Reject non-phone tracking identifiers when qualifying United States targets; retain only valid 10-digit US numbers or 11-digit numbers beginning with country code `1`.
+- Clear previously extracted invalid phones during requalification.
+- Preserve useful discovery company names when a contact page exposes an unrelated person or heading as its site name.
+- Normalize generic contact-page search titles back to the company domain brand.
+
 ## v0.2.3
 
 - Reject marketplaces and downloadable form-template results during discovery.
