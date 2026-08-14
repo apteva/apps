@@ -1869,18 +1869,86 @@ func limitExtractResponse(fields []extractResponseField, maxChars int) map[strin
 		return map[string]any{}
 	}
 
-	out := map[string]any{"truncated": true}
+	ordered := prioritizeExtractResponseFields(fields)
+	reservedTruncatedFields := extractResponseFieldKeys(ordered)
+	var out map[string]any
+	for range len(fields) + 1 {
+		var truncatedFields []string
+		out, truncatedFields = buildLimitedExtractResponse(ordered, reservedTruncatedFields, maxChars)
+		if sameExtractFieldKeys(truncatedFields, reservedTruncatedFields) {
+			return out
+		}
+		reservedTruncatedFields = truncatedFields
+	}
+	return out
+}
+
+func prioritizeExtractResponseFields(fields []extractResponseField) []extractResponseField {
+	ordered := make([]extractResponseField, 0, len(fields))
+	for _, field := range fields {
+		if !isLargeExtractResponseField(field.Key) {
+			ordered = append(ordered, field)
+		}
+	}
+	for _, field := range fields {
+		if isLargeExtractResponseField(field.Key) {
+			ordered = append(ordered, field)
+		}
+	}
+	return ordered
+}
+
+func isLargeExtractResponseField(key string) bool {
+	switch key {
+	case "html", "text", "markdown":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractResponseFieldKeys(fields []extractResponseField) []string {
+	keys := make([]string, 0, len(fields))
+	for _, field := range fields {
+		keys = append(keys, field.Key)
+	}
+	return keys
+}
+
+func sameExtractFieldKeys(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func buildLimitedExtractResponse(fields []extractResponseField, reservedTruncatedFields []string, maxChars int) (map[string]any, []string) {
+	out := map[string]any{
+		"truncated":        true,
+		"truncated_fields": reservedTruncatedFields,
+	}
+	if jsonObjectSize(out) > maxChars {
+		return map[string]any{"truncated": true}, extractResponseFieldKeys(fields)
+	}
+
+	truncatedFields := make([]string, 0, len(fields))
 	for _, field := range fields {
 		out[field.Key] = field.Value
 		if jsonObjectSize(out) <= maxChars {
 			continue
 		}
 		delete(out, field.Key)
+		truncatedFields = append(truncatedFields, field.Key)
 		if partial, ok := fitExtractValue(out, field.Key, field.Value, maxChars); ok {
 			out[field.Key] = partial
 		}
 	}
-	return out
+	return out, truncatedFields
 }
 
 func fitExtractValue(base map[string]any, key string, value any, maxChars int) (any, bool) {

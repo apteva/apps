@@ -889,6 +889,47 @@ func TestInternalSessionExtractEnforcesAggregateResponseLimit(t *testing.T) {
 	}
 }
 
+func TestInternalSessionExtractPreservesLinksBeforeLargeHTML(t *testing.T) {
+	largeHTML := strings.Repeat("<article>large result page</article>", 2000)
+	fake := &fakeComp{
+		url: "https://www.google.com/search?q=example",
+		extractResult: backends.ExtractResult{
+			URL:  "https://www.google.com/search?q=example",
+			HTML: largeHTML,
+			Links: []backends.ExtractLink{{
+				URL:  "https://example.com/result",
+				Text: "Example result",
+			}},
+			Metadata: map[string]any{"description": "Search results"},
+			Rendered: true,
+		},
+	}
+	app := appWithSession("br_large_html", fake, "local")
+
+	out, err := app.extractSessionDOM("br_large_html", extractOptions{
+		Formats:  []string{"html", "links", "metadata"},
+		MaxChars: 50000,
+	})
+	if err != nil {
+		t.Fatalf("extract large html: %v", err)
+	}
+	links, ok := out["links"].([]backends.ExtractLink)
+	if !ok || len(links) != 1 || links[0].URL != "https://example.com/result" {
+		t.Fatalf("structured links were lost behind large HTML: %#v", out["links"])
+	}
+	truncatedFields, ok := out["truncated_fields"].([]string)
+	if !ok || !containsString(truncatedFields, "html") {
+		t.Fatalf("truncated_fields=%#v, want html", out["truncated_fields"])
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal limited response: %v", err)
+	}
+	if len(encoded) > 50000 {
+		t.Fatalf("aggregate response exceeds max_chars: got %d", len(encoded))
+	}
+}
+
 func TestInternalSessionExtractDefaultsToTextOnly(t *testing.T) {
 	fake := &fakeComp{
 		url: "https://example.com/default",
