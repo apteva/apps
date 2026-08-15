@@ -367,6 +367,18 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if fake.closeCalls != 1 {
 		t.Errorf("Close calls: want 1, got %d", fake.closeCalls)
 	}
+	statusOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "status", "session_id": sessionID})
+	if err != nil {
+		t.Fatalf("browser_session status after close: %v", err)
+	}
+	closedStatus := statusOut.(map[string]any)
+	if closedStatus["closed"] != true || closedStatus["status"] != "closed" || closedStatus["close_reason"] != "explicit_close" || closedStatus["closed_at"] == "" {
+		t.Fatalf("closed session status is incomplete: %#v", closedStatus)
+	}
+	assertBrowserViewReference(t, closedStatus["view"], sessionID)
+	if _, err := app.toolBrowserSession(ctx, map[string]any{"action": "status", "session_id": "br_unknown"}); err == nil || !strings.Contains(err.Error(), "session br_unknown not found") {
+		t.Fatalf("unknown session status should remain not found: %v", err)
+	}
 	listOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "list"})
 	if err != nil {
 		t.Fatalf("legacy browser_session list after close: %v", err)

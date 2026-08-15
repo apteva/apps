@@ -1077,7 +1077,17 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 		}
 		sess, ok := a.reg.get(id)
 		if !ok {
-			return nil, fmt.Errorf("session %s not found", id)
+			if ctx == nil || ctx.AppDB() == nil {
+				return nil, fmt.Errorf("session %s not found", id)
+			}
+			row, err := dbGetSession(ctx.AppDB(), id)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return nil, fmt.Errorf("session %s not found", id)
+				}
+				return nil, err
+			}
+			return historicalSessionOutput(row), nil
 		}
 		return a.sessionOutput(id, sess), nil
 	case "tabs":
@@ -1667,7 +1677,14 @@ func environmentPointer(value backends.EnvironmentOptions) *backends.Environment
 }
 
 func (a *App) sessionOutput(id string, s *session) map[string]any {
-	info := a.sessionInfo(id, s)
+	return sessionInfoOutput(a.sessionInfo(id, s))
+}
+
+func historicalSessionOutput(row *ComputerSession) map[string]any {
+	return sessionInfoOutput(historicalSessionInfo(row))
+}
+
+func sessionInfoOutput(info sessionInfo) map[string]any {
 	out := map[string]any{
 		"session_id":                    info.SessionID,
 		"backend_session_id":            info.BackendSessionID,
@@ -1694,10 +1711,22 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"opened_at":                     info.OpenedAt,
 		"last_used_at":                  info.LastUsedAt,
 		"proxy":                         info.Proxy,
-		"view":                          browserViewReference(id),
+		"view":                          browserViewReference(info.SessionID),
+	}
+	if info.Status != "active" {
+		out["closed"] = true
+	}
+	if info.ClosedAt != "" {
+		out["closed_at"] = info.ClosedAt
+	}
+	if info.CloseReason != "" {
+		out["close_reason"] = info.CloseReason
 	}
 	if info.Environment != nil {
 		out["environment"] = info.Environment
+	}
+	if info.Usage != nil {
+		out["usage"] = info.Usage
 	}
 	return out
 }
