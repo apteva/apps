@@ -23,6 +23,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -684,12 +685,12 @@ func TestComputerUseNavigationAndSafetySchema(t *testing.T) {
 	tool := findTool(t, (&App{}).MCPTools(), "computer_use")
 	properties := tool.InputSchema["properties"].(map[string]any)
 	actions := properties["action"].(map[string]any)["enum"].([]string)
-	for _, required := range []string{"navigate", "back", "reload", "wait_for_stable"} {
+	for _, required := range []string{"navigate", "back", "reload", "wait_for", "wait_for_stable"} {
 		if !slices.Contains(actions, required) {
 			t.Fatalf("computer_use action schema missing %q: %v", required, actions)
 		}
 	}
-	for _, required := range []string{"url", "expected_text", "quiet_ms", "timeout_ms"} {
+	for _, required := range []string{"url", "expected_text", "conditions", "match", "quiet_ms", "timeout_ms", "observation"} {
 		if _, ok := properties[required]; !ok {
 			t.Fatalf("computer_use schema missing %s", required)
 		}
@@ -738,6 +739,134 @@ func TestComputerUseWaitForStableValidationAndDispatch(t *testing.T) {
 		"quiet_ms":   500,
 	}); err == nil || !strings.Contains(err.Error(), "invalid_wait") {
 		t.Fatalf("quiet_ms on another action should fail: %v", err)
+	}
+}
+
+func TestComputerUseOutcomeWaitAndStabilityTimeoutAreStructured(t *testing.T) {
+	fake := &fakeComp{
+		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://example.com/post/saved",
+		somTargets: []backends.SetOfMarkTarget{{ID: "som_update", Label: 10, Role: "button", AccessibleName: "Update"}},
+		waitResult: backends.WaitResult{
+			Matched: true, WaitedMS: 125, Match: "any", CurrentURL: "https://example.com/post/saved",
+			Conditions: []backends.WaitConditionResult{{Index: 0, Type: "url_changed", Matched: true}},
+		},
+	}
+	app := appWithSession("br_outcome", fake, "browserbase")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_outcome", "action": "wait_for", "match": "any",
+		"conditions": []any{map[string]any{"type": "url_changed", "value": "https://example.com/post/edit"}},
+		"timeout_ms": 5000,
+	})
+	if err != nil {
+		t.Fatalf("wait_for outcome: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["matched"] != true || m["timed_out"] != false || m["observed_url"] != "https://example.com/post/saved" {
+		t.Fatalf("outcome payload=%#v", m)
+	}
+	if _, embedded := m["screenshot"]; embedded {
+		t.Fatalf("wait_for default semantic observation must not embed image bytes: %#v", m)
+	}
+	if _, ok := m["som_delta"].(map[string]any); !ok || fake.screenshotCalls != 1 {
+		t.Fatalf("wait_for should return one lightweight semantic refresh: calls=%d out=%#v", fake.screenshotCalls, m)
+	}
+	if fake.lastAction.Type != "wait_for" || len(fake.lastAction.Conditions) != 1 || fake.lastAction.Conditions[0].Value != "https://example.com/post/edit" {
+		t.Fatalf("wait_for dispatch=%+v", fake.lastAction)
+	}
+
+	timedOut := backends.WaitResult{TimedOut: true, WaitedMS: 15000, LoadingIndicators: 3, InflightRequests: 2, LoadingFrames: 2}
+	fake.waitResult = timedOut
+	fake.waitErr = &stability.TimeoutError{Kind: "stable", Result: timedOut}
+	out, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_outcome", "action": "wait_for_stable", "quiet_ms": 1500, "timeout_ms": 15000,
+	})
+	if err != nil {
+		t.Fatalf("stability timeout must be nonfatal: %v", err)
+	}
+	m = out.(map[string]any)
+	if m["timed_out"] != true || m["stable"] != false || m["loading_indicators"] != 3 || m["inflight_requests"] != 2 || m["loading_frames"] != 2 {
+		t.Fatalf("structured stability timeout=%#v", m)
+	}
+	if !strings.Contains(m["text"].(string), "does not mean an earlier browser action failed") {
+		t.Fatalf("timeout text conflates wait with prior operation: %#v", m)
+	}
+}
+
+func TestComputerUseInvalidatesSemanticSnapshotAfterPageChange(t *testing.T) {
+	fake := &fakeComp{
+		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://example.com/editor",
+		somTargets: []backends.SetOfMarkTarget{
+			{ID: "som_close", Label: 8, Role: "button", AccessibleName: "Close menu"},
+			{ID: "som_more", Label: 9, Role: "button", AccessibleName: "More options"},
+		},
+	}
+	app := appWithSession("br_stale", fake, "local")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_stale", "action": "screenshot"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_stale", "action": "click", "label": 8, "expected_text": "Close menu"}); err != nil {
+		t.Fatalf("first guarded click: %v", err)
+	}
+	before := len(fake.actionOnlyCalls)
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_stale", "action": "click", "label": 9, "expected_text": "More options"}); err == nil || !strings.Contains(err.Error(), "semantic snapshot is stale") {
+		t.Fatalf("reused label should be rejected before dispatch: %v", err)
+	}
+	if len(fake.actionOnlyCalls) != before {
+		t.Fatalf("stale label reached backend: %+v", fake.actionOnlyCalls)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_stale", "action": "screenshot"}); err != nil {
+		t.Fatalf("semantic refresh: %v", err)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": "br_stale", "action": "click", "label": 9, "expected_text": "More options"}); err != nil {
+		t.Fatalf("current label after refresh: %v", err)
+	}
+}
+
+func TestComputerUseBatchOutcomeCanReturnOnlySemanticDelta(t *testing.T) {
+	fake := &fakeComp{
+		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://example.com/post/saved",
+		somTargets: []backends.SetOfMarkTarget{{ID: "som_update", Label: 10, Role: "button", AccessibleName: "Update"}},
+		waitResult: backends.WaitResult{Matched: true, WaitedMS: 80, Match: "any", CurrentURL: "https://example.com/post/saved"},
+	}
+	app := appWithSession("br_batch_outcome", fake, "browserbase")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_batch_outcome", "action": "batch", "observation": "som_delta",
+		"steps": []any{
+			map[string]any{"action": "click", "label": 10, "expected_text": "Update"},
+			map[string]any{"action": "wait_for", "conditions": []any{map[string]any{"type": "url_changed", "value": "https://example.com/post/edit"}}, "timeout_ms": 5000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("outcome batch: %v", err)
+	}
+	m := out.(map[string]any)
+	if m["completed_steps"] != 2 || m["timed_out"] == true {
+		t.Fatalf("batch completion=%#v", m)
+	}
+	if _, embedded := m["screenshot"]; embedded {
+		t.Fatalf("som_delta observation embedded screenshot: %#v", m)
+	}
+	if _, ok := m["som_delta"].(map[string]any); !ok || fake.screenshotCalls != 1 {
+		t.Fatalf("batch semantic refresh missing: calls=%d out=%#v", fake.screenshotCalls, m)
+	}
+}
+
+func TestComputerUseIgnoresEmptyOptionalWaitAndObservationDefaults(t *testing.T) {
+	fake := &fakeComp{url: "https://example.com", png: []byte{0x89, 0x50, 0x4e, 0x47}}
+	app := appWithSession("br_verbose", fake, "local")
+	_, err := app.toolComputerUse(tk.NewAppCtx(t, "apteva.yaml"), map[string]any{
+		"session_id": "br_verbose", "action": "click", "selector": "#continue", "expected_text": "Continue",
+		"conditions": []any{}, "match": "", "quiet_ms": 0, "timeout_ms": 0, "observation": "",
+	})
+	if err != nil {
+		t.Fatalf("empty optional defaults should be ignored for an ordinary action: %v", err)
+	}
+	if len(fake.actionOnlyCalls) != 1 || fake.actionOnlyCalls[0].Selector != "#continue" {
+		t.Fatalf("ordinary action was not dispatched: %+v", fake.actionOnlyCalls)
 	}
 }
 
@@ -2038,6 +2167,9 @@ func TestComputerUseBatchAbortsAndReturnsOneFinalFrame(t *testing.T) {
 	if fake.screenshotCalls != 0 {
 		t.Fatalf("failed batch must not claim a final screenshot, got %d", fake.screenshotCalls)
 	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err != nil {
+		t.Fatalf("refresh semantic snapshot after failed batch: %v", err)
+	}
 
 	settings := backends.ScrollRegion{ID: "scroll_settings", Name: "Settings", Role: "region", CanScrollY: true, MaxScrollY: 800}
 	fake.executeActionHook = nil
@@ -3051,6 +3183,8 @@ type fakeComp struct {
 	extractResult     backends.ExtractResult
 	extractErr        error
 	extractOptions    backends.ExtractOptions
+	waitResult        backends.WaitResult
+	waitErr           error
 	mu                sync.Mutex // for the unlikely concurrent test
 }
 
@@ -3099,6 +3233,45 @@ func (f *fakeComp) ExecuteAction(action backends.Action) error {
 		return f.executeErr
 	}
 	return f.executeActionErr
+}
+
+func (f *fakeComp) runWait(action backends.Action) (backends.WaitResult, error) {
+	f.mu.Lock()
+	f.lastAction = action
+	f.actionOnlyCalls = append(f.actionOnlyCalls, action)
+	f.mu.Unlock()
+	if f.executeActionHook != nil {
+		if err := f.executeActionHook(action); err != nil {
+			return backends.WaitResult{}, err
+		}
+	}
+	if f.waitErr != nil {
+		return f.waitResult, f.waitErr
+	}
+	if f.executeActionErr != nil {
+		return backends.WaitResult{}, f.executeActionErr
+	}
+	if f.executeErr != nil {
+		return backends.WaitResult{}, f.executeErr
+	}
+	return f.waitResult, nil
+}
+
+func (f *fakeComp) WaitForStable(quietMS, timeoutMS int) (backends.WaitResult, error) {
+	result, err := f.runWait(backends.Action{Type: "wait_for_stable", QuietMS: quietMS, TimeoutMS: timeoutMS})
+	if !result.Stable && !result.Matched && !result.TimedOut && result.WaitedMS == 0 && err == nil {
+		result.Stable = true
+	}
+	return result, err
+}
+
+func (f *fakeComp) WaitForOutcome(conditions []backends.WaitCondition, match string, quietMS, timeoutMS int) (backends.WaitResult, error) {
+	result, err := f.runWait(backends.Action{Type: "wait_for", Conditions: conditions, Match: match, QuietMS: quietMS, TimeoutMS: timeoutMS})
+	if !result.Stable && !result.Matched && !result.TimedOut && result.WaitedMS == 0 && err == nil {
+		result.Matched = true
+		result.Match = firstNonEmpty(match, "any")
+	}
+	return result, err
 }
 
 func (f *fakeComp) Screenshot() ([]byte, error) {

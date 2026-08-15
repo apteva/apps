@@ -460,8 +460,16 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	case "wait_for_stable":
 		_, cancel := c.actionContext(action.Type)
 		defer cancel()
-		if _, err := c.waitForStable(action.QuietMS, action.TimeoutMS); err != nil {
+		if _, err := c.WaitForStable(action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for_stable: %w", err)
+		}
+		return c.Screenshot()
+
+	case "wait_for":
+		_, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if _, err := c.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS); err != nil {
+			return nil, fmt.Errorf("wait_for: %w", err)
 		}
 		return c.Screenshot()
 
@@ -566,7 +574,12 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 	case "wait_for_stable":
 		_, cancel := c.actionContext(action.Type)
 		defer cancel()
-		_, err := c.waitForStable(action.QuietMS, action.TimeoutMS)
+		_, err := c.WaitForStable(action.QuietMS, action.TimeoutMS)
+		return err
+	case "wait_for":
+		_, cancel := c.actionContext(action.Type)
+		defer cancel()
+		_, err := c.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS)
 		return err
 	case "scroll":
 		ctx, cancel := c.actionContext(action.Type)
@@ -1429,11 +1442,18 @@ func (c *Computer) attachStabilityTracker() {
 	c.stabilityTracker = tracker
 }
 
-func (c *Computer) waitForStable(quietMS, timeoutMS int) (stability.Result, error) {
+func (c *Computer) WaitForStable(quietMS, timeoutMS int) (stability.Result, error) {
 	if c.stabilityTracker != nil {
 		return c.stabilityTracker.Wait(quietMS, timeoutMS)
 	}
 	return stability.Wait(c.ctx, quietMS, timeoutMS)
+}
+
+func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match string, quietMS, timeoutMS int) (stability.Result, error) {
+	if c.stabilityTracker != nil {
+		return c.stabilityTracker.WaitForOutcome(conditions, match, quietMS, timeoutMS)
+	}
+	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
 func pickInitialPageTarget(infos []*target.Info) target.ID {

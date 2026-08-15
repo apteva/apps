@@ -107,12 +107,19 @@ provides:
         target_id plus som_revision when a workflow spans changing screenshots;
         stale revisions and name/role mismatches are rejected. Computer resolves the live element
         again immediately before dispatch and rejects loading or disabled
-        targets. A coordinate that lands on a consequential control requires
-        expected_text exactly matching its current accessible name. When
-        autosave, a spinner, aria-busy, or another loading state is visible,
-        use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms
-        (default 10000), then take a fresh screenshot. Stability includes DOM,
-        navigation, loading-frame, and finite network activity. If the page asks to Browse, choose, attach,
+        targets. For any click that saves, submits, publishes, deletes, sends,
+        pays, or navigates, pass expected_text with the intended accessible
+        name so it is verified atomically. A coordinate that lands on a consequential control requires
+        expected_text exactly matching its current accessible name. For an
+        operation outcome, prefer action=wait_for with declarative URL, text,
+        selector, or semantic-target conditions. It ignores unrelated
+        background requests and embedded frames. To verify navigation away
+        from a known current URL, use type=url_changed with that pre-action
+        URL; use url_equals only when the destination URL is known. Use
+        action=wait_for_stable only when the whole page must become quiet.
+        Wait timeouts return timed_out=true
+        and observed signals; they never mean an earlier click or edit failed.
+        If the page asks to Browse, choose, attach,
         upload, or drop a file, use action=upload_file with selector or label
         plus source_url/base64/file_path; do not operate the native OS file
         picker. For any native select, dropdown, combobox, listbox, or
@@ -149,20 +156,19 @@ provides:
         Use action=navigate with url for direct navigation, action=back for
         browser history, and action=reload to refresh the current page. Do not
         emulate these with Control+L, Alt+ArrowLeft, or F5. Use action=batch
-        with ordered click/double_click/scroll/wait/wait_for_stable steps for an
-        abort-on-error guarded sequence and one final screenshot. After scrolling,
-        tab switching, selection, upload, checked-state changes, text changes,
-        temporal-field changes, or navigation, take a fresh screenshot because
-        labels are re-enumerated. Args:
+        for guarded click followed by wait_for. Set observation=som_delta for a
+        compact refreshed semantic state without image bytes; batch keeps
+        observation=screenshot as its compatibility default. Semantic labels
+        and target ids become stale after page-changing actions and must be
+        refreshed before reuse. Args:
         session_id, action, url? (navigate only), tab_id?, coordinate?, label?,
         target_id?, som_revision?, selector?, expected_text?, expected_name?,
-        expected_role?, quiet_ms?, timeout_ms?,
+        expected_role?, conditions?, match?, quiet_ms?, timeout_ms?, observation?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
         text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,
         duration?, steps? (batch only), annotate? (screenshot/batch, default true), include_som?
         (screenshot/batch, default false). Ordinary actions return a compact
         summary and screenshot_url without embedding duplicate image bytes.
-        Explicit screenshot and batch return one binary frame plus som_delta.
         They also include compact safety_targets for loading, disabled, or
         consequential controls; full structured som is returned with include_som=true.
     - name: computer_context_create

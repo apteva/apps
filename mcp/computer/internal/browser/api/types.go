@@ -12,30 +12,32 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
-	Type         string   `json:"type"`                    // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "wait_for_stable", "select_option", "set_checked", "set_temporal", "set_text"
-	X            int      `json:"x,omitempty"`             // click/scroll coordinate
-	Y            int      `json:"y,omitempty"`             // click/scroll coordinate
-	Selector     string   `json:"selector,omitempty"`      // CSS selector for click and DOM-targeted form actions
-	Files        []string `json:"files,omitempty"`         // local or provider-session file paths for upload_file
-	Text         string   `json:"text,omitempty"`          // for "type" action
-	Value        string   `json:"value,omitempty"`         // for "select_option": option value; for "set_temporal": full field value
-	Checked      bool     `json:"checked,omitempty"`       // for "set_checked": desired checkbox/switch/radio state
-	Texts        []string `json:"texts,omitempty"`         // for "select_option": option display texts
-	Values       []string `json:"values,omitempty"`        // for "select_option": option values
-	Mode         string   `json:"mode,omitempty"`          // for "select_option": replace, add, remove, toggle; for "set_text": replace, append
-	NewlineMode  string   `json:"newline_mode,omitempty"`  // for "set_text": preserve, compact
-	Key          string   `json:"key,omitempty"`           // for "key" action (e.g. "Enter", "Escape")
-	Direction    string   `json:"direction,omitempty"`     // for "scroll": "up", "down", "left", "right"
-	Amount       int      `json:"amount,omitempty"`        // for "scroll": CSS pixels; defaults to 300
-	URL          string   `json:"url,omitempty"`           // for "navigate"
-	Duration     int      `json:"duration,omitempty"`      // for "wait" (milliseconds)
-	QuietMS      int      `json:"quiet_ms,omitempty"`      // for "wait_for_stable": required mutation-free interval
-	TimeoutMS    int      `json:"timeout_ms,omitempty"`    // for "wait_for_stable": maximum wait
-	ExpectedText string   `json:"expected_text,omitempty"` // live accessible name required immediately before click
-	TargetID     string   `json:"target_id,omitempty"`     // stable SoM target or semantic scroll-region id
-	SOMRevision  int      `json:"som_revision,omitempty"`  // optional revision guard for label/target_id actions
-	ExpectedName string   `json:"expected_name,omitempty"` // semantic target name required before dispatch
-	ExpectedRole string   `json:"expected_role,omitempty"` // semantic target role required before dispatch
+	Type         string          `json:"type"`                    // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "wait_for", "wait_for_stable", "select_option", "set_checked", "set_temporal", "set_text"
+	X            int             `json:"x,omitempty"`             // click/scroll coordinate
+	Y            int             `json:"y,omitempty"`             // click/scroll coordinate
+	Selector     string          `json:"selector,omitempty"`      // CSS selector for click and DOM-targeted form actions
+	Files        []string        `json:"files,omitempty"`         // local or provider-session file paths for upload_file
+	Text         string          `json:"text,omitempty"`          // for "type" action
+	Value        string          `json:"value,omitempty"`         // for "select_option": option value; for "set_temporal": full field value
+	Checked      bool            `json:"checked,omitempty"`       // for "set_checked": desired checkbox/switch/radio state
+	Texts        []string        `json:"texts,omitempty"`         // for "select_option": option display texts
+	Values       []string        `json:"values,omitempty"`        // for "select_option": option values
+	Mode         string          `json:"mode,omitempty"`          // for "select_option": replace, add, remove, toggle; for "set_text": replace, append
+	NewlineMode  string          `json:"newline_mode,omitempty"`  // for "set_text": preserve, compact
+	Key          string          `json:"key,omitempty"`           // for "key" action (e.g. "Enter", "Escape")
+	Direction    string          `json:"direction,omitempty"`     // for "scroll": "up", "down", "left", "right"
+	Amount       int             `json:"amount,omitempty"`        // for "scroll": CSS pixels; defaults to 300
+	URL          string          `json:"url,omitempty"`           // for "navigate"
+	Duration     int             `json:"duration,omitempty"`      // for "wait" (milliseconds)
+	QuietMS      int             `json:"quiet_ms,omitempty"`      // for "wait_for_stable": required mutation-free interval
+	TimeoutMS    int             `json:"timeout_ms,omitempty"`    // for "wait_for"/"wait_for_stable": maximum wait
+	Match        string          `json:"match,omitempty"`         // for "wait_for": any (default) or all
+	Conditions   []WaitCondition `json:"conditions,omitempty"`    // for "wait_for": observable completion conditions
+	ExpectedText string          `json:"expected_text,omitempty"` // live accessible name required immediately before click
+	TargetID     string          `json:"target_id,omitempty"`     // stable SoM target or semantic scroll-region id
+	SOMRevision  int             `json:"som_revision,omitempty"`  // optional revision guard for label/target_id actions
+	ExpectedName string          `json:"expected_name,omitempty"` // semantic target name required before dispatch
+	ExpectedRole string          `json:"expected_role,omitempty"` // semantic target role required before dispatch
 	// GuardDangerousCoordinate is set by the MCP layer only when the caller
 	// explicitly targeted a raw coordinate. Backends then require expected_text
 	// if the live hit-tested element is consequential.
@@ -47,6 +49,42 @@ type Action struct {
 	// most recent screenshot. Takes precedence over X/Y when set.
 	// Implementations that don't support SoM fall back to X/Y.
 	Label int `json:"label,omitempty"`
+}
+
+// WaitCondition is one provider-neutral browser outcome. Conditions are
+// intentionally declarative: they cover common navigation and DOM outcomes
+// without exposing arbitrary JavaScript execution to callers.
+type WaitCondition struct {
+	Type          string `json:"type"`
+	Value         string `json:"value,omitempty"`
+	Selector      string `json:"selector,omitempty"`
+	TargetID      string `json:"target_id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Role          string `json:"role,omitempty"`
+	CaseSensitive bool   `json:"case_sensitive,omitempty"`
+}
+
+type WaitConditionResult struct {
+	Index    int    `json:"index"`
+	Type     string `json:"type"`
+	Matched  bool   `json:"matched"`
+	TargetID string `json:"target_id,omitempty"`
+}
+
+// WaitResult separates what was observed from whether the wait exhausted its
+// deadline. A timed-out wait does not imply that an earlier click or edit
+// failed; MCP callers can inspect these fields and choose another observation.
+type WaitResult struct {
+	Stable            bool                  `json:"stable,omitempty"`
+	Matched           bool                  `json:"matched,omitempty"`
+	TimedOut          bool                  `json:"timed_out,omitempty"`
+	WaitedMS          int                   `json:"waited_ms"`
+	Match             string                `json:"match,omitempty"`
+	CurrentURL        string                `json:"current_url,omitempty"`
+	Conditions        []WaitConditionResult `json:"conditions,omitempty"`
+	LoadingIndicators int                   `json:"loading_indicators,omitempty"`
+	InflightRequests  int                   `json:"inflight_requests,omitempty"`
+	LoadingFrames     int                   `json:"loading_frames,omitempty"`
 }
 
 // PresentationOptions makes browser actions legible in live views and hosted
@@ -287,6 +325,14 @@ type Computer interface {
 // preserving Computer.Execute's historical action+screenshot contract.
 type ActionOnlyExecutor interface {
 	ExecuteAction(action Action) error
+}
+
+// StabilityWaiter is implemented by CDP-backed providers. The MCP layer uses
+// it to return structured, nonfatal timeout observations and outcome-specific
+// completion without confusing a wait timeout with failure of a prior action.
+type StabilityWaiter interface {
+	WaitForStable(quietMS, timeoutMS int) (WaitResult, error)
+	WaitForOutcome(conditions []WaitCondition, match string, quietMS, timeoutMS int) (WaitResult, error)
 }
 
 // TabInfo describes one browser page target inside a provider session.

@@ -142,7 +142,7 @@ Current SoM: %s`, mustJSON(mapsFromAny(scrollOut["som_delta"].(map[string]any)["
 		"session_id": sessionID, "action": textDecision.Action,
 		"target_id": textDecision.TargetID, "expected_name": textDecision.ExpectedName,
 		"expected_role": textDecision.ExpectedRole, "text": textDecision.Text,
-		"newline_mode": textDecision.NewlineMode,
+		"newline_mode": textDecision.NewlineMode, "observation": "som_delta",
 	})
 	if !boolFromAny(textOut["text_verified"]) || stringValue(textOut["text_rendered"]) != textDecision.Text {
 		t.Fatalf("rendered text readback was not verified: %v", textOut)

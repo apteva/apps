@@ -40,6 +40,7 @@ import (
 	browserenvironment "github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/presentation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/stability"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	_ "modernc.org/sqlite"
@@ -93,7 +94,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. For ordinary browsing, pass only action=open plus url or context_id/context_name. Omit every other optional field unless the task explicitly requires that override; never populate optional fields with guessed or schema-default values. environment is an advanced QA/device-emulation override only, for a specifically requested user agent, locale, timezone, geolocation, scale, mobile, or touch profile. Never send environment for normal navigation, read-only audits, or saved-login contexts. Proxy overrides are also opt-in: omit proxy_mode and all proxy_* fields to use Computer settings. managed uses the selected browser backend's proxy, profile uses a safe configured profile returned by computer_proxy_profile_list, and direct explicitly disables proxies. Use presentation_mode=demo only for a requested user-facing walkthrough; fast is the default. Usually omit viewport to use Computer's default desktop viewport, 1600x800. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. Open, status, and close results include view, a copyable browser-view component reference containing only session_id."
     - name: computer_use
-      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, and semantic scroll_regions. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and returns normalized rendered-text verification. Use wait_for_stable around loading UI. Use batch for guarded click/double_click/scroll/wait/wait_for_stable sequences with one final screenshot."
+      description: "Drive an app-owned browser session. Start with action=screenshot. Screenshots expose stable SoM target ids, a som_revision, safety state, and semantic scroll_regions. Existing label and coordinate actions remain supported. Prefer target_id with som_revision across changing frames; optional expected_name and expected_role reject stale or contradictory targets. For a click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so Computer verifies it atomically at dispatch. For scroll, select a scroll_regions target_id when multiple containers can move. Results report requested and actual regions, observed offsets, no/wrong movement, boundaries, and newly revealed controls. set_text preserves rich paragraph structure and returns normalized rendered-text verification. Prefer outcome-specific wait_for over page-wide wait_for_stable on dynamic sites. To verify navigation away from a known URL, use url_changed with the pre-action URL; url_equals is only for a known destination. Wait timeouts are structured observations, not failure of a prior action. Use batch with observation=som_delta for guarded action, outcome wait, and one lightweight semantic refresh without screenshot bytes."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -311,6 +312,7 @@ type session struct {
 	lastUsed         time.Time
 	somRevision      int
 	somPrevious      map[string]backends.SetOfMarkTarget
+	somDirty         bool
 }
 
 type reapedSession struct {
@@ -584,8 +586,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates that resolve to consequential controls require expected_text exactly matching the live accessible name. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
-				"When autosave, a spinner, aria-busy, or another loading state is visible, use action=wait_for_stable with quiet_ms (default 1500) and timeout_ms (default 10000), then take a fresh screenshot. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. For any click that saves, submits, publishes, deletes, sends, pays, or navigates, pass expected_text with the intended accessible name so the name and loading state are verified atomically. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates that resolve to consequential controls require expected_text exactly matching the live accessible name. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
+				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, or semantic-target conditions; it ignores unrelated background requests and embedded frames. To verify navigation away from a known current URL, use type=url_changed and value=<the URL before the action>; use url_equals only when value is the desired destination. Use action=wait_for_stable only when the whole page must become quiet. A wait timeout returns timed_out=true and observed signals; it never means an earlier click or edit failed. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
@@ -593,15 +595,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, screenshots return semantic scroll_regions. When more than one region can scroll, pass target_id for the intended region and optionally expected_name/expected_role. Scroll reports the region that actually moved, before/after offsets, moved, wrong_target, at_start/at_end, and newly revealed controls. amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
-				"Use action=batch with steps=[{action:\"scroll\",target_id:\"scroll_...\"},{action:\"wait_for_stable\"}] or guarded click steps for a sequence that aborts on the first error and returns one final screenshot. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
-				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click guard), expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, quiet_ms?, timeout_ms?, annotate? (screenshot only, default true). " +
-				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Explicit screenshot and batch return one binary screenshot envelope. Full tabs and viewport metadata are available from browser_session.",
+				"Use action=batch for guarded click followed by wait_for. Set observation=som_delta to receive a lightweight refreshed semantic state without image bytes; batch keeps observation=screenshot as its compatibility default. Semantic labels and target ids become stale after page-changing actions and must be refreshed before reuse. Actions: screenshot, batch, navigate, back, reload, click, double_click, type, key, scroll, wait, wait_for, wait_for_stable, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), target_id? (stable SoM target or scroll region), som_revision? (stale-target guard), selector? (CSS selector), expected_text? (click guard), expected_name?, expected_role?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, conditions?, match?, quiet_ms?, timeout_ms?, observation?, annotate? (screenshot only, default true). " +
+				"Screenshot responses include compact safety_targets and som_delta; pass include_som=true for every structured target. Ordinary actions return a compact summary plus screenshot_url instead of embedding duplicate image bytes. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "batch", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
 				"steps": map[string]any{
 					"type": "array", "minItems": 1, "maxItems": 20,
-					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for_stable steps. Scroll steps accept target_id, direction, amount, expected_name, and expected_role. The batch aborts on the first failed guard/action and captures one final annotated screenshot after all steps succeed.",
+					"description": "For action=batch. Ordered click/double_click/scroll/wait/wait_for/wait_for_stable steps. A timed-out wait stops later steps but returns completed steps and the requested final observation. Batch defaults observation=screenshot for compatibility; use som_delta for a compact semantic refresh.",
 					"items":       map[string]any{"type": "object"},
 				},
 				"url":           map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
@@ -611,7 +613,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target_id":     map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
 				"som_revision":  map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
 				"selector":      map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
-				"expected_text": map[string]any{"type": "string", "description": "For click/double_click, exact accessible name required at dispatch time. Required when a raw coordinate lands on a consequential control; optional extra protection for labels/selectors."},
+				"expected_text": map[string]any{"type": "string", "description": "For click/double_click, the intended exact accessible name, verified atomically at dispatch time along with loading/disabled state. Always pass it for actions that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
 				"expected_name": map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, especially scroll."},
 				"expected_role": map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, especially scroll."},
 				"checked":       map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
@@ -630,11 +632,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"direction":     map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
 				"amount":        map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":      map[string]any{"type": "integer"},
-				"quiet_ms":      map[string]any{"type": "integer", "minimum": 100, "maximum": 10000, "description": "For wait_for_stable, required DOM/resource quiet interval. Default 1500 ms."},
-				"timeout_ms":    map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For wait_for_stable, maximum wait. Default 10000 ms."},
-				"annotate":      map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
-				"som":           map[string]any{"type": "boolean", "description": "Alias for annotate."},
-				"include_som":   map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
+				"conditions": map[string]any{"type": "array", "minItems": 1, "maxItems": 8, "description": "For wait_for. Declarative browser outcomes. match defaults to any.", "items": map[string]any{"type": "object", "properties": map[string]any{
+					"type":           map[string]any{"type": "string", "enum": []string{"url_changed", "url_equals", "url_contains", "text_present", "text_absent", "selector_present", "selector_absent", "target_present", "target_absent"}, "description": "Outcome predicate. For navigation away from a known current URL, choose url_changed. Choose url_equals only when the destination URL is known."},
+					"value":          map[string]any{"type": "string", "description": "Required for URL/text conditions. For url_changed, pass the URL before the action (success means current URL differs). For url_equals/url_contains, pass the desired destination URL/value. For text conditions, pass visible text."},
+					"selector":       map[string]any{"type": "string", "description": "CSS selector required for selector conditions."},
+					"target_id":      map[string]any{"type": "string", "description": "Current semantic target id required for target conditions."},
+					"case_sensitive": map[string]any{"type": "boolean"},
+				}, "required": []string{"type"}}},
+				"match":       map[string]any{"type": "string", "enum": []string{"any", "all"}, "description": "For wait_for with multiple conditions. Defaults any."},
+				"quiet_ms":    map[string]any{"type": "integer", "minimum": 100, "maximum": 10000, "description": "For wait_for, optional time the outcome must remain matched. For wait_for_stable, required page-wide quiet interval; default 1500 ms."},
+				"timeout_ms":  map[string]any{"type": "integer", "minimum": 500, "maximum": 30000, "description": "For wait_for/wait_for_stable, maximum wait. Timeout is returned as structured timed_out=true, not failure of a prior action."},
+				"observation": map[string]any{"type": "string", "enum": []string{"none", "som_delta", "screenshot"}, "description": "Final observation after an action or batch. som_delta refreshes semantic targets without returning image bytes. Batch defaults screenshot; scroll and waits default som_delta; other actions default none."},
+				"annotate":    map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
+				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"include_som": map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
 		},
@@ -2064,6 +2075,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Use action=wait_for_stable with quiet_ms=1500 and timeout_ms between quiet_ms and 30000.",
 			nil)
 	}
+	if err := validateObservationArgs(action, args); err != nil {
+		return nil, computerUseFailure("invalid_observation", id, sess, action,
+			err.Error(), "Use observation=none, som_delta, or screenshot. Omit it for the action default.", err)
+	}
 	if err := validateSelectOptionArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			err.Error(),
@@ -2100,6 +2115,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "batch" {
 		return a.toolComputerUseBatchLocked(ctx, id, sess, args)
 	}
+	conditions, conditionsErr := waitConditionsArg(args["conditions"])
+	if conditionsErr != nil {
+		return nil, computerUseFailure("invalid_wait", id, sess, action, conditionsErr.Error(), "Pass valid declarative wait_for conditions.", conditionsErr)
+	}
+	conditions, conditionsErr = hydrateWaitTargetConditions(sess, conditions)
+	if conditionsErr != nil {
+		return nil, computerUseFailure("invalid_wait", id, sess, action, conditionsErr.Error(), "Take a fresh semantic observation and use its current target_id.", conditionsErr)
+	}
 
 	act := backends.Action{
 		Type:         action,
@@ -2118,6 +2141,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Duration:     intArg(args, "duration"),
 		QuietMS:      intArg(args, "quiet_ms"),
 		TimeoutMS:    intArg(args, "timeout_ms"),
+		Match:        strings.TrimSpace(stringArg(args, "match")),
+		Conditions:   conditions,
 		ExpectedText: strings.TrimSpace(stringArg(args, "expected_text")),
 		TargetID:     strings.TrimSpace(stringArg(args, "target_id")),
 		SOMRevision:  intArg(args, "som_revision"),
@@ -2212,6 +2237,11 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Use local, Browserbase, Steel, or Browser Engine for wait_for_stable, or use a bounded wait followed by a fresh screenshot.",
 			nil)
 	}
+	if action == "wait_for" && sess.backend == "service" {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not expose DOM outcome signals", sess.backend),
+			"Use local, Browserbase, Steel, or Browser Engine for wait_for, or use a bounded wait followed by a fresh observation.", nil)
+	}
 
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := []backends.TabInfo(nil)
@@ -2226,8 +2256,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if includeSOM {
 		annotate = true
 	}
+	var waitResult *backends.WaitResult
 	if action == "screenshot" {
 		shot, err = screenshotWithOptions(sess.comp, annotate)
+	} else if action == "wait_for" || action == "wait_for_stable" {
+		observed, waitErr := executeSemanticWait(sess, act)
+		waitResult = &observed
+		err = waitErr
+		screenshotSkipped = true
 	} else if canExecuteActionOnly(sess, action) {
 		err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
 		screenshotSkipped = true
@@ -2262,12 +2298,24 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	tabEvent := tabFollowResult{}
 	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
 		tabEvent = autoFollowNewTab(sess.comp, beforeTabs)
-		if tabEvent.Switched && !screenshotSkipped {
-			if reshot, serr := screenshotWithOptions(sess.comp, annotateArg(args, true)); serr == nil {
-				shot = reshot
-			} else if ctx != nil {
-				ctx.Logger().Warn("new tab screenshot failed", "session_id", id, "err", serr.Error())
-			}
+	}
+	markSemanticSnapshotDirty(sess, action)
+	observation := observationArg(args, action)
+	var observationDelta map[string]any
+	if action != "screenshot" && observation != "none" {
+		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
+		observedShot, observeErr := screenshotWithOptions(sess.comp, observeAnnotate)
+		if observeErr != nil {
+			return nil, computerUseFailure("backend_error", id, sess, action,
+				"browser action completed but semantic observation failed",
+				"Call computer_use(action=screenshot) to retrieve the latest browser state.", observeErr)
+		}
+		if observeAnnotate {
+			observationDelta = setOfMarkDelta(sess)
+		}
+		if observation == "screenshot" {
+			shot = observedShot
+			screenshotSkipped = false
 		}
 	}
 	afterURL := currentURL(sess.comp)
@@ -2313,25 +2361,25 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		textResult = textResultFor(sess.comp)
 	}
 	var scrollResult *backends.ScrollResult
-	var actionSOMDelta map[string]any
 	if action == "scroll" {
 		scrollResult = scrollResultFor(sess.comp)
-		actionSOMDelta = setOfMarkDelta(sess)
 	}
 	mergeSelectResultPayload(payload, selectResult)
 	mergeCheckedResultPayload(payload, checkedResult)
 	mergeTemporalResultPayload(payload, temporalResult)
 	mergeTextResultPayload(payload, textResult)
 	mergeScrollResultPayload(payload, scrollResult)
-	if actionSOMDelta != nil {
-		payload["som_delta"] = actionSOMDelta
+	if observationDelta != nil {
+		payload["som_delta"] = observationDelta
 	}
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
-	if action == "wait_for_stable" {
-		payload["stable"] = true
-		payload["quiet_ms"] = stableQuietMS
+	if waitResult != nil {
+		mergeWaitResultPayload(payload, *waitResult)
+		if action == "wait_for_stable" {
+			payload["quiet_ms"] = stableQuietMS
+		}
 	}
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
@@ -2347,12 +2395,17 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["height"] = disp.Height
 	}
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
-	if action == "wait_for_stable" {
-		out["stable"] = true
-		out["quiet_ms"] = stableQuietMS
+	if waitResult != nil {
+		mergeWaitResultPayload(out, *waitResult)
+		if action == "wait_for_stable" {
+			out["quiet_ms"] = stableQuietMS
+		}
 	}
 	if screenshotSkipped {
 		out["text"] = fmt.Sprintf("Success: %s action completed. Latest visual state is available at screenshot_url.", action)
+		if waitResult != nil && waitResult.TimedOut {
+			out["text"] = "Wait timed out without proving the requested condition. This does not mean an earlier browser action failed. Inspect the returned signals or request another observation."
+		}
 		out["screenshot_available"] = true
 		out["post_action_screenshot"] = "not_embedded"
 		out["next_step"] = "Call computer_use(action=screenshot) when visual grounding is needed."
@@ -2376,11 +2429,21 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if includeSOM && !screenshotSkipped {
 		out["som"] = setOfMarkFor(sess.comp)
 	}
-	if action == "screenshot" && !screenshotSkipped {
+	if action == "screenshot" && !screenshotSkipped && annotate {
 		out["som_delta"] = setOfMarkDelta(sess)
 		out["scroll_regions"] = scrollRegionsFor(sess.comp)
 		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
 			out["safety_targets"] = targets
+		}
+	}
+	if observationDelta != nil {
+		out["som_delta"] = observationDelta
+		out["scroll_regions"] = scrollRegionsFor(sess.comp)
+		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
+			out["safety_targets"] = targets
+		}
+		if boolArgDefault(args, "include_som", false) {
+			out["som"] = setOfMarkFor(sess.comp)
 		}
 	}
 	for k, v := range uploadMeta {
@@ -2391,9 +2454,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeTemporalResultPayload(out, temporalResult)
 	mergeTextResultPayload(out, textResult)
 	mergeScrollResultPayload(out, scrollResult)
-	if actionSOMDelta != nil {
-		out["som_delta"] = actionSOMDelta
-		if added, ok := actionSOMDelta["added"]; ok {
+	if observationDelta != nil {
+		if added, ok := observationDelta["added"]; ok {
 			out["revealed_targets"] = added
 		}
 	}
@@ -2422,7 +2484,7 @@ func canExecuteActionOnly(sess *session, action string) bool {
 		return false
 	}
 	switch action {
-	case "click", "double_click", "wait", "wait_for_stable":
+	case "click", "double_click", "wait", "wait_for", "wait_for_stable":
 	default:
 		return false
 	}
@@ -2442,11 +2504,13 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 	steps, err := batchStepArgs(args["steps"])
 	if err != nil {
 		return nil, computerUseFailure("invalid_batch", id, sess, "batch", err.Error(),
-			"Pass 1-20 ordered click/double_click/scroll/wait/wait_for_stable step objects.", err)
+			"Pass 1-20 ordered click/double_click/scroll/wait/wait_for/wait_for_stable step objects.", err)
 	}
 	beforeURL := currentURL(sess.comp)
 	beforeTabs := tabsFor(sess.comp)
 	completed := make([]map[string]any, 0, len(steps))
+	completedCount := 0
+	batchTimedOut := false
 	for index, step := range steps {
 		action := strings.TrimSpace(stringArg(step, "action"))
 		switch action {
@@ -2455,12 +2519,12 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
 					fmt.Sprintf("step %d: %v", index+1, err), "Take a fresh screenshot and use a current label, selector, or explicit coordinate.", err)
 			}
-		case "wait_for_stable":
+		case "wait_for", "wait_for_stable":
 			if sess.backend == "service" {
-				return nil, computerUseFailure("backend_not_supported", id, sess, "batch", "wait_for_stable is unavailable on service backend", "Use a browser backend with DOM stability signals.", nil)
+				return nil, computerUseFailure("backend_not_supported", id, sess, "batch", action+" is unavailable on service backend", "Use a browser backend with DOM outcome signals.", nil)
 			}
 			if err := validateStableArgs(action, step); err != nil {
-				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, err), "Use quiet_ms=1500 and timeout_ms up to 30000.", err)
+				return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, err), "Use declarative conditions for wait_for, or quiet_ms for wait_for_stable.", err)
 			}
 		case "scroll":
 			if strings.TrimSpace(stringArg(step, "direction")) == "" {
@@ -2470,13 +2534,22 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 		case "wait":
 		default:
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
-				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, scroll, wait, or wait_for_stable inside a batch.", nil)
+				fmt.Sprintf("step %d uses unsupported action %q", index+1, action), "Use click, double_click, scroll, wait, wait_for, or wait_for_stable inside a batch.", nil)
+		}
+		conditions, conditionErr := waitConditionsArg(step["conditions"])
+		if conditionErr != nil {
+			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, conditionErr), "Pass valid declarative wait_for conditions.", conditionErr)
+		}
+		conditions, conditionErr = hydrateWaitTargetConditions(sess, conditions)
+		if conditionErr != nil {
+			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch", fmt.Sprintf("step %d: %v", index+1, conditionErr), "Use a current target_id from the latest semantic observation.", conditionErr)
 		}
 
 		act := backends.Action{
 			Type: action, Label: intArg(step, "label"), Selector: stringArg(step, "selector"),
 			Direction: stringArg(step, "direction"), Amount: intArg(step, "amount"),
 			Duration: intArg(step, "duration"), QuietMS: intArg(step, "quiet_ms"), TimeoutMS: intArg(step, "timeout_ms"),
+			Match: strings.TrimSpace(stringArg(step, "match")), Conditions: conditions,
 			ExpectedText: strings.TrimSpace(stringArg(step, "expected_text")),
 			TargetID:     strings.TrimSpace(stringArg(step, "target_id")), SOMRevision: intArg(step, "som_revision"),
 			ExpectedName: strings.TrimSpace(stringArg(step, "expected_name")), ExpectedRole: strings.TrimSpace(stringArg(step, "expected_role")),
@@ -2509,7 +2582,12 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 				fmt.Sprintf("step %d: Set-of-Mark label %d is stale or absent", index+1, act.Label), "Take a fresh screenshot and rebuild the batch from current labels.", nil)
 		}
 
-		if canExecuteBatchActionOnly(sess, action) {
+		var waitResult *backends.WaitResult
+		if action == "wait_for" || action == "wait_for_stable" {
+			observed, waitErr := executeSemanticWait(sess, act)
+			waitResult = &observed
+			err = waitErr
+		} else if canExecuteBatchActionOnly(sess, action) {
 			err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
 		} else {
 			_, err = sess.comp.Execute(act)
@@ -2523,41 +2601,74 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 				fmt.Sprintf("step %d (%s) failed after %d completed steps: %v", index+1, action, len(completed), err),
 				"No later steps were executed. Take a fresh screenshot and inspect the live target state before retrying.", err)
 		}
+		markSemanticSnapshotDirty(sess, action)
 		stepResult := map[string]any{"index": index + 1, "action": action, "status": "completed"}
+		if waitResult != nil {
+			mergeWaitResultPayload(stepResult, *waitResult)
+			if waitResult.TimedOut {
+				stepResult["status"] = "timed_out"
+				batchTimedOut = true
+			}
+		}
 		if action == "scroll" {
 			mergeScrollResultPayload(stepResult, scrollResultFor(sess.comp))
 		}
 		completed = append(completed, stepResult)
+		if batchTimedOut {
+			break
+		}
+		completedCount++
 	}
 
 	tabEvent := autoFollowNewTab(sess.comp, beforeTabs)
-	shot, err := screenshotWithOptions(sess.comp, annotateArg(args, true))
-	if err != nil {
-		return nil, computerUseFailure("backend_error", id, sess, "batch", "batch completed but final screenshot failed", "Call action=screenshot to retrieve the latest frame.", err)
+	observation := observationArg(args, "batch")
+	var shot []byte
+	var delta map[string]any
+	if observation != "none" {
+		observeAnnotate := observation == "som_delta" || annotateArg(args, true)
+		shot, err = screenshotWithOptions(sess.comp, observeAnnotate)
+		if err != nil {
+			return nil, computerUseFailure("backend_error", id, sess, "batch", "batch completed but final observation failed", "Call action=screenshot to retrieve the latest frame.", err)
+		}
+		if observeAnnotate {
+			delta = setOfMarkDelta(sess)
+		}
 	}
 	a.recordSessionNavigation(ctx, id, sess)
 	afterURL := currentURL(sess.comp)
-	mime := imageMIME(shot)
 	out := map[string]any{
-		"session_id": id, "current_url": afterURL, "text": "Success: batch completed. One final screenshot attached.",
-		"steps": completed, "completed_steps": len(completed), "screenshot": binaryEnvelope(shot, mime), "mime_type": mime,
+		"session_id": id, "current_url": afterURL, "text": "Success: batch completed.",
+		"steps": completed, "completed_steps": completedCount,
 		"screenshot_url": sessionResourceURL(ctx, id, "screenshot"),
 	}
-	delta := setOfMarkDelta(sess)
-	out["som_delta"] = delta
-	if added, ok := delta["added"]; ok {
-		out["revealed_targets"] = added
+	if batchTimedOut {
+		out["timed_out"] = true
+		out["text"] = "Batch stopped at a timed-out wait. Earlier completed steps were not rolled back; no later steps were executed."
 	}
-	out["scroll_regions"] = scrollRegionsFor(sess.comp)
-	if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
-		out["safety_targets"] = targets
+	if observation == "screenshot" {
+		mime := imageMIME(shot)
+		out["screenshot"] = binaryEnvelope(shot, mime)
+		out["mime_type"] = mime
+		if !batchTimedOut {
+			out["text"] = "Success: batch completed. One final screenshot attached."
+		}
 	}
-	if boolArgDefault(args, "include_som", false) {
-		out["som"] = setOfMarkFor(sess.comp)
+	if delta != nil {
+		out["som_delta"] = delta
+		if added, ok := delta["added"]; ok {
+			out["revealed_targets"] = added
+		}
+		out["scroll_regions"] = scrollRegionsFor(sess.comp)
+		if targets := safetySetOfMarkFor(sess.comp); len(targets) > 0 {
+			out["safety_targets"] = targets
+		}
+		if boolArgDefault(args, "include_som", false) {
+			out["som"] = setOfMarkFor(sess.comp)
+		}
 	}
 	mergeNavigationDelta(out, "batch", beforeURL, afterURL, "")
 	mergeTabFollowPayload(out, tabEvent)
-	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": len(completed), "current_url": afterURL})
+	emitEvent(ctx, "session.action", map[string]any{"session_id": id, "action": "batch", "completed_steps": completedCount, "timed_out": batchTimedOut, "current_url": afterURL})
 	return out, nil
 }
 
@@ -2936,6 +3047,9 @@ func resolveStableActionTarget(sess *session, action *backends.Action) error {
 	if action.SOMRevision > 0 && action.SOMRevision != sess.somRevision {
 		return fmt.Errorf("target revision %d is stale; current revision is %d", action.SOMRevision, sess.somRevision)
 	}
+	if sess.somDirty && strings.HasPrefix(action.TargetID, "scroll_") {
+		return fmt.Errorf("semantic snapshot is stale after a page-changing action; current labels and target ids must be refreshed")
+	}
 	if action.Type == "scroll" && strings.HasPrefix(action.TargetID, "scroll_") {
 		for _, region := range scrollRegionsFor(sess.comp) {
 			if region.ID != action.TargetID {
@@ -2967,6 +3081,9 @@ func resolveStableActionTarget(sess *session, action *backends.Action) error {
 			return fmt.Errorf("target_id %q is not present in the latest screenshot", action.TargetID)
 		}
 		return nil
+	}
+	if sess.somDirty {
+		return fmt.Errorf("semantic snapshot is stale after a page-changing action; current labels and target ids must be refreshed")
 	}
 	if action.ExpectedName != "" {
 		actual := firstNonEmpty(target.AccessibleName, target.Text)
@@ -3015,6 +3132,7 @@ func setOfMarkDelta(sess *session) map[string]any {
 	sort.Strings(removed)
 	sess.somPrevious = next
 	sess.somRevision++
+	sess.somDirty = false
 	out := map[string]any{
 		"revision": sess.somRevision,
 		"added":    added,
@@ -3025,6 +3143,97 @@ func setOfMarkDelta(sess *session) map[string]any {
 		out["unchanged"] = true
 	}
 	return out
+}
+
+func markSemanticSnapshotDirty(sess *session, action string) {
+	if sess == nil {
+		return
+	}
+	switch action {
+	case "click", "double_click", "type", "key", "scroll", "wait", "wait_for", "wait_for_stable",
+		"navigate", "back", "reload", "upload_file", "select_option", "set_checked", "set_text", "set_temporal":
+		sess.somDirty = true
+	}
+}
+
+func executeSemanticWait(sess *session, action backends.Action) (backends.WaitResult, error) {
+	waiter, ok := sess.comp.(backends.StabilityWaiter)
+	if !ok {
+		return backends.WaitResult{}, fmt.Errorf("backend %q does not expose browser wait signals", sess.backend)
+	}
+	var result backends.WaitResult
+	var err error
+	if action.Type == "wait_for" {
+		result, err = waiter.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS)
+	} else {
+		result, err = waiter.WaitForStable(action.QuietMS, action.TimeoutMS)
+	}
+	if err != nil {
+		var timeoutErr *stability.TimeoutError
+		if errors.As(err, &timeoutErr) {
+			return timeoutErr.Result, nil
+		}
+	}
+	return result, err
+}
+
+func mergeWaitResultPayload(payload map[string]any, result backends.WaitResult) {
+	payload["stable"] = result.Stable
+	payload["matched"] = result.Matched
+	payload["timed_out"] = result.TimedOut
+	payload["waited_ms"] = result.WaitedMS
+	if result.Match != "" {
+		payload["match"] = result.Match
+	}
+	if result.CurrentURL != "" {
+		payload["observed_url"] = result.CurrentURL
+	}
+	if len(result.Conditions) > 0 {
+		payload["conditions"] = result.Conditions
+	}
+	payload["loading_indicators"] = result.LoadingIndicators
+	payload["inflight_requests"] = result.InflightRequests
+	payload["loading_frames"] = result.LoadingFrames
+}
+
+func observationArg(args map[string]any, action string) string {
+	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "observation")))
+	if mode != "" {
+		return mode
+	}
+	switch action {
+	case "batch":
+		return "screenshot"
+	case "scroll", "wait_for", "wait_for_stable":
+		return "som_delta"
+	default:
+		return "none"
+	}
+}
+
+func hydrateWaitTargetConditions(sess *session, conditions []backends.WaitCondition) ([]backends.WaitCondition, error) {
+	if len(conditions) == 0 {
+		return conditions, nil
+	}
+	targets := setOfMarkFor(sess.comp)
+	for index := range conditions {
+		condition := &conditions[index]
+		if condition.Type != "target_present" && condition.Type != "target_absent" {
+			continue
+		}
+		for _, target := range targets {
+			if target.ID != condition.TargetID {
+				continue
+			}
+			condition.Name = firstNonEmpty(target.AccessibleName, target.Text)
+			condition.Role = target.Role
+			break
+		}
+		if condition.Name == "" {
+			return nil, fmt.Errorf("wait_for target_id %q is not present in the latest semantic snapshot", condition.TargetID)
+		}
+	}
+	return conditions, nil
 }
 
 func hasSetOfMarkLabel(comp backends.Computer, label int) bool {
@@ -4016,11 +4225,28 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 }
 
 func validateStableArgs(action string, args map[string]any) error {
-	if action != "wait_for_stable" {
-		if rawArgPresent(args, "quiet_ms") || rawArgPresent(args, "timeout_ms") {
-			return fmt.Errorf("quiet_ms and timeout_ms are only valid for wait_for_stable")
+	conditions, err := waitConditionsArg(args["conditions"])
+	if err != nil {
+		return err
+	}
+	match := strings.ToLower(strings.TrimSpace(stringArg(args, "match")))
+	if action != "wait_for_stable" && action != "wait_for" {
+		if intArg(args, "quiet_ms") != 0 || intArg(args, "timeout_ms") != 0 || len(conditions) > 0 || match != "" {
+			return fmt.Errorf("quiet_ms, timeout_ms, conditions, and match are only valid for wait_for or wait_for_stable")
 		}
 		return nil
+	}
+	if action == "wait_for" && len(conditions) == 0 {
+		return fmt.Errorf("wait_for requires at least one condition")
+	}
+	if action == "wait_for_stable" && len(conditions) > 0 {
+		return fmt.Errorf("conditions are only valid for wait_for")
+	}
+	if action == "wait_for_stable" && match != "" {
+		return fmt.Errorf("match is only valid for wait_for")
+	}
+	if match != "" && match != "any" && match != "all" {
+		return fmt.Errorf("match must be any or all")
 	}
 	quietMS := intArg(args, "quiet_ms")
 	timeoutMS := intArg(args, "timeout_ms")
@@ -4034,6 +4260,87 @@ func validateStableArgs(action string, args map[string]any) error {
 		return fmt.Errorf("timeout_ms must be greater than or equal to quiet_ms")
 	}
 	return nil
+}
+
+func validateObservationArgs(action string, args map[string]any) error {
+	if !rawArgPresent(args, "observation") {
+		return nil
+	}
+	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "observation")))
+	if mode == "" {
+		return nil
+	}
+	if mode != "none" && mode != "som_delta" && mode != "screenshot" {
+		return fmt.Errorf("observation must be none, som_delta, or screenshot")
+	}
+	if action == "screenshot" {
+		return fmt.Errorf("observation is not valid for screenshot; use annotate/include_som directly")
+	}
+	return nil
+}
+
+func waitConditionsArg(raw any) ([]backends.WaitCondition, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	if text, ok := raw.(string); ok {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, nil
+		}
+		var decoded []any
+		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+			return nil, fmt.Errorf("conditions must be an array of objects")
+		}
+		raw = decoded
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		if typed, typedOK := raw.([]map[string]any); typedOK {
+			items = make([]any, len(typed))
+			for i := range typed {
+				items[i] = typed[i]
+			}
+		} else {
+			return nil, fmt.Errorf("conditions must be an array of objects")
+		}
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if len(items) > 8 {
+		return nil, fmt.Errorf("conditions must contain between 1 and 8 objects")
+	}
+	out := make([]backends.WaitCondition, 0, len(items))
+	for index, item := range items {
+		mapped, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("condition %d must be an object", index+1)
+		}
+		condition := backends.WaitCondition{
+			Type: strings.ToLower(strings.TrimSpace(stringArg(mapped, "type"))), Value: strings.TrimSpace(stringArg(mapped, "value")),
+			Selector: strings.TrimSpace(stringArg(mapped, "selector")), TargetID: strings.TrimSpace(stringArg(mapped, "target_id")),
+		}
+		condition.CaseSensitive, _ = boolArg(mapped, "case_sensitive")
+		switch condition.Type {
+		case "url_changed", "url_equals", "url_contains", "text_present", "text_absent":
+			if condition.Value == "" {
+				return nil, fmt.Errorf("condition %d type %s requires value", index+1, condition.Type)
+			}
+		case "selector_present", "selector_absent":
+			if condition.Selector == "" {
+				return nil, fmt.Errorf("condition %d type %s requires selector", index+1, condition.Type)
+			}
+		case "target_present", "target_absent":
+			if condition.TargetID == "" {
+				return nil, fmt.Errorf("condition %d type %s requires target_id", index+1, condition.Type)
+			}
+		default:
+			return nil, fmt.Errorf("condition %d has unsupported type %q", index+1, condition.Type)
+		}
+		out = append(out, condition)
+	}
+	return out, nil
 }
 
 func validateSelectOptionArgs(action string, args map[string]any) error {

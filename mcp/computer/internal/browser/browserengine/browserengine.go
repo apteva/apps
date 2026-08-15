@@ -905,8 +905,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.finishAction(action)
 
 	case "wait_for_stable":
-		if _, err := c.waitForStable(action.QuietMS, action.TimeoutMS); err != nil {
+		if _, err := c.WaitForStable(action.QuietMS, action.TimeoutMS); err != nil {
 			return nil, fmt.Errorf("wait_for_stable: %w", err)
+		}
+		return c.finishAction(action)
+
+	case "wait_for":
+		if _, err := c.WaitForOutcome(action.Conditions, action.Match, action.QuietMS, action.TimeoutMS); err != nil {
+			return nil, fmt.Errorf("wait_for: %w", err)
 		}
 		return c.finishAction(action)
 
@@ -934,7 +940,7 @@ func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
 
 func (c *Computer) ExecuteAction(action computer.Action) error {
 	switch action.Type {
-	case "click", "double_click", "scroll", "wait", "wait_for_stable":
+	case "click", "double_click", "scroll", "wait", "wait_for", "wait_for_stable":
 		action.NoScreenshot = true
 		_, err := c.Execute(action)
 		return err
@@ -956,11 +962,18 @@ func (c *Computer) attachStabilityTracker() {
 	c.stabilityTracker = tracker
 }
 
-func (c *Computer) waitForStable(quietMS, timeoutMS int) (stability.Result, error) {
+func (c *Computer) WaitForStable(quietMS, timeoutMS int) (stability.Result, error) {
 	if c.stabilityTracker != nil {
 		return c.stabilityTracker.Wait(quietMS, timeoutMS)
 	}
 	return stability.Wait(c.ctx, quietMS, timeoutMS)
+}
+
+func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match string, quietMS, timeoutMS int) (stability.Result, error) {
+	if c.stabilityTracker != nil {
+		return c.stabilityTracker.WaitForOutcome(conditions, match, quietMS, timeoutMS)
+	}
+	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
 }
 
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
